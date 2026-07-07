@@ -1,0 +1,22 @@
+{
+  "version": "harness.experiment-matrix.v1",
+  "id": "matrix-smoke",
+  "kind": "matrix",
+  "continueOnError": true,
+  "base": {
+    "games": 1,
+    "maxTransitions": 2,
+    "timeout": "5m",
+    "json": "summary",
+    "continueOnError": true
+  },
+  "cells": [
+    {
+      "id": "kimi-k2-7-streaming-pilot",
+      "label": "kimi-k2.7 streaming pilot",
+      "group": "openai-compatible",
+      "models": ["kimi-k2.7"],
+      "seed": "matrix-smoke-kimi"
+    }
+  ]
+}

@@ -7,6 +7,7 @@ import type { HarnessAssignmentConfig, ResolvedAgentAssignment } from "../harnes
 import type { SocialEpisodeArtifact } from "../harness/social";
 import type { HarnessCheckpoint, MatchArtifact } from "../harness/artifacts";
 import type { TournamentArtifactWriteResult } from "../harness/tournamentArtifacts";
+import type { ExperimentMatrixArtifactWriteResult } from "../harness/experimentMatrix";
 
 export interface StoredMatch {
   id: string;
@@ -30,6 +31,7 @@ export interface StoredMatch {
 const matches = new Map<string, StoredMatch>();
 const checkpoints = new Map<string, HarnessCheckpoint>();
 const tournamentArtifactSets = new Map<string, StoredTournamentArtifactSet>();
+const experimentMatrixArtifactSets = new Map<string, StoredExperimentMatrixArtifactSet>();
 const artifactRecoveryAudits = new Map<string, StoredArtifactRecoveryAuditRecord>();
 
 export interface StoredTournamentArtifactFiles {
@@ -62,6 +64,30 @@ export interface StoredTournamentArtifactSet {
   outputDir: string;
   files: TournamentArtifactWriteResult["files"];
   relativeFiles: StoredTournamentArtifactFiles;
+}
+
+export interface StoredExperimentMatrixArtifactFiles {
+  manifest: string;
+  specNormalized: string;
+  cells: string;
+  statistics: string;
+  summaryMarkdown: string;
+  modelStatsCsv: string;
+  profileStatsCsv: string;
+  pairwiseModelComparisonsCsv: string;
+  tournaments: Array<{
+    cellId: string;
+    manifest: string;
+  }>;
+}
+
+export interface StoredExperimentMatrixArtifactSet {
+  id: string;
+  createdAt: string;
+  matrixId: string;
+  outputDir: string;
+  files: ExperimentMatrixArtifactWriteResult["files"];
+  relativeFiles: StoredExperimentMatrixArtifactFiles;
 }
 
 export interface StoredArtifactRecoveryAuditRecord {
@@ -167,6 +193,19 @@ export function listTournamentArtifactSets(): StoredTournamentArtifactSet[] {
   return [...tournamentArtifactSets.values()].map((set) => cloneJson(set)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+export function saveExperimentMatrixArtifactSet(set: StoredExperimentMatrixArtifactSet): void {
+  experimentMatrixArtifactSets.set(set.id, cloneJson(set));
+}
+
+export function getExperimentMatrixArtifactSet(id: string): StoredExperimentMatrixArtifactSet | undefined {
+  const set = experimentMatrixArtifactSets.get(id);
+  return set ? cloneJson(set) : undefined;
+}
+
+export function listExperimentMatrixArtifactSets(): StoredExperimentMatrixArtifactSet[] {
+  return [...experimentMatrixArtifactSets.values()].map((set) => cloneJson(set)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
 export function saveArtifactRecoveryAuditRecord(
   record: Omit<StoredArtifactRecoveryAuditRecord, "id" | "createdAt"> & { createdAt?: string }
 ): StoredArtifactRecoveryAuditRecord | undefined {
@@ -189,6 +228,7 @@ export function clearServerStoreForTests(): void {
   matches.clear();
   checkpoints.clear();
   tournamentArtifactSets.clear();
+  experimentMatrixArtifactSets.clear();
   artifactRecoveryAudits.clear();
 }
 

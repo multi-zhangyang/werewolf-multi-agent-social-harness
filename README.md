@@ -49,6 +49,7 @@ npm test              # deterministic engine tests
 npm run agent:probe   # real OpenAI-compatible model calls inside one harness turn
 npm run arena:match   # full multi-agent harness match using the configured models
 npm run arena:tournament -- --games=3 --maxTransitions=8 --timeout=5m
+npm run arena:matrix -- --spec=experiments/matrix-smoke.json --outputDir=/tmp/werewolf-matrix-smoke --overwrite
 npm run build         # typecheck and production build
 ```
 
@@ -161,6 +162,62 @@ analysis exports (`episodes.csv`, `agents.csv`, `metrics.csv`,
 `leaderboard.csv`). CSV files are derived from recorded harness artifacts; they
 do not replace replay or JSONL evidence.
 
+Experiment matrix runs are the next layer above tournament runs. A matrix spec
+expands either explicit cells or dimensions into normalized tournament cells,
+runs each cell through the same harness/tournament path, and aggregates
+seat-level outcome statistics across cells:
+
+```bash
+npm run arena:matrix -- --spec=experiments/matrix-smoke.json --json=summary
+
+npm run arena:matrix -- \
+  --spec=experiments/matrix-smoke.json \
+  --outputDir=/tmp/werewolf-matrix-smoke \
+  --overwrite \
+  --json=summary
+```
+
+`experiments/matrix-smoke.json` is intentionally small: one cell, one game, two
+transitions, and the configured `kimi-k2.7` model. The two-transition budget is
+deliberate: it advances past setup and reaches an agent decision, so the
+artifact should include real provider request ids and completed streaming
+telemetry without pretending to finish a full Werewolf game. For paper-scale
+runs, increase `cells`, `dimensions`, `games`, and `maxTransitions`
+deliberately.
+
+Matrix artifact directories contain:
+
+- `manifest.json`
+- `spec.normalized.json`
+- `cells.jsonl`
+- `statistics.json`
+- `summary.md`
+- `model_stats.csv`
+- `profile_stats.csv`
+- `pairwise_model_comparisons.csv`
+- nested tournament manifests under `tournaments/<cellId>/manifest.json`
+
+The matrix statistics include model/profile win rates, Wilson 95% intervals,
+reward means, reward standard errors, and pairwise model comparisons using an
+unpaired seat-level two-proportion z-test with Holm correction. The statistic is
+descriptive screening only: seat rows inside the same game are not independent,
+and the artifact explicitly sets `superiorityClaims: false`.
+
+The API equivalent is:
+
+```bash
+curl -X POST http://localhost:8787/api/experiments/matrix/run \
+  -H 'content-type: application/json' \
+  -d '{"spec":{"version":"harness.experiment-matrix.v1","id":"api-matrix","kind":"matrix","base":{"models":["model-a"],"games":1,"maxTransitions":1,"timeout":"5m"}}}'
+```
+
+To export matrix artifacts through the API/cockpit, configure either
+`MATRIX_ARTIFACT_BASE_DIR` or `TOURNAMENT_ARTIFACT_BASE_DIR`; matrix artifact
+sets default under the matrix base, or under
+`<TOURNAMENT_ARTIFACT_BASE_DIR>/matrices` when only the tournament base exists.
+Without a configured matrix artifact base, the cockpit still runs real matrix
+experiments but does not request artifact export.
+
 The API also stores a `MatchArtifact` for completed `/api/matches/run` records:
 
 ```bash
@@ -223,6 +280,8 @@ export TOURNAMENT_GAMES=3
 export TOURNAMENT_TIMEOUT_MS=600000
 ```
 
-The API route `POST /api/matches/run` accepts `models`, `profiles`, `assignment`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, and optional game `config`; completed responses include public state, summary, `hasArtifact`, and artifact counters. Ordinary UI reads redacted artifact projections with sanitized exposure records; full private/postgame truth remains behind explicit artifact/JSONL routes. `POST /api/harness/probe` accepts `model`, `timeoutMs`/`timeout`, and optional `seed`. `POST /api/tournaments/run` accepts `models`, `profiles`, `assignment`, `games`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, `continueOnError`, and optional game `config`; it returns `episodes`, whose completed entries include `trajectory`, `socialEpisode`, `assignment`, and `resolvedAssignments`.
+The API route `POST /api/matches/run` accepts `models`, `profiles`, `assignment`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, and optional game `config`; completed responses include public state, summary, `hasArtifact`, and artifact counters. Ordinary UI reads redacted artifact projections with sanitized exposure records; full private/postgame truth remains behind explicit artifact/JSONL routes. `POST /api/harness/probe` accepts `model`, `timeoutMs`/`timeout`, and optional `seed`. `POST /api/tournaments/run` accepts `models`, `profiles`, `assignment`, `games`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, `continueOnError`, and optional game `config`; it returns `episodes`, whose completed entries include `trajectory`, `socialEpisode`, `assignment`, and `resolvedAssignments`. `POST /api/experiments/matrix/run` accepts a matrix spec plus the same top-level tournament override fields; it returns summary, cells, statistics, and optional artifact set metadata.
 
 `POST /api/tournaments/run` also accepts `{ "spec": { ... } }`; top-level request fields such as `games`, `maxTransitions`, `timeout`, `profiles`, and `assignment` override the embedded spec using the same normalizer as `arena:tournament -- --spec`.
+`POST /api/experiments/matrix/run` follows the same override rule, but applies
+top-level fields to the matrix base before cell normalization.

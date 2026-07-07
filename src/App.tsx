@@ -59,10 +59,11 @@ import type {
   HarnessRunStatus,
   HarnessStepRecord
 } from "./harness/types";
+import type { ExperimentMatrixStatistics, MatrixSubjectStats, PairwiseModelComparison } from "./harness/experimentMatrix";
 import { deriveSocialExposureRecords, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
 import type { SocialStateMutationJournalEntry } from "./harness/socialState";
 
-type Workspace = "runs" | "timeline" | "society" | "lineage" | "evaluation" | "compare";
+type Workspace = "runs" | "timeline" | "society" | "lineage" | "evaluation" | "experiments" | "compare";
 type ArtifactView = "postgame-redacted";
 
 interface ArtifactProjection {
@@ -133,6 +134,12 @@ interface ConfigResponse {
     protocol?: string;
     endpoint?: string;
     models?: string[];
+  };
+  artifactExport?: {
+    tournamentConfigured?: boolean;
+    matrixConfigured?: boolean;
+    checkpointConfigured?: boolean;
+    matchConfigured?: boolean;
   };
 }
 
@@ -293,6 +300,82 @@ interface BranchTreeResponse {
   summary: BranchTreeSummary;
 }
 
+interface MatrixCellSummary {
+  index: number;
+  id: string;
+  label: string;
+  group: string;
+  status: "completed" | "failed";
+  elapsedMs: number;
+  tournamentSeed?: string | null;
+  gamesRequested: number;
+  gamesCompleted: number;
+  gamesFailed: number;
+  models: string[];
+  profileCount: number;
+  episodes: unknown[];
+  error?: string | null;
+  hasArtifacts: boolean;
+}
+
+interface MatrixArtifactFiles {
+  manifest: string;
+  specNormalized: string;
+  cells: string;
+  statistics: string;
+  summaryMarkdown: string;
+  modelStatsCsv: string;
+  profileStatsCsv: string;
+  pairwiseModelComparisonsCsv: string;
+  tournaments: Array<{
+    cellId: string;
+    manifest: string;
+  }>;
+}
+
+interface MatrixArtifactSet {
+  artifactSetId: string;
+  id: string;
+  createdAt: string;
+  matrixId: string;
+  files: MatrixArtifactFiles;
+  downloads: MatrixArtifactFiles;
+}
+
+interface MatrixArtifactsResponse {
+  artifactSets: MatrixArtifactSet[];
+}
+
+interface MatrixRunSummary {
+  kind?: "experiment-matrix";
+  ok?: boolean;
+  matrixId?: string;
+  status?: "completed" | "partial" | "failed";
+  cellsRequested?: number;
+  cellsCompleted?: number;
+  cellsFailed?: number;
+  gamesRequested?: number;
+  gamesCompleted?: number;
+  gamesFailed?: number;
+  elapsedMs?: number;
+  timedOut?: boolean;
+  denominatorPolicy?: ExperimentMatrixStatistics["denominatorPolicy"];
+  statisticStatus?: ExperimentMatrixStatistics["status"];
+  modelStats?: MatrixSubjectStats[];
+  profileStats?: MatrixSubjectStats[];
+  pairwiseModelComparisons?: PairwiseModelComparison[];
+  failureReason?: string | null;
+  artifacts?: MatrixArtifactSet | null;
+}
+
+interface MatrixRunResponse {
+  summary?: MatrixRunSummary;
+  artifacts?: MatrixArtifactSet | null;
+  cells?: MatrixCellSummary[];
+  statistics?: ExperimentMatrixStatistics;
+  error?: string;
+}
+
 interface InspectorItem {
   kind: string;
   title: string;
@@ -318,6 +401,7 @@ const workspaceItems: Array<{
   { id: "society", label: "社会", description: "agent、消息、关系证据", icon: <TeamOutlined /> },
   { id: "lineage", label: "谱系", description: "checkpoint、fork、branch tree", icon: <ApiOutlined /> },
   { id: "evaluation", label: "评测", description: "指标、证据、告警", icon: <SafetyCertificateOutlined /> },
+  { id: "experiments", label: "实验矩阵", description: "runner、统计显著性、工件", icon: <BarChartOutlined /> },
   { id: "compare", label: "对比", description: "基准与候选工件矩阵", icon: <SwapOutlined /> }
 ];
 
@@ -334,6 +418,10 @@ export function App() {
   const [selectedCheckpointId, setSelectedCheckpointId] = useState("");
   const [forkLineage, setForkLineage] = useState<ForkLineageSummary | null>(null);
   const [branchTree, setBranchTree] = useState<BranchTreeSummary | null>(null);
+  const [matrixResult, setMatrixResult] = useState<MatrixRunResponse | null>(null);
+  const [matrixArtifactSets, setMatrixArtifactSets] = useState<MatrixArtifactSet[]>([]);
+  const [selectedMatrixModels, setSelectedMatrixModels] = useState<string[]>([]);
+  const [matrixGames, setMatrixGames] = useState("1");
   const [workspace, setWorkspace] = useState<Workspace>("runs");
   const [selectedStepIndex, setSelectedStepIndex] = useState(0);
   const [selectedAgentId, setSelectedAgentId] = useState<string>("");
@@ -396,6 +484,11 @@ export function App() {
       const profileModel = nextConfig.defaultProfiles?.find((profile) => profile.model && (!nextModels.length || nextModels.includes(profile.model)))?.model;
       return profileModel ?? nextModels[0] ?? current;
     });
+    setSelectedMatrixModels((current) => {
+      const stillValid = current.filter((model) => nextModels.includes(model));
+      if (stillValid.length) return stillValid;
+      return nextModels.slice(0, Math.min(2, nextModels.length));
+    });
     return nextConfig;
   }, []);
 
@@ -403,6 +496,13 @@ export function App() {
     const records = await apiJson<MatchRecord[]>("/api/matches");
     const ordered = [...records].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
     setMatches(ordered);
+    return ordered;
+  }, []);
+
+  const refreshMatrixArtifacts = useCallback(async () => {
+    const response = await apiJson<MatrixArtifactsResponse>("/api/experiments/matrix/artifacts");
+    const ordered = [...response.artifactSets].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    setMatrixArtifactSets(ordered);
     return ordered;
   }, []);
 
@@ -440,7 +540,7 @@ export function App() {
     setBusy("bootstrap");
     try {
       await loadConfig();
-      const records = await refreshMatches();
+      const [records] = await Promise.all([refreshMatches(), refreshMatrixArtifacts()]);
       const latest = records.find((match) => match.hasArtifact);
       if (latest) {
         await loadArtifact(latest, "postgame-redacted");
@@ -452,7 +552,7 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [loadArtifact, loadConfig, refreshMatches, setActionStatus]);
+  }, [loadArtifact, loadConfig, refreshMatches, refreshMatrixArtifacts, setActionStatus]);
 
   useEffect(() => {
     void bootstrap();
@@ -530,6 +630,73 @@ export function App() {
       setBusy(null);
     }
   }, [config?.defaultProfiles, loadArtifact, maxTransitions, refreshMatches, selectedModel, setActionStatus, timeoutSeconds]);
+
+  const handleRefreshMatrixArtifacts = useCallback(async () => {
+    setBusy("matrix:artifacts");
+    try {
+      const records = await refreshMatrixArtifacts();
+      setActionStatus(`实验矩阵工件已刷新：${records.length} 组`);
+    } catch (nextError) {
+      setActionStatus("实验矩阵工件刷新失败", errorMessage(nextError));
+    } finally {
+      setBusy(null);
+    }
+  }, [refreshMatrixArtifacts, setActionStatus]);
+
+  const handleRunMatrixExperiment = useCallback(async () => {
+    const modelCells = selectedMatrixModels.length ? selectedMatrixModels : selectedModel ? [selectedModel] : models.slice(0, 1);
+    if (!modelCells.length) {
+      setActionStatus("无法启动实验矩阵：没有可用模型", "请先确认 /api/config 返回模型列表。");
+      return;
+    }
+    setBusy("matrix:run");
+    setActionStatus(`正在启动真实 streaming experiment matrix：${modelCells.join(", ")}`);
+    try {
+      const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
+      const transitions = parseNonNegativeInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS);
+      const games = parsePositiveInteger(matrixGames, 1);
+      const matrixId = `ui-matrix-${Date.now()}`;
+      const exportArtifacts = Boolean(config?.artifactExport?.matrixConfigured);
+      const response = await apiJson<MatrixRunResponse>("/api/experiments/matrix/run", {
+        method: "POST",
+        body: JSON.stringify({
+          version: "harness.experiment-matrix.v1",
+          id: matrixId,
+          kind: "matrix",
+          continueOnError: true,
+          base: {
+            games,
+            maxTransitions: transitions,
+            timeoutMs,
+            continueOnError: true
+          },
+          cells: modelCells.map((model, index) => ({
+            id: safeMatrixCellId(`${matrixId}-${index + 1}-${model}`),
+            label: `${model} · ${games} game${games === 1 ? "" : "s"}`,
+            group: "model",
+            models: [model],
+            seed: `${matrixId}-${index + 1}`
+          })),
+          exportArtifacts
+        })
+      });
+      setMatrixResult(response);
+      if (response.artifacts) {
+        setMatrixArtifactSets((current) => [response.artifacts!, ...current.filter((artifactSet) => artifactSet.id !== response.artifacts!.id)]);
+      }
+      await refreshMatrixArtifacts();
+      setInspector(inspectorFromMatrixResult(response));
+      setWorkspace("experiments");
+      const summary = response.summary;
+      setActionStatus(
+        `实验矩阵完成：cells=${summary?.cellsCompleted ?? 0}/${summary?.cellsRequested ?? 0} · games=${summary?.gamesCompleted ?? 0}/${summary?.gamesRequested ?? 0} · artifact=${exportArtifacts ? "exported" : "disabled"}`
+      );
+    } catch (nextError) {
+      setActionStatus("实验矩阵运行失败", errorMessage(nextError));
+    } finally {
+      setBusy(null);
+    }
+  }, [config?.artifactExport?.matrixConfigured, matrixGames, maxTransitions, models, refreshMatrixArtifacts, selectedMatrixModels, selectedModel, setActionStatus, timeoutSeconds]);
 
   const handleReplay = useCallback(async () => {
     if (!currentMatchId) {
@@ -842,6 +1009,28 @@ export function App() {
           warnings={warnings}
           onInspectMetric={(metric) => setInspector(inspectorFromMetric(metric))}
           onInspectWarning={(warning) => setInspector(inspectorFromWarning(warning))}
+        />
+      )
+    },
+    {
+      key: "experiments",
+      label: "实验矩阵",
+      children: (
+        <ExperimentsWorkspace
+          models={models}
+          selectedModels={selectedMatrixModels}
+          onSelectedModelsChange={setSelectedMatrixModels}
+          matrixGames={matrixGames}
+          onMatrixGamesChange={setMatrixGames}
+          maxTransitions={maxTransitions}
+          timeoutSeconds={timeoutSeconds}
+          result={matrixResult}
+          artifactSets={matrixArtifactSets}
+          busy={busy}
+          onRunMatrix={handleRunMatrixExperiment}
+          onRefreshArtifacts={handleRefreshMatrixArtifacts}
+          onInspectResult={(result) => setInspector(inspectorFromMatrixResult(result))}
+          onInspectArtifactSet={(artifactSet) => setInspector(inspectorFromMatrixArtifactSet(artifactSet))}
         />
       )
     },
@@ -2087,6 +2276,304 @@ function EvaluationWorkspace({
   );
 }
 
+function ExperimentsWorkspace({
+  models,
+  selectedModels,
+  onSelectedModelsChange,
+  matrixGames,
+  onMatrixGamesChange,
+  maxTransitions,
+  timeoutSeconds,
+  result,
+  artifactSets,
+  busy,
+  onRunMatrix,
+  onRefreshArtifacts,
+  onInspectResult,
+  onInspectArtifactSet
+}: {
+  models: string[];
+  selectedModels: string[];
+  onSelectedModelsChange: (models: string[]) => void;
+  matrixGames: string;
+  onMatrixGamesChange: (value: string) => void;
+  maxTransitions: string;
+  timeoutSeconds: string;
+  result: MatrixRunResponse | null;
+  artifactSets: MatrixArtifactSet[];
+  busy: string | null;
+  onRunMatrix: () => void;
+  onRefreshArtifacts: () => void;
+  onInspectResult: (result: MatrixRunResponse) => void;
+  onInspectArtifactSet: (artifactSet: MatrixArtifactSet) => void;
+}) {
+  const statistics = result?.statistics;
+  const summary = result?.summary;
+  const modelStats = statistics?.modelStats ?? summary?.modelStats ?? [];
+  const profileStats = statistics?.profileStats ?? summary?.profileStats ?? [];
+  const pairwise = statistics?.pairwiseModelComparisons ?? summary?.pairwiseModelComparisons ?? [];
+  const cells = result?.cells ?? [];
+  const latestArtifactSet = result?.artifacts ?? artifactSets[0] ?? null;
+
+  const modelColumns: TableProps<MatrixSubjectStats>["columns"] = [
+    { title: "model", dataIndex: "subjectId", render: (value: string) => <Text code>{value}</Text> },
+    { title: "seat games", dataIndex: "seatGames" },
+    { title: "wins", dataIndex: "wins" },
+    { title: "win rate", dataIndex: "winRate", render: (value: number) => formatPercent(value) },
+    { title: "Wilson 95%", render: (_, row) => (row.winRateWilson95 ? `${formatPercent(row.winRateWilson95[0])} - ${formatPercent(row.winRateWilson95[1])}` : "n/a") },
+    { title: "reward mean", dataIndex: "rewardMean", render: (value: number) => formatNumber(value, 3) },
+    { title: "reward se", dataIndex: "rewardStdError", render: (value?: number | null) => (typeof value === "number" ? formatNumber(value, 3) : "n/a") }
+  ];
+  const profileColumns: TableProps<MatrixSubjectStats>["columns"] = [
+    { title: "profile", dataIndex: "subjectId", render: (value: string) => <Text code>{value}</Text> },
+    { title: "model", dataIndex: "model", render: (value?: string) => value ?? "n/a" },
+    { title: "policy", dataIndex: "policyName", render: (value?: string) => value ?? "n/a" },
+    { title: "seat games", dataIndex: "seatGames" },
+    { title: "win rate", dataIndex: "winRate", render: (value: number) => formatPercent(value) },
+    { title: "reward mean", dataIndex: "rewardMean", render: (value: number) => formatNumber(value, 3) }
+  ];
+  const pairwiseColumns: TableProps<PairwiseModelComparison>["columns"] = [
+    { title: "left", dataIndex: "leftModel", render: (value: string) => <Text code>{value}</Text> },
+    { title: "right", dataIndex: "rightModel", render: (value: string) => <Text code>{value}</Text> },
+    { title: "left n", dataIndex: "leftSeatGames" },
+    { title: "right n", dataIndex: "rightSeatGames" },
+    { title: "diff", dataIndex: "winRateDiff", render: (value: number) => formatSignedPercent(value) },
+    { title: "p", dataIndex: "pValueTwoSided", render: (value?: number | null) => formatPValue(value) },
+    { title: "Holm p", dataIndex: "pValueHolm", render: (value?: number | null) => formatPValue(value) },
+    { title: "method", dataIndex: "method", render: (value: string) => <Tag>{value.replace("two_proportion_z_test_", "")}</Tag> }
+  ];
+  const cellColumns: TableProps<MatrixCellSummary>["columns"] = [
+    { title: "cell", dataIndex: "id", render: (value: string) => <Text code>{value}</Text> },
+    { title: "label", dataIndex: "label", ellipsis: true },
+    { title: "status", dataIndex: "status", render: (value: MatrixCellSummary["status"]) => <StatusTag status={value} /> },
+    { title: "models", dataIndex: "models", render: (value: string[]) => value.join(", ") },
+    { title: "games", render: (_, cell) => `${cell.gamesCompleted}/${cell.gamesRequested}` },
+    { title: "elapsed", dataIndex: "elapsedMs", render: (value: number) => `${value}ms` },
+    { title: "artifact", dataIndex: "hasArtifacts", render: (value: boolean) => <Tag color={value ? "processing" : "default"}>{value ? "yes" : "no"}</Tag> }
+  ];
+  const artifactColumns: TableProps<MatrixArtifactSet>["columns"] = [
+    {
+      title: "artifact set",
+      render: (_, artifactSet) => (
+        <Button type="link" size="small" onClick={() => onInspectArtifactSet(artifactSet)}>
+          <Text code>{shortId(artifactSet.artifactSetId)}</Text>
+        </Button>
+      )
+    },
+    { title: "matrix", dataIndex: "matrixId", render: (value: string) => <Text code>{value}</Text> },
+    { title: "created", dataIndex: "createdAt", render: (value: string) => formatDate(value) },
+    { title: "nested tournaments", render: (_, artifactSet) => artifactSet.files.tournaments.length },
+    {
+      title: "downloads",
+      align: "right",
+      render: (_, artifactSet) => <MatrixDownloadButtons artifactSet={artifactSet} />
+    }
+  ];
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} sm={12} xl={6}>
+          <Card>
+            <Statistic title="matrix status" value={summary?.status ?? "pending"} prefix={<ExperimentOutlined />} suffix={<Text type="secondary">{summary?.matrixId ?? "未运行"}</Text>} />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} xl={6}>
+          <Card>
+            <Statistic title="cells" value={`${summary?.cellsCompleted ?? 0}/${summary?.cellsRequested ?? 0}`} prefix={<DatabaseOutlined />} suffix={<Text type="secondary">failed {summary?.cellsFailed ?? 0}</Text>} />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} xl={6}>
+          <Card>
+            <Statistic title="games" value={`${summary?.gamesCompleted ?? 0}/${summary?.gamesRequested ?? 0}`} prefix={<PlayCircleOutlined />} suffix={<Text type="secondary">failed {summary?.gamesFailed ?? 0}</Text>} />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} xl={6}>
+          <Card>
+            <Statistic title="seat rows" value={statistics?.status.completedSeatRows ?? summary?.statisticStatus?.completedSeatRows ?? 0} prefix={<TeamOutlined />} suffix={<Text type="secondary">{pairwise.length} pairwise</Text>} />
+          </Card>
+        </Col>
+      </Row>
+
+      <Card
+        title="Streaming Experiment Matrix Runner"
+        extra={
+          <Space wrap>
+            <Button icon={decorativeIcon(<ReloadOutlined />)} loading={busy === "matrix:artifacts"} disabled={Boolean(busy)} onClick={onRefreshArtifacts}>
+              刷新工件
+            </Button>
+            <Button type="primary" icon={decorativeIcon(<PlayCircleOutlined />)} loading={busy === "matrix:run"} disabled={Boolean(busy)} onClick={onRunMatrix}>
+              运行矩阵
+            </Button>
+          </Space>
+        }
+      >
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Text type="secondary">每个选中模型会生成一个 matrix cell；server 负责 streaming 调用、artifact 导出、统计聚合和显著性表。</Text>
+          <Row gutter={[12, 12]} align="bottom">
+            <Col xs={24} xl={12}>
+              <Form layout="vertical" size="small">
+                <Form.Item label="矩阵模型">
+                  <Select
+                    mode="multiple"
+                    allowClear
+                    value={selectedModels}
+                    placeholder="选择模型生成 matrix cells"
+                    options={models.map((model) => ({ value: model, label: model }))}
+                    onChange={onSelectedModelsChange}
+                    virtual={false}
+                  />
+                </Form.Item>
+              </Form>
+            </Col>
+            <Col xs={24} sm={8} xl={4}>
+              <Form layout="vertical" size="small">
+                <Form.Item label="games / cell">
+                  <Input aria-label="matrix games" inputMode="numeric" value={matrixGames} onChange={(event) => onMatrixGamesChange(event.target.value)} />
+                </Form.Item>
+              </Form>
+            </Col>
+            <Col xs={24} sm={8} xl={4}>
+              <Form layout="vertical" size="small">
+                <Form.Item label="max transitions">
+                  <Input aria-label="matrix max transitions" readOnly value={maxTransitions} />
+                </Form.Item>
+              </Form>
+            </Col>
+            <Col xs={24} sm={8} xl={4}>
+              <Form layout="vertical" size="small">
+                <Form.Item label="timeout seconds">
+                  <Input aria-label="matrix timeout seconds" readOnly value={timeoutSeconds} />
+                </Form.Item>
+              </Form>
+            </Col>
+          </Row>
+        </Space>
+      </Card>
+
+      {summary?.failureReason ? <Alert showIcon type="warning" message="Matrix failure summary" description={summary.failureReason} /> : null}
+
+      <Card
+        title="统计解释边界"
+        extra={statistics ? <Tag color="processing">{statistics.denominatorPolicy.superiorityClaims ? "claims enabled" : "descriptive only"}</Tag> : <Tag>未运行</Tag>}
+      >
+        <Descriptions
+          size="small"
+          bordered
+          column={{ xs: 1, md: 2 }}
+          items={descriptionItems([
+            ["seat rows", statistics?.status.completedSeatRows ?? summary?.statisticStatus?.completedSeatRows ?? 0],
+            ["failed episodes", statistics?.denominatorPolicy.failedEpisodes ?? summary?.denominatorPolicy?.failedEpisodes ?? "n/a"],
+            ["significance", statistics?.denominatorPolicy.significance ?? summary?.denominatorPolicy?.significance ?? "n/a"],
+            ["superiority claims", String(statistics?.denominatorPolicy.superiorityClaims ?? summary?.denominatorPolicy?.superiorityClaims ?? false)]
+          ])}
+        />
+      </Card>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} xxl={13}>
+          <Card title="Model Statistics" extra={latestArtifactSet ? <MatrixDownloadButtons artifactSet={latestArtifactSet} /> : <Tag>no artifact</Tag>}>
+            <Table
+              rowKey="subjectId"
+              size="small"
+              bordered
+              columns={modelColumns}
+              dataSource={modelStats}
+              pagination={{ pageSize: 8 }}
+              locale={{ emptyText: <Empty description="运行实验矩阵后，这里展示 server 返回的 model_stats。" /> }}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} xxl={11}>
+          <Card title="Pairwise Significance" extra={<Tag>Holm corrected</Tag>}>
+            <Table
+              rowKey={(row) => `${row.leftModel}-${row.rightModel}`}
+              size="small"
+              bordered
+              columns={pairwiseColumns}
+              dataSource={pairwise}
+              pagination={{ pageSize: 8 }}
+              expandable={{
+                expandedRowRender: (row) => <Text type="secondary">{row.warning}</Text>
+              }}
+              locale={{ emptyText: <Empty description="至少两个有结果的模型后，这里展示 pairwise 比较。" /> }}
+            />
+          </Card>
+        </Col>
+      </Row>
+
+      <Card title="Matrix Cells" extra={result ? <Button icon={decorativeIcon(<CodeOutlined />)} onClick={() => onInspectResult(result)}>证据</Button> : <Tag>未运行</Tag>}>
+        <Table
+          rowKey="id"
+          size="small"
+          bordered
+          columns={cellColumns}
+          dataSource={cells}
+          pagination={{ pageSize: 8 }}
+          expandable={{
+            expandedRowRender: (cell) => (
+              <Descriptions
+                size="small"
+                column={{ xs: 1, md: 2 }}
+                items={descriptionItems([
+                  ["seed", cell.tournamentSeed ?? "n/a"],
+                  ["profile count", cell.profileCount],
+                  ["episodes", cell.episodes.length],
+                  ["error", cell.error ?? "n/a"]
+                ])}
+              />
+            )
+          }}
+          locale={{ emptyText: <Empty description="尚未运行 matrix，或 server 未返回 cells。" /> }}
+        />
+      </Card>
+
+      <Card title="Profile Statistics">
+        <Table
+          rowKey="subjectId"
+          size="small"
+          bordered
+          columns={profileColumns}
+          dataSource={profileStats}
+          pagination={{ pageSize: 8 }}
+          locale={{ emptyText: <Empty description="运行完成后展示 profile_stats。" /> }}
+        />
+      </Card>
+
+      <Card title="Matrix Artifact Registry" extra={<Tag>{artifactSets.length} sets</Tag>}>
+        <Table
+          rowKey="artifactSetId"
+          size="small"
+          bordered
+          columns={artifactColumns}
+          dataSource={artifactSets}
+          pagination={{ pageSize: 8 }}
+          locale={{ emptyText: <Empty description="没有 matrix artifact set。运行矩阵时默认导出 artifact。" /> }}
+        />
+      </Card>
+    </Space>
+  );
+}
+
+function MatrixDownloadButtons({ artifactSet }: { artifactSet: MatrixArtifactSet }) {
+  return (
+    <Space size={4} wrap>
+      <Button size="small" href={artifactSet.downloads.summaryMarkdown} icon={decorativeIcon(<CloudDownloadOutlined />)}>
+        summary
+      </Button>
+      <Button size="small" href={artifactSet.downloads.statistics} icon={decorativeIcon(<CloudDownloadOutlined />)}>
+        stats
+      </Button>
+      <Button size="small" href={artifactSet.downloads.modelStatsCsv} icon={decorativeIcon(<CloudDownloadOutlined />)}>
+        models
+      </Button>
+      <Button size="small" href={artifactSet.downloads.pairwiseModelComparisonsCsv} icon={decorativeIcon(<CloudDownloadOutlined />)}>
+        pairwise
+      </Button>
+    </Space>
+  );
+}
+
 function CompareWorkspace({
   artifact,
   candidateArtifact,
@@ -2378,6 +2865,11 @@ function parsePositiveInteger(value: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseNonNegativeInteger(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function clampIndex(index: number, length: number): number {
   if (length <= 0) return 0;
   return Math.min(Math.max(index, 0), length - 1);
@@ -2407,6 +2899,27 @@ function formatDate(value: string): string {
 function formatNumber(value: number, digits: number): string {
   if (!Number.isFinite(value)) return "n/a";
   return value.toFixed(digits);
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return "n/a";
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatSignedPercent(value: number): string {
+  if (!Number.isFinite(value)) return "n/a";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatPercent(value)}`;
+}
+
+function formatPValue(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+  if (value < 0.0001) return "<0.0001";
+  return value.toFixed(4);
+}
+
+function safeMatrixCellId(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.-]/g, "_") || "matrix-cell";
 }
 
 function formatValue(value: unknown): string {
@@ -2703,6 +3216,57 @@ function inspectorFromBranchTree(tree: BranchTreeSummary): InspectorItem {
       checkpointNodes: tree.checkpoints?.length ?? 0,
       matchNodes: tree.matches?.length ?? 0,
       edges: tree.edges
+    }
+  };
+}
+
+function inspectorFromMatrixResult(result: MatrixRunResponse): InspectorItem {
+  const summary = result.summary;
+  const statistics = result.statistics;
+  return {
+    kind: "experiment-matrix-result",
+    title: `Matrix ${summary?.matrixId ?? "result"}`,
+    subtitle: `${summary?.status ?? "unknown"} · cells ${summary?.cellsCompleted ?? 0}/${summary?.cellsRequested ?? 0}`,
+    fields: [
+      ["matrix", summary?.matrixId ?? "n/a"],
+      ["status", summary?.status ?? "n/a"],
+      ["ok", String(Boolean(summary?.ok))],
+      ["cells", `${summary?.cellsCompleted ?? 0}/${summary?.cellsRequested ?? 0}`],
+      ["games", `${summary?.gamesCompleted ?? 0}/${summary?.gamesRequested ?? 0}`],
+      ["seat rows", statistics?.status.completedSeatRows ?? summary?.statisticStatus?.completedSeatRows ?? 0],
+      ["models", statistics?.modelStats.length ?? summary?.modelStats?.length ?? 0],
+      ["pairwise", statistics?.pairwiseModelComparisons.length ?? summary?.pairwiseModelComparisons?.length ?? 0],
+      ["artifact", result.artifacts?.artifactSetId ?? summary?.artifacts?.artifactSetId ?? "n/a"]
+    ],
+    json: {
+      summary,
+      statistics,
+      cells: result.cells,
+      artifacts: result.artifacts
+    }
+  };
+}
+
+function inspectorFromMatrixArtifactSet(artifactSet: MatrixArtifactSet): InspectorItem {
+  return {
+    kind: "experiment-matrix-artifact-set",
+    title: `Matrix Artifact ${shortId(artifactSet.artifactSetId)}`,
+    subtitle: artifactSet.matrixId,
+    fields: [
+      ["artifact set", artifactSet.artifactSetId],
+      ["matrix", artifactSet.matrixId],
+      ["created", artifactSet.createdAt],
+      ["top files", Object.keys(artifactSet.files).length - 1],
+      ["nested tournaments", artifactSet.files.tournaments.length],
+      ["summary", artifactSet.downloads.summaryMarkdown],
+      ["statistics", artifactSet.downloads.statistics]
+    ],
+    json: {
+      artifactSetId: artifactSet.artifactSetId,
+      matrixId: artifactSet.matrixId,
+      createdAt: artifactSet.createdAt,
+      files: artifactSet.files,
+      downloads: artifactSet.downloads
     }
   };
 }
