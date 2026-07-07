@@ -1,0 +1,384 @@
+import { writeFile } from "node:fs/promises";
+import { modelClientFromEnv, providerConfigSummaryFromEnv } from "../agents/providerRegistry";
+import { normalizeModelList } from "../agents/schema";
+import { createGame } from "../core/engine";
+import type { GameEvent, MatchMetrics } from "../core/types";
+import { buildMatchArtifact, toTrajectoryJsonl } from "../harness/artifacts";
+import { summarizeEvaluationWarnings } from "../harness/evaluation";
+import {
+  assignmentFromUnknown,
+  describeResolvedAssignments,
+  profilesFromUnknown,
+  resolveAgentConfigs,
+  type HarnessAssignmentConfig
+} from "../harness/profiles";
+import { OpenAIHarnessReasoner } from "../harness/reasoner";
+import { runHarnessMatch } from "../harness/runtime";
+import type { AdversarialEvaluation, HarnessAgentProfile, HarnessEvaluationReport, HarnessTurnTrace } from "../harness/types";
+
+interface MatchOptions {
+  models: string[];
+  profiles: HarnessAgentProfile[];
+  seed: string;
+  temperature: number;
+  assignment?: HarnessAssignmentConfig;
+  timeoutMs?: number;
+  maxTransitions?: number;
+  export?: string;
+  exportJsonl?: string;
+  json: "summary" | "full";
+}
+
+if (hasFlag("help")) {
+  printUsage();
+} else {
+  await main().catch((error) => {
+    console.log(
+      JSON.stringify(
+        {
+          summary: {
+            kind: "match",
+            ok: false,
+            provider: providerConfigSummaryFromEnv(),
+            endpoint: providerConfigSummaryFromEnv().endpoint,
+            evaluation: null,
+            failureReason: describeError(error)
+          }
+        },
+        null,
+        2
+      )
+    );
+    process.exitCode = 1;
+  });
+}
+
+async function main(): Promise<void> {
+  const options = parseOptions();
+  const timeoutController = new AbortController();
+  const timeout = options.timeoutMs
+    ? setTimeout(() => timeoutController.abort(new Error(`Match timeout exceeded ${options.timeoutMs}ms.`)), options.timeoutMs)
+    : undefined;
+  const startedAt = performance.now();
+  const heartbeat = setInterval(() => {
+    console.error(
+      `[match] still waiting on real API calls, elapsedMs=${Math.round(performance.now() - startedAt)} maxTransitions=${
+        options.maxTransitions ?? "none"
+      }`
+    );
+  }, 15_000);
+  heartbeat.unref();
+  timeout?.unref();
+
+  console.error(
+    `[match] provider=${providerConfigSummaryFromEnv().protocol} endpoint=${providerConfigSummaryFromEnv().endpoint ?? "none"} models=${options.models.join(",")} seed=${options.seed} timeoutMs=${
+      options.timeoutMs ?? "none"
+    } maxTransitions=${options.maxTransitions ?? "none"}`
+  );
+
+  try {
+    const initialState = createGame({ id: `cli-${options.seed}`, seed: options.seed });
+    const agents = resolveAgentConfigs(initialState.players, options.profiles, 0, options.temperature, options.assignment);
+    const resolvedAssignments = describeResolvedAssignments(initialState.players, agents);
+
+    const result = await runHarnessMatch({
+      initialState,
+      agents,
+      reasoner: new OpenAIHarnessReasoner(
+        modelClientFromEnv(process.env, {
+          abortSignal: timeoutController.signal
+        })
+      ),
+      maxTransitions: options.maxTransitions
+    });
+
+    const harnessTurns = result.state.events.filter((event) => event.type === "harness.turn");
+    const harnessErrors = result.state.events.filter((event) => event.type === "harness.error");
+    const summary = {
+      kind: "match",
+      ok: result.status !== "failed" && harnessErrors.length === 0,
+      provider: providerConfigSummaryFromEnv(),
+      endpoint: providerConfigSummaryFromEnv().endpoint,
+      seed: options.seed,
+      models: options.models,
+      profiles: options.profiles,
+      assignment: options.assignment ?? { strategy: "profile-rotation" },
+      resolvedAssignments,
+      status: result.status,
+      truncationReason: result.truncationReason ?? null,
+      failureStateHash: result.failureStateHash ?? null,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      maxTransitions: options.maxTransitions ?? null,
+      timeoutMs: options.timeoutMs ?? null,
+      gameOver: result.state.phase === "game_over",
+      stoppedBeforeGameOver: result.state.phase !== "game_over",
+      winner: result.state.winner ?? null,
+      endReason: result.state.endReason ?? null,
+      day: result.state.day,
+      phase: result.state.phase,
+      harnessTurns: harnessTurns.length,
+      harnessErrors: harnessErrors.length,
+      trajectorySteps: result.trajectory.length,
+      averageModelLatencyMs: result.metrics.averageLatencyMs,
+      modelUsage: summarizeModelUsage(result.metrics),
+      evaluation: summarizeEvaluation(result.evaluation),
+      evaluationReport: summarizeEvaluationReport(result.evaluationReport),
+      lastHarnessTurns: harnessTurns.slice(-12).map(summarizeHarnessTurn),
+      harnessFailures: harnessErrors.map(summarizeHarnessFailure),
+      failureReason: result.failureReason ?? (harnessErrors.length ? harnessErrors.map((event) => summarizeHarnessFailure(event).failureReason).join(" | ") : null),
+      metrics: result.metrics,
+      exports: {
+        artifact: options.export ?? null,
+        jsonl: options.exportJsonl ?? null
+      },
+      agents: result.agents.map((agent) => ({
+        playerId: agent.playerId,
+        profileId: agent.profileId,
+        model: agent.model,
+        temperature: agent.temperature,
+        policyName: agent.policyName,
+        turns: agent.turns,
+        observations: agent.observations
+      }))
+    };
+    const artifact = buildMatchArtifact({
+      runId: `cli-${options.seed}`,
+      seed: options.seed,
+      models: Array.from(new Set(options.profiles.map((profile) => profile.model))),
+      profiles: options.profiles,
+      assignment: options.assignment,
+      resolvedAssignments,
+      result
+    });
+
+    if (options.export) {
+      await writeFile(options.export, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
+    }
+    if (options.exportJsonl) {
+      await writeFile(options.exportJsonl, toTrajectoryJsonl(artifact), "utf8");
+    }
+    if (result.status === "failed") {
+      process.exitCode = 1;
+    }
+
+    console.log(
+      JSON.stringify(
+        options.json === "full"
+          ? {
+              summary,
+              artifact
+            }
+          : { summary },
+        null,
+        2
+      )
+    );
+  } catch (error) {
+    process.exitCode = 1;
+    console.log(
+      JSON.stringify(
+        {
+          summary: {
+            kind: "match",
+            ok: false,
+            provider: providerConfigSummaryFromEnv(),
+            endpoint: providerConfigSummaryFromEnv().endpoint,
+            seed: options.seed,
+            models: options.models,
+            profiles: options.profiles,
+            assignment: options.assignment ?? null,
+            elapsedMs: Math.round(performance.now() - startedAt),
+            maxTransitions: options.maxTransitions ?? null,
+            timeoutMs: options.timeoutMs ?? null,
+            timedOut: timeoutController.signal.aborted,
+            evaluation: null,
+            failureReason: describeError(error)
+          }
+        },
+        null,
+        2
+      )
+    );
+  } finally {
+    clearInterval(heartbeat);
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function parseOptions(): MatchOptions {
+  const json = readArg("json") ?? "summary";
+  if (json !== "summary" && json !== "full") {
+    throw new Error("--json must be summary or full.");
+  }
+  const temperature = parseTemperature(readArg("temperature") ?? process.env.AGENT_TEMPERATURE ?? "0.7");
+  const models = normalizeModelList(readArg("models") ?? process.env.LLM_MODELS);
+  return {
+    models,
+    profiles: profilesFromUnknown(readArg("profiles") ?? process.env.AGENT_PROFILES, models, temperature),
+    assignment: assignmentFromUnknown(readArg("assignment") ?? process.env.AGENT_ASSIGNMENT),
+    seed: readArg("seed") ?? `cli-${Date.now()}`,
+    temperature,
+    timeoutMs: parseDurationMs(readArg("timeoutMs") ?? readArg("timeout") ?? process.env.MATCH_TIMEOUT_MS, "match timeout"),
+    maxTransitions: parseOptionalPositiveInteger(
+      readArg("maxTransitions") ?? readArg("steps") ?? process.env.MATCH_MAX_TRANSITIONS,
+      "maxTransitions"
+    ),
+    export: readArg("export"),
+    exportJsonl: readArg("exportJsonl"),
+    json
+  };
+}
+
+function summarizeModelUsage(metrics: MatchMetrics): Record<string, object> {
+  return Object.fromEntries(
+    Object.entries(metrics.modelUsage).map(([model, usage]) => [
+      model,
+      {
+        calls: usage.calls,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        totalLatencyMs: usage.latencyMs,
+        averageLatencyMs: usage.calls ? Math.round(usage.latencyMs / usage.calls) : 0
+      }
+    ])
+  );
+}
+
+function summarizeEvaluation(evaluation: AdversarialEvaluation | undefined): object | null {
+  if (!evaluation) return null;
+  return {
+    winner: evaluation.winner ?? null,
+    teamRewards: evaluation.teamRewards,
+    agentRewards: evaluation.agentRewards.map((reward) => ({
+      playerId: reward.playerId,
+      profileId: reward.profileId,
+      model: reward.model,
+      role: reward.role,
+      team: reward.team,
+      won: reward.won,
+      reward: reward.reward,
+      components: reward.components
+    })),
+    voteAccuracyByAgent: evaluation.voteAccuracyByAgent,
+    influenceByAgent: evaluation.influenceByAgent,
+    deceptionByAgent: evaluation.deceptionByAgent,
+    trajectorySteps: evaluation.trajectory.length,
+    lastTrajectorySteps: evaluation.trajectory.slice(-12)
+  };
+}
+
+function summarizeEvaluationReport(report: HarnessEvaluationReport | undefined): object | null {
+  if (!report) return null;
+  return {
+    id: report.id,
+    evaluatorIds: report.evaluatorIds,
+    metricCount: report.metricCount,
+    ...summarizeEvaluationWarnings(report.warnings),
+    summary: report.summary,
+    topMetrics: report.metrics.slice(0, 12).map((metric) => ({
+      id: metric.id,
+      scope: metric.scope,
+      subjectId: metric.subjectId,
+      value: metric.value,
+      weight: metric.weight,
+      source: metric.source
+    }))
+  };
+}
+
+function summarizeHarnessTurn(event: GameEvent): object {
+  const trace = event.payload as Partial<HarnessTurnTrace>;
+  return {
+    seq: event.seq,
+    harnessTurn: trace.traceId ?? String(event.seq),
+    day: event.day,
+    phase: event.phase,
+    actorId: trace.playerId ?? event.actorId ?? null,
+    model: trace.model ?? null,
+    actionKind: trace.actionKind ?? null,
+    policy: trace.policyName ?? null,
+    command: trace.commandType ?? null,
+    intent: trace.intent ?? null,
+    targetId: trace.targetId ?? null,
+    confidence: trace.confidence ?? null,
+    modelLatencyMs: trace.latencyMs ?? null,
+    promptTokens: trace.promptTokens ?? null,
+    completionTokens: trace.completionTokens ?? null,
+    providerRequestId: trace.providerRequestId ?? null
+  };
+}
+
+function summarizeHarnessFailure(event: GameEvent): { failureReason: string } & Record<string, unknown> {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  return {
+    seq: event.seq,
+    day: event.day,
+    phase: event.phase,
+    actorId: event.actorId ?? null,
+    model: typeof payload.model === "string" ? payload.model : null,
+    actionKind: typeof payload.actionKind === "string" ? payload.actionKind : null,
+    failureReason: typeof payload.message === "string" ? payload.message : JSON.stringify(event.payload)
+  };
+}
+
+function readArg(name: string): string | undefined {
+  const argv = process.argv.slice(2);
+  const inline = argv.find((arg) => arg.startsWith(`--${name}=`));
+  if (inline) return inline.slice(name.length + 3);
+  const index = argv.findIndex((arg) => arg === `--${name}`);
+  if (index >= 0 && argv[index + 1] && !argv[index + 1].startsWith("--")) {
+    return argv[index + 1];
+  }
+  return undefined;
+}
+
+function hasFlag(name: string): boolean {
+  return process.argv.slice(2).includes(`--${name}`) || process.argv.slice(2).includes(`-${name[0]}`);
+}
+
+function parseDurationMs(value: string | undefined, name: string): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const match = value.trim().match(/^(\d+(?:\.\d+)?)(ms|s|m)?$/i);
+  if (!match) throw new Error(`${name} must be a duration like 30000, 30s, or 2m.`);
+  const amount = Number(match[1]);
+  const unit = match[2]?.toLowerCase() ?? "ms";
+  const multiplier = unit === "m" ? 60_000 : unit === "s" ? 1000 : 1;
+  const ms = amount * multiplier;
+  if (!Number.isInteger(ms) || ms <= 0) throw new Error(`${name} must resolve to a positive integer number of milliseconds.`);
+  return ms;
+}
+
+function parseOptionalPositiveInteger(value: string | undefined, name: string): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer.`);
+  return parsed;
+}
+
+function parseTemperature(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 2) throw new Error("temperature must be between 0 and 2.");
+  return parsed;
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function printUsage(): void {
+  console.log(
+    [
+      "Usage: npm run arena:match -- [--models=modelA,modelB] [--seed=name] [--maxTransitions=8] [--timeout=60s] [--json=summary|full]",
+      "       npm run arena:match -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35",
+      "       npm run arena:match -- --assignment='{\"strategy\":\"team\",\"teams\":{\"werewolves\":[\"wolf\"],\"village\":[\"village\"]},\"fallback\":\"error\"}'",
+      "       npm run arena:match -- --export=artifacts/match.json --exportJsonl=artifacts/trajectory.jsonl",
+      "",
+      "Runs a real multi-agent harness episode. No fake fallback or model substitution is used.",
+      "Use --maxTransitions for short validation runs against real APIs."
+    ].join("\n")
+  );
+}
