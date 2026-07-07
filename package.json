@@ -14,6 +14,7 @@
     "agent:probe": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx src/scripts/probe.ts",
     "arena:match": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx src/scripts/runMatch.ts",
     "arena:tournament": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx src/scripts/runTournament.ts",
+    "arena:matrix": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx src/scripts/runMatrix.ts",
     "arena:replay": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx src/scripts/replayMatch.ts"
   },
   "dependencies": {
