@@ -45,6 +45,11 @@ export interface StoredTournamentArtifactFiles {
   costLatency: string;
   leaderboard: string;
   benchmarkStatistics: string;
+  summaryMarkdown: string;
+  episodesCsv: string;
+  agentsCsv: string;
+  metricsCsv: string;
+  leaderboardCsv: string;
   matches: string[];
   matchesJsonl: string[];
 }

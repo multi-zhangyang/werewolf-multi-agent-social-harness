@@ -149,6 +149,18 @@ npm run arena:tournament -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village
 `arena:match -- --json=full` prints `{ summary, artifact }`. If you redirect stdout, unwrap `.artifact` before passing the file to `arena:replay`; `--export` writes the artifact object directly.
 `socialEpisode.messages[*]` may include top-level `speechActs` and `deliveryReceipts`; these are evaluator-ready typed facts, not only display metadata. JSONL exports include flat `social_speech_act`, `social_delivery_receipt`, and derived `social_exposure` records for analysis.
 
+Tournament directory export is the paper/reproduction artifact pack. Use
+`arena:tournament -- --outputDir=<dir>` or `POST /api/tournaments/run` with
+`exportArtifacts: true` and a configured `TOURNAMENT_ARTIFACT_BASE_DIR`. The
+directory includes `manifest.json`, `spec.normalized.json`, `assignment.json`,
+aggregate `episodes.jsonl` / `trajectory.jsonl` / `metrics.jsonl`, per-match
+artifacts under `matches/`, audit files (`integrity.jsonl`, `failures.jsonl`,
+`cost_latency.json`), deterministic aggregate reports (`leaderboard.json`,
+`benchmark_statistics.json`), a human-readable `summary.md`, and tabular
+analysis exports (`episodes.csv`, `agents.csv`, `metrics.csv`,
+`leaderboard.csv`). CSV files are derived from recorded harness artifacts; they
+do not replace replay or JSONL evidence.
+
 The API also stores a `MatchArtifact` for completed `/api/matches/run` records:
 
 ```bash

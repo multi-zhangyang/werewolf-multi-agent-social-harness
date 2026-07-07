@@ -42,6 +42,11 @@ export interface TournamentArtifactWriteResult {
     costLatency: string;
     leaderboard: string;
     benchmarkStatistics: string;
+    summaryMarkdown: string;
+    episodesCsv: string;
+    agentsCsv: string;
+    metricsCsv: string;
+    leaderboardCsv: string;
     matchesDir: string;
     matches: string[];
     matchesJsonl: string[];
@@ -188,6 +193,11 @@ export async function writeTournamentArtifactDirectory(
     costLatency: path.join(outputDir, "cost_latency.json"),
     leaderboard: path.join(outputDir, "leaderboard.json"),
     benchmarkStatistics: path.join(outputDir, "benchmark_statistics.json"),
+    summaryMarkdown: path.join(outputDir, "summary.md"),
+    episodesCsv: path.join(outputDir, "episodes.csv"),
+    agentsCsv: path.join(outputDir, "agents.csv"),
+    metricsCsv: path.join(outputDir, "metrics.csv"),
+    leaderboardCsv: path.join(outputDir, "leaderboard.csv"),
     matchesDir,
     matches: [] as string[],
     matchesJsonl: [] as string[]
@@ -234,6 +244,17 @@ export async function writeTournamentArtifactDirectory(
   const costLatency = buildCostLatencyReport(result, artifactRecords, createdAt);
   const benchmarkStatistics = buildBenchmarkStatistics(result, createdAt, artifactsByIndex);
   const leaderboard = buildLeaderboard(result, createdAt, artifactsByIndex, benchmarkStatistics);
+  const summaryMarkdown = buildTournamentSummaryMarkdown(result, {
+    createdAt,
+    experimentId: options.experimentId ?? result.experiment.id,
+    artifactRecords,
+    integrity,
+    failures
+  });
+  const episodesCsv = buildCsv(EPISODE_CSV_HEADERS, episodeCsvRows(result, relativeMatchPaths, relativeMatchJsonlPaths, artifactsByIndex));
+  const agentsCsv = buildCsv(AGENT_CSV_HEADERS, agentCsvRows(result));
+  const metricsCsv = buildCsv(METRIC_CSV_HEADERS, metricCsvRows(result));
+  const leaderboardCsv = buildCsv(LEADERBOARD_CSV_HEADERS, leaderboardCsvRows(result));
 
   await writeJson(files.manifest, manifest, overwrite);
   await writeJson(files.registry, registry, overwrite);
@@ -247,6 +268,11 @@ export async function writeTournamentArtifactDirectory(
   await writeJson(files.costLatency, costLatency, overwrite);
   await writeJson(files.benchmarkStatistics, benchmarkStatistics, overwrite);
   await writeJson(files.leaderboard, leaderboard, overwrite);
+  await writeText(files.summaryMarkdown, summaryMarkdown, overwrite);
+  await writeText(files.episodesCsv, episodesCsv, overwrite);
+  await writeText(files.agentsCsv, agentsCsv, overwrite);
+  await writeText(files.metricsCsv, metricsCsv, overwrite);
+  await writeText(files.leaderboardCsv, leaderboardCsv, overwrite);
 
   return filesResult(outputDir, files);
 }
@@ -326,6 +352,11 @@ function buildManifest(
       costLatency: "cost_latency.json",
       leaderboard: "leaderboard.json",
       benchmarkStatistics: "benchmark_statistics.json",
+      summaryMarkdown: "summary.md",
+      episodesCsv: "episodes.csv",
+      agentsCsv: "agents.csv",
+      metricsCsv: "metrics.csv",
+      leaderboardCsv: "leaderboard.csv",
       matches: options.artifactRecords.map((record) => options.relativeMatchPaths.get(record.index)).filter(Boolean),
       matchesJsonl: options.artifactRecords.map((record) => options.relativeMatchJsonlPaths.get(record.index)).filter(Boolean)
     },
@@ -1353,6 +1384,364 @@ function countStatuses(episodes: TournamentEpisode[]): Record<string, number> {
   return counts;
 }
 
+function buildTournamentSummaryMarkdown(
+  result: TournamentResult,
+  options: {
+    createdAt: string;
+    experimentId: string;
+    artifactRecords: TournamentMatchArtifactRecord[];
+    integrity: ReturnType<typeof aggregateIntegrityRecords>;
+    failures: ReturnType<typeof aggregateFailureRecords>;
+  }
+): string {
+  const warningSummary = summarizeEvaluationWarnings(
+    result.episodes.flatMap((episode) => episode.evaluationReport?.warnings ?? [])
+  );
+  const statusCounts = countStatuses(result.episodes);
+  const integrityErrorCount = options.integrity.reduce((sum, record) => sum + record.errorCount, 0);
+  const lines = [
+    `# Tournament Summary: ${markdownText(options.experimentId)}`,
+    "",
+    "## Run Set",
+    "",
+    `- Created at: ${markdownText(options.createdAt)}`,
+    `- Experiment id: ${markdownText(options.experimentId)}`,
+    `- Seed: ${markdownText(result.seed)}`,
+    `- Models: ${result.models.map(markdownText).join(", ") || "none"}`,
+    `- Profiles: ${result.profiles.length}`,
+    `- Games requested: ${result.gamesRequested}`,
+    `- Episodes scheduled: ${result.episodes.length}`,
+    `- Games completed: ${result.gamesCompleted}`,
+    `- Games failed: ${result.gamesFailed}`,
+    `- Match artifacts: ${options.artifactRecords.length}`,
+    `- Evaluation warnings: ${warningSummary.warningCount}`,
+    `- Integrity errors: ${integrityErrorCount}`,
+    `- Failure records: ${options.failures.length}`,
+    "",
+    "## Harness Status",
+    "",
+    markdownTable(
+      ["status", "count"],
+      Object.entries(statusCounts).map(([status, count]) => [status, String(count)])
+    ),
+    "",
+    "## Model Leaderboard",
+    "",
+    markdownTable(
+      ["model", "seat_games", "seat_wins", "win_rate", "avg_reward", "turns", "errors"],
+      Object.values(result.modelStats).map((stats) => [
+        stats.model,
+        String(stats.seatGames),
+        String(stats.seatWins),
+        ratio(stats.seatWins, stats.seatGames),
+        String(stats.averageReward),
+        String(stats.harnessTurns),
+        String(stats.harnessErrors)
+      ])
+    ),
+    "",
+    "## Profile Leaderboard",
+    "",
+    markdownTable(
+      ["profile", "model", "policy", "seat_games", "seat_wins", "win_rate", "avg_reward"],
+      Object.values(result.profileStats).map((stats) => [
+        stats.profileId,
+        stats.model,
+        stats.policyName ?? "",
+        String(stats.seatGames),
+        String(stats.seatWins),
+        ratio(stats.seatWins, stats.seatGames),
+        String(stats.averageReward)
+      ])
+    ),
+    "",
+    "## Files",
+    "",
+    "- `manifest.json`: run-set manifest and artifact file registry",
+    "- `spec.normalized.json`: normalized reproducible experiment spec",
+    "- `assignment.json`: per-episode profile/model/role/seat assignment ledger",
+    "- `episodes.jsonl`, `trajectory.jsonl`, `metrics.jsonl`: machine-readable analysis streams",
+    "- `episodes.csv`, `agents.csv`, `metrics.csv`, `leaderboard.csv`: tabular analysis exports",
+    "- `integrity.jsonl`, `failures.jsonl`, `cost_latency.json`: audit, failure, and provider telemetry",
+    "- `leaderboard.json`, `benchmark_statistics.json`: aggregate deterministic summaries",
+    "- `matches/*.json`, `matches/*.jsonl`: per-match artifacts and replay streams",
+    "",
+    "## Interpretation Policy",
+    "",
+    "This summary is derived from recorded harness artifacts. It is suitable for run-set inspection and paper experiment bookkeeping. It does not make model superiority, causality, persuasion-success, or counterfactual claims without an explicit paired design and statistical contract."
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function episodeCsvRows(
+  result: TournamentResult,
+  relativeMatchPaths: Map<number, string>,
+  relativeMatchJsonlPaths: Map<number, string>,
+  artifactsByIndex: Map<number, MatchArtifact>
+): Array<Record<string, CsvCell>> {
+  return result.episodes.map((episode) => {
+    const artifact = artifactsByIndex.get(episode.index);
+    const warningSummary = summarizeEvaluationWarnings(episode.evaluationReport?.warnings);
+    return {
+      tournament_seed: result.seed,
+      episode_index: episode.index,
+      episode_seed: episode.seed,
+      run_id: episode.runId ?? artifact?.runId ?? "",
+      match_id: episode.matchId ?? artifact?.matchId ?? "",
+      status: episode.status,
+      harness_status: episode.harnessStatus ?? artifact?.status ?? "",
+      winner: episode.winner ?? artifact?.finalState.winner ?? "",
+      phase: episode.phase ?? artifact?.finalState.phase ?? "",
+      day: episode.day ?? artifact?.finalState.day ?? "",
+      trajectory_steps: episode.trajectory?.length ?? artifact?.trajectory.length ?? 0,
+      message_count: episode.socialEpisode?.messages.length ?? artifact?.socialEpisode.messages.length ?? 0,
+      metric_count: episode.evaluationReport?.metricCount ?? artifact?.evaluationReport.metricCount ?? 0,
+      warning_count: warningSummary.warningCount,
+      warning_codes: warningSummary.warningCodes.map((warning) => warning.code).join("|"),
+      harness_error_count: episode.metrics?.harnessErrorCount ?? artifact?.metrics.harnessErrorCount ?? 0,
+      agent_count: episode.agents.length,
+      match_artifact: relativeMatchPaths.get(episode.index) ?? "",
+      match_jsonl: relativeMatchJsonlPaths.get(episode.index) ?? "",
+      error: episode.error ?? artifact?.failureReason ?? ""
+    };
+  });
+}
+
+function agentCsvRows(result: TournamentResult): Array<Record<string, CsvCell>> {
+  return result.episodes.flatMap((episode) =>
+    episode.agents.map((agent) => ({
+      tournament_seed: result.seed,
+      episode_index: episode.index,
+      episode_seed: episode.seed,
+      run_id: episode.runId ?? "",
+      match_id: episode.matchId ?? "",
+      status: episode.status,
+      harness_status: episode.harnessStatus ?? "",
+      player_id: agent.playerId,
+      seat: agent.seat,
+      profile_id: agent.profileId ?? "",
+      model: agent.model,
+      policy_name: agent.policyName ?? "",
+      role: agent.role ?? "",
+      team: agent.team ?? "",
+      won: agent.won ?? "",
+      reward: agent.reward ?? ""
+    }))
+  );
+}
+
+function metricCsvRows(result: TournamentResult): Array<Record<string, CsvCell>> {
+  return result.episodes.flatMap((episode) =>
+    (episode.evaluationReport?.metrics ?? []).map((metric) => ({
+      tournament_seed: result.seed,
+      episode_index: episode.index,
+      episode_seed: episode.seed,
+      run_id: episode.runId ?? "",
+      match_id: episode.matchId ?? "",
+      status: episode.status,
+      harness_status: episode.harnessStatus ?? "",
+      metric_id: metric.id,
+      label: metric.label,
+      evaluator_id: metric.evaluatorId ?? "",
+      evaluator_version: metric.evaluatorVersion ?? "",
+      scope: metric.scope,
+      subject_id: metric.subjectId ?? "",
+      value: metric.value,
+      unit: metric.unit ?? "",
+      higher_is_better: metric.higherIsBetter ?? "",
+      weight: metric.weight ?? "",
+      denominator: metric.denominator ?? "",
+      confidence: metric.confidence ?? "",
+      aggregation: metric.aggregation ?? "",
+      source: metric.source,
+      scenario: metric.scenario ?? "",
+      split: metric.split ?? "",
+      evidence_ref_count: metric.evidenceRefs?.length ?? 0,
+      metadata: metric.metadata ? stableJson(metric.metadata) : ""
+    }))
+  );
+}
+
+function leaderboardCsvRows(result: TournamentResult): Array<Record<string, CsvCell>> {
+  return [
+    ...Object.values(result.modelStats).map((stats) => ({
+      subject_type: "model",
+      subject_id: stats.model,
+      model: stats.model,
+      profile_id: "",
+      policy_name: "",
+      seat_games: stats.seatGames,
+      seat_wins: stats.seatWins,
+      win_rate: ratio(stats.seatWins, stats.seatGames),
+      village_seat_games: stats.villageSeatGames,
+      village_seat_wins: stats.villageSeatWins,
+      werewolf_seat_games: stats.werewolfSeatGames,
+      werewolf_seat_wins: stats.werewolfSeatWins,
+      harness_turns: stats.harnessTurns,
+      harness_errors: stats.harnessErrors,
+      prompt_tokens: stats.promptTokens,
+      completion_tokens: stats.completionTokens,
+      latency_ms: stats.latencyMs,
+      reward_total: stats.rewardTotal,
+      average_reward: stats.averageReward
+    })),
+    ...Object.values(result.profileStats).map((stats) => ({
+      subject_type: "profile",
+      subject_id: stats.profileId,
+      model: stats.model,
+      profile_id: stats.profileId,
+      policy_name: stats.policyName ?? "",
+      seat_games: stats.seatGames,
+      seat_wins: stats.seatWins,
+      win_rate: ratio(stats.seatWins, stats.seatGames),
+      village_seat_games: stats.villageSeatGames,
+      village_seat_wins: stats.villageSeatWins,
+      werewolf_seat_games: stats.werewolfSeatGames,
+      werewolf_seat_wins: stats.werewolfSeatWins,
+      harness_turns: stats.harnessTurns,
+      harness_errors: stats.harnessErrors,
+      prompt_tokens: stats.promptTokens,
+      completion_tokens: stats.completionTokens,
+      latency_ms: stats.latencyMs,
+      reward_total: stats.rewardTotal,
+      average_reward: stats.averageReward
+    }))
+  ];
+}
+
+type CsvCell = string | number | boolean | null | undefined;
+
+const EPISODE_CSV_HEADERS = [
+  "tournament_seed",
+  "episode_index",
+  "episode_seed",
+  "run_id",
+  "match_id",
+  "status",
+  "harness_status",
+  "winner",
+  "phase",
+  "day",
+  "trajectory_steps",
+  "message_count",
+  "metric_count",
+  "warning_count",
+  "warning_codes",
+  "harness_error_count",
+  "agent_count",
+  "match_artifact",
+  "match_jsonl",
+  "error"
+];
+
+const AGENT_CSV_HEADERS = [
+  "tournament_seed",
+  "episode_index",
+  "episode_seed",
+  "run_id",
+  "match_id",
+  "status",
+  "harness_status",
+  "player_id",
+  "seat",
+  "profile_id",
+  "model",
+  "policy_name",
+  "role",
+  "team",
+  "won",
+  "reward"
+];
+
+const METRIC_CSV_HEADERS = [
+  "tournament_seed",
+  "episode_index",
+  "episode_seed",
+  "run_id",
+  "match_id",
+  "status",
+  "harness_status",
+  "metric_id",
+  "label",
+  "evaluator_id",
+  "evaluator_version",
+  "scope",
+  "subject_id",
+  "value",
+  "unit",
+  "higher_is_better",
+  "weight",
+  "denominator",
+  "confidence",
+  "aggregation",
+  "source",
+  "scenario",
+  "split",
+  "evidence_ref_count",
+  "metadata"
+];
+
+const LEADERBOARD_CSV_HEADERS = [
+  "subject_type",
+  "subject_id",
+  "model",
+  "profile_id",
+  "policy_name",
+  "seat_games",
+  "seat_wins",
+  "win_rate",
+  "village_seat_games",
+  "village_seat_wins",
+  "werewolf_seat_games",
+  "werewolf_seat_wins",
+  "harness_turns",
+  "harness_errors",
+  "prompt_tokens",
+  "completion_tokens",
+  "latency_ms",
+  "reward_total",
+  "average_reward"
+];
+
+function buildCsv(headers: string[], rows: Array<Record<string, CsvCell>>): string {
+  return `${[headers, ...rows.map((row) => headers.map((header) => row[header]))].map((row) => row.map(csvCell).join(",")).join("\n")}\n`;
+}
+
+function csvCell(value: CsvCell): string {
+  if (value === undefined || value === null) return "";
+  const redacted = redactSecrets(String(value));
+  const text = typeof redacted === "string" ? redacted : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function markdownTable(headers: string[], rows: string[][]): string {
+  if (!rows.length) return "_No records._";
+  const safeHeaders = headers.map(markdownTableCell);
+  const safeRows = rows.map((row) => row.map(markdownTableCell));
+  return [
+    `| ${safeHeaders.join(" | ")} |`,
+    `| ${headers.map(() => "---").join(" | ")} |`,
+    ...safeRows.map((row) => `| ${row.join(" | ")} |`)
+  ].join("\n");
+}
+
+function markdownTableCell(value: string): string {
+  return markdownText(value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
+function markdownText(value: string): string {
+  const redacted = redactSecrets(value);
+  return typeof redacted === "string" ? redacted : value;
+}
+
+function ratio(numerator: number, denominator: number): string {
+  return denominator ? String(round3(numerator / denominator)) : "0";
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value);
+}
+
 async function writeJson(filePath: string, value: unknown, overwrite: boolean): Promise<void> {
   await writeFile(filePath, `${JSON.stringify(redactSecrets(value), null, 2)}\n`, { encoding: "utf8", flag: overwrite ? "w" : "wx" });
 }
@@ -1360,6 +1749,11 @@ async function writeJson(filePath: string, value: unknown, overwrite: boolean): 
 async function writeJsonl(filePath: string, records: unknown[], overwrite: boolean): Promise<void> {
   const data = records.length ? `${records.map((record) => JSON.stringify(redactSecrets(record))).join("\n")}\n` : "";
   await writeFile(filePath, data, { encoding: "utf8", flag: overwrite ? "w" : "wx" });
+}
+
+async function writeText(filePath: string, value: string, overwrite: boolean): Promise<void> {
+  const redacted = redactSecrets(value);
+  await writeFile(filePath, typeof redacted === "string" ? redacted : value, { encoding: "utf8", flag: overwrite ? "w" : "wx" });
 }
 
 function filesResult(outputDir: string, files: TournamentArtifactWriteResult["files"]): TournamentArtifactWriteResult {

@@ -471,6 +471,8 @@ tournament artifact set =
   + episode manifests
   + match artifacts
   + metrics JSONL
+  + analysis CSV tables
+  + human-readable summary
   + failure records
   + replay verification report
   + aggregation report
@@ -480,7 +482,8 @@ Werewolf proof:
 
 - Run model/profile A vs B across role assignments and seeds.
 - Export win rate, vote accuracy, deception exposure, belief calibration,
-  latency, failure rate, and replay pass rate.
+  latency, failure rate, replay pass rate, per-agent rows, per-episode rows,
+  evaluator metric rows, and leaderboard rows.
 
 Evaluation impact:
 

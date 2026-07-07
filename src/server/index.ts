@@ -3341,6 +3341,11 @@ function tournamentArtifactFileShapeFromUnknown(value: unknown): StoredTournamen
   const costLatency = stringField(value, "costLatency");
   const leaderboard = stringField(value, "leaderboard");
   const benchmarkStatistics = stringField(value, "benchmarkStatistics");
+  const summaryMarkdown = stringField(value, "summaryMarkdown");
+  const episodesCsv = stringField(value, "episodesCsv");
+  const agentsCsv = stringField(value, "agentsCsv");
+  const metricsCsv = stringField(value, "metricsCsv");
+  const leaderboardCsv = stringField(value, "leaderboardCsv");
   const matches = stringArrayField(value, "matches");
   const matchesJsonl = stringArrayField(value, "matchesJsonl");
   if (
@@ -3356,6 +3361,11 @@ function tournamentArtifactFileShapeFromUnknown(value: unknown): StoredTournamen
     !costLatency ||
     !leaderboard ||
     !benchmarkStatistics ||
+    !summaryMarkdown ||
+    !episodesCsv ||
+    !agentsCsv ||
+    !metricsCsv ||
+    !leaderboardCsv ||
     !matches ||
     !matchesJsonl
   ) {
@@ -3374,6 +3384,11 @@ function tournamentArtifactFileShapeFromUnknown(value: unknown): StoredTournamen
     costLatency,
     leaderboard,
     benchmarkStatistics,
+    summaryMarkdown,
+    episodesCsv,
+    agentsCsv,
+    metricsCsv,
+    leaderboardCsv,
     matches,
     matchesJsonl
   };
@@ -3394,6 +3409,11 @@ function isExpectedTournamentArtifactFileSet(files: StoredTournamentArtifactFile
     files.costLatency === "cost_latency.json" &&
     files.leaderboard === "leaderboard.json" &&
     files.benchmarkStatistics === "benchmark_statistics.json" &&
+    files.summaryMarkdown === "summary.md" &&
+    files.episodesCsv === "episodes.csv" &&
+    files.agentsCsv === "agents.csv" &&
+    files.metricsCsv === "metrics.csv" &&
+    files.leaderboardCsv === "leaderboard.csv" &&
     files.matches.every((file) => isWriterTournamentMatchArtifactFile(file, ".json")) &&
     files.matchesJsonl.every((file) => isWriterTournamentMatchArtifactFile(file, ".jsonl"))
   );
@@ -3420,6 +3440,11 @@ function absoluteTournamentArtifactFiles(outputDir: string, files: StoredTournam
     costLatency: resolve(files.costLatency),
     leaderboard: resolve(files.leaderboard),
     benchmarkStatistics: resolve(files.benchmarkStatistics),
+    summaryMarkdown: resolve(files.summaryMarkdown),
+    episodesCsv: resolve(files.episodesCsv),
+    agentsCsv: resolve(files.agentsCsv),
+    metricsCsv: resolve(files.metricsCsv),
+    leaderboardCsv: resolve(files.leaderboardCsv),
     matchesDir: resolveUnderDirectory(outputDir, "matches"),
     matches: files.matches.map(resolve),
     matchesJsonl: files.matchesJsonl.map(resolve)
@@ -3501,6 +3526,11 @@ function relativeTournamentArtifactFiles(written: TournamentArtifactWriteResult)
     costLatency: relativeArtifactPath(written.outputDir, written.files.costLatency),
     leaderboard: relativeArtifactPath(written.outputDir, written.files.leaderboard),
     benchmarkStatistics: relativeArtifactPath(written.outputDir, written.files.benchmarkStatistics),
+    summaryMarkdown: relativeArtifactPath(written.outputDir, written.files.summaryMarkdown),
+    episodesCsv: relativeArtifactPath(written.outputDir, written.files.episodesCsv),
+    agentsCsv: relativeArtifactPath(written.outputDir, written.files.agentsCsv),
+    metricsCsv: relativeArtifactPath(written.outputDir, written.files.metricsCsv),
+    leaderboardCsv: relativeArtifactPath(written.outputDir, written.files.leaderboardCsv),
     matches: written.files.matches.map((file) => relativeArtifactPath(written.outputDir, file)),
     matchesJsonl: written.files.matchesJsonl.map((file) => relativeArtifactPath(written.outputDir, file))
   };
@@ -3531,6 +3561,11 @@ function mapTournamentArtifactFiles(
     costLatency: mapFile(files.costLatency),
     leaderboard: mapFile(files.leaderboard),
     benchmarkStatistics: mapFile(files.benchmarkStatistics),
+    summaryMarkdown: mapFile(files.summaryMarkdown),
+    episodesCsv: mapFile(files.episodesCsv),
+    agentsCsv: mapFile(files.agentsCsv),
+    metricsCsv: mapFile(files.metricsCsv),
+    leaderboardCsv: mapFile(files.leaderboardCsv),
     matches: files.matches.map(mapFile),
     matchesJsonl: files.matchesJsonl.map(mapFile)
   };
@@ -3569,6 +3604,11 @@ function flattenTournamentArtifactFiles(files: StoredTournamentArtifactFiles): s
     files.costLatency,
     files.leaderboard,
     files.benchmarkStatistics,
+    files.summaryMarkdown,
+    files.episodesCsv,
+    files.agentsCsv,
+    files.metricsCsv,
+    files.leaderboardCsv,
     ...files.matches,
     ...files.matchesJsonl
   ];
@@ -3694,6 +3734,8 @@ function isPathStrictlyInsideDirectory(candidate: string, directory: string): bo
 function contentTypeForArtifactFile(relativePath: string): string {
   if (relativePath.endsWith(".jsonl")) return "application/x-ndjson";
   if (relativePath.endsWith(".json")) return "application/json";
+  if (relativePath.endsWith(".csv")) return "text/csv";
+  if (relativePath.endsWith(".md")) return "text/markdown";
   return "application/octet-stream";
 }
 

@@ -88,6 +88,11 @@ describe("tournament artifact directory writer", () => {
     expect(written.files.costLatency).toBe(path.join(outputDir, "cost_latency.json"));
     expect(written.files.benchmarkStatistics).toBe(path.join(outputDir, "benchmark_statistics.json"));
     expect(written.files.integrity).toBe(path.join(outputDir, "integrity.jsonl"));
+    expect(written.files.summaryMarkdown).toBe(path.join(outputDir, "summary.md"));
+    expect(written.files.episodesCsv).toBe(path.join(outputDir, "episodes.csv"));
+    expect(written.files.agentsCsv).toBe(path.join(outputDir, "agents.csv"));
+    expect(written.files.metricsCsv).toBe(path.join(outputDir, "metrics.csv"));
+    expect(written.files.leaderboardCsv).toBe(path.join(outputDir, "leaderboard.csv"));
     await expectRequiredFiles(outputDir);
     const matchFiles = await readdir(path.join(outputDir, "matches"));
     expect(matchFiles.filter((file) => file.endsWith(".json"))).toHaveLength(1);
@@ -135,6 +140,11 @@ describe("tournament artifact directory writer", () => {
     expect(manifest.files.costLatency).toBe("cost_latency.json");
     expect(manifest.files.benchmarkStatistics).toBe("benchmark_statistics.json");
     expect(manifest.files.integrity).toBe("integrity.jsonl");
+    expect(manifest.files.summaryMarkdown).toBe("summary.md");
+    expect(manifest.files.episodesCsv).toBe("episodes.csv");
+    expect(manifest.files.agentsCsv).toBe("agents.csv");
+    expect(manifest.files.metricsCsv).toBe("metrics.csv");
+    expect(manifest.files.leaderboardCsv).toBe("leaderboard.csv");
     expect(manifest.files.matches).toHaveLength(1);
     expect(manifest.files.matchesJsonl).toHaveLength(1);
     expect(manifest.files.matchesJsonl[0]).toMatch(/^matches\/.+\.jsonl$/);
@@ -147,6 +157,32 @@ describe("tournament artifact directory writer", () => {
       jsonlPath: expect.stringMatching(/^matches\/.+\.jsonl$/)
     });
     expect(Object.values(manifest.files).flat().every((file) => typeof file !== "string" || !path.isAbsolute(file))).toBe(true);
+
+    const summaryMarkdown = await readFile(path.join(outputDir, "summary.md"), "utf8");
+    expect(summaryMarkdown).toContain("# Tournament Summary: writer-layout");
+    expect(summaryMarkdown).toContain("- Seed: writer-truncated");
+    expect(summaryMarkdown).toContain("## Interpretation Policy");
+    expect(summaryMarkdown).toContain("does not make model superiority");
+
+    const episodesCsv = await readFile(path.join(outputDir, "episodes.csv"), "utf8");
+    expect(episodesCsv).toMatch(/^tournament_seed,episode_index,episode_seed,run_id,match_id,status,harness_status,winner,phase,day,/);
+    expect(episodesCsv).toContain("writer-truncated,0,writer-truncated:g1");
+    expect(episodesCsv).toContain(",completed,truncated,");
+    expect(episodesCsv).toContain("matches/");
+
+    const agentsCsv = await readFile(path.join(outputDir, "agents.csv"), "utf8");
+    expect(agentsCsv).toMatch(/^tournament_seed,episode_index,episode_seed,run_id,match_id,status,harness_status,player_id,seat,/);
+    expect(agentsCsv.trim().split("\n")).toHaveLength(result.episodes[0].agents.length + 1);
+    expect(agentsCsv).toContain(",alpha,");
+
+    const metricsCsv = await readFile(path.join(outputDir, "metrics.csv"), "utf8");
+    expect(metricsCsv).toMatch(/^tournament_seed,episode_index,episode_seed,run_id,match_id,status,harness_status,metric_id,label,/);
+    expect(metricsCsv).toContain("agent.reward");
+    expect(metricsCsv).toContain(WEREWOLF_OUTCOME_EVALUATOR_ID);
+
+    const leaderboardCsv = await readFile(path.join(outputDir, "leaderboard.csv"), "utf8");
+    expect(leaderboardCsv).toMatch(/^subject_type,subject_id,model,profile_id,policy_name,seat_games,seat_wins,win_rate,/);
+    expect(leaderboardCsv).toContain("model,alpha,alpha,");
 
     const episodes = await readJsonl<Record<string, any>>(path.join(outputDir, "episodes.jsonl"));
     expect(episodes).toHaveLength(1);
@@ -1551,6 +1587,11 @@ async function expectRequiredFiles(outputDir: string): Promise<void> {
       "cost_latency.json",
       "leaderboard.json",
       "benchmark_statistics.json",
+      "summary.md",
+      "episodes.csv",
+      "agents.csv",
+      "metrics.csv",
+      "leaderboard.csv",
       "matches"
     ])
   );

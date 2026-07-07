@@ -73,6 +73,11 @@ describe("tournament artifact server API", () => {
           costLatency: "cost_latency.json",
           leaderboard: "leaderboard.json",
           benchmarkStatistics: "benchmark_statistics.json",
+          summaryMarkdown: "summary.md",
+          episodesCsv: "episodes.csv",
+          agentsCsv: "agents.csv",
+          metricsCsv: "metrics.csv",
+          leaderboardCsv: "leaderboard.csv",
           matches: [expect.stringMatching(/^matches\/.+\.json$/)],
           matchesJsonl: [expect.stringMatching(/^matches\/.+\.jsonl$/)]
         }
@@ -166,6 +171,11 @@ describe("tournament artifact server API", () => {
         integrity: "integrity.jsonl",
         costLatency: "cost_latency.json",
         benchmarkStatistics: "benchmark_statistics.json",
+        summaryMarkdown: "summary.md",
+        episodesCsv: "episodes.csv",
+        agentsCsv: "agents.csv",
+        metricsCsv: "metrics.csv",
+        leaderboardCsv: "leaderboard.csv",
         matches: [expect.stringMatching(/^matches\/.+\.json$/)],
         matchesJsonl: [expect.stringMatching(/^matches\/.+\.jsonl$/)]
       },
@@ -179,6 +189,38 @@ describe("tournament artifact server API", () => {
       ]
     });
     expect(Object.values(manifest.body.files).flat().every((file) => typeof file !== "string" || !path.isAbsolute(file))).toBe(true);
+
+    const summaryMarkdown = await requestText(baseUrl, "GET", `/api/tournament-artifacts/${artifactSetId}/files/summary.md`);
+    expect(summaryMarkdown.status).toBe(200);
+    expect(summaryMarkdown.contentType).toMatch(/text\/markdown/);
+    expect(summaryMarkdown.text).toContain("# Tournament Summary:");
+    expect(summaryMarkdown.text).toContain("server-tournament-artifacts");
+    expect(summaryMarkdown.text).not.toContain(artifactBaseDir);
+
+    const episodesCsv = await requestText(baseUrl, "GET", `/api/tournament-artifacts/${artifactSetId}/files/episodes.csv`);
+    expect(episodesCsv.status).toBe(200);
+    expect(episodesCsv.contentType).toMatch(/text\/csv/);
+    expect(episodesCsv.text).toContain("tournament_seed,episode_index,episode_seed");
+    expect(episodesCsv.text).toContain("server-tournament-artifacts,0,server-tournament-artifacts:g1");
+    expect(episodesCsv.text).not.toContain(artifactBaseDir);
+
+    const agentsCsv = await requestText(baseUrl, "GET", `/api/tournament-artifacts/${artifactSetId}/files/agents.csv`);
+    expect(agentsCsv.status).toBe(200);
+    expect(agentsCsv.contentType).toMatch(/text\/csv/);
+    expect(agentsCsv.text).toContain("player_id,seat,profile_id,model");
+    expect(agentsCsv.text).not.toContain(artifactBaseDir);
+
+    const metricsCsv = await requestText(baseUrl, "GET", `/api/tournament-artifacts/${artifactSetId}/files/metrics.csv`);
+    expect(metricsCsv.status).toBe(200);
+    expect(metricsCsv.contentType).toMatch(/text\/csv/);
+    expect(metricsCsv.text).toContain("metric_id,label,evaluator_id");
+    expect(metricsCsv.text).not.toContain(artifactBaseDir);
+
+    const leaderboardCsv = await requestText(baseUrl, "GET", `/api/tournament-artifacts/${artifactSetId}/files/leaderboard.csv`);
+    expect(leaderboardCsv.status).toBe(200);
+    expect(leaderboardCsv.contentType).toMatch(/text\/csv/);
+    expect(leaderboardCsv.text).toContain("subject_type,subject_id,model");
+    expect(leaderboardCsv.text).not.toContain(artifactBaseDir);
 
     const trajectory = await requestText(baseUrl, "GET", `/api/tournament-artifacts/${artifactSetId}/files/trajectory.jsonl`);
     expect(trajectory.status).toBe(200);
