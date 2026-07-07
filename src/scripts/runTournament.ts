@@ -238,6 +238,11 @@ function summarizeArtifactWrite(artifacts: TournamentArtifactWriteResult): objec
       costLatency: artifacts.files.costLatency,
       leaderboard: artifacts.files.leaderboard,
       benchmarkStatistics: artifacts.files.benchmarkStatistics,
+      summaryMarkdown: artifacts.files.summaryMarkdown,
+      episodesCsv: artifacts.files.episodesCsv,
+      agentsCsv: artifacts.files.agentsCsv,
+      metricsCsv: artifacts.files.metricsCsv,
+      leaderboardCsv: artifacts.files.leaderboardCsv,
       matchesDir: artifacts.files.matchesDir,
       matches: artifacts.files.matches,
       matchesJsonl: artifacts.files.matchesJsonl
@@ -362,7 +367,7 @@ function printUsage(): void {
       "       npm run arena:tournament -- --games=1 --maxTransitions=0 --outputDir=/tmp/werewolf-tournament-artifacts",
       "",
       "Runs role-balanced multi-agent harness episodes. No fake fallback or model substitution is used.",
-      "Use --outputDir or --exportDir to write manifest.json, registry.json, JSONL files, leaderboard.json, benchmark_statistics.json, and per-match artifacts.",
+      "Use --outputDir or --exportDir to write manifest.json, registry.json, JSONL files, CSV analysis files, summary.md, leaderboard.json, benchmark_statistics.json, and per-match artifacts.",
       "Existing artifact files are not overwritten unless --overwrite=true or --overwrite is provided."
     ].join("\n")
   );
