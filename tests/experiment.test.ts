@@ -116,6 +116,16 @@ describe("tournament experiment spec", () => {
     expect(() => normalizeTournamentExperimentSpec({ models: "alpha", maxTransitions: -1 })).toThrow(/maxTransitions/);
   });
 
+  it("keeps slash-containing provider model ids intact", () => {
+    const experiment = normalizeTournamentExperimentSpec({
+      models: "tencent/hy3:free,moonshotai/kimi-k2.7",
+      games: 1
+    });
+
+    expect(experiment.models).toEqual(["tencent/hy3:free", "moonshotai/kimi-k2.7"]);
+    expect(experiment.profiles.map((profile) => profile.model)).toEqual(["tencent/hy3:free", "moonshotai/kimi-k2.7"]);
+  });
+
   it("derives normalized models from explicit profiles instead of stale top-level models", () => {
     const experiment = normalizeTournamentExperimentSpec({
       models: ["stale-model"],
