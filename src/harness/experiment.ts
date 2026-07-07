@@ -117,7 +117,7 @@ function modelsFromProfiles(profiles: HarnessAgentProfile[]): string[] {
 
 function splitModels(value: string): string[] {
   return value
-    .split(/[,\s/]+/)
+    .split(/[,\s]+/)
     .map((model) => model.trim())
     .filter(Boolean);
 }
