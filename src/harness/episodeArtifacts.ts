@@ -61,6 +61,8 @@ export interface HarnessEpisodeArtifactEnvelope<
   finalState: TState;
   socialEpisode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
   agents: TAgentState[];
+  /** Optional compacted durable actor-state sidecar for the native episode. */
+  agentSnapshotFrames?: HarnessAgentSnapshotFrame<TAgentState>[];
   forkOf?: TForkProvenance;
 }
 
@@ -75,6 +77,13 @@ export interface HarnessAgentSnapshotFrame<TAgentState = unknown> {
   agentsHash: string;
   agents: TAgentState[];
 }
+
+/**
+ * A frame registry remains a sidecar, rather than scheduler state. It may be
+ * stored with a canonical artifact, supplied to model-free replay, or used by
+ * a checkpoint resolver; it never contains a policy, reasoner, or provider.
+ */
+export type HarnessAgentSnapshotFrameRegistry<TAgentState = unknown> = readonly HarnessAgentSnapshotFrame<TAgentState>[];
 
 export function harnessAgentSnapshotFrameId(agentsHash: string): string {
   return `agent-snapshot:${agentsHash}`;
@@ -178,6 +187,42 @@ export interface ResolvedHarnessAgentSnapshot<TAgentState> {
   frameId?: string;
 }
 
+/**
+ * Resolve one compacted recorded state without constructing an actor. This
+ * helper intentionally returns undefined for dangling or inconsistent refs;
+ * validators turn that absence into artifact evidence rather than guessing a
+ * state from a command or replaying a model decision.
+ */
+export function resolveHarnessAgentSnapshotFrame<TAgentState>(input: {
+  frames: HarnessAgentSnapshotFrameRegistry<TAgentState>;
+  step: Pick<SocialHarnessStep, "actorSnapshotsHashAfterStep" | "actorSnapshotFrameIdAfterStep">;
+}): ResolvedHarnessAgentSnapshot<TAgentState> | undefined {
+  const frameId = input.step.actorSnapshotFrameIdAfterStep;
+  const agentsHash = input.step.actorSnapshotsHashAfterStep;
+  if (!frameId || !agentsHash) return undefined;
+  const frame = input.frames.find((candidate) => candidate.frameId === frameId);
+  if (!frame || frame.agentsHash !== agentsHash) return undefined;
+  return {
+    agents: cloneArtifact(frame.agents),
+    agentsHash: frame.agentsHash,
+    frameId: frame.frameId
+  };
+}
+
+/**
+ * Adapt an external frame registry to the existing prefix-checkpoint resolver
+ * seam. The returned resolver only reads recorded immutable data; it does not
+ * know a domain's actor schema or restoration behavior.
+ */
+export function createHarnessAgentSnapshotFrameResolver<TAgentState>(frames: HarnessAgentSnapshotFrameRegistry<TAgentState>) {
+  return <TState, TObservation, TPending, TCommand>(input: {
+    episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
+    step: SocialHarnessStep<TObservation, TPending, TCommand>;
+    stepIndex: number;
+  }): ResolvedHarnessAgentSnapshot<TAgentState> | undefined =>
+    resolveHarnessAgentSnapshotFrame({ frames, step: input.step });
+}
+
 export type HarnessAgentSnapshotResolver<TState, TObservation, TPending, TCommand, TAgentState> = (input: {
   episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
   step: SocialHarnessStep<TObservation, TPending, TCommand>;
@@ -247,6 +292,8 @@ export interface RecordedSocialAgentStateAuditResult {
 
 export interface AuditRecordedSocialAgentSnapshotsOptions<TState, TObservation, TPending, TCommand, TAgentState> {
   episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
+  /** Optional external registry used by compacted canonical artifacts. */
+  snapshotFrames?: HarnessAgentSnapshotFrameRegistry<TAgentState>;
   /** Require a durable state capture after every committed actor receipt. */
   requireSnapshotsAfterCommitted?: boolean;
   /** When provided, bind the last recorded state frame to an artifact's final actor snapshot. */
@@ -260,10 +307,9 @@ export interface AuditRecordedSocialAgentSnapshotsOptions<TState, TObservation, 
 }
 
 /**
- * Audit inline actor snapshots currently carried by native social steps.
- * Snapshot frames/redaction schemas remain optional domain-level artifact
- * concerns; this verifies the generic causal invariants shared by every
- * domain without touching an actor, policy, reasoner, or provider.
+ * Audit inline or compacted recorded actor snapshots carried by native social
+ * steps. This verifies generic causal invariants without touching an actor,
+ * policy, reasoner, or provider.
  */
 export function auditRecordedSocialAgentSnapshots<TState, TObservation, TPending, TCommand, TAgentState>(
   options: AuditRecordedSocialAgentSnapshotsOptions<TState, TObservation, TPending, TCommand, TAgentState>
@@ -276,45 +322,81 @@ export function auditRecordedSocialAgentSnapshots<TState, TObservation, TPending
 
   for (const [stepIndex, step] of options.episode.steps.entries()) {
     const committed = isSocialStepCommitted(step);
-    const hasAgents = Array.isArray(step.actorSnapshotsAfterStep);
+    const hasInlineAgents = Array.isArray(step.actorSnapshotsAfterStep);
     const hasHash = typeof step.actorSnapshotsHashAfterStep === "string";
-    if (hasAgents !== hasHash) {
-      mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot payload/hash must be recorded together.`);
+    const hasFrameId = typeof step.actorSnapshotFrameIdAfterStep === "string";
+    if (hasInlineAgents && !hasHash) {
+      mismatches.push(`Native step ${stepIndex} ${step.traceId}: inline actor snapshot requires a snapshot hash.`);
       continue;
     }
-    if (!hasAgents) {
+    if (hasFrameId && !hasHash) {
+      mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame id requires a snapshot hash.`);
+      continue;
+    }
+
+    let agents: TAgentState[] | undefined;
+    let resolvedHash: string | undefined;
+    if (hasInlineAgents) {
+      agents = step.actorSnapshotsAfterStep as TAgentState[];
+      resolvedHash = step.actorSnapshotsHashAfterStep;
+      const actualHash = hashStableState(agents);
+      checkedSnapshots += 1;
+      if (actualHash !== resolvedHash) {
+        mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot hash mismatch ${actualHash} !== ${resolvedHash}.`);
+      }
+      if (hasFrameId) {
+        if (step.actorSnapshotFrameIdAfterStep !== harnessAgentSnapshotFrameId(resolvedHash!)) {
+          mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame id does not match its hash.`);
+        }
+        if (options.snapshotFrames) {
+          const resolved = resolveHarnessAgentSnapshotFrame({ frames: options.snapshotFrames, step });
+          if (!resolved) {
+            mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame reference cannot be resolved.`);
+          } else if (resolved.agentsHash !== actualHash || hashStableState(resolved.agents) !== actualHash) {
+            mismatches.push(`Native step ${stepIndex} ${step.traceId}: inline actor snapshot does not match its frame payload.`);
+          }
+        }
+      }
+    } else if (hasHash || hasFrameId) {
+      if (!hasHash || !hasFrameId) {
+        mismatches.push(`Native step ${stepIndex} ${step.traceId}: compacted actor snapshot requires both hash and frame id.`);
+      } else if (!options.snapshotFrames) {
+        mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame reference requires an external frame registry.`);
+      } else {
+        const resolved = resolveHarnessAgentSnapshotFrame({ frames: options.snapshotFrames, step });
+        if (!resolved) {
+          mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame reference cannot be resolved.`);
+        } else {
+          agents = resolved.agents;
+          resolvedHash = resolved.agentsHash;
+          checkedSnapshots += 1;
+          const actualHash = hashStableState(agents);
+          if (actualHash !== resolvedHash) {
+            mismatches.push(`Native step ${stepIndex} ${step.traceId}: resolved actor snapshot hash mismatch ${actualHash} !== ${resolvedHash}.`);
+          }
+        }
+      }
+    }
+
+    if (!agents || !resolvedHash) {
       if (committed && requireSnapshots) {
         mismatches.push(`Native step ${stepIndex} ${step.traceId}: committed step is missing a durable actor snapshot.`);
       }
       continue;
     }
 
-    const agents = step.actorSnapshotsAfterStep as TAgentState[];
-    const actualHash = hashStableState(agents);
-    checkedSnapshots += 1;
-    if (actualHash !== step.actorSnapshotsHashAfterStep) {
-      mismatches.push(
-        `Native step ${stepIndex} ${step.traceId}: actor snapshot hash mismatch ${actualHash} !== ${step.actorSnapshotsHashAfterStep}.`
-      );
-    }
-    if (
-      step.actorSnapshotFrameIdAfterStep !== undefined &&
-      step.actorSnapshotFrameIdAfterStep !== harnessAgentSnapshotFrameId(step.actorSnapshotsHashAfterStep!)
-    ) {
-      mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame id does not match its hash.`);
-    }
-    if (!committed && previousHash !== undefined && step.actorSnapshotsHashAfterStep !== previousHash) {
+    if (!committed && previousHash !== undefined && resolvedHash !== previousHash) {
       mismatches.push(`Native step ${stepIndex} ${step.traceId}: rejected step changed the recorded durable actor state.`);
     }
     if (step.schedulerMode === "parallel" && step.atomic && step.batchId) {
       const hashes = parallelHashesByBatch.get(step.batchId) ?? new Set<string>();
-      hashes.add(step.actorSnapshotsHashAfterStep!);
+      hashes.add(resolvedHash);
       parallelHashesByBatch.set(step.batchId, hashes);
     }
     for (const error of options.validateSnapshot?.({ agents, step, stepIndex }) ?? []) {
       mismatches.push(`Native step ${stepIndex} ${step.traceId}: ${error}`);
     }
-    previousHash = step.actorSnapshotsHashAfterStep;
+    previousHash = resolvedHash;
   }
 
   for (const [batchId, hashes] of parallelHashesByBatch) {
@@ -333,6 +415,162 @@ export function auditRecordedSocialAgentSnapshots<TState, TObservation, TPending
     checkedNativeSteps: options.episode.steps.length,
     checkedSnapshots,
     mismatches
+  };
+}
+
+/**
+ * Validate a canonical compacted registry, then run the same causal audit as
+ * raw inline episodes. The registry is intentionally domain-neutral: it does
+ * not inspect player ids, roles, teams, social journals, or private schemas.
+ */
+export function validateHarnessAgentSnapshotFrameRegistry<TState, TObservation, TPending, TCommand, TAgentState>(
+  options: AuditRecordedSocialAgentSnapshotsOptions<TState, TObservation, TPending, TCommand, TAgentState> & {
+    frames: HarnessAgentSnapshotFrameRegistry<TAgentState>;
+  }
+): RecordedSocialAgentStateAuditResult {
+  const mismatches: string[] = [];
+  const framesById = new Map<string, HarnessAgentSnapshotFrame<TAgentState>>();
+  const hashes = new Set<string>();
+  for (const [index, frame] of options.frames.entries()) {
+    const label = `Agent snapshot frame ${index}`;
+    if (frame.artifactVersion !== HARNESS_AGENT_SNAPSHOT_FRAME_VERSION) {
+      mismatches.push(`${label}: artifactVersion must be ${HARNESS_AGENT_SNAPSHOT_FRAME_VERSION}.`);
+    }
+    if (frame.kind !== "agent-snapshot-frame") mismatches.push(`${label}: kind must be agent-snapshot-frame.`);
+    if (!isNonemptyString(frame.frameId)) {
+      mismatches.push(`${label}: frameId is required.`);
+    } else if (framesById.has(frame.frameId)) {
+      mismatches.push(`${label}: duplicate frameId ${frame.frameId}.`);
+    }
+    if (!Array.isArray(frame.agents)) {
+      mismatches.push(`${label}: agents must be an array.`);
+      continue;
+    }
+    const actualHash = hashStableState(frame.agents);
+    if (frame.agentsHash !== actualHash) {
+      mismatches.push(`${label}: agentsHash mismatch ${actualHash} !== ${frame.agentsHash}.`);
+    }
+    if (frame.frameId !== harnessAgentSnapshotFrameId(frame.agentsHash)) {
+      mismatches.push(`${label}: frameId does not match agentsHash.`);
+    }
+    if (hashes.has(frame.agentsHash)) mismatches.push(`${label}: duplicate agentsHash ${frame.agentsHash}.`);
+    hashes.add(frame.agentsHash);
+    if (isNonemptyString(frame.frameId) && !framesById.has(frame.frameId)) framesById.set(frame.frameId, frame);
+  }
+
+  const referencedFrameIds = new Set<string>();
+  for (const [stepIndex, step] of options.episode.steps.entries()) {
+    const hasHash = typeof step.actorSnapshotsHashAfterStep === "string";
+    const frameId = step.actorSnapshotFrameIdAfterStep;
+    if (frameId !== undefined && typeof frameId !== "string") {
+      mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame id must be a string when present.`);
+      continue;
+    }
+    if (frameId !== undefined) {
+      referencedFrameIds.add(frameId);
+      if (!hasHash) {
+        mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame id requires a snapshot hash.`);
+        continue;
+      }
+      const frame = framesById.get(frameId);
+      if (!frame) {
+        mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame ${frameId} is missing.`);
+      } else if (frame.agentsHash !== step.actorSnapshotsHashAfterStep) {
+        mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame hash does not match the step hash.`);
+      }
+    } else if (hasHash && !Array.isArray(step.actorSnapshotsAfterStep)) {
+      mismatches.push(`Native step ${stepIndex} ${step.traceId}: compacted actor snapshot hash is missing a frame id.`);
+    }
+  }
+  for (const frame of options.frames) {
+    if (!referencedFrameIds.has(frame.frameId)) {
+      mismatches.push(`Agent snapshot frame ${frame.frameId} is orphaned from the native social episode.`);
+    }
+  }
+
+  const audit = auditRecordedSocialAgentSnapshots({ ...options, snapshotFrames: options.frames });
+  const allMismatches = [...mismatches, ...audit.mismatches];
+  return {
+    ok: allMismatches.length === 0,
+    checkedNativeSteps: audit.checkedNativeSteps,
+    checkedSnapshots: audit.checkedSnapshots,
+    mismatches: allMismatches
+  };
+}
+
+/**
+ * Deduplicate inline native snapshots into a canonical external frame registry
+ * without altering the caller-owned episode. Legacy trajectory projections are
+ * intentionally not touched here; a domain compatibility layer owns them.
+ */
+export function compactRecordedSocialAgentSnapshots<TState, TObservation, TPending, TCommand, TAgentState>(input: {
+  episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
+  existingFrames?: HarnessAgentSnapshotFrameRegistry<TAgentState>;
+}): {
+  episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
+  frames: HarnessAgentSnapshotFrame<TAgentState>[];
+} {
+  const episode = cloneArtifact(input.episode);
+  const framesById = new Map<string, HarnessAgentSnapshotFrame<TAgentState>>();
+  for (const [index, frame] of (input.existingFrames ?? []).entries()) {
+    const label = `Existing agent snapshot frame ${index}`;
+    assertCanonicalHarnessAgentSnapshotFrame(frame, label);
+    if (framesById.has(frame.frameId)) throw new Error(`${label}: duplicate frameId ${frame.frameId}.`);
+    framesById.set(frame.frameId, cloneArtifact(frame));
+  }
+
+  for (const [stepIndex, step] of episode.steps.entries()) {
+    const hasAgents = Array.isArray(step.actorSnapshotsAfterStep);
+    const hasHash = typeof step.actorSnapshotsHashAfterStep === "string";
+    const hasFrameId = typeof step.actorSnapshotFrameIdAfterStep === "string";
+    if (hasAgents !== hasHash) {
+      throw new Error(`Native step ${stepIndex} ${step.traceId}: actor snapshot payload/hash must be recorded together.`);
+    }
+    if (hasFrameId && !hasHash) {
+      throw new Error(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame id requires a snapshot hash.`);
+    }
+    if (hasAgents) {
+      const agents = step.actorSnapshotsAfterStep as TAgentState[];
+      const agentsHash = hashStableState(agents);
+      if (agentsHash !== step.actorSnapshotsHashAfterStep) {
+        throw new Error(`Native step ${stepIndex} ${step.traceId}: actor snapshot hash mismatch.`);
+      }
+      const frameId = harnessAgentSnapshotFrameId(agentsHash);
+      if (hasFrameId && step.actorSnapshotFrameIdAfterStep !== frameId) {
+        throw new Error(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame id does not match its hash.`);
+      }
+      const existing = framesById.get(frameId);
+      if (!existing) {
+        framesById.set(frameId, {
+          artifactVersion: HARNESS_AGENT_SNAPSHOT_FRAME_VERSION,
+          kind: "agent-snapshot-frame",
+          frameId,
+          agentsHash,
+          agents: cloneArtifact(agents)
+        });
+      }
+      step.actorSnapshotsHashAfterStep = agentsHash;
+      step.actorSnapshotFrameIdAfterStep = frameId;
+      delete step.actorSnapshotsAfterStep;
+      continue;
+    }
+    if (!hasHash) continue;
+    if (!hasFrameId) {
+      throw new Error(`Native step ${stepIndex} ${step.traceId}: compacted actor snapshot hash is missing a frame id.`);
+    }
+    const frameId = step.actorSnapshotFrameIdAfterStep!;
+    if (frameId !== harnessAgentSnapshotFrameId(step.actorSnapshotsHashAfterStep!)) {
+      throw new Error(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame id does not match its hash.`);
+    }
+    const frame = framesById.get(frameId);
+    if (!frame || frame.agentsHash !== step.actorSnapshotsHashAfterStep) {
+      throw new Error(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame reference cannot be resolved.`);
+    }
+  }
+
+  return {
+    episode,
+    frames: [...framesById.values()].sort((left, right) => left.frameId.localeCompare(right.frameId))
   };
 }
 
@@ -642,6 +880,24 @@ export function validateHarnessEpisodeArtifactEnvelope<
     errors.push("finalState does not match socialEpisode.finalState.");
   }
   for (const error of validateSocialEpisodeArtifact(artifact.socialEpisode)) errors.push(`socialEpisode.${error}`);
+  if (artifact.agentSnapshotFrames !== undefined) {
+    if (!Array.isArray(artifact.agentSnapshotFrames)) {
+      errors.push("agentSnapshotFrames must be an array when present.");
+    } else {
+      const audit = validateHarnessAgentSnapshotFrameRegistry({
+        episode: artifact.socialEpisode,
+        frames: artifact.agentSnapshotFrames,
+        finalAgents: artifact.agents
+      });
+      for (const mismatch of audit.mismatches) errors.push(`agentSnapshotFrames: ${mismatch}`);
+    }
+  } else if (artifact.socialEpisode.steps.some((step) => step.actorSnapshotsAfterStep !== undefined)) {
+    const audit = auditRecordedSocialAgentSnapshots({
+      episode: artifact.socialEpisode,
+      finalAgents: artifact.agents
+    });
+    for (const mismatch of audit.mismatches) errors.push(`agentSnapshots: ${mismatch}`);
+  }
   if (artifact.forkOf) errors.push(...validateGenericForkProvenance(artifact.forkOf));
   return errors;
 }
@@ -840,6 +1096,20 @@ function validateCheckpointMessages(messages: readonly SocialMessage[], lastMess
 
 function isNonemptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function assertCanonicalHarnessAgentSnapshotFrame<TAgentState>(frame: HarnessAgentSnapshotFrame<TAgentState>, label: string): void {
+  if (frame.artifactVersion !== HARNESS_AGENT_SNAPSHOT_FRAME_VERSION) {
+    throw new Error(`${label}: artifactVersion must be ${HARNESS_AGENT_SNAPSHOT_FRAME_VERSION}.`);
+  }
+  if (frame.kind !== "agent-snapshot-frame") throw new Error(`${label}: kind must be agent-snapshot-frame.`);
+  if (!isNonemptyString(frame.frameId)) throw new Error(`${label}: frameId is required.`);
+  if (!Array.isArray(frame.agents)) throw new Error(`${label}: agents must be an array.`);
+  const actualHash = hashStableState(frame.agents);
+  if (frame.agentsHash !== actualHash) throw new Error(`${label}: agentsHash mismatch.`);
+  if (frame.frameId !== harnessAgentSnapshotFrameId(frame.agentsHash)) {
+    throw new Error(`${label}: frameId does not match agentsHash.`);
+  }
 }
 
 function endsAtCompleteNativeBatch(steps: SocialEpisodeArtifact["steps"]): boolean {

@@ -20,6 +20,7 @@ import { replayWerewolfSocialEpisode } from "./replay";
 import { redactSecrets } from "./redaction";
 import {
   HARNESS_AGENT_SNAPSHOT_FRAME_VERSION,
+  compactRecordedSocialAgentSnapshots,
   createGenericForkProvenance,
   harnessAgentSnapshotFrameId,
   validateHarnessCheckpointEnvelope,
@@ -266,14 +267,22 @@ function extractAgentSnapshotFrames(options: {
     delete step.agentSnapshotsAfterStep;
   }
 
-  for (const step of options.socialEpisode.steps) {
-    if (!step.actorSnapshotsAfterStep || !step.actorSnapshotsHashAfterStep) continue;
-    const frame = frameFor(step.actorSnapshotsAfterStep as AgentHarnessState[], step.actorSnapshotsHashAfterStep);
-    step.actorSnapshotFrameIdAfterStep = frame.frameId;
-    delete step.actorSnapshotsAfterStep;
-  }
-
-  return [...framesById.values()].sort((a, b) => a.frameId.localeCompare(b.frameId));
+  const compacted = compactRecordedSocialAgentSnapshots({
+    episode: options.socialEpisode,
+    existingFrames: [...framesById.values()]
+  });
+  Object.assign(options.socialEpisode, compacted.episode);
+  return compacted.frames
+    .map(
+      (frame): AgentSnapshotFrame => ({
+        artifactVersion: AGENT_SNAPSHOT_FRAME_VERSION,
+        kind: "agent-snapshot-frame",
+        frameId: frame.frameId,
+        agentsHash: frame.agentsHash,
+        agents: cloneJson(frame.agents)
+      })
+    )
+    .sort((left, right) => left.frameId.localeCompare(right.frameId));
 }
 
 function normalizeAgentSnapshotFramesAfterRedaction(artifact: MatchArtifact): void {
@@ -931,7 +940,8 @@ function validateNativeSocialExecution(artifact: MatchArtifact, errors: string[]
   }
 
   const replay = replayWerewolfSocialEpisode(execution as SocialEpisodeArtifact<GameState, unknown, unknown, GameCommand>, {
-    stopOnMismatch: false
+    stopOnMismatch: false,
+    agentSnapshotFrames: artifact.agentSnapshotFrames
   });
   for (const mismatch of replay.mismatches) errors.push(`socialEpisode replay: ${mismatch}`);
 }
@@ -1026,7 +1036,10 @@ export function buildHarnessCheckpointAtPrefix(options: {
     exposureSummary: undefined,
     metrics: undefined
   }) as HarnessCheckpoint["executionPrefix"];
-  const firstReplay = replayWerewolfSocialEpisode(executionPrefix, { stopOnMismatch: false });
+  const firstReplay = replayWerewolfSocialEpisode(executionPrefix, {
+    stopOnMismatch: false,
+    agentSnapshotFrames: options.artifact.agentSnapshotFrames
+  });
   const nonFinalHashMismatches = firstReplay.mismatches.filter((mismatch) => !mismatch.startsWith("Replay final state hash mismatch"));
   if (nonFinalHashMismatches.length) {
     throw new HarnessCheckpointSelectionError(

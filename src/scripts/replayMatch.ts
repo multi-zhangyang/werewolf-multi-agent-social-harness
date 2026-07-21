@@ -33,7 +33,10 @@ if (hasFlag("help")) {
 async function main(): Promise<void> {
   const options = parseOptions();
   const artifact = JSON.parse(await readFile(options.artifact, "utf8")) as MatchArtifact;
-  const replay = replayWerewolfSocialEpisode(artifact.socialEpisode, { stopOnMismatch: options.stopOnMismatch });
+  const replay = replayWerewolfSocialEpisode(artifact.socialEpisode, {
+    stopOnMismatch: options.stopOnMismatch,
+    agentSnapshotFrames: artifact.agentSnapshotFrames
+  });
   const finalHashMatchesArtifact = replay.finalHash === replay.expectedFinalHash;
   const summary = {
     kind: "replay",

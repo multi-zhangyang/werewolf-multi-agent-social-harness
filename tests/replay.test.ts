@@ -71,7 +71,9 @@ describe("harness trajectory replay", () => {
     const parsedArtifact = JSON.parse(JSON.stringify(artifact)) as typeof artifact;
     const reasonerCallsBeforeReplay = reasonerCalls;
 
-    const replay = replayWerewolfSocialEpisode(parsedArtifact.socialEpisode);
+    const replay = replayWerewolfSocialEpisode(parsedArtifact.socialEpisode, {
+      agentSnapshotFrames: parsedArtifact.agentSnapshotFrames
+    });
 
     expect(replay.ok).toBe(true);
     expect(replay.mismatches).toEqual([]);
@@ -80,6 +82,7 @@ describe("harness trajectory replay", () => {
     expect(replay.expectedFinalHash).toBe(hashStableState(parsedArtifact.finalState));
     expect(replay.finalHash).toBe(hashStableState(parsedArtifact.finalState));
     expect(replay.finalState.phase).toBe(result.state.phase);
+    expect(replay.agentStateAudit).toMatchObject({ ok: true });
     expect(parsedArtifact.socialEpisode.steps.length).toBeGreaterThan(parsedArtifact.trajectory.length);
     for (const legacyStep of parsedArtifact.trajectory) {
       expect(parsedArtifact.socialEpisode.steps.find((step) => step.traceId === legacyStep.traceId)?.commitStatus).toBe("committed");

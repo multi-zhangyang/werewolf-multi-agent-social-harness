@@ -24844,3 +24844,71 @@ git diff --check
 The production build still reports the pre-existing main JavaScript chunk-size
 warning (about 1.15 MB uncompressed / 358 KB gzip). This is a performance
 follow-up, not a claim that the generic harness refactor removed bundle debt.
+
+## 13.248 Generic Compacted Agent-Snapshot Registry Lock
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+### 13.248.1 Authority And Format
+
+`src/harness/episodeArtifacts.ts` now owns the domain-neutral compacted
+durable-agent-state sidecar. It reuses the existing
+`harness.agent-snapshot-frame.v1` frame format; it does not introduce a
+Werewolf player, role, team, policy, model, or memory schema.
+
+- `compactRecordedSocialAgentSnapshots()` converts an immutable clone of raw
+  native `inline agents + hash` snapshots into deterministic, deduplicated
+  `hash + frameId` references and a sorted registry.
+- `validateHarnessAgentSnapshotFrameRegistry()` validates frame version, kind,
+  id/hash/payload binding, duplicate ids/hashes, dangling refs, orphan frames,
+  rejected-step non-mutation, parallel atomic-batch shared state, and optional
+  final-agent binding.
+- `createHarnessAgentSnapshotFrameResolver()` is the only generic bridge from
+  a registry to a prefix checkpoint. It reads recorded data only. It cannot
+  restore an actor, policy, reasoner, provider, socket, or staged decision.
+
+Inline raw episodes remain replayable. A compacted frame reference without its
+registry is invalid for generic actor-state audit, not a reason to infer state
+from commands. A checkpoint intentionally stores only its selected final agent
+snapshot/hash/frame binding, not every parent frame: its prefix environment
+replay may therefore explicitly omit agent-state audit when the parent registry
+is unavailable. This exception does not apply to a canonical match artifact,
+server replay, or replay CLI, all of which must pass the canonical registry.
+
+### 13.248.2 Consumer Boundary
+
+- `replaySocialEpisode()` audits compacted registries without model calls.
+- `replayWerewolfSocialEpisode()` accepts an optional registry. A bare
+  checkpoint prefix retains its prior environment/message replay behavior when
+  its parent sidecar is absent; a full match replay must receive its sidecar.
+- The Werewolf artifact builder delegates native social-step compaction to the
+  generic helper but retains its legacy trajectory projection and its
+  player/social-journal validation. The generic core never imports that code.
+- `validateNativeSocialExecution()`, server-owned match replay, and the replay
+  CLI pass canonical `agentSnapshotFrames`; React/public projections continue
+  not to receive this private sidecar.
+
+### 13.248.3 Recorded Validation
+
+The independent Ledger proof now covers raw capture -> generic compaction ->
+registry validation -> no-model replay -> registry-backed prefix checkpoint ->
+actual restored fork. It also detects a frame payload/hash tamper and dangling
+frame reference. Werewolf artifact and server tests verify the same registry is
+used by native replay, checkpoint/fork, persisted artifact rehydration, and the
+server replay endpoint.
+
+Focused commands passed:
+
+```bash
+npm run typecheck
+npx vitest run tests/genericHarnessContract.test.ts tests/replay.test.ts \
+  tests/artifacts.test.ts --testTimeout=30000 --maxWorkers=1 \
+  --no-file-parallelism
+npx vitest run tests/serverMatchArtifactsApi.test.ts tests/serverCheckpointApi.test.ts \
+  --testTimeout=30000 --maxWorkers=1 --no-file-parallelism
+git diff --check
+```

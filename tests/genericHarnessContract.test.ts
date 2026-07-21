@@ -9,6 +9,9 @@ import { appendSocialMemory, createAgentSocialState } from "../src/harness/socia
 import {
   HarnessCheckpointSelectionError,
   buildHarnessCheckpointAtPrefix,
+  compactRecordedSocialAgentSnapshots,
+  createHarnessAgentSnapshotFrameResolver,
+  validateHarnessAgentSnapshotFrameRegistry,
   validateHarnessCheckpointEnvelope,
   validateHarnessCheckpointReplay,
   validateHarnessEpisodeArtifactEnvelope,
@@ -262,7 +265,55 @@ describe("generic social harness contract", () => {
     expect(parentReplay.ok).toBe(true);
     expect(parentReplay.agentStateAudit).toMatchObject({ ok: true, checkedNativeSteps: 3, checkedSnapshots: 3 });
 
-    const checkpoint = buildHarnessCheckpointAtPrefix({
+    const compacted = compactRecordedSocialAgentSnapshots<
+      LedgerState,
+      LedgerObservation,
+      LedgerPending,
+      LedgerCommand,
+      LedgerCheckpointActorState
+    >({ episode: parent });
+    const parentAgentStates = [...parentActors.values()].map((actor) => actor.snapshot());
+    expect(parent.steps.every((step) => Array.isArray(step.actorSnapshotsAfterStep))).toBe(true);
+    expect(compacted.episode.steps.every((step) => step.actorSnapshotsAfterStep === undefined)).toBe(true);
+    expect(compacted.episode.steps.every((step) => Boolean(step.actorSnapshotsHashAfterStep && step.actorSnapshotFrameIdAfterStep))).toBe(true);
+    expect(compacted.frames).toHaveLength(3);
+    expect(
+      validateHarnessAgentSnapshotFrameRegistry({
+        episode: compacted.episode,
+        frames: compacted.frames,
+        finalAgents: parentAgentStates
+      })
+    ).toMatchObject({ ok: true, checkedNativeSteps: 3, checkedSnapshots: 3, mismatches: [] });
+    const compactedEnvelope = {
+      artifactVersion: "ledger.episode.v1",
+      kind: "ledger-episode",
+      runId: parent.id,
+      createdAt: "2026-07-21T00:30:00.000Z",
+      status: compacted.episode.status,
+      initialState: compacted.episode.initialState,
+      finalState: compacted.episode.finalState,
+      socialEpisode: compacted.episode,
+      agents: parentAgentStates,
+      agentSnapshotFrames: compacted.frames
+    } satisfies HarnessEpisodeArtifactEnvelope<
+      LedgerState,
+      LedgerObservation,
+      LedgerPending,
+      LedgerCommand,
+      LedgerCheckpointActorState
+    >;
+    expect(validateHarnessEpisodeArtifactEnvelope(compactedEnvelope)).toEqual([]);
+    const compactedReplay = replaySocialEpisode({
+      episode: compacted.episode,
+      environment: new LedgerEnvironment(),
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      agentSnapshotFrames: compacted.frames
+    });
+    expect(compactedReplay.ok).toBe(true);
+    expect(compactedReplay.agentStateAudit).toMatchObject({ ok: true, checkedNativeSteps: 3, checkedSnapshots: 3 });
+
+    const checkpoint = buildHarnessCheckpointAtPrefix<LedgerState, LedgerObservation, LedgerPending, LedgerCommand, LedgerCheckpointActorState>({
       artifactVersion: "ledger.checkpoint.v1",
       kind: "ledger-checkpoint",
       checkpointId: "ledger-prefix-after-a",
@@ -270,23 +321,17 @@ describe("generic social harness contract", () => {
       sourceArtifactVersion: "ledger.episode.v1",
       runId: parent.id,
       sourceStatus: parent.status,
-      episode: parent,
+      episode: compacted.episode,
       selector: { nativeStepCount: 1 },
-      resolveAgentSnapshot({ step }) {
-        if (!Array.isArray(step.actorSnapshotsAfterStep) || !step.actorSnapshotsHashAfterStep) return undefined;
-        return {
-          agents: step.actorSnapshotsAfterStep as LedgerCheckpointActorState[],
-          agentsHash: step.actorSnapshotsHashAfterStep,
-          frameId: step.actorSnapshotFrameIdAfterStep
-        };
-      },
+      resolveAgentSnapshot: createHarnessAgentSnapshotFrameResolver(compacted.frames),
       replayPrefix: (executionPrefix) =>
         replaySocialEpisode({
           episode: executionPrefix,
           environment: new LedgerEnvironment(),
           hashState: hashStableState,
           hashMessages: hashStableState,
-          validateExpectedFinalState: false
+          validateExpectedFinalState: false,
+          agentSnapshotFrames: compacted.frames
         }),
       validateAgentSnapshot({ agents, step }) {
         return agents.some((agent) => !agent.id) || !step.traceId ? ["ledger actor state is malformed"] : [];
@@ -308,7 +353,8 @@ describe("generic social harness contract", () => {
           episode: executionPrefix,
           environment: new LedgerEnvironment(),
           hashState: hashStableState,
-          hashMessages: hashStableState
+          hashMessages: hashStableState,
+          auditAgentSnapshots: false
         })
       )
     ).toEqual([]);
@@ -350,9 +396,9 @@ describe("generic social harness contract", () => {
       entries: ["a:parent-a", "b:fork-b", "c:fork-c"]
     });
 
-    const withoutSnapshot = clone(parent);
-    delete withoutSnapshot.steps[0]?.actorSnapshotsAfterStep;
+    const withoutSnapshot = clone(compacted.episode);
     delete withoutSnapshot.steps[0]?.actorSnapshotsHashAfterStep;
+    delete withoutSnapshot.steps[0]?.actorSnapshotFrameIdAfterStep;
     expect(() =>
       buildHarnessCheckpointAtPrefix({
         artifactVersion: "ledger.checkpoint.v1",
@@ -360,6 +406,7 @@ describe("generic social harness contract", () => {
         sourceArtifactVersion: "ledger.episode.v1",
         episode: withoutSnapshot,
         selector: { nativeStepCount: 1 },
+        resolveAgentSnapshot: createHarnessAgentSnapshotFrameResolver(compacted.frames),
         replayPrefix: () => {
           throw new Error("replay must not run when durable snapshots are absent");
         }
@@ -376,6 +423,28 @@ describe("generic social harness contract", () => {
     });
     expect(tamperedReplay.ok).toBe(false);
     expect(tamperedReplay.mismatches.join(" ")).toMatch(/Recorded agent state audit: .*snapshot hash mismatch/);
+
+    const tamperedFrameRegistry = clone(compacted.frames);
+    tamperedFrameRegistry[0]!.agents[0]!.committedEntries.push("tampered-frame");
+    const tamperedFrameReplay = replaySocialEpisode({
+      episode: compacted.episode,
+      environment: new LedgerEnvironment(),
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      agentSnapshotFrames: tamperedFrameRegistry
+    });
+    expect(tamperedFrameReplay.ok).toBe(false);
+    expect(tamperedFrameReplay.mismatches.join(" ")).toMatch(/resolved actor snapshot hash mismatch|frame reference cannot be resolved/);
+
+    const danglingFrameEpisode = clone(compacted.episode);
+    danglingFrameEpisode.steps[0]!.actorSnapshotFrameIdAfterStep = "agent-snapshot:dangling";
+    const danglingFrameAudit = validateHarnessAgentSnapshotFrameRegistry({
+      episode: danglingFrameEpisode,
+      frames: compacted.frames,
+      finalAgents: parentAgentStates
+    });
+    expect(danglingFrameAudit.ok).toBe(false);
+    expect(danglingFrameAudit.mismatches.join(" ")).toMatch(/actor snapshot frame agent-snapshot:dangling is missing/i);
   });
 
   it("records an environment-rejected proposal without mutating state or committing its message", async () => {
