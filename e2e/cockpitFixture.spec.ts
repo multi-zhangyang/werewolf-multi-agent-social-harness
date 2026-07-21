@@ -18,6 +18,17 @@ test("renders recorded server truth without a provider and never requests a full
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
   await expect(page.getByText(fixtureMatchId).first()).toBeVisible();
 
+  // The postgame projection contains the recorded native timeline. Its
+  // explicit inspector action must be usable with ordinary keyboard focus;
+  // pointer row selection remains only a convenience path.
+  await page.getByRole("menuitem", { name: /时间线/ }).click();
+  await expect(page.getByRole("tabpanel", { name: "时间线" })).toBeVisible();
+  const firstNativeStep = page.getByRole("button", { name: "查看原生步骤 1" });
+  await firstNativeStep.focus();
+  await expect(firstNativeStep).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Step 详情")).toBeVisible();
+
   const projection = page.getByRole("combobox", { name: "工件投影" });
   const requestCountBeforeViewChange = artifactViews.length;
   const truthArtifact = page.waitForResponse((response) => isArtifactResponse(response, "truth-redacted"));

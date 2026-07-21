@@ -1,7 +1,8 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { runEvaluationRegistry } from "../src/harness/evaluation";
 import { hashStableState } from "../src/harness/hash";
-import { replaySocialEpisode } from "../src/harness/replay";
+import { replaySocialEpisode } from "../src/harness/generic";
 import { runHarnessEpisode } from "../src/harness/runner";
 import { ScaffoldedSocialActor } from "../src/harness/scaffold";
 import { createSocialStateEvaluator } from "../src/harness/socialEvaluator";
@@ -76,6 +77,20 @@ const privateABChannel: SocialChannel = {
 };
 
 describe("generic social harness contract", () => {
+  it("keeps the reusable runner, replay, checkpoint, and public barrel free of Werewolf/core imports", () => {
+    const genericModulePaths = [
+      "../src/harness/generic.ts",
+      "../src/harness/runner.ts",
+      "../src/harness/socialReplay.ts",
+      "../src/harness/episodeArtifacts.ts",
+      "../src/harness/checkpointRuntime.ts"
+    ];
+    for (const relativePath of genericModulePaths) {
+      const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
+      expect(source).not.toMatch(/from\s+["'](?:\.\.\/core|\.\/environment|\.\/artifacts|\.\/werewolfAdapter|\.\.\/server|\.\.\/components)/);
+    }
+  });
+
   it("keeps environment observations scoped, delivers messages by channel visibility, and replays a non-Werewolf episode", async () => {
     const actorA = new LedgerActor("a", () => ({
       actorId: "a",
@@ -303,6 +318,26 @@ describe("generic social harness contract", () => {
       LedgerCheckpointActorState
     >;
     expect(validateHarnessEpisodeArtifactEnvelope(compactedEnvelope)).toEqual([]);
+    const rawInlineEnvelope = {
+      ...compactedEnvelope,
+      socialEpisode: parent,
+      agentSnapshotFrames: undefined
+    };
+    expect(validateHarnessEpisodeArtifactEnvelope(rawInlineEnvelope)).toEqual([]);
+
+    const compactedWithoutRegistry = {
+      ...compactedEnvelope,
+      agentSnapshotFrames: undefined
+    };
+    expect(validateHarnessEpisodeArtifactEnvelope(compactedWithoutRegistry).join(" ")).toMatch(
+      /actor snapshot frame reference requires an external frame registry/
+    );
+
+    const danglingFrameEnvelope = clone(compactedEnvelope);
+    danglingFrameEnvelope.socialEpisode.steps[0]!.actorSnapshotFrameIdAfterStep = "agent-snapshot:dangling";
+    expect(validateHarnessEpisodeArtifactEnvelope(danglingFrameEnvelope).join(" ")).toMatch(
+      /actor snapshot frame agent-snapshot:dangling is missing/i
+    );
     const compactedReplay = replaySocialEpisode({
       episode: compacted.episode,
       environment: new LedgerEnvironment(),
@@ -359,6 +394,17 @@ describe("generic social harness contract", () => {
       )
     ).toEqual([]);
 
+    const verifyLedgerCheckpointReplay = (candidate: typeof checkpoint) =>
+      validateHarnessCheckpointReplay(candidate, (executionPrefix) =>
+        replaySocialEpisode({
+          episode: executionPrefix,
+          environment: new LedgerEnvironment(),
+          hashState: hashStableState,
+          hashMessages: hashStableState,
+          auditAgentSnapshots: false
+        })
+      );
+
     const forked = await runForkedHarnessEpisode({
       checkpoint,
       createdAt: "2026-07-21T01:00:01.000Z",
@@ -371,6 +417,7 @@ describe("generic social harness contract", () => {
           return agentStates.map((state) => new CheckpointLedgerActor(state.id, `fork-${state.id}`, state));
         }
       },
+      verifyCheckpointReplay: verifyLedgerCheckpointReplay,
       episode: {
         id: "ledger-generic-prefix-fork",
         schedulerMode: "aec",
@@ -395,6 +442,39 @@ describe("generic social harness contract", () => {
       done: true,
       entries: ["a:parent-a", "b:fork-b", "c:fork-c"]
     });
+
+    const structurallySelfConsistentButUnreplayable = clone(checkpoint);
+    structurallySelfConsistentButUnreplayable.executionPrefix.steps[0]!.action.command.entry = "tampered-command";
+    structurallySelfConsistentButUnreplayable.source.executionPrefixHash = hashStableState(
+      structurallySelfConsistentButUnreplayable.executionPrefix
+    );
+    expect(validateHarnessCheckpointEnvelope(structurallySelfConsistentButUnreplayable)).toEqual([]);
+    let environmentRestores = 0;
+    let actorRestores = 0;
+    await expect(
+      runForkedHarnessEpisode({
+        checkpoint: structurallySelfConsistentButUnreplayable,
+        runtime: {
+          createEnvironment(initialState) {
+            environmentRestores += 1;
+            return new LedgerEnvironment({ initialState });
+          },
+          restoreActors(agentStates) {
+            actorRestores += 1;
+            return agentStates.map((state) => new CheckpointLedgerActor(state.id, `forbidden-${state.id}`, state));
+          }
+        },
+        verifyCheckpointReplay: verifyLedgerCheckpointReplay,
+        episode: {
+          id: "ledger-generic-prefix-invalid-fork",
+          schedulerMode: "aec",
+          hashState: hashStableState,
+          hashMessages: hashStableState
+        }
+      })
+    ).rejects.toThrow(/Checkpoint replay verification failed/);
+    expect(environmentRestores).toBe(0);
+    expect(actorRestores).toBe(0);
 
     const withoutSnapshot = clone(compacted.episode);
     delete withoutSnapshot.steps[0]?.actorSnapshotsHashAfterStep;
@@ -445,6 +525,78 @@ describe("generic social harness contract", () => {
     });
     expect(danglingFrameAudit.ok).toBe(false);
     expect(danglingFrameAudit.mismatches.join(" ")).toMatch(/actor snapshot frame agent-snapshot:dangling is missing/i);
+  });
+
+  it("rejects a repeated policy trace before a second generic transition and preserves the first snapshot binding", async () => {
+    const environment = new LedgerEnvironment({ actorIds: ["a", "a"] });
+    const actor = new LedgerActor("a", () => ({
+      actorId: "a",
+      kind: "record",
+      traceId: "ledger-duplicate-policy-trace",
+      command: { actorId: "a", entry: "duplicate-trace-attempt" }
+    }));
+    let snapshotCaptures = 0;
+    const episode = await runHarnessEpisode<
+      LedgerState,
+      LedgerObservation,
+      LedgerPending,
+      LedgerCommand,
+      { id: LedgerActorId; durableMemoryVersion: number }
+    >({
+      id: "ledger-duplicate-trace",
+      environment,
+      actors: [actor],
+      channels: [publicChannel],
+      schedulerMode: "aec",
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      captureAgentSnapshots: () => {
+        snapshotCaptures += 1;
+        return [{ id: "a", durableMemoryVersion: environment.snapshot().turn }];
+      }
+    });
+
+    expect(episode.status).toBe("failed");
+    expect(episode.failureReason).toMatch(/already recorded by an earlier native step/);
+    expect(environment.stepCalls).toBe(1);
+    expect(snapshotCaptures).toBe(1);
+    expect(episode.steps).toHaveLength(2);
+    expect(episode.steps[0]).toMatchObject({
+      traceId: "ledger-duplicate-policy-trace",
+      actorId: "a",
+      commitStatus: "committed",
+      actorSnapshotsAfterStep: [{ id: "a", durableMemoryVersion: 1 }]
+    });
+    expect(episode.steps[1]).toMatchObject({
+      actorId: "system",
+      commitStatus: "rejected",
+      failure: { stage: "trace_identity" }
+    });
+    expect(episode.steps[1]?.actorSnapshotsAfterStep).toBeUndefined();
+    expect(new Set(episode.steps.map((step) => step.traceId)).size).toBe(episode.steps.length);
+    expect(actor.receipts.map((receipt) => receipt.status)).toEqual(["committed", "rejected"]);
+    expect(actor.receipts[1]?.traceId).toBe(episode.steps[1]?.traceId);
+    expect(validateSocialEpisodeArtifact(episode)).toEqual([]);
+
+    const agents = [{ id: "a" as LedgerActorId, durableMemoryVersion: 1 }];
+    const envelope = {
+      artifactVersion: "ledger.episode.v1",
+      kind: "ledger-episode",
+      runId: episode.id,
+      createdAt: "2026-07-21T02:00:00.000Z",
+      status: episode.status,
+      initialState: episode.initialState,
+      finalState: episode.finalState,
+      socialEpisode: episode,
+      agents
+    } satisfies HarnessEpisodeArtifactEnvelope<
+      LedgerState,
+      LedgerObservation,
+      LedgerPending,
+      LedgerCommand,
+      (typeof agents)[number]
+    >;
+    expect(validateHarnessEpisodeArtifactEnvelope(envelope)).toEqual([]);
   });
 
   it("records an environment-rejected proposal without mutating state or committing its message", async () => {

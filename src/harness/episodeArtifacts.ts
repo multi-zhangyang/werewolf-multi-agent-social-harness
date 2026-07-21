@@ -891,7 +891,19 @@ export function validateHarnessEpisodeArtifactEnvelope<
       });
       for (const mismatch of audit.mismatches) errors.push(`agentSnapshotFrames: ${mismatch}`);
     }
-  } else if (artifact.socialEpisode.steps.some((step) => step.actorSnapshotsAfterStep !== undefined)) {
+  } else if (
+    artifact.socialEpisode.steps.some(
+      (step) =>
+        step.actorSnapshotsAfterStep !== undefined ||
+        step.actorSnapshotsHashAfterStep !== undefined ||
+        step.actorSnapshotFrameIdAfterStep !== undefined
+    )
+  ) {
+    // Canonical episode envelopes may retain raw inline snapshots without a
+    // sidecar, but a compacted hash/frame reference is only auditable with its
+    // registry. The no-parent-registry replay exception belongs exclusively to
+    // an explicitly selected bare checkpoint prefix, never to a canonical
+    // artifact that claims replay/fork authority.
     const audit = auditRecordedSocialAgentSnapshots({
       episode: artifact.socialEpisode,
       finalAgents: artifact.agents

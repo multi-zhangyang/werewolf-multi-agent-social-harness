@@ -3276,7 +3276,17 @@ function TimelineWorkspace({
     { title: "action", render: (_, step) => step.action.kind },
     { title: "command", render: (_, step) => readSocialCommandType(step) },
     { title: "messages", render: (_, step) => (step.messageSeqRange ? rangeLabel(step.messageSeqRange) : "none") },
-    { title: "state", render: (_, step) => `${shortId(step.preStateHash)} -> ${shortId(step.postStateHash)}` }
+    { title: "state", render: (_, step) => `${shortId(step.preStateHash)} -> ${shortId(step.postStateHash)}` },
+    {
+      title: "查看",
+      fixed: "right",
+      width: 72,
+      render: (_, __, index) => (
+        <Button type="link" size="small" aria-label={`查看原生步骤 ${index + 1}`} onClick={() => onSelectStep(index)}>
+          查看
+        </Button>
+      )
+    }
   ];
   const legacyColumns: TableProps<RedactedHarnessStepDto>["columns"] = [
     { title: "#", width: 64, render: (_, __, index) => index + 1 },
@@ -3287,6 +3297,19 @@ function TimelineWorkspace({
     {
       title: "native link",
       render: (_, step) => (nativeStepByTraceId.has(step.traceId) ? <Tag color="success">linked</Tag> : <Tag color="error">missing</Tag>)
+    },
+    {
+      title: "查看",
+      fixed: "right",
+      width: 72,
+      render: (_, legacyStep) => {
+        const index = steps.findIndex((step) => step.traceId === legacyStep.traceId);
+        return (
+          <Button type="link" size="small" aria-label={`查看旧轨迹步骤 ${shortId(legacyStep.traceId)}`} disabled={index < 0} onClick={() => onSelectStep(index)}>
+            查看
+          </Button>
+        );
+      }
     }
   ];
 
@@ -3547,7 +3570,17 @@ function SocietyWorkspace({
     { title: "profile", dataIndex: "profileId", render: (value?: string) => value ?? "n/a" },
     { title: "policy", dataIndex: "policyName" },
     { title: "turns", dataIndex: "turns" },
-    { title: "beliefs", render: (_, agent) => Object.keys(agent.beliefs ?? {}).length }
+    { title: "beliefs", render: (_, agent) => Object.keys(agent.beliefs ?? {}).length },
+    {
+      title: "查看",
+      fixed: "right",
+      width: 72,
+      render: (_, agent) => (
+        <Button type="link" size="small" aria-label={`查看 agent ${agent.playerId}`} onClick={() => onSelectAgent(agent)}>
+          查看
+        </Button>
+      )
+    }
   ];
   const agentActivityColumns: TableProps<(typeof agentActivityRows)[number]>["columns"] = [
     {
@@ -3599,7 +3632,17 @@ function SocietyWorkspace({
     { title: "visibility", dataIndex: "visibility", render: (visibility: SocialMessage["visibility"]) => <VisibilityTag visibility={visibility} /> },
     { title: "acts", width: 72, render: (_, message) => message.speechActs?.length ?? 0 },
     { title: "receipts", width: 92, render: (_, message) => message.deliveryReceipts?.length ?? 0 },
-    { title: "content", dataIndex: "content", ellipsis: true }
+    { title: "content", dataIndex: "content", ellipsis: true },
+    {
+      title: "查看",
+      fixed: "right",
+      width: 72,
+      render: (_, message) => (
+        <Button type="link" size="small" aria-label={`查看消息 ${message.seq}`} onClick={() => onSelectMessage(message)}>
+          查看
+        </Button>
+      )
+    }
   ];
   const relationshipColumns: TableProps<ReturnType<typeof readRelationshipRows>[number]>["columns"] = [
     { title: "owner", dataIndex: "owner", render: (owner: string) => <Text code>{owner}</Text> },
@@ -3868,17 +3911,43 @@ function LineageWorkspace({
     { title: "messages", render: (_, checkpoint) => checkpoint.counts.socialMessages },
     { title: "state hash", render: (_, checkpoint) => <Text code>{shortId(checkpoint.source.stateHash)}</Text> },
     {
-      title: "action",
+      title: "选择",
+      fixed: "right",
+      align: "right",
+      render: (_, checkpoint) => (
+        <Space size={2}>
+          <Button
+            size="small"
+            type={selectedCheckpointId === checkpoint.checkpointId ? "primary" : "default"}
+            aria-label={`选择 checkpoint ${shortId(checkpoint.checkpointId)}`}
+            onClick={() => onSelectCheckpoint(checkpoint)}
+          >
+            选择
+          </Button>
+          <Button
+            size="small"
+            icon={decorativeIcon(<BranchesOutlined />)}
+            loading={busy === "branch-tree" && selectedCheckpointId === checkpoint.checkpointId}
+            aria-label={`加载 checkpoint ${shortId(checkpoint.checkpointId)} 的 branch tree`}
+            onClick={() => onLoadBranchTree(checkpoint.checkpointId)}
+          >
+            Tree
+          </Button>
+        </Space>
+      )
+    },
+    {
+      title: "证据",
       fixed: "right",
       align: "right",
       render: (_, checkpoint) => (
         <Button
           size="small"
-          icon={decorativeIcon(<BranchesOutlined />)}
-          loading={busy === "branch-tree" && selectedCheckpointId === checkpoint.checkpointId}
-          onClick={() => onLoadBranchTree(checkpoint.checkpointId)}
+          icon={decorativeIcon(<CodeOutlined />)}
+          aria-label={`查看 checkpoint ${shortId(checkpoint.checkpointId)} 证据`}
+          onClick={() => onInspectCheckpoint(checkpoint)}
         >
-          Branch Tree
+          证据
         </Button>
       )
     }
@@ -4170,14 +4239,34 @@ function EvaluationWorkspace({
     },
     { title: "weight", dataIndex: "weight", render: (value?: number) => (value === undefined ? "n/a" : value) },
     { title: "source", render: (_, metric) => metric.evaluatorId ?? metric.source },
-    { title: "evidence", render: (_, metric) => metric.evidenceRefs?.length ?? 0 }
+    { title: "evidence", render: (_, metric) => metric.evidenceRefs?.length ?? 0 },
+    {
+      title: "查看",
+      fixed: "right",
+      width: 72,
+      render: (_, metric) => (
+        <Button type="link" size="small" aria-label={`查看指标 ${metric.id}`} onClick={() => onInspectMetric(metric, resolvePromotion(metric))}>
+          查看
+        </Button>
+      )
+    }
   ];
   const warningColumns: TableProps<HarnessEvaluationWarning>["columns"] = [
     { title: "severity", dataIndex: "severity", render: (severity: HarnessEvaluationWarning["severity"]) => <SeverityTag severity={severity} /> },
     { title: "code", dataIndex: "code" },
     { title: "evaluator", dataIndex: "evaluatorId", render: (value?: string) => value ?? "n/a" },
     { title: "message", dataIndex: "message", ellipsis: true },
-    { title: "evidence", render: (_, warning) => warning.evidenceRefs?.length ?? 0 }
+    { title: "evidence", render: (_, warning) => warning.evidenceRefs?.length ?? 0 },
+    {
+      title: "查看",
+      fixed: "right",
+      width: 72,
+      render: (_, warning) => (
+        <Button type="link" size="small" aria-label={`查看告警 ${warning.code}`} onClick={() => onInspectWarning(warning)}>
+          查看
+        </Button>
+      )
+    }
   ];
 
   return (
@@ -4488,6 +4577,16 @@ function CompareWorkspace({
         ) : (
           "—"
         )
+    },
+    {
+      title: "查看",
+      fixed: "right",
+      width: 72,
+      render: (_value, row) => (
+        <Button type="link" size="small" aria-label={`查看对比行 ${row.id}`} onClick={() => onInspectRow(row)}>
+          查看
+        </Button>
+      )
     }
   ];
   const pendingReason = !comparison

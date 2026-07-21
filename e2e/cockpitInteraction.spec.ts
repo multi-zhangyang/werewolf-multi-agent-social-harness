@@ -20,12 +20,30 @@ function isApiResponse(response: Response, path: string, method = "GET") {
 async function selectComboboxOption(
   page: Page,
   name: string,
-  direction: "ArrowDown" | "ArrowUp" = "ArrowDown"
+  target: { name: string | RegExp } | { index: number }
 ): Promise<void> {
   const selector = page.getByRole("combobox", { name });
   await selector.click();
-  await selector.press(direction);
-  await selector.press("Enter");
+  await expect(selector).toHaveAttribute("aria-expanded", "true", { timeout: 10_000 });
+  // rc-select keeps hidden ARIA listbox portals for assistive metadata. Its
+  // rendered, interactive choices are the visible option items; selecting
+  // from that set avoids stale hidden portals while exercising the real UI.
+  const options = page.locator(".ant-select-item-option:visible");
+  await expect(options.first()).toBeVisible({ timeout: 10_000 });
+  const option = "name" in target
+    ? options.filter({ hasText: target.name })
+    : options.nth(target.index);
+  await option.click();
+}
+
+/**
+ * The primary sidebar and the horizontal tab strip invoke the same workspace
+ * state transition. Prefer the sidebar in E2E so rc-tabs overflow/scroll
+ * mechanics never decide whether a live harness/API assertion is exercised.
+ */
+async function navigateWorkspace(page: Page, name: string): Promise<void> {
+  await page.getByRole("menuitem", { name: new RegExp(name) }).click();
+  await expect(page.getByRole("tabpanel", { name })).toBeVisible();
 }
 
 type E2EMatchRecord = {
@@ -174,7 +192,9 @@ async function ensureServerArtifacts(page: Page, requiredCount = 1) {
 }
 
 test("harness cockpit uses real API-backed interactions", async ({ page }) => {
-  test.setTimeout(300_000);
+  // One bounded streaming turn may consume the normal per-run timeout; keep
+  // the aggregate budget above that plus the subsequent replay/API assertions.
+  test.setTimeout(480_000);
   const failedRequests: string[] = [];
   const failedApiResponses: string[] = [];
   const apiResponses: string[] = [];
@@ -251,8 +271,8 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
       url.pathname.endsWith("/artifact") &&
       url.searchParams.get("view") === "truth-redacted"
     );
-  });
-  await selectComboboxOption(page, "工件投影");
+  }, { timeout: 30_000 });
+  await selectComboboxOption(page, "工件投影", { name: /公开视图/ });
   const truthArtifactResponse = await truthArtifact;
   expect(truthArtifactResponse.ok()).toBeTruthy();
   const truthArtifactBody = (await truthArtifactResponse.json()) as E2EMatchArtifactProjection & {
@@ -278,8 +298,8 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
       url.pathname.endsWith("/artifact") &&
       url.searchParams.get("view") === "postgame-redacted"
     );
-  });
-  await selectComboboxOption(page, "工件投影", "ArrowUp");
+  }, { timeout: 30_000 });
+  await selectComboboxOption(page, "工件投影", { name: /研究视图/ });
   expect((await researchArtifact).ok()).toBeTruthy();
 
   await page.getByLabel("最大 transitions").fill("2");
@@ -304,7 +324,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   expect([uiRunArtifact.matchId, uiRunArtifact.runId]).toContain(uiRun.id);
   await expect(statusWith(page, /真实 harness run 完成/)).toBeVisible({ timeout: 20_000 });
 
-  await page.getByRole("tab", { name: "对比", exact: true }).click();
+  await navigateWorkspace(page, "对比");
   await expect(statusWith(page, "工作区已切换：对比")).toBeVisible();
   await expect(page.getByRole("combobox", { name: "候选运行" })).toBeVisible();
   const candidateArtifactResponse = page.waitForResponse((response) => {
@@ -315,7 +335,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
       url.pathname.endsWith("/artifact") &&
       url.searchParams.get("view") === "postgame-redacted"
     );
-  });
+  }, { timeout: 30_000 });
   const comparisonArtifactResponse = page.waitForResponse((response) => {
     const url = new URL(response.url());
     return (
@@ -323,8 +343,10 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
       url.pathname.startsWith(`/api/matches/${uiRun.id}/compare/`) &&
       url.searchParams.get("view") === "postgame-redacted"
     );
-  });
-  await selectComboboxOption(page, "候选运行");
+  }, { timeout: 30_000 });
+  // The just-run match is excluded from its own candidate list. With a single
+  // existing baseline there is exactly one selectable candidate at index 0.
+  await selectComboboxOption(page, "候选运行", { index: 0 });
   expect((await candidateArtifactResponse).ok()).toBeTruthy();
   const comparisonResponse = await comparisonArtifactResponse;
   expect(comparisonResponse.ok()).toBeTruthy();
@@ -350,7 +372,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   await expect(statusWith(page, /候选切换后对比已加载|对比工件已加载/)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("columnheader", { name: "row", exact: true }).last()).toBeVisible();
 
-  await page.getByRole("tab", { name: "时间线", exact: true }).click();
+  await navigateWorkspace(page, "时间线");
   await expect(page.getByRole("button", { name: "复现", exact: true })).toBeVisible();
   await expect(page.getByText(/主时间线来自原生 social episode/)).toBeVisible();
   await expect(page.getByText("Legacy trajectory projection", { exact: true })).toBeVisible();
@@ -372,7 +394,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   expect(new URL(jsonl.url()).searchParams.get("view")).toBe("postgame-redacted");
   await expect(statusWith(page, /trajectory\.jsonl 已验证/)).toBeVisible({ timeout: 15_000 });
 
-  await page.getByRole("tab", { name: "谱系", exact: true }).click();
+  await navigateWorkspace(page, "谱系");
   await expect(page.getByText("Checkpoint Registry", { exact: true })).toBeVisible();
   await expect(page.getByText("只展示 summary，不读取 full checkpoint artifact")).toBeVisible();
 
@@ -420,11 +442,11 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   await expect(statusWith(page, /branch tree 已加载/)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("Branch Tree Nodes", { exact: true })).toBeVisible();
 
-  await page.getByRole("tab", { name: "社会", exact: true }).click();
+  await navigateWorkspace(page, "社会");
   await expect(page.getByRole("columnheader", { name: "agent", exact: true }).first()).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "channel", exact: true }).first()).toBeVisible();
 
-  await page.getByRole("tab", { name: "评测", exact: true }).click();
+  await navigateWorkspace(page, "评测");
   await expect(page.getByRole("columnheader", { name: "metric", exact: true }).first()).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "severity", exact: true }).first()).toBeVisible();
 

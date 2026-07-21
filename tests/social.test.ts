@@ -419,6 +419,40 @@ describe("generic social harness scheduler contract", () => {
     expect(artifact.steps[0].terminationReason).toBe("parallel terminal test");
   });
 
+  it("rejects duplicate policy trace IDs in a parallel batch before stepBatch", async () => {
+    const environment = new TestParallelEnvironment();
+    const actorA = new TestActor("a", { traceId: "duplicate-policy-trace" });
+    const actorB = new TestActor("b", { traceId: "duplicate-policy-trace" });
+
+    const artifact = await runSocialEpisode({
+      id: "social-parallel-duplicate-trace",
+      environment,
+      actors: [actorA, actorB],
+      schedulerMode: "parallel",
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(artifact.failureReason).toMatch(/duplicate native traceId duplicate-policy-trace/);
+    expect(environment.stepCalls).toBe(0);
+    expect(environment.batchCalls).toBe(0);
+    expect(artifact.steps).toMatchObject([
+      {
+        actorId: "system",
+        commitStatus: "rejected",
+        schedulerMode: "parallel",
+        resolutionPolicy: "scheduler-validation",
+        failure: { stage: "trace_identity" }
+      }
+    ]);
+    expect(actorA.receipts).toMatchObject([{ status: "rejected", actorId: "a", traceId: artifact.steps[0]?.traceId }]);
+    expect(actorB.receipts).toMatchObject([{ status: "rejected", actorId: "b", traceId: artifact.steps[0]?.traceId }]);
+    expect(actorA.receipts[0]?.action?.traceId).toBe("duplicate-policy-trace");
+    expect(actorB.receipts[0]?.action?.traceId).toBe("duplicate-policy-trace");
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+  });
+
   it("records a decision-collection failure as one complete rejected parallel batch", async () => {
     const environment = new TestParallelEnvironment();
     const actorA = new TestActor("a");
@@ -1832,6 +1866,7 @@ class TestActor implements SocialActor<TestObservation, TestPending, TestCommand
       messages?: SocialAction<TestCommand>["messages"];
       terminate?: boolean;
       actionActorId?: string;
+      traceId?: string;
     } = {}
   ) {
     this.profile = { id, model: `${id}-model` };
@@ -1849,6 +1884,7 @@ class TestActor implements SocialActor<TestObservation, TestPending, TestCommand
     return {
       actorId: actionActorId,
       kind: pending.kind,
+      traceId: this.options.traceId,
       command: {
         actorId: actionActorId,
         value: `${actionActorId}:${pending.kind}`,

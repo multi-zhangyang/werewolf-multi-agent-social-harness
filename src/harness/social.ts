@@ -1040,6 +1040,11 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
   const actorById = new Map(options.actors.map((actor) => [actor.id, actor]));
   const initialState = cloneJson(options.environment.snapshot());
   const steps: Array<SocialHarnessStep<TObservation, TPending, TCommand>> = [];
+  const usedNativeTraceIds = new Set<string>();
+  const recordNativeSteps = (...records: Array<SocialHarnessStep<TObservation, TPending, TCommand>>): void => {
+    steps.push(...records);
+    for (const record of records) usedNativeTraceIds.add(record.traceId);
+  };
   const maxTransitions = options.maxTransitions ?? 320;
 
   let status: SocialEpisodeStatus = "completed";
@@ -1086,6 +1091,10 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     }
     const pendingBatch = selectPendingBatch(pendingActions, schedulerMode);
     if (!pendingBatch.length) {
+      const systemTraceId = allocateRunnerTraceId(
+        usedNativeTraceIds,
+        `${options.id}:social:${turnIndex}:system`
+      );
       const systemOutcome = applyOptionalSystemTransition({
         optionsId: options.id,
         environment: options.environment,
@@ -1095,10 +1104,11 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
         schedulerMode,
         hashState: options.hashState,
         eventSeq: options.eventSeq,
-        systemTransition: options.systemTransition
+        systemTransition: options.systemTransition,
+        traceId: systemTraceId
       });
       if (!systemOutcome) break;
-      steps.push(systemOutcome.step);
+      recordNativeSteps(systemOutcome.step);
       if (systemOutcome.status === "failed") {
         status = "failed";
         failureReason = systemOutcome.reason;
@@ -1127,9 +1137,10 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
       const reason = `Scheduler batch ${batchId} contains multiple pending actions for actor ${duplicateActorId}.`;
       const failure = defaultFailureEvidence("scheduler_validation", reason);
       const stateHash = options.hashState?.(options.environment.snapshot());
-      steps.push(
+      recordNativeSteps(
         schedulerFailureStep({
           optionsId: options.id,
+          traceId: allocateRunnerTraceId(usedNativeTraceIds, `${options.id}:scheduler:${batchIndex}:rejected`),
           turnIndex,
           batchId,
           batchIndex,
@@ -1165,8 +1176,35 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
 	          traceIdForDecision: options.traceIdForDecision,
 	          actorTurnIndexForDecision: options.actorTurnIndexForDecision
 	        })
-	      )
-	    );
+      )
+    );
+
+    const traceIdentityFailure = findNativeTraceIdentityFailure(decisions, usedNativeTraceIds, options.id);
+    if (traceIdentityFailure) {
+      const failure = defaultFailureEvidence("trace_identity", traceIdentityFailure.message);
+      const rejectionStep = schedulerFailureStep<TObservation, TPending, TCommand>({
+        optionsId: options.id,
+        traceId: allocateRunnerTraceId(usedNativeTraceIds, `${options.id}:scheduler:${batchIndex}:trace_identity:rejected`),
+        turnIndex,
+        batchId,
+        batchIndex,
+        batchSize: pendingBatch.length,
+        schedulerMode,
+        pendingAction: pendingBatch[traceIdentityFailure.pendingIndex] ?? pendingBatch[0],
+        decisionStateHash,
+        preStateHash: decisionStateHash,
+        postStateHash: decisionStateHash,
+        failure
+      });
+      // Actions keep their policy-provided trace evidence intact. The rejected
+      // runner receipt instead refers to the unique native scheduler record;
+      // staged actor state is keyed by transactionId, never by traceId.
+      rejectUncommittedDecisions(decisions, failure, { receiptTraceId: rejectionStep.traceId });
+      recordNativeSteps(rejectionStep);
+      status = "failed";
+      failureReason = traceIdentityFailure.message;
+      break;
+    }
 
     const failedDecision = decisions.find((decision) => !decision.ok);
     if (failedDecision) {
@@ -1209,7 +1247,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
       };
       rejectUncommittedDecisions(decisions, failureForDecision);
       if (schedulerMode === "parallel") {
-        steps.push(
+        recordNativeSteps(
           ...rejectedParallelDecisionBatchSteps({
             optionsId: options.id,
             decisions,
@@ -1224,7 +1262,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
           })
         );
       } else {
-        steps.push(
+        recordNativeSteps(
           ...rejectedSequentialDecisionBatchSteps({
             optionsId: options.id,
             decisions,
@@ -1254,7 +1292,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
         };
         rejectUncommittedDecisions(successfulDecisions, truncationFailure);
         const truncationState = options.environment.snapshot();
-        steps.push(
+        recordNativeSteps(
           ...rejectedParallelDecisionBatchSteps({
             optionsId: options.id,
             decisions: successfulDecisions,
@@ -1286,7 +1324,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
 	        afterEnvironmentStep: options.afterEnvironmentStep,
 	        onEnvironmentStepFailure: options.onEnvironmentStepFailure
 	      });
-      steps.push(...outcome.steps);
+      recordNativeSteps(...outcome.steps);
       if (outcome.status === "failed") {
         status = "failed";
         failureReason = outcome.reason;
@@ -1321,7 +1359,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
 	          afterEnvironmentStep: options.afterEnvironmentStep,
 	          onEnvironmentStepFailure: options.onEnvironmentStepFailure
 	        });
-        steps.push(outcome.step);
+        recordNativeSteps(outcome.step);
         if (outcome.status === "failed") {
           status = "failed";
           failureReason = outcome.reason;
@@ -1332,7 +1370,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
           };
           rejectUncommittedDecisions(remainingDecisions, batchAbortFailure);
           const abortedStateHash = options.hashState?.(options.environment.snapshot());
-          steps.push(
+          recordNativeSteps(
             ...rejectedSequentialDecisionBatchSteps({
               optionsId: options.id,
               decisions: remainingDecisions,
@@ -1358,7 +1396,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
           };
           rejectUncommittedDecisions(remainingDecisions, batchAbortFailure);
           const abortedStateHash = options.hashState?.(options.environment.snapshot());
-          steps.push(
+          recordNativeSteps(
             ...rejectedSequentialDecisionBatchSteps({
               optionsId: options.id,
               decisions: remainingDecisions,
@@ -1384,7 +1422,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
           };
           rejectUncommittedDecisions(remainingDecisions, batchAbortFailure);
           const abortedStateHash = options.hashState?.(options.environment.snapshot());
-          steps.push(
+          recordNativeSteps(
             ...rejectedSequentialDecisionBatchSteps({
               optionsId: options.id,
               decisions: remainingDecisions,
@@ -1465,6 +1503,64 @@ function isSuccessfulDecision<TObservation, TPending, TCommand>(
   return decision.ok;
 }
 
+interface NativeTraceIdentityFailure {
+  pendingIndex: number;
+  message: string;
+}
+
+/**
+ * Native trace IDs bind committed/rejected execution records, snapshot frames,
+ * replay evidence, and social exposure. A policy may provide an action trace
+ * for evidence, but it may not reuse a previously-recorded native identity.
+ * Check every collected decision before preflight/message publication or any
+ * environment transition so collisions are fail-closed and mutation-free.
+ */
+function findNativeTraceIdentityFailure<TObservation, TPending, TCommand>(
+  decisions: readonly SocialDecision<TObservation, TPending, TCommand>[],
+  usedNativeTraceIds: ReadonlySet<string>,
+  optionsId: string
+): NativeTraceIdentityFailure | undefined {
+  const batchTraceOwners = new Map<string, number>();
+  for (const decision of decisions) {
+    const traceId = decision.ok
+      ? decision.action.traceId
+      : decision.traceId ?? `${optionsId}:social:${decision.turnIndex}:${decision.actorId}`;
+    if (!traceId?.trim()) {
+      return {
+        pendingIndex: decision.pendingIndex,
+        message: `Runner ${optionsId} received a missing native traceId for pending decision ${decision.pendingIndex + 1}.`
+      };
+    }
+    const priorPendingIndex = batchTraceOwners.get(traceId);
+    if (priorPendingIndex !== undefined) {
+      return {
+        pendingIndex: decision.pendingIndex,
+        message: `Runner ${optionsId} received duplicate native traceId ${traceId} for pending decisions ${priorPendingIndex + 1} and ${decision.pendingIndex + 1}.`
+      };
+    }
+    if (usedNativeTraceIds.has(traceId)) {
+      return {
+        pendingIndex: decision.pendingIndex,
+        message: `Runner ${optionsId} received native traceId ${traceId} that was already recorded by an earlier native step.`
+      };
+    }
+    batchTraceOwners.set(traceId, decision.pendingIndex);
+  }
+  return undefined;
+}
+
+/** Reserve a trace only for a runner-owned system/scheduler record. */
+function allocateRunnerTraceId(usedNativeTraceIds: ReadonlySet<string>, baseTraceId: string): string {
+  if (!usedNativeTraceIds.has(baseTraceId)) return baseTraceId;
+  let suffix = 2;
+  let traceId = `${baseTraceId}:runner:${suffix}`;
+  while (usedNativeTraceIds.has(traceId)) {
+    suffix += 1;
+    traceId = `${baseTraceId}:runner:${suffix}`;
+  }
+  return traceId;
+}
+
 /**
  * A batch can be abandoned after actors have observed and reasoned but before
  * their commands reach the environment. Tell each affected actor explicitly
@@ -1473,16 +1569,18 @@ function isSuccessfulDecision<TObservation, TPending, TCommand>(
  */
 function rejectUncommittedDecisions<TObservation, TPending, TCommand>(
   decisions: readonly SocialDecision<TObservation, TPending, TCommand>[],
-  failure: SocialStepFailureEvidence | ((decision: SocialDecision<TObservation, TPending, TCommand>) => SocialStepFailureEvidence)
+  failure: SocialStepFailureEvidence | ((decision: SocialDecision<TObservation, TPending, TCommand>) => SocialStepFailureEvidence),
+  options: { receiptTraceId?: string } = {}
 ): void {
   for (const decision of decisions) {
     if (!decision.actor) continue;
     const resolvedFailure = typeof failure === "function" ? failure(decision) : failure;
-    const traceId = decision.ok
+    const proposedTraceId = decision.ok
       ? decision.action.traceId ?? `social:${decision.turnIndex}:${decision.actorId}`
       : decision.traceId ?? `social:${decision.turnIndex}:${decision.actorId}`;
+    const traceId = options.receiptTraceId ?? proposedTraceId;
     deliverActorStepReceipt(decision.actor, {
-      id: `${traceId}:rejected`,
+      id: `${decision.transactionId ?? traceId}:rejected`,
       status: "rejected",
       traceId,
       transactionId: decision.transactionId,
@@ -1630,6 +1728,7 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
   hashState?: (state: TState) => string;
   eventSeq?: (state: TState) => number;
   systemTransition?: SocialSystemTransitionProvider<TState, TObservation, TPending, TCommand>;
+  traceId: string;
 }):
   | {
       status: "ok" | "failed";
@@ -1656,7 +1755,7 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
       reason,
       feedback,
       step: {
-        traceId: `${input.optionsId}:social:${input.turnIndex}:${actorId}`,
+        traceId: input.traceId,
         turnIndex: input.turnIndex,
         batchId: `${input.optionsId}:system:${input.batchIndex}`,
         batchIndex: 1,
@@ -1686,7 +1785,7 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
   const beforeSeq = input.bus.listMessages().at(-1)?.seq ?? 0;
   const messages = transition.action.messages ?? [];
   const base = {
-    traceId: `${input.optionsId}:social:${input.turnIndex}:${actorId}`,
+    traceId: input.traceId,
     turnIndex: input.turnIndex,
     batchId,
     batchIndex: 1,
@@ -2348,6 +2447,7 @@ function failedDecisionToStep<TObservation, TPending, TCommand>(input: {
  */
 function schedulerFailureStep<TObservation, TPending, TCommand>(input: {
   optionsId: string;
+  traceId?: string;
   turnIndex: number;
   batchId: string;
   batchIndex: number;
@@ -2360,7 +2460,7 @@ function schedulerFailureStep<TObservation, TPending, TCommand>(input: {
   failure: SocialStepFailureEvidence;
 }): SocialHarnessStep<TObservation, TPending, TCommand> {
   return {
-    traceId: `${input.optionsId}:scheduler:${input.batchIndex}:rejected`,
+    traceId: input.traceId ?? `${input.optionsId}:scheduler:${input.batchIndex}:rejected`,
     turnIndex: input.turnIndex,
     batchId: input.batchId,
     batchIndex: input.batchIndex,
