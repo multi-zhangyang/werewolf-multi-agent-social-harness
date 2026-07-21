@@ -39,6 +39,15 @@ export interface RunForkedHarnessEpisodeOptions<TState, TAgentState, TObservatio
   checkpoint: HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand>;
   runtime: SocialCheckpointRuntimeAdapter<TState, TAgentState, TObservation, TPending, TCommand>;
   /**
+   * Required model-free replay gate for a persisted checkpoint prefix. The
+   * generic runtime cannot construct a domain environment itself, so the
+   * domain supplies this deterministic verifier instead of an implicit trust
+   * exception. It runs before environment or actor restoration.
+   */
+  verifyCheckpointReplay: (
+    checkpoint: HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand>
+  ) => readonly string[];
+  /**
    * All normal scheduler, observation, validation, and trace hooks remain
    * domain-owned.  The fork seed owns only state, actors, and social history.
    */
@@ -80,6 +89,10 @@ export async function runForkedHarnessEpisode<TState, TAgentState, TObservation,
   const domainErrors = options.validateCheckpoint?.(options.checkpoint) ?? [];
   if (domainErrors.length) {
     throw new Error(`Invalid domain checkpoint ${options.checkpoint.checkpointId}: ${domainErrors.join(" ")}`);
+  }
+  const replayErrors = options.verifyCheckpointReplay(options.checkpoint);
+  if (replayErrors.length) {
+    throw new Error(`Checkpoint replay verification failed for ${options.checkpoint.checkpointId}: ${replayErrors.join(" ")}`);
   }
   const seed = buildSocialCheckpointForkSeed(options.checkpoint, options);
   const socialEpisode = await runHarnessEpisode({

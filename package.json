@@ -27,6 +27,7 @@
     "@anthropic-ai/sdk": "^0.110.0",
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource/noto-sans-sc": "^5.2.9",
+    "@noble/hashes": "2.2.0",
     "@vitejs/plugin-react": "^6.0.3",
     "antd": "^6.5.0",
     "express": "^5.2.1",
