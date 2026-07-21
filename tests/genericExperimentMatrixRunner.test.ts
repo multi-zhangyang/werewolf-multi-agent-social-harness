@@ -49,14 +49,15 @@ describe("generic experiment matrix control plane", () => {
     ]);
   });
 
-  it("stops at a failed cell when configured and rejects malformed cell identity before it runs", async () => {
+  it("continues after a bounded cell but stops at a failed cell when configured", async () => {
     const calls: string[] = [];
     const result = await runGenericExperimentMatrix({
       experiment: {
         id: "stop-on-failure",
         continueOnError: false,
         cells: [
-          { id: "first", input: "failed" as const },
+          { id: "bounded", input: "truncated" as const },
+          { id: "first-failure", input: "failed" as const },
           { id: "never", input: "completed" as const }
         ]
       },
@@ -66,16 +67,24 @@ describe("generic experiment matrix control plane", () => {
       },
       statusOf: (result) => result
     });
-    expect(calls).toEqual(["first"]);
+    expect(calls).toEqual(["bounded", "first-failure"]);
     expect(result).toMatchObject({
-      status: "failed",
-      cellsRequested: 2,
-      cellsAttempted: 1,
+      status: "partial",
+      cellsRequested: 3,
+      cellsAttempted: 2,
       cellsUnstarted: 1,
       cellsFailed: 1,
-      cellsCompleted: 0
+      cellsCompleted: 0,
+      cellsTruncated: 1
     });
 
+    expect(result.cells.map((cell) => [cell.id, cell.status])).toEqual([
+      ["bounded", "truncated"],
+      ["first-failure", "failed"]
+    ]);
+  });
+
+  it("rejects malformed cell identity before it runs", () => {
     expect(() =>
       validateGenericExperimentMatrixSpec({
         id: "bad",
@@ -85,6 +94,14 @@ describe("generic experiment matrix control plane", () => {
         ]
       })
     ).toThrow(/duplicate cell id/);
+
+    expect(() =>
+      validateGenericExperimentMatrixSpec({
+        id: "invalid-continue",
+        continueOnError: "false" as never,
+        cells: [{ id: "cell", input: null }]
+      })
+    ).toThrow(/continueOnError must be a boolean/i);
   });
 
   it("converts an invalid domain lifecycle into explicit failed cell evidence", async () => {
@@ -111,6 +128,37 @@ describe("generic experiment matrix control plane", () => {
       status: "failed",
       error: expect.stringMatching(/status must be completed, truncated, or failed/i)
     });
+    expect(result.cells[0]).not.toHaveProperty("result");
+  });
+
+  it("records a thrown domain execution as a failed cell and continues when configured", async () => {
+    const calls: string[] = [];
+    const result = await runGenericExperimentMatrix({
+      experiment: {
+        id: "thrown-cell",
+        continueOnError: true,
+        cells: [
+          { id: "throw", input: "throw" as const },
+          { id: "recover", input: "completed" as const }
+        ]
+      },
+      runCell(input, context) {
+        calls.push(context.id);
+        if (input === "throw") throw new Error("ledger execution failed");
+        return input;
+      },
+      statusOf: (result) => result
+    });
+
+    expect(calls).toEqual(["throw", "recover"]);
+    expect(result).toMatchObject({
+      status: "partial",
+      cellsAttempted: 2,
+      cellsUnstarted: 0,
+      cellsCompleted: 1,
+      cellsFailed: 1
+    });
+    expect(result.cells[0]).toMatchObject({ status: "failed", error: "ledger execution failed" });
     expect(result.cells[0]).not.toHaveProperty("result");
   });
 });

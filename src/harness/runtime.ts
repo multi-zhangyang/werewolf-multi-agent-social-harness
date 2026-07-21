@@ -14,14 +14,6 @@ export {
   validateGenericTournamentRunSetArtifact,
   writeGenericTournamentRunSetArtifact
 } from "./genericTournamentArtifacts";
-export { runGenericExperimentMatrix, validateGenericExperimentMatrixSpec } from "./experimentMatrixRunner";
-export type {
-  GenericExperimentMatrixCell,
-  GenericExperimentMatrixCellResult,
-  GenericExperimentMatrixResult,
-  GenericExperimentMatrixSpec,
-  RunGenericExperimentMatrixOptions
-} from "./experimentMatrixRunner";
 export type {
   BuildGenericTournamentRunSetOptions,
   GenericTournamentArtifactAdapter,
