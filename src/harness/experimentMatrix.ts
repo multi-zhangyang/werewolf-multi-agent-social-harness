@@ -6,6 +6,7 @@ import {
   type NormalizedTournamentExperiment,
   type TournamentExperimentSpecV1
 } from "./experiment";
+import { runGenericExperimentMatrix } from "./experimentMatrixRunner";
 import { hashStableState } from "./hash";
 import type { HarnessAssignmentConfig } from "./profiles";
 import { redactSecrets } from "./redaction";
@@ -248,66 +249,66 @@ export function mergeMatrixExperimentOverrides(
 }
 
 export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): Promise<ExperimentMatrixResult> {
-  const createdAt = new Date().toISOString();
-  const cells: ExperimentMatrixCellResult[] = [];
-  for (let index = 0; index < options.experiment.cells.length; index += 1) {
-    const cell = options.experiment.cells[index];
-    const started = performance.now();
-    try {
-      const tournament = await runTournament({
-        models: cell.tournament.models,
-        profiles: cell.tournament.profiles,
-        assignment: cell.tournament.assignment,
-        games: cell.tournament.games,
-        seed: cell.tournament.seed,
-        maxTransitions: cell.tournament.maxTransitions,
-        config: cell.tournament.config,
-        temperature: cell.tournament.temperature,
-        continueOnError: cell.tournament.continueOnError,
-        experiment: cell.tournament,
-        includeArtifacts: options.includeArtifacts,
-        reasoner: options.reasoner
-      });
+  const elapsedMsByExecutionId = new Map<string, number>();
+  const generic = await runGenericExperimentMatrix({
+    experiment: {
+      id: options.experiment.id,
+      continueOnError: options.experiment.continueOnError,
+      cells: options.experiment.cells.map((cell) => ({
+        id: cell.id,
+        label: cell.label,
+        group: cell.group,
+        input: cell.tournament
+      }))
+    },
+    runCell: async (tournament, context) => {
+      const started = performance.now();
+      try {
+        return await runTournament({
+          models: tournament.models,
+          profiles: tournament.profiles,
+          assignment: tournament.assignment,
+          games: tournament.games,
+          seed: tournament.seed,
+          maxTransitions: tournament.maxTransitions,
+          config: tournament.config,
+          temperature: tournament.temperature,
+          continueOnError: tournament.continueOnError,
+          experiment: tournament,
+          includeArtifacts: options.includeArtifacts,
+          reasoner: options.reasoner
+        });
+      } finally {
+        elapsedMsByExecutionId.set(context.executionId, Math.round(performance.now() - started));
+      }
+    },
+    statusOf: (tournament) => {
       const gamesTruncated = tournament.gamesTruncated ?? tournament.episodes.filter((episode) => episode.status === "truncated").length;
-      cells.push({
-        index,
-        id: cell.id,
-        label: cell.label,
-        group: cell.group,
-        status: tournament.gamesFailed ? "failed" : gamesTruncated > 0 ? "truncated" : "completed",
-        elapsedMs: Math.round(performance.now() - started),
-        tournament
-      });
-      if (tournament.gamesFailed && !options.experiment.continueOnError) break;
-    } catch (error) {
-      cells.push({
-        index,
-        id: cell.id,
-        label: cell.label,
-        group: cell.group,
-        status: "failed",
-        elapsedMs: Math.round(performance.now() - started),
-        error: error instanceof Error ? error.message : String(error)
-      });
-      if (!options.experiment.continueOnError) break;
-    }
-  }
-  const completedAt = new Date().toISOString();
+      return tournament.gamesFailed ? "failed" : gamesTruncated > 0 ? "truncated" : "completed";
+    },
+  });
+  const cells: ExperimentMatrixCellResult[] = generic.cells.map((cell) => ({
+    index: cell.index,
+    id: cell.id,
+    label: cell.label,
+    group: cell.group,
+    status: cell.status,
+    elapsedMs: elapsedMsByExecutionId.get(cell.executionId) ?? 0,
+    tournament: cell.result,
+    error: cell.error
+  }));
   const statistics = buildExperimentMatrixStatistics(options.experiment, cells);
-  const cellsFailed = cells.filter((cell) => cell.status === "failed").length;
-  const cellsCompleted = cells.filter((cell) => cell.status === "completed").length;
-  const cellsTruncated = cells.filter((cell) => cell.status === "truncated").length;
   return {
     artifactVersion: MATRIX_ARTIFACT_VERSION,
     kind: "experiment-matrix-result",
     experiment: options.experiment,
-    createdAt,
-    completedAt,
-    status: cellsFailed === 0 ? "completed" : cellsCompleted + cellsTruncated > 0 ? "partial" : "failed",
-    cellsRequested: options.experiment.cells.length,
-    cellsCompleted,
-    cellsTruncated,
-    cellsFailed,
+    createdAt: generic.createdAt,
+    completedAt: generic.completedAt,
+    status: generic.status,
+    cellsRequested: generic.cellsRequested,
+    cellsCompleted: generic.cellsCompleted,
+    cellsTruncated: generic.cellsTruncated,
+    cellsFailed: generic.cellsFailed,
     gamesRequested: sumCells(cells, (cell) => cell.tournament?.gamesRequested ?? 0),
     gamesCompleted: sumCells(cells, (cell) => cell.tournament?.gamesCompleted ?? 0),
     gamesTruncated: sumCells(cells, gamesTruncatedForCell),
