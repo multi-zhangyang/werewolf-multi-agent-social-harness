@@ -99,6 +99,144 @@ describe("scaffolded social actor", () => {
     expect(state.memory[2].metadata).toMatchObject({ policyId: "policy-a" });
   });
 
+  it("passes typed reasoner advice to the policy without granting it command authority", async () => {
+    const actor = createScaffoldedActor<TestObservation, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      reasoner: {
+        id: "typed-advice-reasoner",
+        reflect(input) {
+          expect(input.reasoner).toBeUndefined();
+          return {
+            memo: "private typed advice memo",
+            advice: { preferredValue: "reasoner-proposed" }
+          };
+        }
+      },
+      policy: {
+        id: "typed-advice-policy",
+        decide(input) {
+          expect(input.reasoner).toEqual({
+            memo: "private typed advice memo",
+            advice: { preferredValue: "reasoner-proposed" }
+          });
+          return {
+            actorId: "a",
+            kind: input.pendingAction.kind,
+            command: {
+              actorId: "a",
+              // The policy deliberately rejects the advice's proposed value.
+              value: "policy-authoritative"
+            }
+          };
+        }
+      }
+    });
+
+    actor.observe({ turn: 1 });
+    const action = await actor.decide({ actorId: "a", kind: "vote" });
+
+    expect(action.command.value).toBe("policy-authoritative");
+    expect(actor.state.memory.map((entry) => entry.kind)).toEqual(["observation", "memo", "decision"]);
+    expect(actor.state.memory[1]).toMatchObject({ content: "private typed advice memo", source: "reasoner" });
+  });
+
+  it("receipt-gates a single adapter-owned canonical state without allocating a second scaffold state", async () => {
+    interface CanonicalTestState {
+      actorId: string;
+      observations: number;
+      committedValues: string[];
+      social: ReturnType<typeof createAgentSocialState<TestObservation, TestPending, TestCommand>>;
+    }
+
+    const initialCanonicalState: CanonicalTestState = {
+      actorId: "a",
+      observations: 0,
+      committedValues: [],
+      social: createAgentSocialState<TestObservation, TestPending, TestCommand>({ agentId: "a", profile })
+    };
+    const actor = createScaffoldedActor<TestObservation, TestPending, TestCommand, CanonicalTestState, { proposal: string }>({
+      id: "a",
+      profile,
+      initialCanonicalState,
+      canonicalStateAdapter: {
+        clone: (state) => structuredClone(state),
+        socialState: (state) => state.social,
+        observe({ state }) {
+          state.observations += 1;
+        },
+        afterDecision({ state, action, reasonerOutput }) {
+          expect(reasonerOutput).toEqual({ memo: "canonical memo", advice: { proposal: "advisory" } });
+          state.committedValues.push(action.command.value);
+        }
+      },
+      reasoner: {
+        id: "canonical-state-reasoner",
+        reflect() {
+          return { memo: "canonical memo", advice: { proposal: "advisory" } };
+        }
+      },
+      policy: {
+        id: "canonical-state-policy",
+        decide(input) {
+          expect(input.agent).toMatchObject({ actorId: "a", observations: 1, committedValues: [] });
+          expect(input.reasoner?.advice).toEqual({ proposal: "advisory" });
+          return {
+            actorId: "a",
+            kind: input.pendingAction.kind,
+            command: { actorId: "a", value: "policy-selected" }
+          };
+        }
+      }
+    });
+    const pending: TestPending = { actorId: "a", kind: "vote" };
+    const observationContext = (traceId: string, transactionId: string) => ({
+      traceId,
+      transactionId,
+      transactional: true as const,
+      turnIndex: 1,
+      batchId: "canonical-state-batch",
+      batchIndex: 1,
+      batchSize: 1,
+      schedulerMode: "aec" as const,
+      pendingAction: structuredClone(pending)
+    });
+
+    actor.observe({ turn: 1 }, observationContext("canonical:rejected", "canonical-tx-rejected"));
+    await actor.decide(pending);
+    expect(actor.state).toEqual(initialCanonicalState);
+    actor.onStepResult({
+      id: "canonical-tx-rejected:rejected",
+      status: "rejected",
+      traceId: "canonical:rejected",
+      transactionId: "canonical-tx-rejected",
+      turnIndex: 1,
+      actorId: "a",
+      pendingAction: pending
+    });
+    expect(actor.state).toEqual(initialCanonicalState);
+
+    actor.observe({ turn: 2 }, observationContext("canonical:committed", "canonical-tx-committed"));
+    const action = await actor.decide(pending);
+    actor.onStepResult({
+      id: "canonical-tx-committed:committed",
+      status: "committed",
+      traceId: "canonical:committed",
+      transactionId: "canonical-tx-committed",
+      turnIndex: 1,
+      actorId: "a",
+      pendingAction: pending,
+      action
+    });
+
+    expect(actor.state).toMatchObject({
+      actorId: "a",
+      observations: 1,
+      committedValues: ["policy-selected"],
+      social: initialCanonicalState.social
+    });
+  });
+
   it("provides deterministic cloned recall to scaffold policy and reasoner without granting store mutation", async () => {
     let reasonerRecallSeqs: number[] = [];
     let policyRecallSeqs: number[] = [];

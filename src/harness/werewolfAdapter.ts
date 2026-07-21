@@ -2,9 +2,14 @@ import { getPendingActions } from "../core/engine";
 import { isAgentPendingAction } from "../core/pending";
 import type { AgentPendingAction } from "../core/pending";
 import type { GameCommand, GameState, PendingAction, Phase, PlayerState, PlayerView } from "../core/types";
-import { WerewolfAgentActor } from "./actor";
+import {
+  WerewolfAgentActor,
+  applyWerewolfReasonerProposal,
+  commitWerewolfAgentTurn,
+  type WerewolfAgentObserveContext
+} from "./actor";
 import { hashStableState } from "./hash";
-import { attachSpeech, policyForRole } from "./policy";
+import { attachSpeech, planAction, policyForRole } from "./policy";
 import type {
   SocialAction,
   SocialActionValidationResult,
@@ -30,6 +35,14 @@ import type {
 } from "./social";
 import { SocialCommunicationBus } from "./social";
 import { runHarnessEpisode } from "./runner";
+import {
+  createScaffoldedActor,
+  type AgentDecisionInput,
+  type AgentPolicy,
+  type AgentReasoner,
+  type ScaffoldCanonicalStateAdapter,
+  type ScaffoldedSocialActor
+} from "./scaffold";
 import { createAgentSocialState } from "./socialState";
 import { describeError, providerFailureFromError } from "./providerFailure";
 import {
@@ -51,6 +64,8 @@ import {
   type HarnessTurnTrace,
   type PolicyPlan,
   type ReasonerAgentContext,
+  type ReasonerMemoryEntry,
+  type ReasonerOutput,
   type ReasonerOutputSummary,
   type WerewolfHarnessObservation
 } from "./types";
@@ -75,6 +90,12 @@ export interface WerewolfSocialActorAdapterOptions {
   reasoner: HarnessReasoner;
   players: PlayerState[];
   tracePrefix?: string;
+  /**
+   * The production path uses the generic receipt-gated scaffold with the
+   * canonical AgentHarnessState bridge. Legacy mode remains only for direct
+   * compatibility tests and migration parity baselines.
+   */
+  executionMode?: "legacy" | "scaffold";
 }
 
 export interface WerewolfMessageDraftInput {
@@ -160,6 +181,13 @@ class WerewolfSocialTurnError extends Error {
 export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObservation, WerewolfSocialPendingAction, GameCommand> {
   readonly id: string;
   readonly profile: SocialAgentProfile;
+  private readonly scaffolded?: ScaffoldedSocialActor<
+    WerewolfSocialObservation,
+    WerewolfSocialPendingAction,
+    GameCommand,
+    AgentHarnessState,
+    ReasonerOutput
+  >;
   private readonly turnTraces = new Map<string, HarnessTurnTrace>();
   private readonly pendingProposals = new Map<
     string,
@@ -197,13 +225,29 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       temperature: options.actor.state.temperature,
       policyId: options.actor.state.policyName
     };
+    if (options.executionMode === "scaffold") {
+      if (options.tracePrefix) {
+        throw new Error("Scaffolded Werewolf actors do not support tracePrefix; use runner-owned trace identity.");
+      }
+      this.scaffolded = createScaffoldedWerewolfActor({
+        id: this.id,
+        profile: this.profile,
+        initialState: options.actor.state,
+        reasoner: options.reasoner,
+        players: options.players
+      });
+    }
   }
 
   get state(): AgentHarnessState {
-    return this.options.actor.state;
+    return this.scaffolded ? this.scaffolded.state : this.options.actor.state;
   }
 
   observe(observation: WerewolfSocialObservation, context?: SocialActorObservationContext<WerewolfSocialPendingAction>): void {
+    if (this.scaffolded) {
+      this.scaffolded.observe(observation, context);
+      return;
+    }
     if (observation.kind !== "player") {
       throw new Error(`Werewolf social actor ${this.id} cannot observe ${observation.kind} observation.`);
     }
@@ -232,6 +276,19 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
   }
 
   async decide(pending: WerewolfSocialPendingAction): Promise<SocialAction<GameCommand>> {
+    if (this.scaffolded) {
+      try {
+        const action = await this.scaffolded.decide(pending);
+        const metadata = parseWerewolfHarnessTurnActionMetadata(action.metadata, action.traceId ?? `${this.id}:missing-trace`);
+        this.turnTraces.set(metadata.turnTrace.traceId, cloneJson(metadata.turnTrace));
+        return action;
+      } catch (error) {
+        throw new WerewolfSocialTurnError(
+          `Harness turn failed for ${this.id}/${this.state.model}/${pending.kind}: ${describeError(error)}`,
+          error
+        );
+      }
+    }
     if (!isAgentPendingAction(pending)) {
       throw new Error(`Werewolf social actor ${this.id} cannot decide system pending action ${pending.kind}.`);
     }
@@ -347,6 +404,14 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
   }
 
   onStepResult(receipt: SocialActorStepReceipt<WerewolfSocialObservation, WerewolfSocialPendingAction, GameCommand>): void {
+    if (this.scaffolded) {
+      this.scaffolded.onStepResult(receipt);
+      if (receipt.status !== "committed" && receipt.action?.metadata) {
+        const metadata = tryParseWerewolfHarnessTurnActionMetadata(receipt.action.metadata, receipt.action.traceId);
+        if (metadata) this.turnTraces.delete(metadata.turnTrace.traceId);
+      }
+      return;
+    }
     const transactionId = receipt.transactionId ?? receipt.traceId;
     const stagedActor = this.stagedActors.get(transactionId);
     this.stagedActors.delete(transactionId);
@@ -384,6 +449,288 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
     if (!traceId) return undefined;
     return cloneJson(this.turnTraces.get(traceId));
   }
+}
+
+/**
+ * Production bridge: `AgentHarnessState` is the only durable private state.
+ * The generic scaffold owns speculative cloning, candidate sequencing, and
+ * receipt-gated replacement; these domain callbacks only reduce/commit that
+ * one canonical state and project existing Werewolf evidence envelopes.
+ */
+function createScaffoldedWerewolfActor(input: {
+  id: string;
+  profile: SocialAgentProfile;
+  initialState: AgentHarnessState;
+  reasoner: HarnessReasoner;
+  players: PlayerState[];
+}): ScaffoldedSocialActor<
+  WerewolfSocialObservation,
+  WerewolfSocialPendingAction,
+  GameCommand,
+  AgentHarnessState,
+  ReasonerOutput
+> {
+  const stateAdapter: ScaffoldCanonicalStateAdapter<
+    AgentHarnessState,
+    WerewolfSocialObservation,
+    WerewolfSocialPendingAction,
+    GameCommand,
+    ReasonerOutput
+  > = {
+    clone: cloneJson,
+    socialState: (state) => {
+      if (!state.social) throw new Error(`Scaffolded Werewolf actor ${state.playerId} is missing canonical social state.`);
+      return state.social as unknown as import("./socialState").AgentSocialState<
+        WerewolfSocialObservation,
+        WerewolfSocialPendingAction,
+        GameCommand
+      >;
+    },
+    observe: ({ state, observation, context }) => {
+      const playerTurn = requireScaffoldedWerewolfPlayerTurn({ observation, pending: context?.pendingAction, context });
+      new WerewolfAgentActor(state).observe(playerTurn.view, playerTurn.observeContext);
+    },
+    afterDecision: ({ state, observation, pendingAction, action, context }) => {
+      const playerTurn = requireScaffoldedWerewolfPlayerTurn({ observation, pending: pendingAction, context });
+      const metadata = parseWerewolfHarnessTurnActionMetadata(action.metadata, action.traceId ?? `${state.playerId}:missing-trace`);
+      if (metadata.turnTrace.playerId !== state.playerId || metadata.policyPlan.command.type !== action.command.type) {
+        throw new Error(`Scaffolded Werewolf action metadata does not match canonical actor ${state.playerId}.`);
+      }
+      const reasonerOutput = metadata.reasonerOutput;
+      commitWerewolfAgentTurn({
+        state,
+        view: playerTurn.view,
+        observeContext: playerTurn.observeContext,
+        plan: cloneJson(metadata.policyPlan),
+        privateMemo: metadata.turnTrace.privateMemo,
+        context: {
+          traceId: metadata.turnTrace.traceId,
+          turnIndex: playerTurn.receiptTurnIndex,
+          pendingAction: cloneJson(playerTurn.pending),
+          providerRequestId: reasonerOutput.providerRequestId
+        }
+      });
+      if (state.socialStateHash !== metadata.agentStateHash) {
+        throw new Error(
+          `Scaffolded Werewolf committed agent state hash mismatch for ${state.playerId}: expected ${metadata.agentStateHash}, received ${state.socialStateHash}.`
+        );
+      }
+    }
+  };
+  const policy: AgentPolicy<
+    WerewolfSocialObservation,
+    WerewolfSocialPendingAction,
+    GameCommand,
+    AgentHarnessState,
+    ReasonerOutput
+  > = {
+    id: `werewolf-policy:${input.initialState.policyName}`,
+    decide: (decision) => buildScaffoldedWerewolfAction({ decision, players: input.players })
+  };
+  const reasoner: AgentReasoner<
+    WerewolfSocialObservation,
+    WerewolfSocialPendingAction,
+    GameCommand,
+    AgentHarnessState,
+    ReasonerOutput
+  > = {
+    id: "werewolf-harness-reasoner",
+    async reflect(decision) {
+      const playerTurn = requireScaffoldedWerewolfPlayerTurn({
+        observation: decision.observation,
+        pending: decision.pendingAction,
+        context: decision.observationContext
+      });
+      const policyPlan = werewolfPolicyPlanForScaffoldDecision(decision, playerTurn);
+      const output = await input.reasoner.think({
+        traceId: playerTurn.traceId,
+        view: cloneJson(playerTurn.view),
+        action: cloneJson(playerTurn.pending),
+        agent: toReasonerAgentContext(decision.agent),
+        policyPlan: cloneJson(policyPlan),
+        memoryRetrieval: cloneJson(decision.memoryRetrieval),
+        recalledMemory: scaffoldReasonerMemoryEntries(decision)
+      });
+      return {
+        memo: output.content,
+        advice: cloneJson(output)
+      };
+    }
+  };
+  return createScaffoldedActor({
+    id: input.id,
+    profile: input.profile,
+    policy,
+    reasoner,
+    initialCanonicalState: cloneJson(input.initialState),
+    canonicalStateAdapter: stateAdapter
+  });
+}
+
+function buildScaffoldedWerewolfAction(input: {
+  decision: AgentDecisionInput<
+    WerewolfSocialObservation,
+    WerewolfSocialPendingAction,
+    GameCommand,
+    AgentHarnessState,
+    ReasonerOutput
+  >;
+  players: PlayerState[];
+}): SocialAction<GameCommand> {
+  const playerTurn = requireScaffoldedWerewolfPlayerTurn({
+    observation: input.decision.observation,
+    pending: input.decision.pendingAction,
+    context: input.decision.observationContext
+  });
+  const reasonerOutput = input.decision.reasoner?.advice;
+  if (!reasonerOutput) {
+    throw new Error(`Scaffolded Werewolf actor ${input.decision.agent.playerId} requires reasoner output before policy action selection.`);
+  }
+  let plan = werewolfPolicyPlanForScaffoldDecision(input.decision, playerTurn);
+  plan = applyWerewolfReasonerProposal(plan, playerTurn.pending, reasonerOutput.actionProposal);
+  if (playerTurn.pending.kind === "speech" || playerTurn.pending.kind === "last_words" || playerTurn.pending.kind === "whisper") {
+    plan = attachSpeech(plan, normalizeSpeech(reasonerOutput.content));
+  }
+  const command = plan.command;
+  const commitContext = {
+    traceId: playerTurn.traceId,
+    turnIndex: playerTurn.receiptTurnIndex,
+    pendingAction: cloneJson(playerTurn.pending),
+    providerRequestId: reasonerOutput.completion.providerRequestId
+  };
+  const preview = cloneJson(input.decision.agent);
+  commitWerewolfAgentTurn({
+    state: preview,
+    view: playerTurn.view,
+    observeContext: playerTurn.observeContext,
+    plan: cloneJson(plan),
+    privateMemo: reasonerOutput.content,
+    context: commitContext
+  });
+  const expectedAgentStateHash = preview.socialStateHash;
+  if (!expectedAgentStateHash) throw new Error(`Scaffolded Werewolf actor ${preview.playerId} did not produce an agent state hash.`);
+  const publicSpeech = command.type === "speech.submit" || command.type === "lastWords.submit" ? command.text : undefined;
+  const trace: HarnessTurnTrace = {
+    traceId: playerTurn.traceId,
+    playerId: preview.playerId,
+    profileId: preview.profileId,
+    model: preview.model,
+    actionKind: playerTurn.pending.kind,
+    policyName: preview.policyName,
+    commandType: command.type,
+    intent: plan.intent,
+    targetId: plan.targetId,
+    confidence: plan.confidence,
+    strategyTags: plan.strategyTags,
+    arbitration: cloneJson(plan.arbitration),
+    memoryRetrieval: cloneJson(plan.memoryRetrieval),
+    beliefs: cloneJson(preview.beliefs),
+    privateMemo: reasonerOutput.content,
+    publicSpeech,
+    latencyMs: reasonerOutput.completion.latencyMs,
+    promptTokens: reasonerOutput.completion.usage.promptTokens,
+    completionTokens: reasonerOutput.completion.usage.completionTokens,
+    providerRequestId: reasonerOutput.completion.providerRequestId,
+    attempts: reasonerOutput.completion.attempts,
+    retryHistory: cloneJson(reasonerOutput.completion.retryHistory),
+    stream: cloneJson(reasonerOutput.completion.stream),
+    agentStateHash: expectedAgentStateHash
+  };
+  const reasonerSummary = summarizeReasonerOutput(reasonerOutput.content, reasonerOutput.completion, reasonerOutput.actionProposal);
+  const metadata: WerewolfSocialActionMetadata = {
+    kind: WEREWOLF_HARNESS_TURN_METADATA_KIND,
+    turnIndex: playerTurn.actorTurnIndex,
+    policyPlan: cloneJson(plan),
+    reasonerOutput: cloneJson(reasonerSummary),
+    turnTrace: cloneJson(trace),
+    agentStateHash: expectedAgentStateHash
+  };
+  return {
+    actorId: preview.playerId,
+    kind: command.type,
+    traceId: playerTurn.traceId,
+    command: cloneJson(command),
+    metadata: metadata as unknown as Record<string, unknown>,
+    messages: createWerewolfMessageDrafts({
+      players: input.players,
+      traceId: playerTurn.traceId,
+      turnIndex: playerTurn.actorTurnIndex,
+      actorId: preview.playerId,
+      pendingAction: playerTurn.pending,
+      command,
+      policyPlan: plan,
+      observation: playerTurn.view,
+      reasonerOutput: reasonerSummary
+    })
+  };
+}
+
+function werewolfPolicyPlanForScaffoldDecision(
+  decision: AgentDecisionInput<
+    WerewolfSocialObservation,
+    WerewolfSocialPendingAction,
+    GameCommand,
+    AgentHarnessState,
+    ReasonerOutput
+  >,
+  playerTurn: ReturnType<typeof requireScaffoldedWerewolfPlayerTurn>
+): PolicyPlan {
+  return {
+    ...planAction(playerTurn.view, playerTurn.pending, decision.agent),
+    memoryRetrieval: cloneJson(decision.memoryRetrieval)
+  };
+}
+
+function scaffoldReasonerMemoryEntries(
+  decision: AgentDecisionInput<
+    WerewolfSocialObservation,
+    WerewolfSocialPendingAction,
+    GameCommand,
+    AgentHarnessState,
+    ReasonerOutput
+  >
+): ReasonerMemoryEntry[] {
+  return (decision.recalledMemory ?? []).map((entry) => ({
+    memorySeq: entry.seq,
+    kind: entry.kind,
+    source: entry.source,
+    visibility: entry.visibility,
+    tags: [...entry.tags],
+    content: entry.content ? entry.content.slice(0, 480) : undefined
+  }));
+}
+
+function requireScaffoldedWerewolfPlayerTurn(input: {
+  observation: WerewolfSocialObservation;
+  pending: WerewolfSocialPendingAction | undefined;
+  context: SocialActorObservationContext<WerewolfSocialPendingAction> | undefined;
+}): {
+  view: HarnessPlayerView;
+  pending: AgentPendingAction;
+  traceId: string;
+  actorTurnIndex: number;
+  receiptTurnIndex: number;
+  observeContext: WerewolfAgentObserveContext;
+} {
+  if (input.observation.kind !== "player") {
+    throw new Error(`Scaffolded Werewolf actor cannot observe ${input.observation.kind} observation.`);
+  }
+  const pending = input.pending;
+  if (!pending || !isAgentPendingAction(pending) || pending.actorId !== input.observation.agentId) {
+    throw new Error(`Scaffolded Werewolf actor ${input.observation.agentId} received an invalid pending action.`);
+  }
+  const context = input.context;
+  if (!context?.traceId) throw new Error(`Scaffolded Werewolf actor ${input.observation.agentId} requires a runner traceId.`);
+  const traceId = context.traceId;
+  const actorTurnIndex = context.actorTurnIndex ?? context.turnIndex;
+  return {
+    view: input.observation.view,
+    pending: cloneJson(pending),
+    traceId,
+    actorTurnIndex,
+    receiptTurnIndex: context.turnIndex,
+    observeContext: { traceId, turnIndex: actorTurnIndex }
+  };
 }
 
 export class WerewolfSocialEnvironment
@@ -613,7 +960,8 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
       new WerewolfSocialActorAdapter({
         actor,
         reasoner: options.reasoner,
-        players: initialState.players
+        players: initialState.players,
+        executionMode: "scaffold"
       })
   );
   const channels = cloneJson(options.initialSocialChannels ?? createWerewolfSocialChannels(initialState.players));
@@ -634,7 +982,7 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
       if (context.actorId === WEREWOLF_SYSTEM_ACTOR_ID) return;
       const traceId = context.action.traceId;
       if (!traceId) return;
-      const agents = snapshotAgentStates(agentActors);
+      const agents = snapshotAgentStates(actors);
       agentSnapshotsByTraceId.set(traceId, {
         agents,
         hash: hashStableState(agents)
@@ -657,7 +1005,7 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
     trajectory: projectedSteps.map((step) => step.harnessStep),
     socialSteps: toWerewolfLegacySocialSteps(initialState.id, projectedSteps),
     actors,
-    agentStates: [...agentActors.values()].map((actor) => cloneJson(actor.state)),
+    agentStates: actors.map((actor) => cloneJson(actor.state)),
     channels: artifact.channels.map(cloneJson)
   };
 }
@@ -1410,8 +1758,8 @@ function createSequentialActorTurnIndexProvider(): SocialActorTurnIndexProvider<
   };
 }
 
-function snapshotAgentStates(agentActors: Map<string, WerewolfAgentActor>): AgentHarnessState[] {
-  return [...agentActors.values()].map((actor) => cloneJson(actor.state));
+function snapshotAgentStates(actors: readonly Pick<WerewolfSocialActorAdapter, "state">[]): AgentHarnessState[] {
+  return actors.map((actor) => cloneJson(actor.state));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -25429,3 +25429,65 @@ poisoned in-memory-statistics test covering JSON/CSV/Markdown together,
 completed/truncated/failed lifecycle isolation, recorded-promotion mutation,
 truth-redacted no-recovery behavior, and an explicit minimal-public fail-closed
 case. No live provider call is required for this pure artifact-plane change.
+
+## 13.258 Production Werewolf Scaffold Canonical-State Migration Lock
+
+Timestamp: `2026-07-21`
+
+The production Werewolf path now uses the generic receipt-gated
+`ScaffoldedSocialActor` while retaining the existing `AgentHarnessState` as
+its sole durable, serializable private-state owner. This is an agent-plane
+convergence change, not a new model protocol, a new environment authority, or
+a second Werewolf state machine.
+
+- `ScaffoldCanonicalStateAdapter` in `src/harness/scaffold.ts` owns the
+  generic transactional lifecycle: clone canonical state, stage observation
+  and social ingestion, run optional reasoner/policy/arbitration, then replace
+  durable state only on a committed environment receipt. A rejected receipt
+  discards the entire staged state.
+- The Werewolf bridge keeps domain-local reductions in the adapter: PlayerView
+  observation, belief/social ingestion, `PolicyPlan`, legal bounded advisory
+  merge, typed commands, message drafts, and the existing committed social
+  journal reducer. The environment still owns command legality and transitions.
+- `WerewolfAgentActor` remains a compatibility reducer/facade for direct
+  callers and migration parity tests. It is no longer the mutable production
+  state owner under `runWerewolfSocialHarnessPrefix()`.
+- `AgentReasonerOutput.advice` is typed advisory data. The policy selects the
+  command, generic candidate/arbitration controls remain local, and the
+  environment validates the selected command again. A reasoner cannot directly
+  mutate canonical actor state or the game world.
+- Deterministic legacy/scaffold parity covers a seer turn's native social
+  artifact, committed command, state hash, social journal, message output,
+  post-commit agent snapshot, and legacy trajectory projection. Generic
+  canonical-state tests also prove rejected-turn rollback and receipt-only
+  durability without allocating a second default scaffold state.
+- Checkpoint/fork and snapshot consumers continue to receive canonical
+  `AgentHarnessState[]`; replay remains a recorded-command operation that
+  creates no actor, reasoner, evaluator, or provider call.
+
+Live validation used the existing generic OpenAI-compatible streaming path
+with runtime model `grok-4.5`, without a Grok-specific branch, prompt, parser,
+fallback, or maximum-token request field. A four-transition production match
+completed three model-backed cognition turns through provider stop events; all
+three passed local policy/arbitration and environment commit, with zero
+rejected native steps and zero harness errors. A one-game, four-transition
+tournament completed with the same lifecycle result and a completed evaluator
+report. Both runs were intentional bounded truncations, not terminal-game or
+model-quality claims. Their completed-only leaderboard rows therefore remain
+zero by design.
+
+Required regression before a later change to this bridge:
+
+```bash
+npm run typecheck
+npx vitest run tests/scaffold.test.ts tests/werewolfAdapter.test.ts \
+  tests/artifacts.test.ts tests/replay.test.ts tests/harness.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism
+npm test -- --maxWorkers=1 --no-file-parallelism
+npm run build
+git diff --check
+```
+
+Any future change here must preserve transaction id as lifecycle identity and
+action trace id as evidence identity. It must never make reasoner output,
+React state, or replay the source of environment truth.

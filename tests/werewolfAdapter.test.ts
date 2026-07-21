@@ -378,6 +378,87 @@ describe("Werewolf generic social adapter", () => {
     expect(internal.pendingProposals.size).toBe(0);
   });
 
+  it("matches the legacy adapter for a deterministic scaffold-backed seer turn", async () => {
+    const initialState = createGame({ id: "werewolf-scaffold-seer-parity", seed: "werewolf-scaffold-seer-parity" });
+    const seer = initialState.players.find((player) => player.role === "seer");
+    if (!seer) throw new Error("Expected a seer in the default Werewolf config.");
+
+    const run = async (executionMode: "legacy" | "scaffold") => {
+      const actor = new WerewolfAgentActor({
+        playerId: seer.id,
+        profileId: "scaffold-seer-parity-profile",
+        model: "scaffold-seer-parity-model",
+        temperature: 0,
+        policyName: policyForRole(seer.role),
+        turns: 0,
+        observations: 0,
+        beliefs: {},
+        privateMemos: []
+      });
+      const reasoner: HarnessReasoner = {
+        async think(input) {
+          const content = `scaffold parity memo:${input.traceId}:${input.action.kind}:${input.policyPlan.policyName}`;
+          return {
+            content,
+            completion: {
+              content,
+              latencyMs: 1,
+              usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 },
+              providerRequestId: `scaffold-parity-${input.traceId}`,
+              attempts: 1
+            }
+          };
+        }
+      };
+      const socialActor = new WerewolfSocialActorAdapter({
+        actor,
+        reasoner,
+        players: initialState.players,
+        executionMode
+      });
+      const snapshots: Array<{ traceId: string; agents: AgentHarnessState[]; hash: string }> = [];
+      const artifact = await runSocialEpisode({
+        id: initialState.id,
+        environment: WerewolfSocialEnvironment.fromState(initialState),
+        actors: [socialActor],
+        channels: createWerewolfSocialChannels(initialState.players),
+        schedulerMode: "aec",
+        maxTransitions: 2,
+        hashState: hashStableState,
+        eventSeq: werewolfEventSeq,
+        assembleObservation: assembleWerewolfSocialObservation,
+        systemTransition: werewolfSystemTransition,
+        afterEnvironmentStep(context) {
+          if (context.actorId === "system" || !context.action.traceId) return;
+          const agents = [structuredClone(socialActor.state)];
+          snapshots.push({
+            traceId: context.action.traceId,
+            agents,
+            hash: hashStableState(agents)
+          });
+        }
+      });
+      return { artifact, agent: socialActor.state, snapshots };
+    };
+
+    const legacy = await run("legacy");
+    const scaffold = await run("scaffold");
+
+    expect(normalizeJson(scaffold.artifact)).toEqual(normalizeJson(legacy.artifact));
+    expect(normalizeJson(scaffold.agent)).toEqual(normalizeJson(legacy.agent));
+    expect(scaffold.agent.socialStateHash).toBe(legacy.agent.socialStateHash);
+    expect(scaffold.agent.social?.journal?.entries).toEqual(legacy.agent.social?.journal?.entries);
+    expect(scaffold.snapshots).toEqual(legacy.snapshots);
+    expect(scaffold.snapshots[0]).toMatchObject({
+      traceId: scaffold.artifact.steps[1]?.traceId,
+      agents: [scaffold.agent],
+      hash: hashStableState([scaffold.agent])
+    });
+    expect(projectWerewolfSocialStepsToHarnessTrajectory(scaffold.artifact.steps)).toEqual(
+      projectWerewolfSocialStepsToHarnessTrajectory(legacy.artifact.steps)
+    );
+  });
+
   it("cleans transactional proposals when a runner-owned trace-collision receipt differs from policy trace evidence", async () => {
     const initialState = createGame({ id: "werewolf-trace-collision-cleanup", seed: "werewolf-trace-collision-cleanup" });
     const nightSeerState = applyCommand(initialState, { type: "system.advance", actorId: "system" });

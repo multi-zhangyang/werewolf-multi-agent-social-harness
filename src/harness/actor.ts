@@ -20,19 +20,19 @@ import {
 } from "./socialState";
 import type { AgentHarnessState, HarnessPlayerView, PolicyPlan, ReasonerActionProposal, ReasonerMemoryEntry } from "./types";
 
-interface ObserveContext {
+export interface WerewolfAgentObserveContext {
   traceId: string;
   turnIndex: number;
 }
 
-interface CommitContext extends ObserveContext {
+export interface WerewolfAgentCommitContext extends WerewolfAgentObserveContext {
   pendingAction: AgentPendingAction;
   providerRequestId?: string;
 }
 
 export class WerewolfAgentActor {
   private latestView?: PlayerView;
-  private latestObserveContext?: ObserveContext;
+  private latestObserveContext?: WerewolfAgentObserveContext;
   private readonly seenMessageIds = new Set<string>();
 
   constructor(public readonly state: AgentHarnessState) {
@@ -41,7 +41,7 @@ export class WerewolfAgentActor {
     this.updateSocialHash();
   }
 
-  observe(view: PlayerView | HarnessPlayerView, context?: ObserveContext): void {
+  observe(view: PlayerView | HarnessPlayerView, context?: WerewolfAgentObserveContext): void {
     this.latestView = view;
     this.latestObserveContext = context;
     this.state.observations += 1;
@@ -112,125 +112,21 @@ export class WerewolfAgentActor {
     pending: AgentPendingAction,
     proposal: ReasonerActionProposal | undefined
   ): PolicyPlan {
-    if (!proposal) return plan;
-    if (proposal.commandType && proposal.commandType !== plan.command.type) return plan;
-
-    const legalTargetIds = legalTargetIdsForPending(pending);
-    const next = cloneJson(plan);
-    const targetId = proposal.targetId;
-    if (targetId && !legalTargetIds.includes(targetId)) return plan;
-
-    if (pending.kind === "speech" && targetId) {
-      if (next.command.type !== "speech.submit") return plan;
-      next.command.pressureTargetId = targetId;
-      next.pressureTargetId = targetId;
-      next.targetId = targetId;
-    } else if (pending.kind === "witch") {
-      if (next.command.type !== "witch.act") return plan;
-      if (proposal.saveTargetId && (!pending.canSave || proposal.saveTargetId !== pending.nightVictimId)) return plan;
-      if (proposal.poisonTargetId && !pending.legalPoisonTargetIds.includes(proposal.poisonTargetId)) return plan;
-      next.command = {
-        type: "witch.act",
-        actorId: pending.actorId,
-        saveTargetId: proposal.saveTargetId,
-        poisonTargetId: proposal.poisonTargetId
-      };
-      next.targetId = proposal.saveTargetId ?? proposal.poisonTargetId;
-    } else if (pending.kind === "vote" && next.command.type === "vote.cast") {
-      if (!targetId && proposal.abstain === undefined && !next.command.abstain) return plan;
-      next.command = targetId
-        ? { type: "vote.cast", actorId: pending.actorId, targetId }
-        : { type: "vote.cast", actorId: pending.actorId, abstain: proposal.abstain ?? next.command.abstain };
-      next.targetId = targetId;
-    } else if (pending.kind === "sheriff_vote" && next.command.type === "sheriff.vote") {
-      if (!targetId && proposal.abstain === undefined && !next.command.abstain) return plan;
-      next.command = targetId
-        ? { type: "sheriff.vote", actorId: pending.actorId, targetId }
-        : { type: "sheriff.vote", actorId: pending.actorId, abstain: proposal.abstain ?? next.command.abstain };
-      next.targetId = targetId;
-    } else if (pending.kind === "shoot" && next.command.type === "hunter.shoot") {
-      next.command = { type: "hunter.shoot", actorId: pending.actorId, targetId };
-      next.targetId = targetId;
-    } else if (pending.kind === "inspect" && next.command.type === "seer.inspect" && targetId) {
-      next.command = { type: "seer.inspect", actorId: pending.actorId, targetId };
-      next.targetId = targetId;
-    } else if (pending.kind === "kill" && next.command.type === "werewolf.killVote" && targetId) {
-      next.command = { type: "werewolf.killVote", actorId: pending.actorId, targetId };
-      next.targetId = targetId;
-    } else {
-      return plan;
-    }
-
-    next.reasonerProposal = cloneJson(proposal);
-    next.strategyTags = uniqueStrings([...next.strategyTags, "reasoner-candidate"]);
-    if (proposal.confidence !== undefined) next.confidence = Math.max(0, Math.min(1, proposal.confidence));
-    if (proposal.rationale?.trim()) next.intent = `${next.intent}；候选理由：${proposal.rationale.trim()}`;
-    return next;
+    return applyWerewolfReasonerProposal(plan, pending, proposal);
   }
 
-  commitTurn(plan: PolicyPlan, privateMemo: string, context?: CommitContext): void {
+  commitTurn(plan: PolicyPlan, privateMemo: string, context?: WerewolfAgentCommitContext): void {
     if (!this.latestView) {
       throw new Error(`Agent ${this.state.playerId} cannot commit a turn without an observation.`);
     }
-    this.state.turns += 1;
-    this.state.lastIntent = plan.intent;
-    this.state.privateMemos.push(privateMemo);
-    this.state.privateMemos = this.state.privateMemos.slice(-20);
-    const social = this.ensureSocialState();
-    setSocialLastPlan(
-      social,
+    commitWerewolfAgentTurn({
+      state: this.state,
+      view: this.latestView,
+      observeContext: this.latestObserveContext,
       plan,
-      [observationEvidence(this.state.observations, this.latestObserveContext)],
-      socialMutationContext(this.latestView, this.latestObserveContext),
-      {
-        pendingActionKind: context?.pendingAction.kind,
-        commandType: plan.command.type
-      }
-    );
-    appendSocialMemory(social, {
-      kind: "memo",
-      source: "reasoner",
-      visibility: "private",
-      content: privateMemo,
-      salience: 0.7,
-      importance: 0.6,
-      pendingAction: cloneJson(context?.pendingAction),
-      evidenceRefs: [traceEvidence(context, `reasoner memo for ${plan.command.type}`)],
-      tags: ["reasoner-memo", `command:${plan.command.type}`],
-      metadata: {
-        intent: plan.intent,
-        policyName: plan.policyName,
-        confidence: plan.confidence,
-        strategyTags: plan.strategyTags,
-        providerRequestId: context?.providerRequestId,
-        turnIndex: context?.turnIndex
-      }
-    }, mutationContextFromPending(context));
-    appendSocialMemory(social, {
-      kind: "decision",
-      source: "policy",
-      visibility: "private",
-      action: {
-        actorId: this.state.playerId,
-        kind: plan.command.type,
-        command: cloneJson(plan.command)
-      },
-      salience: 0.8,
-      importance: 0.7,
-      pendingAction: cloneJson(context?.pendingAction),
-      evidenceRefs: [traceEvidence(context, `policy ${plan.policyName} selected ${plan.command.type}`)],
-      tags: ["policy-decision", `command:${plan.command.type}`, ...plan.strategyTags],
-      metadata: {
-        intent: plan.intent,
-        confidence: plan.confidence,
-        targetId: plan.targetId,
-        claimedRole: plan.claimedRole,
-        pressureTargetId: plan.pressureTargetId,
-        arbitration: cloneJson(plan.arbitration),
-        memoryRetrieval: cloneJson(plan.memoryRetrieval)
-      }
-    }, mutationContextFromPending(context));
-    this.updateSocialHash();
+      privateMemo,
+      context
+    });
   }
 
   /**
@@ -239,7 +135,7 @@ export class WerewolfAgentActor {
    * delivery must not be able to rewrite that artifact after the environment
    * has accepted the command.
    */
-  previewCommittedStateHash(plan: PolicyPlan, privateMemo: string, context?: CommitContext): string {
+  previewCommittedStateHash(plan: PolicyPlan, privateMemo: string, context?: WerewolfAgentCommitContext): string {
     if (!this.latestView) {
       throw new Error(`Agent ${this.state.playerId} cannot preview a committed turn without an observation.`);
     }
@@ -265,7 +161,7 @@ export class WerewolfAgentActor {
     return this.state.social;
   }
 
-  private recordObservation(view: PlayerView | HarnessPlayerView, context?: ObserveContext): void {
+  private recordObservation(view: PlayerView | HarnessPlayerView, context?: WerewolfAgentObserveContext): void {
     const evidence = observationEvidence(this.state.observations, context);
     appendSocialMemory(this.ensureSocialState(), {
       kind: "observation",
@@ -287,7 +183,7 @@ export class WerewolfAgentActor {
     }, socialMutationContext(view, context));
   }
 
-  private recordVisibleSocialMessages(view: PlayerView, context?: ObserveContext): void {
+  private recordVisibleSocialMessages(view: PlayerView, context?: WerewolfAgentObserveContext): void {
     const social = this.ensureSocialState();
     ingestVisibleSocialMessages({
       social,
@@ -304,7 +200,7 @@ export class WerewolfAgentActor {
     });
   }
 
-  private recordGenericBeliefs(view: PlayerView, context?: ObserveContext): void {
+  private recordGenericBeliefs(view: PlayerView, context?: WerewolfAgentObserveContext): void {
     const social = this.ensureSocialState();
     const evidence = observationEvidence(this.state.observations, context);
     for (const [playerId, belief] of Object.entries(this.state.beliefs)) {
@@ -325,7 +221,7 @@ export class WerewolfAgentActor {
     }
   }
 
-  private ensureEpisodeGoal(view: PlayerView, context?: ObserveContext): void {
+  private ensureEpisodeGoal(view: PlayerView, context?: WerewolfAgentObserveContext): void {
     const social = this.ensureSocialState();
     if (social.goals.goals.some((goal) => goal.id === "episode-win-condition")) return;
     pushSocialGoal(social, {
@@ -350,6 +246,159 @@ export class WerewolfAgentActor {
   }
 }
 
+/**
+ * Domain-local, pure advisory merge shared by the legacy compatibility actor
+ * and scaffold-backed actor policies. It preserves the existing rule that a
+ * reasoner can only select within the policy's pending legal action family.
+ */
+export function applyWerewolfReasonerProposal(
+  plan: PolicyPlan,
+  pending: AgentPendingAction,
+  proposal: ReasonerActionProposal | undefined
+): PolicyPlan {
+  if (!proposal) return plan;
+  if (proposal.commandType && proposal.commandType !== plan.command.type) return plan;
+
+  const legalTargetIds = legalTargetIdsForPending(pending);
+  const next = cloneJson(plan);
+  const targetId = proposal.targetId;
+  if (targetId && !legalTargetIds.includes(targetId)) return plan;
+
+  if (pending.kind === "speech" && targetId) {
+    if (next.command.type !== "speech.submit") return plan;
+    next.command.pressureTargetId = targetId;
+    next.pressureTargetId = targetId;
+    next.targetId = targetId;
+  } else if (pending.kind === "witch") {
+    if (next.command.type !== "witch.act") return plan;
+    if (proposal.saveTargetId && (!pending.canSave || proposal.saveTargetId !== pending.nightVictimId)) return plan;
+    if (proposal.poisonTargetId && !pending.legalPoisonTargetIds.includes(proposal.poisonTargetId)) return plan;
+    next.command = {
+      type: "witch.act",
+      actorId: pending.actorId,
+      saveTargetId: proposal.saveTargetId,
+      poisonTargetId: proposal.poisonTargetId
+    };
+    next.targetId = proposal.saveTargetId ?? proposal.poisonTargetId;
+  } else if (pending.kind === "vote" && next.command.type === "vote.cast") {
+    if (!targetId && proposal.abstain === undefined && !next.command.abstain) return plan;
+    next.command = targetId
+      ? { type: "vote.cast", actorId: pending.actorId, targetId }
+      : { type: "vote.cast", actorId: pending.actorId, abstain: proposal.abstain ?? next.command.abstain };
+    next.targetId = targetId;
+  } else if (pending.kind === "sheriff_vote" && next.command.type === "sheriff.vote") {
+    if (!targetId && proposal.abstain === undefined && !next.command.abstain) return plan;
+    next.command = targetId
+      ? { type: "sheriff.vote", actorId: pending.actorId, targetId }
+      : { type: "sheriff.vote", actorId: pending.actorId, abstain: proposal.abstain ?? next.command.abstain };
+    next.targetId = targetId;
+  } else if (pending.kind === "shoot" && next.command.type === "hunter.shoot") {
+    next.command = { type: "hunter.shoot", actorId: pending.actorId, targetId };
+    next.targetId = targetId;
+  } else if (pending.kind === "inspect" && next.command.type === "seer.inspect" && targetId) {
+    next.command = { type: "seer.inspect", actorId: pending.actorId, targetId };
+    next.targetId = targetId;
+  } else if (pending.kind === "kill" && next.command.type === "werewolf.killVote" && targetId) {
+    next.command = { type: "werewolf.killVote", actorId: pending.actorId, targetId };
+    next.targetId = targetId;
+  } else {
+    return plan;
+  }
+
+  next.reasonerProposal = cloneJson(proposal);
+  next.strategyTags = uniqueStrings([...next.strategyTags, "reasoner-candidate"]);
+  if (proposal.confidence !== undefined) next.confidence = Math.max(0, Math.min(1, proposal.confidence));
+  if (proposal.rationale?.trim()) next.intent = `${next.intent}；候选理由：${proposal.rationale.trim()}`;
+  return next;
+}
+
+/**
+ * Apply a receipt-gated, already selected plan to one canonical Werewolf
+ * agent state. The caller must invoke this only on a transaction-local clone
+ * before `ScaffoldedSocialActor` receives a committed receipt.
+ */
+export function commitWerewolfAgentTurn(input: {
+  state: AgentHarnessState;
+  view: PlayerView | HarnessPlayerView;
+  observeContext?: WerewolfAgentObserveContext;
+  plan: PolicyPlan;
+  privateMemo: string;
+  context?: WerewolfAgentCommitContext;
+}): void {
+  input.state.turns += 1;
+  input.state.lastIntent = input.plan.intent;
+  input.state.privateMemos.push(input.privateMemo);
+  input.state.privateMemos = input.state.privateMemos.slice(-20);
+  const social = ensureWerewolfAgentSocialState(input.state);
+  setSocialLastPlan(
+    social,
+    input.plan,
+    [observationEvidence(input.state.observations, input.observeContext)],
+    socialMutationContext(input.view, input.observeContext),
+    {
+      pendingActionKind: input.context?.pendingAction.kind,
+      commandType: input.plan.command.type
+    }
+  );
+  appendSocialMemory(social, {
+    kind: "memo",
+    source: "reasoner",
+    visibility: "private",
+    content: input.privateMemo,
+    salience: 0.7,
+    importance: 0.6,
+    pendingAction: cloneJson(input.context?.pendingAction),
+    evidenceRefs: [traceEvidence(input.context, `reasoner memo for ${input.plan.command.type}`)],
+    tags: ["reasoner-memo", `command:${input.plan.command.type}`],
+    metadata: {
+      intent: input.plan.intent,
+      policyName: input.plan.policyName,
+      confidence: input.plan.confidence,
+      strategyTags: input.plan.strategyTags,
+      providerRequestId: input.context?.providerRequestId,
+      turnIndex: input.context?.turnIndex
+    }
+  }, mutationContextFromPending(input.context));
+  appendSocialMemory(social, {
+    kind: "decision",
+    source: "policy",
+    visibility: "private",
+    action: {
+      actorId: input.state.playerId,
+      kind: input.plan.command.type,
+      command: cloneJson(input.plan.command)
+    },
+    salience: 0.8,
+    importance: 0.7,
+    pendingAction: cloneJson(input.context?.pendingAction),
+    evidenceRefs: [traceEvidence(input.context, `policy ${input.plan.policyName} selected ${input.plan.command.type}`)],
+    tags: ["policy-decision", `command:${input.plan.command.type}`, ...input.plan.strategyTags],
+    metadata: {
+      intent: input.plan.intent,
+      confidence: input.plan.confidence,
+      targetId: input.plan.targetId,
+      claimedRole: input.plan.claimedRole,
+      pressureTargetId: input.plan.pressureTargetId,
+      arbitration: cloneJson(input.plan.arbitration),
+      memoryRetrieval: cloneJson(input.plan.memoryRetrieval)
+    }
+  }, mutationContextFromPending(input.context));
+  input.state.socialStateHash = hashStableState(social);
+}
+
+function ensureWerewolfAgentSocialState(state: AgentHarnessState): NonNullable<AgentHarnessState["social"]> {
+  state.social ??= createAgentSocialState({
+    agentId: state.playerId,
+    profile: {
+      id: state.profileId ?? state.playerId,
+      model: state.model,
+      temperature: state.temperature,
+      policyId: state.policyName
+    }
+  });
+  return state.social;
+}
+
 function legalTargetIdsForPending(action: AgentPendingAction): string[] {
   if (action.kind === "witch") return action.legalPoisonTargetIds;
   if (action.kind === "speech") return action.legalPressureTargetIds;
@@ -357,7 +406,7 @@ function legalTargetIdsForPending(action: AgentPendingAction): string[] {
   return action.legalTargetIds;
 }
 
-function observationEvidence(seq: number, context?: ObserveContext): EvidenceRef {
+function observationEvidence(seq: number, context?: WerewolfAgentObserveContext): EvidenceRef {
   return {
     artifact: "observation",
     seq,
@@ -366,7 +415,7 @@ function observationEvidence(seq: number, context?: ObserveContext): EvidenceRef
   };
 }
 
-function traceEvidence(context: CommitContext | undefined, description: string): EvidenceRef {
+function traceEvidence(context: WerewolfAgentCommitContext | undefined, description: string): EvidenceRef {
   return {
     artifact: context ? "trace" : "memory",
     traceId: context?.traceId,
@@ -377,7 +426,7 @@ function traceEvidence(context: CommitContext | undefined, description: string):
 
 function socialMutationContext(
   view: PlayerView | HarnessPlayerView,
-  context?: ObserveContext,
+  context?: WerewolfAgentObserveContext,
   messageSeqRange?: { start: number; end: number }
 ): SocialStateMutationContext {
   return {
@@ -389,7 +438,7 @@ function socialMutationContext(
   };
 }
 
-function mutationContextFromPending(context?: CommitContext): SocialStateMutationContext | undefined {
+function mutationContextFromPending(context?: WerewolfAgentCommitContext): SocialStateMutationContext | undefined {
   if (!context) return undefined;
   return {
     traceId: context.traceId,
