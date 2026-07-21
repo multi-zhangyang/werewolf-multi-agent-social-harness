@@ -40,6 +40,7 @@ interface TournamentCliOptions {
   temperature: number;
   assignment?: HarnessAssignmentConfig;
   maxTransitions?: number;
+  jointPhaseScheduler?: TournamentExperimentSpecV1["jointPhaseScheduler"];
   timeoutMs?: number;
   continueOnError: boolean;
   config?: TournamentExperimentSpecV1["config"];
@@ -102,6 +103,7 @@ async function main(): Promise<void> {
       seed: options.seed,
       games: options.games,
       maxTransitions: options.maxTransitions,
+      jointPhaseScheduler: options.jointPhaseScheduler,
       config: options.config,
       temperature: options.temperature,
       experiment: options.experiment,
@@ -141,6 +143,7 @@ async function main(): Promise<void> {
       gamesFailed: result.gamesFailed,
       gamesTruncated: result.gamesTruncated ?? result.episodes.filter((episode) => episode.status === "truncated").length,
       maxTransitions: options.maxTransitions ?? null,
+      jointPhaseScheduler: options.jointPhaseScheduler ?? "aec-batched-decision",
       timeoutMs: options.timeoutMs ?? null,
       continueOnError: options.continueOnError,
       elapsedMs: Math.round(performance.now() - startedAt),
@@ -174,6 +177,7 @@ async function parseOptions(): Promise<TournamentCliOptions> {
     assignment: process.env.AGENT_ASSIGNMENT as TournamentExperimentSpecV1["assignment"],
     games: process.env.TOURNAMENT_GAMES,
     maxTransitions: process.env.MATCH_MAX_TRANSITIONS,
+    jointPhaseScheduler: process.env.WEREWOLF_JOINT_PHASE_SCHEDULER as TournamentExperimentSpecV1["jointPhaseScheduler"],
     timeout: process.env.TOURNAMENT_TIMEOUT_MS,
     temperature: process.env.AGENT_TEMPERATURE ?? "0.7"
   };
@@ -184,6 +188,7 @@ async function parseOptions(): Promise<TournamentCliOptions> {
     seed: readArg("seed"),
     games: readArg("games"),
     maxTransitions: readArg("maxTransitions") ?? readArg("steps"),
+    jointPhaseScheduler: readArg("jointPhaseScheduler") as TournamentExperimentSpecV1["jointPhaseScheduler"] | undefined,
     timeout: readArg("timeoutMs") ?? readArg("timeout"),
     temperature: readArg("temperature"),
     outputDir: readArg("outputDir") ?? readArg("exportDir"),
@@ -202,6 +207,7 @@ async function parseOptions(): Promise<TournamentCliOptions> {
     games: normalized.games,
     temperature: normalized.temperature,
     maxTransitions: normalized.maxTransitions,
+    jointPhaseScheduler: normalized.jointPhaseScheduler,
     timeoutMs: normalized.timeoutMs,
     continueOnError: normalized.continueOnError,
     config: normalized.config,

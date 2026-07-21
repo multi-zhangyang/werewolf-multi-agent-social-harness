@@ -1746,6 +1746,7 @@ function episodeRecord(
     matchId: episode.matchId ?? null,
     status: episode.status,
     harnessStatus: episode.harnessStatus ?? null,
+    jointPhaseScheduler: episode.jointPhaseScheduler ?? null,
     winner: redactTruth ? null : episode.winner ?? null,
     phase: episode.phase ?? null,
     day: episode.day ?? null,
