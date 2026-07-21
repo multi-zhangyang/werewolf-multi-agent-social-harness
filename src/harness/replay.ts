@@ -1,6 +1,7 @@
 import { isAgentPendingAction, type AgentPendingAction } from "../core/pending";
 import type { GameCommand, GameState } from "../core/types";
 import { WerewolfEnvironment } from "./environment";
+import { auditRecordedSocialAgentSnapshots, type RecordedSocialAgentStateAuditResult } from "./episodeArtifacts";
 import { hashStableState } from "./hash";
 import {
   isSocialParallelJointStep,
@@ -36,6 +37,8 @@ export interface SocialEpisodeReplayResult<TState = unknown> {
   messages: SocialMessage[];
   messagesHash?: string;
   expectedMessagesHash?: string;
+  /** Present only when the episode contains recorded inline actor snapshots. */
+  agentStateAudit?: RecordedSocialAgentStateAuditResult;
   mismatches: string[];
 }
 
@@ -46,6 +49,14 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand>(op
   hashMessages?: (messages: SocialMessage[]) => string;
   eventSeq?: (state: TState) => number;
   stopOnMismatch?: boolean;
+  /**
+   * Prefix checkpoint construction has not yet populated episode.finalState.
+   * It still replays every command/message and validates their local hashes;
+   * only the final expected-state comparison is intentionally deferred.
+   */
+  validateExpectedFinalState?: boolean;
+  /** Defaults to true when inline durable actor snapshots are present. */
+  auditAgentSnapshots?: boolean;
 }): SocialEpisodeReplayResult<TState> {
   const { episode } = options;
   const mismatches: string[] = [];
@@ -237,7 +248,7 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand>(op
   function finalizeReplay(): SocialEpisodeReplayResult<TState> {
     const finalState = options.environment.snapshot();
     const finalHash = options.hashState?.(finalState);
-    const expectedFinalHash = options.hashState?.(episode.finalState);
+    const expectedFinalHash = options.validateExpectedFinalState === false ? undefined : options.hashState?.(episode.finalState);
     if (finalHash && expectedFinalHash && finalHash !== expectedFinalHash) {
       addMismatch(`Replay final state hash mismatch ${finalHash} !== ${expectedFinalHash}.`);
     }
@@ -246,6 +257,19 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand>(op
     const expectedMessagesHash = options.hashMessages?.(episode.messages);
     if (messagesHash && expectedMessagesHash && messagesHash !== expectedMessagesHash) {
       addMismatch(`Replay messages hash mismatch ${messagesHash} !== ${expectedMessagesHash}.`);
+    }
+
+    // A domain may compact snapshots into an external frame registry (the
+    // Werewolf artifact does so after execution).  Generic replay can audit
+    // only inline payloads; a frame-backed domain keeps its own resolver and
+    // validator rather than treating the missing inline body as corruption.
+    const hasRecordedActorSnapshots = episode.steps.some((step) => step.actorSnapshotsAfterStep !== undefined);
+    const agentStateAudit =
+      options.auditAgentSnapshots === false || !hasRecordedActorSnapshots
+        ? undefined
+        : auditRecordedSocialAgentSnapshots({ episode });
+    for (const mismatch of agentStateAudit?.mismatches ?? []) {
+      addMismatch(`Recorded agent state audit: ${mismatch}`);
     }
 
     return {
@@ -259,6 +283,7 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand>(op
       messages,
       messagesHash,
       expectedMessagesHash,
+      agentStateAudit,
       mismatches
     };
   }
