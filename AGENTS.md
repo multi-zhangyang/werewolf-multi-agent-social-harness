@@ -25491,3 +25491,47 @@ git diff --check
 Any future change here must preserve transaction id as lifecycle identity and
 action trace id as evidence identity. It must never make reasoner output,
 React state, or replay the source of environment truth.
+
+## 13.259 Scaffold Differential-Parity And Atomic Replay Lock
+
+Timestamp: `2026-07-21`
+
+The scaffold migration has two direct legacy/scaffold differential fixtures in
+addition to the broader production replay, failure, checkpoint, and fork
+tests:
+
+- A deterministic Seer turn compares the complete native artifact, command,
+  messages, canonical agent state, social journal, post-commit snapshot, and
+  legacy trajectory projection.
+- A true two-wolf `parallel` batch compares those same records across one
+  atomic `stepBatch()` and proves the snapshot visible after either batch row
+  contains both actors' receipt-committed canonical state.
+- A runner-owned trace-identity rejection compares both modes after both
+  actors have staged observation/reasoner/policy work. It proves that rejected
+  receipts preserve the environment state, leave both canonical states with
+  zero turns/observations and empty social memory/journal, and remove the
+  proposed trace evidence without depending on either implementation's private
+  staging maps.
+
+The parallel fixture also locks the replay boundary: the legacy
+`HarnessStepRecord` projection must remain equal across modes for compatibility
+display, but it is not authoritative replay input for an atomic parallel
+batch. Its two projected rows share one atomic post-state hash and cannot be
+replayed sequentially. `replayWerewolfSocialEpisode()` must instead replay the
+recorded native batch through `stepBatch()`; the fixture verifies two replayed
+steps, one replayed batch, no mismatch, and the recorded final hash.
+
+Focused validation after adding these fixtures:
+
+```bash
+npm run typecheck
+npx vitest run tests/werewolfAdapter.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism
+# 31/31 tests passed
+git diff --check
+```
+
+Do not expose a public unrecorded execution-mode option solely to force
+legacy/scaffold checkpoint or fork comparisons. Production checkpoint/fork
+tests remain scaffold-backed and artifacts remain implementation-neutral;
+replay authority must never depend on an actor runtime mode.

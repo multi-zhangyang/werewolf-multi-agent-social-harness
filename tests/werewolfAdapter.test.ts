@@ -40,7 +40,7 @@ import {
   type WerewolfSocialObservation,
   type WerewolfSocialPendingAction
 } from "../src/harness/werewolfAdapter";
-import { replayHarnessTrajectory } from "../src/harness/replay";
+import { replayHarnessTrajectory, replayWerewolfSocialEpisode } from "../src/harness/replay";
 import {
   DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER,
   type AgentHarnessState,
@@ -459,7 +459,107 @@ describe("Werewolf generic social adapter", () => {
     );
   });
 
-  it("cleans transactional proposals when a runner-owned trace-collision receipt differs from policy trace evidence", async () => {
+  it("matches the legacy adapter across an atomic parallel wolf batch and post-receipt snapshots", async () => {
+    const initialState = createGame({ id: "werewolf-scaffold-parallel-parity", seed: "werewolf-scaffold-parallel-parity" });
+    const seer = initialState.players.find((player) => player.role === "seer");
+    if (!seer) throw new Error("Expected a seer in the default Werewolf config.");
+    const afterAdvance = applyCommand(initialState, { type: "system.advance", actorId: "system" });
+    const inspectTarget = afterAdvance.players.find((player) => player.alive && player.id !== seer.id);
+    if (!inspectTarget) throw new Error("Expected a legal seer inspect target.");
+    const nightWolves = applyCommand(afterAdvance, { type: "seer.inspect", actorId: seer.id, targetId: inspectTarget.id });
+    const wolves = nightWolves.players.filter((player) => player.role === "werewolf");
+    expect(nightWolves.phase).toBe("night_wolves");
+    expect(wolves).toHaveLength(2);
+
+    const run = async (executionMode: "legacy" | "scaffold") => {
+      const reasoner: HarnessReasoner = {
+        async think(input) {
+          const content = `parallel scaffold parity memo:${input.traceId}:${input.agent.playerId}:${input.action.kind}`;
+          return {
+            content,
+            completion: {
+              content,
+              latencyMs: 1,
+              usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 },
+              providerRequestId: `parallel-scaffold-parity-${input.traceId}`,
+              attempts: 1
+            }
+          };
+        }
+      };
+      const actors = wolves.map((wolf) =>
+        new WerewolfSocialActorAdapter({
+          actor: new WerewolfAgentActor({
+            playerId: wolf.id,
+            profileId: `${wolf.id}-parallel-scaffold-parity-profile`,
+            model: "parallel-scaffold-parity-model",
+            temperature: 0,
+            policyName: policyForRole(wolf.role),
+            turns: 0,
+            observations: 0,
+            beliefs: {},
+            privateMemos: []
+          }),
+          reasoner,
+          players: nightWolves.players,
+          executionMode
+        })
+      );
+      const snapshots: Array<{ traceId: string; agents: AgentHarnessState[]; hash: string }> = [];
+      const artifact = await runSocialEpisode({
+        id: nightWolves.id,
+        environment: WerewolfSocialEnvironment.fromState(nightWolves),
+        actors,
+        channels: createWerewolfSocialChannels(nightWolves.players),
+        schedulerMode: "parallel",
+        maxTransitions: 2,
+        hashState: hashStableState,
+        eventSeq: werewolfEventSeq,
+        assembleObservation: assembleWerewolfSocialObservation,
+        systemTransition: werewolfSystemTransition,
+        afterEnvironmentStep(context) {
+          if (!context.action.traceId) return;
+          const agents = actors.map((actor) => structuredClone(actor.state));
+          snapshots.push({
+            traceId: context.action.traceId,
+            agents,
+            hash: hashStableState(agents)
+          });
+        }
+      });
+      return { artifact, actors: actors.map((actor) => actor.state), snapshots };
+    };
+
+    const legacy = await run("legacy");
+    const scaffold = await run("scaffold");
+    const legacyTrajectory = projectWerewolfSocialStepsToHarnessTrajectory(legacy.artifact.steps);
+    const scaffoldTrajectory = projectWerewolfSocialStepsToHarnessTrajectory(scaffold.artifact.steps);
+
+    expect(normalizeJson(scaffold.artifact)).toEqual(normalizeJson(legacy.artifact));
+    expect(normalizeJson(scaffold.actors)).toEqual(normalizeJson(legacy.actors));
+    expect(scaffold.snapshots).toEqual(legacy.snapshots);
+    expect(scaffold.artifact.steps).toHaveLength(2);
+    expect(scaffold.artifact.steps.every((step) => step.schedulerMode === "parallel")).toBe(true);
+    expect(scaffold.artifact.steps.every((step) => step.resolutionPolicy === "parallel-stepBatch" && step.atomic === true)).toBe(true);
+    expect(new Set(scaffold.artifact.steps.map((step) => step.preStateHash)).size).toBe(1);
+    expect(new Set(scaffold.artifact.steps.map((step) => step.postStateHash)).size).toBe(1);
+    expect(new Set(scaffold.snapshots.map((snapshot) => snapshot.hash)).size).toBe(1);
+    expect(scaffold.snapshots).toHaveLength(2);
+    for (const snapshot of scaffold.snapshots) {
+      expect(snapshot.agents).toEqual(scaffold.actors);
+      expect(snapshot.agents.every((agent) => agent.turns === 1 && agent.observations === 1)).toBe(true);
+      expect(snapshot.agents.every((agent) => typeof agent.socialStateHash === "string")).toBe(true);
+    }
+    expect(scaffoldTrajectory).toEqual(legacyTrajectory);
+    const replay = replayWerewolfSocialEpisode(scaffold.artifact, { stopOnMismatch: false });
+    expect(replay.ok).toBe(true);
+    expect(replay.mismatches).toEqual([]);
+    expect(replay.replayedSteps).toBe(2);
+    expect(replay.replayedBatches).toBe(1);
+    expect(replay.finalHash).toBe(hashStableState(scaffold.artifact.finalState));
+  });
+
+  it("rolls back trace-collision decisions identically in legacy and scaffold actors", async () => {
     const initialState = createGame({ id: "werewolf-trace-collision-cleanup", seed: "werewolf-trace-collision-cleanup" });
     const nightSeerState = applyCommand(initialState, { type: "system.advance", actorId: "system" });
     const inspect = getPendingActions(nightSeerState).find((action) => action.kind === "inspect");
@@ -472,75 +572,78 @@ describe("Werewolf generic social adapter", () => {
     const wolves = nightWolvesState.players.filter((player) => player.role === "werewolf");
     expect(wolves).toHaveLength(2);
 
-    const adapters = wolves.map(
-      (wolf) =>
-        new WerewolfSocialActorAdapter({
-          actor: new WerewolfAgentActor({
-            playerId: wolf.id,
-            profileId: `${wolf.id}-trace-collision-profile`,
-            model: "trace-collision-model",
-            temperature: 0,
-            policyName: policyForRole(wolf.role),
-            turns: 0,
-            observations: 0,
-            beliefs: {},
-            privateMemos: []
-          }),
-          reasoner: {
-            async think(input) {
-              const content = `trace collision memo:${input.traceId}:${input.agent.playerId}`;
-              return {
-                content,
-                completion: {
+    const run = async (executionMode: "legacy" | "scaffold") => {
+      const adapters = wolves.map(
+        (wolf) =>
+          new WerewolfSocialActorAdapter({
+            actor: new WerewolfAgentActor({
+              playerId: wolf.id,
+              profileId: `${wolf.id}-trace-collision-profile`,
+              model: "trace-collision-model",
+              temperature: 0,
+              policyName: policyForRole(wolf.role),
+              turns: 0,
+              observations: 0,
+              beliefs: {},
+              privateMemos: []
+            }),
+            reasoner: {
+              async think(input) {
+                const content = `trace collision memo:${input.traceId}:${input.agent.playerId}`;
+                return {
                   content,
-                  latencyMs: 1,
-                  usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-                  attempts: 1
-                }
-              };
-            }
-          },
-          players: nightWolvesState.players
-        })
+                  completion: {
+                    content,
+                    latencyMs: 1,
+                    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+                    attempts: 1
+                  }
+                };
+              }
+            },
+            players: nightWolvesState.players,
+            executionMode
+          })
+      );
+      const artifact = await runSocialEpisode({
+        id: "werewolf-trace-collision-cleanup",
+        environment: WerewolfSocialEnvironment.fromState(nightWolvesState),
+        actors: adapters,
+        channels: createWerewolfSocialChannels(nightWolvesState.players),
+        schedulerMode: "aec-batched-decision",
+        maxTransitions: 1,
+        hashState: hashStableState,
+        eventSeq: werewolfEventSeq,
+        assembleObservation: assembleWerewolfSocialObservation,
+        // Deliberately collide the two policy trace ids. The generic runner
+        // emits a unique scheduler-owned rejection trace id in this case.
+        traceIdForDecision: () => "policy-trace-collision"
+      });
+      return { artifact, adapters };
+    };
+
+    const legacy = await run("legacy");
+    const scaffold = await run("scaffold");
+
+    expect(normalizeJson(scaffold.artifact)).toEqual(normalizeJson(legacy.artifact));
+    expect(normalizeJson(scaffold.adapters.map((adapter) => adapter.state))).toEqual(
+      normalizeJson(legacy.adapters.map((adapter) => adapter.state))
     );
-
-    const artifact = await runSocialEpisode({
-      id: "werewolf-trace-collision-cleanup",
-      environment: WerewolfSocialEnvironment.fromState(nightWolvesState),
-      actors: adapters,
-      channels: createWerewolfSocialChannels(nightWolvesState.players),
-      schedulerMode: "aec-batched-decision",
-      maxTransitions: 1,
-      hashState: hashStableState,
-      eventSeq: werewolfEventSeq,
-      assembleObservation: assembleWerewolfSocialObservation,
-      // Deliberately collide the two policy trace ids. The generic runner
-      // emits a unique scheduler-owned rejection trace id in this case.
-      traceIdForDecision: () => "policy-trace-collision"
-    });
-
-    expect(artifact.status).toBe("failed");
-    expect(artifact.steps).toHaveLength(1);
-    expect(artifact.steps[0]).toMatchObject({
+    expect(scaffold.artifact.status).toBe("failed");
+    expect(scaffold.artifact.steps).toHaveLength(1);
+    expect(scaffold.artifact.steps[0]).toMatchObject({
       actorId: "system",
       traceId: expect.stringContaining("trace_identity:rejected"),
       commitStatus: "rejected",
       failure: { stage: "trace_identity" }
     });
-    expect(artifact.steps[0]?.traceId).not.toBe("policy-trace-collision");
-    expect(artifact.finalState).toEqual(nightWolvesState);
-    for (const adapter of adapters) {
+    expect(scaffold.artifact.steps[0]?.traceId).not.toBe("policy-trace-collision");
+    expect(scaffold.artifact.finalState).toEqual(nightWolvesState);
+    for (const adapter of [...legacy.adapters, ...scaffold.adapters]) {
       expect(adapter.state).toMatchObject({ turns: 0, observations: 0, beliefs: {}, privateMemos: [] });
       expect(adapter.state.social?.memory.entries).toEqual([]);
       expect(adapter.state.social?.journal?.entries ?? []).toEqual([]);
-      const internal = adapter as unknown as {
-        stagedActors: Map<string, unknown>;
-        pendingProposals: Map<string, unknown>;
-        turnTraces: Map<string, unknown>;
-      };
-      expect(internal.stagedActors.size).toBe(0);
-      expect(internal.pendingProposals.size).toBe(0);
-      expect(internal.turnTraces.size).toBe(0);
+      expect(adapter.turnTraceFor("policy-trace-collision")).toBeUndefined();
     }
   });
 
