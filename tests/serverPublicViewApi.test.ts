@@ -56,6 +56,7 @@ describe("public match API redaction", () => {
 
     const detail = await requestJson(baseUrl, "GET", `/api/matches/${record.id}`);
     expect(detail.status).toBe(200);
+    expect(detail.headers.get("x-powered-by")).toBeNull();
     assertPublicMatchResponse(detail.body);
     expect(detail.body.state).not.toHaveProperty("night");
     expect(detail.body.state).not.toHaveProperty("pendingHunterId");

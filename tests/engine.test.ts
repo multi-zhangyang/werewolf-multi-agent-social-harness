@@ -29,7 +29,7 @@ function pendingByKind<K extends PendingAction["kind"]>(state: GameState, kind: 
 
 describe("game-core state machine", () => {
   it("runs a night cycle, resolves hunter shot, and resumes day speech", () => {
-    let state = createGame({ id: "test-night-hunter", seed: "night-hunter" });
+    let state = createGame({ id: "test-night-hunter", seed: "night-hunter", config: { lastWords: "none" } });
     state = advanceSystem(state);
     expect(state.phase).toBe("night_seer");
 
@@ -133,6 +133,88 @@ describe("game-core state machine", () => {
     const pending = getPendingActions(state);
     expect(pending).toHaveLength(1);
     expect(isAgentPendingAction(pending[0])).toBe(false);
+  });
+
+  it("runs a public day-one sheriff election and makes the elected vote weight effective", () => {
+    let state = createGame({
+      id: "test-sheriff-election",
+      seed: "sheriff-election",
+      config: { sheriff: "day1", sheriffVoteWeight: 1.5, lastWords: "none" }
+    });
+    state = advanceSystem(state);
+    const inspect = pendingByKind(state, "inspect")[0];
+    state = applyCommand(state, { type: "seer.inspect", actorId: inspect.actorId, targetId: inspect.legalTargetIds[0] });
+    const nightTarget = pendingByKind(state, "kill")[0].legalTargetIds[0];
+    for (const kill of pendingByKind(state, "kill")) {
+      state = applyCommand(state, { type: "werewolf.killVote", actorId: kill.actorId, targetId: nightTarget });
+    }
+    const witch = pendingByKind(state, "witch")[0];
+    state = applyCommand(state, { type: "witch.act", actorId: witch.actorId, saveTargetId: witch.nightVictimId });
+
+    expect(state.phase).toBe("sheriff_vote");
+    const sheriff = pendingByKind(state, "sheriff_vote")[0].legalTargetIds[0];
+    while (state.phase === "sheriff_vote") {
+      const ballot = pendingByKind(state, "sheriff_vote")[0];
+      state = applyCommand(state, { type: "sheriff.vote", actorId: ballot.actorId, targetId: sheriff });
+    }
+
+    expect(state.phase).toBe("day_speech");
+    expect(state.players.find((player) => player.id === sheriff)?.isSheriff).toBe(true);
+    expect(state.events.some((event) => event.type === "sheriff.elected" && (event.payload as { winnerId?: string }).winnerId === sheriff)).toBe(true);
+
+    while (state.phase === "day_speech") {
+      const speech = pendingByKind(state, "speech")[0];
+      state = applyCommand(state, { type: "speech.submit", actorId: speech.actorId, text: "按公开信息完成发言，等待投票检验。" });
+    }
+    const sheriffVote = pendingByKind(state, "vote").find((vote) => vote.actorId === sheriff);
+    expect(sheriffVote).toBeDefined();
+    state = applyCommand(state, { type: "vote.cast", actorId: sheriffVote!.actorId, targetId: sheriffVote!.legalTargetIds[0] });
+    expect(state.votes.at(-1)?.weight).toBe(1.5);
+    expect(state.votes.at(-1)?.kind).toBe("exile");
+  });
+
+  it("queues exactly one public last-words turn after an eligible night death", () => {
+    let state = createGame({ id: "test-last-words", seed: "last-words", config: { sheriff: "off", lastWords: "all" } });
+    state = advanceSystem(state);
+    const inspect = pendingByKind(state, "inspect")[0];
+    state = applyCommand(state, { type: "seer.inspect", actorId: inspect.actorId, targetId: inspect.legalTargetIds[0] });
+    const victim = livingPlayers(state).find((player) => player.role === "villager");
+    expect(victim).toBeDefined();
+    for (const kill of pendingByKind(state, "kill")) {
+      state = applyCommand(state, { type: "werewolf.killVote", actorId: kill.actorId, targetId: victim!.id });
+    }
+    const witch = pendingByKind(state, "witch")[0];
+    state = applyCommand(state, { type: "witch.act", actorId: witch.actorId });
+
+    expect(state.phase).toBe("last_words");
+    const lastWords = pendingByKind(state, "last_words")[0];
+    expect(lastWords.actorId).toBe(victim!.id);
+    state = applyCommand(state, { type: "lastWords.submit", actorId: lastWords.actorId, text: "请重点复盘昨夜刀口和白天的票型，不要轻易放过矛盾发言。" });
+
+    expect(state.phase).toBe("day_speech");
+    expect(state.speeches.at(-1)).toMatchObject({ playerId: victim!.id, kind: "last_words" });
+    expect(state.events.at(-1)?.type).toBe("phase.changed");
+    expect(state.events.some((event) => event.type === "last_words.submitted")).toBe(true);
+  });
+
+  it("keeps core witch validation and role cardinality aligned with the harness boundary", () => {
+    let state = createGame({ id: "test-core-witch-validation", seed: "core-witch-validation" });
+    state = advanceSystem(state);
+    const inspect = pendingByKind(state, "inspect")[0];
+    state = applyCommand(state, { type: "seer.inspect", actorId: inspect.actorId, targetId: inspect.legalTargetIds[0] });
+    for (const kill of pendingByKind(state, "kill")) {
+      state = applyCommand(state, { type: "werewolf.killVote", actorId: kill.actorId, targetId: kill.legalTargetIds[0] });
+    }
+    const witch = pendingByKind(state, "witch")[0];
+    const invalidSave = witch.legalPoisonTargetIds.find((playerId) => playerId !== witch.nightVictimId);
+    expect(() => applyCommand(state, { type: "witch.act", actorId: witch.actorId, saveTargetId: invalidSave })).toThrow(/only save/i);
+    expect(() =>
+      createGame({
+        id: "duplicate-seer",
+        seed: "duplicate-seer",
+        config: { seats: 3, roles: ["seer", "seer", "werewolf"] }
+      })
+    ).toThrow(/at most one/i);
   });
 
   it("derives event timestamps from sequence so same seed and commands yield identical event and state hashes", () => {

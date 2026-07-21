@@ -239,6 +239,14 @@ describe("harness agent-environment cycle", () => {
         environment.step({ type: "speech.submit", actorId: action.actorId, text: "joint-vote setup speech" });
         continue;
       }
+      if (action.kind === "last_words") {
+        environment.step({ type: "lastWords.submit", actorId: action.actorId, text: "joint-vote setup last words" });
+        continue;
+      }
+      if (action.kind === "sheriff_vote") {
+        environment.step({ type: "sheriff.vote", actorId: action.actorId, targetId: action.legalTargetIds[0] });
+        continue;
+      }
       if (action.kind === "kill") {
         environment.step({ type: "werewolf.killVote", actorId: action.actorId, targetId: action.legalTargetIds[0]! });
         continue;

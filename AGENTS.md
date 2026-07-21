@@ -24672,3 +24672,67 @@ rows, artifact manifests/JSONL/Markdown, request override normalization,
 allowlisted nested downloads, traversal rejection, and registry rehydration.
 The cockpit fixture test covers server-owned matrix lifecycle rendering while
 the existing truth-redacted artifact/comparison regression remains active.
+
+## 13.246 Werewolf Rule-State Authority And Live Validation Lock
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+### 13.246.1 Domain Contract
+
+`classic-9-seat-v1` is the current deterministic Werewolf proof ruleset. The
+core state machine, not a policy, reasoner, UI, or transcript parser, owns
+these optional configured rules:
+
+- `sheriff: "day1"` opens one public election after first-night resolution.
+  Living players cast one unweighted ballot, a unique plurality is elected,
+  and ties/all-abstentions leave the office vacant. A sheriff's ordinary exile
+  vote uses `sheriffVoteWeight`; death vacates the office with no implicit
+  transfer rule.
+- `lastWords` is a serialized public pending-action phase. `all` gives each
+  eliminated player exactly one ordered `lastWords.submit`; `firstNightOnly`
+  covers only day-one night kill/poison deaths; `none` creates no such action.
+  The resume target is state-recorded, so replay does not infer it from text.
+- The core engine rejects invalid Witch save/poison targets even outside the
+  `WerewolfEnvironment` wrapper, and it rejects duplicate Seer/Witch/Hunter
+  cards instead of assigning an unreachable role action.
+- `timers` are presentation-duration metadata. Bounded unattended execution
+  is controlled by harness timeout and max-transition configuration, not wall
+  clock mutation in domain state.
+
+Any future sheriff transfer, election runoff/tie-break, hunter poison, potion,
+or timing variation must introduce a named ruleset/version and tests; it must
+not silently alter this adapter or reasoner prompts.
+
+### 13.246.2 Artifact, Social, And Replay Boundaries
+
+- Sheriff ballots and last words are separate typed commands/pending actions,
+  separate from ordinary exile votes and day speech. `VoteRecord.kind` keeps
+  the two ballot ledgers disjoint.
+- The Werewolf adapter projects sheriff ballots and last words as public table
+  messages with typed speech acts; a model cannot directly elect a sheriff or
+  advance the queue.
+- Native replay maps and validates `sheriff.vote` and `lastWords.submit` like
+  every other committed domain command. No actor, reasoner, or provider call is
+  made during replay.
+
+### 13.246.3 Validation And Security Baseline
+
+Focused validation after this contract change must include:
+
+```bash
+npx vitest run tests/engine.test.ts tests/harness.test.ts \
+  --testTimeout=30000 --maxWorkers=1 --no-file-parallelism
+npm run typecheck
+npm ci --dry-run
+npm audit --omit=dev
+```
+
+The production audit is expected to be empty. `concurrently` is development
+only and is pinned through the lock file to 9.2.4, which carries
+`shell-quote` 1.9.0. The bundled API is local research software: direct
+Internet exposure requires an authenticated, rate-limited deployment layer;
+the repository must not imply that setting `HOST=0.0.0.0` alone is safe.

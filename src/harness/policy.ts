@@ -177,6 +177,37 @@ export function planAction(view: PlayerView, action: AgentPendingAction, agent: 
     };
   }
 
+  if (action.kind === "last_words") {
+    return {
+      policyName: agent.policyName,
+      command: {
+        type: "lastWords.submit",
+        actorId: action.actorId,
+        text: "",
+        strategyTags: ["遗言", "公开复盘"]
+      },
+      intent: "发表仅一次的公开遗言，保留可审计的判断与线索",
+      confidence: 0.6,
+      strategyTags: ["遗言", "公开复盘"]
+    };
+  }
+
+  if (action.kind === "sheriff_vote") {
+    const arbitration = arbitrateSocialTarget(agent, action.legalTargetIds, view.you.team === "werewolves" ? "target-village" : "suspect-werewolf");
+    const targetId = arbitration?.selectedTargetId ?? action.legalTargetIds[0];
+    return {
+      policyName: agent.policyName,
+      command: targetId
+        ? { type: "sheriff.vote", actorId: action.actorId, targetId }
+        : { type: "sheriff.vote", actorId: action.actorId, abstain: true },
+      targetId,
+      intent: targetId ? `警长竞选投给 ${targetId}，以公开影响力和当前社会判断加权` : "没有合法警长候选，弃票",
+      confidence: targetId ? confidenceFromArbitration(agent, targetId, arbitration) : 0.2,
+      strategyTags: view.you.team === "werewolves" ? ["警长竞选", "影响力争夺"] : ["警长竞选", "公开授权"],
+      arbitration
+    };
+  }
+
   if (action.kind === "vote") {
     const arbitration = arbitrateSocialTarget(agent, action.legalTargetIds, view.you.team === "werewolves" ? "target-village" : "suspect-werewolf");
     const targetId = arbitration?.selectedTargetId;
@@ -223,6 +254,16 @@ export function planAction(view: PlayerView, action: AgentPendingAction, agent: 
 }
 
 export function attachSpeech(plan: PolicyPlan, speech: string): PolicyPlan {
+  if (plan.command.type === "lastWords.submit") {
+    return {
+      ...plan,
+      command: {
+        ...plan.command,
+        text: speech,
+        strategyTags: plan.strategyTags
+      }
+    };
+  }
   if (plan.command.type !== "speech.submit") return plan;
   return {
     ...plan,

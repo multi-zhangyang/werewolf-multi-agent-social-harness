@@ -1,6 +1,6 @@
 # Multi-Agent Society Harness Plan
 
-Last checked: 2026-07-14.
+Last checked: 2026-07-21.
 
 This document is the working basis for the project goal:
 
@@ -46,7 +46,7 @@ The current repository already has a substantial harness foundation.
 | Plane | Current owners | Status |
 | --- | --- | --- |
 | Control plane | `src/harness/experiment.ts`, `src/harness/profiles.ts`, `src/harness/tournament.ts`, CLI scripts, server run routes | Experiment specs, profiles, assignment strategies, tournaments, bounded runs, timeout parsing, and provider protocol selection exist. |
-| Environment plane | `src/core/*`, `src/harness/environment.ts`, `src/harness/werewolfAdapter.ts`, `src/harness/runtime.ts` | Werewolf engine owns phases, pending actions, legal commands, deaths, votes, victory, and deterministic transitions. `GameState` / `GameEvent` are domain-only; harness traces, provider telemetry, and failures cannot change the domain hash. |
+| Environment plane | `src/core/*`, `src/harness/environment.ts`, `src/harness/werewolfAdapter.ts`, `src/harness/runtime.ts` | Werewolf engine owns phases, pending actions, legal commands, deaths, public last words, day-one sheriff election, votes, victory, and deterministic transitions. `GameState` / `GameEvent` are domain-only; harness traces, provider telemetry, and failures cannot change the domain hash. |
 | Observation plane | `src/core/view.ts`, `src/harness/social.ts`, `WerewolfAgentActor` path in runtime | Agents receive scoped player views plus visible social channels/messages. Hidden truth is not a normal reasoner input. |
 | Society plane | `src/harness/social.ts`, `src/harness/socialState.ts`, `src/harness/actor.ts`, `src/harness/policy.ts` | Message bus, channels, social state stores, relationships, reputation, norms, goals, commitments, coalitions, gossip, sanctions, trust repair, betrayal records, scoped speech-act ingestion, structured `metadata.socialFacts` ingestion, and social-target arbitration exist. Ingestion is evidence-backed and observation-scoped, not transcript inference. |
 | Agent plane | `src/harness/scaffold.ts`, `src/harness/socialObservationIngestor.ts`, `src/harness/belief.ts`, `src/harness/reasoner.ts`, `src/harness/policy.ts` | Durable actor state, memory, beliefs, social ledgers, generic scaffold visible social-message ingestion, candidate scoring, action arbitration, and optional provider-backed reasoner exist. The generic scaffold now ingests `SocialObservation.visibleMessages` / wrapped `view.social.messages` into evidence-backed memory and social-state stores through the scaffold observation-ingestor path. Ingestion is scoped to the actor observation, uses explicit typed speech acts / structured social facts only, does not parse free text, and does not use hidden truth. Production Werewolf remains the first proof path over this generic scaffold capability. The model remains an optional reasoner/speech component, not the actor or store owner. |

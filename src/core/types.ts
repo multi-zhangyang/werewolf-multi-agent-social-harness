@@ -8,6 +8,8 @@ export type Phase =
   | "night_wolves"
   | "night_witch"
   | "night_resolve"
+  | "last_words"
+  | "sheriff_vote"
   | "day_speech"
   | "day_vote"
   | "exile_resolve"
@@ -89,6 +91,12 @@ export interface SpeechRecord {
   day: number;
   playerId: string;
   text: string;
+  /**
+   * A last word is a public, terminal statement by an eliminated player. It
+   * deliberately remains a speech record so projections and evaluators keep a
+   * single auditable public-language ledger.
+   */
+  kind?: "day" | "last_words";
   claimedRole?: Role;
   pressureTargetId?: string;
   strategyTags: string[];
@@ -100,6 +108,8 @@ export interface VoteRecord {
   targetId?: string;
   abstain: boolean;
   weight: number;
+  /** Day exile votes are weighted; day-one sheriff votes are always one vote. */
+  kind?: "exile" | "sheriff";
 }
 
 export interface DeathRecord {
@@ -147,6 +157,10 @@ export interface GameEvent {
     | "night.resolved"
     | "speech.submitted"
     | "vote.cast"
+    | "sheriff.vote_cast"
+    | "sheriff.elected"
+    | "sheriff.vacated"
+    | "last_words.submitted"
     | "player.died"
     | "hunter.shot"
     | "game.ended";
@@ -171,6 +185,11 @@ export interface GameState {
   currentSpeakerSeat?: number;
   pendingHunterId?: string;
   hunterResume?: "day_speech" | "next_night";
+  /** Ordered by deterministic death resolution; only the head may speak. */
+  lastWordsQueue?: string[];
+  /** Where the state machine resumes once the last queued final statement ends. */
+  lastWordsResume?: "sheriff_vote" | "day_speech" | "next_night";
+  sheriffElectionCompleted?: boolean;
   winner?: Team;
   endReason?: string;
 }
@@ -178,6 +197,7 @@ export interface GameState {
 export type PublicGameState = Omit<
   GameState,
   "id" | "seed" | "players" | "night" | "deaths" | "events" | "pendingHunterId" | "hunterResume"
+  | "lastWordsQueue" | "lastWordsResume"
 > & {
   players: PublicPlayer[];
   deaths: Array<Omit<DeathRecord, "sourceId">>;
@@ -227,6 +247,20 @@ export type HunterShootCommand = {
   targetId?: string;
 };
 
+export type CastSheriffVoteCommand = {
+  type: "sheriff.vote";
+  actorId: string;
+  targetId?: string;
+  abstain?: boolean;
+};
+
+export type SubmitLastWordsCommand = {
+  type: "lastWords.submit";
+  actorId: string;
+  text: string;
+  strategyTags?: string[];
+};
+
 export type SystemAdvanceCommand = {
   type: "system.advance";
   actorId: "system";
@@ -239,6 +273,8 @@ export type GameCommand =
   | SubmitSpeechCommand
   | CastVoteCommand
   | HunterShootCommand
+  | CastSheriffVoteCommand
+  | SubmitLastWordsCommand
   | SystemAdvanceCommand;
 
 export type PendingAction =
@@ -269,6 +305,17 @@ export type PendingAction =
       phase: "day_speech";
       actorId: string;
       legalPressureTargetIds: string[];
+    }
+  | {
+      kind: "last_words";
+      phase: "last_words";
+      actorId: string;
+    }
+  | {
+      kind: "sheriff_vote";
+      phase: "sheriff_vote";
+      actorId: string;
+      legalTargetIds: string[];
     }
   | {
       kind: "vote";

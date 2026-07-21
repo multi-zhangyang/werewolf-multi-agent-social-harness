@@ -379,6 +379,8 @@ function actionKindForCommand(command: GameCommand): AgentPendingAction["kind"] 
   if (command.type === "werewolf.killVote") return "kill";
   if (command.type === "witch.act") return "witch";
   if (command.type === "speech.submit") return "speech";
+  if (command.type === "lastWords.submit") return "last_words";
+  if (command.type === "sheriff.vote") return "sheriff_vote";
   if (command.type === "vote.cast") return "vote";
   if (command.type === "hunter.shoot") return "shoot";
   return "advance";

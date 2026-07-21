@@ -248,11 +248,11 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       const reasonerOutput = await this.options.reasoner.think(reasonerInput);
       const actionProposal = reasonerOutput.actionProposal;
       plan = stagedActor.applyReasonerProposal(plan, pending, actionProposal);
-      if (pending.kind === "speech") {
+      if (pending.kind === "speech" || pending.kind === "last_words") {
         plan = attachSpeech(plan, normalizeSpeech(reasonerOutput.content));
       }
       const command = stagedActor.act(plan);
-      const publicSpeech = command.type === "speech.submit" ? command.text : undefined;
+      const publicSpeech = command.type === "speech.submit" || command.type === "lastWords.submit" ? command.text : undefined;
       const commitContext = {
         traceId: this.latest.traceId,
         turnIndex: this.latest.receiptTurnIndex,
@@ -776,6 +776,42 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
     });
   }
 
+  if (input.command.type === "lastWords.submit") {
+    messages.push({
+      channelId: "table",
+      senderId: input.actorId,
+      recipientIds: publicRecipientIds,
+      visibility: "public",
+      content: input.command.text,
+      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
+      metadata: {
+        ...baseMetadata,
+        kind: "public-last-words",
+        day: input.observation.day
+      }
+    });
+  }
+
+  if (input.command.type === "sheriff.vote") {
+    messages.push({
+      channelId: "table",
+      senderId: input.actorId,
+      recipientIds: publicRecipientIds,
+      visibility: "public",
+      content: input.command.abstain
+        ? `${input.actorId} abstained from the sheriff election.`
+        : `${input.actorId} voted for ${input.command.targetId} in the sheriff election.`,
+      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
+      metadata: {
+        ...baseMetadata,
+        kind: "public-sheriff-vote",
+        day: input.observation.day,
+        targetId: input.command.targetId,
+        abstain: Boolean(input.command.abstain)
+      }
+    });
+  }
+
   if (input.command.type === "vote.cast") {
     messages.push({
       channelId: "table",
@@ -910,6 +946,35 @@ function werewolfSpeechActsForCommand(command: GameCommand, actorId: string): So
       });
     }
     return acts.length ? acts : undefined;
+  }
+
+  if (command.type === "lastWords.submit") {
+    return [
+      {
+        id: "",
+        kind: "statement",
+        subjectId: actorId,
+        value: "last_words",
+        confidence: 1,
+        evidenceRefs,
+        metadata: { source: "last_words", messageKind: "public-last-words" }
+      }
+    ];
+  }
+
+  if (command.type === "sheriff.vote") {
+    return [
+      {
+        id: "",
+        kind: "vote_intent",
+        subjectId: actorId,
+        targetId: command.targetId,
+        value: command.abstain ? "sheriff.vote.abstain" : "sheriff.vote",
+        confidence: 1,
+        evidenceRefs,
+        metadata: { source: "metadata.targetId", abstain: Boolean(command.abstain), messageKind: "public-sheriff-vote" }
+      }
+    ];
   }
 
   if (command.type === "vote.cast") {

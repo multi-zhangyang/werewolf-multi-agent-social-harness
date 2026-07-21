@@ -17,6 +17,14 @@ Frontend: `http://127.0.0.1:5173` by default. If that port is occupied, Vite wil
 
 API: `http://127.0.0.1:8787` by default. Set `HOST` explicitly if you intentionally want a different bind address.
 
+> Deployment boundary: the bundled Express server is a **local research and
+> development server**, not an Internet-facing multi-tenant service. It has
+> local-only defaults and local gates for full/research artifacts, but run,
+> probe, and postgame research routes are intentionally not a public auth
+> surface. Do not bind it directly to a public interface. Put any remote use
+> behind an authenticated, rate-limited reverse proxy and use the
+> truth-redacted share APIs rather than research projections.
+
 ## Required LLM environment
 
 The runtime does not use a local scripted substitute when the API key is missing. Set:
@@ -42,6 +50,37 @@ Provider integration policy:
 - Concrete model ids are runtime configuration, not project defaults.
 - Select the adapter explicitly with `LLM_PROVIDER_PROTOCOL`; never infer protocol from a model string.
 - Default `agent:probe`, `arena:match`, and `arena:tournament` CLI summaries expose only provider protocol/configuration state, bounded metrics, safe failure classification, and stream-completion status. They deliberately omit provider endpoints, provider request ids, and raw provider errors. `--json=full` is explicit local/debug output and must not be published without applying the artifact redaction policy.
+
+## Werewolf proof ruleset
+
+The first adapter is the documented deterministic `classic-9-seat-v1` proof
+ruleset. It has one optional Seer, Witch, and Hunter at most; duplicate special
+role cards are rejected at game creation rather than silently losing a turn.
+The engine, not a model or the React cockpit, owns the following rules:
+
+- `sheriff: "day1"` opens a public day-one election after night resolution.
+  Every living player casts one unweighted ballot, including self-nomination.
+  A unique plurality becomes sheriff; a tie or all-abstention leaves the office
+  vacant. The elected sheriff's ordinary exile vote uses
+  `sheriffVoteWeight`. The office becomes vacant on death; this ruleset has no
+  unconfigured transfer/tie-break procedure.
+- `lastWords: "all"` queues one ordered public final statement per eliminated
+  player before the engine resumes the next public/night phase.
+  `firstNightOnly` applies only to first-night kill/poison deaths, and `none`
+  suppresses the phase. Last words are typed `lastWords.submit` actions and
+  recorded public messages/events, not transcript-only UI text.
+- Witch save must target the actual selected wolf-night victim, and poison
+  must target a living non-self player. These checks exist in the core engine
+  as well as the harness adapter.
+- `timers` are presentation/default-duration metadata for human-facing
+  surfaces. They are not a wall-clock authority for unattended model runs;
+  harness `timeout` and `maxTransitions` are the deterministic execution
+  bounds recorded in artifacts.
+
+Different real-world Werewolf variants make different choices about sheriff
+handoff, election ties, hunter poison, and potion timing. Add a versioned
+ruleset contract before changing any of these deterministic semantics; do not
+hide a variant change in a prompt or UI branch.
 
 ## Commands
 
@@ -242,7 +281,7 @@ checkpoint selector or lineage authority.
 `view=full` is local/debug access only. Fork execution always restores the
 canonical validated checkpoint stored by the server, not an API projection.
 
-Latest end-to-end validation on 2026-07-14 used the user-specified configured
+Historical end-to-end validation on 2026-07-14 used the then user-specified configured
 OpenAI-compatible endpoint and `tencent/hy3:free`. The streaming probe passed
 1/1. A first match with a 40-second bound timed out and correctly remained a
 failed/rejected native step with zero commits; this failure is part of the
@@ -263,6 +302,14 @@ TypeScript typecheck, production build, and `git diff --check`. The existing
 large-chunk build warning and intentional invalid-streaming-JSON parser-test
 stderr remained non-fatal. No provider request id, credential, or raw sensitive
 provider output is part of these records.
+
+Current incremental validation is intentionally recorded separately from that
+historical run: the production dependency audit is clean after moving the
+dev-only launcher out of runtime dependencies and upgrading its vulnerable
+transitive parser; focused engine/harness tests cover sheriff election, last
+words, role cardinality, core witch legality, and day-vote separation. A
+bounded real streaming probe is required whenever the provider/reasoner path
+changes and is reported only through its safe summary.
 
 Useful CLI limits:
 
