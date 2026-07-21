@@ -1,6 +1,7 @@
 import { shuffleDeterministic } from "./random";
 import { DEFAULT_CONFIG, ROLE_DEFINITIONS, teamForRole } from "./roles";
 import type {
+  CastSheriffVoteCommand,
   CastVoteCommand,
   DeathReason,
   GameCommand,
@@ -13,6 +14,7 @@ import type {
   PlayerState,
   Role,
   SpeechRecord,
+  SubmitLastWordsCommand,
   SubmitSpeechCommand,
   Team,
   VoteRecord
@@ -41,6 +43,10 @@ export function createGame(options: {
   };
   if (config.roles.length !== config.seats) {
     throw new Error(`Role count (${config.roles.length}) must equal seat count (${config.seats}).`);
+  }
+  assertSupportedRoleCardinality(config.roles);
+  if (!Number.isFinite(config.sheriffVoteWeight) || config.sheriffVoteWeight <= 0) {
+    throw new Error("sheriffVoteWeight must be a finite positive number.");
   }
 
   const roles = shuffleDeterministic(config.roles, `${options.seed}:roles`);
@@ -143,6 +149,26 @@ export function getPendingActions(state: GameState): PendingAction[] {
     return [{ kind: "advance", phase: state.phase, actorId: "system" }];
   }
 
+  if (state.phase === "last_words") {
+    const actorId = state.lastWordsQueue?.[0];
+    if (!actorId) return [{ kind: "advance", phase: state.phase, actorId: "system" }];
+    return [{ kind: "last_words", phase: state.phase, actorId }];
+  }
+
+  if (state.phase === "sheriff_vote") {
+    const electedVotes = state.votes.filter((vote) => vote.day === state.day && vote.kind === "sheriff");
+    const voted = new Set(electedVotes.map((vote) => vote.voterId));
+    const open = alive.filter((player) => !voted.has(player.id));
+    if (open.length === 0) return [{ kind: "advance", phase: state.phase, actorId: "system" }];
+    const legalTargetIds = alive.map((player) => player.id);
+    return open.map((player) => ({
+      kind: "sheriff_vote",
+      phase: "sheriff_vote",
+      actorId: player.id,
+      legalTargetIds
+    }));
+  }
+
   if (state.phase === "day_speech") {
     const current = getCurrentSpeaker(state);
     if (!current) return [{ kind: "advance", phase: state.phase, actorId: "system" }];
@@ -157,7 +183,9 @@ export function getPendingActions(state: GameState): PendingAction[] {
   }
 
   if (state.phase === "day_vote") {
-    const voted = new Set(state.votes.filter((vote) => vote.day === state.day).map((vote) => vote.voterId));
+    const voted = new Set(
+      state.votes.filter((vote) => vote.day === state.day && (vote.kind ?? "exile") === "exile").map((vote) => vote.voterId)
+    );
     const open = alive.filter((player) => !voted.has(player.id));
     if (open.length === 0) return [{ kind: "advance", phase: state.phase, actorId: "system" }];
     return open.map((player) => ({
@@ -233,7 +261,13 @@ export function applyCommand(state: GameState, command: GameCommand): GameState 
     const actor = requireAliveRole(state, command.actorId, "witch");
     if (command.saveTargetId && !actor.ability.witchSaveAvailable) throw new Error("Witch save is not available.");
     if (command.poisonTargetId && !actor.ability.witchPoisonAvailable) throw new Error("Witch poison is not available.");
+    const nightVictimId = selectWolfTarget(state);
+    if (command.saveTargetId && command.saveTargetId !== nightVictimId) {
+      throw new Error("Witch can only save the selected wolf-night victim.");
+    }
+    if (command.saveTargetId) requireLivingTarget(state, command.saveTargetId);
     if (command.poisonTargetId === actor.id) throw new Error("Witch cannot poison self.");
+    if (command.poisonTargetId) requireLivingTarget(state, command.poisonTargetId);
     let next = cloneState(state);
     const nextActor = getPlayer(next, actor.id);
     if (!nextActor) throw new Error("Missing witch after clone.");
@@ -258,8 +292,14 @@ export function applyCommand(state: GameState, command: GameCommand): GameState 
   if (command.type === "speech.submit") {
     return submitSpeech(state, command);
   }
+  if (command.type === "lastWords.submit") {
+    return submitLastWords(state, command);
+  }
   if (command.type === "vote.cast") {
     return castVote(state, command);
+  }
+  if (command.type === "sheriff.vote") {
+    return castSheriffVote(state, command);
   }
   if (command.type === "hunter.shoot") {
     return hunterShoot(state, command);
@@ -315,6 +355,7 @@ function submitSpeech(state: GameState, command: SubmitSpeechCommand): GameState
     day: state.day,
     playerId: actor.id,
     text: trimmed.slice(0, 1200),
+    kind: "day",
     claimedRole: command.claimedRole,
     pressureTargetId: command.pressureTargetId,
     strategyTags: command.strategyTags?.slice(0, 8) ?? []
@@ -331,6 +372,37 @@ function submitSpeech(state: GameState, command: SubmitSpeechCommand): GameState
   return maybeAutoAdvance(next);
 }
 
+function submitLastWords(state: GameState, command: SubmitLastWordsCommand): GameState {
+  const expectedActorId = state.lastWordsQueue?.[0];
+  if (!expectedActorId || expectedActorId !== command.actorId) {
+    throw new Error("No last words are pending for this player.");
+  }
+  const actor = getPlayer(state, command.actorId);
+  if (!actor || actor.alive) throw new Error("Only an eliminated player may submit last words.");
+  const trimmed = command.text.trim();
+  if (!trimmed) throw new Error("Last words cannot be empty.");
+  let next = cloneState(state);
+  next.speeches.push({
+    day: next.day,
+    playerId: actor.id,
+    text: trimmed.slice(0, 1200),
+    kind: "last_words",
+    strategyTags: command.strategyTags?.slice(0, 8) ?? []
+  });
+  next.lastWordsQueue = (next.lastWordsQueue ?? []).slice(1);
+  next = appendEvent(next, {
+    type: "last_words.submitted",
+    actorId: actor.id,
+    visibility: "public",
+    payload: {
+      playerId: actor.id,
+      text: trimmed.slice(0, 1200),
+      remaining: next.lastWordsQueue.length
+    }
+  });
+  return maybeAutoAdvance(next);
+}
+
 function castVote(state: GameState, command: CastVoteCommand): GameState {
   const actor = requireLivingTarget(state, command.actorId);
   if (!command.abstain) {
@@ -338,19 +410,49 @@ function castVote(state: GameState, command: CastVoteCommand): GameState {
     const target = requireLivingTarget(state, command.targetId);
     if (target.id === actor.id) throw new Error("Player cannot vote self.");
   }
-  const alreadyVoted = state.votes.some((vote) => vote.day === state.day && vote.voterId === actor.id);
+  const alreadyVoted = state.votes.some(
+    (vote) => vote.day === state.day && (vote.kind ?? "exile") === "exile" && vote.voterId === actor.id
+  );
   if (alreadyVoted) throw new Error("Player already voted this day.");
   const record: VoteRecord = {
     day: state.day,
     voterId: actor.id,
     targetId: command.abstain ? undefined : command.targetId,
     abstain: Boolean(command.abstain),
-    weight: actor.isSheriff ? state.config.sheriffVoteWeight : 1
+    weight: actor.isSheriff ? state.config.sheriffVoteWeight : 1,
+    kind: "exile"
   };
   let next = cloneState(state);
   next.votes.push(record);
   next = appendEvent(next, {
     type: "vote.cast",
+    actorId: actor.id,
+    visibility: "public",
+    payload: record
+  });
+  return maybeAutoAdvance(next);
+}
+
+function castSheriffVote(state: GameState, command: CastSheriffVoteCommand): GameState {
+  const actor = requireLivingTarget(state, command.actorId);
+  if (!command.abstain) {
+    if (!command.targetId) throw new Error("Sheriff vote target is required unless abstaining.");
+    requireLivingTarget(state, command.targetId);
+  }
+  const alreadyVoted = state.votes.some((vote) => vote.day === state.day && vote.kind === "sheriff" && vote.voterId === actor.id);
+  if (alreadyVoted) throw new Error("Player already cast a sheriff vote this day.");
+  const record: VoteRecord = {
+    day: state.day,
+    voterId: actor.id,
+    targetId: command.abstain ? undefined : command.targetId,
+    abstain: Boolean(command.abstain),
+    weight: 1,
+    kind: "sheriff"
+  };
+  let next = cloneState(state);
+  next.votes.push(record);
+  next = appendEvent(next, {
+    type: "sheriff.vote_cast",
     actorId: actor.id,
     visibility: "public",
     payload: record
@@ -415,6 +517,19 @@ function advancePhase(state: GameState): GameState {
       next.phase = "hunter_shot";
       return appendPhaseChanged(next);
     }
+    return resumeAfterDeathResolution(next, shouldHoldSheriffElection(next) ? "sheriff_vote" : "day_speech");
+  }
+  if (next.phase === "last_words") {
+    if (next.lastWordsQueue?.length) {
+      throw new Error("Cannot advance while a player still has last words pending.");
+    }
+    const resume = next.lastWordsResume;
+    if (!resume) throw new Error("Last words phase is missing its deterministic resume target.");
+    next.lastWordsResume = undefined;
+    return enterResumePhase(next, resume);
+  }
+  if (next.phase === "sheriff_vote") {
+    next = resolveSheriffElection(next);
     next.phase = "day_speech";
     next.currentSpeakerSeat = livingPlayers(next)[0]?.seat;
     next = appendPhaseChanged(next);
@@ -438,30 +553,14 @@ function advancePhase(state: GameState): GameState {
       next.phase = "hunter_shot";
       return appendPhaseChanged(next);
     }
-    if (next.day >= next.config.maxDays) {
-      return endGame(next, "werewolves", `maxDays=${next.config.maxDays} reached`);
-    }
-    next.day += 1;
-    next.night = { wolfVotes: {} };
-    next.currentSpeakerSeat = undefined;
-    next.phase = firstNightPhase(next);
-    next = appendPhaseChanged(next);
-    return next;
+    return resumeAfterDeathResolution(next, "next_night");
   }
   if (next.phase === "hunter_shot") {
     const winner = determineWinner(next);
     if (winner) return endGame(next, winner, "hunter shot met a win condition");
-    if (next.hunterResume === "day_speech") {
-      next.phase = "day_speech";
-      next.currentSpeakerSeat = livingPlayers(next)[0]?.seat;
-    } else {
-      if (next.day >= next.config.maxDays) return endGame(next, "werewolves", `maxDays=${next.config.maxDays} reached`);
-      next.day += 1;
-      next.night = { wolfVotes: {} };
-      next.phase = firstNightPhase(next);
-    }
+    const resume = next.hunterResume === "day_speech" ? (shouldHoldSheriffElection(next) ? "sheriff_vote" : "day_speech") : "next_night";
     next.hunterResume = undefined;
-    return appendPhaseChanged(next);
+    return resumeAfterDeathResolution(next, resume);
   }
 
   return next;
@@ -509,7 +608,9 @@ function resolveNight(state: GameState): GameState {
 
 function resolveExile(state: GameState): GameState {
   let next = cloneState(state);
-  const todaysVotes = next.votes.filter((vote) => vote.day === next.day && !vote.abstain && vote.targetId);
+  const todaysVotes = next.votes.filter(
+    (vote) => vote.day === next.day && (vote.kind ?? "exile") === "exile" && !vote.abstain && vote.targetId
+  );
   const tally = new Map<string, number>();
   for (const vote of todaysVotes) {
     if (!vote.targetId) continue;
@@ -520,6 +621,91 @@ function resolveExile(state: GameState): GameState {
     next = eliminatePlayer(next, sorted[0][0], "exile", "village_vote");
   }
   return next;
+}
+
+/**
+ * Classic-9-seat-v1 sheriff rule: after every living player casts one public
+ * day-one election ballot, a unique plurality becomes sheriff. A tied or
+ * fully abstained election deliberately leaves the office vacant; there is no
+ * hidden tie-breaker and no synthetic winner.
+ */
+function resolveSheriffElection(state: GameState): GameState {
+  let next = cloneState(state);
+  const ballots = next.votes.filter((vote) => vote.day === next.day && vote.kind === "sheriff" && !vote.abstain && vote.targetId);
+  const tally = new Map<string, number>();
+  for (const ballot of ballots) {
+    if (!ballot.targetId) continue;
+    tally.set(ballot.targetId, (tally.get(ballot.targetId) ?? 0) + 1);
+  }
+  const ranking = [...tally.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const winnerId = ranking.length > 0 && (ranking.length === 1 || ranking[0][1] > ranking[1][1]) ? ranking[0][0] : undefined;
+  for (const player of next.players) player.isSheriff = player.id === winnerId;
+  next.sheriffElectionCompleted = true;
+  next = appendEvent(next, {
+    type: "sheriff.elected",
+    actorId: "system",
+    visibility: "public",
+    payload: {
+      winnerId,
+      status: winnerId ? "elected" : "vacant_tie_or_abstention",
+      tally: Object.fromEntries(ranking)
+    }
+  });
+  return next;
+}
+
+function shouldHoldSheriffElection(state: GameState): boolean {
+  return state.config.sheriff === "day1" && state.day === 1 && !state.sheriffElectionCompleted;
+}
+
+function resumeAfterDeathResolution(
+  state: GameState,
+  resume: NonNullable<GameState["lastWordsResume"]>
+): GameState {
+  const queued = eligibleLastWords(state);
+  if (queued.length > 0) {
+    const next = cloneState(state);
+    next.lastWordsQueue = queued;
+    next.lastWordsResume = resume;
+    next.currentSpeakerSeat = undefined;
+    next.phase = "last_words";
+    return appendPhaseChanged(next);
+  }
+  return enterResumePhase(state, resume);
+}
+
+function enterResumePhase(state: GameState, resume: NonNullable<GameState["lastWordsResume"]>): GameState {
+  let next = cloneState(state);
+  next.lastWordsQueue = undefined;
+  if (resume === "sheriff_vote") {
+    next.phase = "sheriff_vote";
+    next.currentSpeakerSeat = undefined;
+    return appendPhaseChanged(next);
+  }
+  if (resume === "day_speech") {
+    next.phase = "day_speech";
+    next.currentSpeakerSeat = livingPlayers(next)[0]?.seat;
+    return appendPhaseChanged(next);
+  }
+  if (next.day >= next.config.maxDays) return endGame(next, "werewolves", `maxDays=${next.config.maxDays} reached`);
+  next.day += 1;
+  next.night = { wolfVotes: {} };
+  next.currentSpeakerSeat = undefined;
+  next.phase = firstNightPhase(next);
+  return appendPhaseChanged(next);
+}
+
+function eligibleLastWords(state: GameState): string[] {
+  if (state.config.lastWords === "none") return [];
+  const alreadySpoken = new Set(state.speeches.filter((speech) => speech.kind === "last_words").map((speech) => speech.playerId));
+  const alreadyQueued = new Set(state.lastWordsQueue ?? []);
+  return state.deaths
+    .filter((death) => {
+      if (alreadySpoken.has(death.playerId) || alreadyQueued.has(death.playerId)) return false;
+      if (state.config.lastWords === "all") return true;
+      return death.day === 1 && (death.reason === "night_kill" || death.reason === "poison");
+    })
+    .map((death) => death.playerId);
 }
 
 export function selectWolfTarget(state: GameState): string | undefined {
@@ -558,6 +744,19 @@ function eliminatePlayer(state: GameState, playerId: string, reason: DeathReason
       revealedRole: next.config.revealOnDeath ? player.role : undefined
     }
   });
+  if (player.isSheriff) {
+    player.isSheriff = false;
+    next = appendEvent(next, {
+      type: "sheriff.vacated",
+      actorId: "system",
+      visibility: "public",
+      payload: {
+        playerId,
+        reason,
+        succession: "vacant"
+      }
+    });
+  }
   return next;
 }
 
@@ -613,6 +812,8 @@ function assertPhaseAllows(state: GameState, command: GameCommand): void {
       "night_wolves",
       "night_witch",
       "night_resolve",
+      "last_words",
+      "sheriff_vote",
       "day_speech",
       "day_vote",
       "exile_resolve",
@@ -622,6 +823,8 @@ function assertPhaseAllows(state: GameState, command: GameCommand): void {
     "werewolf.killVote": ["night_wolves"],
     "witch.act": ["night_witch"],
     "speech.submit": ["day_speech"],
+    "lastWords.submit": ["last_words"],
+    "sheriff.vote": ["sheriff_vote"],
     "vote.cast": ["day_vote"],
     "hunter.shoot": ["hunter_shot"]
   };
@@ -680,6 +883,15 @@ function countRoles(roles: Role[]): Record<Role, number> {
     },
     { villager: 0, werewolf: 0, seer: 0, witch: 0, hunter: 0 } satisfies Record<Role, number>
   );
+}
+
+function assertSupportedRoleCardinality(roles: Role[]): void {
+  for (const role of ["seer", "witch", "hunter"] as const) {
+    const count = roles.filter((candidate) => candidate === role).length;
+    if (count > 1) {
+      throw new Error(`Classic Werewolf ruleset supports at most one ${ROLE_DEFINITIONS[role].displayName}; received ${count}.`);
+    }
+  }
 }
 
 function ratio(numerator: number, denominator: number): number {

@@ -239,6 +239,9 @@ export interface ServerAppDependencies {
 
 export function createServerApp(dependencies: ServerAppDependencies = {}): express.Express {
 const app = express();
+// This server is local-by-default, but avoid advertising the framework even
+// when an operator places it behind a deployment-specific authenticated proxy.
+app.disable("x-powered-by");
 const artifactAccessBindHost = dependencies.artifactAccessBindHost ?? host;
 const createReasoner =
   dependencies.createReasoner ??

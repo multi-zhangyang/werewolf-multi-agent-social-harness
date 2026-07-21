@@ -39,7 +39,7 @@ export class OpenAIHarnessReasoner implements HarnessReasoner {
 }
 
 function buildHarnessMessages(input: ReasonerInput): ChatMessage[] {
-  const speechMode = input.action.kind === "speech";
+  const speechMode = input.action.kind === "speech" || input.action.kind === "last_words";
   return [
     {
       role: "system",
@@ -48,7 +48,9 @@ function buildHarnessMessages(input: ReasonerInput): ChatMessage[] {
             "你是狼人杀 Agent 的语言生成器，不是动作控制器。",
             "Harness 已经完成观测、信念更新、策略选择和动作仲裁；你只负责生成该 Agent 的公开发言。",
             "不要输出 JSON、Markdown、字段表或私密思维链。",
-            "整条回复必须就是玩家可公开说出的话，80 到 220 个汉字。"
+            input.action.kind === "last_words"
+              ? "这是被淘汰玩家仅一次的遗言。整条回复必须就是可公开说出的遗言，80 到 220 个汉字。"
+              : "整条回复必须就是玩家可公开说出的话，80 到 220 个汉字。"
           ].join("\n")
         : [
             "你是狼人杀 Agent 的战术顾问，不是动作控制器。",
@@ -68,6 +70,8 @@ function buildHarnessMessages(input: ReasonerInput): ChatMessage[] {
         `Harness策略=${input.policyPlan.policyName}`,
         `Harness意图=${input.policyPlan.intent}`,
         `Harness目标=${input.policyPlan.targetId ?? "none"}`,
+        `当前技能=${JSON.stringify(input.view.you.ability)}`,
+        `当前私有事实=${privateFactSummary(input)}`,
         `信念Top=${beliefSummary(input.agent.beliefs)}`,
         `公开玩家=${input.view.publicPlayers
           .map((player) => `${player.id}/${player.name}/${player.alive ? "alive" : "dead"}/${player.revealedRole ?? "hidden"}`)
@@ -90,6 +94,21 @@ function buildHarnessMessages(input: ReasonerInput): ChatMessage[] {
       ].join("\n")
     }
   ];
+}
+
+function privateFactSummary(input: ReasonerInput): string {
+  const facts: string[] = [];
+  if (input.view.privateInfo.werewolfAllies?.length) {
+    facts.push(`狼人同伴=${input.view.privateInfo.werewolfAllies.join(",")}`);
+  }
+  if (input.view.privateInfo.lastInspection) {
+    const inspection = input.view.privateInfo.lastInspection;
+    facts.push(`查验=${inspection.targetId}:${inspection.resultTeam}`);
+  }
+  if (input.view.privateInfo.witchNightVictimId) {
+    facts.push(`女巫刀口=${input.view.privateInfo.witchNightVictimId}`);
+  }
+  return facts.join("; ") || "none";
 }
 
 function parseReasonerOutput(content: string, speechMode: boolean): {

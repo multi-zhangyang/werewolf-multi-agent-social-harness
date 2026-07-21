@@ -164,6 +164,8 @@ function actionKindForCommand(command: Exclude<GameCommand, { type: "system.adva
   if (command.type === "werewolf.killVote") return "kill";
   if (command.type === "witch.act") return "witch";
   if (command.type === "speech.submit") return "speech";
+  if (command.type === "lastWords.submit") return "last_words";
+  if (command.type === "sheriff.vote") return "sheriff_vote";
   if (command.type === "vote.cast") return "vote";
   return "shoot";
 }
@@ -190,6 +192,17 @@ function assertCommandMatchesAction(command: Exclude<GameCommand, { type: "syste
   if (command.type === "speech.submit" && action.kind === "speech") {
     if (command.pressureTargetId) {
       assertLegalTarget(action.legalPressureTargetIds, command.pressureTargetId, command.type);
+    }
+    return;
+  }
+  if (command.type === "lastWords.submit" && action.kind === "last_words") {
+    if (!command.text.trim()) throw new Error("Command lastWords.submit requires non-empty text.");
+    return;
+  }
+  if (command.type === "sheriff.vote" && action.kind === "sheriff_vote") {
+    if (!command.abstain) {
+      if (!command.targetId) throw new Error(`Command ${command.type} requires a target unless abstaining.`);
+      assertLegalTarget(action.legalTargetIds, command.targetId, command.type);
     }
     return;
   }

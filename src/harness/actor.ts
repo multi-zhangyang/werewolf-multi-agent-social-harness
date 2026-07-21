@@ -103,6 +103,12 @@ export class WerewolfAgentActor {
         ? { type: "vote.cast", actorId: pending.actorId, targetId }
         : { type: "vote.cast", actorId: pending.actorId, abstain: proposal.abstain ?? next.command.abstain };
       next.targetId = targetId;
+    } else if (pending.kind === "sheriff_vote" && next.command.type === "sheriff.vote") {
+      if (!targetId && proposal.abstain === undefined && !next.command.abstain) return plan;
+      next.command = targetId
+        ? { type: "sheriff.vote", actorId: pending.actorId, targetId }
+        : { type: "sheriff.vote", actorId: pending.actorId, abstain: proposal.abstain ?? next.command.abstain };
+      next.targetId = targetId;
     } else if (pending.kind === "shoot" && next.command.type === "hunter.shoot") {
       next.command = { type: "hunter.shoot", actorId: pending.actorId, targetId };
       next.targetId = targetId;
@@ -307,6 +313,7 @@ export class WerewolfAgentActor {
 function legalTargetIdsForPending(action: AgentPendingAction): string[] {
   if (action.kind === "witch") return action.legalPoisonTargetIds;
   if (action.kind === "speech") return action.legalPressureTargetIds;
+  if (action.kind === "last_words") return [];
   return action.legalTargetIds;
 }
 
