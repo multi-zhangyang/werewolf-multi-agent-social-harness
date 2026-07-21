@@ -87,6 +87,7 @@ import { legacyMetricPromotionPolicyFromSummary, resolveRecordedMetricPromotion 
 import { countSocialStepCommits, deriveSocialExposureRecords, isSocialStepCommitted, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
 import { isSafeHarnessCheckpointBoundary } from "./harness/episodeArtifacts";
 import type { SocialStateMutationJournalEntry } from "./harness/socialState";
+import { AgentDecisionEvidencePanel, buildDecisionJournalEvidence } from "./components/cockpit/AgentDecisionEvidencePanel";
 import { SocialEvidenceGraph } from "./components/cockpit/SocialEvidenceGraph";
 import { WerewolfReviewBoard } from "./components/cockpit/WerewolfReviewBoard";
 import { buildWerewolfReviewModel } from "./components/cockpit/werewolfReviewProjection";
@@ -3369,6 +3370,17 @@ function TimelineWorkspace({
   const nativeStepByTraceId = useMemo(() => new Map(steps.map((step) => [step.traceId, step])), [steps]);
   const legacyStepByTraceId = useMemo(() => new Map(legacySteps.map((step) => [step.traceId, step])), [legacySteps]);
   const selectedLegacyStep = selectedStep ? legacyStepByTraceId.get(selectedStep.traceId) ?? null : null;
+  const selectedDecisionJournal = useMemo(
+    () =>
+      selectedStep
+        ? buildDecisionJournalEvidence(
+            artifact?.agents.flatMap((agent) => agent.social?.journal?.entries ?? []) ?? [],
+            selectedStep.actorId,
+            selectedStep.traceId
+          )
+        : [],
+    [artifact?.agents, selectedStep]
+  );
   const schedulerCounts = useMemo(() => countSocialSchedulerModes(steps), [steps]);
   const { committedSteps, rejectedSteps } = useMemo(() => countSocialStepCommits(steps), [steps]);
   const replayFrameBoundaryIndexes = useMemo(
@@ -3623,6 +3635,13 @@ function TimelineWorkspace({
                   ["message seq", selectedStep.messageSeqRange ? rangeLabel(selectedStep.messageSeqRange) : "none"],
                   ["event seq", selectedStep.eventSeqRange ? rangeLabel(selectedStep.eventSeqRange) : "none"]
                 ])}
+              />
+              <AgentDecisionEvidencePanel
+                nativeStep={selectedStep}
+                legacyStep={selectedLegacyStep}
+                view={artifactView}
+                journal={selectedDecisionJournal}
+                shortId={shortId}
               />
               {canLoadSelectedReplayFrame ? (
                 <Button

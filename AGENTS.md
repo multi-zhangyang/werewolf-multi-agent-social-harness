@@ -25583,3 +25583,54 @@ was visually inspected at the fixed fixture viewport; no screenshot baseline
 is persisted by this lock. Future visual changes should preserve the same
 projection/redaction and narrow-viewport checks before adding a visual
 baseline workflow.
+
+## 13.261 Agent Decision Evidence And Receipt Authority Lock
+
+Timestamp: `2026-07-21`
+
+The Timeline cockpit now has an `AgentDecisionEvidencePanel` for one selected
+native social step. It makes the harness-managed actor lifecycle readable
+without treating a model completion, a legacy projection, or browser state as
+environment authority.
+
+- The native `socialEpisode.steps[]` receipt is the execution authority. Its
+  scheduler/batch context, action family, commit status, failure stage, and
+  recorded state hashes determine whether a proposed action was committed or
+  rejected.
+- A trace-linked `trajectory` record is only a redacted compatibility evidence
+  source for policy name/confidence/tags and reasoner aggregate telemetry. It
+  is explicitly labelled `trace-linked evidence`; it cannot by itself prove a
+  command was committed or that an actor changed durable state.
+- Private observations, beliefs, memory retrieval and excerpts, reasoner
+  content/proposals, policy intent/targets/candidate arbitration, private memo,
+  provider request/retry/stream detail, command payloads, and raw metadata are
+  never passed through the panel. Missing trace evidence stays missing; the UI
+  does not infer cognition from message recipients, scheduler cadence, or a
+  final actor snapshot.
+- A committed trace may show only a content-free social journal identity
+  linked by the exact `agentId + traceId`: journal sequence, store, mutation
+  kind, subject id, and evidence count. Before/after/delta summaries,
+  metadata, evidence descriptions, beliefs, and memory content are discarded.
+  A rejected receipt never claims a durable journal commit.
+- The panel is available only in `postgame-redacted` research review. The
+  `truth-redacted` projection has no decision chain; React cannot recreate it
+  from public messages or hidden role/action cadence.
+- Long journal labels are constrained to their panel and wrap on narrow
+  screens. They cannot widen the page outside the 390px cockpit viewport.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/agentDecisionEvidencePanel.test.ts tests/socialState.test.ts \
+  tests/scaffold.test.ts tests/werewolfAdapter.test.ts tests/serverPublicViewApi.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=dot
+npm run test:e2e
+git diff --check
+```
+
+The focused deterministic suite completed with 5 files / 90 tests. The fixture
+browser suite completed 7/7, including the no-full-artifact decision-panel
+path, truth-redacted panel removal, all-workspace 390px width check, and
+bounded evidence drawer check. The production build retains the existing
+bundle-size warning as a separate performance task.
