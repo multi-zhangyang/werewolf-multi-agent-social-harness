@@ -376,6 +376,7 @@ function samePendingAction(left: AgentPendingAction, right: AgentPendingAction):
 
 function actionKindForCommand(command: GameCommand): AgentPendingAction["kind"] | "advance" {
   if (command.type === "seer.inspect") return "inspect";
+  if (command.type === "werewolf.whisper") return "whisper";
   if (command.type === "werewolf.killVote") return "kill";
   if (command.type === "witch.act") return "witch";
   if (command.type === "speech.submit") return "speech";

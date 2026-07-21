@@ -313,7 +313,7 @@ export class WerewolfAgentActor {
 function legalTargetIdsForPending(action: AgentPendingAction): string[] {
   if (action.kind === "witch") return action.legalPoisonTargetIds;
   if (action.kind === "speech") return action.legalPressureTargetIds;
-  if (action.kind === "last_words") return [];
+  if (action.kind === "last_words" || action.kind === "whisper") return [];
   return action.legalTargetIds;
 }
 

@@ -72,6 +72,11 @@ The engine, not a model or the React cockpit, owns the following rules:
 - Witch save must target the actual selected wolf-night victim, and poison
   must target a living non-self player. These checks exist in the core engine
   as well as the harness adapter.
+- `wolfDiscussion: "one_turn"` enables one serialized, wolf-team-only
+  `werewolf.whisper` per living wolf before the night kill-vote batch. It is
+  off by default so existing experiment specifications retain their previous
+  transition and provider-call budgets; enable it explicitly in a game config
+  when studying private coordination.
 - `timers` are presentation/default-duration metadata for human-facing
   surfaces. They are not a wall-clock authority for unattended model runs;
   harness `timeout` and `maxTransitions` are the deterministic execution

@@ -74,6 +74,7 @@ export function createGame(options: {
     players,
     night: { wolfVotes: {} },
     speeches: [],
+    wolfWhispers: [],
     votes: [],
     deaths: [],
     events: [],
@@ -124,6 +125,21 @@ export function getPendingActions(state: GameState): PendingAction[] {
       phase: "night_wolves",
       actorId: wolf.id,
       legalTargetIds,
+      teamActorIds: wolves.map((player) => player.id)
+    }));
+  }
+
+  if (state.phase === "night_wolf_discussion") {
+    const wolves = alive.filter((player) => player.role === "werewolf");
+    const alreadyWhispered = new Set(state.wolfWhispers.filter((whisper) => whisper.day === state.day).map((whisper) => whisper.playerId));
+    const openWolves = wolves.filter((wolf) => !alreadyWhispered.has(wolf.id));
+    if (wolves.length === 0 || openWolves.length === 0) {
+      return [{ kind: "advance", phase: state.phase, actorId: "system" }];
+    }
+    return openWolves.map((wolf) => ({
+      kind: "whisper",
+      phase: "night_wolf_discussion",
+      actorId: wolf.id,
       teamActorIds: wolves.map((player) => player.id)
     }));
   }
@@ -257,6 +273,9 @@ export function applyCommand(state: GameState, command: GameCommand): GameState 
     });
     return maybeAutoAdvance(next);
   }
+  if (command.type === "werewolf.whisper") {
+    return submitWerewolfWhisper(state, command);
+  }
   if (command.type === "witch.act") {
     const actor = requireAliveRole(state, command.actorId, "witch");
     if (command.saveTargetId && !actor.ability.witchSaveAvailable) throw new Error("Witch save is not available.");
@@ -369,6 +388,30 @@ function submitSpeech(state: GameState, command: SubmitSpeechCommand): GameState
     payload: record
   });
   next.currentSpeakerSeat = nextLivingSpeakerSeat(next);
+  return maybeAutoAdvance(next);
+}
+
+function submitWerewolfWhisper(state: GameState, command: Extract<GameCommand, { type: "werewolf.whisper" }>): GameState {
+  const actor = requireAliveRole(state, command.actorId, "werewolf");
+  const alreadyWhispered = state.wolfWhispers.some((whisper) => whisper.day === state.day && whisper.playerId === actor.id);
+  if (alreadyWhispered) throw new Error("Werewolf already used this night's discussion turn.");
+  const trimmed = command.text.trim();
+  if (!trimmed) throw new Error("Werewolf whisper cannot be empty.");
+  let next = cloneState(state);
+  next.wolfWhispers.push({
+    day: state.day,
+    playerId: actor.id,
+    text: trimmed.slice(0, 1200),
+    strategyTags: command.strategyTags?.slice(0, 8) ?? []
+  });
+  next = appendEvent(next, {
+    type: "werewolves.whispered",
+    actorId: actor.id,
+    visibility: "private",
+    payload: {
+      text: trimmed.slice(0, 1200)
+    }
+  });
   return maybeAutoAdvance(next);
 }
 
@@ -495,7 +538,12 @@ function advancePhase(state: GameState): GameState {
     return next;
   }
   if (next.phase === "night_seer") {
-    next.phase = "night_wolves";
+    next.phase = firstWolfPhase(next);
+    next = appendPhaseChanged(next);
+    return next;
+  }
+  if (next.phase === "night_wolf_discussion") {
+    next.phase = livingPlayers(next).some((player) => player.role === "werewolf") ? "night_wolves" : firstPostWolfPhase(next);
     next = appendPhaseChanged(next);
     return next;
   }
@@ -788,7 +836,17 @@ function endGame(state: GameState, winner: Team, reason: string): GameState {
 
 function firstNightPhase(state: GameState): Phase {
   if (livingPlayers(state).some((player) => player.role === "seer")) return "night_seer";
-  if (livingPlayers(state).some((player) => player.role === "werewolf")) return "night_wolves";
+  return firstWolfPhase(state);
+}
+
+function firstWolfPhase(state: GameState): Phase {
+  if (livingPlayers(state).some((player) => player.role === "werewolf")) {
+    return state.config.wolfDiscussion === "one_turn" ? "night_wolf_discussion" : "night_wolves";
+  }
+  return firstPostWolfPhase(state);
+}
+
+function firstPostWolfPhase(state: GameState): Phase {
   if (livingPlayers(state).some((player) => player.role === "witch")) return "night_witch";
   return "night_resolve";
 }
@@ -809,6 +867,7 @@ function assertPhaseAllows(state: GameState, command: GameCommand): void {
     "system.advance": [
       "role_reveal",
       "night_seer",
+      "night_wolf_discussion",
       "night_wolves",
       "night_witch",
       "night_resolve",
@@ -820,6 +879,7 @@ function assertPhaseAllows(state: GameState, command: GameCommand): void {
       "hunter_shot"
     ],
     "seer.inspect": ["night_seer"],
+    "werewolf.whisper": ["night_wolf_discussion"],
     "werewolf.killVote": ["night_wolves"],
     "witch.act": ["night_witch"],
     "speech.submit": ["day_speech"],

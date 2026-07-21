@@ -48,6 +48,7 @@ export const DEFAULT_CONFIG: GameConfig = {
   roles: ["werewolf", "werewolf", "villager", "villager", "villager", "villager", "seer", "witch", "hunter"],
   sheriff: "off",
   sheriffVoteWeight: 1.5,
+  wolfDiscussion: "off",
   revealOnDeath: true,
   lastWords: "all",
   maxDays: 6,

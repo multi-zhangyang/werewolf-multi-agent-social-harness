@@ -117,6 +117,28 @@ export function planAction(view: PlayerView, action: AgentPendingAction, agent: 
     };
   }
 
+  if (action.kind === "whisper") {
+    const targetId = chooseWolfKillTarget(
+      view,
+      view.publicPlayers.filter((player) => player.alive && !action.teamActorIds.includes(player.id)).map((player) => player.id),
+      agent,
+      parameters
+    );
+    return {
+      policyName: agent.policyName,
+      command: {
+        type: "werewolf.whisper",
+        actorId: action.actorId,
+        text: "",
+        strategyTags: ["狼队密谈", "夜刀预案"]
+      },
+      targetId,
+      intent: targetId ? `向狼队私下建议关注 ${targetId}，同步夜刀与白天伪装预案` : "向狼队私下同步当前夜晚风险与白天伪装预案",
+      confidence: targetId ? confidenceFor(agent, targetId) : 0.56,
+      strategyTags: ["狼队密谈", "夜刀预案"]
+    };
+  }
+
   if (action.kind === "witch") {
     const highWolf = topWolfCandidates(agent.beliefs, action.legalPoisonTargetIds)[0];
     const highWolfProb = highWolf ? agent.beliefs[highWolf]?.wolfProb ?? 0 : 0;
@@ -255,6 +277,16 @@ export function planAction(view: PlayerView, action: AgentPendingAction, agent: 
 
 export function attachSpeech(plan: PolicyPlan, speech: string): PolicyPlan {
   if (plan.command.type === "lastWords.submit") {
+    return {
+      ...plan,
+      command: {
+        ...plan.command,
+        text: speech,
+        strategyTags: plan.strategyTags
+      }
+    };
+  }
+  if (plan.command.type === "werewolf.whisper") {
     return {
       ...plan,
       command: {
