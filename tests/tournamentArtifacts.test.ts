@@ -83,10 +83,28 @@ describe("tournament artifact directory writer", () => {
       metricId: "agent.reward",
       message: "tournament warning propagation test"
     };
+    const testEvaluatorFailure = {
+      evaluatorId: "test.tournament-evaluator-failure",
+      label: "Test tournament evaluator failure",
+      version: "1.0.0",
+      stage: "evaluate" as const,
+      code: "evaluator_exception" as const,
+      message: "Evaluator execution failed; no metrics or output were recorded."
+    };
     if (!result.episodes[0].evaluationReport) throw new Error("Expected evaluation report for warning propagation test.");
     result.episodes[0].evaluationReport.warnings = [testWarning];
-    if (result.episodes[0].artifact) result.episodes[0].artifact.evaluationReport.warnings = [testWarning];
-    if (result.artifacts?.[0]) result.artifacts[0].artifact.evaluationReport.warnings = [testWarning];
+    result.episodes[0].evaluationReport.status = "incomplete";
+    result.episodes[0].evaluationReport.failures = [testEvaluatorFailure];
+    if (result.episodes[0].artifact) {
+      result.episodes[0].artifact.evaluationReport.warnings = [testWarning];
+      result.episodes[0].artifact.evaluationReport.status = "incomplete";
+      result.episodes[0].artifact.evaluationReport.failures = [testEvaluatorFailure];
+    }
+    if (result.artifacts?.[0]) {
+      result.artifacts[0].artifact.evaluationReport.warnings = [testWarning];
+      result.artifacts[0].artifact.evaluationReport.status = "incomplete";
+      result.artifacts[0].artifact.evaluationReport.failures = [testEvaluatorFailure];
+    }
 
     const written = await writeTournamentArtifactDirectory(result, {
       outputDir,
@@ -145,6 +163,12 @@ describe("tournament artifact directory writer", () => {
           })
         ]
       }),
+      evaluationCoverage: {
+        evaluationReportCount: 1,
+        evaluationCompletedEpisodes: 0,
+        evaluationIncompleteEpisodes: 1,
+        evaluatorFailureCount: 1
+      },
       artifactIntegrityOkCount: 1,
       artifactIntegrityErrorCount: 0,
       artifactIntegrityErroredMatchCount: 0,
@@ -192,6 +216,8 @@ describe("tournament artifact directory writer", () => {
     expect(manifest.files.matchesJsonl).toHaveLength(1);
     expect(manifest.files.matchesJsonl[0]).toMatch(/^matches\/.+\.jsonl$/);
     expect(manifest.matches[0]).toMatchObject({
+      evaluationStatus: "incomplete",
+      evaluatorFailureCount: 1,
       evaluationWarningCount: 1,
       evaluationWarningCodes: ["test.warning"],
       integrityOk: true,
@@ -258,6 +284,8 @@ describe("tournament artifact directory writer", () => {
       harnessStatus: "truncated",
       seed: "writer-truncated:g1",
       evaluationWarningCount: 1,
+      evaluationStatus: "incomplete",
+      evaluatorFailureCount: 1,
       evaluationWarningCodes: ["test.warning"],
       warningSummary: expect.objectContaining({
         warningCount: 1,
@@ -284,6 +312,16 @@ describe("tournament artifact directory writer", () => {
     expect(episodes[0].matchJsonl).toMatch(/^matches\/.+\.jsonl$/);
     expect(Array.isArray(episodes[0].agents)).toBe(true);
     expect(episodes[0].agents.length).toBeGreaterThan(0);
+    const evaluatorFailures = await readJsonl<Record<string, any>>(path.join(outputDir, "failures.jsonl"));
+    expect(evaluatorFailures).toEqual([
+      expect.objectContaining({
+        type: "evaluation_failure",
+        status: "truncated",
+        harnessStatus: "truncated",
+        evaluationStatus: "incomplete",
+        evaluatorFailure: testEvaluatorFailure
+      })
+    ]);
     for (const agent of episodes[0].agents) {
       expect(agent).toMatchObject({
         playerId: expect.any(String),

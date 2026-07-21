@@ -2,6 +2,7 @@ import type {
   AgentHarnessState,
   HarnessEvaluatorManifestConfig,
   HarnessEvaluatorManifestEntry,
+  HarnessEvaluatorFailure,
   HarnessEvaluationModuleResult,
   HarnessEvaluationReport,
   HarnessEvaluationWarning,
@@ -66,6 +67,9 @@ interface EvaluationModuleRun {
   manifest: HarnessEvaluatorManifestEntry;
 }
 
+const EVALUATOR_EXECUTION_FAILURE_MESSAGE = "Evaluator execution failed; no metrics or output were recorded.";
+const EVALUATOR_INVALID_RESULT_MESSAGE = "Evaluator returned an invalid module result; no metrics or output were recorded.";
+
 export function runEvaluationRegistry<
   TState,
   TMetrics,
@@ -80,32 +84,54 @@ export function runEvaluationRegistry<
   promotionPolicy?: MetricPromotionPolicy;
 }): HarnessEvaluationReport {
   const promotionPolicy = options.promotionPolicy ?? DEFAULT_METRIC_PROMOTION_POLICY;
-  const moduleResults = options.evaluators.map((evaluator) => {
-    const result = evaluator.evaluate(options.context);
-    const metrics = result.metrics.map((item) =>
-      materializeMetricPromotion(
-        {
-          ...item,
-          evaluatorId: item.evaluatorId ?? result.evaluatorId,
-          evaluatorVersion: item.evaluatorVersion ?? result.version,
-          evidenceRefs: item.evidenceRefs ?? []
-        },
-        promotionPolicy
-      )
-    );
-    return { evaluator, result, metrics };
-  });
+  const moduleResults: Array<{
+    evaluator: HarnessEvaluator<TState, TMetrics, TSocialEpisode, unknown, TAgent, TTrajectory>;
+    result: HarnessEvaluationModuleResult;
+    metrics: HarnessMetricRecord[];
+    manifest: HarnessEvaluatorManifestEntry;
+  }> = [];
+  const evaluatorRegistry: HarnessEvaluatorManifestEntry[] = [];
+  const failures: HarnessEvaluatorFailure[] = [];
+
+  for (const evaluator of options.evaluators) {
+    let result: HarnessEvaluationModuleResult;
+    try {
+      result = evaluator.evaluate(options.context);
+    } catch {
+      failures.push(evaluatorFailure(evaluator, "evaluate"));
+      evaluatorRegistry.push(evaluatorManifestEntry(evaluator, evaluatorFallbackModuleResult(evaluator), []));
+      continue;
+    }
+
+    try {
+      assertEvaluationModuleResult(result);
+      const metrics = result.metrics.map((item) => {
+        if (!isPlainRecord(item)) throw new Error("invalid evaluator metric");
+        return materializeMetricPromotion(
+          {
+            ...item,
+            evaluatorId: item.evaluatorId ?? result.evaluatorId,
+            evaluatorVersion: item.evaluatorVersion ?? result.version,
+            evidenceRefs: item.evidenceRefs ?? []
+          },
+          promotionPolicy
+        );
+      });
+      const manifest = evaluatorManifestEntry(evaluator, result, metrics);
+      evaluatorRegistry.push(manifest);
+      moduleResults.push({ evaluator, result, metrics, manifest });
+    } catch {
+      failures.push(evaluatorFailure(evaluator, "result_normalization"));
+      evaluatorRegistry.push(evaluatorManifestEntry(evaluator, evaluatorFallbackModuleResult(evaluator), []));
+    }
+  }
   const metrics = moduleResults.flatMap((moduleResult) => moduleResult.metrics);
-  const evaluatorRegistry = moduleResults.map(({ evaluator, result, metrics: moduleMetrics }) =>
-    evaluatorManifestEntry(evaluator, result, moduleMetrics)
-  );
-  const moduleRuns: EvaluationModuleRun[] = moduleResults.map((moduleResult, index) => ({
-    ...moduleResult,
-    manifest: evaluatorRegistry[index]
-  }));
+  const moduleRuns: EvaluationModuleRun[] = moduleResults;
   return {
     id: options.id,
     createdAt: options.createdAt ?? new Date().toISOString(),
+    status: failures.length ? "incomplete" : "completed",
+    failures,
     evaluatorIds: moduleResults.map(({ result }) => result.evaluatorId),
     evaluatorRegistry,
     metricCount: metrics.length,
@@ -114,6 +140,38 @@ export function runEvaluationRegistry<
     warnings: collectEvaluationWarnings(moduleRuns, promotionPolicy),
     summary: summarizeMetrics(metrics, promotionPolicy)
   };
+}
+
+function evaluatorFallbackModuleResult(evaluator: EvaluatorManifestSource): HarnessEvaluationModuleResult {
+  return {
+    evaluatorId: evaluator.id,
+    label: evaluator.label,
+    version: evaluator.version,
+    metrics: []
+  };
+}
+
+function evaluatorFailure(evaluator: EvaluatorManifestSource, stage: HarnessEvaluatorFailure["stage"]): HarnessEvaluatorFailure {
+  return {
+    evaluatorId: evaluator.id,
+    label: evaluator.label,
+    version: evaluator.version,
+    stage,
+    code: stage === "evaluate" ? "evaluator_exception" : "invalid_module_result",
+    message: stage === "evaluate" ? EVALUATOR_EXECUTION_FAILURE_MESSAGE : EVALUATOR_INVALID_RESULT_MESSAGE
+  };
+}
+
+function assertEvaluationModuleResult(value: unknown): asserts value is HarnessEvaluationModuleResult {
+  if (!isPlainRecord(value)) throw new Error("invalid evaluator module result");
+  if (!isNonEmptyString(value.evaluatorId) || !isNonEmptyString(value.label) || !isNonEmptyString(value.version)) {
+    throw new Error("invalid evaluator module identity");
+  }
+  if (!Array.isArray(value.metrics)) throw new Error("invalid evaluator metrics");
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function evaluatorManifestEntry(

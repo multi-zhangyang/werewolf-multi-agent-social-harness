@@ -71,6 +71,21 @@ function primaryMetricPromotionSummary(result: TournamentResult): MetricPromotio
   return report ? normalizeMetricPromotionSummary(report.summary.promotion) : undefined;
 }
 
+function evaluationCoverageForEpisodes(episodes: readonly TournamentEpisode[]): {
+  evaluationReportCount: number;
+  evaluationCompletedEpisodes: number;
+  evaluationIncompleteEpisodes: number;
+  evaluatorFailureCount: number;
+} {
+  const reports = episodes.flatMap((episode) => (episode.evaluationReport ? [episode.evaluationReport] : []));
+  return {
+    evaluationReportCount: reports.length,
+    evaluationCompletedEpisodes: reports.filter((report) => (report.status ?? "completed") === "completed").length,
+    evaluationIncompleteEpisodes: reports.filter((report) => (report.status ?? "completed") === "incomplete").length,
+    evaluatorFailureCount: reports.reduce((sum, report) => sum + (report.failures?.length ?? 0), 0)
+  };
+}
+
 function metricPromotionCatalogDescriptor(summary: MetricPromotionSummary): {
   catalogId: string;
   catalogVersion: string;
@@ -1432,6 +1447,7 @@ function buildManifest(
     { nativeSteps: 0, committedSteps: 0, rejectedSteps: 0 }
   );
   const promotionSummary = summarizeTournamentMetricPromotions(result);
+  const evaluationCoverage = evaluationCoverageForEpisodes(result.episodes);
   return {
     artifactVersion: TOURNAMENT_ARTIFACT_VERSION,
     kind: "tournament",
@@ -1461,6 +1477,7 @@ function buildManifest(
     evaluationWarningSeverityCounts: warningSummary.warningSeverityCounts,
     evaluationWarningCodes: warningSummary.warningCodes.map((warning) => warning.code),
     evaluationWarningSummary: warningSummary,
+    evaluationCoverage,
     artifactIntegrityOkCount: integrityRecords.filter((record) => record.ok).length,
     artifactIntegrityErrorCount: integrityErrorCount,
     artifactIntegrityErroredMatchCount: integrityRecords.filter((record) => !record.ok).length,
@@ -1508,6 +1525,8 @@ function buildManifest(
         runId: record.runId,
         matchId: record.matchId ?? null,
         status: record.artifact.status,
+        evaluationStatus: record.artifact.evaluationReport.status ?? "completed",
+        evaluatorFailureCount: record.artifact.evaluationReport.failures?.length ?? 0,
         evaluationWarningCount: matchWarningSummary.warningCount,
         evaluationWarningCodes: matchWarningSummary.warningCodes.map((warning) => warning.code),
         integrityOk: integrity?.ok ?? false,
@@ -1652,6 +1671,7 @@ function buildRegistrySnapshot(result: TournamentResult, createdAt: string): obj
   const registryById = new Map(registryEntries.map((entry) => [`${entry.id}@${entry.version}`, entry]));
   const promotionSummary = summarizeTournamentMetricPromotions(result);
   const promotionMetadata = metricPromotionExportMetadata(result);
+  const evaluationCoverage = evaluationCoverageForEpisodes(result.episodes);
   return {
     artifactVersion: TOURNAMENT_ARTIFACT_VERSION,
     kind: "evaluator-registry-snapshot",
@@ -1663,6 +1683,7 @@ function buildRegistrySnapshot(result: TournamentResult, createdAt: string): obj
     scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
     metricPromotionClassCounts: promotionSummary.byClass,
     scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
+    evaluationCoverage,
     reports: reports.map(({ episode, report }) => ({
       episodeIndex: episode.index,
       seed: episode.seed,
@@ -1670,6 +1691,8 @@ function buildRegistrySnapshot(result: TournamentResult, createdAt: string): obj
       runId: episode.runId ?? null,
       reportId: report.id,
       createdAt: report.createdAt,
+      status: report.status ?? "completed",
+      evaluatorFailureCount: report.failures?.length ?? 0,
       evaluatorIds: report.evaluatorIds,
       evaluatorRegistry: report.evaluatorRegistry ?? [],
       metricCount: report.metricCount,
@@ -1760,6 +1783,12 @@ function episodeRecord(
     scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
     metricPromotionClassCounts: promotionSummary.byClass,
     scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
+    ...(redactTruth
+      ? {}
+      : {
+          evaluationStatus: episode.evaluationReport?.status ?? "completed",
+          evaluatorFailureCount: episode.evaluationReport?.failures?.length ?? 0
+        }),
     evaluationWarningCount: summarizeEvaluationWarnings(episode.evaluationReport?.warnings).warningCount,
     evaluationWarningCodes: summarizeEvaluationWarnings(episode.evaluationReport?.warnings).warningCodes.map((warning) => warning.code),
     warningSummary: summarizeEvaluationWarnings(episode.evaluationReport?.warnings),
@@ -1920,7 +1949,7 @@ function aggregateFailureRecords(
   redactTruth = false
 ): object[] {
   const artifactsByIndex = new Map(artifactRecords.map((record) => [record.index, record.artifact]));
-  return result.episodes
+  const executionFailures = result.episodes
     .filter((episode) => episode.status === "failed" || episode.harnessStatus === "failed")
     .map((episode) => {
       const artifact = artifactsByIndex.get(episode.index);
@@ -1969,6 +1998,32 @@ function aggregateFailureRecords(
         partialArtifact: relativeMatchPaths.get(episode.index) ?? null
       };
     });
+  if (redactTruth) return executionFailures;
+
+  const evaluatorFailures = result.episodes.flatMap((episode) => {
+    const artifact = artifactsByIndex.get(episode.index);
+    const report = episode.evaluationReport ?? artifact?.evaluationReport;
+    if (!report?.failures?.length) return [];
+    const stepCounts = countSocialStepCommits(episode.socialEpisode?.steps ?? artifact?.socialEpisode.steps ?? []);
+    return report.failures.map((failure) => ({
+      type: "evaluation_failure",
+      episodeIndex: episode.index,
+      tournamentEpisodeIndex: episode.index,
+      tournamentSeed: result.seed,
+      episodeSeed: episode.seed,
+      runId: episode.runId ?? artifact?.runId ?? null,
+      matchId: episode.matchId ?? artifact?.matchId ?? null,
+      status: episode.status,
+      harnessStatus: episode.harnessStatus ?? artifact?.status ?? null,
+      evaluationStatus: report.status ?? "completed",
+      evaluatorFailure: failure,
+      nativeSteps: stepCounts.nativeSteps,
+      committedSteps: stepCounts.committedSteps,
+      rejectedSteps: stepCounts.rejectedSteps,
+      partialArtifact: relativeMatchPaths.get(episode.index) ?? null
+    }));
+  });
+  return [...executionFailures, ...evaluatorFailures];
 }
 
 function failureAttributionsForEpisode(
@@ -2276,6 +2331,7 @@ function buildLeaderboard(
       )
     : result.profileStats;
   const promotionSummary = summarizeTournamentMetricPromotions(result);
+  const evaluationCoverage = evaluationCoverageForEpisodes(result.episodes);
   return {
     artifactVersion: TOURNAMENT_ARTIFACT_VERSION,
     kind: "tournament-leaderboard",
@@ -2295,6 +2351,7 @@ function buildLeaderboard(
     scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
     metricPromotionClassCounts: promotionSummary.byClass,
     scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
+    evaluationCoverage,
     benchmarkStatistics,
     episodes: result.episodes.map((episode) => {
       const artifact = artifactsByIndex.get(episode.index);
@@ -2370,6 +2427,7 @@ function buildBenchmarkStatistics(
   }
   const promotionSummary = summarizeTournamentMetricPromotions(result);
   const promotionMetadata = metricPromotionExportMetadata(result);
+  const evaluationCoverage = evaluationCoverageForEpisodes(result.episodes);
 
   return {
     artifactVersion: TOURNAMENT_ARTIFACT_VERSION,
@@ -2403,6 +2461,7 @@ function buildBenchmarkStatistics(
     scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
     metricPromotionClassCounts: promotionSummary.byClass,
     scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
+    evaluationCoverage,
     statusDenominators: {
       gamesRequested: result.gamesRequested,
       episodesScheduled: scheduledEpisodes,
@@ -2414,6 +2473,9 @@ function buildBenchmarkStatistics(
       matchArtifactCount: artifactCount,
       completedWithEvaluation: result.episodes.filter((episode) => episode.status === "completed" && Boolean(episode.evaluation)).length,
       completedWithEvaluationReport: result.episodes.filter((episode) => episode.status === "completed" && Boolean(episode.evaluationReport)).length,
+      evaluationCompletedEpisodes: evaluationCoverage.evaluationCompletedEpisodes,
+      evaluationIncompleteEpisodes: evaluationCoverage.evaluationIncompleteEpisodes,
+      evaluatorFailureCount: evaluationCoverage.evaluatorFailureCount,
       truncatedWithArtifact: result.episodes.filter((episode) => episode.status === "truncated" && artifactsByIndex.has(episode.index)).length,
       truncatedWithEvaluation: result.episodes.filter((episode) => episode.status === "truncated" && Boolean(episode.evaluation)).length,
       truncatedWithEvaluationReport: result.episodes.filter((episode) => episode.status === "truncated" && Boolean(episode.evaluationReport)).length,
@@ -2441,6 +2503,8 @@ function buildBenchmarkStatistics(
         hasArtifact: Boolean(artifact),
         hasEvaluation: Boolean(episode.evaluation),
         hasEvaluationReport: Boolean(episode.evaluationReport),
+        evaluationStatus: episode.evaluationReport ? episode.evaluationReport.status ?? "completed" : null,
+        evaluatorFailureCount: episode.evaluationReport?.failures?.length ?? 0,
         nativeSteps: stepCounts.nativeSteps,
         committedSteps: stepCounts.committedSteps,
         rejectedSteps: stepCounts.rejectedSteps

@@ -103,7 +103,7 @@ export type TrajectoryJsonlStepSource = Omit<
 export type TrajectoryJsonlEvaluationReportSource = Partial<
   Pick<
     HarnessEvaluationReport,
-    "id" | "createdAt" | "evaluatorIds" | "evaluatorRegistry" | "metricCount" | "warnings" | "summary" | "metrics"
+    "id" | "createdAt" | "status" | "failures" | "evaluatorIds" | "evaluatorRegistry" | "metricCount" | "warnings" | "summary" | "metrics"
   >
 >;
 
@@ -348,6 +348,7 @@ function findAgentSnapshotFrame(artifact: MatchArtifact, step: HarnessStepRecord
 export function toTrajectoryJsonl(artifact: TrajectoryJsonlSource): string {
   const evaluationReport = artifact.evaluationReport;
   const evaluationWarnings = evaluationReport?.warnings ?? [];
+  const evaluationFailures = evaluationReport?.failures ?? [];
   const evaluationMetrics = evaluationReport?.metrics ?? [];
   const hasExportIdentity = artifact.runId !== undefined || artifact.matchId !== undefined || artifact.seed !== undefined;
   const lines: unknown[] = [
@@ -382,9 +383,12 @@ export function toTrajectoryJsonl(artifact: TrajectoryJsonlSource): string {
       matchId: artifact.matchId,
       id: evaluationReport?.id ?? null,
       createdAt: evaluationReport?.createdAt ?? null,
+      status: evaluationReport?.status ?? "completed",
       evaluatorIds: evaluationReport?.evaluatorIds ?? [],
       evaluatorRegistry: evaluationReport?.evaluatorRegistry ?? [],
       metricCount: evaluationReport?.metricCount ?? null,
+      failureCount: evaluationFailures.length,
+      failures: evaluationFailures,
       warnings: evaluationWarnings,
       warningSummary: summarizeEvaluationWarnings(evaluationWarnings),
       summary: evaluationReport?.summary ?? null
@@ -761,9 +765,50 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
       `evaluationReport.metricCount mismatch: expected ${artifact.evaluationReport.metrics.length}, received ${artifact.evaluationReport.metricCount}.`
     );
   }
+  validateEvaluationFailureIntegrity(artifact.evaluationReport, errors);
   validateEvaluationPromotionIntegrity(artifact.evaluationReport, errors);
 
   return errors;
+}
+
+function validateEvaluationFailureIntegrity(report: HarnessEvaluationReport, errors: string[]): void {
+  const status = report.status ?? "completed";
+  const failures = report.failures ?? [];
+  if (status !== "completed" && status !== "incomplete") {
+    errors.push(`evaluationReport.status must be completed or incomplete.`);
+  }
+  if (!Array.isArray(failures)) {
+    errors.push("evaluationReport.failures must be an array when present.");
+    return;
+  }
+  if ((status === "completed") !== (failures.length === 0)) {
+    errors.push("evaluationReport.status must be completed exactly when failures is empty.");
+  }
+  for (const [index, failure] of failures.entries()) {
+    const label = `evaluationReport.failures[${index}]`;
+    if (!isRecord(failure)) {
+      errors.push(`${label} must be an object.`);
+      continue;
+    }
+    for (const key of Object.keys(failure)) {
+      if (!["evaluatorId", "label", "version", "stage", "code", "message"].includes(key)) {
+        errors.push(`${label}.${key} is not permitted.`);
+      }
+    }
+    if (typeof failure.evaluatorId !== "string" || !failure.evaluatorId) errors.push(`${label}.evaluatorId must be a non-empty string.`);
+    if (typeof failure.label !== "string" || !failure.label) errors.push(`${label}.label must be a non-empty string.`);
+    if (typeof failure.version !== "string" || !failure.version) errors.push(`${label}.version must be a non-empty string.`);
+    if (failure.stage !== "evaluate" && failure.stage !== "result_normalization") {
+      errors.push(`${label}.stage must be evaluate or result_normalization.`);
+    }
+    const expectedCode = failure.stage === "evaluate" ? "evaluator_exception" : "invalid_module_result";
+    const expectedMessage =
+      failure.stage === "evaluate"
+        ? "Evaluator execution failed; no metrics or output were recorded."
+        : "Evaluator returned an invalid module result; no metrics or output were recorded.";
+    if (failure.code !== expectedCode) errors.push(`${label}.code does not match its stage.`);
+    if (failure.message !== expectedMessage) errors.push(`${label}.message must use the controlled message for its stage.`);
+  }
 }
 
 /**

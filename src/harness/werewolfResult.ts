@@ -4,9 +4,9 @@ import {
   createDeceptionBeliefShiftEvaluator,
   createDeceptionReputationAssociationEvaluator,
   createWerewolfEvaluationSuite,
-  WEREWOLF_ADVERSARIAL_EVALUATOR_ID
+  evaluateAdversarialMatch
 } from "./evaluator";
-import { runEvaluationRegistry } from "./evaluation";
+import { runEvaluationRegistry, type HarnessEvaluator } from "./evaluation";
 import { WEREWOLF_METRIC_PROMOTION_POLICY } from "./werewolfMetricPromotion";
 import { hashStableState } from "./hash";
 import { harnessFailureEvidenceFromEpisode } from "./executionEvidence";
@@ -26,7 +26,6 @@ import {
   createTrustRepairReputationTemporalAssociationEvaluator
 } from "./socialEvaluator";
 import type {
-  AdversarialEvaluation,
   AgentHarnessState,
   HarnessForkProvenance,
   HarnessPlayerView,
@@ -39,6 +38,15 @@ import type {
 
 export type WerewolfResultSocialStep = SocialHarnessStep<HarnessPlayerView, AgentPendingAction, GameCommand>;
 
+export type WerewolfResultEvaluator = HarnessEvaluator<
+  GameState,
+  MatchMetrics,
+  SocialEpisodeArtifact<GameState, WerewolfHarnessObservation, import("../core/types").PendingAction, GameCommand>,
+  unknown,
+  AgentHarnessState,
+  HarnessStepRecord
+>;
+
 export interface BuildWerewolfHarnessRunResultOptions {
   status: HarnessRunStatus;
   truncationReason?: string;
@@ -49,6 +57,11 @@ export interface BuildWerewolfHarnessRunResultOptions {
   trajectory: HarnessStepRecord[];
   socialEpisode: SocialEpisodeArtifact<GameState, WerewolfHarnessObservation, import("../core/types").PendingAction, GameCommand>;
   forkOf?: HarnessForkProvenance;
+  /**
+   * Experimental/test-only evaluator extension. These remain advisory
+   * postgame modules; they never affect environment authority or replay.
+   */
+  additionalEvaluators?: readonly WerewolfResultEvaluator[];
 }
 
 export function buildWerewolfHarnessRunResultFromParts(options: BuildWerewolfHarnessRunResultOptions): HarnessRunResult {
@@ -89,11 +102,15 @@ export function buildWerewolfHarnessRunResultFromParts(options: BuildWerewolfHar
       createDeceptionBeliefShiftEvaluator(),
       createDeceptionReputationAssociationEvaluator(),
       createSocialFactIngestEvidenceEvaluator(),
-      createSocialDynamicsEvaluator()
+      createSocialDynamicsEvaluator(),
+      ...(options.additionalEvaluators ?? [])
     ],
     promotionPolicy: WEREWOLF_METRIC_PROMOTION_POLICY
   });
-  const evaluation = evaluationReport.outputs[WEREWOLF_ADVERSARIAL_EVALUATOR_ID] as AdversarialEvaluation;
+  // Compatibility result evaluation is a pure domain reduction, not a
+  // registry output. A failed optional/experimental evaluator must not make a
+  // completed environment trajectory disappear or fabricate a zero result.
+  const evaluation = evaluateAdversarialMatch(state, agentStates, socialEpisode);
   return {
     status: options.status,
     truncationReason: options.truncationReason,

@@ -25303,3 +25303,74 @@ git diff --check
 The full deterministic suite completed with 39 test files and 419 tests
 passing. The production build retains the existing large-JavaScript-chunk
 warning as a separate performance follow-up.
+
+## 13.256 Evaluator Failure Isolation And Live Grok Validation Lock
+
+Timestamp: `2026-07-21`
+
+Evaluation coverage is an artifact-plane fact, independent of the environment
+lifecycle. A `completed`, `truncated`, or `failed` social episode is not
+discarded solely because a postgame evaluator throws or returns an invalid
+result.
+
+- `HarnessEvaluationReport.status` is `completed | incomplete`. Its optional
+  `status` / `failures` pair is legacy-compatible: absent means completed with
+  no failures; every newly created registry report contains both fields.
+- A `HarnessEvaluatorFailure` keeps only static evaluator identity, the
+  `evaluate | result_normalization` stage, a fixed code, and a fixed message.
+  It never serializes an error message, stack, cause, prompt, provider body,
+  or arbitrary thrown value.
+- `runEvaluationRegistry()` isolates module execution and normalization in
+  registration order. Later evaluators still run; successful metrics and
+  outputs remain; failed modules receive neither fabricated metrics nor zeros.
+  `evaluatorIds` and outputs list successes only, while the manifest registry
+  retains each attempted static evaluator manifest in registration order.
+- `HarnessRunResult.status` and `MatchArtifact.status` remain environment
+  lifecycle. `evaluationReport.status` alone states evaluator coverage.
+- Werewolf's compatibility `result.evaluation` is computed by the pure,
+  recorded-state `evaluateAdversarialMatch(...)` reducer, not read from the
+  registry output. An experimental evaluator failure cannot erase a replayable
+  trajectory, retry a provider, or fabricate an evaluation.
+- JSONL records evaluation status/failure count/controlled failure rows.
+  Artifact integrity requires `completed` exactly when failures are empty and
+  rejects unknown fields and stage/code/message mismatches. Replay still uses
+  recorded commands only and never reruns evaluators.
+- Research tournament packs record aggregate coverage and a distinct
+  `evaluation_failure` in `failures.jsonl`, rather than a social/provider-step
+  failure. Lifecycle denominators remain based on environment status; truth-
+  redacted exports omit evaluator failure details. Server and research CLI
+  summaries expose only coverage counts/status, not raw error details.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/evaluation.test.ts tests/artifacts.test.ts \
+  tests/werewolfResult.test.ts tests/tournamentArtifacts.test.ts \
+  tests/serverTournamentArtifactsApi.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --reporter=dot
+npm run build
+npm run test:e2e
+git diff --check
+```
+
+The full deterministic suite completed with 40 test files and 422 tests
+passing; the browser suite completed 6/6. The existing production bundle-size
+warning remains a separate performance follow-up.
+
+Real provider validation used the existing generic OpenAI-compatible streaming
+path with `grok-4.5`, without a provider-specific adapter, parser, prompt,
+fallback, or max-token field:
+
+```bash
+npm run arena:match -- --models=grok-4.5 --maxTransitions=4 --timeout=120s --json=summary
+npm run arena:tournament -- --models=grok-4.5 --games=1 --maxTransitions=4 --timeout=180s --json=summary
+```
+
+Both runs completed inside bounds as intentional four-transition truncations,
+not execution failures. Every model-backed match decision completed through a
+provider stop event, passed local policy/arbitration and environment commit,
+and produced no rejected native step or harness error. The one-game tournament
+preserved that lifecycle distinction with zero failed episodes. This lock
+contains no endpoint, credential, request id, prompt, or private artifact.

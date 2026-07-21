@@ -226,6 +226,131 @@ describe("generic evaluation registry", () => {
     expect(report.summary.agentScores.a1).toBe(0.65);
   });
 
+  it("isolates evaluator exceptions, preserves successful modules, and never persists raw exception text", () => {
+    const executionOrder: string[] = [];
+    const healthy = (id: string): HarnessEvaluator<{ ok: boolean }> => ({
+      id,
+      label: `${id} evaluator`,
+      version: "1.0.0",
+      evaluate() {
+        executionOrder.push(id);
+        return {
+          evaluatorId: id,
+          label: `${id} evaluator`,
+          version: "1.0.0",
+          metrics: [
+            metric({
+              id: `${id}.metric`,
+              label: `${id} metric`,
+              scope: "episode",
+              value: 1,
+              source: id,
+              evidenceRefs: [{ artifact: "state", description: id }]
+            })
+          ],
+          output: { id }
+        };
+      }
+    });
+    const failed: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.intentional-throw",
+      label: "Intentional throwing evaluator",
+      version: "1.0.0",
+      evaluate() {
+        executionOrder.push("generic.intentional-throw");
+        throw new Error("raw evaluator exception must never reach the artifact");
+      }
+    };
+
+    const report = runEvaluationRegistry({
+      id: "isolated-evaluator-exception",
+      createdAt: new Date(0).toISOString(),
+      context: genericContext("isolated-evaluator-exception"),
+      evaluators: [healthy("generic.before"), failed, healthy("generic.after")]
+    });
+
+    expect(executionOrder).toEqual(["generic.before", "generic.intentional-throw", "generic.after"]);
+    expect(report.status).toBe("incomplete");
+    expect(report.failures).toEqual([
+      {
+        evaluatorId: "generic.intentional-throw",
+        label: "Intentional throwing evaluator",
+        version: "1.0.0",
+        stage: "evaluate",
+        code: "evaluator_exception",
+        message: "Evaluator execution failed; no metrics or output were recorded."
+      }
+    ]);
+    expect(report.evaluatorIds).toEqual(["generic.before", "generic.after"]);
+    expect(report.evaluatorRegistry?.map((entry) => entry.id)).toEqual([
+      "generic.before",
+      "generic.intentional-throw",
+      "generic.after"
+    ]);
+    expect(report.metrics.map((item) => item.id)).toEqual(["generic.before.metric", "generic.after.metric"]);
+    expect(report.outputs).toEqual({
+      "generic.before": { id: "generic.before" },
+      "generic.after": { id: "generic.after" }
+    });
+    expect(JSON.stringify(report)).not.toContain("raw evaluator exception");
+  });
+
+  it("isolates malformed module results during normalization and continues in registration order", () => {
+    const executionOrder: string[] = [];
+    const malformed: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.malformed-result",
+      label: "Malformed result evaluator",
+      version: "1.0.0",
+      evaluate() {
+        executionOrder.push("generic.malformed-result");
+        return {
+          evaluatorId: "generic.malformed-result",
+          label: "Malformed result evaluator",
+          version: "1.0.0",
+          metrics: null
+        } as unknown as ReturnType<HarnessEvaluator<{ ok: boolean }>["evaluate"]>;
+      }
+    };
+    const healthy: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.after-malformed",
+      label: "After malformed evaluator",
+      version: "1.0.0",
+      evaluate() {
+        executionOrder.push("generic.after-malformed");
+        return {
+          evaluatorId: "generic.after-malformed",
+          label: "After malformed evaluator",
+          version: "1.0.0",
+          metrics: [],
+          output: { continued: true }
+        };
+      }
+    };
+
+    const report = runEvaluationRegistry({
+      id: "isolated-malformed-evaluator-result",
+      createdAt: new Date(0).toISOString(),
+      context: genericContext("isolated-malformed-evaluator-result"),
+      evaluators: [malformed, healthy]
+    });
+
+    expect(executionOrder).toEqual(["generic.malformed-result", "generic.after-malformed"]);
+    expect(report.status).toBe("incomplete");
+    expect(report.failures).toEqual([
+      {
+        evaluatorId: "generic.malformed-result",
+        label: "Malformed result evaluator",
+        version: "1.0.0",
+        stage: "result_normalization",
+        code: "invalid_module_result",
+        message: "Evaluator returned an invalid module result; no metrics or output were recorded."
+      }
+    ]);
+    expect(report.evaluatorIds).toEqual(["generic.after-malformed"]);
+    expect(report.outputs).toEqual({ "generic.after-malformed": { continued: true } });
+    expect(JSON.stringify(report)).not.toContain("TypeError");
+  });
+
   it("applies evaluation.metric-promotion.v1 so zero-weight and unevidenced weights stay off scorecards", () => {
     const evaluator: HarnessEvaluator<{ ok: boolean }> = {
       id: "generic.promotion-policy",

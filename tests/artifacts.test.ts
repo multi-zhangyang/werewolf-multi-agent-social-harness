@@ -435,6 +435,17 @@ describe("match artifact JSONL export", () => {
       message: "artifact warning propagation test"
     };
     artifact.evaluationReport.warnings = [testWarning];
+    artifact.evaluationReport.status = "incomplete";
+    artifact.evaluationReport.failures = [
+      {
+        evaluatorId: "test.evaluator-failure",
+        label: "Test evaluator failure",
+        version: "1.0.0",
+        stage: "evaluate",
+        code: "evaluator_exception",
+        message: "Evaluator execution failed; no metrics or output were recorded."
+      }
+    ];
 
     const jsonl = toTrajectoryJsonl(artifact);
     const records = parseJsonl(jsonl);
@@ -482,6 +493,9 @@ describe("match artifact JSONL export", () => {
     expect(evaluationReport).toMatchObject({
       runId: artifact.runId,
       id: artifact.evaluationReport.id,
+      status: "incomplete",
+      failureCount: 1,
+      failures: artifact.evaluationReport.failures,
       evaluatorIds: artifact.evaluationReport.evaluatorIds,
       warnings: [expect.objectContaining({ code: "test.warning", severity: "warning", evaluatorId: WEREWOLF_ADVERSARIAL_EVALUATOR_ID })],
       warningSummary: expect.objectContaining({

@@ -492,9 +492,31 @@ export interface HarnessEvaluationWarning {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * A controlled evaluator-module failure. This is deliberately not an Error
+ * serialization: evaluator/provider exception text and stacks may contain
+ * prompts, private inputs, or implementation details and must not enter a
+ * replayable artifact.
+ */
+export interface HarnessEvaluatorFailure {
+  evaluatorId: string;
+  label: string;
+  version: string;
+  stage: "evaluate" | "result_normalization";
+  code: "evaluator_exception" | "invalid_module_result";
+  message: string;
+}
+
 export interface HarnessEvaluationReport {
   id: string;
   createdAt: string;
+  /**
+   * Evaluator coverage is independent of the environment lifecycle. Absent
+   * values are interpreted as a completed legacy report with no failures.
+   * Newly generated reports always materialize both fields.
+   */
+  status?: "completed" | "incomplete";
+  failures?: HarnessEvaluatorFailure[];
   evaluatorIds: string[];
   evaluatorRegistry?: HarnessEvaluatorManifestEntry[];
   metricCount: number;
