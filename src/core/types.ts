@@ -5,6 +5,7 @@ export type Role = "villager" | "werewolf" | "seer" | "witch" | "hunter";
 export type Phase =
   | "role_reveal"
   | "night_seer"
+  | "night_wolf_discussion"
   | "night_wolves"
   | "night_witch"
   | "night_resolve"
@@ -32,6 +33,8 @@ export interface GameConfig {
   roles: Role[];
   sheriff: "off" | "day1";
   sheriffVoteWeight: number;
+  /** One scoped wolf-team message per living wolf before every kill-vote batch. */
+  wolfDiscussion: "off" | "one_turn";
   revealOnDeath: boolean;
   lastWords: "none" | "firstNightOnly" | "all";
   maxDays: number;
@@ -102,6 +105,14 @@ export interface SpeechRecord {
   strategyTags: string[];
 }
 
+/** Private wolf-team coordination is an environment record, not an LLM transcript. */
+export interface WolfWhisperRecord {
+  day: number;
+  playerId: string;
+  text: string;
+  strategyTags: string[];
+}
+
 export interface VoteRecord {
   day: number;
   voterId: string;
@@ -153,6 +164,7 @@ export interface GameEvent {
     | "phase.changed"
     | "seer.inspected"
     | "werewolves.voted"
+    | "werewolves.whispered"
     | "witch.acted"
     | "night.resolved"
     | "speech.submitted"
@@ -179,6 +191,7 @@ export interface GameState {
   players: PlayerState[];
   night: NightState;
   speeches: SpeechRecord[];
+  wolfWhispers: WolfWhisperRecord[];
   votes: VoteRecord[];
   deaths: DeathRecord[];
   events: GameEvent[];
@@ -197,7 +210,7 @@ export interface GameState {
 export type PublicGameState = Omit<
   GameState,
   "id" | "seed" | "players" | "night" | "deaths" | "events" | "pendingHunterId" | "hunterResume"
-  | "lastWordsQueue" | "lastWordsResume"
+  | "lastWordsQueue" | "lastWordsResume" | "wolfWhispers"
 > & {
   players: PublicPlayer[];
   deaths: Array<Omit<DeathRecord, "sourceId">>;
@@ -216,6 +229,13 @@ export type WerewolfKillVoteCommand = {
   type: "werewolf.killVote";
   actorId: string;
   targetId: string;
+};
+
+export type WerewolfWhisperCommand = {
+  type: "werewolf.whisper";
+  actorId: string;
+  text: string;
+  strategyTags?: string[];
 };
 
 export type WitchActCommand = {
@@ -268,6 +288,7 @@ export type SystemAdvanceCommand = {
 
 export type GameCommand =
   | SeerInspectCommand
+  | WerewolfWhisperCommand
   | WerewolfKillVoteCommand
   | WitchActCommand
   | SubmitSpeechCommand
@@ -289,6 +310,12 @@ export type PendingAction =
       phase: "night_wolves";
       actorId: string;
       legalTargetIds: string[];
+      teamActorIds: string[];
+    }
+  | {
+      kind: "whisper";
+      phase: "night_wolf_discussion";
+      actorId: string;
       teamActorIds: string[];
     }
   | {

@@ -197,6 +197,33 @@ describe("game-core state machine", () => {
     expect(state.events.some((event) => event.type === "last_words.submitted")).toBe(true);
   });
 
+  it("offers an explicit scoped wolf discussion before the joint night kill votes", () => {
+    let state = createGame({
+      id: "test-wolf-discussion",
+      seed: "wolf-discussion",
+      config: { wolfDiscussion: "one_turn", lastWords: "none" }
+    });
+    state = advanceSystem(state);
+    const inspect = pendingByKind(state, "inspect")[0];
+    state = applyCommand(state, { type: "seer.inspect", actorId: inspect.actorId, targetId: inspect.legalTargetIds[0] });
+
+    expect(state.phase).toBe("night_wolf_discussion");
+    const whispers = pendingByKind(state, "whisper");
+    expect(whispers.length).toBeGreaterThan(0);
+    for (const whisper of whispers) {
+      state = applyCommand(state, {
+        type: "werewolf.whisper",
+        actorId: whisper.actorId,
+        text: `建议优先处理高影响目标，并同步白天的切割和站边策略。`
+      });
+    }
+
+    expect(state.phase).toBe("night_wolves");
+    expect(state.wolfWhispers).toHaveLength(whispers.length);
+    expect(state.events.filter((event) => event.type === "werewolves.whispered")).toHaveLength(whispers.length);
+    expect(serializePublicState(state)).not.toHaveProperty("wolfWhispers");
+  });
+
   it("keeps core witch validation and role cardinality aligned with the harness boundary", () => {
     let state = createGame({ id: "test-core-witch-validation", seed: "core-witch-validation" });
     state = advanceSystem(state);

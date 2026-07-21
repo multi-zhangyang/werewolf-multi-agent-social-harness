@@ -39,16 +39,20 @@ export class OpenAIHarnessReasoner implements HarnessReasoner {
 }
 
 function buildHarnessMessages(input: ReasonerInput): ChatMessage[] {
-  const speechMode = input.action.kind === "speech" || input.action.kind === "last_words";
+  const speechMode = input.action.kind === "speech" || input.action.kind === "last_words" || input.action.kind === "whisper";
   return [
     {
       role: "system",
       content: speechMode
         ? [
             "你是狼人杀 Agent 的语言生成器，不是动作控制器。",
-            "Harness 已经完成观测、信念更新、策略选择和动作仲裁；你只负责生成该 Agent 的公开发言。",
+            input.action.kind === "whisper"
+              ? "Harness 已经完成观测、信念更新、策略选择和动作仲裁；你只负责生成给狼人同伴的私密协调消息。"
+              : "Harness 已经完成观测、信念更新、策略选择和动作仲裁；你只负责生成该 Agent 的公开发言。",
             "不要输出 JSON、Markdown、字段表或私密思维链。",
-            input.action.kind === "last_words"
+            input.action.kind === "whisper"
+              ? "整条回复只是一条给狼队同伴的私密消息，60 到 180 个汉字；可以提出目标、风险和白天协作，但不要假装已经执行行动。"
+              : input.action.kind === "last_words"
               ? "这是被淘汰玩家仅一次的遗言。整条回复必须就是可公开说出的遗言，80 到 220 个汉字。"
               : "整条回复必须就是玩家可公开说出的话，80 到 220 个汉字。"
           ].join("\n")
@@ -89,7 +93,9 @@ function buildHarnessMessages(input: ReasonerInput): ChatMessage[] {
           .map((vote) => `${vote.voterId}->${vote.abstain ? "abstain" : vote.targetId}`)
           .join(" | ") || "none"}`,
         speechMode
-          ? "现在生成公开发言。必须像真实玩家，不要提到 harness、模型、概率表或系统。"
+          ? input.action.kind === "whisper"
+            ? "现在生成仅对狼人同伴可见的协调消息。不要提到 harness、模型、概率表或系统。"
+            : "现在生成公开发言。必须像真实玩家，不要提到 harness、模型、概率表或系统。"
           : "现在生成私密战术备忘。不要编造不可见信息。"
       ].join("\n")
     }

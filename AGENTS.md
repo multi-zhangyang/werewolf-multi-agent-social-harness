@@ -24702,6 +24702,11 @@ these optional configured rules:
 - `timers` are presentation-duration metadata. Bounded unattended execution
   is controlled by harness timeout and max-transition configuration, not wall
   clock mutation in domain state.
+- `wolfDiscussion: "one_turn"` is an explicit experimental ruleset switch.
+  It creates one ordered, scoped `werewolf.whisper` action per living wolf
+  before the joint kill-vote batch. It is off by default to preserve older
+  experiment transition budgets; enabling it must be visible in the recorded
+  config and artifact.
 
 Any future sheriff transfer, election runoff/tie-break, hunter poison, potion,
 or timing variation must introduce a named ruleset/version and tests; it must

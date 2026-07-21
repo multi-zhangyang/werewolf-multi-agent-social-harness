@@ -431,6 +431,15 @@ describe("Werewolf generic social adapter", () => {
         metadata: { source: "metadata.targetId", messageKind: "werewolf-kill-vote" }
       }
     ]);
+    expect(draftSpeechActs({ type: "werewolf.whisper", actorId: actor.id, text: "Coordinate the night target and tomorrow's cover story." })).toMatchObject([
+      {
+        id: "",
+        kind: "coalition_signal",
+        subjectId: actor.id,
+        value: "werewolf.whisper",
+        metadata: { source: "werewolf.whisper", messageKind: "werewolf-whisper" }
+      }
+    ]);
     expect(draftSpeechActs({ type: "seer.inspect", actorId: actor.id, targetId: firstTargetId })).toMatchObject([
       {
         id: "",
@@ -453,6 +462,60 @@ describe("Werewolf generic social adapter", () => {
         metadata: { source: "metadata.kind", hasSave: true, hasPoison: true, messageKind: "private-witch-action" }
       }
     ]);
+  });
+
+  it("delivers a committed wolf whisper to the next wolf before the kill-vote batch", async () => {
+    const initialState = createGame({
+      id: "werewolf-team-discussion",
+      seed: "werewolf-team-discussion",
+      config: { wolfDiscussion: "one_turn", lastWords: "none" }
+    });
+    const agents = resolveAgentConfigs(initialState.players, profilesFromModels(["team-discussion-model"], 0), 0, 0);
+    const visibleWhispersByActor = new Map<string, number>();
+    const reasoner: HarnessReasoner = {
+      async think(input) {
+        if (input.action.kind === "whisper") {
+          visibleWhispersByActor.set(
+            input.agent.playerId,
+            input.view.social.messages.filter((message) => message.metadata?.kind === "werewolf-whisper").length
+          );
+        }
+        const content =
+          input.action.kind === "whisper"
+            ? "建议今晚优先处理高影响目标，并在白天保持一致口径，避免在公开发言中暴露夜间协作。"
+            : `team-discussion memo:${input.action.kind}`;
+        return {
+          content,
+          completion: {
+            content,
+            latencyMs: 1,
+            usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 },
+            providerRequestId: `team-discussion-${input.traceId}`,
+            attempts: 1,
+            stream: { enabled: true, completed: true, completedBy: "done_sentinel" }
+          }
+        };
+      }
+    };
+
+    const result = await runHarnessMatch({ initialState, agents, reasoner, maxTransitions: 4 });
+    const whispers = result.socialEpisode.steps.filter((step) => step.action.command.type === "werewolf.whisper");
+
+    expect(result.status).toBe("truncated");
+    expect(result.metrics.harnessErrorCount).toBe(0);
+    expect(result.socialEpisode.steps.map((step) => step.action.command.type)).toEqual([
+      "system.advance",
+      "seer.inspect",
+      "werewolf.whisper",
+      "werewolf.whisper"
+    ]);
+    expect(whispers).toHaveLength(2);
+    expect(whispers.every((step) => step.commitStatus === "committed")).toBe(true);
+    expect(visibleWhispersByActor.get(whispers[0].actorId)).toBe(0);
+    expect(visibleWhispersByActor.get(whispers[1].actorId)).toBe(1);
+    expect(
+      result.socialEpisode.messages.filter((message) => message.metadata?.kind === "werewolf-whisper").every((message) => message.visibility === "team")
+    ).toBe(true);
   });
 
   it("can project generic Werewolf steps with legacy harness trace ids", async () => {

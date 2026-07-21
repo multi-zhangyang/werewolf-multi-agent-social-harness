@@ -248,7 +248,7 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       const reasonerOutput = await this.options.reasoner.think(reasonerInput);
       const actionProposal = reasonerOutput.actionProposal;
       plan = stagedActor.applyReasonerProposal(plan, pending, actionProposal);
-      if (pending.kind === "speech" || pending.kind === "last_words") {
+      if (pending.kind === "speech" || pending.kind === "last_words" || pending.kind === "whisper") {
         plan = attachSpeech(plan, normalizeSpeech(reasonerOutput.content));
       }
       const command = stagedActor.act(plan);
@@ -862,6 +862,23 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
     });
   }
 
+  if (input.command.type === "werewolf.whisper") {
+    messages.push({
+      channelId: "werewolf-team",
+      senderId: input.actorId,
+      recipientIds: wolfIds.filter((wolfId) => wolfId !== input.actorId),
+      visibility: "team",
+      content: input.command.text,
+      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
+      metadata: {
+        ...baseMetadata,
+        kind: "werewolf-whisper",
+        day: input.observation.day,
+        strategyTags: input.command.strategyTags ?? []
+      }
+    });
+  }
+
   if (input.command.type === "seer.inspect") {
     messages.push({
       channelId: `private-${input.actorId}`,
@@ -1018,6 +1035,20 @@ function werewolfSpeechActsForCommand(command: GameCommand, actorId: string): So
         confidence: 1,
         evidenceRefs,
         metadata: { source: "metadata.targetId", messageKind: "werewolf-kill-vote" }
+      }
+    ];
+  }
+
+  if (command.type === "werewolf.whisper") {
+    return [
+      {
+        id: "",
+        kind: "coalition_signal",
+        subjectId: actorId,
+        value: "werewolf.whisper",
+        confidence: 1,
+        evidenceRefs,
+        metadata: { source: "werewolf.whisper", messageKind: "werewolf-whisper" }
       }
     ];
   }

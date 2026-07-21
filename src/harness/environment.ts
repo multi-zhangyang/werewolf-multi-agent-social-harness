@@ -161,6 +161,7 @@ export class WerewolfEnvironment {
 
 function actionKindForCommand(command: Exclude<GameCommand, { type: "system.advance" }>): AgentPendingAction["kind"] {
   if (command.type === "seer.inspect") return "inspect";
+  if (command.type === "werewolf.whisper") return "whisper";
   if (command.type === "werewolf.killVote") return "kill";
   if (command.type === "witch.act") return "witch";
   if (command.type === "speech.submit") return "speech";
@@ -173,6 +174,10 @@ function actionKindForCommand(command: Exclude<GameCommand, { type: "system.adva
 function assertCommandMatchesAction(command: Exclude<GameCommand, { type: "system.advance" }>, action: AgentPendingAction): void {
   if (command.type === "seer.inspect" && action.kind === "inspect") {
     assertLegalTarget(action.legalTargetIds, command.targetId, command.type);
+    return;
+  }
+  if (command.type === "werewolf.whisper" && action.kind === "whisper") {
+    if (!command.text.trim()) throw new Error("Command werewolf.whisper requires non-empty text.");
     return;
   }
   if (command.type === "werewolf.killVote" && action.kind === "kill") {
