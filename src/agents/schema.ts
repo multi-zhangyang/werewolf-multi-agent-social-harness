@@ -53,7 +53,50 @@ export type ProviderFailureKind =
   | "non_json"
   | "empty_content"
   | "network"
+  | "gateway_html"
   | "unknown";
+
+export const PROVIDER_FAILURE_KINDS: readonly ProviderFailureKind[] = [
+  "http",
+  "timeout",
+  "abort",
+  "stream_invalid_json",
+  "stream_empty",
+  "stream_missing_body",
+  "non_json",
+  "empty_content",
+  "network",
+  "gateway_html",
+  "unknown"
+] as const;
+
+export function isProviderFailureKind(value: string | undefined): value is ProviderFailureKind {
+  return typeof value === "string" && (PROVIDER_FAILURE_KINDS as readonly string[]).includes(value);
+}
+
+export function looksLikeHtmlGatewayPayload(value: unknown): boolean {
+  const text = collectProviderErrorText(value);
+  if (!text) return false;
+  return (
+    /<\s*html[\s>]/i.test(text) ||
+    /<\s*head[\s>]/i.test(text) ||
+    /Authorization Required/i.test(text) ||
+    /<\s*center>\s*<\s*h1>/i.test(text) ||
+    (/nginx/i.test(text) && /<\s*body[\s>]/i.test(text))
+  );
+}
+
+function collectProviderErrorText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return value.message;
+  if (Array.isArray(value)) return value.map((item) => collectProviderErrorText(item)).join("\n");
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>)
+      .map((item) => collectProviderErrorText(item))
+      .join("\n");
+  }
+  return "";
+}
 
 export type ProviderFailureStage =
   | "before_start"

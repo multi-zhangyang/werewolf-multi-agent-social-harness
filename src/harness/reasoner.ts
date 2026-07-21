@@ -1,7 +1,20 @@
 import { ROLE_DEFINITIONS } from "../core/roles";
 import type { ModelClient } from "../agents/modelClient";
 import type { ChatMessage } from "../agents/schema";
-import type { HarnessReasoner, ReasonerInput, ReasonerOutput } from "./types";
+import { z } from "zod";
+import type { HarnessReasoner, ReasonerActionProposal, ReasonerInput, ReasonerOutput } from "./types";
+
+const actionProposalSchema = z
+  .object({
+    commandType: z.string().min(1).max(80).optional(),
+    targetId: z.string().min(1).max(120).optional(),
+    saveTargetId: z.string().min(1).max(120).optional(),
+    poisonTargetId: z.string().min(1).max(120).optional(),
+    abstain: z.boolean().optional(),
+    confidence: z.number().min(0).max(1).optional(),
+    rationale: z.string().max(400).optional()
+  })
+  .strict();
 
 export class OpenAIHarnessReasoner implements HarnessReasoner {
   constructor(private readonly client: ModelClient) {}
@@ -10,14 +23,17 @@ export class OpenAIHarnessReasoner implements HarnessReasoner {
     const completion = await this.client.complete({
       model: input.agent.model,
       temperature: input.agent.temperature,
-      messages: buildHarnessMessages(input)
+      messages: buildHarnessMessages(input),
+      stream: true
     });
     if (!completion.content.trim()) {
       throw new Error(`Model ${input.agent.model} returned empty harness cognition.`);
     }
+    const parsed = parseReasonerOutput(completion.content, input.action.kind === "speech");
     return {
-      content: completion.content.trim(),
-      completion
+      content: parsed.content,
+      completion,
+      actionProposal: parsed.actionProposal
     };
   }
 }
@@ -37,8 +53,9 @@ function buildHarnessMessages(input: ReasonerInput): ChatMessage[] {
         : [
             "你是狼人杀 Agent 的战术顾问，不是动作控制器。",
             "Harness 已经负责环境、信念、策略、动作仲裁和执行；你只写一段私密战术备忘，帮助复盘该 Agent 的局势理解。",
-            "不要输出 JSON、Markdown、字段表或命令。",
-            "用 60 到 180 个汉字说明当前局势、风险和策略依据。"
+            "先用 60 到 180 个汉字说明当前局势、风险和策略依据。",
+            "最后单独一行可选地写 ACTION_CANDIDATE: 后接一个 JSON object；字段只能是 commandType、targetId、saveTargetId、poisonTargetId、abstain、confidence、rationale。",
+            "该对象只是候选证据，会被 policy 仲裁和环境验证，不能直接改变世界。"
           ].join("\n")
     },
     {
@@ -73,6 +90,50 @@ function buildHarnessMessages(input: ReasonerInput): ChatMessage[] {
       ].join("\n")
     }
   ];
+}
+
+function parseReasonerOutput(content: string, speechMode: boolean): {
+  content: string;
+  actionProposal?: ReasonerActionProposal;
+} {
+  const normalized = content.trim();
+  if (speechMode) return { content: normalized };
+  const marker = "ACTION_CANDIDATE:";
+  const markerIndex = normalized.lastIndexOf(marker);
+  if (markerIndex < 0) return { content: normalized };
+  const memo = normalized.slice(0, markerIndex).trim();
+  const actionProposal = parseActionProposal(normalized.slice(markerIndex + marker.length));
+  return {
+    content: memo || normalized,
+    actionProposal
+  };
+}
+
+function parseActionProposal(content: string): ReasonerActionProposal | undefined {
+  const trimmed = content.trim();
+  if (!trimmed) return undefined;
+  const candidates = [trimmed, trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")];
+  for (const candidate of candidates) {
+    const parsed = tryParseObject(candidate);
+    const result = actionProposalSchema.safeParse(parsed);
+    if (result.success) return result.data;
+  }
+  return undefined;
+}
+
+function tryParseObject(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    const start = value.indexOf("{");
+    const end = value.lastIndexOf("}");
+    if (start < 0 || end <= start) return undefined;
+    try {
+      return JSON.parse(value.slice(start, end + 1));
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 function beliefSummary(beliefs: ReasonerInput["agent"]["beliefs"]): string {

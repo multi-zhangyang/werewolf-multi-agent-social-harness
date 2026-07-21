@@ -17,11 +17,47 @@ function isApiResponse(response: Response, path: string, method = "GET") {
   return url.pathname === path && response.request().method() === method;
 }
 
+async function selectComboboxOption(
+  page: Page,
+  name: string,
+  direction: "ArrowDown" | "ArrowUp" = "ArrowDown"
+): Promise<void> {
+  const selector = page.getByRole("combobox", { name });
+  await selector.click();
+  await selector.press(direction);
+  await selector.press("Enter");
+}
+
 type E2EMatchRecord = {
   id?: string;
   hasArtifact?: boolean;
+  nativeSteps?: number;
   trajectorySteps?: number;
+  status?: string;
+  harnessStatus?: string | null;
+  summary?: {
+    kind?: string;
+    ok?: boolean;
+    status?: string;
+    harnessErrorCount?: number;
+    harnessFailureCount?: number;
+    failureReason?: string | null;
+    nativeSteps?: number;
+  };
 };
+
+function expectSuccessfulHarnessRun(run: E2EMatchRecord): void {
+  expect(run.status).toBe("completed");
+  expect(["completed", "truncated"]).toContain(run.harnessStatus);
+  expect(run.summary).toMatchObject({
+    kind: "match",
+    ok: true,
+    status: run.harnessStatus,
+    harnessErrorCount: 0,
+    harnessFailureCount: 0,
+    failureReason: null
+  });
+}
 
 type E2EMatchArtifactProjection = {
   artifactVersion?: string;
@@ -47,7 +83,7 @@ type E2ECheckpointCreateResponse = {
     kind?: string;
     ok?: boolean;
     checkpointId?: string;
-    counts?: { trajectorySteps?: number; socialMessages?: number };
+    counts?: { nativeSteps?: number; socialMessages?: number; channels?: number };
   };
   artifactUrl?: string;
 };
@@ -124,11 +160,13 @@ async function ensureServerArtifacts(page: Page, requiredCount = 1) {
       },
       timeout: 180_000
     });
+    expect(runResponse.status()).toBe(200);
     expect(runResponse.ok()).toBeTruthy();
     const run = (await runResponse.json()) as E2EMatchRecord;
+    expectSuccessfulHarnessRun(run);
     expect(run.id).toBeTruthy();
     expect(run.hasArtifact).toBeTruthy();
-    expect(run.trajectorySteps ?? 0).toBeGreaterThan(0);
+    expect((run.nativeSteps ?? run.summary?.nativeSteps ?? run.trajectorySteps) ?? 0).toBeGreaterThan(0);
     artifactBackedMatches = await readArtifactBackedMatches(page);
   }
 
@@ -140,6 +178,11 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   const failedRequests: string[] = [];
   const failedApiResponses: string[] = [];
   const apiResponses: string[] = [];
+  const pageErrors: string[] = [];
+
+  page.on("pageerror", (error) => {
+    pageErrors.push(error.message);
+  });
 
   page.on("requestfailed", (request) => {
     failedRequests.push(`${request.method()} ${request.url()} ${request.failure()?.errorText ?? "failed"}`);
@@ -173,7 +216,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   expect(baselineArtifactResponse.ok()).toBeTruthy();
   const baselineArtifact = (await baselineArtifactResponse.json()) as E2EMatchArtifactProjection;
   expect(baselineArtifact).toMatchObject({
-    artifactVersion: "harness.match.v1",
+    artifactVersion: "harness.match.v2",
     kind: "match",
     projection: {
       view: "postgame-redacted",
@@ -189,7 +232,9 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   await expect(rawDrawer).toBeVisible();
   await expect(rawDrawer.getByText("private evidence redacted")).toBeVisible();
   const rawText = await rawDrawer.getByRole("textbox").inputValue();
-  const rawProjection = JSON.parse(rawText) as { projection?: { view?: string; privateEvidenceRedacted?: boolean } };
+  const rawProjection = JSON.parse(rawText) as {
+    projection?: { view?: string; privateEvidenceRedacted?: boolean; postgameTruthRedacted?: boolean };
+  };
   expect(rawProjection.projection).toMatchObject({
     view: "postgame-redacted",
     privateEvidenceRedacted: true
@@ -197,6 +242,45 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   expect(rawText).not.toContain('"view": "full"');
   await page.keyboard.press("Escape");
   await expect(rawDrawer).toBeHidden();
+
+  const truthArtifact = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      response.request().method() === "GET" &&
+      url.pathname.includes("/api/matches/") &&
+      url.pathname.endsWith("/artifact") &&
+      url.searchParams.get("view") === "truth-redacted"
+    );
+  });
+  await selectComboboxOption(page, "工件投影");
+  const truthArtifactResponse = await truthArtifact;
+  expect(truthArtifactResponse.ok()).toBeTruthy();
+  const truthArtifactBody = (await truthArtifactResponse.json()) as E2EMatchArtifactProjection & {
+    projection?: { view?: string; privateEvidenceRedacted?: boolean; postgameTruthRedacted?: boolean };
+    finalState?: { players?: Array<Record<string, unknown>>; winner?: unknown };
+  };
+  expect(truthArtifactBody.projection).toMatchObject({
+    view: "truth-redacted",
+    privateEvidenceRedacted: true,
+    postgameTruthRedacted: true
+  });
+  for (const player of truthArtifactBody.finalState?.players ?? []) {
+    expect(player).not.toHaveProperty("role");
+    expect(player).not.toHaveProperty("team");
+  }
+  await expect(statusWith(page, /view=truth-redacted/)).toBeVisible({ timeout: 15_000 });
+
+  const researchArtifact = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      response.request().method() === "GET" &&
+      url.pathname.includes("/api/matches/") &&
+      url.pathname.endsWith("/artifact") &&
+      url.searchParams.get("view") === "postgame-redacted"
+    );
+  });
+  await selectComboboxOption(page, "工件投影", "ArrowUp");
+  expect((await researchArtifact).ok()).toBeTruthy();
 
   await page.getByLabel("最大 transitions").fill("2");
   await page.getByLabel("超时秒数").fill("120");
@@ -207,11 +291,13 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   }, { timeout: 180_000 });
   await page.getByRole("button", { name: "运行实验", exact: true }).click();
   const runResponse = await runRequest;
+  expect(runResponse.status()).toBe(200);
   expect(runResponse.ok()).toBeTruthy();
   const uiRun = (await runResponse.json()) as E2EMatchRecord & { id: string };
+  expectSuccessfulHarnessRun(uiRun);
   expect(uiRun.id).toBeTruthy();
   expect(uiRun.hasArtifact).toBeTruthy();
-  expect(uiRun.trajectorySteps ?? 0).toBeGreaterThan(0);
+  expect((uiRun.nativeSteps ?? uiRun.summary?.nativeSteps ?? uiRun.trajectorySteps) ?? 0).toBeGreaterThan(0);
   const uiRunArtifactResponse = await runArtifact;
   expect(uiRunArtifactResponse.ok()).toBeTruthy();
   const uiRunArtifact = (await uiRunArtifactResponse.json()) as E2EMatchArtifactProjection;
@@ -220,17 +306,13 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
 
   await page.getByRole("tab", { name: "对比", exact: true }).click();
   await expect(statusWith(page, "工作区已切换：对比")).toBeVisible();
-  const comparePanel = page.getByRole("tabpanel", { name: "对比" });
-  await expect(comparePanel.getByText("Baseline / Candidate", { exact: true })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "候选运行" })).toBeVisible();
-
-  await page.getByRole("combobox", { name: "候选运行" }).click();
-  await page.getByRole("option", { name: new RegExp(baselineMatchId.slice(0, 8)) }).click();
   const candidateArtifactResponse = page.waitForResponse((response) => {
     const url = new URL(response.url());
     return (
       response.request().method() === "GET" &&
-      url.pathname === `/api/matches/${baselineMatchId}/artifact` &&
+      url.pathname.startsWith("/api/matches/") &&
+      url.pathname.endsWith("/artifact") &&
       url.searchParams.get("view") === "postgame-redacted"
     );
   });
@@ -238,11 +320,11 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
     const url = new URL(response.url());
     return (
       response.request().method() === "GET" &&
-      url.pathname === `/api/matches/${uiRun.id}/compare/${baselineMatchId}` &&
+      url.pathname.startsWith(`/api/matches/${uiRun.id}/compare/`) &&
       url.searchParams.get("view") === "postgame-redacted"
     );
   });
-  await page.getByRole("button", { name: "加载对比工件", exact: true }).click();
+  await selectComboboxOption(page, "候选运行");
   expect((await candidateArtifactResponse).ok()).toBeTruthy();
   const comparisonResponse = await comparisonArtifactResponse;
   expect(comparisonResponse.ok()).toBeTruthy();
@@ -256,19 +338,23 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
     }
   });
   expect([comparisonArtifact.baseline?.matchId, comparisonArtifact.baseline?.runId]).toContain(uiRun.id);
-  expect([comparisonArtifact.candidate?.matchId, comparisonArtifact.candidate?.runId]).toContain(baselineMatchId);
+  const comparisonCandidateId = comparisonArtifact.candidate?.matchId ?? comparisonArtifact.candidate?.runId;
+  expect(comparisonCandidateId).toBeTruthy();
+  expect(comparisonCandidateId).not.toBe(uiRun.id);
   expect(comparisonArtifact.rows ?? []).toEqual(
     expect.arrayContaining([
       expect.objectContaining({ id: "trajectory_steps" }),
       expect.objectContaining({ id: "social_messages" })
     ])
   );
-  await expect(statusWith(page, /对比工件已加载/)).toBeVisible({ timeout: 15_000 });
-  await expect(comparePanel.getByText("对比矩阵", { exact: true })).toBeVisible();
+  await expect(statusWith(page, /候选切换后对比已加载|对比工件已加载/)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("columnheader", { name: "row", exact: true }).last()).toBeVisible();
 
   await page.getByRole("tab", { name: "时间线", exact: true }).click();
   await expect(page.getByRole("button", { name: "复现", exact: true })).toBeVisible();
-  await expect(page.getByText("Scheduler Waterfall", { exact: true })).toBeVisible();
+  await expect(page.getByText(/主时间线来自原生 social episode/)).toBeVisible();
+  await expect(page.getByText("Legacy trajectory projection", { exact: true })).toBeVisible();
+  await expect(page.getByText("migration/debug only", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "scheduler", exact: true }).first()).toBeVisible();
   const replayResponse = page.waitForResponse((response) => isApiResponse(response, `/api/matches/${uiRun.id}/replay`, "POST"));
   await page.getByRole("button", { name: "复现", exact: true }).click();
@@ -344,6 +430,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
 
   expect(failedRequests.filter((request) => request.includes("/api/"))).toEqual([]);
   expect(failedApiResponses).toEqual([]);
+  expect(pageErrors).toEqual([]);
   expect(apiResponses.some((response) => response.includes("/api/matches/run"))).toBeTruthy();
   expect(apiResponses.some((response) => response.includes("/api/matches") && response.includes("/compare/"))).toBeTruthy();
   expect(apiResponses.some((response) => response.includes("view=full"))).toBeFalsy();

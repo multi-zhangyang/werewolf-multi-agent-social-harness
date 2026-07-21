@@ -149,8 +149,6 @@ export interface GameEvent {
     | "vote.cast"
     | "player.died"
     | "hunter.shot"
-    | "harness.turn"
-    | "harness.error"
     | "game.ended";
   actorId?: string;
   visibility: "public" | "private" | "postgame";
@@ -177,13 +175,14 @@ export interface GameState {
   endReason?: string;
 }
 
-export type PublicGameState = Omit<GameState, "players" | "night" | "deaths" | "events" | "pendingHunterId" | "hunterResume"> & {
+export type PublicGameState = Omit<
+  GameState,
+  "id" | "seed" | "players" | "night" | "deaths" | "events" | "pendingHunterId" | "hunterResume"
+> & {
   players: PublicPlayer[];
   deaths: Array<Omit<DeathRecord, "sourceId">>;
   events: GameEvent[];
   pendingActionCount: number;
-  harnessTurnCount: number;
-  harnessErrorCount: number;
   publicEventCount: number;
 };
 
@@ -290,8 +289,6 @@ export type PendingAction =
     };
 
 export interface PlayerView {
-  gameId: string;
-  seed: string;
   phase: Phase;
   day: number;
   you: {
@@ -311,7 +308,7 @@ export interface PlayerView {
   };
   speeches: SpeechRecord[];
   votes: VoteRecord[];
-  deaths: DeathRecord[];
+  deaths: Array<Omit<DeathRecord, "sourceId">>;
   recentEvents: GameEvent[];
   pendingAction: PendingAction;
 }

@@ -1,6 +1,6 @@
 # Multi-Agent Society Harness Plan
 
-Last checked: 2026-07-07.
+Last checked: 2026-07-14.
 
 This document is the working basis for the project goal:
 
@@ -45,16 +45,29 @@ The current repository already has a substantial harness foundation.
 
 | Plane | Current owners | Status |
 | --- | --- | --- |
-| Control plane | `src/harness/experiment.ts`, `src/harness/profiles.ts`, `src/harness/tournament.ts`, `src/harness/experimentMatrix.ts`, CLI scripts, server run routes | Experiment specs, profiles, assignment strategies, tournaments, experiment matrices, bounded runs, timeout parsing, and provider protocol selection exist. Matrix cells can be explicit or dimension-expanded, and each cell normalizes to the existing tournament contract instead of creating a parallel runner. |
-| Environment plane | `src/core/*`, `src/harness/environment.ts`, `src/harness/werewolfAdapter.ts`, `src/harness/runtime.ts` | Werewolf engine owns phases, pending actions, legal commands, deaths, votes, victory, and deterministic transitions. |
+| Control plane | `src/harness/experiment.ts`, `src/harness/profiles.ts`, `src/harness/tournament.ts`, CLI scripts, server run routes | Experiment specs, profiles, assignment strategies, tournaments, bounded runs, timeout parsing, and provider protocol selection exist. |
+| Environment plane | `src/core/*`, `src/harness/environment.ts`, `src/harness/werewolfAdapter.ts`, `src/harness/runtime.ts` | Werewolf engine owns phases, pending actions, legal commands, deaths, votes, victory, and deterministic transitions. `GameState` / `GameEvent` are domain-only; harness traces, provider telemetry, and failures cannot change the domain hash. |
 | Observation plane | `src/core/view.ts`, `src/harness/social.ts`, `WerewolfAgentActor` path in runtime | Agents receive scoped player views plus visible social channels/messages. Hidden truth is not a normal reasoner input. |
 | Society plane | `src/harness/social.ts`, `src/harness/socialState.ts`, `src/harness/actor.ts`, `src/harness/policy.ts` | Message bus, channels, social state stores, relationships, reputation, norms, goals, commitments, coalitions, gossip, sanctions, trust repair, betrayal records, scoped speech-act ingestion, structured `metadata.socialFacts` ingestion, and social-target arbitration exist. Ingestion is evidence-backed and observation-scoped, not transcript inference. |
 | Agent plane | `src/harness/scaffold.ts`, `src/harness/socialObservationIngestor.ts`, `src/harness/belief.ts`, `src/harness/reasoner.ts`, `src/harness/policy.ts` | Durable actor state, memory, beliefs, social ledgers, generic scaffold visible social-message ingestion, candidate scoring, action arbitration, and optional provider-backed reasoner exist. The generic scaffold now ingests `SocialObservation.visibleMessages` / wrapped `view.social.messages` into evidence-backed memory and social-state stores through the scaffold observation-ingestor path. Ingestion is scoped to the actor observation, uses explicit typed speech acts / structured social facts only, does not parse free text, and does not use hidden truth. Production Werewolf remains the first proof path over this generic scaffold capability. The model remains an optional reasoner/speech component, not the actor or store owner. |
 | Provider plane | `src/agents/openaiClient.ts`, `src/agents/openaiResponsesClient.ts`, `src/agents/anthropicMessagesClient.ts`, `src/agents/providerRegistry.ts` | Protocol-based adapters exist. Live calls are streaming. OpenAI-compatible chat calls do not send max-token fields under current policy. No provider/model special casing should be added. |
-| Artifact plane | `src/harness/artifacts.ts`, `src/harness/replay.ts`, `src/harness/matchComparison.ts`, `src/harness/experimentMatrix.ts`, server artifact/checkpoint/matrix routes | Match artifacts, trajectory JSONL, deterministic replay, comparison, checkpoint, fork, fork-lineage, branch-tree, persistence indexes, recovery audits, tournament evidence packs, and experiment matrix artifact sets exist. Matrix artifacts include normalized spec, cell JSONL, statistics JSON, CSV tables, summary Markdown, and nested tournament manifests. |
-| Evaluation plane | `src/harness/evaluation.ts`, `src/harness/evaluator.ts`, `src/harness/socialEvaluator.ts`, `src/harness/werewolfResult.ts`, `src/harness/experimentMatrix.ts` | Deterministic outcome, vote accuracy, role survival, influence, deception, belief-shift association, reputation association, calibration, social-state, social-dynamics, social-fact ingest evidence, commitment/coalition association, commitment/coalition lifecycle evaluators, tournament aggregation, and matrix-level descriptive statistics exist with metric ids/evidence refs. Matrix statistics include model/profile win rates, Wilson intervals, reward summaries, and pairwise model comparisons with Holm correction. Matrix significance is explicitly descriptive and sets `superiorityClaims: false`. |
-| API/server plane | `src/server/index.ts`, `src/server/store.ts` | Run, replay, artifact, comparison, checkpoint, fork, branch tree, tournament, experiment matrix, recovery audit, and config APIs exist. Default host is now local-only unless `HOST` is explicitly overridden. Matrix artifact export is opt-in through configured base directories and uses a download whitelist rather than exposing arbitrary filesystem paths. |
-| React cockpit plane | `src/App.tsx`, `e2e/cockpitInteraction.spec.ts` | Ant Design cockpit reads API/artifact truth. Runs/timeline/society/lineage/evaluation/experiments/compare workspaces exist. The experiments workspace can launch streaming matrix cells, inspect model/profile statistics, pairwise significance, cell status, and registered artifact downloads. Lineage workspace uses summary checkpoint/fork/branch-tree APIs and does not fetch full checkpoint artifacts in ordinary UI flow. |
+| Artifact plane | `src/harness/artifacts.ts`, `src/harness/replay.ts`, `src/harness/matchComparison.ts`, server artifact/checkpoint routes | `harness.match.v2` uses native `socialEpisode.steps` as execution/replay/integrity authority. Zero-model replay, comparison, checkpoint/fork, lineage, branch tree, persistence indexes, and recovery audits exist. `trajectory` is legacy migration/debug projection only. New checkpoints/forks use `harness.checkpoint.v2` / `harness.fork-provenance.v2` over native execution prefixes. |
+| Evaluation plane | `src/harness/evaluation.ts`, `src/harness/evaluator.ts`, `src/harness/socialEvaluator.ts`, `src/harness/werewolfResult.ts` | Deterministic outcome, vote accuracy, role survival, influence, deception, belief-shift association, reputation association, calibration, social-state, social-dynamics, social-fact ingest evidence, commitment/coalition association, and commitment/coalition lifecycle evaluators exist with metric ids/evidence refs. The social-fact ingest evidence evaluator is a deterministic zero-weight default runtime diagnostic for scoped exposure-to-journal links; it does not affect rewards or leaderboards. Broader norm/gossip/trust-repair/betrayal temporal evaluators exist as standalone zero-weight contracts and are not default runtime/tournament metrics unless explicitly wired. |
+| API/server plane | `src/server/index.ts`, `src/server/store.ts` | Run, replay, artifact, comparison, checkpoint, fork, branch tree, tournament, recovery audit, and config APIs exist. A finished match is stored as exactly one integrity-validated `MatchArtifact`; summaries and public views are derived. Default host is local-only unless `HOST` is explicitly overridden. |
+| React cockpit plane | `src/App.tsx`, `e2e/cockpitInteraction.spec.ts` | Ant Design cockpit reads API/artifact truth. Runs/timeline/society/lineage/evaluation/compare workspaces exist. Lineage workspace uses summary checkpoint/fork/branch-tree APIs and does not fetch full checkpoint artifacts in ordinary UI flow. |
+
+The API/server projection contract is now structurally honest.
+`PostgameMatchProjectionDto` and `MatchArtifactViewDto` are composed from
+redacted harness step, social step/message/action/failure, command/pending-action,
+agent/social-state, and snapshot-frame DTOs. `MatchComparisonSource` and
+`TrajectoryJsonlSource` let comparison and JSONL serializers consume recorded
+canonical or redacted structural fields without casting the projection to a
+full replay artifact. Deep whitelists remove legal targets, provider
+request/retry/stream telemetry, `infosByAgent`, private/team speech acts, nested
+agent metadata, and evidence-ref descriptions. Focused validation for this slice
+passed the public-view suite 11/11, a further focused DTO/comparison/JSONL set of
+18 tests, and TypeScript typecheck; no new full-suite, E2E, or live-provider
+result is implied.
 
 ## Harness Invariants
 
@@ -85,13 +98,17 @@ These invariants are non-negotiable for future work.
 
 5. Replay is not rerun
 
-   Replay re-applies recorded commands and checks hashes. It must not call the
-   model provider unless the operation is explicitly marked as a rerun/fork.
+   Native replay consumes `socialEpisode.steps`, including explicit system and
+   rejected steps, applies only committed actions, and validates state,
+   event, and message ranges/hashes. It never calls actors, policies, reasoners,
+   or model providers. A model-backed continuation is a new rerun/fork.
 
 6. Fork has provenance
 
    A fork must carry parent checkpoint id, parent run/match, parent hashes,
-   parent trajectory prefix, creation reason, and boundary validation.
+   parent native execution-prefix boundary/counts, message/channel hashes,
+   creation reason, and boundary validation. Legacy trajectory length or prefix
+   is not lineage authority.
 
 7. Evaluation reads facts
 
@@ -114,6 +131,19 @@ These invariants are non-negotiable for future work.
 
    Live model validation must use streaming, bounded timeout/retry, completion
    accounting, provider failure records, and local parser/action validation.
+
+11. Domain state is not telemetry
+
+   `GameState` / `GameEvent` contain only domain facts. Reasoner memos, provider
+   telemetry, harness traces, rejected proposals, and harness failures belong
+   to native execution artifacts and do not alter the domain-state hash.
+
+12. Commit precedes durable actor mutation
+
+   A proposal is staged evidence, not a committed turn. Decision memory,
+   reasoner memo, turn counters, emitted messages, and post-step agent snapshots
+   become committed state only after environment validation and actor-scoped
+   feedback. Rejections remain artifact evidence without publishing messages.
 
 ## Target Harness Capability Stack
 
@@ -151,7 +181,7 @@ backlog below tracks remaining execution glue and broader coverage.
 
 | Module | Responsibility | Required evidence |
 | --- | --- | --- |
-| `ObservationIngestor` | Implemented deterministic baseline for scoped visible social messages. It converts `SocialObservation.visibleMessages` and wrapped `view.social.messages` into evidence-backed message memory plus explicit typed speech-act / structured `metadata.socialFacts` social-state updates. Natural-language-only content is stored as ordinary message memory and is not parsed into social facts. | Observation trace id, message ids, exact message sequence range, actor-scoped visibility, redaction policy. |
+| `ObservationIngestor` | Implemented deterministic baseline for scoped visible social messages. It converts `SocialObservation.visibleMessages` and wrapped `view.social.messages` into evidence-backed message memory plus explicit typed speech-act / structured `metadata.socialFacts` social-state updates. Natural-language-only content is stored as ordinary message memory and is not parsed into social facts. Exact consumed message ids are persisted in the actor-private, versioned `AgentSocialState.messageIngestion` tracker so bounded-memory trimming and checkpoint/fork restoration cannot reapply an already consumed message. | Observation trace id, exact actor-scoped message ids, exact message sequence range, actor-scoped visibility, redaction policy. |
 | `MemoryRetriever` | Retrieves relevant memories by recency, salience, importance, social target, and current pending action. | Memory entry ids, retrieval scores, reason for retrieval. |
 | `BeliefUpdater` | Updates probabilistic claims about roles, teams, statements, contradictions, and action history. | Prior claim id, new evidence refs, confidence delta, contradiction records. |
 | `TheoryOfMindStore` | Tracks what agent A thinks agent B knows, believes, wants, or intends. | Scoped message/action evidence only; no hidden truth. |
@@ -160,7 +190,7 @@ backlog below tracks remaining execution glue and broader coverage.
 | `NormLifecycle` | Creates, reinforces, violates, sanctions, and repairs norms. | Norm id, expected behavior, violation evidence, sanction/repair evidence. |
 | `CommitmentTracker` | Records promises, stances, requested actions, deadlines, fulfillment, breach, and withdrawal. | Speaker, audience, target, deadline, later action evidence. |
 | `CoalitionTracker` | Records explicit coalition formation, coordination, shared target persistence, betrayal, and dissolution evidence. Automatic coalition detection from repeated aligned actions remains future work; never treat a single same vote alone as coalition proof. | Repeated aligned actions plus explicit messages; never a single same vote alone. |
-| `ClaimExtractor` | Converts typed speech-act metadata into role claims, accusations, defenses, vote intents, requests, agreements, contradictions, commitments, and coalition signals; the implemented actor-scoped slice covers top-level `role_claim`, `accusation`, `vote_intent`, `role_action`, `claim`, `commitment`, and non-kill `coalition_signal` acts through focused tests. Structured `metadata.socialFacts` covers relationship, reputation, commitment/status, coalition/evidence, gossip, norm/status, norm-sanction/status, trust-repair/status, and betrayal/evidence. | Message id, speech act id, subject/target, confidence, parser/source. |
+| `ClaimExtractor` | Consumes explicit typed speech acts into role claims, accusations, defenses, vote intents, requests, agreements, contradictions, commitments, and coalition signals; the implemented actor-scoped slice covers top-level `role_claim`, `accusation`, `vote_intent`, `role_action`, `claim`, `commitment`, and `coalition_signal` acts through focused tests. Structured `metadata.socialFacts` covers relationship, reputation, commitment/status, coalition/evidence, gossip, norm/status, norm-sanction/status, trust-repair/status, and betrayal/evidence. | Message id, speech act id, subject/target, confidence, adapter/source. |
 | `CandidateGenerator` | Produces legal-intent candidates for speaking, voting, role actions, withholding, revealing, accusing, defending, coordinating, or passing. | Pending action id, legal target list, strategy tags. |
 | `ReasonerAdapter` | Optional streaming model component that drafts memo, reflection, critique, speech, or candidate rationale. | Stream status, provider request id, latency, usage, parsed text, failure records. |
 | `ActionArbitrator` | Scores candidates using utility, role/team goals, social risk, deception exposure, norms, reputation, and legality. | Candidate list, score contributions, rejected candidates, selected candidate id. |
@@ -181,7 +211,10 @@ Implementation order:
 3. Treat generic scaffold visible social-message observation ingestion as the
    current deterministic baseline. It reuses scoped `SocialObservation` /
    wrapped `view.social.messages` contracts, preserves hidden-truth exclusion,
-   and does not parse free text.
+   and does not parse free text. Its exact actor-scoped consumed-message
+   identities are durable private state rather than an actor-instance cache or
+   a global sequence watermark; this preserves exact-once store consequences
+   after bounded-memory trimming and snapshot/checkpoint/fork restoration.
 4. Preserve the implemented `evaluation.social-fact-ingest-evidence.v1`
    diagnostic as the current typed speech-act / structured-fact exposure-to-
    journal coverage baseline, then broaden artifact/evaluator evidence chains
@@ -273,15 +306,16 @@ SocialMessage.speechActs?: Array<{
 
 Werewolf proof:
 
-- Public day speech currently derives `role_claim` from `claimedRole` and
-  `accusation` from `pressureTargetId`.
-- Public votes derive `vote_intent`.
-- Wolf kill votes derive `coalition_signal`.
-- Seer, witch, and hunter action messages derive `role_action`.
-- Explicit top-level `speechActs` can be supplied by domain adapters and
-  consumed by the tested actor-scoped ingestion path; legacy metadata remains for
-  compatibility where typed facts are absent.
-- Explicit top-level `commitment` and non-kill `coalition_signal` speech acts
+- The Werewolf adapter explicitly translates public day speech into
+  `role_claim` / `accusation`, public votes into `vote_intent`, wolf kill votes
+  into `coalition_signal`, and seer, witch, and hunter actions into
+  `role_action`.
+- The generic communication bus canonicalizes explicit `speechActs` and generic
+  `metadata.socialFacts`; it never infers domain semantics from arbitrary
+  metadata fields or command labels.
+- Legacy domain metadata remains available to the Werewolf actor as a temporary
+  compatibility input, but it is not a generic semantic source.
+- Explicit top-level `commitment` and structurally specified `coalition_signal` speech acts
   can be ingested into commitment/coalition ledgers.
 - Structured `metadata.socialFacts` can be ingested into relationship,
   reputation, commitment, coalition, gossip, norm, norm-sanction, trust-repair,
@@ -496,95 +530,6 @@ Validation:
 - Replay verifier over every completed match.
 - CLI/API download test.
 
-### Goal 6: Experiment Matrix Runner And Statistical Aggregation
-
-Why:
-
-Paper-quality multi-agent experiments need more than a single tournament. The
-harness must run controlled model/profile/seed/config matrices, preserve every
-cell's tournament provenance, and emit aggregation tables that can be
-recomputed from artifacts.
-
-Implemented generic contract:
-
-```text
-experiment matrix =
-  matrix spec
-  + base tournament spec
-  + explicit cells or dimension expansion
-  + normalized tournament per cell
-  + streaming provider-backed tournament execution
-  + per-cell status/failure accounting
-  + model/profile aggregate rows
-  + descriptive pairwise statistics
-  + artifact set with registered downloadable files
-```
-
-Implemented artifact contract:
-
-```text
-matrix artifact set =
-  manifest.json
-  + spec.normalized.json
-  + cells.jsonl
-  + statistics.json
-  + summary.md
-  + model_stats.csv
-  + profile_stats.csv
-  + pairwise_model_comparisons.csv
-  + tournaments/<cellId>/manifest.json
-```
-
-Werewolf proof:
-
-- Each cell normalizes into the existing Werewolf tournament runner, preserving
-  seeded role assignment, profiles, models, max-transition limits, config,
-  timeout policy, and failure accounting.
-- A small checked-in pilot spec, `experiments/matrix-smoke.json`, runs a real
-  streaming provider path for `yourmodel-k2.7` with one cell, one game, and two
-  transitions. The second transition is deliberate because it reaches an agent
-  pending action and should record completed provider stream telemetry without
-  pretending to complete a full Werewolf game.
-- Larger paper runs can expand dimensions across models, profiles,
-  assignments, seeds, game counts, transition budgets, and temperatures.
-
-Evaluation impact:
-
-- `statistics.json` aggregates completed seat outcome rows by model and
-  profile, including win/loss counts, win rate, Wilson 95% interval, reward
-  mean, standard deviation, and standard error.
-- Pairwise model rows use an unpaired seat-level two-proportion z-test plus Holm
-  p-value correction. This is a descriptive screening table only: seats inside
-  one game are not independent, paired-seed structure is not modeled, and the
-  artifact explicitly records `superiorityClaims: false`.
-- Truncated games and failed cells remain visible in status denominators. They
-  do not silently disappear, and truncated games do not invent win/loss outcome
-  rows.
-
-UI/API impact:
-
-- `POST /api/experiments/matrix/run` accepts a matrix spec plus top-level
-  tournament override fields. Top-level overrides apply to the matrix base
-  before cell normalization.
-- `GET /api/experiments/matrix/artifacts` and related detail/download routes
-  expose only registered artifact files and never leak local artifact base
-  paths.
-- The cockpit `实验矩阵` workspace starts real streaming matrix runs, shows cell
-  and game status, displays model/profile stats and pairwise significance, and
-  downloads registered matrix/tournament evidence files from server truth.
-
-Validation:
-
-- `tests/experimentMatrix.test.ts` covers explicit-cell normalization,
-  dimension expansion, truncated-game denominator policy, synthetic outcome
-  aggregation, Holm-adjusted pairwise output, and artifact writing.
-- `tests/serverExperimentMatrixApi.test.ts` covers server matrix run/export,
-  rehydration, path redaction, file download whitelist, top-level override
-  semantics, and filesystem-control rejection.
-- Typecheck, focused matrix tests, full deterministic tests, production build,
-  and a real streaming matrix pilot should pass before this slice is reported as
-  complete for a release/push.
-
 ## Frontend Cockpit Direction
 
 The cockpit should keep using Ant Design components and server truth. The
@@ -600,9 +545,7 @@ important views are:
 5. Evaluation: metric registry, evidence refs, warning coverage, deterministic
    vs model-graded separation.
 6. Compare: postgame-redacted match comparison, changed rows, metric deltas.
-7. Experiments: matrix runner, model/profile statistics, descriptive
-   significance table, cell failure accounting, and matrix artifact downloads.
-8. Tournament: artifact sets, leaderboard, failure accounting, replay pass rate.
+7. Tournament: artifact sets, leaderboard, failure accounting, replay pass rate.
 
 UI quality means the user can click and the server moves. A beautiful static
 screen is not acceptable.
@@ -620,7 +563,6 @@ typecheck
   -> bounded streaming model probe if provider/reasoner changed
   -> bounded streaming match
   -> bounded streaming tournament
-  -> bounded streaming experiment matrix
 ```
 
 Do not replace live validation with a fake smoke test when the change touches
@@ -636,7 +578,7 @@ society.speech-act-commitment-coalition-ingestion.v1
 society.structured-relationship-reputation-consequence-ingestion.v1
 evaluation.social-fact-ingest-evidence.v1
 agent.scaffold-visible-social-observation-ingestion.v1
-experiment.matrix-runner-statistics-artifacts.v1
+agent.durable-social-message-ingestion-idempotency.v1
 ```
 
 Current verified facts:
@@ -651,15 +593,15 @@ Current verified facts:
 - The generic scaffold observation ingestor records ordinary visible messages
   as evidence-backed memory and applies only explicit typed `SocialMessage.speechActs`
   / structured `metadata.socialFacts` through existing store APIs.
-- Top-level `commitment` and non-kill `coalition_signal` speech acts can create
+- Top-level `commitment` and structurally specified `coalition_signal` speech acts can create
   commitment and coalition records through existing social-state store APIs.
 - Structured `metadata.socialFacts` can create relationship/reputation
   consequence mutations only when explicit numeric deltas are present.
 - `evaluation.social-fact-ingest-evidence.v1` is implemented as a deterministic
   zero-weight postgame diagnostic.
 - It links explicit actor-scoped exposure candidates to social-state mutation
-  journal entries for top-level `commitment` speech acts, top-level non-kill
-  `coalition_signal` speech acts, structured relationship `metadata.socialFacts`
+  journal entries for top-level `commitment` speech acts, top-level structurally
+  specified `coalition_signal` speech acts, structured relationship `metadata.socialFacts`
   with explicit numeric deltas, and structured reputation `metadata.socialFacts`
   with explicit numeric deltas.
 - Candidate exposure comes only from scoped observation-derived exposure records,
@@ -667,6 +609,12 @@ Current verified facts:
 - Generic scaffold ingestion likewise reads only actor-scoped observation
   messages. It does not read global transcripts, infer exposure from public
   visibility or `recipientIds`, or use hidden truth.
+- Visible-message exact-once identity is now durable in the actor-private,
+  versioned `AgentSocialState.messageIngestion` tracker. It survives bounded
+  memory trimming and snapshot/checkpoint/fork restoration, while legacy
+  states best-effort hydrate retained message evidence. Exact ids are used
+  instead of an unsafe global sequence watermark, and ordinary redacted API
+  projections clear the private identity list.
 - Missing-mutation candidates are reported as diagnostics, not failure,
   no-effect, causality, reward, deception success, persuasion outcome, or
   leaderboard evidence.
@@ -677,14 +625,6 @@ Current verified facts:
   or policy arbitration.
 - This deterministic slice did not touch provider adapters, reasoner request
   shape, streaming protocol, timeout/retry policy, or live model arbitration.
-- `experiment.matrix-runner-statistics-artifacts.v1` expands explicit or
-  dimension-based cells into existing tournament specs, runs each cell through
-  the tournament harness, aggregates model/profile statistics, emits
-  descriptive pairwise comparisons, writes matrix artifact directories, and
-  exposes matrix run/artifact APIs plus a cockpit analysis workspace.
-- Matrix statistics do not make causal or paired-seed superiority claims. Failed
-  cells/games stay in status denominators; truncated games without an observed
-  winner do not invent outcome rows.
 
 Validation passed:
 
@@ -695,13 +635,8 @@ Validation passed:
 - `npx vitest run tests/social.test.ts tests/werewolfAdapter.test.ts tests/harness.test.ts --reporter=dot`
 - `npx vitest run tests/actorSocialClaims.test.ts tests/werewolfAdapter.test.ts tests/harness.test.ts --reporter=dot`
 - `npx vitest run tests/serverPublicViewApi.test.ts tests/serverTournamentArtifactsApi.test.ts tests/serverMatchArtifactsApi.test.ts --reporter=dot`
-- `npx vitest run tests/experimentMatrix.test.ts --reporter=dot`
-- `npx vitest run tests/serverExperimentMatrixApi.test.ts --reporter=dot`
 - `npx tsc --noEmit --pretty false --noErrorTruncation`
 - `npm test -- --reporter=dot`
-- `npm run build`
-- `git diff --check`
-- `npm run arena:matrix -- --spec=experiments/matrix-smoke.json --outputDir=/tmp/werewolf-matrix-live-1783400656 --overwrite --json=summary --timeout=5m`
 
 Current observed results after `agent.scaffold-visible-social-observation-ingestion.v1`:
 
@@ -712,16 +647,4 @@ Current observed results after `agent.scaffold-visible-social-observation-ingest
 - Focused server public/tournament/match artifact API suite passed: 3 files /
   33 tests.
 - Typecheck passed.
-- Focused experiment matrix harness suite passed: `tests/experimentMatrix.test.ts`.
-- Focused server experiment matrix API suite passed:
-  `tests/serverExperimentMatrixApi.test.ts`.
-- Full deterministic Vitest suite passed: 25 files / 249 tests.
-- Production build passed. Vite reported a large chunk warning for the current
-  cockpit bundle, but did not fail the build.
-- Checked-in `experiments/matrix-smoke.json` live pilot completed through the
-  real OpenAI-compatible streaming path with `yourmodel-k2.7`: 1 cell requested, 1
-  completed, 0 failed; 1 game requested, 1 completed, 0 failed; 2 reasoner
-  outputs, 2 provider request ids, 2 completed stream telemetry records, both
-  completed by `provider_stop_event`. The game is intentionally truncated by
-  the two-transition budget and therefore does not produce completed win/loss
-  seat outcome rows.
+- Full deterministic Vitest suite passed: 23 files / 240 tests.

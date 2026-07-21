@@ -11,7 +11,7 @@ import type {
   ResponseUsage
 } from "openai/resources/responses/responses";
 import type { ModelClient, ModelCompletionRequest, ModelCompletionResult } from "./modelClient";
-import { ModelCallError, type ChatMessage, type ChatCompletionUsage, type ProviderStreamCompletionMode } from "./schema";
+import { ModelCallError, type ChatMessage, type ChatCompletionUsage, type ProviderStreamCompletionMode, looksLikeHtmlGatewayPayload } from "./schema";
 import { normalizeSdkBaseUrl } from "./providerUrls";
 
 export interface OpenAIResponsesClientOptions {
@@ -270,8 +270,13 @@ function openAISdkModelCallError(error: unknown, stage: string, timeoutMs: numbe
   }
   if (error instanceof APIError) {
     const status = typeof error.status === "number" ? error.status : undefined;
-    return new ModelCallError(`OpenAI Responses API HTTP ${status ?? "error"}: ${error.message.slice(0, 600)}`, {
-      failureKind: status === undefined ? "unknown" : "http",
+    const htmlGateway = looksLikeHtmlGatewayPayload(error.message) || looksLikeHtmlGatewayPayload(error.error);
+    const failureKind = status === undefined ? "unknown" : htmlGateway ? "gateway_html" : "http";
+    const message = htmlGateway
+      ? `OpenAI Responses API HTTP ${status ?? "error"}: gateway returned HTML (likely wrong endpoint path or gateway auth failure).`
+      : `OpenAI Responses API HTTP ${status ?? "error"}: ${error.message.slice(0, 600)}`;
+    return new ModelCallError(message, {
+      failureKind,
       providerStage: status === undefined ? stage : "http_response",
       status,
       retryable: status === undefined ? true : isRetryableHttpStatus(status),

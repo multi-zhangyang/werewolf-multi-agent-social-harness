@@ -1,7 +1,6 @@
 import type { AgentPendingAction } from "../core/pending";
 import type { GameCommand, PlayerView, Role } from "../core/types";
 import { updateBeliefs } from "./belief";
-import type { MultiAgentActor } from "./contracts";
 import { hashStableState } from "./hash";
 import { planAction } from "./policy";
 import type { SocialMessage, SocialSpeechAct } from "./social";
@@ -17,7 +16,7 @@ import {
   type EvidenceRef,
   type SocialStateMutationContext,
 } from "./socialState";
-import type { AgentHarnessState, HarnessPlayerView, PolicyPlan } from "./types";
+import type { AgentHarnessState, HarnessPlayerView, PolicyPlan, ReasonerActionProposal } from "./types";
 
 interface ObserveContext {
   traceId: string;
@@ -29,7 +28,7 @@ interface CommitContext extends ObserveContext {
   providerRequestId?: string;
 }
 
-export class WerewolfAgentActor implements MultiAgentActor {
+export class WerewolfAgentActor {
   private latestView?: PlayerView;
   private latestObserveContext?: ObserveContext;
   private readonly seenMessageIds = new Set<string>();
@@ -37,6 +36,7 @@ export class WerewolfAgentActor implements MultiAgentActor {
   constructor(public readonly state: AgentHarnessState) {
     this.ensureSocialState();
     this.hydrateSeenMessageIds();
+    this.updateSocialHash();
   }
 
   observe(view: PlayerView | HarnessPlayerView, context?: ObserveContext): void {
@@ -56,17 +56,6 @@ export class WerewolfAgentActor implements MultiAgentActor {
       throw new Error(`Agent ${this.state.playerId} cannot plan without first observing.`);
     }
     const plan = planAction(this.latestView, action, this.state);
-    setSocialLastPlan(
-      this.ensureSocialState(),
-      plan,
-      [observationEvidence(this.state.observations, this.latestObserveContext)],
-      socialMutationContext(this.latestView, this.latestObserveContext),
-      {
-        pendingActionKind: action.kind,
-        commandType: plan.command.type
-      }
-    );
-    this.updateSocialHash();
     return plan;
   }
 
@@ -74,12 +63,85 @@ export class WerewolfAgentActor implements MultiAgentActor {
     return plan.command;
   }
 
+  /**
+   * Merge an optional reasoner candidate without handing it environment
+   * authority. The policy still fixes the action kind; only a target/resource
+   * choice inside the pending legal set may be considered.
+   */
+  applyReasonerProposal(
+    plan: PolicyPlan,
+    pending: AgentPendingAction,
+    proposal: ReasonerActionProposal | undefined
+  ): PolicyPlan {
+    if (!proposal) return plan;
+    if (proposal.commandType && proposal.commandType !== plan.command.type) return plan;
+
+    const legalTargetIds = legalTargetIdsForPending(pending);
+    const next = cloneJson(plan);
+    const targetId = proposal.targetId;
+    if (targetId && !legalTargetIds.includes(targetId)) return plan;
+
+    if (pending.kind === "speech" && targetId) {
+      if (next.command.type !== "speech.submit") return plan;
+      next.command.pressureTargetId = targetId;
+      next.pressureTargetId = targetId;
+      next.targetId = targetId;
+    } else if (pending.kind === "witch") {
+      if (next.command.type !== "witch.act") return plan;
+      if (proposal.saveTargetId && (!pending.canSave || proposal.saveTargetId !== pending.nightVictimId)) return plan;
+      if (proposal.poisonTargetId && !pending.legalPoisonTargetIds.includes(proposal.poisonTargetId)) return plan;
+      next.command = {
+        type: "witch.act",
+        actorId: pending.actorId,
+        saveTargetId: proposal.saveTargetId,
+        poisonTargetId: proposal.poisonTargetId
+      };
+      next.targetId = proposal.saveTargetId ?? proposal.poisonTargetId;
+    } else if (pending.kind === "vote" && next.command.type === "vote.cast") {
+      if (!targetId && proposal.abstain === undefined && !next.command.abstain) return plan;
+      next.command = targetId
+        ? { type: "vote.cast", actorId: pending.actorId, targetId }
+        : { type: "vote.cast", actorId: pending.actorId, abstain: proposal.abstain ?? next.command.abstain };
+      next.targetId = targetId;
+    } else if (pending.kind === "shoot" && next.command.type === "hunter.shoot") {
+      next.command = { type: "hunter.shoot", actorId: pending.actorId, targetId };
+      next.targetId = targetId;
+    } else if (pending.kind === "inspect" && next.command.type === "seer.inspect" && targetId) {
+      next.command = { type: "seer.inspect", actorId: pending.actorId, targetId };
+      next.targetId = targetId;
+    } else if (pending.kind === "kill" && next.command.type === "werewolf.killVote" && targetId) {
+      next.command = { type: "werewolf.killVote", actorId: pending.actorId, targetId };
+      next.targetId = targetId;
+    } else {
+      return plan;
+    }
+
+    next.reasonerProposal = cloneJson(proposal);
+    next.strategyTags = uniqueStrings([...next.strategyTags, "reasoner-candidate"]);
+    if (proposal.confidence !== undefined) next.confidence = Math.max(0, Math.min(1, proposal.confidence));
+    if (proposal.rationale?.trim()) next.intent = `${next.intent}；候选理由：${proposal.rationale.trim()}`;
+    return next;
+  }
+
   commitTurn(plan: PolicyPlan, privateMemo: string, context?: CommitContext): void {
+    if (!this.latestView) {
+      throw new Error(`Agent ${this.state.playerId} cannot commit a turn without an observation.`);
+    }
     this.state.turns += 1;
     this.state.lastIntent = plan.intent;
     this.state.privateMemos.push(privateMemo);
     this.state.privateMemos = this.state.privateMemos.slice(-20);
     const social = this.ensureSocialState();
+    setSocialLastPlan(
+      social,
+      plan,
+      [observationEvidence(this.state.observations, this.latestObserveContext)],
+      socialMutationContext(this.latestView, this.latestObserveContext),
+      {
+        pendingActionKind: context?.pendingAction.kind,
+        commandType: plan.command.type
+      }
+    );
     appendSocialMemory(social, {
       kind: "memo",
       source: "reasoner",
@@ -123,6 +185,25 @@ export class WerewolfAgentActor implements MultiAgentActor {
       }
     }, mutationContextFromPending(context));
     this.updateSocialHash();
+  }
+
+  /**
+   * Compute the serializable post-commit state hash without mutating this
+   * actor. The harness uses this while assembling an action artifact; receipt
+   * delivery must not be able to rewrite that artifact after the environment
+   * has accepted the command.
+   */
+  previewCommittedStateHash(plan: PolicyPlan, privateMemo: string, context?: CommitContext): string {
+    if (!this.latestView) {
+      throw new Error(`Agent ${this.state.playerId} cannot preview a committed turn without an observation.`);
+    }
+    const preview = new WerewolfAgentActor(cloneJson(this.state));
+    preview.latestView = cloneJson(this.latestView);
+    preview.latestObserveContext = cloneJson(this.latestObserveContext);
+    preview.commitTurn(cloneJson(plan), privateMemo, cloneJson(context));
+    const hash = preview.state.socialStateHash;
+    if (!hash) throw new Error(`Agent ${this.state.playerId} did not produce a preview social state hash.`);
+    return hash;
   }
 
   private ensureSocialState(): NonNullable<AgentHarnessState["social"]> {
@@ -169,9 +250,9 @@ export class WerewolfAgentActor implements MultiAgentActor {
       seenMessageIds: this.seenMessageIds,
       context: socialMutationContext(view, context),
       additionalMessageTags: messageTags,
-      onMessageIngested: ({ message, evidence, context: mutationContext }) => {
+      onMessageIngested: ({ social: stagedSocial, message, evidence, context: mutationContext }) => {
         if (message.senderId !== this.state.playerId) {
-          recordSocialMessageBeliefs(social, message, evidence, this.state.playerId, mutationContext);
+          recordSocialMessageBeliefs(stagedSocial, message, evidence, this.state.playerId, mutationContext);
         }
       }
     });
@@ -221,6 +302,12 @@ export class WerewolfAgentActor implements MultiAgentActor {
   private hydrateSeenMessageIds(): void {
     hydrateSeenSocialMessageIds(this.ensureSocialState(), this.seenMessageIds);
   }
+}
+
+function legalTargetIdsForPending(action: AgentPendingAction): string[] {
+  if (action.kind === "witch") return action.legalPoisonTargetIds;
+  if (action.kind === "speech") return action.legalPressureTargetIds;
+  return action.legalTargetIds;
 }
 
 function observationEvidence(seq: number, context?: ObserveContext): EvidenceRef {

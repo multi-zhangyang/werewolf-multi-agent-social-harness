@@ -2,6 +2,14 @@ export type SocialChannelKind = "public" | "team" | "private" | "system";
 export type SocialResolvedSchedulerMode = "aec" | "aec-batched-decision" | "parallel";
 export type SocialSchedulerMode = SocialResolvedSchedulerMode | "simultaneous-batch";
 export type SocialEpisodeStatus = "completed" | "truncated" | "failed";
+export type SocialDecisionFailureStage =
+  | "pending_actor_resolution"
+  | "actor_lookup"
+  | "decision_identity"
+  | "environment_observe"
+  | "observation_assembly"
+  | "actor_observe"
+  | "actor_decide";
 
 export interface SocialAgentProfile {
   id: string;
@@ -92,7 +100,13 @@ export interface SocialObservation<TVisibleState = unknown, TPending = unknown> 
   channels: SocialChannel[];
 }
 
-export interface SocialObservationAssemblyContext<TState = unknown, TObservation = unknown, TPending = unknown> {
+/**
+ * Adapter-safe inputs for constructing an actor observation. The canonical
+ * domain state deliberately does not cross this boundary: only the
+ * environment's actor-scoped projection and the actor's visible social slice
+ * may be incorporated into an observation.
+ */
+export interface SocialObservationAssemblyContext<TObservation = unknown, TPending = unknown> {
   agentId: string;
   pendingAction: TPending;
   environmentObservation: TObservation;
@@ -100,11 +114,10 @@ export interface SocialObservationAssemblyContext<TState = unknown, TObservation
     channels: SocialChannel[];
     messages: SocialMessage[];
   };
-  state: TState;
 }
 
-export type SocialObservationAssembler<TState = unknown, TObservation = unknown, TPending = unknown> = (
-  context: SocialObservationAssemblyContext<TState, TObservation, TPending>
+export type SocialObservationAssembler<TObservation = unknown, TPending = unknown> = (
+  context: SocialObservationAssemblyContext<TObservation, TPending>
 ) => TObservation;
 
 export interface SocialAction<TCommand = unknown> {
@@ -118,6 +131,14 @@ export interface SocialAction<TCommand = unknown> {
 
 export interface SocialActorObservationContext<TPending = unknown> {
   traceId?: string;
+  /** Runner-owned key for staging and resolving one actor turn. It is kept
+   * distinct from action trace ids, which adapters may supply for evidence. */
+  transactionId?: string;
+  /**
+   * Set only by the harness runner. Actors must stage durable state while this
+   * is true and merge it only from a committed step receipt.
+   */
+  transactional?: true;
   turnIndex: number;
   actorTurnIndex?: number;
   batchId: string;
@@ -145,8 +166,7 @@ export type SocialSystemTransitionProvider<TState = unknown, TObservation = unkn
   context: SocialSystemTransitionContext<TState>
 ) => SocialSystemTransition<TObservation, TPending, TCommand> | undefined | null;
 
-export interface SocialBeforeEnvironmentStepContext<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown> {
-  environment: SocialEnvironment<TState, TObservation, TPending, TCommand>;
+export interface SocialEnvironmentStepContext<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown> {
   actor?: SocialActor<TObservation, TPending, TCommand>;
   actorId: string;
   profileId: string;
@@ -165,12 +185,19 @@ export interface SocialBeforeEnvironmentStepContext<TState = unknown, TObservati
   decisionStateHash?: string;
 }
 
-export type SocialBeforeEnvironmentStepHook<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown> = (
-  context: SocialBeforeEnvironmentStepContext<TState, TObservation, TPending, TCommand>
+export interface SocialAfterEnvironmentStepContext<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown>
+  extends SocialEnvironmentStepContext<TState, TObservation, TPending, TCommand> {
+  feedback: SocialStepFeedback<TState, TObservation>;
+  postStateHash?: string;
+  eventSeqRange?: [number, number];
+  messageSeqRange?: [number, number];
+}
+
+export type SocialAfterEnvironmentStepHook<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown> = (
+  context: SocialAfterEnvironmentStepContext<TState, TObservation, TPending, TCommand>
 ) => void;
 
 export interface SocialDecisionFailureContext<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown> {
-  environment: SocialEnvironment<TState, TObservation, TPending, TCommand>;
   actor?: SocialActor<TObservation, TPending, TCommand>;
   actorId: string;
   profileId: string;
@@ -186,15 +213,15 @@ export interface SocialDecisionFailureContext<TState = unknown, TObservation = u
   decisionState: TState;
   decisionStateHash?: string;
   preStateHash?: string;
+  failureStage: SocialDecisionFailureStage;
   error: unknown;
 }
 
 export type SocialDecisionFailureHook<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown> = (
   context: SocialDecisionFailureContext<TState, TObservation, TPending, TCommand>
-) => void;
+) => SocialStepFailureEvidence | void;
 
 export interface SocialEnvironmentStepFailureContext<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown> {
-  environment: SocialEnvironment<TState, TObservation, TPending, TCommand>;
   actor?: SocialActor<TObservation, TPending, TCommand>;
   actorId: string;
   profileId: string;
@@ -216,9 +243,65 @@ export interface SocialEnvironmentStepFailureContext<TState = unknown, TObservat
   error: unknown;
 }
 
+export type SocialStepCommitStatus = "committed" | "rejected";
+
+export interface SocialStepFailureEvidence {
+  stage: string;
+  message: string;
+  causeName?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Optional preflight result returned by an environment before the runner
+ * commits a command. Environments remain the authority for legality; the
+ * runner only records and enforces the result before calling `step()` or
+ * publishing social messages.
+ */
+export interface SocialActionValidationResult {
+  valid: boolean;
+  code?: string;
+  message?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export class SocialActionValidationError extends Error {
+  readonly result: SocialActionValidationResult;
+
+  constructor(result: SocialActionValidationResult) {
+    super(result.message ?? result.code ?? "Social action rejected by environment validation.");
+    this.name = "SocialActionValidationError";
+    this.result = cloneJson(result);
+  }
+}
+
+/** Raised when an allegedly pure preflight changes canonical environment state. */
+export class SocialPreflightMutationError extends Error {
+  constructor(
+    readonly beforeFingerprint: string,
+    readonly afterFingerprint: string
+  ) {
+    super("Environment validateAction() mutated canonical state; preflight must be pure.");
+    this.name = "SocialPreflightMutationError";
+  }
+}
+
+/**
+ * The runner owns the identity boundary between a scheduled actor and its
+ * action/message drafts. Domain environments still validate command payloads,
+ * but a scheduled actor must never be able to impersonate another actor in a
+ * generic harness episode.
+ */
+export class SocialActionOwnershipError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SocialActionOwnershipError";
+  }
+}
+
 export type SocialEnvironmentStepFailureHook<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown> = (
   context: SocialEnvironmentStepFailureContext<TState, TObservation, TPending, TCommand>
-) => void;
+) => SocialStepFailureEvidence | void;
 
 export interface SocialStepFeedback<TState = unknown, TObservation = unknown> {
   state: TState;
@@ -239,12 +322,29 @@ export interface SocialEnvironment<TState = unknown, TObservation = unknown, TPe
   snapshot(): TState;
   pendingActions(): TPending[];
   observe(agentId: string, pending: TPending): TObservation;
+  /**
+   * Validate a command against the supplied pending action without mutating
+   * environment state. The runner invokes this before message validation and
+   * before `step`/`stepBatch`; implementations may omit it when `step` already
+   * provides an equivalent pure legality boundary.
+   */
+  validateAction?(command: TCommand, pending: TPending): SocialActionValidationResult;
+  /**
+   * Apply one command atomically. If this method throws, `snapshot()` must
+   * remain observationally equal to its value before the call. The runner
+   * cannot roll back arbitrary domain state; a mutation followed by an error
+   * is recorded as a non-atomic environment failure and is not replayable.
+   */
   step(command: TCommand): SocialStepResult<TState, TObservation>;
   done(): boolean;
 }
 
 export interface SocialParallelEnvironment<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown>
   extends SocialEnvironment<TState, TObservation, TPending, TCommand> {
+  /**
+   * Apply the complete joint command set atomically under the same failure
+   * contract as `step()`.
+   */
   stepBatch(commandsByAgent: Record<string, TCommand>): SocialStepResult<TState, TObservation>;
 }
 
@@ -253,6 +353,28 @@ export interface SocialActor<TObservation = unknown, TPending = unknown, TComman
   readonly profile: SocialAgentProfile;
   observe(observation: TObservation, context?: SocialActorObservationContext<TPending>): void;
   decide(pending: TPending): Promise<SocialAction<TCommand>> | SocialAction<TCommand>;
+  onStepResult?(receipt: SocialActorStepReceipt<TObservation, TPending, TCommand>): void;
+}
+
+export interface SocialActorStepReceipt<TObservation = unknown, TPending = unknown, TCommand = unknown> {
+  id: string;
+  status: SocialStepCommitStatus;
+  traceId: string;
+  /** Matches the transactional observation context, not necessarily traceId. */
+  transactionId?: string;
+  turnIndex: number;
+  actorId: string;
+  pendingAction: TPending;
+  action?: SocialAction<TCommand>;
+  observation?: TObservation;
+  reward?: number;
+  terminated?: boolean;
+  truncated?: boolean;
+  info?: Record<string, unknown>;
+  postStateHash?: string;
+  eventSeqRange?: [number, number];
+  messageSeqRange?: [number, number];
+  failure?: SocialStepFailureEvidence;
 }
 
 export interface SocialTraceIdProviderContext<TState = unknown, TPending = unknown> {
@@ -303,6 +425,7 @@ export interface SocialHarnessStep<TObservation = unknown, TPending = unknown, T
   pendingAction: TPending;
   observation: TObservation;
   action: SocialAction<TCommand>;
+  commitStatus?: SocialStepCommitStatus;
   decisionStateHash?: string;
   preStateHash?: string;
   postStateHash?: string;
@@ -321,11 +444,21 @@ export interface SocialHarnessStep<TObservation = unknown, TPending = unknown, T
   terminationReason?: string;
   truncationReason?: string;
   error?: string;
+  failure?: SocialStepFailureEvidence;
 }
 
 export interface SocialEpisodeArtifact<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown> {
   id: string;
+  /** Domain adapter identifier; absent only on legacy artifacts. */
+  domainId?: string;
   status: SocialEpisodeStatus;
+  execution?: {
+    schemaVersion: "harness.social-execution.v1";
+    started: boolean;
+    notStartedStage?: string;
+    initialMessageCount: number;
+    initialMessagesHash?: string;
+  };
   schedulerMode: SocialResolvedSchedulerMode;
   profiles: SocialAgentProfile[];
   channels: SocialChannel[];
@@ -372,6 +505,79 @@ export interface SocialExposureSummary {
   sourceCount: number;
   observerCount: number;
   byVisibility: Record<SocialMessage["visibility"], number>;
+}
+
+export interface SocialStepCommitCounts {
+  nativeSteps: number;
+  committedSteps: number;
+  rejectedSteps: number;
+}
+
+/**
+ * Whether a native social step is committed for progress/replay filtering.
+ * Legacy steps without commitStatus treat absence of error as committed.
+ */
+export function isSocialStepCommitted(
+  step: Pick<SocialHarnessStep, "commitStatus" | "error">
+): boolean {
+  if (step.commitStatus === "committed") return true;
+  if (step.commitStatus === "rejected") return false;
+  // Missing/unknown commitStatus: absence of error is treated as committed.
+  return !step.error;
+}
+
+/**
+ * A non-atomic environment failure means a domain adapter mutated state and
+ * then threw before it could return a committed result. The record is useful
+ * failure evidence, but it cannot be deterministic replay authority.
+ */
+export function isSocialStepNonReplayableFailure(
+  step: Pick<SocialHarnessStep, "failure">
+): boolean {
+  return step.failure?.stage === "environment_non_atomic_failure";
+}
+
+/**
+ * Count native social-episode steps by commit status.
+ * Legacy steps without commitStatus treat absence of error as committed.
+ */
+export function countSocialStepCommits(
+  steps: ReadonlyArray<Pick<SocialHarnessStep, "commitStatus" | "error">>
+): SocialStepCommitCounts {
+  let committedSteps = 0;
+  let rejectedSteps = 0;
+  for (const step of steps) {
+    if (isSocialStepCommitted(step)) committedSteps += 1;
+    else rejectedSteps += 1;
+  }
+  return {
+    nativeSteps: steps.length,
+    committedSteps,
+    rejectedSteps
+  };
+}
+
+/**
+ * Count native social-episode steps by actor, excluding system transitions.
+ * Shared by agents.csv, match CLI agent summaries, and other actor-level density surfaces.
+ */
+export function countSocialStepCommitsByActor(
+  steps: ReadonlyArray<Pick<SocialHarnessStep, "actorId" | "commitStatus" | "error">>
+): Map<string, SocialStepCommitCounts> {
+  const byActor = new Map<string, SocialStepCommitCounts>();
+  for (const step of steps) {
+    if (step.actorId === "system") continue;
+    const current = byActor.get(step.actorId) ?? {
+      nativeSteps: 0,
+      committedSteps: 0,
+      rejectedSteps: 0
+    };
+    current.nativeSteps += 1;
+    if (isSocialStepCommitted(step)) current.committedSteps += 1;
+    else current.rejectedSteps += 1;
+    byActor.set(step.actorId, current);
+  }
+  return byActor;
 }
 
 export function deriveSocialExposureRecords<TState, TObservation, TPending, TCommand>(
@@ -489,6 +695,30 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
     stepsByTraceId.set(step.traceId, step);
     validateSeqRange(step.messageSeqRange, messagesBySeq, `steps[${index}].messageSeqRange`, errors);
 
+    if (step.action.actorId !== step.actorId) {
+      errors.push(
+        `steps[${index}].action.actorId ${step.action.actorId} does not match scheduled actor ${step.actorId}.`
+      );
+    }
+    for (const [messageIndex, message] of (step.action.messages ?? []).entries()) {
+      if (message.senderId !== step.actorId) {
+        errors.push(
+          `steps[${index}].action.messages[${messageIndex}].senderId ${message.senderId} does not match scheduled actor ${step.actorId}.`
+        );
+      }
+    }
+    if (isSocialStepNonReplayableFailure(step)) {
+      errors.push(`steps[${index}] records an environment_non_atomic_failure and cannot be replayed as a valid artifact.`);
+    }
+    if (
+      !isSocialStepCommitted(step) &&
+      step.preStateHash !== undefined &&
+      step.postStateHash !== undefined &&
+      step.preStateHash !== step.postStateHash
+    ) {
+      errors.push(`steps[${index}] rejected step changed domain state hash ${step.preStateHash} -> ${step.postStateHash}.`);
+    }
+
     if (step.messageSeqRange && isSeqRange(step.messageSeqRange)) {
       const [start, end] = step.messageSeqRange;
       for (let seq = start; seq <= end; seq += 1) {
@@ -535,7 +765,134 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
     }
   }
 
+  errors.push(...validateSocialParallelBatchLayout(episode.steps));
+
   return errors;
+}
+
+/**
+ * A true parallel transition is one atomic environment step over a complete
+ * joint command set. These structural checks prevent an artifact from being
+ * replayed as a truncated or mixed batch.
+ */
+export function validateSocialParallelBatchLayout<TObservation, TPending, TCommand>(
+  steps: ReadonlyArray<SocialHarnessStep<TObservation, TPending, TCommand>>
+): string[] {
+  const errors: string[] = [];
+  const stepsByBatchId = new Map<string, Array<{ index: number; step: SocialHarnessStep<TObservation, TPending, TCommand> }>>();
+  const parallelBatchIds = new Set<string>();
+
+  for (const [index, step] of steps.entries()) {
+    const batchId = step.batchId?.trim();
+    if (batchId) {
+      const entries = stepsByBatchId.get(batchId) ?? [];
+      entries.push({ index, step });
+      stepsByBatchId.set(batchId, entries);
+    }
+
+    if (step.schedulerMode !== "parallel") {
+      if (step.resolutionPolicy === "parallel-stepBatch") {
+        errors.push(`steps[${index}] uses parallel-stepBatch without the parallel scheduler.`);
+      }
+      continue;
+    }
+    if (isParallelSystemTransitionStep(step)) continue;
+
+    if (step.atomic !== true) {
+      errors.push(`steps[${index}] parallel step must be atomic.`);
+    }
+    if (step.resolutionPolicy !== "parallel-stepBatch") {
+      errors.push(`steps[${index}] parallel step must use resolutionPolicy parallel-stepBatch.`);
+    }
+    if (!batchId) {
+      errors.push(`steps[${index}] parallel batch is missing batchId.`);
+    } else {
+      parallelBatchIds.add(batchId);
+    }
+    if (!isPositiveInteger(step.batchIndex)) {
+      errors.push(`steps[${index}] parallel batch has invalid batchIndex ${String(step.batchIndex)}.`);
+    }
+    if (!isPositiveInteger(step.batchSize)) {
+      errors.push(`steps[${index}] parallel batch has invalid batchSize ${String(step.batchSize)}.`);
+    }
+  }
+
+  for (const batchId of parallelBatchIds) {
+    const batch = stepsByBatchId.get(batchId) ?? [];
+    const reference = batch.find(({ step }) => step.schedulerMode === "parallel" && !isParallelSystemTransitionStep(step));
+    if (!reference) continue;
+
+    const { step: first } = reference;
+    const expectedSize = first.batchSize;
+    const expectedBatchIndex = first.batchIndex;
+    for (let offset = 1; offset < batch.length; offset += 1) {
+      if (batch[offset].index !== batch[offset - 1].index + 1) {
+        errors.push(`parallel batch ${batchId} is not contiguous.`);
+        break;
+      }
+    }
+    if (isPositiveInteger(expectedSize) && batch.length !== expectedSize) {
+      errors.push(`parallel batch ${batchId} is incomplete: expected ${expectedSize} steps, found ${batch.length}.`);
+    }
+
+    const actorIds = new Set<string>();
+    const committed = isSocialStepCommitted(first);
+    for (const { index, step } of batch) {
+      if (!isSocialParallelJointStep(step)) {
+        errors.push(`steps[${index}] joins parallel batch ${batchId} without parallel atomic metadata.`);
+      }
+      if (step.batchSize !== expectedSize) {
+        errors.push(`steps[${index}] batchSize ${String(step.batchSize)} does not match parallel batch ${batchId} size ${String(expectedSize)}.`);
+      }
+      if (step.batchIndex !== expectedBatchIndex) {
+        errors.push(`steps[${index}] batchIndex ${String(step.batchIndex)} does not match parallel batch ${batchId}.`);
+      }
+      if (step.preStateHash !== first.preStateHash) {
+        errors.push(`steps[${index}] preStateHash does not match parallel batch ${batchId}.`);
+      }
+      if (step.decisionStateHash !== first.decisionStateHash) {
+        errors.push(`steps[${index}] decisionStateHash does not match parallel batch ${batchId}.`);
+      }
+      if (isSocialStepCommitted(step) !== committed) {
+        errors.push(`steps[${index}] commit status does not match parallel batch ${batchId}.`);
+      }
+      if (actorIds.has(step.actorId)) {
+        errors.push(`steps[${index}] duplicates actor ${step.actorId} in parallel batch ${batchId}.`);
+      }
+      actorIds.add(step.actorId);
+      if (committed && step.postStateHash !== first.postStateHash) {
+        errors.push(`steps[${index}] postStateHash does not match committed parallel batch ${batchId}.`);
+      }
+      if (committed && !sameOptionalRange(step.eventSeqRange, first.eventSeqRange)) {
+        errors.push(`steps[${index}] eventSeqRange does not match committed parallel batch ${batchId}.`);
+      }
+    }
+  }
+  return errors;
+}
+
+export function isSocialParallelJointStep(step: Pick<SocialHarnessStep, "schedulerMode" | "atomic" | "resolutionPolicy">): boolean {
+  return step.schedulerMode === "parallel" && step.atomic === true && step.resolutionPolicy === "parallel-stepBatch";
+}
+
+function isParallelSystemTransitionStep(
+  step: Pick<SocialHarnessStep, "actorId" | "schedulerMode" | "atomic" | "resolutionPolicy">
+): boolean {
+  return (
+    step.schedulerMode === "parallel" &&
+    step.actorId === "system" &&
+    step.atomic !== true &&
+    (step.resolutionPolicy === "system-transition" || step.resolutionPolicy === "scheduler-validation")
+  );
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function sameOptionalRange(left: [number, number] | undefined, right: [number, number] | undefined): boolean {
+  if (!left || !right) return left === right;
+  return left[0] === right[0] && left[1] === right[1];
 }
 
 export class SocialCommunicationBus {
@@ -565,13 +922,26 @@ export class SocialCommunicationBus {
   }
 
   publishMany(messages: Array<Omit<SocialMessage, "id" | "seq" | "createdAt">>): SocialMessage[] {
+    const records = this.prepareMessages(messages);
+    this.messages.push(...records);
+    return records.map(cloneJson);
+  }
+
+  validateMessages(messages: Array<Omit<SocialMessage, "id" | "seq" | "createdAt">>): void {
+    // Build the complete batch before the environment commits. This detects
+    // serialization/speech-act failures while publication is still side-effect
+    // free, and lets publishMany append the batch atomically.
+    this.prepareMessages(messages);
+  }
+
+  private prepareMessages(messages: Array<Omit<SocialMessage, "id" | "seq" | "createdAt">>): SocialMessage[] {
     for (const message of messages) this.validateMessage(message);
-    const records: SocialMessage[] = [];
-    for (const message of messages) {
-      const seq = (this.messages.at(-1)?.seq ?? 0) + 1;
+    const startingSeq = this.messages.at(-1)?.seq ?? 0;
+    return messages.map((message, index) => {
+      const seq = startingSeq + index + 1;
       const id = `msg-${seq}`;
       const draft = cloneJson(message);
-      const record: SocialMessage = {
+      return {
         ...draft,
         id,
         seq,
@@ -579,14 +949,7 @@ export class SocialCommunicationBus {
         deliveryReceipts: deliveryReceiptsForMessage(draft, this.channels.get(draft.channelId), id, seq),
         createdAt: deterministicMessageTimestamp(seq)
       };
-      this.messages.push(record);
-      records.push(cloneJson(record));
-    }
-    return records;
-  }
-
-  validateMessages(messages: Array<Omit<SocialMessage, "id" | "seq" | "createdAt">>): void {
-    for (const message of messages) this.validateMessage(message);
+    });
   }
 
   private restoreMessages(messages: SocialMessage[]): void {
@@ -640,8 +1003,9 @@ export class SocialCommunicationBus {
   }
 }
 
-export async function runSocialEpisode<TState, TObservation, TPending extends { actorId?: string }, TCommand>(options: {
+export interface SocialEpisodeOptions<TState, TObservation, TPending extends { actorId?: string }, TCommand> {
   id: string;
+  domainId?: string;
   environment: SocialEnvironment<TState, TObservation, TPending, TCommand>;
   actors: Array<SocialActor<TObservation, TPending, TCommand>>;
   channels?: SocialChannel[];
@@ -649,18 +1013,30 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
   schedulerMode?: SocialSchedulerMode;
   maxTransitions?: number;
   hashState?: (state: TState) => string;
+  hashMessages?: (messages: SocialMessage[]) => string;
   eventSeq?: (state: TState) => number;
-	  beforeEnvironmentStep?: SocialBeforeEnvironmentStepHook<TState, TObservation, TPending, TCommand>;
-  assembleObservation?: SocialObservationAssembler<TState, TObservation, TPending>;
+	  afterEnvironmentStep?: SocialAfterEnvironmentStepHook<TState, TObservation, TPending, TCommand>;
+  assembleObservation?: SocialObservationAssembler<TObservation, TPending>;
   systemTransition?: SocialSystemTransitionProvider<TState, TObservation, TPending, TCommand>;
   traceIdForDecision?: SocialTraceIdProvider<TState, TPending>;
 	  actorTurnIndexForDecision?: SocialActorTurnIndexProvider<TState, TPending>;
 	  schedulerModeForBatch?: SocialSchedulerResolver<TState, TPending>;
 	  onDecisionFailure?: SocialDecisionFailureHook<TState, TObservation, TPending, TCommand>;
 	  onEnvironmentStepFailure?: SocialEnvironmentStepFailureHook<TState, TObservation, TPending, TCommand>;
-		}): Promise<SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>> {
+}
+
+export async function runSocialEpisode<TState, TObservation, TPending extends { actorId?: string }, TCommand>(
+  options: SocialEpisodeOptions<TState, TObservation, TPending, TCommand>
+): Promise<SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>> {
   const defaultSchedulerMode = normalizeSchedulerMode(options.schedulerMode ?? "aec");
   const bus = new SocialCommunicationBus(options.channels ?? [], options.initialMessages ?? []);
+  const initialMessages = bus.listMessages();
+  const execution = {
+    schemaVersion: "harness.social-execution.v1" as const,
+    started: true,
+    initialMessageCount: initialMessages.length,
+    initialMessagesHash: options.hashMessages?.(initialMessages)
+  };
   const actorById = new Map(options.actors.map((actor) => [actor.id, actor]));
   const initialState = cloneJson(options.environment.snapshot());
   const steps: Array<SocialHarnessStep<TObservation, TPending, TCommand>> = [];
@@ -676,7 +1052,9 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     failureReason = "Parallel scheduler requires environment.stepBatch().";
     return {
       id: options.id,
+      domainId: options.domainId,
       status: "failed",
+      execution,
       schedulerMode: defaultSchedulerMode,
       profiles: options.actors.map((actor) => cloneJson(actor.profile)),
       channels: bus.listChannels(),
@@ -717,7 +1095,6 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
         schedulerMode,
         hashState: options.hashState,
         eventSeq: options.eventSeq,
-        beforeEnvironmentStep: options.beforeEnvironmentStep,
         systemTransition: options.systemTransition
       });
       if (!systemOutcome) break;
@@ -745,6 +1122,31 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     const decisionStateHash = options.hashState?.(decisionState);
     const batchId = `${options.id}:batch:${batchIndex}`;
 
+    const duplicateActorId = findDuplicatePendingActorId(pendingBatch);
+    if (duplicateActorId) {
+      const reason = `Scheduler batch ${batchId} contains multiple pending actions for actor ${duplicateActorId}.`;
+      const failure = defaultFailureEvidence("scheduler_validation", reason);
+      const stateHash = options.hashState?.(options.environment.snapshot());
+      steps.push(
+        schedulerFailureStep({
+          optionsId: options.id,
+          turnIndex,
+          batchId,
+          batchIndex,
+          batchSize: pendingBatch.length,
+          schedulerMode,
+          pendingAction: pendingBatch.find((pending) => pending.actorId === duplicateActorId) ?? pendingBatch[0],
+          decisionStateHash,
+          preStateHash: stateHash,
+          postStateHash: stateHash,
+          failure
+        })
+      );
+      status = "failed";
+      failureReason = reason;
+      break;
+    }
+
     const decisions = await Promise.all(
       pendingBatch.map((pending, pendingIndex) =>
 	        collectDecision({
@@ -771,11 +1173,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
       status = "failed";
       failureReason = failedDecision.error;
       const failedTurnIndex = failedDecision.turnIndex;
-      const failedPreState = options.environment.snapshot();
-      const failedPreStateHash = options.hashState?.(failedPreState);
-      const beforeFailureEventSeq = options.eventSeq?.(failedPreState);
-      options.onDecisionFailure?.({
-        environment: options.environment,
+      const adapterFailure = options.onDecisionFailure?.({
         actor: failedDecision.actor,
         actorId: failedDecision.actorId,
         profileId: failedDecision.actor?.profile.id ?? failedDecision.actorId,
@@ -790,24 +1188,58 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
         traceId: failedDecision.traceId,
         decisionState: cloneJson(decisionState),
         decisionStateHash,
-        preStateHash: failedPreStateHash,
+        preStateHash: decisionStateHash,
+        failureStage: failedDecision.failureStage,
         error: failedDecision.rawError
       });
       const failedPostState = options.environment.snapshot();
-      const afterFailureEventSeq = options.eventSeq?.(failedPostState);
-      steps.push(failedDecisionToStep({
-        optionsId: options.id,
-        turnIndex: failedTurnIndex,
-        batchId,
-        batchIndex,
-        batchSize: pendingBatch.length,
-        schedulerMode,
-        decisionStateHash,
-        preStateHash: failedPreStateHash,
-        postStateHash: options.hashState?.(failedPostState),
-        eventSeqRange: eventSeqRange(beforeFailureEventSeq, afterFailureEventSeq),
-        decision: failedDecision
-      }));
+      const failedPostStateHash = options.hashState?.(failedPostState);
+      const failedEventSeqRange = eventSeqRange(options.eventSeq?.(decisionState), options.eventSeq?.(failedPostState));
+      const decisionFailure = adapterFailure ?? defaultFailureEvidence(failedDecision.failureStage, failedDecision.rawError);
+      const failureForDecision = (decision: SocialDecision<TObservation, TPending, TCommand>): SocialStepFailureEvidence => {
+        if (!decision.ok) {
+          return decision === failedDecision
+            ? decisionFailure
+            : defaultFailureEvidence(decision.failureStage, decision.rawError);
+        }
+        return {
+          stage: "batch_aborted",
+          message: `Parallel batch ${batchId} was abandoned before stepBatch() because ${failedDecision.actorId} failed during ${failedDecision.failureStage}.`
+        };
+      };
+      rejectUncommittedDecisions(decisions, failureForDecision);
+      if (schedulerMode === "parallel") {
+        steps.push(
+          ...rejectedParallelDecisionBatchSteps({
+            optionsId: options.id,
+            decisions,
+            batchId,
+            batchIndex,
+            batchSize: pendingBatch.length,
+            decisionStateHash,
+            preStateHash: decisionStateHash,
+            postStateHash: failedPostStateHash,
+            eventSeqRange: failedEventSeqRange,
+            failureForDecision
+          })
+        );
+      } else {
+        steps.push(
+          ...rejectedSequentialDecisionBatchSteps({
+            optionsId: options.id,
+            decisions,
+            batchId,
+            batchIndex,
+            batchSize: pendingBatch.length,
+            schedulerMode,
+            decisionStateHash,
+            preStateHash: decisionStateHash,
+            postStateHash: failedPostStateHash,
+            eventSeqRange: failedEventSeqRange,
+            failureForDecision
+          })
+        );
+      }
       break;
     }
     const successfulDecisions = decisions.filter(isSuccessfulDecision);
@@ -816,6 +1248,26 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
       if (turnIndex + successfulDecisions.length - 1 > maxTransitions) {
         status = "truncated";
         truncationReason = `maxTransitions ${maxTransitions} reached before parallel batch could be applied`;
+        const truncationFailure: SocialStepFailureEvidence = {
+          stage: "scheduler_truncation",
+          message: truncationReason
+        };
+        rejectUncommittedDecisions(successfulDecisions, truncationFailure);
+        const truncationState = options.environment.snapshot();
+        steps.push(
+          ...rejectedParallelDecisionBatchSteps({
+            optionsId: options.id,
+            decisions: successfulDecisions,
+            batchId,
+            batchIndex,
+            batchSize: pendingBatch.length,
+            decisionStateHash,
+            preStateHash: decisionStateHash,
+            postStateHash: options.hashState?.(truncationState),
+            eventSeqRange: eventSeqRange(options.eventSeq?.(decisionState), options.eventSeq?.(truncationState)),
+            failureForDecision: () => truncationFailure
+          })
+        );
         break;
       }
       const outcome = applyParallelBatch({
@@ -831,7 +1283,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
 	        decisionStateHash,
 	        hashState: options.hashState,
 	        eventSeq: options.eventSeq,
-	        beforeEnvironmentStep: options.beforeEnvironmentStep,
+	        afterEnvironmentStep: options.afterEnvironmentStep,
 	        onEnvironmentStepFailure: options.onEnvironmentStepFailure
 	      });
       steps.push(...outcome.steps);
@@ -852,7 +1304,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
       }
       turnIndex += successfulDecisions.length;
     } else {
-      for (const decision of successfulDecisions) {
+      for (const [decisionIndex, decision] of successfulDecisions.entries()) {
         const outcome = applySequentialDecision({
           optionsId: options.id,
           environment: options.environment,
@@ -866,23 +1318,86 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
 	          decisionStateHash,
 	          hashState: options.hashState,
 	          eventSeq: options.eventSeq,
-	          beforeEnvironmentStep: options.beforeEnvironmentStep,
+	          afterEnvironmentStep: options.afterEnvironmentStep,
 	          onEnvironmentStepFailure: options.onEnvironmentStepFailure
 	        });
         steps.push(outcome.step);
         if (outcome.status === "failed") {
           status = "failed";
           failureReason = outcome.reason;
+          const remainingDecisions = successfulDecisions.slice(decisionIndex + 1);
+          const batchAbortFailure: SocialStepFailureEvidence = {
+            stage: "batch_aborted",
+            message: `Batch ${batchId} stopped before this proposal reached the environment: ${outcome.reason ?? "a prior transition failed"}.`
+          };
+          rejectUncommittedDecisions(remainingDecisions, batchAbortFailure);
+          const abortedStateHash = options.hashState?.(options.environment.snapshot());
+          steps.push(
+            ...rejectedSequentialDecisionBatchSteps({
+              optionsId: options.id,
+              decisions: remainingDecisions,
+              batchId,
+              batchIndex,
+              batchSize: pendingBatch.length,
+              schedulerMode,
+              decisionStateHash,
+              preStateHash: abortedStateHash,
+              postStateHash: abortedStateHash,
+              failureForDecision: () => batchAbortFailure
+            })
+          );
           break;
         }
         if (outcome.feedback.episodeTruncated) {
           status = "truncated";
           truncationReason = outcome.feedback.truncationReason;
+          const remainingDecisions = successfulDecisions.slice(decisionIndex + 1);
+          const batchAbortFailure: SocialStepFailureEvidence = {
+            stage: "batch_aborted",
+            message: truncationReason ?? `Batch ${batchId} stopped before this proposal reached the environment because the episode was truncated.`
+          };
+          rejectUncommittedDecisions(remainingDecisions, batchAbortFailure);
+          const abortedStateHash = options.hashState?.(options.environment.snapshot());
+          steps.push(
+            ...rejectedSequentialDecisionBatchSteps({
+              optionsId: options.id,
+              decisions: remainingDecisions,
+              batchId,
+              batchIndex,
+              batchSize: pendingBatch.length,
+              schedulerMode,
+              decisionStateHash,
+              preStateHash: abortedStateHash,
+              postStateHash: abortedStateHash,
+              failureForDecision: () => batchAbortFailure
+            })
+          );
           break;
         }
         if (outcome.feedback.episodeTerminated) {
           status = "completed";
           terminationReason = outcome.feedback.terminationReason;
+          const remainingDecisions = successfulDecisions.slice(decisionIndex + 1);
+          const batchAbortFailure: SocialStepFailureEvidence = {
+            stage: "batch_aborted",
+            message: terminationReason ?? `Batch ${batchId} stopped before this proposal reached the environment because the episode terminated.`
+          };
+          rejectUncommittedDecisions(remainingDecisions, batchAbortFailure);
+          const abortedStateHash = options.hashState?.(options.environment.snapshot());
+          steps.push(
+            ...rejectedSequentialDecisionBatchSteps({
+              optionsId: options.id,
+              decisions: remainingDecisions,
+              batchId,
+              batchIndex,
+              batchSize: pendingBatch.length,
+              schedulerMode,
+              decisionStateHash,
+              preStateHash: abortedStateHash,
+              postStateHash: abortedStateHash,
+              failureForDecision: () => batchAbortFailure
+            })
+          );
           break;
         }
         turnIndex += 1;
@@ -899,7 +1414,9 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
   }
   return {
     id: options.id,
+    domainId: options.domainId,
     status,
+    execution,
     schedulerMode: defaultSchedulerMode,
     profiles: options.actors.map((actor) => cloneJson(actor.profile)),
     channels: bus.listChannels(),
@@ -924,6 +1441,7 @@ type SocialDecision<TObservation, TPending, TCommand> =
       action: SocialAction<TCommand>;
       pendingIndex: number;
       turnIndex: number;
+      transactionId: string;
     }
   | {
       ok: false;
@@ -934,7 +1452,9 @@ type SocialDecision<TObservation, TPending, TCommand> =
       pendingIndex: number;
       turnIndex: number;
       traceId?: string;
+      transactionId?: string;
       actorTurnIndex?: number;
+      failureStage: SocialDecisionFailureStage;
       error: string;
       rawError: unknown;
     };
@@ -943,6 +1463,36 @@ function isSuccessfulDecision<TObservation, TPending, TCommand>(
   decision: SocialDecision<TObservation, TPending, TCommand>
 ): decision is Extract<SocialDecision<TObservation, TPending, TCommand>, { ok: true }> {
   return decision.ok;
+}
+
+/**
+ * A batch can be abandoned after actors have observed and reasoned but before
+ * their commands reach the environment. Tell each affected actor explicitly
+ * so staged private/social state is discarded rather than becoming a hidden
+ * side effect of an uncommitted proposal.
+ */
+function rejectUncommittedDecisions<TObservation, TPending, TCommand>(
+  decisions: readonly SocialDecision<TObservation, TPending, TCommand>[],
+  failure: SocialStepFailureEvidence | ((decision: SocialDecision<TObservation, TPending, TCommand>) => SocialStepFailureEvidence)
+): void {
+  for (const decision of decisions) {
+    if (!decision.actor) continue;
+    const resolvedFailure = typeof failure === "function" ? failure(decision) : failure;
+    const traceId = decision.ok
+      ? decision.action.traceId ?? `social:${decision.turnIndex}:${decision.actorId}`
+      : decision.traceId ?? `social:${decision.turnIndex}:${decision.actorId}`;
+    deliverActorStepReceipt(decision.actor, {
+      id: `${traceId}:rejected`,
+      status: "rejected",
+      traceId,
+      transactionId: decision.transactionId,
+      turnIndex: decision.turnIndex,
+      actorId: decision.actorId,
+      pendingAction: cloneJson(decision.pending),
+      action: decision.ok ? cloneJson(decision.action) : undefined,
+      failure: cloneJson(resolvedFailure)
+    });
+  }
 }
 
 async function collectDecision<TState, TObservation, TPending extends { actorId?: string }, TCommand>(input: {
@@ -957,7 +1507,7 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
   batchIndex: number;
   batchSize: number;
   schedulerMode: SocialResolvedSchedulerMode;
-  assembleObservation?: SocialObservationAssembler<TState, TObservation, TPending>;
+  assembleObservation?: SocialObservationAssembler<TObservation, TPending>;
   traceIdForDecision?: SocialTraceIdProvider<TState, TPending>;
   actorTurnIndexForDecision?: SocialActorTurnIndexProvider<TState, TPending>;
 }): Promise<SocialDecision<TObservation, TPending, TCommand>> {
@@ -970,6 +1520,7 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       pending: input.pending,
       pendingIndex: input.pendingIndex,
       turnIndex: input.turnIndex,
+      failureStage: "pending_actor_resolution",
       error: error.message,
       rawError: error
     };
@@ -983,13 +1534,16 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       pending: input.pending,
       pendingIndex: input.pendingIndex,
       turnIndex: input.turnIndex,
+      failureStage: "actor_lookup",
       error: error.message,
       rawError: error
     };
   }
+  const transactionId = `${input.batchId}:transaction:${input.pendingIndex}:${input.turnIndex}:${actorId}`;
   let observation: TObservation | undefined;
   let traceId: string | undefined;
   let actorTurnIndex: number | undefined;
+  let failureStage: SocialDecisionFailureStage = "decision_identity";
   try {
     const stateBeforeObserve = input.environment.snapshot();
     const decisionIdentityContext: SocialTraceIdProviderContext<TState, TPending> = {
@@ -1007,21 +1561,24 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
     traceId = input.traceIdForDecision?.({
       ...decisionIdentityContext,
       actorTurnIndex
-    });
+    }) ?? `${input.optionsId}:social:${input.turnIndex}:${actorId}`;
+    failureStage = "environment_observe";
     const environmentObservation = input.environment.observe(actorId, input.pending);
-    const state = input.environment.snapshot();
     const visibleSocial = input.bus.observe(actorId);
+    failureStage = "observation_assembly";
     observation = input.assembleObservation
       ? input.assembleObservation({
           agentId: actorId,
           pendingAction: cloneJson(input.pending),
           environmentObservation,
-          visibleSocial,
-          state: cloneJson(state)
+          visibleSocial
         })
       : environmentObservation;
+    failureStage = "actor_observe";
     actor.observe(observation, {
       traceId,
+      transactionId,
+      transactional: true,
       turnIndex: input.turnIndex,
       actorTurnIndex,
       batchId: input.batchId,
@@ -1030,8 +1587,20 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       schedulerMode: input.schedulerMode,
       pendingAction: cloneJson(input.pending)
     });
+    failureStage = "actor_decide";
     const action = await actor.decide(input.pending);
-    return { ok: true, actor, actorId, pending: input.pending, observation, action, pendingIndex: input.pendingIndex, turnIndex: input.turnIndex };
+    const actionWithTraceId = action.traceId ? action : { ...action, traceId };
+    return {
+      ok: true,
+      actor,
+      actorId,
+      pending: input.pending,
+      observation,
+      action: actionWithTraceId,
+      pendingIndex: input.pendingIndex,
+      turnIndex: input.turnIndex,
+      transactionId
+    };
   } catch (error) {
     return {
       ok: false,
@@ -1042,7 +1611,9 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       pendingIndex: input.pendingIndex,
       turnIndex: input.turnIndex,
       traceId,
+      transactionId,
       actorTurnIndex,
+      failureStage,
       error: error instanceof Error ? error.message : String(error),
       rawError: error
     };
@@ -1058,7 +1629,6 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
   schedulerMode: SocialResolvedSchedulerMode;
   hashState?: (state: TState) => string;
   eventSeq?: (state: TState) => number;
-  beforeEnvironmentStep?: SocialBeforeEnvironmentStepHook<TState, TObservation, TPending, TCommand>;
   systemTransition?: SocialSystemTransitionProvider<TState, TObservation, TPending, TCommand>;
 }):
   | {
@@ -1099,9 +1669,11 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
         pendingAction: undefined as unknown as TPending,
         observation: undefined as unknown as TObservation,
         action: { actorId, kind: "system.error", command: undefined as TCommand },
+        commitStatus: "rejected",
         decisionStateHash: input.hashState?.(preState),
         preStateHash: input.hashState?.(preState),
-        error: reason
+        error: reason,
+        failure: defaultFailureEvidence("system_transition_resolution", error)
       }
     };
   }
@@ -1130,27 +1702,17 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
     decisionStateHash: preStateHash,
     preStateHash
   } satisfies SocialHarnessStep<TObservation, TPending, TCommand>;
+  let environmentStepStarted = false;
+  let environmentCommitted = false;
+  let feedback: SocialStepFeedback<TState, TObservation> | undefined;
   try {
+    assertSocialActionOwnership(transition.action, actorId);
+    assertSocialActionValid(input.environment, transition.action.command, transition.pendingAction);
     input.bus.validateMessages(messages);
-    input.beforeEnvironmentStep?.({
-      environment: input.environment,
-      actorId,
-      profileId,
-      turnIndex: input.turnIndex,
-      batchId,
-      batchIndex: 1,
-      batchSize: 1,
-      schedulerMode: input.schedulerMode,
-      atomic: false,
-      resolutionPolicy: "system-transition",
-      pendingAction: cloneJson(transition.pendingAction),
-      observation: cloneJson(transition.observation),
-      action: cloneJson(transition.action),
-      preState: cloneJson(preState),
-      preStateHash,
-      decisionStateHash: preStateHash
-    });
-    const feedback = normalizeStepFeedback(input.environment.step(transition.action.command), input.environment);
+    environmentStepStarted = true;
+    const result = input.environment.step(transition.action.command);
+    environmentCommitted = true;
+    feedback = normalizeStepFeedback(result, input.environment);
     input.bus.publishMany(messages);
     const afterEventSeq = input.eventSeq?.(feedback.state);
     const afterSeq = input.bus.listMessages().at(-1)?.seq ?? beforeSeq;
@@ -1159,6 +1721,7 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
       feedback,
       step: {
         ...base,
+        commitStatus: "committed",
         postStateHash: input.hashState?.(feedback.state),
         eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
         messageSeqRange: afterSeq > beforeSeq ? [beforeSeq + 1, afterSeq] : undefined,
@@ -1168,16 +1731,47 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     const failureState = input.environment.snapshot();
-    const feedback = emptyStepFeedback(failureState, input.environment);
+    const failureStateHash = input.hashState?.(failureState);
     const afterEventSeq = input.eventSeq?.(failureState);
+    const afterSeq = input.bus.listMessages().at(-1)?.seq ?? beforeSeq;
+    if (environmentCommitted) {
+      const committedFeedback = feedback ?? emptyStepFeedback(failureState, input.environment);
+      const failure = defaultFailureEvidence("post_commit_failure", error);
+      return {
+        status: "failed",
+        reason: failure.message,
+        feedback: committedFeedback,
+        step: {
+          ...base,
+          commitStatus: "committed",
+          postStateHash: failureStateHash,
+          eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
+          messageSeqRange: afterSeq > beforeSeq ? [beforeSeq + 1, afterSeq] : undefined,
+          error: failure.message,
+          failure,
+          ...feedbackFields(committedFeedback)
+        }
+      };
+    }
+    const rejectedFeedback = emptyStepFeedback(failureState, input.environment);
+    const failure = environmentFailureEvidence({
+      error,
+      fallbackStage: failureStageForError(error, "system_environment_step"),
+      environmentStepStarted,
+      preStateHash,
+      failureStateHash
+    });
     return {
       status: "failed",
       reason,
-      feedback,
+      feedback: rejectedFeedback,
       step: {
         ...base,
+        commitStatus: "rejected",
+        postStateHash: failureStateHash,
         eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
-        error: reason
+        error: reason,
+        failure
       }
     };
   }
@@ -1196,7 +1790,7 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
 	  decisionStateHash?: string;
 	  hashState?: (state: TState) => string;
 	  eventSeq?: (state: TState) => number;
-	  beforeEnvironmentStep?: SocialBeforeEnvironmentStepHook<TState, TObservation, TPending, TCommand>;
+	  afterEnvironmentStep?: SocialAfterEnvironmentStepHook<TState, TObservation, TPending, TCommand>;
 	  onEnvironmentStepFailure?: SocialEnvironmentStepFailureHook<TState, TObservation, TPending, TCommand>;
 	}): {
   status: "ok" | "failed";
@@ -1208,12 +1802,46 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
   const beforeEventSeq = input.eventSeq?.(preState);
   const beforeSeq = input.bus.listMessages().at(-1)?.seq ?? 0;
   const messages = input.decision.action.messages ?? [];
+  const stepBase = baseStep(input);
+  const preStateHash = input.hashState?.(preState);
+  let environmentStepStarted = false;
+  let environmentCommitted = false;
+  let feedback: SocialStepFeedback<TState, TObservation> | undefined;
+  let actorReceiptDelivered = false;
   try {
+    assertSocialActionOwnership(input.decision.action, input.decision.actorId);
+    assertSocialActionValid(input.environment, input.decision.action.command, input.decision.pending);
     input.bus.validateMessages(messages);
-    const stepBase = baseStep(input);
-    const preStateHash = input.hashState?.(preState);
-    input.beforeEnvironmentStep?.({
-      environment: input.environment,
+    environmentStepStarted = true;
+    const result = input.environment.step(input.decision.action.command);
+    environmentCommitted = true;
+    feedback = normalizeStepFeedback(result, input.environment);
+    input.bus.publishMany(messages);
+    const afterEventSeq = input.eventSeq?.(feedback.state);
+    const afterSeq = input.bus.listMessages().at(-1)?.seq ?? beforeSeq;
+    const postStateHash = input.hashState?.(feedback.state);
+    const committedEventSeqRange = eventSeqRange(beforeEventSeq, afterEventSeq);
+    const committedMessageSeqRange = afterSeq > beforeSeq ? ([beforeSeq + 1, afterSeq] as [number, number]) : undefined;
+    const actorFeedbackFailure = deliverActorStepReceipt(input.decision.actor, {
+      id: `${stepBase.traceId}:committed`,
+      status: "committed",
+      traceId: stepBase.traceId,
+      transactionId: input.decision.transactionId,
+      turnIndex: stepBase.turnIndex,
+      actorId: stepBase.actorId,
+      pendingAction: cloneJson(input.decision.pending),
+      action: input.decision.action,
+      observation: cloneJson(feedback.observationsByAgent[stepBase.actorId]),
+      reward: feedback.rewardsByAgent[stepBase.actorId],
+      terminated: feedback.terminationsByAgent[stepBase.actorId],
+      truncated: feedback.truncationsByAgent[stepBase.actorId],
+      info: cloneJson(feedback.infosByAgent[stepBase.actorId]),
+      postStateHash,
+      eventSeqRange: committedEventSeqRange,
+      messageSeqRange: committedMessageSeqRange
+    });
+    actorReceiptDelivered = true;
+    const afterEnvironmentFailure = invokeAfterEnvironmentStep(input.afterEnvironmentStep, {
       actor: input.decision.actor,
       actorId: stepBase.actorId,
       profileId: stepBase.profileId,
@@ -1229,33 +1857,88 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
       action: cloneJson(input.decision.action),
       preState: cloneJson(preState),
       preStateHash,
-      decisionStateHash: input.decisionStateHash
+      decisionStateHash: input.decisionStateHash,
+      feedback: cloneJson(feedback),
+      postStateHash,
+      eventSeqRange: committedEventSeqRange,
+      messageSeqRange: committedMessageSeqRange
     });
-    const feedback = normalizeStepFeedback(input.environment.step(input.decision.action.command), input.environment);
-    input.bus.publishMany(messages);
-    const afterEventSeq = input.eventSeq?.(feedback.state);
-    const afterSeq = input.bus.listMessages().at(-1)?.seq ?? beforeSeq;
+    const postCommitFailure = combineStepFailureEvidence(actorFeedbackFailure, afterEnvironmentFailure);
     return {
-      status: "ok",
+      status: postCommitFailure ? "failed" : "ok",
+      reason: postCommitFailure?.message,
       feedback,
       step: {
         ...stepBase,
         action: cloneJson(input.decision.action),
+        commitStatus: "committed",
         preStateHash,
-        postStateHash: input.hashState?.(feedback.state),
-        eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
-        messageSeqRange: afterSeq > beforeSeq ? [beforeSeq + 1, afterSeq] : undefined,
+        postStateHash,
+        eventSeqRange: committedEventSeqRange,
+        messageSeqRange: committedMessageSeqRange,
+        error: postCommitFailure?.message,
+        failure: postCommitFailure,
         ...feedbackFields(feedback)
       }
     };
-	  } catch (error) {
-	    const reason = error instanceof Error ? error.message : String(error);
-	    const stepBase = baseStep(input);
-	    const preStateHash = input.hashState?.(preState);
-	    const failureStateBeforeHook = input.environment.snapshot();
-	    input.onEnvironmentStepFailure?.({
-	      environment: input.environment,
-	      actor: input.decision.actor,
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const failureState = input.environment.snapshot();
+    const failureStateHash = input.hashState?.(failureState);
+    const afterEventSeq = input.eventSeq?.(failureState);
+    const afterSeq = input.bus.listMessages().at(-1)?.seq ?? beforeSeq;
+
+    // An environment return is the commit boundary. Errors from feedback
+    // normalization, bus publication, or post-step observers must not rewrite
+    // a committed domain transition as a rejected proposal.
+    if (environmentCommitted) {
+      const committedFeedback = feedback ?? emptyStepFeedback(failureState, input.environment);
+      const committedEventSeqRange = eventSeqRange(beforeEventSeq, afterEventSeq);
+      const committedMessageSeqRange = afterSeq > beforeSeq ? ([beforeSeq + 1, afterSeq] as [number, number]) : undefined;
+      const postCommitFailure = defaultFailureEvidence("post_commit_failure", error);
+      const receiptFailure = actorReceiptDelivered
+        ? undefined
+        : deliverActorStepReceipt(input.decision.actor, {
+            id: `${stepBase.traceId}:committed`,
+            status: "committed",
+            traceId: stepBase.traceId,
+            transactionId: input.decision.transactionId,
+            turnIndex: stepBase.turnIndex,
+            actorId: stepBase.actorId,
+            pendingAction: cloneJson(input.decision.pending),
+            action: input.decision.action,
+            observation: cloneJson(committedFeedback.observationsByAgent[stepBase.actorId]),
+            reward: committedFeedback.rewardsByAgent[stepBase.actorId],
+            terminated: committedFeedback.terminationsByAgent[stepBase.actorId],
+            truncated: committedFeedback.truncationsByAgent[stepBase.actorId],
+            info: cloneJson(committedFeedback.infosByAgent[stepBase.actorId]),
+            postStateHash: failureStateHash,
+            eventSeqRange: committedEventSeqRange,
+            messageSeqRange: committedMessageSeqRange
+          });
+      const failure = combineStepFailureEvidence(postCommitFailure, receiptFailure) ?? postCommitFailure;
+      return {
+        status: "failed",
+        reason: failure.message,
+        feedback: committedFeedback,
+        step: {
+          ...stepBase,
+          action: cloneJson(input.decision.action),
+          commitStatus: "committed",
+          preStateHash,
+          postStateHash: failureStateHash,
+          eventSeqRange: committedEventSeqRange,
+          messageSeqRange: committedMessageSeqRange,
+          error: failure.message,
+          failure,
+          ...feedbackFields(committedFeedback)
+        }
+      };
+    }
+
+    const failureStateBeforeHook = failureState;
+    const adapterFailure = input.onEnvironmentStepFailure?.({
+      actor: input.decision.actor,
 	      actorId: stepBase.actorId,
 	      profileId: stepBase.profileId,
 	      turnIndex: stepBase.turnIndex,
@@ -1265,30 +1948,52 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
 	      schedulerMode: stepBase.schedulerMode,
 	      atomic: false,
 	      resolutionPolicy: stepBase.resolutionPolicy ?? "sequential-apply",
-	      pendingAction: cloneJson(input.decision.pending),
-	      observation: cloneJson(input.decision.observation),
-	      action: cloneJson(input.decision.action),
-	      preState: cloneJson(preState),
-	      preStateHash,
-	      decisionStateHash: input.decisionStateHash,
-	      failureState: cloneJson(failureStateBeforeHook),
-	      failureStateHash: input.hashState?.(failureStateBeforeHook),
-	      error
-	    });
-	    const failureState = input.environment.snapshot();
-	    const feedback = emptyStepFeedback(failureState, input.environment);
-	    const afterEventSeq = input.eventSeq?.(failureState);
-	    return {
+      pendingAction: cloneJson(input.decision.pending),
+      observation: cloneJson(input.decision.observation),
+      action: cloneJson(input.decision.action),
+      preState: cloneJson(preState),
+      preStateHash,
+      decisionStateHash: input.decisionStateHash,
+      failureState: cloneJson(failureStateBeforeHook),
+      failureStateHash,
+      error
+    }) ?? undefined;
+    const rejectedFeedback = emptyStepFeedback(failureState, input.environment);
+    const failure = environmentFailureEvidence({
+      error,
+      fallbackStage: failureStageForError(error, "environment_step"),
+      adapterFailure,
+      environmentStepStarted,
+      preStateHash,
+      failureStateHash
+    });
+    const rejectedEventSeqRange = eventSeqRange(beforeEventSeq, afterEventSeq);
+    const receiptFailure = deliverActorStepReceipt(input.decision.actor, {
+	      id: `${stepBase.traceId}:rejected`,
+	      status: "rejected",
+	      traceId: stepBase.traceId,
+      transactionId: input.decision.transactionId,
+	      turnIndex: stepBase.turnIndex,
+	      actorId: stepBase.actorId,
+      pendingAction: cloneJson(input.decision.pending),
+      action: input.decision.action,
+      postStateHash: failureStateHash,
+      eventSeqRange: rejectedEventSeqRange,
+      failure
+    });
+    return {
       status: "failed",
       reason,
-	      feedback,
-	      step: {
-	        ...stepBase,
-	        action: cloneJson(input.decision.action),
-	        preStateHash,
-	        postStateHash: input.hashState?.(failureState),
-	        eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
-	        error: reason
+      feedback: rejectedFeedback,
+      step: {
+        ...stepBase,
+        action: cloneJson(input.decision.action),
+        commitStatus: "rejected",
+        preStateHash,
+        postStateHash: failureStateHash,
+        eventSeqRange: rejectedEventSeqRange,
+        error: reason,
+        failure: receiptFailure ?? failure
 	      }
     };
   }
@@ -1307,7 +2012,7 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
 	  decisionStateHash?: string;
 	  hashState?: (state: TState) => string;
 	  eventSeq?: (state: TState) => number;
-	  beforeEnvironmentStep?: SocialBeforeEnvironmentStepHook<TState, TObservation, TPending, TCommand>;
+	  afterEnvironmentStep?: SocialAfterEnvironmentStepHook<TState, TObservation, TPending, TCommand>;
 	  onEnvironmentStepFailure?: SocialEnvironmentStepFailureHook<TState, TObservation, TPending, TCommand>;
 	}): {
   status: "ok" | "failed";
@@ -1319,13 +2024,77 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
   const beforeEventSeq = input.eventSeq?.(preState);
   const beforeSeq = input.bus.listMessages().at(-1)?.seq ?? 0;
   const messages = input.decisions.flatMap((decision) => decision.action.messages ?? []);
+  const preStateHash = input.hashState?.(preState);
+  const messageSeqRangeByActor = new Map<string, [number, number] | undefined>();
+  const receiptDeliveredByActor = new Set<string>();
+  let environmentStepStarted = false;
+  let environmentCommitted = false;
+  let feedback: SocialStepFeedback<TState, TObservation> | undefined;
   try {
+    for (const decision of input.decisions) {
+      assertSocialActionOwnership(decision.action, decision.actorId);
+      assertSocialActionValid(input.environment, decision.action.command, decision.pending);
+    }
+    assertParallelActorIdsUnique(input.decisions);
     input.bus.validateMessages(messages);
-    const preStateHash = input.hashState?.(preState);
-    input.decisions.forEach((decision, index) => {
+    const commandsByAgent = Object.fromEntries(input.decisions.map((decision) => [decision.actorId, decision.action.command]));
+    environmentStepStarted = true;
+    const result = input.environment.stepBatch(commandsByAgent);
+    environmentCommitted = true;
+    feedback = normalizeStepFeedback(result, input.environment);
+    // Publish in decision order and retain per-actor seq ranges so integrity can
+    // attribute message metadata.traceId to the owning step in a joint batch.
+    for (const decision of input.decisions) {
+      const actorMessages = decision.action.messages ?? [];
+      if (!actorMessages.length) {
+        messageSeqRangeByActor.set(decision.actorId, undefined);
+        continue;
+      }
+      const published = input.bus.publishMany(actorMessages);
+      const firstSeq = published[0]?.seq;
+      const lastSeq = published.at(-1)?.seq;
+      messageSeqRangeByActor.set(
+        decision.actorId,
+        firstSeq !== undefined && lastSeq !== undefined ? [firstSeq, lastSeq] : undefined
+      );
+    }
+    const afterEventSeq = input.eventSeq?.(feedback.state);
+    const postStateHash = input.hashState?.(feedback.state);
+    const committedEventSeqRange = eventSeqRange(beforeEventSeq, afterEventSeq);
+    const receiptFailures = new Map<string, SocialStepFailureEvidence>();
+    for (const [index, decision] of input.decisions.entries()) {
       const stepBase = baseStep({ ...input, decision, turnIndex: input.turnIndex + index });
-      input.beforeEnvironmentStep?.({
-        environment: input.environment,
+      const committedMessageSeqRange = messageSeqRangeByActor.get(decision.actorId);
+      const failure = deliverActorStepReceipt(decision.actor, {
+        id: `${stepBase.traceId}:committed`,
+        status: "committed",
+        traceId: stepBase.traceId,
+        transactionId: decision.transactionId,
+        turnIndex: stepBase.turnIndex,
+        actorId: stepBase.actorId,
+        pendingAction: cloneJson(decision.pending),
+        action: decision.action,
+        observation: cloneJson(feedback.observationsByAgent[stepBase.actorId]),
+        reward: feedback.rewardsByAgent[stepBase.actorId],
+        terminated: feedback.terminationsByAgent[stepBase.actorId],
+        truncated: feedback.truncationsByAgent[stepBase.actorId],
+        info: cloneJson(feedback.infosByAgent[stepBase.actorId]),
+        postStateHash,
+        eventSeqRange: committedEventSeqRange,
+        messageSeqRange: committedMessageSeqRange
+      });
+      receiptDeliveredByActor.add(stepBase.actorId);
+      if (failure) receiptFailures.set(stepBase.actorId, failure);
+    }
+
+    // Agent-private state is part of the committed joint outcome. Run snapshot
+    // hooks only after every actor has processed its receipt, so all records
+    // taken for this batch describe the same post-commit agent state.
+    const actorFeedbackFailures = new Map<string, SocialStepFailureEvidence>();
+    for (const [index, decision] of input.decisions.entries()) {
+      const stepBase = baseStep({ ...input, decision, turnIndex: input.turnIndex + index });
+      const committedMessageSeqRange = messageSeqRangeByActor.get(decision.actorId);
+      const afterEnvironmentFailure = invokeAfterEnvironmentStep(input.afterEnvironmentStep, {
         actor: decision.actor,
         actorId: stepBase.actorId,
         profileId: stepBase.profileId,
@@ -1341,37 +2110,104 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
         action: cloneJson(decision.action),
         preState: cloneJson(preState),
         preStateHash,
-        decisionStateHash: input.decisionStateHash
+        decisionStateHash: input.decisionStateHash,
+        feedback: cloneJson(feedback),
+        postStateHash,
+        eventSeqRange: committedEventSeqRange,
+        messageSeqRange: committedMessageSeqRange
       });
-    });
-    const commandsByAgent = Object.fromEntries(input.decisions.map((decision) => [decision.actorId, decision.action.command]));
-    const feedback = normalizeStepFeedback(input.environment.stepBatch(commandsByAgent), input.environment);
-    input.bus.publishMany(messages);
-    const afterEventSeq = input.eventSeq?.(feedback.state);
-    const afterSeq = input.bus.listMessages().at(-1)?.seq ?? beforeSeq;
+      const postCommitFailure = combineStepFailureEvidence(receiptFailures.get(stepBase.actorId), afterEnvironmentFailure);
+      if (postCommitFailure) actorFeedbackFailures.set(stepBase.actorId, postCommitFailure);
+    }
+    const firstActorFeedbackFailure = actorFeedbackFailures.values().next().value as SocialStepFailureEvidence | undefined;
     return {
-      status: "ok",
+      status: firstActorFeedbackFailure ? "failed" : "ok",
+      reason: firstActorFeedbackFailure?.message,
       feedback,
-      steps: input.decisions.map((decision, index) => ({
-        ...baseStep({ ...input, decision, turnIndex: input.turnIndex + index }),
-        action: cloneJson(decision.action),
-        atomic: true,
-        resolutionPolicy: "parallel-stepBatch",
-        preStateHash,
-        postStateHash: input.hashState?.(feedback.state),
-        eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
-        messageSeqRange: afterSeq > beforeSeq ? [beforeSeq + 1, afterSeq] : undefined,
-        ...feedbackFields(feedback)
-      }))
+      steps: input.decisions.map((decision, index) => {
+        const feedbackFailure = actorFeedbackFailures.get(decision.actorId);
+        return {
+          ...baseStep({ ...input, decision, turnIndex: input.turnIndex + index }),
+          action: cloneJson(decision.action),
+          commitStatus: "committed" as const,
+          atomic: true,
+          resolutionPolicy: "parallel-stepBatch",
+          preStateHash,
+          postStateHash,
+          eventSeqRange: committedEventSeqRange,
+          messageSeqRange: messageSeqRangeByActor.get(decision.actorId),
+          error: feedbackFailure?.message,
+          failure: feedbackFailure,
+          ...feedbackFields(feedback!)
+        };
+      })
     };
-	  } catch (error) {
-	    const reason = error instanceof Error ? error.message : String(error);
-	    const preStateHash = input.hashState?.(preState);
-	    const failureStateBeforeHook = input.environment.snapshot();
-	    for (const [index, decision] of input.decisions.entries()) {
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const failureState = input.environment.snapshot();
+    const failureStateHash = input.hashState?.(failureState);
+    const afterEventSeq = input.eventSeq?.(failureState);
+    const afterSeq = input.bus.listMessages().at(-1)?.seq ?? beforeSeq;
+
+    if (environmentCommitted) {
+      const committedFeedback = feedback ?? emptyStepFeedback(failureState, input.environment);
+      const committedEventSeqRange = eventSeqRange(beforeEventSeq, afterEventSeq);
+      const committedFailures = new Map<string, SocialStepFailureEvidence>();
+      for (const [index, decision] of input.decisions.entries()) {
+        const stepBase = baseStep({ ...input, decision, turnIndex: input.turnIndex + index });
+        const postCommitFailure = defaultFailureEvidence("post_commit_failure", error);
+        const receiptFailure = receiptDeliveredByActor.has(stepBase.actorId)
+          ? undefined
+          : deliverActorStepReceipt(decision.actor, {
+              id: `${stepBase.traceId}:committed`,
+              status: "committed",
+              traceId: stepBase.traceId,
+              transactionId: decision.transactionId,
+              turnIndex: stepBase.turnIndex,
+              actorId: stepBase.actorId,
+              pendingAction: cloneJson(decision.pending),
+              action: decision.action,
+              observation: cloneJson(committedFeedback.observationsByAgent[stepBase.actorId]),
+              reward: committedFeedback.rewardsByAgent[stepBase.actorId],
+              terminated: committedFeedback.terminationsByAgent[stepBase.actorId],
+              truncated: committedFeedback.truncationsByAgent[stepBase.actorId],
+              info: cloneJson(committedFeedback.infosByAgent[stepBase.actorId]),
+              postStateHash: failureStateHash,
+              eventSeqRange: committedEventSeqRange,
+              messageSeqRange: messageSeqRangeByActor.get(stepBase.actorId)
+            });
+        committedFailures.set(
+          stepBase.actorId,
+          combineStepFailureEvidence(postCommitFailure, receiptFailure) ?? postCommitFailure
+        );
+      }
+      const failure = committedFailures.values().next().value as SocialStepFailureEvidence;
+      return {
+        status: "failed",
+        reason: failure.message,
+        feedback: committedFeedback,
+        steps: input.decisions.map((decision, index) => ({
+          ...baseStep({ ...input, decision, turnIndex: input.turnIndex + index }),
+          action: cloneJson(decision.action),
+          commitStatus: "committed" as const,
+          atomic: true,
+          resolutionPolicy: "parallel-stepBatch",
+          preStateHash,
+          postStateHash: failureStateHash,
+          eventSeqRange: committedEventSeqRange,
+          messageSeqRange: messageSeqRangeByActor.get(decision.actorId),
+          error: committedFailures.get(decision.actorId)?.message,
+          failure: committedFailures.get(decision.actorId),
+          ...feedbackFields(committedFeedback)
+        }))
+      };
+    }
+
+    const failureStateBeforeHook = failureState;
+    const parallelFailures = new Map<string, SocialStepFailureEvidence>();
+    for (const [index, decision] of input.decisions.entries()) {
 	      const stepBase = baseStep({ ...input, decision, turnIndex: input.turnIndex + index });
-	      input.onEnvironmentStepFailure?.({
-	        environment: input.environment,
+      const adapterFailure = input.onEnvironmentStepFailure?.({
 	        actor: decision.actor,
 	        actorId: stepBase.actorId,
 	        profileId: stepBase.profileId,
@@ -1384,31 +2220,52 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
 	        resolutionPolicy: "parallel-stepBatch",
 	        pendingAction: cloneJson(decision.pending),
 	        observation: cloneJson(decision.observation),
-	        action: cloneJson(decision.action),
-	        preState: cloneJson(preState),
-	        preStateHash,
-	        decisionStateHash: input.decisionStateHash,
-	        failureState: cloneJson(failureStateBeforeHook),
-	        failureStateHash: input.hashState?.(failureStateBeforeHook),
-	        error
-	      });
-	    }
-	    const failureState = input.environment.snapshot();
-	    const feedback = emptyStepFeedback(failureState, input.environment);
-	    const afterEventSeq = input.eventSeq?.(failureState);
-	    return {
+        action: cloneJson(decision.action),
+        preState: cloneJson(preState),
+        preStateHash,
+        decisionStateHash: input.decisionStateHash,
+        failureState: cloneJson(failureStateBeforeHook),
+        failureStateHash,
+        error
+      }) ?? undefined;
+      const failure = environmentFailureEvidence({
+        error,
+        fallbackStage: failureStageForError(error, "parallel_environment_step"),
+        adapterFailure,
+        environmentStepStarted,
+        preStateHash,
+        failureStateHash
+      });
+      const receiptFailure = deliverActorStepReceipt(decision.actor, {
+	        id: `${stepBase.traceId}:rejected`,
+	        status: "rejected",
+	        traceId: stepBase.traceId,
+        transactionId: decision.transactionId,
+	        turnIndex: stepBase.turnIndex,
+	        actorId: stepBase.actorId,
+        pendingAction: cloneJson(decision.pending),
+        action: decision.action,
+        postStateHash: failureStateHash,
+        failure
+      });
+      parallelFailures.set(decision.actorId, receiptFailure ?? failure);
+    }
+    const rejectedFeedback = emptyStepFeedback(failureState, input.environment);
+    return {
       status: "failed",
       reason,
-      feedback,
+      feedback: rejectedFeedback,
       steps: input.decisions.map((decision, index) => ({
         ...baseStep({ ...input, decision, turnIndex: input.turnIndex + index }),
 	        action: cloneJson(decision.action),
-	        atomic: true,
-	        resolutionPolicy: "parallel-stepBatch",
-	        preStateHash,
-	        postStateHash: input.hashState?.(failureState),
-	        eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
-	        error: reason
+	        commitStatus: "rejected",
+        atomic: true,
+        resolutionPolicy: "parallel-stepBatch",
+        preStateHash,
+        postStateHash: failureStateHash,
+        eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
+	        error: reason,
+	        failure: parallelFailures.get(decision.actorId) ?? defaultFailureEvidence("parallel_environment_step", error)
 	      }))
     };
   }
@@ -1452,6 +2309,7 @@ function failedDecisionToStep<TObservation, TPending, TCommand>(input: {
   preStateHash?: string;
   postStateHash?: string;
   eventSeqRange?: [number, number];
+  failure: SocialStepFailureEvidence;
   decision: Extract<SocialDecision<TObservation, TPending, TCommand>, { ok: false }>;
 }): SocialHarnessStep<TObservation, TPending, TCommand> {
   return {
@@ -1463,7 +2321,7 @@ function failedDecisionToStep<TObservation, TPending, TCommand>(input: {
     actorId: input.decision.actorId,
     profileId: input.decision.actor?.profile.id ?? input.decision.actorId,
     schedulerMode: input.schedulerMode,
-    atomic: false,
+    atomic: input.schedulerMode === "parallel",
     resolutionPolicy:
       input.schedulerMode === "parallel"
         ? "parallel-stepBatch"
@@ -1473,12 +2331,342 @@ function failedDecisionToStep<TObservation, TPending, TCommand>(input: {
     pendingAction: cloneJson(input.decision.pending),
     observation: cloneJson(input.decision.observation as TObservation),
     action: { actorId: input.decision.actorId, kind: "error", command: undefined as TCommand },
+    commitStatus: "rejected",
     decisionStateHash: input.decisionStateHash,
     preStateHash: input.preStateHash,
     postStateHash: input.postStateHash,
     eventSeqRange: input.eventSeqRange,
-    error: input.decision.error
+    error: input.decision.error,
+    failure: cloneJson(input.failure)
   };
+}
+
+/**
+ * Scheduler/input failures happen before any actor observes or decides. Keep
+ * them as explicit rejected native records so the artifact explains why the
+ * runner made no environment call without pretending a joint action existed.
+ */
+function schedulerFailureStep<TObservation, TPending, TCommand>(input: {
+  optionsId: string;
+  turnIndex: number;
+  batchId: string;
+  batchIndex: number;
+  batchSize: number;
+  schedulerMode: SocialResolvedSchedulerMode;
+  pendingAction: TPending;
+  decisionStateHash?: string;
+  preStateHash?: string;
+  postStateHash?: string;
+  failure: SocialStepFailureEvidence;
+}): SocialHarnessStep<TObservation, TPending, TCommand> {
+  return {
+    traceId: `${input.optionsId}:scheduler:${input.batchIndex}:rejected`,
+    turnIndex: input.turnIndex,
+    batchId: input.batchId,
+    batchIndex: input.batchIndex,
+    batchSize: input.batchSize,
+    actorId: "system",
+    profileId: "system",
+    schedulerMode: input.schedulerMode,
+    atomic: false,
+    resolutionPolicy: "scheduler-validation",
+    pendingAction: cloneJson(input.pendingAction),
+    observation: undefined as unknown as TObservation,
+    action: { actorId: "system", kind: "scheduler.error", command: undefined as TCommand },
+    commitStatus: "rejected",
+    decisionStateHash: input.decisionStateHash,
+    preStateHash: input.preStateHash,
+    postStateHash: input.postStateHash,
+    error: input.failure.message,
+    failure: cloneJson(input.failure)
+  };
+}
+
+/**
+ * AEC batched collection is concurrent only while agents form proposals. If
+ * the batch is abandoned before a proposal is applied, record every affected
+ * proposal as rejected so receipts and native evidence remain symmetric.
+ */
+function rejectedSequentialDecisionBatchSteps<TObservation, TPending, TCommand>(input: {
+  optionsId: string;
+  decisions: ReadonlyArray<SocialDecision<TObservation, TPending, TCommand>>;
+  batchId: string;
+  batchIndex: number;
+  batchSize: number;
+  schedulerMode: Exclude<SocialResolvedSchedulerMode, "parallel">;
+  decisionStateHash?: string;
+  preStateHash?: string;
+  postStateHash?: string;
+  eventSeqRange?: [number, number];
+  failureForDecision: (decision: SocialDecision<TObservation, TPending, TCommand>) => SocialStepFailureEvidence;
+}): Array<SocialHarnessStep<TObservation, TPending, TCommand>> {
+  return input.decisions.map((decision) => {
+    const failure = input.failureForDecision(decision);
+    if (!decision.ok) {
+      return failedDecisionToStep({
+        optionsId: input.optionsId,
+        turnIndex: decision.turnIndex,
+        batchId: input.batchId,
+        batchIndex: input.batchIndex,
+        batchSize: input.batchSize,
+        schedulerMode: input.schedulerMode,
+        decisionStateHash: input.decisionStateHash,
+        preStateHash: input.preStateHash,
+        postStateHash: input.postStateHash,
+        eventSeqRange: input.eventSeqRange,
+        failure,
+        decision
+      });
+    }
+
+    return {
+      ...baseStep({
+        optionsId: input.optionsId,
+        decision,
+        turnIndex: decision.turnIndex,
+        batchId: input.batchId,
+        batchIndex: input.batchIndex,
+        batchSize: input.batchSize,
+        schedulerMode: input.schedulerMode,
+        decisionStateHash: input.decisionStateHash
+      }),
+      action: cloneJson(decision.action),
+      commitStatus: "rejected",
+      preStateHash: input.preStateHash,
+      postStateHash: input.postStateHash,
+      eventSeqRange: input.eventSeqRange,
+      error: failure.message,
+      failure: cloneJson(failure)
+    };
+  });
+}
+
+function rejectedParallelDecisionBatchSteps<TObservation, TPending, TCommand>(input: {
+  optionsId: string;
+  decisions: ReadonlyArray<SocialDecision<TObservation, TPending, TCommand>>;
+  batchId: string;
+  batchIndex: number;
+  batchSize: number;
+  decisionStateHash?: string;
+  preStateHash?: string;
+  postStateHash?: string;
+  eventSeqRange?: [number, number];
+  failureForDecision: (decision: SocialDecision<TObservation, TPending, TCommand>) => SocialStepFailureEvidence;
+}): Array<SocialHarnessStep<TObservation, TPending, TCommand>> {
+  return input.decisions.map((decision) => {
+    const failure = input.failureForDecision(decision);
+    if (!decision.ok) {
+      return failedDecisionToStep({
+        optionsId: input.optionsId,
+        turnIndex: decision.turnIndex,
+        batchId: input.batchId,
+        batchIndex: input.batchIndex,
+        batchSize: input.batchSize,
+        schedulerMode: "parallel",
+        decisionStateHash: input.decisionStateHash,
+        preStateHash: input.preStateHash,
+        postStateHash: input.postStateHash,
+        eventSeqRange: input.eventSeqRange,
+        failure,
+        decision
+      });
+    }
+
+    return {
+      ...baseStep({
+        optionsId: input.optionsId,
+        decision,
+        turnIndex: decision.turnIndex,
+        batchId: input.batchId,
+        batchIndex: input.batchIndex,
+        batchSize: input.batchSize,
+        schedulerMode: "parallel",
+        decisionStateHash: input.decisionStateHash
+      }),
+      action: cloneJson(decision.action),
+      commitStatus: "rejected",
+      atomic: true,
+      resolutionPolicy: "parallel-stepBatch",
+      preStateHash: input.preStateHash,
+      postStateHash: input.postStateHash,
+      eventSeqRange: input.eventSeqRange,
+      error: failure.message,
+      failure: cloneJson(failure)
+    };
+  });
+}
+
+function defaultFailureEvidence(stage: string, error: unknown): SocialStepFailureEvidence {
+  const validation = error instanceof SocialActionValidationError ? error.result : undefined;
+  return {
+    stage,
+    message: error instanceof Error ? error.message : String(error),
+    causeName: error instanceof Error ? error.name : undefined,
+    metadata: validation
+      ? {
+          code: validation.code,
+          ...(validation.metadata ?? {})
+        }
+      : undefined
+  };
+}
+
+function failureStageForError(error: unknown, fallback: string): string {
+  if (error instanceof SocialActionValidationError) return "environment_validation";
+  if (error instanceof SocialActionOwnershipError) return "action_ownership";
+  return fallback;
+}
+
+function environmentFailureEvidence(input: {
+  error: unknown;
+  fallbackStage: string;
+  adapterFailure?: SocialStepFailureEvidence;
+  environmentStepStarted: boolean;
+  preStateHash?: string;
+  failureStateHash?: string;
+}): SocialStepFailureEvidence {
+  const base = input.adapterFailure ?? defaultFailureEvidence(input.fallbackStage, input.error);
+  if (input.error instanceof SocialPreflightMutationError) {
+    return {
+      stage: "environment_non_atomic_failure",
+      message: "Environment validateAction() mutated domain state; the failure is not replayable.",
+      causeName: input.error.name,
+      metadata: {
+        originalStage: base.stage,
+        preflightBeforeFingerprint: input.error.beforeFingerprint,
+        preflightAfterFingerprint: input.error.afterFingerprint,
+        ...(base.metadata ? { originalMetadata: cloneJson(base.metadata) } : {})
+      }
+    };
+  }
+  if (
+    input.environmentStepStarted &&
+    input.preStateHash !== undefined &&
+    input.failureStateHash !== undefined &&
+    input.preStateHash !== input.failureStateHash
+  ) {
+    return {
+      stage: "environment_non_atomic_failure",
+      message: "Environment transition threw after mutating domain state; the failure is not replayable.",
+      causeName: base.causeName,
+      metadata: {
+        originalStage: base.stage,
+        preStateHash: input.preStateHash,
+        failureStateHash: input.failureStateHash,
+        ...(base.metadata ? { originalMetadata: cloneJson(base.metadata) } : {})
+      }
+    };
+  }
+  return base;
+}
+
+function invokeAfterEnvironmentStep<TState, TObservation, TPending, TCommand>(
+  hook: SocialAfterEnvironmentStepHook<TState, TObservation, TPending, TCommand> | undefined,
+  context: SocialAfterEnvironmentStepContext<TState, TObservation, TPending, TCommand>
+): SocialStepFailureEvidence | undefined {
+  if (!hook) return undefined;
+  try {
+    hook(context);
+    return undefined;
+  } catch (error) {
+    return defaultFailureEvidence("after_environment_step", error);
+  }
+}
+
+function combineStepFailureEvidence(
+  ...failures: Array<SocialStepFailureEvidence | undefined>
+): SocialStepFailureEvidence | undefined {
+  const present = failures.filter((failure): failure is SocialStepFailureEvidence => failure !== undefined);
+  if (!present.length) return undefined;
+  if (present.length === 1) return present[0];
+  return {
+    stage: "post_commit_feedback",
+    message: present.map((failure) => `${failure.stage}: ${failure.message}`).join("; "),
+    metadata: {
+      failures: present.map((failure) => ({
+        stage: failure.stage,
+        message: failure.message,
+        ...(failure.causeName ? { causeName: failure.causeName } : {})
+      }))
+    }
+  };
+}
+
+function assertSocialActionValid<TState, TObservation, TPending, TCommand>(
+  environment: SocialEnvironment<TState, TObservation, TPending, TCommand>,
+  command: TCommand,
+  pending: TPending
+): void {
+  if (!environment.validateAction) return;
+  const beforeFingerprint = fingerprintState(environment.snapshot());
+  const result = environment.validateAction(command, cloneJson(pending));
+  const afterFingerprint = fingerprintState(environment.snapshot());
+  if (beforeFingerprint !== afterFingerprint) {
+    throw new SocialPreflightMutationError(beforeFingerprint, afterFingerprint);
+  }
+  if (!result.valid) throw new SocialActionValidationError(result);
+}
+
+function fingerprintState(value: unknown): string {
+  return JSON.stringify(normalizeForFingerprint(value));
+}
+
+function normalizeForFingerprint(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeForFingerprint);
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(record)
+        .sort()
+        .map((key) => [key, normalizeForFingerprint(record[key])])
+    );
+  }
+  return value;
+}
+
+function assertSocialActionOwnership<TCommand>(action: SocialAction<TCommand>, expectedActorId: string): void {
+  if (action.actorId !== expectedActorId) {
+    throw new SocialActionOwnershipError(
+      `Scheduled actor ${expectedActorId} returned an action owned by ${action.actorId}.`
+    );
+  }
+  for (const [index, message] of (action.messages ?? []).entries()) {
+    if (message.senderId !== expectedActorId) {
+      throw new SocialActionOwnershipError(
+        `Scheduled actor ${expectedActorId} returned message draft ${index} with sender ${message.senderId}.`
+      );
+    }
+  }
+}
+
+function assertParallelActorIdsUnique<TObservation, TPending, TCommand>(
+  decisions: Array<Extract<SocialDecision<TObservation, TPending, TCommand>, { ok: true }>>
+): void {
+  const seen = new Set<string>();
+  for (const decision of decisions) {
+    if (seen.has(decision.actorId)) {
+      throw new SocialActionOwnershipError(
+        `Parallel batch contains multiple decisions for scheduled actor ${decision.actorId}.`
+      );
+    }
+    seen.add(decision.actorId);
+  }
+}
+
+function deliverActorStepReceipt<TObservation, TPending, TCommand>(
+  actor: SocialActor<TObservation, TPending, TCommand>,
+  receipt: SocialActorStepReceipt<TObservation, TPending, TCommand>
+): SocialStepFailureEvidence | undefined {
+  if (!actor.onStepResult) return undefined;
+  try {
+    // Actor feedback is advisory lifecycle input, never a mutable handle to
+    // the runner-owned proposed action that will be serialized in the native
+    // artifact. Give each actor an isolated serializable receipt.
+    actor.onStepResult(cloneJson(receipt));
+    return undefined;
+  } catch (error) {
+    return defaultFailureEvidence("actor_step_feedback", error);
+  }
 }
 
 function feedbackFields<TState, TObservation>(feedback: SocialStepFeedback<TState, TObservation>): Pick<
@@ -1583,6 +2771,17 @@ function selectPendingBatch<TPending>(pending: TPending[], schedulerMode: Social
   return pending.slice(0, 1);
 }
 
+function findDuplicatePendingActorId<TPending extends { actorId?: string }>(pendingBatch: readonly TPending[]): string | undefined {
+  const actorIds = new Set<string>();
+  for (const pending of pendingBatch) {
+    const actorId = pending.actorId;
+    if (!actorId) continue;
+    if (actorIds.has(actorId)) return actorId;
+    actorIds.add(actorId);
+  }
+  return undefined;
+}
+
 function deterministicMessageTimestamp(seq: number): string {
   return new Date(seq * 1000).toISOString();
 }
@@ -1593,7 +2792,7 @@ function normalizeSpeechActs(
   messageSeq: number
 ): SocialSpeechAct[] | undefined {
   const explicitActs = Array.isArray(message.speechActs) ? message.speechActs : [];
-  const derivedActs = speechActsFromMetadata(message);
+  const derivedActs = speechActsFromStructuredSocialFacts(message);
   const acts = [...explicitActs, ...derivedActs];
   if (!acts.length) return undefined;
   return acts.map((act, index) => {
@@ -1613,103 +2812,11 @@ function normalizeSpeechActs(
   });
 }
 
-function speechActsFromMetadata(message: Omit<SocialMessage, "id" | "seq" | "createdAt">): SocialSpeechAct[] {
+function speechActsFromStructuredSocialFacts(message: Omit<SocialMessage, "id" | "seq" | "createdAt">): SocialSpeechAct[] {
   const metadata = asRecord(message.metadata);
   if (!metadata) return [];
   const acts: SocialSpeechAct[] = [];
   const evidenceRefs: SocialEvidenceRef[] = [];
-  const kind = stringMetadata(metadata.kind);
-  const claimedRole = stringMetadata(metadata.claimedRole);
-  if (claimedRole) {
-    acts.push({
-      id: "",
-      kind: "role_claim",
-      subjectId: message.senderId,
-      value: claimedRole,
-      confidence: 1,
-      evidenceRefs,
-      metadata: { source: "metadata.claimedRole", messageKind: kind }
-    });
-  }
-  const pressureTargetId = stringMetadata(metadata.pressureTargetId);
-  if (pressureTargetId) {
-    acts.push({
-      id: "",
-      kind: "accusation",
-      subjectId: message.senderId,
-      targetId: pressureTargetId,
-      value: "pressure_target",
-      confidence: 0.8,
-      evidenceRefs,
-      metadata: { source: "metadata.pressureTargetId", messageKind: kind }
-    });
-  }
-  const targetId = stringMetadata(metadata.targetId);
-  if (kind === "public-vote" && targetId) {
-    acts.push({
-      id: "",
-      kind: "vote_intent",
-      subjectId: message.senderId,
-      targetId,
-      value: "vote.cast",
-      confidence: 1,
-      evidenceRefs,
-      metadata: { source: "metadata.targetId", abstain: Boolean(metadata.abstain), messageKind: kind }
-    });
-  }
-  if (kind === "public-hunter-shot" && targetId) {
-    acts.push({
-      id: "",
-      kind: "role_action",
-      subjectId: message.senderId,
-      targetId,
-      value: "hunter.shoot",
-      confidence: 1,
-      evidenceRefs,
-      metadata: { source: "metadata.targetId", messageKind: kind }
-    });
-  }
-  if (kind === "werewolf-kill-vote" && targetId) {
-    acts.push({
-      id: "",
-      kind: "coalition_signal",
-      subjectId: message.senderId,
-      targetId,
-      value: "werewolf.killVote",
-      confidence: 1,
-      evidenceRefs,
-      metadata: { source: "metadata.targetId", messageKind: kind }
-    });
-  }
-  if (kind === "private-seer-inspect" && targetId) {
-    acts.push({
-      id: "",
-      kind: "role_action",
-      subjectId: message.senderId,
-      targetId,
-      value: "seer.inspect",
-      confidence: 1,
-      evidenceRefs,
-      metadata: { source: "metadata.targetId", messageKind: kind }
-    });
-  }
-  if (kind === "private-witch-action") {
-    acts.push({
-      id: "",
-      kind: "role_action",
-      subjectId: message.senderId,
-      targetId: stringMetadata(metadata.poisonTargetId) ?? stringMetadata(metadata.saveTargetId),
-      value: "witch.act",
-      confidence: 1,
-      evidenceRefs,
-      metadata: {
-        source: "metadata.kind",
-        messageKind: kind,
-        hasSave: Boolean(metadata.saveTargetId),
-        hasPoison: Boolean(metadata.poisonTargetId)
-      }
-    });
-  }
   for (const fact of socialFactsFromMetadata(metadata)) {
     const factKind = stringMetadata(fact.kind);
     const actKind = speechActKindFromSocialFact(factKind);

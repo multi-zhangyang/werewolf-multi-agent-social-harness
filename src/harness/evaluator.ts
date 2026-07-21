@@ -1,6 +1,8 @@
 import type { GameEvent, GameState, Role, Team } from "../core/types";
 import { metric, type HarnessEvaluator, type HarnessEvaluationContext } from "./evaluation";
-import { deriveSocialExposureRecords, type SocialEpisodeArtifact, type SocialExposureRecord, type SocialMessage } from "./social";
+import { harnessFailureEvidenceFromEpisode } from "./executionEvidence";
+import { werewolfHarnessTurnEvidenceFromEpisode } from "./werewolfExecutionEvidence";
+import { deriveSocialExposureRecords, isSocialStepCommitted, type SocialEpisodeArtifact, type SocialExposureRecord, type SocialMessage } from "./social";
 import type {
   AdversarialEvaluation,
   AgentHarnessState,
@@ -10,9 +12,27 @@ import type {
   HarnessEvaluationModuleResult,
   HarnessMetricEvidenceRef,
   HarnessMetricRecord,
+  HarnessStepRecord,
   HarnessTurnTrace
 } from "./types";
 import type { EvidenceRef, SocialStateMutationJournalEntry } from "./socialState";
+
+type WerewolfEvaluationContext<TSocialEpisode = unknown> = HarnessEvaluationContext<
+  GameState,
+  unknown,
+  TSocialEpisode,
+  AgentHarnessState,
+  HarnessStepRecord
+>;
+
+type WerewolfEvaluator<TOutput = unknown, TSocialEpisode = unknown> = HarnessEvaluator<
+  GameState,
+  unknown,
+  TSocialEpisode,
+  TOutput,
+  AgentHarnessState,
+  HarnessStepRecord
+>;
 
 export const WEREWOLF_ADVERSARIAL_EVALUATOR_ID = "werewolf.adversarial.v1";
 export const WEREWOLF_OUTCOME_EVALUATOR_ID = "werewolf.outcome.v1";
@@ -227,14 +247,14 @@ export interface DeceptionReputationAssociationEvaluation {
   ambiguousOrderingExposureRecords: number;
 }
 
-export function createWerewolfAdversarialEvaluator(): HarnessEvaluator<GameState, unknown, unknown, AdversarialEvaluation> {
+export function createWerewolfAdversarialEvaluator(): WerewolfEvaluator<AdversarialEvaluation> {
   return {
     id: WEREWOLF_ADVERSARIAL_EVALUATOR_ID,
     label: "Werewolf adversarial summary evaluator",
     version: "1.0.0",
     manifest: WEREWOLF_ADVERSARIAL_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<GameState>): HarnessEvaluationModuleResult<AdversarialEvaluation> {
-      const evaluation = evaluateAdversarialMatch(context.finalState, context.agents);
+    evaluate(context: WerewolfEvaluationContext): HarnessEvaluationModuleResult<AdversarialEvaluation> {
+      const evaluation = evaluateAdversarialMatch(context.finalState, context.agents, context.socialEpisode);
       return {
         evaluatorId: WEREWOLF_ADVERSARIAL_EVALUATOR_ID,
         label: "Werewolf adversarial summary evaluator",
@@ -246,19 +266,19 @@ export function createWerewolfAdversarialEvaluator(): HarnessEvaluator<GameState
   };
 }
 
-export function createWerewolfOutcomeEvaluator(): HarnessEvaluator<GameState, unknown, unknown, WerewolfOutcomeEvaluation> {
+export function createWerewolfOutcomeEvaluator(): WerewolfEvaluator<WerewolfOutcomeEvaluation> {
   return {
     id: WEREWOLF_OUTCOME_EVALUATOR_ID,
     label: "Werewolf outcome and reward evaluator",
     version: "1.0.0",
     manifest: WEREWOLF_OUTCOME_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<GameState>): HarnessEvaluationModuleResult<WerewolfOutcomeEvaluation> {
-      const evaluation = evaluateAdversarialMatch(context.finalState, context.agents);
+    evaluate(context: WerewolfEvaluationContext): HarnessEvaluationModuleResult<WerewolfOutcomeEvaluation> {
+      const evaluation = evaluateAdversarialMatch(context.finalState, context.agents, context.socialEpisode);
       return {
         evaluatorId: WEREWOLF_OUTCOME_EVALUATOR_ID,
         label: "Werewolf outcome and reward evaluator",
         version: "1.0.0",
-        metrics: metricsFromWerewolfOutcomeEvaluation(evaluation, context.finalState, context.agents),
+        metrics: metricsFromWerewolfOutcomeEvaluation(evaluation, context.finalState, context.agents, context.socialEpisode),
         output: {
           winner: evaluation.winner,
           teamRewards: evaluation.teamRewards,
@@ -270,19 +290,14 @@ export function createWerewolfOutcomeEvaluator(): HarnessEvaluator<GameState, un
   };
 }
 
-export function createWerewolfVoteAccuracyEvaluator(): HarnessEvaluator<
-  GameState,
-  unknown,
-  unknown,
-  AdversarialEvaluation["voteAccuracyByAgent"]
-> {
+export function createWerewolfVoteAccuracyEvaluator(): WerewolfEvaluator<AdversarialEvaluation["voteAccuracyByAgent"]> {
   return {
     id: WEREWOLF_VOTE_ACCURACY_EVALUATOR_ID,
     label: "Werewolf vote accuracy evaluator",
     version: "1.0.0",
     manifest: WEREWOLF_VOTE_ACCURACY_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<GameState>): HarnessEvaluationModuleResult<AdversarialEvaluation["voteAccuracyByAgent"]> {
-      const evaluation = evaluateAdversarialMatch(context.finalState, context.agents);
+    evaluate(context: WerewolfEvaluationContext): HarnessEvaluationModuleResult<AdversarialEvaluation["voteAccuracyByAgent"]> {
+      const evaluation = evaluateAdversarialMatch(context.finalState, context.agents, context.socialEpisode);
       return {
         evaluatorId: WEREWOLF_VOTE_ACCURACY_EVALUATOR_ID,
         label: "Werewolf vote accuracy evaluator",
@@ -294,13 +309,13 @@ export function createWerewolfVoteAccuracyEvaluator(): HarnessEvaluator<
   };
 }
 
-export function createWerewolfRoleSurvivalEvaluator(): HarnessEvaluator<GameState, unknown, unknown, WerewolfRoleSurvivalEvaluation> {
+export function createWerewolfRoleSurvivalEvaluator(): WerewolfEvaluator<WerewolfRoleSurvivalEvaluation> {
   return {
     id: WEREWOLF_ROLE_SURVIVAL_EVALUATOR_ID,
     label: "Werewolf role survival evaluator",
     version: "1.0.0",
     manifest: WEREWOLF_ROLE_SURVIVAL_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<GameState>): HarnessEvaluationModuleResult<WerewolfRoleSurvivalEvaluation> {
+    evaluate(context: WerewolfEvaluationContext): HarnessEvaluationModuleResult<WerewolfRoleSurvivalEvaluation> {
       const evaluation = evaluateRoleSurvival(context.finalState);
       return {
         evaluatorId: WEREWOLF_ROLE_SURVIVAL_EVALUATOR_ID,
@@ -313,14 +328,14 @@ export function createWerewolfRoleSurvivalEvaluator(): HarnessEvaluator<GameStat
   };
 }
 
-export function createWerewolfInfluenceEvaluator(): HarnessEvaluator<GameState, unknown, unknown, AdversarialEvaluation["influenceByAgent"]> {
+export function createWerewolfInfluenceEvaluator(): WerewolfEvaluator<AdversarialEvaluation["influenceByAgent"]> {
   return {
     id: WEREWOLF_INFLUENCE_EVALUATOR_ID,
     label: "Werewolf influence evaluator",
     version: "1.0.0",
     manifest: WEREWOLF_INFLUENCE_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<GameState>): HarnessEvaluationModuleResult<AdversarialEvaluation["influenceByAgent"]> {
-      const evaluation = evaluateAdversarialMatch(context.finalState, context.agents);
+    evaluate(context: WerewolfEvaluationContext): HarnessEvaluationModuleResult<AdversarialEvaluation["influenceByAgent"]> {
+      const evaluation = evaluateAdversarialMatch(context.finalState, context.agents, context.socialEpisode);
       return {
         evaluatorId: WEREWOLF_INFLUENCE_EVALUATOR_ID,
         label: "Werewolf influence evaluator",
@@ -332,19 +347,17 @@ export function createWerewolfInfluenceEvaluator(): HarnessEvaluator<GameState, 
   };
 }
 
-export function createWerewolfDeceptionEvaluator<TSocialEpisode = unknown>(): HarnessEvaluator<
-  GameState,
-  unknown,
-  TSocialEpisode,
-  AdversarialEvaluation["deceptionByAgent"]
+export function createWerewolfDeceptionEvaluator<TSocialEpisode = unknown>(): WerewolfEvaluator<
+  AdversarialEvaluation["deceptionByAgent"],
+  TSocialEpisode
 > {
   return {
     id: WEREWOLF_DECEPTION_EVALUATOR_ID,
     label: "Werewolf deception evaluator",
     version: "1.0.0",
     manifest: WEREWOLF_DECEPTION_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<GameState, unknown, TSocialEpisode>): HarnessEvaluationModuleResult<AdversarialEvaluation["deceptionByAgent"]> {
-      const evaluation = evaluateAdversarialMatch(context.finalState, context.agents);
+    evaluate(context: WerewolfEvaluationContext<TSocialEpisode>): HarnessEvaluationModuleResult<AdversarialEvaluation["deceptionByAgent"]> {
+      const evaluation = evaluateAdversarialMatch(context.finalState, context.agents, context.socialEpisode);
       return {
         evaluatorId: WEREWOLF_DECEPTION_EVALUATOR_ID,
         label: "Werewolf deception evaluator",
@@ -356,18 +369,16 @@ export function createWerewolfDeceptionEvaluator<TSocialEpisode = unknown>(): Ha
   };
 }
 
-export function createDeceptionBeliefShiftEvaluator<TSocialEpisode = unknown>(): HarnessEvaluator<
-  GameState,
-  unknown,
-  TSocialEpisode,
-  DeceptionBeliefShiftEvaluation
+export function createDeceptionBeliefShiftEvaluator<TSocialEpisode = unknown>(): WerewolfEvaluator<
+  DeceptionBeliefShiftEvaluation,
+  TSocialEpisode
 > {
   return {
     id: DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
     label: "Deception belief-shift temporal association evaluator",
     version: "1.0.0",
     manifest: DECEPTION_BELIEF_SHIFT_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<GameState, unknown, TSocialEpisode>): HarnessEvaluationModuleResult<DeceptionBeliefShiftEvaluation> {
+    evaluate(context: WerewolfEvaluationContext<TSocialEpisode>): HarnessEvaluationModuleResult<DeceptionBeliefShiftEvaluation> {
       const metrics = metricsFromFalseRoleClaimBeliefTemporalAssociation(context.finalState, context.agents, context.socialEpisode);
       return {
         evaluatorId: DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
@@ -380,18 +391,16 @@ export function createDeceptionBeliefShiftEvaluator<TSocialEpisode = unknown>():
   };
 }
 
-export function createDeceptionReputationAssociationEvaluator<TSocialEpisode = unknown>(): HarnessEvaluator<
-  GameState,
-  unknown,
-  TSocialEpisode,
-  DeceptionReputationAssociationEvaluation
+export function createDeceptionReputationAssociationEvaluator<TSocialEpisode = unknown>(): WerewolfEvaluator<
+  DeceptionReputationAssociationEvaluation,
+  TSocialEpisode
 > {
   return {
     id: DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID,
     label: "Deception reputation temporal association evaluator",
     version: "1.0.0",
     manifest: DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<GameState, unknown, TSocialEpisode>): HarnessEvaluationModuleResult<DeceptionReputationAssociationEvaluation> {
+    evaluate(context: WerewolfEvaluationContext<TSocialEpisode>): HarnessEvaluationModuleResult<DeceptionReputationAssociationEvaluation> {
       const metrics = metricsFromFalseRoleClaimReputationTemporalAssociation(context.finalState, context.agents, context.socialEpisode);
       return {
         evaluatorId: DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID,
@@ -404,13 +413,13 @@ export function createDeceptionReputationAssociationEvaluator<TSocialEpisode = u
   };
 }
 
-export function createWerewolfSocialCalibrationEvaluator(): HarnessEvaluator<GameState, unknown, unknown, WerewolfSocialCalibrationEvaluation> {
+export function createWerewolfSocialCalibrationEvaluator(): WerewolfEvaluator<WerewolfSocialCalibrationEvaluation> {
   return {
     id: WEREWOLF_SOCIAL_CALIBRATION_EVALUATOR_ID,
     label: "Werewolf social calibration evaluator",
     version: "1.0.0",
     manifest: WEREWOLF_SOCIAL_CALIBRATION_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<GameState>): HarnessEvaluationModuleResult<WerewolfSocialCalibrationEvaluation> {
+    evaluate(context: WerewolfEvaluationContext): HarnessEvaluationModuleResult<WerewolfSocialCalibrationEvaluation> {
       const metrics = metricsFromWerewolfSocialCalibration(context.finalState, context.agents);
       return {
         evaluatorId: WEREWOLF_SOCIAL_CALIBRATION_EVALUATOR_ID,
@@ -423,7 +432,7 @@ export function createWerewolfSocialCalibrationEvaluator(): HarnessEvaluator<Gam
   };
 }
 
-export function createWerewolfEvaluationSuite(): Array<HarnessEvaluator<GameState, unknown, unknown>> {
+export function createWerewolfEvaluationSuite(): Array<WerewolfEvaluator> {
   return [
     createWerewolfAdversarialEvaluator(),
     createWerewolfOutcomeEvaluator(),
@@ -435,14 +444,14 @@ export function createWerewolfEvaluationSuite(): Array<HarnessEvaluator<GameStat
   ];
 }
 
-export function evaluateAdversarialMatch(state: GameState, agents: AgentHarnessState[]): AdversarialEvaluation {
+export function evaluateAdversarialMatch(state: GameState, agents: AgentHarnessState[], socialEpisode?: unknown): AdversarialEvaluation {
   const agentByPlayer = new Map(agents.map((agent) => [agent.playerId, agent]));
   const playerById = new Map(state.players.map((player) => [player.id, player]));
-  const trajectory = extractTrajectory(state.events);
+  const trajectory = extractTrajectory(socialEpisode);
   const voteAccuracyByAgent = computeVoteAccuracy(state);
   const influenceByAgent = computeInfluence(state);
   const deceptionByAgent = computeDeception(state);
-  const errorsByAgent = countHarnessErrors(state.events);
+  const errorsByAgent = countHarnessErrors(socialEpisode);
   const agentRewards = state.players.map((player) => {
     const agent = agentByPlayer.get(player.id);
     const reward = rewardAgent({
@@ -571,7 +580,7 @@ export function metricsFromAdversarialEvaluation(
   socialEpisode?: unknown
 ): HarnessMetricRecord[] {
   return [
-    ...metricsFromWerewolfOutcomeEvaluation(evaluation, state, agents),
+    ...metricsFromWerewolfOutcomeEvaluation(evaluation, state, agents, socialEpisode),
     ...metricsFromWerewolfVoteAccuracyEvaluation(evaluation, state),
     ...metricsFromWerewolfRoleSurvivalEvaluation(evaluateRoleSurvival(state), state, agents),
     ...metricsFromWerewolfInfluenceEvaluation(evaluation, state),
@@ -582,11 +591,12 @@ export function metricsFromAdversarialEvaluation(
 export function metricsFromWerewolfOutcomeEvaluation(
   evaluation: AdversarialEvaluation,
   state: GameState,
-  agents: AgentHarnessState[] = []
+  agents: AgentHarnessState[] = [],
+  socialEpisode?: unknown
 ): HarnessMetricRecord[] {
   const metrics: HarnessMetricRecord[] = [];
   const source = WEREWOLF_OUTCOME_EVALUATOR_ID;
-  const turnEventsByActor = groupEventsByActor(state.events.filter((event) => event.type === "harness.turn"));
+  const turnEvidenceByActor = groupTurnEvidenceByActor(socialEpisode);
   const eventEvidence = finalEventEvidence(state);
   metrics.push(
     metric({
@@ -628,9 +638,9 @@ export function metricsFromWerewolfOutcomeEvaluation(
   }
 
   for (const reward of evaluation.agentRewards) {
-    const playerEvents = turnEventsByActor.get(reward.playerId) ?? [];
+    const playerTurns = turnEvidenceByActor.get(reward.playerId) ?? [];
     const player = state.players.find((item) => item.id === reward.playerId);
-    const evidenceRefs = playerEvents.length ? playerEvents.map(eventToEvidenceRef) : player ? survivalEvidenceForPlayer(state, player) : finalEventEvidence(state);
+    const evidenceRefs = playerTurns.length ? playerTurns.map(turnEvidenceToMetricRef) : player ? survivalEvidenceForPlayer(state, player) : finalEventEvidence(state);
     metrics.push(
       metric({
         id: "agent.reward",
@@ -1027,35 +1037,47 @@ export function evaluateRoleSurvival(state: GameState): WerewolfRoleSurvivalEval
   };
 }
 
-function extractTrajectory(events: GameEvent[]): AgentTrajectoryStep[] {
-  return events
-    .filter((event) => event.type === "harness.turn")
-    .map((event) => {
-      const trace = event.payload as Partial<HarnessTurnTrace> & { targetId?: string };
-      return {
-        seq: event.seq,
-        day: event.day,
-        phase: event.phase,
-        playerId: trace.playerId ?? event.actorId ?? "unknown",
-        profileId: trace.profileId,
-        model: trace.model ?? "unknown",
-        actionKind: String(trace.actionKind ?? "unknown"),
-        policyName: String(trace.policyName ?? "unknown"),
-        commandType: String(trace.commandType ?? "unknown"),
-        intent: String(trace.intent ?? ""),
-        confidence: typeof trace.confidence === "number" ? trace.confidence : 0,
-        targetId: trace.targetId
-      };
+function extractTrajectory(socialEpisode: unknown): AgentTrajectoryStep[] {
+  return werewolfHarnessTurnEvidenceFromEpisode(socialEpisode)
+    .filter(({ step }) => isSocialStepCommitted(step))
+    .map(({ step, trace }) => {
+    const observation = asRecord(step.observation);
+    const view = asRecord(observation?.view) ?? observation;
+    return {
+      seq: step.turnIndex,
+      day: typeof view?.day === "number" ? view.day : 0,
+      phase: typeof view?.phase === "string" ? view.phase : "unknown",
+      playerId: trace.playerId,
+      profileId: trace.profileId,
+      model: trace.model,
+      actionKind: String(trace.actionKind ?? "unknown"),
+      policyName: String(trace.policyName ?? "unknown"),
+      commandType: String(trace.commandType ?? "unknown"),
+      intent: String(trace.intent ?? ""),
+      confidence: typeof trace.confidence === "number" ? trace.confidence : 0,
+      targetId: trace.targetId
+    };
     });
 }
 
-function groupEventsByActor(events: GameEvent[]): Map<string, GameEvent[]> {
-  const grouped = new Map<string, GameEvent[]>();
-  for (const event of events) {
-    const actorId = event.actorId ?? "unknown";
-    grouped.set(actorId, [...(grouped.get(actorId) ?? []), event]);
+function groupTurnEvidenceByActor(socialEpisode: unknown): Map<string, ReturnType<typeof werewolfHarnessTurnEvidenceFromEpisode>> {
+  const grouped = new Map<string, ReturnType<typeof werewolfHarnessTurnEvidenceFromEpisode>>();
+  for (const evidence of werewolfHarnessTurnEvidenceFromEpisode(socialEpisode).filter(
+    ({ step }) => isSocialStepCommitted(step)
+  )) {
+    grouped.set(evidence.actorId, [...(grouped.get(evidence.actorId) ?? []), evidence]);
   }
   return grouped;
+}
+
+function turnEvidenceToMetricRef(evidence: ReturnType<typeof werewolfHarnessTurnEvidenceFromEpisode>[number]): HarnessMetricEvidenceRef {
+  return {
+    artifact: "trace",
+    id: evidence.traceId,
+    seq: evidence.turnIndex,
+    traceId: evidence.traceId,
+    description: evidence.trace.commandType
+  };
 }
 
 function eventToEvidenceRef(event: GameEvent): HarnessMetricEvidenceRef {
@@ -1071,7 +1093,25 @@ function eventToEvidenceRef(event: GameEvent): HarnessMetricEvidenceRef {
 
 function finalEventEvidence(state: GameState): HarnessMetricEvidenceRef[] {
   const finalEvent = [...state.events].reverse().find((event) => event.type === "game.ended") ?? state.events.at(-1);
-  return finalEvent ? [eventToEvidenceRef(finalEvent)] : [stateEvidence("final game state")];
+  return finalEvent
+    ? [eventToEvidenceRef(finalEvent)]
+    : [
+        stateEvidence("final game state", {
+          id: state.id,
+          description: `final game state: phase=${state.phase}, day=${state.day}, winner=${state.winner ?? "none"}`
+        })
+      ];
+}
+
+function postgameRoleTruthEvidence(state: GameState, playerId: string): HarnessMetricEvidenceRef[] {
+  const refs: HarnessMetricEvidenceRef[] = [
+    stateEvidence(`postgame role truth for ${playerId}`, {
+      id: playerId
+    })
+  ];
+  const ended = [...state.events].reverse().find((event) => event.type === "game.ended");
+  if (ended) refs.unshift(eventToEvidenceRef(ended));
+  return refs;
 }
 
 function teamEvidenceRefs(state: GameState, players: Array<{ id: string }>): HarnessMetricEvidenceRef[] {
@@ -1093,14 +1133,36 @@ function voteEvidenceForPlayer(state: GameState, playerId: string): HarnessMetri
   const refs = state.events
     .filter((event) => event.type === "vote.cast" && event.actorId === playerId)
     .map(eventToEvidenceRef);
-  return refs.length ? refs : [stateEvidence(`vote records for ${playerId}`)];
+  if (refs.length) return refs;
+  const voteRecords = state.votes.filter((vote) => vote.voterId === playerId);
+  if (voteRecords.length) {
+    return voteRecords.map((vote, index) =>
+      stateEvidence(`vote records for ${playerId}`, {
+        id: `${playerId}:vote:d${vote.day}:${index + 1}`,
+        description: vote.abstain
+          ? `vote records for ${playerId}: day=${vote.day}, abstain=true`
+          : `vote records for ${playerId}: day=${vote.day}, target=${vote.targetId ?? "none"}`
+      })
+    );
+  }
+  return [stateEvidence(`vote records for ${playerId}`, { id: playerId })];
 }
 
 function speechEvidenceForPlayer(state: GameState, playerId: string): HarnessMetricEvidenceRef[] {
   const refs = state.events
     .filter((event) => event.type === "speech.submitted" && event.actorId === playerId && Boolean(payloadPressureTargetId(event.payload)))
     .map(eventToEvidenceRef);
-  return refs.length ? refs : [stateEvidence(`pressure speeches for ${playerId}`)];
+  if (refs.length) return refs;
+  const pressureSpeeches = state.speeches.filter((speech) => speech.playerId === playerId && Boolean(speech.pressureTargetId));
+  if (pressureSpeeches.length) {
+    return pressureSpeeches.map((speech, index) =>
+      stateEvidence(`pressure speeches for ${playerId}`, {
+        id: `${playerId}:pressure:d${speech.day}:${index + 1}`,
+        description: `pressure speeches for ${playerId}: day=${speech.day}, target=${speech.pressureTargetId}`
+      })
+    );
+  }
+  return [stateEvidence(`pressure speeches for ${playerId}`, { id: playerId })];
 }
 
 function misdirectVoteEvidence(state: GameState): HarnessMetricEvidenceRef[] {
@@ -1115,7 +1177,22 @@ function misdirectVoteEvidence(state: GameState): HarnessMetricEvidenceRef[] {
       return voter?.team === "village" && target?.team === "village";
     })
     .map(eventToEvidenceRef);
-  return refs.length ? refs : [stateEvidence("village-on-village misdirect votes")];
+  if (refs.length) return refs;
+  const voteRecords = state.votes.filter((vote) => {
+    if (vote.abstain || !vote.targetId) return false;
+    const voter = playerById.get(vote.voterId);
+    const target = playerById.get(vote.targetId);
+    return voter?.team === "village" && target?.team === "village";
+  });
+  if (voteRecords.length) {
+    return voteRecords.map((vote, index) =>
+      stateEvidence("village-on-village misdirect votes", {
+        id: `${vote.voterId}:misdirect:d${vote.day}:${index + 1}`,
+        description: `village-on-village misdirect votes: day=${vote.day}, voter=${vote.voterId}, target=${vote.targetId}`
+      })
+    );
+  }
+  return [stateEvidence("village-on-village misdirect votes", { id: state.id })];
 }
 
 function roleClaimConsistencyByAgent(state: GameState): Array<{
@@ -1170,7 +1247,7 @@ function roleClaimEvidenceForPlayer(state: GameState, playerId: string): Harness
       return Boolean(payloadClaimedRole(event.payload));
     })
     .map(eventToEvidenceRef);
-  return refs.length ? [...refs, stateEvidence(`postgame role truth for ${playerId}`)] : [stateEvidence(`role claims for ${playerId}`)];
+  return refs.length ? [...refs, ...postgameRoleTruthEvidence(state, playerId)] : [stateEvidence(`role claims for ${playerId}`, { id: playerId })];
 }
 
 interface CalibrationSample {
@@ -1236,7 +1313,11 @@ function calibrationSubject(agent: AgentHarnessState): Record<string, unknown> {
 }
 
 function calibrationEvidenceRefs(agent: AgentHarnessState, socialRefs: EvidenceRef[], stateDescription: string): HarnessMetricEvidenceRef[] {
-  return uniqueEvidenceRefs([...metricEvidenceFromSocialRefs(agent, socialRefs), agentStateEvidence(agent), stateEvidence(stateDescription)]);
+  return uniqueEvidenceRefs([
+    ...metricEvidenceFromSocialRefs(agent, socialRefs),
+    agentStateEvidence(agent),
+    stateEvidence(stateDescription, { id: agent.playerId })
+  ]);
 }
 
 function calibrationMetadata(samples: CalibrationSample[]): Record<string, unknown> {
@@ -1281,6 +1362,10 @@ function metricEvidenceFromSocialRefs(agent: AgentHarnessState, refs: EvidenceRe
     }
     if (ref.artifact === "trace") {
       mapped.push({ artifact: "trace", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
+      continue;
+    }
+    if (ref.artifact === "observation") {
+      mapped.push({ artifact: "observation", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
       continue;
     }
     if (ref.artifact === "state" || ref.artifact === "outcome") {
@@ -1425,7 +1510,9 @@ function metricsFromFalseRoleClaimExposure(state: GameState, agents: AgentHarnes
         denominator: exposureRecords.length,
         confidence: 1,
         aggregation: "sum",
-        evidenceRefs: evidenceRefs.length ? evidenceRefs : [stateEvidence(`false role claim exposure records for ${player.id}`)],
+        evidenceRefs: evidenceRefs.length
+          ? evidenceRefs
+          : [stateEvidence(`false role claim exposure records for ${player.id}`, { id: player.id })],
         metadata
       }),
       metric({
@@ -1442,7 +1529,9 @@ function metricsFromFalseRoleClaimExposure(state: GameState, agents: AgentHarnes
         denominator: falseClaimSpeakerIds.size,
         confidence: 1,
         aggregation: "sum",
-        evidenceRefs: evidenceRefs.length ? evidenceRefs : [stateEvidence(`false role claim exposure records for ${player.id}`)],
+        evidenceRefs: evidenceRefs.length
+          ? evidenceRefs
+          : [stateEvidence(`false role claim exposure records for ${player.id}`, { id: player.id })],
         metadata
       })
     ];
@@ -1752,7 +1841,15 @@ function falseRoleClaimBeliefTemporalAssociationEvidence(
       ])
     );
   }
-  return uniqueEvidenceRefs(refs.length ? refs : [stateEvidence("false role claim belief temporal association records")]);
+  return uniqueEvidenceRefs(
+    refs.length
+      ? refs
+      : [
+          stateEvidence("false role claim belief temporal association records", {
+            id: agent?.playerId
+          })
+        ]
+  );
 }
 
 function falseRoleClaimBeliefTemporalAssociationMetadata(audit: FalseRoleClaimBeliefTemporalAssociationAudit): Record<string, unknown> {
@@ -2043,7 +2140,15 @@ function falseRoleClaimReputationTemporalAssociationEvidence(
       ])
     );
   }
-  return uniqueEvidenceRefs(refs.length ? refs : [stateEvidence("false role claim reputation temporal association records")]);
+  return uniqueEvidenceRefs(
+    refs.length
+      ? refs
+      : [
+          stateEvidence("false role claim reputation temporal association records", {
+            id: agent?.playerId
+          })
+        ]
+  );
 }
 
 function falseRoleClaimReputationTemporalAssociationMetadata(audit: FalseRoleClaimReputationTemporalAssociationAudit): Record<string, unknown> {
@@ -2160,7 +2265,9 @@ function metricsFromFalseRoleClaimPressureVoteFollow(state: GameState, agents: A
         denominator: records.length,
         confidence: records.length ? 1 : 0,
         aggregation: "sum",
-        evidenceRefs: evidenceRefs.length ? evidenceRefs : [stateEvidence(`false role claim pressure vote-follow records for ${speakerId}`)],
+        evidenceRefs: evidenceRefs.length
+          ? evidenceRefs
+          : [stateEvidence(`false role claim pressure vote-follow records for ${speakerId}`, { id: speakerId })],
         metadata
       }),
       metric({
@@ -2177,7 +2284,9 @@ function metricsFromFalseRoleClaimPressureVoteFollow(state: GameState, agents: A
         denominator: records.length,
         confidence: records.length ? 1 : 0,
         aggregation: "ratio",
-        evidenceRefs: evidenceRefs.length ? evidenceRefs : [stateEvidence(`false role claim pressure vote-follow records for ${speakerId}`)],
+        evidenceRefs: evidenceRefs.length
+          ? evidenceRefs
+          : [stateEvidence(`false role claim pressure vote-follow records for ${speakerId}`, { id: speakerId })],
         metadata
       })
     ];
@@ -2246,16 +2355,32 @@ function falseRoleClaimExposureEvidence(
         refs.push({ artifact: "trace", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
         continue;
       }
+      if (ref.artifact === "observation") {
+        refs.push({
+          artifact: "observation",
+          id: ref.id,
+          seq: ref.seq,
+          traceId: ref.traceId,
+          description: ref.description ?? `scoped exposure of ${record.messageId}`
+        });
+        continue;
+      }
       refs.push({
-        artifact: "trace",
+        artifact: "observation",
         id: ref.id,
         seq: ref.seq,
         traceId: ref.traceId,
-        description: `observation:${ref.description ?? `scoped exposure of ${record.messageId}`}`
+        description: ref.description ?? `scoped exposure of ${record.messageId}`
       });
     }
     const claim = falseClaimByMessageId.get(record.messageId);
-    if (claim) refs.push(stateEvidence(`postgame role truth for ${claim.sourceId}`));
+    if (claim) {
+      refs.push(
+        stateEvidence(`postgame role truth for ${claim.sourceId}`, {
+          id: claim.sourceId
+        })
+      );
+    }
   }
   return uniqueEvidenceRefs(refs);
 }
@@ -2328,16 +2453,30 @@ function falseRoleClaimPressureVoteFollowEvidence(records: FalseRoleClaimPressur
         refs.push({ artifact: "trace", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
         continue;
       }
+      if (ref.artifact === "observation") {
+        refs.push({
+          artifact: "observation",
+          id: ref.id,
+          seq: ref.seq,
+          traceId: ref.traceId,
+          description: ref.description ?? `scoped exposure of ${record.exposure.messageId}`
+        });
+        continue;
+      }
       refs.push({
-        artifact: "trace",
+        artifact: "observation",
         id: ref.id,
         seq: ref.seq,
         traceId: ref.traceId,
-        description: `observation:${ref.description ?? `scoped exposure of ${record.exposure.messageId}`}`
+        description: ref.description ?? `scoped exposure of ${record.exposure.messageId}`
       });
     }
     if (record.voteEvent) refs.push(eventToEvidenceRef(record.voteEvent));
-    refs.push(stateEvidence(`postgame role truth for ${record.claim.sourceId}`));
+    refs.push(
+      stateEvidence(`postgame role truth for ${record.claim.sourceId}`, {
+        id: record.claim.sourceId
+      })
+    );
   }
   return uniqueEvidenceRefs(refs);
 }
@@ -2489,10 +2628,17 @@ function payloadClaimedRole(payload: unknown): string | undefined {
   return typeof payload === "object" && payload && "claimedRole" in payload ? String(payload.claimedRole) : undefined;
 }
 
-function stateEvidence(description: string): HarnessMetricEvidenceRef {
+function stateEvidence(
+  description: string,
+  options?: {
+    id?: string;
+    description?: string;
+  }
+): HarnessMetricEvidenceRef {
   return {
     artifact: "state",
-    description
+    id: options?.id,
+    description: options?.description ?? description
   };
 }
 
@@ -2533,10 +2679,10 @@ function agentSubject(reward: AgentReward): Record<string, unknown> {
   };
 }
 
-function countHarnessErrors(events: GameEvent[]): Record<string, number> {
+function countHarnessErrors(socialEpisode: unknown): Record<string, number> {
   const counts: Record<string, number> = {};
-  for (const event of events.filter((item) => item.type === "harness.error")) {
-    const playerId = event.actorId ?? "unknown";
+  for (const failure of harnessFailureEvidenceFromEpisode(socialEpisode)) {
+    const playerId = failure.actorId ?? "unknown";
     counts[playerId] = (counts[playerId] ?? 0) + 1;
   }
   return counts;

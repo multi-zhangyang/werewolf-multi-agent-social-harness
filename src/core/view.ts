@@ -27,8 +27,6 @@ export function createPlayerView(state: GameState, playerId: string, pendingActi
     player.role === "seer" && state.night.seerInspection?.actorId === player.id ? state.night.seerInspection : undefined;
 
   return {
-    gameId: state.id,
-    seed: state.seed,
     phase: state.phase,
     day: state.day,
     you: {
@@ -48,7 +46,7 @@ export function createPlayerView(state: GameState, playerId: string, pendingActi
     },
     speeches: state.speeches,
     votes: state.votes,
-    deaths: state.deaths,
+    deaths: publicDeathsForState(state.deaths),
     recentEvents: visibleEventsForPlayer(state.events, player.id),
     pendingAction
   };
@@ -57,8 +55,6 @@ export function createPlayerView(state: GameState, playerId: string, pendingActi
 export function serializePublicState(state: GameState): PublicGameState {
   const publicEvents = publicEventsForState(state.events);
   return {
-    id: state.id,
-    seed: state.seed,
     config: state.config,
     phase: state.phase,
     day: state.day,
@@ -71,8 +67,6 @@ export function serializePublicState(state: GameState): PublicGameState {
     winner: state.winner,
     endReason: state.endReason,
     pendingActionCount: getPendingActions(state).length,
-    harnessTurnCount: state.events.filter((event) => event.type === "harness.turn").length,
-    harnessErrorCount: state.events.filter((event) => event.type === "harness.error").length,
     publicEventCount: publicEvents.length
   };
 }
@@ -83,7 +77,8 @@ export function roleText(role: keyof typeof ROLE_DEFINITIONS): string {
 
 function visibleEventsForPlayer(events: GameEvent[], playerId: string): GameEvent[] {
   return events
-    .filter((event) => event.visibility === "public" || event.actorId === playerId)
+    .filter((event) => event.visibility === "public" || (event.visibility === "private" && event.actorId === playerId))
+    .map((event) => (event.visibility === "public" ? sanitizePublicEvent(event) : cloneJson(event)))
     .slice(-40);
 }
 

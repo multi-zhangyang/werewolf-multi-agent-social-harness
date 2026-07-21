@@ -1,109 +1,250 @@
 # Multi-Agent Harness Research Notes
 
-Checked on 2026-07-04. Refreshed on 2026-07-06. This file records the external references that define the harness vocabulary used by this project.
+This document records the verified external vocabulary used by the local
+architecture. It is not evidence that this repository adopts any external
+runtime. Local implementation claims below are tied to inspected repository
+contracts; external claims are limited to the cited official documentation.
 
-This project treats provider-backed model adapters as pluggable reasoners, not as Agents themselves.
-
-Current applied synthesis lives in
-[multi-agent-society-harness-plan.md](multi-agent-society-harness-plan.md).
-That document maps these references to concrete project invariants, current
-local modules, backlog items, and validation gates.
+The project conclusion is fixed: provider-backed model adapters are optional
+reasoners inside harness-managed agents. The product is an environment-
+authoritative, replayable, evaluable multi-agent harness, not a group chat.
 
 ## Working Definitions
 
-- **Multi-agent system**: multiple agent entities operate in a shared environment, receive observations, select actions from a legal action space, and affect a shared state transition. This matches the PettingZoo AEC framing: one selected agent acts, then the environment advances.
-- **Agent**: a stateful actor with identity, private state, observation handling, policy/strategy, action selection, and optional model/tool calls. In this project, a provider-backed model adapter is only one possible reasoner inside an Agent.
-- **Harness**: the execution shell around an experiment. It sets up episodes, injects configurations, drives the environment-agent loop, records trajectories, computes metrics, and makes runs reproducible. It is not a prompt and not a UI.
-- **Trajectory**: the ordered, replayable record of observations, plans, commands, reasoner output, model usage, and resulting environment events.
+- **Environment**: the authority that exposes scoped observations and legal
+  action conditions, validates actions, and commits state transitions.
+- **Agent**: a durable actor with identity, private/social state, observation
+  handling, policy, arbitration, and optional model/tool-backed reasoning.
+- **Proposal**: a staged action/message candidate. It is not an environment or
+  agent-state commit.
+- **Committed step**: a validated environment transition, its published message
+  envelopes, and the actor receipt that follows them.
+- **Domain event**: a fact emitted by the domain transition. Provider telemetry,
+  private reasoner memos, and harness failures are not domain events.
+- **Execution evidence**: scheduler steps, scoped observations, proposed
+  actions/messages, commit status, traces, failures, hashes, and ranges recorded
+  by the harness.
+- **Deterministic playback**: applying recorded committed native steps with zero
+  actor/model/API calls and verifying their state and message consequences.
+- **Fork/rerun**: a new execution lineage from a checkpoint. It may call models
+  or external APIs and may diverge from the parent run.
 
-## Authoritative Sources And Conclusions
+## PettingZoo: Environment Cycles And Parallel Semantics
 
-### OpenAI Agents SDK Multi-Agent
+Official sources:
 
-Sources:
+- AEC API: https://pettingzoo.farama.org/api/aec/
+- Parallel API: https://pettingzoo.farama.org/api/parallel/
+- Pinned AEC documentation source:
+  https://github.com/Farama-Foundation/PettingZoo/blob/dc1a4c8b679783b2fcb95b5a0d5af2a629deedbd/docs/api/aec.md#L85-L111
+- Pinned base environment contracts:
+  https://github.com/Farama-Foundation/PettingZoo/blob/dc1a4c8b679783b2fcb95b5a0d5af2a629deedbd/pettingzoo/utils/env.py#L29-L100
+- Pinned parallel environment contracts:
+  https://github.com/Farama-Foundation/PettingZoo/blob/dc1a4c8b679783b2fcb95b5a0d5af2a629deedbd/pettingzoo/utils/env.py#L287-L331
 
-- OpenAI Agents SDK agents: https://openai.github.io/openai-agents-python/agents/
-- OpenAI Agents SDK multi-agent orchestration: https://openai.github.io/openai-agents-python/multi_agent/
-- OpenAI Agents SDK tracing: https://openai.github.io/openai-agents-python/tracing/
+Verified source implications:
 
-Relevant guidance:
+- AEC is a sequential agent-environment cycle: one selected agent acts for an
+  environment transition.
+- Per-agent observation is distinct from global environment state.
+- The Parallel API represents actions for live agents in one environment step;
+  it is a different contract from AEC.
+- Legal-action metadata or action masks help describe available choices, but
+  the environment still owns `step()` and transition semantics.
 
-- The SDK describes an Agent as a configured runtime component with instructions, model selection, tools, handoffs, guardrails, and related execution settings, not as a bare chat completion call.
-- The SDK supports two main multi-agent patterns: an LLM can decide when to hand off, or the application can orchestrate agents in code.
-- The tracing model treats runs, agent steps, model generations, tool calls, and handoffs as structured spans, which makes postgame inspection and eval possible.
+Local architecture consequence:
 
-Project conclusion:
+- `SocialEnvironment.observe(agentId, pending)` and the Werewolf `PlayerView`
+  implement actor-scoped observation boundaries.
+- `WerewolfEnvironment.step()` remains the final validator even when policy has
+  already selected from pending legal targets.
+- `aec-batched-decision` means concurrent/shared-state decision collection plus
+  sequential environment application. It is not a parallel environment.
+- Local `parallel` mode is valid only with `SocialParallelEnvironment.stepBatch()`
+  and an atomic joint transition. `Promise.all()` over reasoner calls does not
+  satisfy that contract.
 
-- Keep code-driven orchestration in the harness. The Werewolf rules, pending actions, legal targets, role policies, and command arbitration must remain deterministic project logic.
-- Use provider-backed model calls only as `HarnessReasoner` components: they may generate private tactical memo text and public speech text, but they must not directly own `GameCommand`.
-- Preserve per-turn trace records that include model usage, latency, policy, command type, public speech, and private memo. This is the local equivalent of an agent trace.
+## OpenAI Agents: Runtime, Orchestration, Results, And Tracing
 
-### LangGraph Multi-Agent And Persistence
+Official sources:
 
-Sources:
+- Agents guide: https://developers.openai.com/api/docs/guides/agents
+- Defining agents: https://developers.openai.com/api/docs/guides/agents/define-agents
+- Running agents and the agent loop:
+  https://developers.openai.com/api/docs/guides/agents/running-agents#the-agent-loop
+- Orchestration: https://developers.openai.com/api/docs/guides/agents/orchestration
+- Tracing:
+  https://developers.openai.com/api/docs/guides/agents/integrations-observability#tracing
+- Results: https://developers.openai.com/api/docs/guides/agents/results
 
-- LangGraph multi-agent systems: https://docs.langchain.com/oss/python/langgraph/multi-agent
-- LangGraph persistence: https://docs.langchain.com/oss/python/langgraph/persistence
-- LangGraph time travel: https://docs.langchain.com/oss/python/langgraph/time-travel
+Verified source implications:
 
-Relevant guidance:
+- Agent definition, the runner/loop, orchestration, run results, and trace data
+  are separate runtime concerns.
+- Application-controlled orchestration is a supported boundary; orchestration
+  does not have to be delegated to a model.
+- Tracing is observability over execution. A trace records what runtime work
+  occurred; it is not the application's domain-state authority.
 
-- LangGraph models multi-agent systems as graph topologies such as network, supervisor, supervisor with tool-calling, and hierarchical teams.
-- A supervisor or graph node can decide control flow, while each agent receives only the state subset needed for its role.
-- Persistence checkpoints graph state after execution steps. Threads, checkpoints, replay, and time travel are first-class concepts.
+Local architecture consequence:
 
-Project conclusion:
+- The harness, not a provider SDK or model, owns scheduling, observations,
+  message commit, environment invocation, artifacts, and evaluation.
+- `HarnessReasoner` is an optional component used by
+  `WerewolfSocialActorAdapter` while driving a `WerewolfAgentActor` decision.
+  Its private memo and provider telemetry are native execution evidence, not
+  the agent definition and not `GameState` events. Public speech enters domain
+  truth only through an accepted typed `speech.submit` command.
+- A model handoff or structured response is, by itself, workflow data rather
+  than committed social communication or a legal game transition. Social
+  messages must pass through the local communication bus, and commands must
+  pass environment validation.
+- Local trace/error records belong to `SocialEpisodeArtifact` and JSONL
+  observability records. They must not be inserted into the domain event log.
 
-- Treat the harness loop as a domain-specific graph even though it is implemented directly in TypeScript: environment -> observation -> belief update -> policy plan -> reasoner -> command -> state transition -> trace.
-- Keep observations scoped. `PlayerView` is the state projection for one agent, and private role information must enter only through that projection.
-- Replay should be based on `GameState.seed`, initial config, event history, and recorded `GameCommand`/`HarnessTurnTrace` data, not on re-prompting an LLM and hoping for the same output.
+## LangGraph: Persistence, Checkpoints, And Time Travel
 
-### PettingZoo AEC API
+Official sources:
 
-Source:
+- Persistence: https://docs.langchain.com/oss/javascript/langgraph/persistence
+- Checkpointers: https://docs.langchain.com/oss/javascript/langgraph/checkpointers
+- Time travel: https://docs.langchain.com/oss/javascript/langgraph/use-time-travel
+- Pinned checkpointer documentation source:
+  https://github.com/langchain-ai/docs/blob/7c417783c90d5ee9fb03378eeddaf20082fddfc5/src/oss/langgraph/checkpointers.mdx#L19-L70
+- Pinned time-travel overview:
+  https://github.com/langchain-ai/docs/blob/7c417783c90d5ee9fb03378eeddaf20082fddfc5/src/oss/langgraph/use-time-travel.mdx#L9-L22
+- Pinned replay/fork behavior:
+  https://github.com/langchain-ai/docs/blob/7c417783c90d5ee9fb03378eeddaf20082fddfc5/src/oss/langgraph/use-time-travel.mdx#L123-L168
 
-- PettingZoo Agent Environment Cycle API: https://pettingzoo.farama.org/api/aec/
+Verified source implications:
 
-Relevant guidance:
+- LangGraph persistence saves checkpointed graph state associated with
+  execution threads.
+- Its time-travel documentation distinguishes replaying from a checkpoint and
+  forking from checkpoint state.
+- In that documentation, replay can re-execute downstream graph nodes. Those
+  nodes may perform model or API work again.
 
-- The AEC model is a sequential multi-agent contract: the environment exposes the selected agent, the agent receives an observation and legal-action metadata, then `step(action)` advances the environment.
-- The API separates environment state from agent action choice and includes explicit termination/truncation handling.
+Local architecture consequence:
 
-Project conclusion:
+- This repository must not borrow the word `replay` without qualifying its
+  semantics. Re-executing nodes, policies, models, or APIs is not deterministic
+  playback of a recorded match.
+- `replaySocialEpisode()` applies recorded `commitStatus: "committed"` native
+  steps, skips rejected steps, verifies state/event/message evidence, and
+  constructs no actor or reasoner.
+- A local fork/rerun may execute actors and models again, but it must receive a
+  new run identity and retain immutable checkpoint and parent provenance.
+- New local checkpoints use `harness.checkpoint.v2` and bind the native social
+  execution prefix, channel topology, committed message prefix, domain state,
+  actor state, batch-safe boundary, and content hashes. Fork/rerun restores
+  that state into a new lineage; it is still not deterministic playback.
 
-- `WerewolfEnvironment`, `getPendingActions()`, and `applyCommand()` are the local AEC-style boundary. The harness may decide which pending action to service, but the environment remains the authority for phase transitions and legality.
-- `PendingAction` is the legal action envelope. `PolicyPlan.command` must stay inside that legal envelope; the engine remains the final validator.
-- Parallel vote/kill collection is an implementation optimization. The resulting commands still enter the environment as explicit state transitions.
+## Concordia: Componentized Social Actors, Not Rule Authority
 
-### OpenAI Evals And Eval Harnesses
+Official sources:
 
-Sources:
+- Repository and overview: https://github.com/google-deepmind/concordia
+- Component documentation:
+  https://github.com/google-deepmind/concordia/blob/main/concordia/components/README.md
 
-- OpenAI agent evals guide: https://developers.openai.com/api/docs/guides/agent-evals
-- OpenAI Evals repository: https://github.com/openai/evals
-- OpenAI Evals deprecation notice: https://platform.openai.com/docs/guides/evals
+Verified source implications:
 
-Relevant guidance:
+- Concordia models entities as composable components and distinguishes agents,
+  a Game Master, and an engine.
+- Its agent components cover concerns such as memory, observation,
+  instructions, planning/reflection, and action selection.
+- Its architecture is useful as a decomposition reference for social actors,
+  but a language-model Game Master may interpret natural-language action
+  attempts into world outcomes.
 
-- OpenAI's current agent eval guidance centers on traces, datasets, graders, and eval runs: collect structured workflow data, grade behavior, and compare runs.
-- The open-source OpenAI Evals repository is useful historical reference for eval registries and reproducible benchmark runners.
-- The OpenAI Platform Evals docs state that legacy Evals API access ends on October 31, 2026 and stored data is deleted on November 30, 2026.
+Local architecture consequence:
 
-Project conclusion:
+- The local actor scaffold keeps identity, memory, beliefs, relationships,
+  reputation, norms, goals, policy/arbitration, and reasoner output as
+  separately auditable private state concerns.
+- A reasoner/policy can stage a memo or candidate during `decide()`, but durable
+  actor state changes only after a committed receipt. This transactional rule
+  is stricter than a generic planning/action loop because it protects replay,
+  checkpoint, and social-causality evidence from rejected proposals.
+- `WerewolfEnvironment` and the core engine, not a Game Master or reasoner,
+  interpret legal commands, resolve simultaneous action conflicts, and decide
+  victory. Concordia is therefore a design reference, not a runtime dependency.
 
-- Keep this project's eval harness local and provider-independent. The authoritative artifacts are deterministic match state, `harness.turn` events, errors, typed `SocialMessage.speechActs`, delivery/exposure records from scoped observations, evaluator metric records with evidence refs, and computed `MatchMetrics`.
-- External eval systems may consume exported trajectories or datasets, but they must not become the source of truth for game state or replay.
-- Metrics should combine outcome metrics, behavioral metrics, model usage, latency, and error count. Any future LLM-as-grader evaluation should read recorded trajectories and produce an additional metric layer.
+## Generic Artifact Envelope
 
-## Architecture Consequence
+The current local refactor adds `src/harness/episodeArtifacts.ts`. It owns the
+domain-neutral portion of an artifact/checkpoint contract:
 
-The harness owns:
+```text
+HarnessEpisodeArtifactEnvelope
+  = run identity + status + initial/final snapshot
+  + SocialEpisodeArtifact + actor snapshots + fork provenance
 
-- Environment reset, current pending actions, observations, and state transitions.
-- Agent identity, private belief state, role policy, and memory.
-- Action arbitration through legal `GameCommand` values.
-- Model calls for tactical memo and public speech only.
-- Trajectory records, typed speech-act facts, scoped delivery/exposure records, model usage, win-rate, deception, reasoning, latency, and error metrics.
-- Replay inputs: seed/config, event stream, harness traces, and applied commands.
+HarnessCheckpointEnvelope
+  = checkpoint identity + source hashes/cursor
+  + state + actor state + committed social execution prefix
+```
 
-The model does not directly issue the authoritative game command. It can influence speech and private tactical text, but the harness validates and applies all commands.
+This module has no Werewolf state, role, team, command, evaluator, provider,
+or UI imports. A domain supplies those through typed specializations and a
+deterministic replay factory. The Werewolf compatibility layer continues to
+own `MatchArtifact`, seed/config/assignment, domain events, evaluators, and
+public DTO projection.
+
+This applies the useful part of checkpoint systems such as LangGraph while
+preserving a different replay contract: `validateHarnessCheckpointReplay()`
+receives a domain replay function over recorded committed steps, never an
+agent/model runner.
+
+## Applied Local Separation
+
+The external sources converge on boundaries that the local code now expresses:
+
+```text
+domain truth:
+  GameState + domain GameEvent records
+
+native execution authority:
+  SocialEpisodeArtifact
+    + explicit system/player steps
+    + commitStatus
+    + observations/actions/messages
+    + trace/failure evidence
+    + state/event/message hashes and ranges
+
+generic artifact/checkpoint envelope:
+  episode/checkpoint identity + stable hashes + batch boundary
+  + actor snapshot frame identity + immutable fork provenance
+  + domain-supplied replay factory
+
+agent lifecycle:
+  staged proposal
+    -> environment commit
+    -> message commit
+    -> actor-scoped receipt
+    -> committed actor state
+    -> snapshot
+
+legacy migration projection:
+  HarnessStepRecord[] trajectory
+
+deterministic playback:
+  recorded committed native steps only
+  + zero actor/policy/reasoner/provider calls
+
+fork/rerun:
+  new lineage from checkpoint
+  + optional new model/API calls
+```
+
+This separation prevents four category errors:
+
+1. Calling a chat completion an agent.
+2. Calling provider telemetry a domain event.
+3. Calling a rejected proposal a committed turn.
+4. Calling fresh model/API execution deterministic replay.
+
+External frameworks may remain design references or export consumers. They do
+not replace local environment authority, scoped observations, native artifacts,
+or evaluator evidence.

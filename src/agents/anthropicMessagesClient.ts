@@ -6,7 +6,7 @@ import Anthropic, {
 } from "@anthropic-ai/sdk";
 import type { Message, MessageParam, MessageStreamEvent, Usage, MessageDeltaUsage } from "@anthropic-ai/sdk/resources/messages/messages";
 import type { ModelClient, ModelCompletionRequest, ModelCompletionResult } from "./modelClient";
-import { ModelCallError, type ChatCompletionUsage, type ChatMessage, type ProviderStreamCompletionMode } from "./schema";
+import { ModelCallError, type ChatCompletionUsage, type ChatMessage, type ProviderStreamCompletionMode, looksLikeHtmlGatewayPayload } from "./schema";
 import { normalizeSdkBaseUrl } from "./providerUrls";
 
 export interface AnthropicMessagesClientOptions {
@@ -263,8 +263,13 @@ function anthropicSdkModelCallError(error: unknown, stage: string, timeoutMs: nu
   }
   if (error instanceof APIError) {
     const status = typeof error.status === "number" ? error.status : undefined;
-    return new ModelCallError(`Anthropic Messages API HTTP ${status ?? "error"}: ${error.message.slice(0, 600)}`, {
-      failureKind: status === undefined ? "unknown" : "http",
+    const htmlGateway = looksLikeHtmlGatewayPayload(error.message) || looksLikeHtmlGatewayPayload(error.error);
+    const failureKind = status === undefined ? "unknown" : htmlGateway ? "gateway_html" : "http";
+    const message = htmlGateway
+      ? `Anthropic Messages API HTTP ${status ?? "error"}: gateway returned HTML (likely wrong endpoint path or gateway auth failure).`
+      : `Anthropic Messages API HTTP ${status ?? "error"}: ${error.message.slice(0, 600)}`;
+    return new ModelCallError(message, {
+      failureKind,
       providerStage: status === undefined ? stage : "http_response",
       status,
       retryable: status === undefined ? true : isRetryableHttpStatus(status),

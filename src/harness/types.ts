@@ -4,6 +4,7 @@ import type { ModelCompletionResult } from "../agents/modelClient";
 import type { ProviderFailureKind, ProviderFailureStage, ProviderRetryHistoryEntry, ProviderStreamTelemetry } from "../agents/schema";
 import type { SocialChannel, SocialEpisodeArtifact, SocialMessage } from "./social";
 import type { AgentSocialState, EvidenceRef } from "./socialState";
+import type { GenericForkProvenance } from "./episodeArtifacts";
 
 export type PolicyName = "balanced" | "wolf-deceiver" | "village-analyst" | "seer-information" | "witch-conservative" | "hunter-punisher";
 
@@ -37,13 +38,37 @@ export interface AgentHarnessState {
   socialStateHash?: string;
 }
 
+export type WerewolfJointPhaseScheduler = "aec-batched-decision" | "parallel";
+
+/**
+ * Production default for simultaneous Werewolf phases (night kill votes and
+ * day votes). `parallel` remains an explicit opt-in only; do not change this
+ * default without a separate replay/artifact policy decision.
+ */
+export const DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER: WerewolfJointPhaseScheduler = "aec-batched-decision";
+
+/**
+ * Minimum maxTransitions for a Werewolf parallel joint-phase proof path:
+ * system.advance + seer.inspect + 2-wolf kill batch.
+ * Lower values will refuse to apply the first parallel batch.
+ */
+export const WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS = 4;
+
 export interface HarnessRunOptions {
   initialState: GameState;
   agents: HarnessAgentConfig[];
   initialAgentStates?: AgentHarnessState[];
+  initialSocialChannels?: SocialChannel[];
   initialSocialMessages?: SocialMessage[];
   reasoner: HarnessReasoner;
   maxTransitions?: number;
+  /**
+   * Scheduler used for simultaneous Werewolf phases (night kill votes and day
+   * votes). Defaults to {@link DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER}.
+   * `parallel` requires environment stepBatch joint resolution and is opt-in
+   * only.
+   */
+  jointPhaseScheduler?: WerewolfJointPhaseScheduler;
   forkOf?: HarnessForkProvenance;
   recordAgentSnapshots?: boolean;
 }
@@ -60,8 +85,10 @@ export interface HarnessRunResult {
   metrics: MatchMetrics;
   evaluation: AdversarialEvaluation;
   evaluationReport: HarnessEvaluationReport;
+  /** Legacy Werewolf committed-command projection retained for checkpoint migration. */
   trajectory: HarnessStepRecord[];
-  socialEpisode: SocialEpisodeArtifact<GameState, HarnessPlayerView, AgentPendingAction, GameCommand>;
+  /** Authoritative native scheduler/environment/message-bus execution artifact. */
+  socialEpisode: SocialEpisodeArtifact<GameState, WerewolfHarnessObservation, PendingAction, GameCommand>;
   agents: AgentHarnessState[];
   forkOf?: HarnessForkProvenance;
 }
@@ -92,20 +119,13 @@ export interface HarnessErrorPayload {
   attempts?: number;
 }
 
-export interface HarnessForkProvenance {
-  checkpointId: string;
-  parentRunId?: string;
+/**
+ * Werewolf compatibility provenance. The reusable parent/checkpoint/hash
+ * contract lives in episodeArtifacts; matchId remains an adapter-level alias
+ * for server and legacy artifact consumers.
+ */
+export interface HarnessForkProvenance extends GenericForkProvenance<"harness.checkpoint.v2"> {
   parentMatchId?: string;
-  parentTraceId?: string;
-  parentEvidenceTraceIds?: string[];
-  parentTurnIndex?: number;
-  parentStateHash: string;
-  parentTrajectoryHash?: string;
-  parentAgentsHash?: string;
-  parentSocialMessagesHash?: string;
-  parentTrajectoryLength: number;
-  createdAt: string;
-  reason?: string;
 }
 
 export interface HarnessReasoner {
@@ -127,6 +147,25 @@ export type HarnessPlayerView = PlayerView & {
   };
 };
 
+export type WerewolfHarnessObservation =
+  | {
+      kind: "player";
+      agentId: string;
+      view: HarnessPlayerView;
+    }
+  | {
+      kind: "system";
+      agentId: "system";
+      gameId: string;
+      phase: GameState["phase"];
+      day: number;
+      pendingAction: Extract<PendingAction, { kind: "advance" }>;
+      social: {
+        channels: SocialChannel[];
+        messages: SocialMessage[];
+      };
+    };
+
 export interface ReasonerAgentContext {
   playerId: string;
   profileId?: string;
@@ -143,6 +182,22 @@ export interface ReasonerAgentContext {
 export interface ReasonerOutput {
   content: string;
   completion: ModelCompletionResult;
+  actionProposal?: ReasonerActionProposal;
+}
+
+/**
+ * A typed, provider-neutral suggestion from a reasoner. This is deliberately
+ * smaller than GameCommand: it cannot mutate the environment and may be
+ * rejected or ignored by the actor policy.
+ */
+export interface ReasonerActionProposal {
+  commandType?: string;
+  targetId?: string;
+  saveTargetId?: string;
+  poisonTargetId?: string;
+  abstain?: boolean;
+  confidence?: number;
+  rationale?: string;
 }
 
 export type PolicyArbitrationObjective = "suspect-werewolf" | "target-village";
@@ -173,6 +228,7 @@ export interface PolicyPlan {
   claimedRole?: Role;
   pressureTargetId?: string;
   arbitration?: PolicyArbitrationSummary;
+  reasonerProposal?: ReasonerActionProposal;
 }
 
 export interface HarnessTurnTrace {
@@ -210,6 +266,8 @@ export interface ReasonerOutputSummary {
   attempts?: number;
   retryHistory?: ProviderRetryHistoryEntry[];
   stream?: ProviderStreamTelemetry;
+  actionProposal?: ReasonerActionProposal;
+  actionProposalError?: string;
 }
 
 export interface HarnessStepRecord {
@@ -280,9 +338,31 @@ export interface AdversarialEvaluation {
 
 export type HarnessMetricScope = "episode" | "team" | "agent" | "profile" | "model" | "role" | "seat";
 export type HarnessMetricValue = number | string | boolean | null;
+export type HarnessMetricPromotionClass = "diagnostic" | "scorecard" | "benchmark_only";
+
+/**
+ * Immutable promotion resolution recorded when an evaluation report is built.
+ * Readers must prefer this over applying the currently installed catalog to an
+ * historical metric. `legacy_recomputed` is reserved for old artifacts that
+ * predate the stored decision contract.
+ */
+export interface HarnessMetricPromotionDecision {
+  policyId: string;
+  policyVersion: string;
+  policyHash: string;
+  catalogId: string;
+  catalogVersion: string;
+  catalogHash: string;
+  catalogDomainId: string;
+  promotionClass: HarnessMetricPromotionClass;
+  eligibleForScorecard: boolean;
+  reasons: string[];
+  catalogDecisionId?: string;
+  resolution: "recorded" | "legacy_recomputed";
+}
 
 export interface HarnessMetricEvidenceRef {
-  artifact: "trajectory" | "message" | "event" | "trace" | "state" | "agent_state" | "metric";
+  artifact: "trajectory" | "message" | "event" | "trace" | "observation" | "state" | "agent_state" | "metric";
   id?: string;
   seq?: number;
   traceId?: string;
@@ -308,6 +388,23 @@ export interface HarnessMetricRecord {
   evidenceRefs?: HarnessMetricEvidenceRef[];
   scenario?: string;
   split?: string;
+  /**
+   * Compatibility projection of the final promotion class. Evaluators may set
+   * this before registry normalization; normalized reports preserve that input
+   * in declaredPromotionClass and materialize the final class here.
+   */
+  promotionClass?: HarnessMetricPromotionClass;
+  /**
+   * Original evaluator-declared class, retained when registry normalization
+   * materializes a catalog or implicit final class into promotionClass.
+   */
+  declaredPromotionClass?: HarnessMetricPromotionClass;
+  /**
+   * Harness-materialized decision provenance. This is additive so older
+   * artifacts can remain readable while new artifacts are not reclassified by
+   * a future catalog implementation.
+   */
+  promotionDecision?: HarnessMetricPromotionDecision;
   metadata?: Record<string, unknown>;
 }
 
@@ -372,5 +469,29 @@ export interface HarnessEvaluationReport {
     agentScores: Record<string, number>;
     profileScores: Record<string, number>;
     modelScores: Record<string, number>;
+    promotion: {
+      policyId: string;
+      policyVersion: string;
+      policyHash: string;
+      catalogId: string;
+      catalogVersion: string;
+      catalogHash: string;
+      catalogDomainId: string;
+      catalogEntryCount: number;
+      catalogRuleCount: number;
+      catalogRuleIds: string[];
+      catalogScorecardMetricIds: string[];
+      catalogDiagnosticMetricIds: string[];
+      catalogBenchmarkOnlyMetricIds: string[];
+      scorecardMetricCount: number;
+      diagnosticMetricCount: number;
+      weightedMetricCount: number;
+      excludedWeightedMetricCount: number;
+      excludedWeightedMetricIds: string[];
+      scorecardRequiresEvidence: true;
+      scorecardRequiresPositiveWeight: true;
+      uncatalogedMetricPolicy: "implicit_positive_weight_with_evidence" | "legacy_conservative_diagnostic";
+      decisionStorage: "per_metric_recorded";
+    };
   };
 }

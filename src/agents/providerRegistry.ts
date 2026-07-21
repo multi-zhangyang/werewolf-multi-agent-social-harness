@@ -27,6 +27,12 @@ export interface ProviderConfigSummary {
   models: string[];
 }
 
+/** A CLI-safe provider status that deliberately omits endpoint and model details. */
+export interface ProviderDiagnosticSummary {
+  protocol: ModelProviderProtocol | null;
+  configured: boolean;
+}
+
 export function modelClientFromEnv(env: NodeJS.ProcessEnv = process.env, overrides: ProviderClientOverrides = {}): ModelClient {
   const protocol = providerProtocolFromEnv(env);
   if (protocol === "openai-chat-completions") {
@@ -76,6 +82,21 @@ export function providerConfigSummaryFromEnv(env: NodeJS.ProcessEnv = process.en
     configured: Boolean(endpoint && hasKey && hasProtocolRequiredConfig),
     models: normalizeModelList(env.LLM_MODELS)
   };
+}
+
+export function providerDiagnosticSummaryFromEnv(env: NodeJS.ProcessEnv = process.env): ProviderDiagnosticSummary {
+  try {
+    const config = providerConfigSummaryFromEnv(env);
+    return {
+      protocol: config.protocol,
+      configured: config.configured
+    };
+  } catch {
+    return {
+      protocol: null,
+      configured: false
+    };
+  }
 }
 
 export function providerProtocolFromEnv(env: NodeJS.ProcessEnv = process.env): ModelProviderProtocol {

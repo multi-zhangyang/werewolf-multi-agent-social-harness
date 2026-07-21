@@ -1,16 +1,33 @@
 import { readFile } from "node:fs/promises";
-import { modelClientFromEnv, providerConfigSummaryFromEnv } from "../agents/providerRegistry";
+import { modelClientFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
 import {
   mergeExperimentOverrides,
   normalizeTournamentExperimentSpec,
   type NormalizedTournamentExperiment,
   type TournamentExperimentSpecV1
 } from "../harness/experiment";
-import { summarizeEvaluationWarnings } from "../harness/evaluation";
+import {
+  legacyMetricPromotionPolicyFromSummary,
+  summarizeEvaluationWarnings,
+  summarizeResearchMetricPromotionRows
+} from "../harness/evaluation";
 import type { HarnessAssignmentConfig } from "../harness/profiles";
 import { OpenAIHarnessReasoner } from "../harness/reasoner";
+import { safeProviderFailureMessage } from "../harness/providerFailure";
 import { runTournament } from "../harness/tournament";
-import { writeTournamentArtifactDirectory, type TournamentArtifactWriteResult } from "../harness/tournamentArtifacts";
+import {
+  summarizeTournamentMetricPromotionsFromMetrics,
+  summarizeTournamentMetricPromotionsFromReports,
+  writeTournamentArtifactDirectory,
+  type ResearchTournamentArtifactFiles,
+  type TournamentArtifactWriteResult
+} from "../harness/tournamentArtifacts";
+import { countSocialStepCommits } from "../harness/social";
+import {
+  averageTeamRewards,
+  summarizeModelRewardsWithDensity,
+  summarizeProfileRewardsWithDensity
+} from "../harness/tournamentEvaluationSummary";
 import type { AdversarialEvaluation, HarnessAgentProfile, HarnessEvaluationReport } from "../harness/types";
 
 interface TournamentCliOptions {
@@ -41,10 +58,9 @@ if (hasFlag("help")) {
           summary: {
             kind: "tournament",
             ok: false,
-            provider: providerConfigSummaryFromEnv(),
-            endpoint: providerConfigSummaryFromEnv().endpoint,
+            provider: providerDiagnosticSummaryFromEnv(),
             evaluation: null,
-            failureReason: describeError(error)
+            failureReason: safeProviderFailureMessage(error, "Tournament failed before episodes could start.")
           }
         },
         null,
@@ -73,7 +89,7 @@ async function main(): Promise<void> {
   timeout?.unref();
 
   console.error(
-    `[tournament] provider=${providerConfigSummaryFromEnv().protocol} endpoint=${providerConfigSummaryFromEnv().endpoint ?? "none"} models=${options.models.join(",")} seed=${options.seed} games=${
+    `[tournament] protocol=${providerDiagnosticSummaryFromEnv().protocol ?? "invalid"} configured=${providerDiagnosticSummaryFromEnv().configured} models=${options.models.join(",")} seed=${options.seed} games=${
       options.games
     } timeoutMs=${options.timeoutMs ?? "none"} maxTransitions=${options.maxTransitions ?? "none"}`
   );
@@ -100,11 +116,21 @@ async function main(): Promise<void> {
           overwrite: options.overwrite
         })
       : undefined;
+    const episodeStepTotals = result.episodes.reduce(
+      (totals, episode) => {
+        const stepCounts = countSocialStepCommits(episode.socialEpisode?.steps ?? []);
+        totals.nativeSteps += stepCounts.nativeSteps;
+        totals.committedSteps += stepCounts.committedSteps;
+        totals.rejectedSteps += stepCounts.rejectedSteps;
+        return totals;
+      },
+      { nativeSteps: 0, committedSteps: 0, rejectedSteps: 0 }
+    );
     const summary = {
       kind: "tournament",
       ok: result.gamesFailed === 0,
-      provider: providerConfigSummaryFromEnv(),
-      endpoint: providerConfigSummaryFromEnv().endpoint,
+      status: result.gamesFailed > 0 ? "failed" : (result.gamesTruncated ?? 0) > 0 ? "truncated" : "completed",
+      provider: providerDiagnosticSummaryFromEnv(),
       experimentId: options.experimentId,
       seed: options.seed,
       models: result.models,
@@ -113,10 +139,12 @@ async function main(): Promise<void> {
       gamesRequested: result.gamesRequested,
       gamesCompleted: result.gamesCompleted,
       gamesFailed: result.gamesFailed,
+      gamesTruncated: result.gamesTruncated ?? result.episodes.filter((episode) => episode.status === "truncated").length,
       maxTransitions: options.maxTransitions ?? null,
       timeoutMs: options.timeoutMs ?? null,
       continueOnError: options.continueOnError,
       elapsedMs: Math.round(performance.now() - startedAt),
+      ...episodeStepTotals,
       modelStats: result.modelStats,
       profileStats: result.profileStats,
       evaluation: summarizeTournamentEvaluation(result.episodes),
@@ -124,7 +152,11 @@ async function main(): Promise<void> {
       artifacts: artifacts ? summarizeArtifactWrite(artifacts) : null,
       failures: result.episodes
         .filter((episode) => episode.status === "failed")
-        .map((episode) => ({ index: episode.index, seed: episode.seed, error: episode.error }))
+        .map((episode) => ({
+          index: episode.index,
+          seed: episode.seed,
+          failureReason: "Episode failed; inspect validated failure records."
+        }))
     };
     console.log(JSON.stringify(options.json === "full" ? { summary, episodes: result.episodes } : { summary }, null, 2));
     if (result.gamesFailed > 0) process.exitCode = 1;
@@ -189,20 +221,53 @@ function summarizeTournamentEvaluation(episodes: TournamentEpisodes): object {
     return evaluation ? [{ episode, evaluation }] : [];
   });
   const evaluations = evaluated.map((item) => item.evaluation);
+  const stepTotals = episodes.reduce(
+    (totals, episode) => {
+      const stepCounts = countSocialStepCommits(episode.socialEpisode?.steps ?? []);
+      totals.nativeSteps += stepCounts.nativeSteps;
+      totals.committedSteps += stepCounts.committedSteps;
+      totals.rejectedSteps += stepCounts.rejectedSteps;
+      return totals;
+    },
+    { nativeSteps: 0, committedSteps: 0, rejectedSteps: 0 }
+  );
+  const promotionSummary = summarizeTournamentMetricPromotionsFromReports(
+    episodes.flatMap((episode) => (episode.evaluationReport ? [episode.evaluationReport] : []))
+  );
 
   return {
     gamesEvaluated: evaluated.length,
     gamesWithoutEvaluation: completed.length - evaluated.length,
     teamRewards: averageTeamRewards(evaluations),
-    modelRewards: summarizeModelRewards(evaluations),
-    episodes: evaluated.map(({ episode, evaluation }) => ({
-      index: episode.index,
-      seed: episode.seed,
-      winner: evaluation.winner ?? episode.winner ?? null,
-      teamRewards: evaluation.teamRewards,
-      agentRewards: evaluation.agentRewards.map(summarizeAgentReward),
-      trajectorySteps: evaluation.trajectory.length
-    }))
+    modelRewards: summarizeModelRewardsWithDensity(evaluated),
+    profileRewards: summarizeProfileRewardsWithDensity(evaluated),
+    nativeSteps: stepTotals.nativeSteps,
+    committedSteps: stepTotals.committedSteps,
+    rejectedSteps: stepTotals.rejectedSteps,
+    metricCount: promotionSummary.metricCount,
+    scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
+    metricPromotionClassCounts: promotionSummary.byClass,
+    scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
+    episodes: evaluated.map(({ episode, evaluation }) => {
+      const stepCounts = countSocialStepCommits(episode.socialEpisode?.steps ?? []);
+      const episodePromotion = summarizeTournamentMetricPromotionsFromMetrics(
+        episode.evaluationReport?.metrics ?? [],
+        legacyMetricPromotionPolicyFromSummary(episode.evaluationReport?.summary.promotion)
+      );
+      return {
+        index: episode.index,
+        seed: episode.seed,
+        winner: evaluation.winner ?? episode.winner ?? null,
+        teamRewards: evaluation.teamRewards,
+        agentRewards: evaluation.agentRewards.map(summarizeAgentReward),
+        trajectorySteps: evaluation.trajectory.length,
+        metricCount: episode.evaluationReport?.metricCount ?? episodePromotion.metricCount,
+        scorecardEligibleMetricCount: episodePromotion.scorecardEligibleCount,
+        metricPromotionClassCounts: episodePromotion.byClass,
+        scorecardEligibleMetricClassCounts: episodePromotion.scorecardEligibleByClass,
+        ...stepCounts
+      };
+    })
   };
 }
 
@@ -212,17 +277,49 @@ function summarizeTournamentEvaluationReports(episodes: TournamentEpisodes): obj
     return isEvaluationReport(report) ? [report] : [];
   });
   const warningSummary = summarizeEvaluationWarnings(reports.flatMap((report) => report.warnings ?? []));
+  const promotionSummary = summarizeTournamentMetricPromotionsFromReports(reports);
   return {
     reports: reports.length,
     metricCount: reports.reduce((sum, report) => sum + report.metricCount, 0),
+    scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
+    metricPromotionClassCounts: promotionSummary.byClass,
+    scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
     ...warningSummary,
     reportsWithWarnings: reports.filter((report) => (report.warnings?.length ?? 0) > 0).length,
     evaluatorIds: Array.from(new Set(reports.flatMap((report) => report.evaluatorIds))),
-    episodeScores: reports.map((report) => report.summary.episodeScore ?? null)
+    episodeScores: reports.map((report) => report.summary.episodeScore ?? null),
+    // Research CLI only: redacted public server path must not expose topMetrics.
+    topMetrics: summarizeResearchMetricPromotionRowsFromReports(reports, 24),
+    episodeReports: reports.map((report) => {
+      const episodePromotion = summarizeTournamentMetricPromotionsFromMetrics(
+        report.metrics ?? [],
+        legacyMetricPromotionPolicyFromSummary(report.summary.promotion)
+      );
+      return {
+        id: report.id,
+        evaluatorIds: report.evaluatorIds,
+        metricCount: report.metricCount,
+        scorecardEligibleMetricCount: episodePromotion.scorecardEligibleCount,
+        metricPromotionClassCounts: episodePromotion.byClass,
+        scorecardEligibleMetricClassCounts: episodePromotion.scorecardEligibleByClass,
+        episodeScore: report.summary.episodeScore ?? null
+      };
+    })
   };
 }
 
-function summarizeArtifactWrite(artifacts: TournamentArtifactWriteResult): object {
+function summarizeResearchMetricPromotionRowsFromReports(reports: readonly HarnessEvaluationReport[], limit: number) {
+  const rows = reports.flatMap((report) =>
+    summarizeResearchMetricPromotionRows(
+      report.metrics ?? [],
+      Math.max(1, report.metrics.length),
+      legacyMetricPromotionPolicyFromSummary(report.summary.promotion)
+    )
+  );
+  return rows.slice(0, Math.max(0, limit));
+}
+
+function summarizeArtifactWrite(artifacts: TournamentArtifactWriteResult<ResearchTournamentArtifactFiles>): object {
   return {
     outputDir: artifacts.outputDir,
     files: {
@@ -271,37 +368,6 @@ function isAdversarialEvaluation(value: unknown): value is AdversarialEvaluation
   );
 }
 
-function averageTeamRewards(evaluations: AdversarialEvaluation[]): AdversarialEvaluation["teamRewards"] | null {
-  if (!evaluations.length) return null;
-  return {
-    village: round3(evaluations.reduce((sum, evaluation) => sum + evaluation.teamRewards.village, 0) / evaluations.length),
-    werewolves: round3(evaluations.reduce((sum, evaluation) => sum + evaluation.teamRewards.werewolves, 0) / evaluations.length)
-  };
-}
-
-function summarizeModelRewards(evaluations: AdversarialEvaluation[]): Record<string, object> {
-  const byModel = new Map<string, { agentGames: number; wins: number; reward: number }>();
-  for (const evaluation of evaluations) {
-    for (const reward of evaluation.agentRewards) {
-      const stats = byModel.get(reward.model) ?? { agentGames: 0, wins: 0, reward: 0 };
-      stats.agentGames += 1;
-      if (reward.won) stats.wins += 1;
-      stats.reward += reward.reward;
-      byModel.set(reward.model, stats);
-    }
-  }
-  return Object.fromEntries(
-    [...byModel.entries()].map(([model, stats]) => [
-      model,
-      {
-        agentGames: stats.agentGames,
-        wins: stats.wins,
-        winRate: stats.agentGames ? round3(stats.wins / stats.agentGames) : 0,
-        averageReward: stats.agentGames ? round3(stats.reward / stats.agentGames) : 0
-      }
-    ])
-  );
-}
 
 function summarizeAgentReward(reward: AdversarialEvaluation["agentRewards"][number]): object {
   return {
@@ -316,9 +382,6 @@ function summarizeAgentReward(reward: AdversarialEvaluation["agentRewards"][numb
   };
 }
 
-function round3(value: number): number {
-  return Math.round(value * 1000) / 1000;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -335,10 +398,6 @@ function readArg(name: string): string | undefined {
 
 function hasFlag(name: string): boolean {
   return process.argv.slice(2).includes(`--${name}`) || process.argv.slice(2).includes(`-${name[0]}`);
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 async function readSpecInput(path: string | undefined): Promise<unknown> {

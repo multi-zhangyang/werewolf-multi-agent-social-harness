@@ -430,9 +430,15 @@ export interface SocialStateMutationContext {
   eventSeqRange?: SocialStateMutationRange;
 }
 
+export interface SocialMessageIngestionState {
+  schemaVersion: "harness.social-message-ingestion.v1";
+  seenMessageIds: string[];
+}
+
 export interface AgentSocialState<TObservation = unknown, TPending = unknown, TCommand = unknown> {
   agentId: string;
   profile: SocialAgentProfile;
+  messageIngestion?: SocialMessageIngestionState;
   memory: MemoryStore<TObservation, TPending, TCommand>;
   beliefs: BeliefStore;
   relationships: RelationshipGraph;
@@ -457,6 +463,7 @@ export function createAgentSocialState<TObservation, TPending, TCommand>(options
   return {
     agentId: options.agentId,
     profile: cloneJson(options.profile),
+    messageIngestion: createSocialMessageIngestionState(),
     memory: createMemoryStore<TObservation, TPending, TCommand>(options.maxMemoryEntries),
     beliefs: createBeliefStore(),
     relationships: createRelationshipGraph(),
@@ -464,6 +471,18 @@ export function createAgentSocialState<TObservation, TPending, TCommand>(options
     reputation: createReputationLedger(),
     goals: createGoalStack()
   };
+}
+
+export function createSocialMessageIngestionState(): SocialMessageIngestionState {
+  return {
+    schemaVersion: "harness.social-message-ingestion.v1",
+    seenMessageIds: []
+  };
+}
+
+export function ensureSocialMessageIngestionState(state: AgentSocialState): SocialMessageIngestionState {
+  state.messageIngestion ??= createSocialMessageIngestionState();
+  return state.messageIngestion;
 }
 
 export function createMemoryStore<TObservation = unknown, TPending = unknown, TCommand = unknown>(

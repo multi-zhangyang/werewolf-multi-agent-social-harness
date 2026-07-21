@@ -1,5 +1,6 @@
 const SECRET_ENV_NAMES = ["LLM_API_KEY", "OPENAI_API_KEY", "API_KEY", "TOKEN", "SECRET", "AUTHORIZATION"];
 
+export function redactSecrets<T>(value: T): T;
 export function redactSecrets(value: unknown): unknown {
   if (typeof value === "string") return redactSecretText(value);
   if (Array.isArray(value)) return value.map(redactSecrets);

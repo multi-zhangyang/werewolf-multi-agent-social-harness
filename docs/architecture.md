@@ -1,130 +1,372 @@
 # Harness Architecture
 
-This document defines the engineering boundary for the multi-agent harness in this repository. It is intentionally narrower than a general agent framework: the Werewolf engine owns game truth, the harness owns experiment execution, and provider-backed model adapters are only reasoner/speech components.
+This document describes the architecture that exists in this repository after
+the native-execution refactor. The product is a domain-neutral multi-agent
+adversarial/social harness. Werewolf is its first domain adapter and proof
+surface; a collection of chat completions is not the product.
 
-## Core Principle
+The external source vocabulary behind these boundaries is recorded in
+[harness-research.md](harness-research.md).
 
-**LLM does not equal Agent.**
+## Core Invariants
 
-An LLM is a stateless text-generation service unless the application wraps it with identity, state, observation scope, policy, tools, action validation, memory, tracing, and metrics. In this project, the Agent is the harness-managed player actor. A configured provider protocol adapter is a `HarnessReasoner` component used inside that actor, not the actor itself.
+1. An LLM is an optional reasoner inside an agent. It is not the agent, the
+   scheduler, the environment, the artifact store, or an evaluator.
+2. The environment is the only authority for domain legality and domain-state
+   transitions.
+3. `GameState` and `GameEvent` contain Werewolf domain truth only. Harness
+   traces, provider telemetry, private memos, and failures do not become domain
+   events and cannot change the domain hash.
+4. A proposed command or message is not a committed turn. Agent decision state
+   is committed only after the environment transition and message publication
+   succeed.
+5. `SocialEpisodeArtifact.steps` is the native execution authority. Its system,
+   committed, and rejected steps are preserved in scheduler order.
+6. Deterministic playback uses recorded committed steps and never calls an
+   actor, policy, reasoner, or provider. A fork/rerun is a new execution lineage
+   and may call them again.
 
-Current code mapping:
+A reasoner-produced public speech can become part of domain state only after it
+has been normalized into a typed `speech.submit` command and accepted by the
+environment. Reasoner memos and provider diagnostics remain execution evidence;
+they are never smuggled into `GameState.events`.
 
-- `AgentHarnessState` stores agent identity, model config, policy name, turn count, beliefs, private memos, and last intent.
-- `WerewolfEnvironment` implements the local `MultiAgentEnvironment` contract around snapshot, pending actions, observation, step, done, and harness event recording.
-- `planAction()` creates a `PolicyPlan` and authoritative candidate `GameCommand`.
-- `OpenAIHarnessReasoner.think()` now depends on a protocol-neutral `ModelClient`; OpenAI-compatible Chat Completions, OpenAI Responses, and Anthropic Messages adapters normalize text/telemetry into that boundary.
-- `runHarnessMatch()` drives the environment loop and applies commands through `WerewolfEnvironment.step()`.
+## Ownership Boundaries
 
-## Component Boundaries
+| Plane | Current representation | Authority rule |
+| --- | --- | --- |
+| Domain environment | `GameState`, `GameEvent`, `WerewolfEnvironment`, `applyCommand()` | Owns pending actions, command legality, deterministic transitions, phase progression, deaths, and victory. |
+| Scheduler and runner | `runHarnessEpisode()`, `runSocialEpisode()`, `SocialEnvironment`, `SocialParallelEnvironment` | Selects actor/system work and records ordering; it cannot override environment validation. |
+| Observation | `PlayerView`, `WerewolfSocialObservation`, observation assembler | Projects only actor-visible state and visible social channels/messages. |
+| Agent | `WerewolfAgentActor`, `AgentHarnessState`, `AgentSocialState` | Owns durable private/social state through explicit actor lifecycle methods. |
+| Policy and arbitration | `planAction()`, `PolicyPlan`, typed `GameCommand` | Proposes a typed candidate; the environment remains the final legality authority. |
+| Reasoner | `HarnessReasoner`, model client adapters | May produce speech or a private tactical memo and telemetry; owns no environment or agent-state mutation authority. |
+| Communication | `SocialCommunicationBus`, `SocialChannel`, `SocialMessage` | Validates message envelopes before the environment transition and publishes them after a successful transition. |
+| Native artifact | `SocialEpisodeArtifact`, `SocialHarnessStep` | Records system/player steps, commit status, hashes, message/event ranges, traces, and structured failures. |
+| Generic artifact/checkpoint core | `episodeArtifacts.ts`, `HarnessEpisodeArtifactEnvelope`, `HarnessCheckpointEnvelope` | Owns domain-neutral snapshot, hash, batch-boundary, actor-snapshot, and parent-lineage invariants. It receives a domain replay factory and never calls a model. |
+| Domain artifact | `GameState.events`, `MatchArtifact.events` | Records domain events only. |
+| Evaluation | evaluator registry, `MatchMetrics`, evidence refs | Derives results from domain truth and native execution evidence, never model self-report alone. |
+| UI/API | server projections and React cockpit | Consume recorded truth; they do not create hidden roles, transitions, or replay truth. |
 
-| Concept | Owner | Current representation | Engineering rule |
-| --- | --- | --- | --- |
-| Environment | Game engine plus harness runtime | `WerewolfEnvironment`, `GameState`, `getPendingActions()`, `applyCommand()` | The environment is the authority for phase, legal pending actions, state transitions, deaths, winner, and event log. |
-| Agent state | Harness | `AgentHarnessState` | Agent memory and belief state live outside the LLM. They must be serializable enough for tracing and replay. |
-| Observation | Harness view layer | `PlayerView` from `createPlayerView()` | An observation is a scoped projection of state for one player and one pending action. It must respect public/private visibility. |
-| Policy | Harness strategy layer | `PolicyName`, `PolicyPlan`, `planAction()` | Policy maps observation plus agent state to an intended legal command. It is the default action authority. |
-| Reasoner | Pluggable model/tool caller | `HarnessReasoner`, `OpenAIHarnessReasoner` | The reasoner may explain, critique, or phrase speech. It must not mutate game state or bypass action arbitration. |
-| Action arbitration | Harness plus engine | `PolicyPlan.command`, `GameCommand`, `applyTurn()` | Commands are submitted only through typed `GameCommand` values and engine validation. Model text is never an executable command. |
-| Trajectory | Event-sourced state | `harness.turn`, `harness.error`, game events | Every harness turn should be inspectable after the match with policy, command type, beliefs, reasoner output, usage, latency, and errors. |
-| Metrics | Harness reporting | `MatchMetrics`, `collectHarnessMetrics()` | Metrics are computed from terminal state and event history, not from model self-report. |
-| Replay | Harness responsibility | seed/config plus events/traces/commands | Replay should reapply recorded commands and speech or deterministic state transitions. Re-querying the model is a rerun, not a replay. |
+The deleted `src/harness/contracts.ts` layer is not an architecture boundary.
+The generic contracts are the `SocialEnvironment`, `SocialActor`, scheduler,
+message-bus, and episode artifact types in `src/harness/social.ts`, plus the
+domain-neutral artifact/checkpoint envelope in
+`src/harness/episodeArtifacts.ts`. Werewolf knowledge stays in the core engine
+and Werewolf adapter.
 
-## Execution Loop
+## Generic Artifact Core
 
-1. `WerewolfEnvironment` exposes pending actions from the current `GameState`.
-2. The harness creates a `PlayerView` for the selected acting player.
-3. The harness updates that player's `beliefs` from the observation.
-4. The policy layer creates a `PolicyPlan` with intent, confidence, tags, target, and candidate `GameCommand`.
-5. The reasoner receives the view and policy plan. For speech turns it returns public speech text; otherwise it returns private tactical memo text.
-6. The harness attaches speech only when the pending action is a speech action.
-7. The harness records a `HarnessTurnTrace`.
-8. The engine applies the typed `GameCommand` and emits the resulting game events.
-9. At terminal state, metrics are computed from event history and game outcome.
+`SocialEpisodeArtifact` is the native execution record. The generic envelope
+around it is intentionally smaller than a domain artifact:
 
-## Environment
+```text
+HarnessEpisodeArtifactEnvelope<TState, TObservation, TPending, TCommand, TAgent>
+  = artifact identity + run identity + status
+  + initial/final TState
+  + SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>
+  + durable TAgent[] + optional fork provenance
 
-The environment boundary is deterministic game state plus legal transitions. It includes phase progression, pending action discovery, visibility rules, ability effects, vote resolution, death records, and game-over detection. `WerewolfEnvironment` wraps this boundary with `snapshot()`, `pending()`, `pendingActions()`, `observe()`, `step()`, `done()`, `recordTurn()`, and `recordError()`. The harness may drive the environment, but it must not duplicate environment truth in prompt text or reasoner output.
+HarnessCheckpointEnvelope<TState, TAgent, TObservation, TPending, TCommand>
+  = checkpoint identity + source hashes and batch boundary
+  + TState + durable TAgent[] + committed execution prefix
+```
 
-`system.advance` is an environment tick. Player actions such as `seer.inspect`, `werewolf.killVote`, `witch.act`, `speech.submit`, `vote.cast`, and `hunter.shoot` are the only legal player command shapes.
+The generic validator verifies state, execution-prefix, actor, channel, and
+message hashes; sequence and batch-boundary consistency; and generic parent
+provenance. `validateHarnessCheckpointReplay()` receives a domain-owned,
+deterministic replay function. It does not construct an actor, policy,
+reasoner, model client, or provider request.
 
-## Agent State
+`MatchArtifact` and `HarnessCheckpoint` are Werewolf specializations of these
+envelopes. They add seed/config/assignment, Werewolf events and evaluation,
+the legacy trajectory migration projection, and the `matchId` compatibility
+alias. A new domain can use the generic envelope without importing roles,
+teams, `GameState`, or Werewolf evaluators.
 
-An agent has a stable `playerId`, configured `model`, selected `policyName`, private belief map, bounded private memos, and turn metadata. These fields are harness state. They can be influenced by observations and reasoner output, but they are not hidden inside the model provider.
+## Evaluation And Execution Evidence Boundaries
 
-Agent state should remain explicit because it is needed for debugging, comparison across model configurations, and replay-oriented inspection.
+`HarnessEvaluationContext<TState, TMetrics, TSocialEpisode, TAgent,
+TTrajectory>` is parameterized by the domain's actor snapshot and trajectory
+types. A generic evaluator therefore cannot require a Werewolf `PlayerView`,
+`GameCommand`, or legacy `HarnessStepRecord` unless it is explicitly a
+Werewolf evaluator. Its omitted `TAgent`/`TTrajectory` defaults preserve the
+legacy Werewolf public TypeScript API; a new domain supplies its own fourth and
+fifth generic arguments.
 
-## Observation
+`SocialAgentSnapshot` is the minimum projection accepted by the generic social
+evaluators: durable actor identity, optional profile/model/policy identifiers,
+an optional `AgentSocialState`, and an optional state hash. New adapters supply
+`id`; old Werewolf artifacts are read through their existing `playerId` and
+`social.agentId` fields during the compatibility migration. Generic social
+metric subjects expose `actorId` and `policyId`; the historical `playerId` and
+`policyName` aliases are retained only for existing artifact/API readers.
 
-An observation is the data visible to one agent at one decision point. `PlayerView` contains public player data, role-appropriate private information, recent visible events, speeches, votes, deaths, day/phase, and the current `PendingAction`.
+The generic `executionEvidence.ts` module extracts structured failure evidence
+without inspecting a domain marker. `werewolfExecutionEvidence.ts` owns the
+legacy `werewolf-harness-turn` decoder and its `HarnessTurnTrace` projection.
+The marker and envelope remain unchanged so `harness.match.v2` artifacts and
+checkpoints remain readable, but a future domain cannot be mistaken for a
+Werewolf trace merely because it has a similarly shaped metadata object.
 
-The observation must be the only path for private game facts to reach policy or reasoner code. This keeps the harness compatible with adversarial and deception metrics: agents can act only on what they should know.
+Metric-promotion mechanics are generic, while catalog ownership is domain
+specific. `socialMetricPromotion.ts` owns reusable social diagnostics and
+`werewolfMetricPromotion.ts` composes those rules with Werewolf scorecard and
+diagnostic metrics. The generic evaluation layer owns only matching, finite
+numeric value checks, positive-weight checks, evidence requirements, policy
+validation, and report materialization.
 
-## Policy
+When an evaluation report is created, each metric receives an immutable
+`promotionDecision` containing the policy/catalog identity and hashes, final
+class, scorecard eligibility, decision id when applicable, reasons, and a
+`recorded` resolution. Artifact readers must use that stored decision. A legacy
+artifact without one is resolved only through a conservative recovery policy
+derived from its report summary and is labelled `legacy_recomputed`; an
+uncataloged historical metric never becomes scorecard-eligible merely because a
+newer catalog happens to recognize it.
 
-Policy is the strategy layer that turns observation and agent state into an intended command. It can use heuristics, scripted role behavior, search, learned policies, or future model-assisted planning, but the output must remain a typed `PolicyPlan`.
+The hashes are provenance identifiers, not a complete historical policy
+snapshot. Integrity validation can prove report-internal consistency between
+stored decisions and their summary, but it deliberately does not recompute an
+old decision from whatever catalog code happens to be installed today. A future
+fully derivable audit format would need a canonical, content-addressed policy
+snapshot or registry artifact in addition to these hashes.
 
-The current policies are role-shaped: werewolf deception, village analysis, seer information gain, witch resource conservation, and hunter punishment. A model can explain or phrase the policy decision, but policy still owns the default command.
+Comparison artifacts retain the old class projection for compact filtering, and
+add a fixed per-metric decision snapshot only for audit: policy/catalog
+identity, catalog decision id, scorecard eligibility, reason codes, and whether
+the result was recorded or legacy-recomputed. A same-class metric is therefore
+still marked changed when its promotion provenance changes. The projection does
+not include catalog rationales, evaluator metadata, or free-form evidence text.
 
-## Reasoner
+Tournament registry and benchmark artifacts expose a singular
+`metricPromotionPolicy`/catalog descriptor only when every evaluation report
+has the same descriptor. A mixed tournament uses `null` for those singular
+fields, sets `mixedMetricPromotionPolicies`, and preserves the complete sorted
+`metricPromotionPolicies` list. This prevents the first episode's policy from
+being misrepresented as a tournament-wide rule.
 
-The reasoner is intentionally narrow. It receives the selected policy plan and visible context, then returns text. On speech turns, that text becomes public speech after normalization. On non-speech turns, it becomes private tactical memo for trace and postgame analysis.
+## Canonical Commit Lifecycle
 
-The reasoner must not return JSON commands, mutate state, select illegal targets, or become the final arbiter of the action. If a future implementation allows model-suggested plans, those suggestions must pass through the same policy and command validation boundary.
+The production player-step lifecycle is:
 
-## Action Arbitration
+```text
+selected pending action
+  -> scoped environment observation and visible social messages
+  -> actor observe
+  -> policy/reasoner decision and staged proposal
+  -> runner verifies scheduled action/message ownership
+  -> optional pure `validateAction(command, pending)` preflight
+  -> validate proposed message envelopes
+  -> environment validates and commits typed command again
+  -> message bus publishes validated drafts
+  -> actor receives actor-scoped committed receipt
+  -> actor commits turn/memo/decision/last-plan state
+  -> post-feedback agent snapshot is captured
+  -> native SocialHarnessStep is finalized
+```
 
-Action arbitration is the rule that only typed, legal `GameCommand` values can change the environment. The harness chooses when to run agent turns, applies the selected command through the engine, and records errors if engine validation fails.
+`WerewolfSocialActorAdapter.decide()` stages proposal data. It does not increment
+the actor's committed turn count or persist the memo, decision, or last plan.
+`SocialActor.onStepResult()` receives the outcome. The Werewolf adapter calls
+`WerewolfAgentActor.commitTurn()` only for a `committed` receipt. The
+post-environment snapshot hook runs after that receipt, so its agent-state hash
+describes the committed actor state at that boundary.
 
-Votes and werewolf kill votes may be collected concurrently, but concurrency does not change authority: each recorded command is still applied as an explicit transition against engine state.
+The runner owns a separate `transactionId` for that lifecycle. An action's
+`traceId` is evidence identity and may be supplied by a domain adapter or
+policy; it must never be used as the key that resolves staged private state.
+Each receipt carries the runner transaction id, and the runner gives actors an
+isolated serializable receipt copy. An actor therefore cannot mutate an action
+or metadata object that will later be written into the native artifact. The
+Werewolf adapter computes its expected post-commit agent-state hash while the
+proposal is staged, then verifies that the committed staged state matches it;
+it does not fill or rewrite artifact metadata from the receipt callback.
 
-The generic scaffold has a separate pre-arbitration scorer registry in
-`src/harness/scaffold.ts`. That registry resolves serializable scorer configs
-into existing `AgentActionCandidateScorer` instances; it does not define a new
-agent protocol, does not create actions, and does not replace environment
-validation. The built-in `weighted-social-state` scorer only adds
-evidence-backed score contributions to caller-provided candidates with explicit
-`socialTargetIds`. Raw candidate commands, draft messages, scratchpads, and
-arbitrary metadata stay out of the persisted arbitration summary.
+Failure semantics are explicit:
 
-The current production Werewolf path still uses `WerewolfAgentActor`,
-`planAction()`, `PolicyPlan`, and `policy.social-target-arbitration.v1`.
-That Werewolf-specific arbitration now reads explicit society ledgers already
-present on the acting agent's `AgentSocialState`: commitments, coalitions,
-gossip, norm sanctions, trust repairs, and betrayals. These records affect only
-legal target ranking through categorical reasons and evidence refs; the policy
-does not parse free text, read hidden truth, mutate ledgers, promote evaluator
-metrics, or bypass engine validation. Wiring scaffold scorer configs into
-production Werewolf would still be a separate runtime/config/schema change, not
-a side effect of the scaffold registry.
+- A decision, message-validation, or environment-step failure produces a
+  `SocialHarnessStep` with `commitStatus: "rejected"` and structured `failure`
+  evidence.
+- A rejected step retains proposal and failure evidence, publishes no messages,
+  owns no committed message range, and does not count as a committed actor turn.
+- A rejected step must not change the domain-state hash.
+- If actor feedback fails after the environment and message bus already
+  committed, the step remains `commitStatus: "committed"` and carries
+  `actor_step_feedback` failure evidence. Playback therefore follows
+  `commitStatus`, not the mere presence of an `error` field.
+- If a post-step snapshot/observer hook fails after commit, the step likewise
+  remains committed and records `after_environment_step` or combined
+  post-commit failure evidence.
+- If an environment mutates state and then throws, the runner records
+  `environment_non_atomic_failure`; this violates the environment contract and
+  is explicitly non-replayable rather than being silently accepted as a normal
+  rejected proposal.
 
-## Trajectory
+System transitions such as `system.advance` are explicit native system steps.
+Playback must not infer or silently insert a missing system transition.
 
-The trajectory is the postgame record of what happened and why. It combines core game events with harness events:
+## Environment And Action Authority
 
-- `harness.turn`: trace id, player id, model, action kind, policy, command type, intent, confidence, tags, beliefs, private memo, optional public speech, latency, token usage, and provider request id.
-- `harness.error`: actor, model, action kind, trace id, and error message.
-- Core game events: inspections, wolf votes, witch actions, speeches, votes, deaths, phase changes, and game end.
+`WerewolfEnvironment` exposes `snapshot()`, `pending()`, `pendingActions()`,
+`observe()`, pure `validate()`, `step()`, and `done()`. The generic adapter
+maps the pure check to `SocialEnvironment.validateAction(command, pending)` so
+the runner can reject an illegal proposal before it publishes a message draft.
+`step()` retains the same legality assertion as the authoritative second check.
+The environment has no trace-writing or error-writing method. It checks that
+each submitted command matches the current pending action and its legal targets
+before applying it through the core engine.
 
-Trajectory data is visible postgame because it may contain private state and model diagnostics.
+The generic `SocialEnvironment` contract requires `step()` and `stepBatch()` to
+be atomic: if either throws, a following `snapshot()` must be observationally
+unchanged. The runner cannot invent a rollback for arbitrary domain state. It
+does detect hash-visible violations, preserves structured failure evidence, and
+refuses to treat such a trajectory as deterministic replay authority. The
+Werewolf joint batch implementation applies into an isolated working state and
+only assigns it after every command succeeds.
 
-## Metrics
+Before the environment preflight, the runner also enforces that the scheduled
+actor owns `SocialAction.actorId` and every message draft's `senderId`.
+Environment adapters remain responsible for command-payload identity because a
+generic `TCommand` need not expose an actor field.
 
-Metrics are derived from terminal `GameState` and event history. Current metrics include winner, days, deaths, speeches, votes, harness turn count, harness error count, average latency, wolf vote accuracy, village vote accuracy, deception survival score, and model usage.
+The only domain mutations are accepted typed commands such as
+`system.advance`, `seer.inspect`, `werewolf.killVote`, `witch.act`,
+`speech.submit`, `vote.cast`, and `hunter.shoot`. Prompt text, private memos,
+provider request ids, retry telemetry, evaluator output, and UI state cannot
+directly mutate the environment.
 
-Future metrics should follow the same rule: compute from recorded facts. LLM-as-grader output can be added as a separate evaluation layer over recorded trajectories, not as a replacement for deterministic metrics.
+Scheduling mode does not weaken this boundary:
 
-## Replay
+- `aec` decides and applies one selected actor transition at a time.
+- `aec-batched-decision` may collect decisions from a shared decision state but
+  applies them sequentially.
+- `parallel` is a true joint environment transition only when the environment
+  implements `stepBatch()`. Concurrent reasoner calls alone are not a parallel
+  environment.
 
-Replay means reconstructing a prior run from deterministic artifacts. The minimum replay inputs are initial seed/config, player setup, event stream, harness turn traces, and applied commands. A replay should not call the model provider again unless the user explicitly wants a rerun under current model behavior.
+Before concurrent collection, every joint batch must have one pending action
+per actor. Duplicate actor ids are rejected as explicit scheduler-validation
+records before any `observe()` or `decide()` call, preventing two speculative
+turns from racing over one actor's staged state. A true parallel batch delivers
+all committed actor receipts before any post-step snapshot hook runs, so every
+snapshot frame for that batch describes the same complete post-commit agent
+set. If an AEC batched proposal is abandoned because another decision fails or
+an earlier sequential transition ends the episode, the proposal still receives
+a rejected receipt and an explicit `batch_aborted` native step. It is preserved
+for audit and replay, but is not counted as a second root harness/provider
+failure.
 
-This distinction matters because model outputs can change with provider version, sampling, latency, and hidden service-side behavior. Recorded speech and commands are the authoritative replay surface; new reasoner calls create a new experiment.
+## Observation And Communication
+
+An observation is an actor-scoped projection, not a copy of global state.
+`PlayerView` carries public state plus only the private facts legally visible to
+that player. The social observation assembler adds only channels and messages
+visible through the communication bus.
+
+Message envelopes record intended recipients and channel visibility. They do
+not by themselves prove that an actor observed a message. Actor-scoped
+`SocialExposureRecord` evidence is the authority for who actually saw what and
+when. This distinction is required for influence, deception, belief-update, and
+hidden-information evaluation.
+
+## Agent And Reasoner
+
+An agent is a harness-managed social actor with durable identity, profile/role
+assignment, observations, memory, beliefs, relationships, reputation, norms,
+goals, policy, arbitration, and committed decision state. Its serializable
+state supports audit, checkpoint/fork work, and postgame comparison.
+
+The current reasoner receives scoped visible context and a policy plan through
+one streaming cognition request. It may produce public speech for a speech
+action or a private tactical memo plus an optional internal
+`ACTION_CANDIDATE` envelope for an action proposal. The envelope is advisory
+evidence only: `WerewolfAgentActor.applyReasonerProposal()` keeps the policy's
+command kind and accepts only legal target/resource choices, then the
+environment validates the resulting command again. Structured data is useful
+for typed commands and artifacts, but returning JSON is not agency.
+
+## Artifact Separation
+
+`MatchArtifact` version `harness.match.v2` has three deliberately separate
+record families:
+
+- `finalState` and `events` are Werewolf domain truth.
+- `socialEpisode` is native scheduler/environment/message-bus execution
+  authority. Its steps contain observations, actions, `commitStatus`, hashes,
+  event/message ranges, trace metadata, and failures.
+- `trajectory` is a legacy successful-player-command projection retained for
+  checkpoint migration. It omits native system and rejected steps and is not
+  execution authority.
+
+Native scheduler `turnIndex` counts native steps. Legacy trajectory
+`turnIndex` counts its older player-only projection. Their values have different
+semantics and must not be assumed equal; trace ids provide the migration
+cross-link for committed player steps.
+
+JSONL export preserves the same separation:
+
+- `event` records come only from domain events;
+- `social_step` records come from native episode steps;
+- `trace` records are extracted from native step action metadata;
+- `error` records are extracted from native structured step failures.
+
+Metrics and evaluators follow those sources. Outcome and game-rule facts come
+from domain state/events. Harness turn counts, provider usage/latency, rejected
+attempts, and failure attribution come from native social-step evidence. A
+provider call used by a rejected proposal may still count toward real usage,
+but it is not a committed domain or actor turn.
+
+## Deterministic Playback And Fork/Rerun
+
+`replaySocialEpisode()` and `replayWerewolfSocialEpisode()` implement native
+deterministic playback. Playback:
+
+1. starts from the recorded `socialEpisode.initialState`;
+2. restores the recorded initial message prefix and verifies its hash;
+3. processes explicit native steps in order;
+4. applies only steps whose `commitStatus` is `committed` and skips rejected
+   steps while checking that they changed neither domain state, event range,
+   nor messages;
+5. uses `stepBatch()` for a recorded atomic parallel batch;
+6. verifies pre/post state hashes, domain event ranges, message ranges and
+   envelopes, final state hash, and final message hash.
+
+Playback constructs no actors and invokes no policy, reasoner, or provider.
+`replayHarnessTrajectory()` remains only for legacy trajectory/checkpoint
+migration; it is not the match-v2 execution authority.
+
+An artifact containing `environment_non_atomic_failure` is not a valid replay
+artifact. The runner keeps that failure record for diagnosis, but playback
+returns a mismatch instead of pretending that the broken transition can be
+reproduced by skipping it.
+
+Domain event timestamps are deterministic sequence-derived values rather than
+wall-clock reads. They remain displayable event metadata while allowing the same
+seed and command sequence to produce identical event arrays and state hashes.
+
+A fork/rerun is different: it restores an immutable checkpoint into a new run,
+may invoke actors and providers again, and must preserve parent/checkpoint
+provenance and divergence evidence. New checkpoints use
+`harness.checkpoint.v2`: the checkpoint binds the native execution prefix,
+explicit system/committed/rejected steps, scoped channel topology, committed
+message prefix, domain state, actor snapshots, batch-safe boundary, and
+content hashes. Fork provenance uses native boundary turn/trace, execution
+prefix, channel, message, state, and actor hashes. It does not reinterpret a
+legacy trajectory length as a native scheduler position.
+
+This terminology intentionally avoids calling model/API re-execution
+"deterministic replay." New model calls always create a rerun or fork, never a
+playback of recorded truth.
 
 ## Guardrails
 
-- Do not treat prompt text as the harness.
-- Do not let model output bypass `GameCommand`.
-- Do not store private role facts outside scoped observations, agent state, traces, or postgame records.
-- Do not compute metrics from unverified model claims.
-- Do not call a model during replay unless the run is intentionally marked as a rerun.
-- Do not make external eval platforms the source of truth for state, trajectory, or metrics.
+- Do not reintroduce harness trace/error pseudo-events into `GameState`.
+- Do not add a mutable pre-step hook that can alter domain state with telemetry.
+- Do not commit agent decision state before environment and message commit.
+- Do not replay from the legacy projection when a native social episode exists.
+- Do not infer a missing system transition during native playback.
+- Do not treat intended message recipients as proof of observation.
+- Do not let model output or UI state bypass typed command validation.
+- Do not compute authoritative metrics from unverified model claims.
+- Do not call a provider during deterministic playback.
