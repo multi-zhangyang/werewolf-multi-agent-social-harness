@@ -7098,6 +7098,8 @@ function serializeTournamentEpisodeSummaryForApi(episode: TournamentEpisode): ob
     evaluationReportSummary: episode.evaluationReport
       ? {
           id: episode.evaluationReport.id,
+          status: episode.evaluationReport.status ?? "completed",
+          evaluatorFailureCount: episode.evaluationReport.failures?.length ?? 0,
           evaluatorIds: episode.evaluationReport.evaluatorIds,
           metricCount: episode.evaluationReport.metricCount,
           scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
@@ -7256,6 +7258,8 @@ function summarizeEvaluationReport(report: HarnessEvaluationReport | undefined):
   );
   return {
     id: report.id,
+    status: report.status ?? "completed",
+    evaluatorFailureCount: report.failures?.length ?? 0,
     evaluatorIds: report.evaluatorIds,
     metricCount: report.metricCount,
     scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
@@ -7271,6 +7275,9 @@ function summarizeTournamentEvaluationReports(episodes: TournamentEpisodes): obj
   const promotionSummary = summarizeTournamentMetricPromotionsFromReports(reports);
   return {
     reports: reports.length,
+    completedReports: reports.filter((report) => (report.status ?? "completed") === "completed").length,
+    incompleteReports: reports.filter((report) => (report.status ?? "completed") === "incomplete").length,
+    evaluatorFailureCount: reports.reduce((sum, report) => sum + (report.failures?.length ?? 0), 0),
     metricCount: reports.reduce((sum, report) => sum + report.metricCount, 0),
     scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
     metricPromotionClassCounts: promotionSummary.byClass,

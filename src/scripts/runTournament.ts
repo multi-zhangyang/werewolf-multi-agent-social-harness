@@ -240,10 +240,17 @@ function summarizeTournamentEvaluation(episodes: TournamentEpisodes): object {
   const promotionSummary = summarizeTournamentMetricPromotionsFromReports(
     episodes.flatMap((episode) => (episode.evaluationReport ? [episode.evaluationReport] : []))
   );
+  const reports = episodes.flatMap((episode) => {
+    const report = (episode as TournamentEpisode & { evaluationReport?: unknown }).evaluationReport;
+    return isEvaluationReport(report) ? [report] : [];
+  });
 
   return {
     gamesEvaluated: evaluated.length,
     gamesWithoutEvaluation: completed.length - evaluated.length,
+    evaluationCompletedEpisodes: reports.filter((report) => (report.status ?? "completed") === "completed").length,
+    evaluationIncompleteEpisodes: reports.filter((report) => (report.status ?? "completed") === "incomplete").length,
+    evaluatorFailureCount: reports.reduce((sum, report) => sum + (report.failures?.length ?? 0), 0),
     teamRewards: averageTeamRewards(evaluations),
     modelRewards: summarizeModelRewardsWithDensity(evaluated),
     profileRewards: summarizeProfileRewardsWithDensity(evaluated),
@@ -286,6 +293,9 @@ function summarizeTournamentEvaluationReports(episodes: TournamentEpisodes): obj
   const promotionSummary = summarizeTournamentMetricPromotionsFromReports(reports);
   return {
     reports: reports.length,
+    completedReports: reports.filter((report) => (report.status ?? "completed") === "completed").length,
+    incompleteReports: reports.filter((report) => (report.status ?? "completed") === "incomplete").length,
+    evaluatorFailureCount: reports.reduce((sum, report) => sum + (report.failures?.length ?? 0), 0),
     metricCount: reports.reduce((sum, report) => sum + report.metricCount, 0),
     scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
     metricPromotionClassCounts: promotionSummary.byClass,
@@ -303,6 +313,8 @@ function summarizeTournamentEvaluationReports(episodes: TournamentEpisodes): obj
       );
       return {
         id: report.id,
+        status: report.status ?? "completed",
+        evaluatorFailureCount: report.failures?.length ?? 0,
         evaluatorIds: report.evaluatorIds,
         metricCount: report.metricCount,
         scorecardEligibleMetricCount: episodePromotion.scorecardEligibleCount,
