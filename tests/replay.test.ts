@@ -8,6 +8,7 @@ import {
   validateHarnessCheckpoint,
   type MatchArtifact
 } from "../src/harness/artifacts";
+import { buildReplayableSocialPrefix } from "../src/harness/episodeArtifacts";
 import { hashStableState } from "../src/harness/hash";
 import { describeResolvedAssignments, profilesFromModels, resolveAgentConfigs } from "../src/harness/profiles";
 import { replayHarnessTrajectory, replaySocialEpisode, replayWerewolfSocialEpisode } from "../src/harness/replay";
@@ -593,6 +594,53 @@ describe("harness trajectory replay", () => {
     expect(fork.socialEpisode.messages.slice(0, checkpoint.source.messageCount)).toEqual(checkpoint.executionPrefix.messages);
     const firstCommitted = fork.socialEpisode.steps.find((step) => step.commitStatus === "committed");
     expect(firstCommitted?.preStateHash).toBe(checkpoint.source.stateHash);
+  });
+
+  it("derives a complete native replay-review prefix without restoring actors or calling a reasoner", async () => {
+    const initialState = createGame({ id: "replay-review-prefix", seed: "replay-review-prefix" });
+    const profiles = profilesFromModels(["alpha", "beta"], 0.4);
+    const agents = resolveAgentConfigs(initialState.players, profiles, 0, 0.4);
+    let reasonerCalls = 0;
+    const countingReasoner: HarnessReasoner = {
+      async think(input) {
+        reasonerCalls += 1;
+        return reasoner.think(input);
+      }
+    };
+    const parent = await runHarnessMatch({ initialState, agents, reasoner: countingReasoner, maxTransitions: 4 });
+    const artifact = buildMatchArtifact({
+      runId: "replay-review-prefix-run",
+      matchId: "replay-review-prefix-match",
+      seed: initialState.seed,
+      models: ["alpha", "beta"],
+      profiles,
+      resolvedAssignments: describeResolvedAssignments(initialState.players, agents),
+      result: parent
+    });
+    const boundaryIndex = artifact.socialEpisode.steps.findIndex((step, index) => {
+      const next = artifact.socialEpisode.steps[index + 1];
+      return !step.batchId || next?.batchId !== step.batchId || (step.schedulerMode === "aec" && !step.atomic);
+    });
+    expect(boundaryIndex).toBeGreaterThanOrEqual(0);
+    const beforeReplay = reasonerCalls;
+    const prefix = buildReplayableSocialPrefix({
+      episode: artifact.socialEpisode,
+      selector: { nativeStepCount: boundaryIndex + 1 },
+      replayPrefix: (episode) =>
+        replayWerewolfSocialEpisode(episode, {
+          stopOnMismatch: false,
+          validateExpectedFinalState: false,
+          auditAgentSnapshots: false
+        })
+    });
+
+    expect(reasonerCalls).toBe(beforeReplay);
+    expect(prefix.nativeStepCount).toBe(boundaryIndex + 1);
+    expect(prefix.episode.steps).toEqual(artifact.socialEpisode.steps.slice(0, boundaryIndex + 1));
+    expect(prefix.episode.messages.every((message) => message.seq <= prefix.maxMessageSeq)).toBe(true);
+    expect(prefix.replay.ok).toBe(true);
+    expect(prefix.replay.finalHash).toBe(prefix.step.postStateHash);
+    expect(prefix.replay.messagesHash).toBe(hashStableState(prefix.episode.messages));
   });
 
   it("detects tampered native checkpoint provenance before fork execution", async () => {

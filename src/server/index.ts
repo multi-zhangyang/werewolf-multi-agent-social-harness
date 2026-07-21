@@ -25,6 +25,7 @@ import {
   type HarnessCheckpointPrefixSelector,
   type MatchArtifact
 } from "../harness/artifacts";
+import { buildReplayableSocialPrefix } from "../harness/episodeArtifacts";
 import {
   mergeExperimentOverrides,
   normalizeTournamentExperimentSpec,
@@ -156,6 +157,7 @@ import {
   type MatchArtifactView,
   type MatchArtifactViewDto,
   type PostgameMatchProjectionDto,
+  type PostgameReplayFrameDto,
   type RedactedAgentStateDto,
   type RedactedCommandDto,
   type RedactedHarnessStepDto,
@@ -584,6 +586,51 @@ app.get("/api/matches/:id/trajectory.jsonl", async (req, res, next) => {
     res.type("application/x-ndjson").send(toTrajectoryJsonl(artifact));
   } catch (error) {
     next(error);
+  }
+});
+
+/**
+ * Return one server-authoritative, postgame-redacted state frame after a
+ * complete native scheduler boundary. This is intentionally separate from
+ * full-episode replay verification: a valid prefix must never be reported as
+ * proof that later canonical steps also verify.
+ */
+app.post("/api/matches/:id/replay/frame", async (req, res, next) => {
+  try {
+    await loadMatchArtifactIndex(matchArtifactBaseDir);
+    const match = getMatch(req.params.id);
+    if (!match) {
+      res.status(404).json({ error: "match not found" });
+      return;
+    }
+    if (!match.artifact) {
+      res.status(404).json({ error: "match artifact not available" });
+      return;
+    }
+    const body = requestBodyObject(req.body);
+    assertAllowedBodyFields(body, ["nativeStepCount"], "server-owned replay frame");
+    const nativeStepCount = requiredReplayFrameNativeStepCount(body);
+    assertStoredMatchArtifactIntegrity(match.artifact);
+    const prefix = buildReplayableSocialPrefix({
+      episode: match.artifact.socialEpisode,
+      selector: { nativeStepCount },
+      replayPrefix: (episode) =>
+        replayWerewolfSocialEpisode(episode, {
+          // A prefix does not claim that it equals the parent final state. Its
+          // state is derived solely from the recorded command prefix below.
+          validateExpectedFinalState: false,
+          stopOnMismatch: false,
+          // Full canonical integrity was verified above. A view frame has no
+          // actor restore semantics, so it deliberately does not audit or
+          // expose durable actor snapshots again.
+          auditAgentSnapshots: false
+        })
+    });
+    const frame = projectPostgameReplayFrame(prefix);
+    setArtifactProjectionResponseHeaders(res, "postgame-redacted");
+    res.json({ frame: redactSecrets(frame) });
+  } catch (error) {
+    next(httpErrorFromReplayFrameError(error));
   }
 });
 
@@ -1832,6 +1879,42 @@ function httpErrorFromCheckpointSelectionError(error: unknown): unknown {
   if (!(error instanceof HarnessCheckpointSelectionError)) return error;
   const status = error.code === "ambiguous_selector" || error.code === "selector_not_found" ? 400 : 409;
   return new HttpError(status, error.message, error.code);
+}
+
+function requiredReplayFrameNativeStepCount(body: Record<string, unknown>): number {
+  if (!Object.prototype.hasOwnProperty.call(body, "nativeStepCount")) {
+    throw new HttpError(400, "server-owned replay frame requires nativeStepCount.", "replay_frame_selector_required");
+  }
+  try {
+    const value = parseOptionalPositiveInteger(body.nativeStepCount, "nativeStepCount");
+    if (value === undefined) throw new Error("missing nativeStepCount");
+    return value;
+  } catch {
+    throw new HttpError(400, "nativeStepCount must be a positive integer.", "replay_frame_selector_invalid");
+  }
+}
+
+function assertStoredMatchArtifactIntegrity(artifact: MatchArtifact): void {
+  try {
+    assertValidMatchArtifactIntegrity(artifact);
+  } catch {
+    throw new HttpError(409, "Stored match artifact failed integrity validation.", "artifact_integrity_invalid");
+  }
+}
+
+function httpErrorFromReplayFrameError(error: unknown): unknown {
+  if (!(error instanceof HarnessCheckpointSelectionError)) return error;
+  switch (error.code) {
+    case "ambiguous_selector":
+    case "selector_not_found":
+      return new HttpError(400, "Replay frame nativeStepCount did not match a recorded native step.", "replay_frame_selector_not_found");
+    case "unsafe_batch_boundary":
+      return new HttpError(409, "Replay frame must end at a complete native scheduler batch boundary.", "replay_frame_unsafe_batch_boundary");
+    case "prefix_replay_mismatch":
+      return new HttpError(409, "Recorded replay prefix failed integrity verification.", "replay_frame_integrity_mismatch");
+    default:
+      return new HttpError(409, "Replay frame cannot be built from the selected native boundary.", "replay_frame_unavailable");
+  }
 }
 
 function parseOptionalBoolean(value: unknown, name: string): boolean | undefined {
@@ -3260,6 +3343,49 @@ function projectMatchArtifactForView(artifact: MatchArtifact, view: MatchArtifac
   const privateProjected = projectPostgameRedactedArtifact(artifact);
   if (view === "postgame-redacted") return privateProjected;
   return redactSecrets(projectTruthRedactedArtifact(privateProjected));
+}
+
+/**
+ * Project a deterministic native prefix for the local postgame replay
+ * cockpit. A prefix is not a MatchArtifact: it deliberately omits the parent
+ * trajectory, agent snapshots, actions, observations, social topology, and
+ * all evaluator/provider evidence.
+ */
+function projectPostgameReplayFrame(prefix: {
+  nativeStepCount: number;
+  maxMessageSeq: number;
+  step: { postStateHash?: string };
+  episode: MatchArtifact["socialEpisode"];
+  replay: ReturnType<typeof replayWerewolfSocialEpisode>;
+}): PostgameReplayFrameDto {
+  const state = redactStatePrivateEvents(prefix.replay.finalState);
+  const eventCount = Array.isArray(state.events) ? state.events.length : 0;
+  return {
+    artifactVersion: "server.match-replay-frame.v1",
+    kind: "match-replay-frame",
+    authority: "native-social-episode",
+    source: "server-owned-match-artifact",
+    cursor: {
+      nativeStepCount: prefix.nativeStepCount,
+      messageCount: prefix.episode.messages.length,
+      eventCount,
+      stateHash: prefix.replay.finalHash,
+      recordedPostStateHash: prefix.step.postStateHash
+    },
+    projection: {
+      view: "postgame-redacted",
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: false,
+      generatedAt: new Date(0).toISOString()
+    },
+    state,
+    replay: {
+      ok: true,
+      replayedSteps: prefix.replay.replayedSteps,
+      replayedBatches: prefix.replay.replayedBatches,
+      rejectedSteps: prefix.replay.rejectedSteps
+    }
+  };
 }
 
 /**

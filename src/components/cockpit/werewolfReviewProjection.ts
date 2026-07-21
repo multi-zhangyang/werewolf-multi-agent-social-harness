@@ -73,7 +73,10 @@ export interface WerewolfReviewModel {
   publicEvents: WerewolfReviewPublicEvent[];
 }
 
-export function buildWerewolfReviewModel(artifact: PostgameMatchProjectionDto | null): WerewolfReviewModel | null {
+/** The review board needs only a server-projected state and its view policy. */
+export type WerewolfReviewSource = Pick<PostgameMatchProjectionDto, "projection" | "finalState">;
+
+export function buildWerewolfReviewModel(artifact: WerewolfReviewSource | null): WerewolfReviewModel | null {
   if (!artifact || !isRecord(artifact.projection)) return null;
   const truthRedacted =
     artifact.projection.view === "truth-redacted" || artifact.projection.postgameTruthRedacted === true;

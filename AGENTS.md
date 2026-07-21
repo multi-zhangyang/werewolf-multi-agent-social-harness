@@ -25064,3 +25064,84 @@ and failed safe diagnostics, postgame artifact projections, typecheck, and the
 production build. A future server response that reintroduces `endpoint`,
 `chatCompletionsUrl`, or `providerRequestId` into a default/public response is
 an authority/redaction regression.
+
+## 13.252 Server-Authoritative Native Replay Frame Lock
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+The replay cockpit now has a narrow, server-owned prefix-frame path. It is a
+replay presentation capability, not a live game loop, checkpoint, fork, or
+browser game engine.
+
+### 13.252.1 Generic Replay-Prefix Boundary
+
+- `buildReplayableSocialPrefix()` in `src/harness/episodeArtifacts.ts` selects
+  exactly one existing native boundary, reuses the established positive
+  `nativeStepCount` selector and complete-batch guard, retains the exact
+  recorded message prefix, and derives state only through an injected
+  deterministic replay callback.
+- It has no durable actor snapshot requirement and never restores an actor,
+  policy closure, reasoner, provider, socket, or staged decision. It is
+  intentionally separate from `buildHarnessCheckpointAtPrefix()`.
+- A frame cannot end in the middle of an atomic/parallel scheduler batch. A
+  rejected native step remains auditable only when recorded replay proves it
+  caused no state/event/message mutation.
+- The Werewolf adapter forwards `validateExpectedFinalState: false` only for
+  this derived prefix seam. It still validates recorded pending-action
+  authorization against deterministic core state before every committed
+  command.
+
+### 13.252.2 API And Redaction Boundary
+
+- `POST /api/matches/:id/replay/frame` accepts exactly one body field:
+  `{ nativeStepCount: <positive integer> }`. It accepts no client artifact,
+  state, messages, channels, snapshots, commands, trace id, view, or model
+  authority.
+- The route validates the complete canonical stored artifact first, then
+  derives a prefix with no actor/model call. It does not write a checkpoint,
+  fork, cursor record, artifact, or store entry.
+- The transient `server.match-replay-frame.v1` postgame-redacted DTO contains
+  only a server-projected prefix state, cursor counts/hashes, and replay
+  counts. It excludes native steps, commands, pending actions, observations,
+  messages, channel topology, delivery receipts, agents, snapshot frames,
+  trajectories, evaluator data, provider telemetry, seed, and client payload.
+- Native replay-frame cursors are unavailable to `truth-redacted` public
+  views. Native scheduler position can reveal private role/action cadence even
+  if state fields are removed. Public playback requires a separately designed
+  public event/message cursor.
+
+### 13.252.3 React Cockpit Boundary
+
+- React keeps only a requested native-boundary index and the latest
+  server-returned frame. It does not call the core engine, apply a command,
+  recompute a redacted state hash, or infer a role/team/target.
+- Evidence-row selection remains independent from replay-frame selection:
+  every native row can be inspected, but only complete scheduler boundaries
+  enable state-frame controls. This preserves parallel actor audit rows without
+  displaying a fictional intermediate world state.
+- `WerewolfReviewBoard` consumes the existing narrow `projection + state`
+  selector source. It identifies server replay frames and their recorded state
+  hash; loading/error states never render the parent final artifact as if it
+  were the requested cursor.
+
+### 13.252.4 Validation Recorded
+
+```bash
+npm run agent:probe -- --models=grok-4.5 --timeout=90s
+npx vitest run tests/replay.test.ts tests/serverCheckpointApi.test.ts \
+  tests/serverPublicViewApi.test.ts tests/werewolfReviewProjection.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=dot
+npm run typecheck
+npm run build
+npm run test:e2e
+npm test -- --maxWorkers=1 --no-file-parallelism --reporter=dot
+git diff --check
+```
+
+The real `grok-4.5` probe remains on the existing generic OpenAI-compatible
+streaming path. No model-specific adapter, parser, prompt, fallback, or
+model-name branch was added by this replay-frame work.

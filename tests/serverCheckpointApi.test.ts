@@ -1292,6 +1292,67 @@ describe("checkpoint and fork API", () => {
 
   });
 
+  it("derives a postgame-redacted replay frame from only a stored native prefix", async () => {
+    const { record, artifact } = await createStoredArtifactMatch("server-owned-replay-frame", { recordAgentSnapshots: false });
+    const selected = artifact.socialEpisode.steps[0];
+    if (!selected) throw new Error("Expected a native replay step.");
+
+    const frame = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/replay/frame`, {
+      nativeStepCount: 1
+    });
+
+    expect(frame.status).toBe(200);
+    expect(frame.headers.get("cache-control")).toContain("no-store");
+    expect(frame.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(frame.body.frame).toMatchObject({
+      artifactVersion: "server.match-replay-frame.v1",
+      kind: "match-replay-frame",
+      authority: "native-social-episode",
+      source: "server-owned-match-artifact",
+      cursor: {
+        nativeStepCount: 1,
+        messageCount: expect.any(Number),
+        eventCount: expect.any(Number),
+        stateHash: selected.postStateHash,
+        recordedPostStateHash: selected.postStateHash
+      },
+      projection: {
+        view: "postgame-redacted",
+        privateEvidenceRedacted: true,
+        postgameTruthRedacted: false
+      },
+      replay: {
+        ok: true,
+        replayedSteps: 1,
+        replayedBatches: 1,
+        rejectedSteps: 0
+      }
+    });
+    expect(artifact.socialEpisode.steps.length).toBeGreaterThan(1);
+    expect(frame.body.frame.state).not.toEqual(artifact.finalState);
+    expect(frame.body.frame).not.toHaveProperty("agents");
+    expect(frame.body.frame).not.toHaveProperty("agentSnapshotFrames");
+    expect(frame.body.frame).not.toHaveProperty("trajectory");
+    expect(frame.body.frame).not.toHaveProperty("socialEpisode");
+    expect(JSON.stringify(frame.body.frame)).not.toContain("privateMemos");
+    expect(JSON.stringify(frame.body.frame)).not.toContain("providerRequestId");
+    expect(JSON.stringify(frame.body.frame)).not.toContain("pendingAction");
+    expect(JSON.stringify(frame.body.frame)).not.toContain("command");
+
+    const clientAuthority = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/replay/frame`, {
+      nativeStepCount: 1,
+      artifact: artifact
+    });
+    expect(clientAuthority.status).toBe(400);
+    expect(clientAuthority.body.error).toContain("unsupported field");
+
+    const outOfRange = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/replay/frame`, {
+      nativeStepCount: artifact.socialEpisode.steps.length + 1
+    });
+    expect(outOfRange.status).toBe(400);
+    expect(outOfRange.body.code).toBe("replay_frame_selector_not_found");
+  });
+
   it("rejects unavailable matches and client-submitted replay authority", async () => {
     const missing = await requestJson(baseUrl, "POST", "/api/matches/missing/replay", {});
     expect(missing.status).toBe(404);
