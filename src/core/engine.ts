@@ -1,5 +1,5 @@
 import { shuffleDeterministic } from "./random";
-import { DEFAULT_CONFIG, ROLE_DEFINITIONS, teamForRole } from "./roles";
+import { assertSupportedWerewolfRulesetId, DEFAULT_CONFIG, ROLE_DEFINITIONS, teamForRole } from "./roles";
 import type {
   CastSheriffVoteCommand,
   CastVoteCommand,
@@ -41,6 +41,7 @@ export function createGame(options: {
     },
     roles: options.config?.roles ?? DEFAULT_CONFIG.roles
   };
+  assertSupportedWerewolfRulesetId(config.rulesetId);
   if (config.roles.length !== config.seats) {
     throw new Error(`Role count (${config.roles.length}) must equal seat count (${config.seats}).`);
   }
@@ -93,6 +94,7 @@ export function createGame(options: {
 }
 
 export function getPendingActions(state: GameState): PendingAction[] {
+  assertSupportedWerewolfRulesetId(state.config.rulesetId);
   if (state.winner || state.phase === "game_over") return [];
   const alive = livingPlayers(state);
 
@@ -231,6 +233,7 @@ export function getPendingActions(state: GameState): PendingAction[] {
 }
 
 export function applyCommand(state: GameState, command: GameCommand): GameState {
+  assertSupportedWerewolfRulesetId(state.config.rulesetId);
   assertPhaseAllows(state, command);
 
   if (command.type === "system.advance") {

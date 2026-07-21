@@ -1,4 +1,14 @@
-import type { AgentBelief, GameCommand, GameState, MatchMetrics, PendingAction, PlayerView, Role, Team } from "../core/types";
+import type {
+  AgentBelief,
+  GameCommand,
+  GameState,
+  MatchMetrics,
+  PendingAction,
+  PlayerView,
+  Role,
+  Team,
+  WerewolfRulesetId
+} from "../core/types";
 import type { AgentPendingAction } from "../core/pending";
 import type { ModelCompletionResult } from "../agents/modelClient";
 import type { ProviderFailureKind, ProviderFailureStage, ProviderRetryHistoryEntry, ProviderStreamTelemetry } from "../agents/schema";
@@ -126,6 +136,8 @@ export interface HarnessErrorPayload {
  */
 export interface HarnessForkProvenance extends GenericForkProvenance<"harness.checkpoint.v2"> {
   parentMatchId?: string;
+  /** Domain-owned semantic identity verified against the restored checkpoint. */
+  parentRulesetId: WerewolfRulesetId;
 }
 
 export interface HarnessReasoner {

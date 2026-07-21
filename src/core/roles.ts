@@ -1,4 +1,28 @@
-import type { GameConfig, Role, RoleDefinition, Team } from "./types";
+import {
+  WEREWOLF_CLASSIC_9_SEAT_RULESET_ID,
+  type GameConfig,
+  type Role,
+  type RoleDefinition,
+  type Team,
+  type WerewolfRulesetId
+} from "./types";
+
+/**
+ * Domain-owned semantic registry.  Adding a different role/timing/victory
+ * contract requires a distinct identifier and engine implementation; callers
+ * may not relabel an unsupported record as the current classic adapter.
+ */
+export const SUPPORTED_WEREWOLF_RULESET_IDS = [WEREWOLF_CLASSIC_9_SEAT_RULESET_ID] as const;
+
+export function isSupportedWerewolfRulesetId(value: unknown): value is WerewolfRulesetId {
+  return value === WEREWOLF_CLASSIC_9_SEAT_RULESET_ID;
+}
+
+export function assertSupportedWerewolfRulesetId(value: unknown): asserts value is WerewolfRulesetId {
+  if (!isSupportedWerewolfRulesetId(value)) {
+    throw new Error(`Unsupported Werewolf ruleset: ${typeof value === "string" && value ? value : "<missing>"}.`);
+  }
+}
 
 export const ROLE_DEFINITIONS: Record<Role, RoleDefinition> = {
   villager: {
@@ -44,6 +68,7 @@ export const ROLE_DEFINITIONS: Record<Role, RoleDefinition> = {
 };
 
 export const DEFAULT_CONFIG: GameConfig = {
+  rulesetId: WEREWOLF_CLASSIC_9_SEAT_RULESET_ID,
   seats: 9,
   roles: ["werewolf", "werewolf", "villager", "villager", "villager", "villager", "seer", "witch", "hunter"],
   sheriff: "off",

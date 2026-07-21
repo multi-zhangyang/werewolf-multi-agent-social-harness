@@ -2,6 +2,17 @@ export type Team = "village" | "werewolves";
 
 export type Role = "villager" | "werewolf" | "seer" | "witch" | "hunter";
 
+/**
+ * Stable semantic identity for the deterministic Werewolf proof adapter.
+ *
+ * This is domain state, not a generic harness identifier: artifacts and
+ * checkpoints use it to prove which rule semantics their recorded commands
+ * require during model-free replay.
+ */
+export const WEREWOLF_CLASSIC_9_SEAT_RULESET_ID = "werewolf.classic-9-seat.v1" as const;
+
+export type WerewolfRulesetId = typeof WEREWOLF_CLASSIC_9_SEAT_RULESET_ID;
+
 export type Phase =
   | "role_reveal"
   | "night_seer"
@@ -29,6 +40,12 @@ export interface RoleDefinition {
 }
 
 export interface GameConfig {
+  /**
+   * Named semantics for this deterministic Werewolf adapter.  Persisted
+   * records must carry it explicitly; old records are never silently treated
+   * as the current ruleset.
+   */
+  rulesetId: WerewolfRulesetId;
   seats: number;
   roles: Role[];
   sheriff: "off" | "day1";
