@@ -119,6 +119,34 @@ body {
   pointer-events: none;
 }
 
+.agent-decision-evidence-panel {
+  border-color: #d9e5f6;
+  background: linear-gradient(145deg, #fbfdff, #f5f9ff);
+}
+
+.agent-decision-evidence-panel .ant-steps-item-title {
+  color: #20344e;
+  font-weight: 650;
+}
+
+.agent-decision-evidence-panel .ant-steps-item-description {
+  max-width: none;
+  padding-bottom: 12px;
+}
+
+.agent-decision-evidence-panel .ant-descriptions-item-label {
+  color: #667f9e;
+}
+
+/* Journal identity labels can include a domain-owned subject id. Keep the
+ * evidence inside the panel instead of letting a single long tag widen a
+ * compact cockpit viewport. */
+.agent-decision-evidence-panel .ant-tag {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 576px) {
   .social-evidence-graph__canvas svg {
     min-height: 188px;

@@ -28,6 +28,10 @@ test("renders recorded server truth without a provider and never requests a full
   await expect(firstNativeStep).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.getByText("Step 详情")).toBeVisible();
+  const decisionEvidence = page.getByTestId("agent-decision-evidence-panel");
+  await expect(decisionEvidence).toBeVisible();
+  await expect(decisionEvidence).toContainText("Environment receipt");
+  await expect(decisionEvidence).toContainText("private actor state");
 
   const projection = page.getByRole("combobox", { name: "工件投影" });
   const requestCountBeforeViewChange = artifactViews.length;
@@ -47,6 +51,7 @@ test("renders recorded server truth without a provider and never requests a full
     postgameTruthRedacted: true
   });
   await expect(page.getByRole("status")).toContainText("view=truth-redacted");
+  await expect(page.getByTestId("agent-decision-evidence-panel")).toHaveCount(0);
 
   // The public comparison DTO intentionally contains neither run ids nor
   // seeds. Its route context must still make the actual matrix current.
