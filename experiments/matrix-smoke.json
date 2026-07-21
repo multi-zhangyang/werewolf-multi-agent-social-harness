@@ -12,11 +12,11 @@
   },
   "cells": [
     {
-      "id": "yourmodel-k2-7-streaming-pilot",
-      "label": "yourmodel-k2.7 streaming pilot",
+      "id": "grok-4-5-streaming-pilot",
+      "label": "grok-4.5 streaming pilot",
       "group": "openai-compatible",
-      "models": ["yourmodel-k2.7"],
-      "seed": "matrix-smoke-yourmodel"
+      "models": ["grok-4.5"],
+      "seed": "matrix-smoke-grok-4-5"
     }
   ]
 }
