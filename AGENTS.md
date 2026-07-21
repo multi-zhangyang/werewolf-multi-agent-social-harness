@@ -24912,3 +24912,51 @@ npx vitest run tests/serverMatchArtifactsApi.test.ts tests/serverCheckpointApi.t
   --testTimeout=30000 --maxWorkers=1 --no-file-parallelism
 git diff --check
 ```
+
+## 13.249 Latest Runtime Model Selection Lock
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+The active local default model is now:
+
+```text
+LLM_MODELS=grok-4.5
+```
+
+This is a runtime configuration choice, not a new provider integration. The
+model continues to use the existing OpenAI-compatible chat-completions client
+and its required streaming path; do not add a Grok-specific adapter, prompt
+format, response parser, fallback, or model-name branch. The model remains an
+optional reasoner inside the harness-managed actor and cannot bypass policy,
+action arbitration, environment legality, artifact recording, replay, or
+evaluation boundaries.
+
+The local `.env` and `.env.local` runtime configuration, and the tracked
+`.env.example` template, are aligned to this default. Do not print or copy
+endpoint or key values while checking them.
+
+### 13.249.1 Live Streaming Validation
+
+The standard bounded probe completed through the real provider path:
+
+```bash
+npm run agent:probe -- --models=grok-4.5 --timeout=90s
+```
+
+Observed: one real Werewolf Seer decision completed in approximately 17 s;
+the stream was enabled and completed by the provider stop event; the resulting
+`seer.inspect` candidate passed the local policy/arbitration and harness-turn
+path. The probe did not use a provider-specific code path and did not expose
+endpoint or credential material.
+
+Focused regression validation also passed:
+
+```bash
+npx vitest run tests/providerAdapters.test.ts tests/reasonerProposal.test.ts \
+  --testTimeout=30000 --maxWorkers=1 --no-file-parallelism
+npm run typecheck
+```
