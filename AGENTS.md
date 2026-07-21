@@ -25374,3 +25374,58 @@ provider stop event, passed local policy/arbitration and environment commit,
 and produced no rejected native step or harness error. The one-game tournament
 preserved that lifecycle distinction with zero failed episodes. This lock
 contains no endpoint, credential, request id, prompt, or private artifact.
+
+## 13.257 Persisted Raw-Record Leaderboard Reconstruction Lock
+
+Timestamp: `2026-07-21`
+
+Research tournament leaderboards are artifact-derived analyses, not trusted
+copies of `TournamentResult.modelStats` or `TournamentResult.profileStats`.
+The only authoritative inputs to rebuild the leaderboard are the persisted
+control-plane and raw analysis records:
+
+```text
+spec.normalized.json
+  + episodes.jsonl
+  + metrics.jsonl
+  + cost_latency.json
+  -> pure raw-record leaderboard rebuild
+  -> leaderboard.json / leaderboard.csv / summary.md tables
+```
+
+- `rebuildTournamentLeaderboardFromRawRecords()` accepts parsed persisted
+  records, never a `TournamentResult`, current evaluator implementation, or
+  current promotion catalog. It initializes model/profile zero rows from the
+  normalized spec metadata.
+- The completed-only contract remains unchanged: only rows whose episode
+  lifecycle status is `completed` contribute seat, win, role/team, reward,
+  token/latency, harness-error, and native-step leaderboard aggregates.
+  Truncated and failed episodes remain in the raw lifecycle and metric
+  evidence, but cannot silently affect the completed-only aggregate.
+- `agent.reward` totals are read from the persisted `agent.reward` metric
+  rows. Promotion totals read the persisted `promotionClass` and
+  `scorecardEligible` fields exactly; reconstruction must not invoke a newer
+  promotion catalog to reclassify historical records.
+- `episodes.jsonl` includes `hasEvaluationReport`, evaluation coverage fields,
+  and explicit per-profile execution density. That density records the
+  committed compatibility harness-turn count separately from native social
+  step density, so profile turns are never guessed from actor-level committed
+  step counts.
+- `cost_latency.json.episodes[*].modelUsage` is the source of model call,
+  token, and latency totals. The legacy run-level harness-error propagation
+  semantics are deliberately preserved rather than recast as per-agent blame.
+- A truth-redacted research row may omit role/team/winner facts; rebuilding it
+  leaves the corresponding role/team aggregates at zero and never attempts to
+  reverse those facts from other artifact data. The strict `public` pack does
+  not expose these research raw inputs and is intentionally rejected as a
+  leaderboard-rebuild source rather than widened with private identities,
+  role/team truth, seeds, or provider data.
+- Benchmark statistics remain a separate recorded aggregate embedded in the
+  leaderboard; they are not used as a hidden fallback for rebuilt model or
+  profile statistics.
+
+Regression proof must include a disk round trip from parsed raw records, a
+poisoned in-memory-statistics test covering JSON/CSV/Markdown together,
+completed/truncated/failed lifecycle isolation, recorded-promotion mutation,
+truth-redacted no-recovery behavior, and an explicit minimal-public fail-closed
+case. No live provider call is required for this pure artifact-plane change.

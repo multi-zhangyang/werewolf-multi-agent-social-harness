@@ -211,8 +211,15 @@ artifacts under `matches/`, audit files (`integrity.jsonl`, `failures.jsonl`,
 `cost_latency.json`), deterministic aggregate reports (`leaderboard.json`,
 `benchmark_statistics.json`), a human-readable `summary.md`, and tabular
 analysis exports (`episodes.csv`, `agents.csv`, `metrics.csv`,
-`leaderboard.csv`). CSV files are derived from recorded harness artifacts; they
-do not replace replay or JSONL evidence.
+`leaderboard.csv`). `leaderboard.json`, `leaderboard.csv`, and the leaderboard
+tables in `summary.md` are rebuilt from the normalized spec plus the persisted
+research raw records (`episodes.jsonl`, `metrics.jsonl`, and
+`cost_latency.json`); they do not trust an in-memory tournament statistics
+cache. The raw rows include explicit per-profile committed harness-turn and
+step-density evidence so profile aggregates are not inferred from actor step
+counts. Strict public/share packs intentionally omit those research inputs and
+are not leaderboard-rebuild authority. CSV files do not replace replay or JSONL
+evidence.
 
 The API also stores a `MatchArtifact` for completed `/api/matches/run` records:
 

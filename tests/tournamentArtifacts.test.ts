@@ -56,7 +56,8 @@ import {
   BENCHMARK_STATISTICS_VERSION,
   writeTournamentArtifactDirectory
 } from "../src/harness/tournamentArtifacts";
-import type { HarnessEvaluationReport, HarnessEvaluationWarning, HarnessReasoner } from "../src/harness/types";
+import { rebuildTournamentLeaderboardFromRawRecords } from "../src/harness/tournamentLeaderboard";
+import type { HarnessAgentProfile, HarnessEvaluationReport, HarnessEvaluationWarning, HarnessReasoner } from "../src/harness/types";
 
 const tempDirs: string[] = [];
 
@@ -2010,6 +2011,177 @@ describe("tournament artifact directory writer", () => {
     const matchArtifact = await readJson<Record<string, any>>(path.join(outputDir, episodes[0].matchArtifact));
     expect(matchArtifact.forkOf).toEqual(forkOf);
   });
+
+  it("rebuilds research leaderboard exports from persisted raw records without an in-memory stats fallback", async () => {
+    const outputDir = await makeTempDir();
+    const result = await runTournament({
+      models: ["alpha", "beta"],
+      games: 1,
+      seed: "raw-leaderboard-roundtrip",
+      reasoner: deterministicReasoner,
+      maxTransitions: 4,
+      includeArtifacts: true
+    });
+    // Keep this fixture bounded; the artifact plane is deliberately tested
+    // against a hand-labeled completed research row rather than requiring a
+    // full 300+ transition game in every unit-test invocation.
+    expect(result.episodes[0]?.status).toBe("truncated");
+    if (!result.episodes[0]) throw new Error("Expected bounded tournament episode.");
+    result.episodes[0].status = "completed";
+    result.episodes[0].harnessStatus = "completed";
+    result.gamesCompleted = 1;
+    result.gamesTruncated = 0;
+    poisonTournamentStats(result, 917_555_911);
+
+    await writeTournamentArtifactDirectory(result, {
+      outputDir,
+      experimentId: "raw-leaderboard-roundtrip",
+      createdAt: "2026-01-02T03:04:05.000Z"
+    });
+
+    const raw = await readPersistedLeaderboardRawRecords(outputDir);
+    const rebuilt = rebuildTournamentLeaderboardFromRawRecords({
+      models: raw.spec.models,
+      profiles: raw.spec.profiles,
+      episodeRecords: raw.episodes,
+      metricRecords: raw.metrics,
+      costLatencyReport: raw.costLatency
+    });
+    const persisted = await readJson<Record<string, any>>(path.join(outputDir, "leaderboard.json"));
+    expect(rebuilt.modelStats).toEqual(persisted.modelStats);
+    expect(rebuilt.profileStats).toEqual(persisted.profileStats);
+    expect(rebuilt.metricPromotion.metricCount).toBe(persisted.metricCount);
+    expect(rebuilt.metricPromotion.scorecardEligibleCount).toBe(persisted.scorecardEligibleMetricCount);
+    expect(rebuilt.metricPromotion.byClass).toEqual(persisted.metricPromotionClassCounts);
+    expect(rebuilt.metricPromotion.scorecardEligibleByClass).toEqual(persisted.scorecardEligibleMetricClassCounts);
+    expect(Object.values(rebuilt.modelStats).some((stats) => stats.seatGames > 0)).toBe(true);
+    expect(Object.values(rebuilt.profileStats).some((stats) => stats.seatGames > 0)).toBe(true);
+    expect(raw.episodes[0]?.profileExecution).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          profileId: expect.any(String),
+          harnessTurns: expect.any(Number),
+          nativeSteps: expect.any(Number),
+          committedSteps: expect.any(Number),
+          rejectedSteps: expect.any(Number)
+        })
+      ])
+    );
+
+    const leaderboardCsv = await readFile(path.join(outputDir, "leaderboard.csv"), "utf8");
+    const summaryMarkdown = await readFile(path.join(outputDir, "summary.md"), "utf8");
+    expect(leaderboardCsv).not.toContain("917555911");
+    expect(summaryMarkdown).not.toContain("917555911");
+
+    const changedRaw = JSON.parse(JSON.stringify(raw)) as typeof raw;
+    const rewardMetric = changedRaw.metrics.find((metric) => metric.id === "agent.reward" && metric.status === "completed");
+    if (!rewardMetric) throw new Error("Expected a persisted completed agent.reward metric.");
+    const priorPromotion = rebuildTournamentLeaderboardFromRawRecords({
+      models: changedRaw.spec.models,
+      profiles: changedRaw.spec.profiles,
+      episodeRecords: changedRaw.episodes,
+      metricRecords: changedRaw.metrics,
+      costLatencyReport: changedRaw.costLatency
+    });
+    rewardMetric.value += 7;
+    rewardMetric.promotionClass = "benchmark_only";
+    rewardMetric.scorecardEligible = false;
+    const changed = rebuildTournamentLeaderboardFromRawRecords({
+      models: changedRaw.spec.models,
+      profiles: changedRaw.spec.profiles,
+      episodeRecords: changedRaw.episodes,
+      metricRecords: changedRaw.metrics,
+      costLatencyReport: changedRaw.costLatency
+    });
+    expect(totalReward(changed.modelStats)).toBeCloseTo(totalReward(priorPromotion.modelStats) + 7);
+    expect(changed.metricPromotion.byClass.benchmark_only).toBe(priorPromotion.metricPromotion.byClass.benchmark_only + 1);
+    expect(changed.metricPromotion.byClass.scorecard).toBe(priorPromotion.metricPromotion.byClass.scorecard - 1);
+    expect(changed.metricPromotion.scorecardEligibleCount).toBe(priorPromotion.metricPromotion.scorecardEligibleCount - 1);
+
+    const lifecycleRaw = JSON.parse(JSON.stringify(raw)) as typeof raw;
+    const baseMetricRows = lifecycleRaw.metrics.map((metric) => ({ ...metric }));
+    for (const [episodeIndex, status] of [
+      [1, "truncated"],
+      [2, "failed"]
+    ] as const) {
+      const episode = JSON.parse(JSON.stringify(lifecycleRaw.episodes[0]));
+      episode.episodeIndex = episodeIndex;
+      episode.index = episodeIndex;
+      episode.status = status;
+      episode.harnessStatus = status;
+      for (const agent of episode.agents) {
+        agent.nativeSteps = 909;
+        agent.committedSteps = 900;
+        agent.rejectedSteps = 9;
+      }
+      for (const profile of episode.profileExecution) {
+        profile.harnessTurns = 900;
+        profile.nativeSteps = 909;
+        profile.committedSteps = 900;
+        profile.rejectedSteps = 9;
+      }
+      lifecycleRaw.episodes.push(episode);
+      const cost = JSON.parse(JSON.stringify(lifecycleRaw.costLatency.episodes[0]));
+      cost.episodeIndex = episodeIndex;
+      cost.status = status;
+      cost.harnessStatus = status;
+      cost.harnessErrors = 700;
+      for (const usage of Object.values(cost.modelUsage) as Array<Record<string, number>>) {
+        usage.calls = 700;
+        usage.promptTokens = 700;
+        usage.completionTokens = 700;
+        usage.latencyMs = 700;
+      }
+      lifecycleRaw.costLatency.episodes.push(cost);
+      lifecycleRaw.metrics.push(
+        ...baseMetricRows.map((metric) => ({
+          ...metric,
+          episodeIndex,
+          tournamentEpisodeIndex: episodeIndex,
+          status,
+          value: metric.id === "agent.reward" ? 700 : metric.value
+        }))
+      );
+    }
+    const lifecycleRebuilt = rebuildTournamentLeaderboardFromRawRecords({
+      models: lifecycleRaw.spec.models,
+      profiles: lifecycleRaw.spec.profiles,
+      episodeRecords: lifecycleRaw.episodes,
+      metricRecords: lifecycleRaw.metrics,
+      costLatencyReport: lifecycleRaw.costLatency
+    });
+    expect(lifecycleRebuilt.modelStats).toEqual(rebuilt.modelStats);
+    expect(lifecycleRebuilt.profileStats).toEqual(rebuilt.profileStats);
+    expect(lifecycleRebuilt.metricPromotion.metricCount).toBe(rebuilt.metricPromotion.metricCount * 3);
+
+    const redactedRaw = JSON.parse(JSON.stringify(raw)) as typeof raw;
+    for (const episode of redactedRaw.episodes) {
+      for (const agent of episode.agents) {
+        delete agent.role;
+        delete agent.team;
+        delete agent.won;
+      }
+    }
+    const redacted = rebuildTournamentLeaderboardFromRawRecords({
+      models: redactedRaw.spec.models,
+      profiles: redactedRaw.spec.profiles,
+      episodeRecords: redactedRaw.episodes,
+      metricRecords: redactedRaw.metrics,
+      costLatencyReport: redactedRaw.costLatency
+    });
+    expect(Object.values(redacted.modelStats).every((stats) => stats.villageSeatGames === 0 && stats.werewolfSeatGames === 0)).toBe(true);
+    expect(Object.values(redacted.profileStats).every((stats) => Object.values(stats.roleGames).every((count) => count === 0))).toBe(true);
+
+    expect(() =>
+      rebuildTournamentLeaderboardFromRawRecords({
+        models: [],
+        profiles: [],
+        episodeRecords: [{ type: "public_episode", episodeIndex: 0 }],
+        metricRecords: [],
+        costLatencyReport: { kind: "public-tournament-cost-latency", episodes: [] }
+      })
+    ).toThrow("requires an episode record");
+  });
 });
 
 const deterministicReasoner: HarnessReasoner = {
@@ -2227,6 +2399,41 @@ function replacePromotionIdentityForEpisode(
       Object.assign(metric.promotionDecision, identity);
     }
   }
+}
+
+async function readPersistedLeaderboardRawRecords(outputDir: string): Promise<{
+  spec: {
+    models: string[];
+    profiles: Array<Pick<HarnessAgentProfile, "id" | "model" | "policyName">>;
+  };
+  episodes: Array<Record<string, any>>;
+  metrics: Array<Record<string, any>>;
+  costLatency: Record<string, any>;
+}> {
+  return {
+    spec: await readJson(path.join(outputDir, "spec.normalized.json")),
+    episodes: await readJsonl(path.join(outputDir, "episodes.jsonl")),
+    metrics: await readJsonl(path.join(outputDir, "metrics.jsonl")),
+    costLatency: await readJson(path.join(outputDir, "cost_latency.json"))
+  };
+}
+
+function poisonTournamentStats(result: TournamentResult, sentinel: number): void {
+  const poison = (stats: Record<string, any>) => {
+    for (const [key, value] of Object.entries(stats)) {
+      if (typeof value === "number") {
+        stats[key] = sentinel;
+      } else if (value && typeof value === "object") {
+        for (const nestedKey of Object.keys(value)) value[nestedKey] = sentinel;
+      }
+    }
+  };
+  for (const stats of Object.values(result.modelStats)) poison(stats as unknown as Record<string, any>);
+  for (const stats of Object.values(result.profileStats)) poison(stats as unknown as Record<string, any>);
+}
+
+function totalReward(stats: Record<string, { rewardTotal: number }>): number {
+  return Object.values(stats).reduce((total, item) => total + item.rewardTotal, 0);
 }
 
 async function makeTempDir(): Promise<string> {

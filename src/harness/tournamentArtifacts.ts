@@ -28,7 +28,11 @@ import type {
   ProviderFailureSummary
 } from "./types";
 import { redactSecrets } from "./redaction";
-import { countSocialStepCommits, countSocialStepCommitsByActor } from "./social";
+import { countSocialStepCommits, countSocialStepCommitsByActor, isSocialStepCommitted } from "./social";
+import {
+  rebuildTournamentLeaderboardFromRawRecords,
+  type RebuiltTournamentLeaderboard
+} from "./tournamentLeaderboard";
 import { werewolfHarnessTurnEvidenceFromEpisode } from "./werewolfExecutionEvidence";
 export const TOURNAMENT_ARTIFACT_VERSION = "harness.tournament.v1";
 /**
@@ -541,7 +545,21 @@ export async function writeTournamentArtifactDirectory(
   const failures = aggregateFailureRecords(result, artifactRecords, relativeMatchPaths, Boolean(options.redactAssignmentTruth));
   const costLatency = buildCostLatencyReport(result, artifactRecords, createdAt, Boolean(options.redactAssignmentTruth));
   const benchmarkStatistics = buildBenchmarkStatistics(result, createdAt, artifactsByIndex, Boolean(options.redactAssignmentTruth));
-  const leaderboard = buildLeaderboard(result, createdAt, artifactsByIndex, benchmarkStatistics, Boolean(options.redactAssignmentTruth));
+  const rebuiltLeaderboard = rebuildTournamentLeaderboardFromRawRecords({
+    models: result.models,
+    profiles: result.profiles,
+    episodeRecords: episodes,
+    metricRecords: metrics,
+    costLatencyReport: costLatency
+  });
+  const leaderboard = buildLeaderboard(
+    result,
+    createdAt,
+    artifactsByIndex,
+    benchmarkStatistics,
+    rebuiltLeaderboard,
+    Boolean(options.redactAssignmentTruth)
+  );
   const tournamentComparison = buildTournamentComparisonExport(result, {
     createdAt,
     artifactRecords,
@@ -553,7 +571,8 @@ export async function writeTournamentArtifactDirectory(
     experimentId: options.experimentId ?? result.experiment.id,
     artifactRecords,
     integrity,
-    failures
+    failures,
+    rebuiltLeaderboard
   });
   const episodesCsv = buildCsv(
     EPISODE_CSV_HEADERS,
@@ -561,7 +580,10 @@ export async function writeTournamentArtifactDirectory(
   );
   const agentsCsv = buildCsv(AGENT_CSV_HEADERS, agentCsvRows(result, artifactsByIndex, Boolean(options.redactAssignmentTruth)));
   const metricsCsv = buildCsv(METRIC_CSV_HEADERS, metricCsvRows(result, Boolean(options.redactAssignmentTruth)));
-  const leaderboardCsv = buildCsv(LEADERBOARD_CSV_HEADERS, leaderboardCsvRows(result, Boolean(options.redactAssignmentTruth)));
+  const leaderboardCsv = buildCsv(
+    LEADERBOARD_CSV_HEADERS,
+    leaderboardCsvRows(rebuiltLeaderboard, Boolean(options.redactAssignmentTruth))
+  );
   await writeJson(files.manifest, manifest, overwrite);
   await writeJson(files.registry, registry, overwrite);
   await writeJson(files.specNormalized, specNormalized, overwrite);
@@ -1738,6 +1760,7 @@ function episodeRecord(
   const densityByActor = countSocialStepCommitsByActor(
     episode.socialEpisode?.steps ?? artifact?.socialEpisode.steps ?? []
   );
+  const profileExecution = profileExecutionRecords(episode, artifact);
   const agents = episode.agents.map((agent) => {
     const density = densityByActor.get(agent.playerId) ?? {
       nativeSteps: 0,
@@ -1783,12 +1806,12 @@ function episodeRecord(
     scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
     metricPromotionClassCounts: promotionSummary.byClass,
     scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
-    ...(redactTruth
-      ? {}
-      : {
-          evaluationStatus: episode.evaluationReport?.status ?? "completed",
-          evaluatorFailureCount: episode.evaluationReport?.failures?.length ?? 0
-        }),
+    // Evaluation coverage is control-plane metadata, not hidden role truth.
+    // Keep it in a truth-redacted research row so the persisted raw inputs can
+    // distinguish a missing report from a completed report with zero failures.
+    hasEvaluationReport: Boolean(episode.evaluationReport),
+    evaluationStatus: episode.evaluationReport ? episode.evaluationReport.status ?? "completed" : null,
+    evaluatorFailureCount: episode.evaluationReport?.failures?.length ?? 0,
     evaluationWarningCount: summarizeEvaluationWarnings(episode.evaluationReport?.warnings).warningCount,
     evaluationWarningCodes: summarizeEvaluationWarnings(episode.evaluationReport?.warnings).warningCodes.map((warning) => warning.code),
     warningSummary: summarizeEvaluationWarnings(episode.evaluationReport?.warnings),
@@ -1797,10 +1820,70 @@ function episodeRecord(
     assignment: episode.assignment ?? null,
     resolvedAssignments,
     agents,
+    // This mirrors TournamentResult's historical profile aggregation exactly:
+    // native density is attributed by step.profileId (falling back to the
+    // actor's assigned profile), while harness turns are only committed
+    // compatibility traces. Neither can safely be inferred from actor density.
+    profileExecution,
     error: episode.error ?? null,
     matchArtifact: matchPath ?? null,
     matchJsonl: matchJsonlPath ?? null
   };
+}
+
+function profileExecutionRecords(
+  episode: TournamentEpisode,
+  artifact?: MatchArtifact
+): Array<{
+  profileId: string;
+  model: string;
+  harnessTurns: number;
+  nativeSteps: number;
+  committedSteps: number;
+  rejectedSteps: number;
+}> {
+  const agentByPlayer = new Map(episode.agents.map((agent) => [agent.playerId, agent]));
+  const byProfile = new Map<
+    string,
+    {
+      profileId: string;
+      model: string;
+      harnessTurns: number;
+      nativeSteps: number;
+      committedSteps: number;
+      rejectedSteps: number;
+    }
+  >();
+  const ensure = (profileId: string, model: string) => {
+    const existing = byProfile.get(profileId);
+    if (existing) return existing;
+    const created = {
+      profileId,
+      model,
+      harnessTurns: 0,
+      nativeSteps: 0,
+      committedSteps: 0,
+      rejectedSteps: 0
+    };
+    byProfile.set(profileId, created);
+    return created;
+  };
+  const steps = episode.socialEpisode?.steps ?? artifact?.socialEpisode.steps ?? [];
+  for (const step of steps) {
+    if (step.actorId === "system") continue;
+    const actor = agentByPlayer.get(step.actorId);
+    const profileId = step.profileId || actor?.profileId;
+    if (!profileId) continue;
+    const density = ensure(profileId, actor?.model ?? "unknown");
+    density.nativeSteps += 1;
+    if (isSocialStepCommitted(step)) density.committedSteps += 1;
+    else density.rejectedSteps += 1;
+  }
+  for (const trace of episode.evaluation?.trajectory ?? []) {
+    if (!trace.profileId) continue;
+    ensure(trace.profileId, trace.model).harnessTurns += 1;
+  }
+  return [...byProfile.values()].sort((left, right) => left.profileId.localeCompare(right.profileId));
 }
 
 function aggregateTrajectoryRecords(
@@ -2300,38 +2383,9 @@ function buildLeaderboard(
   createdAt: string,
   artifactsByIndex: Map<number, MatchArtifact> = new Map(),
   benchmarkStatistics: object = buildBenchmarkStatistics(result, createdAt, artifactsByIndex),
+  rebuilt: RebuiltTournamentLeaderboard,
   redactTruth = false
 ): object {
-  const modelStats = redactTruth
-    ? Object.fromEntries(
-        Object.entries(result.modelStats).map(([model, stats]) => [
-          model,
-          {
-            ...stats,
-            villageSeatGames: 0,
-            villageSeatWins: 0,
-            werewolfSeatGames: 0,
-            werewolfSeatWins: 0
-          }
-        ])
-      )
-    : result.modelStats;
-  const profileStats = redactTruth
-    ? Object.fromEntries(
-        Object.entries(result.profileStats).map(([profileId, stats]) => [
-          profileId,
-          {
-            ...stats,
-            villageSeatGames: 0,
-            villageSeatWins: 0,
-            werewolfSeatGames: 0,
-            werewolfSeatWins: 0
-          }
-        ])
-      )
-    : result.profileStats;
-  const promotionSummary = summarizeTournamentMetricPromotions(result);
-  const evaluationCoverage = evaluationCoverageForEpisodes(result.episodes);
   return {
     artifactVersion: TOURNAMENT_ARTIFACT_VERSION,
     kind: "tournament-leaderboard",
@@ -2345,13 +2399,21 @@ function buildLeaderboard(
     gamesTruncated: result.gamesTruncated ?? result.episodes.filter((episode) => episode.status === "truncated").length,
     maxTransitions: result.maxTransitions ?? null,
     assignment: result.assignment ?? null,
-    modelStats,
-    profileStats,
-    metricCount: promotionSummary.metricCount,
-    scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
-    metricPromotionClassCounts: promotionSummary.byClass,
-    scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
-    evaluationCoverage,
+    // `modelStats`/`profileStats` and metric coverage are reconstructed from
+    // the same persisted raw rows written beside this file.  They deliberately
+    // do not trust TournamentResult's in-memory aggregate cache.
+    aggregation: {
+      source: ["spec.normalized.json", "episodes.jsonl", "metrics.jsonl", "cost_latency.json"],
+      completedOnly: true,
+      promotionResolution: "recorded_raw_metric_fields"
+    },
+    modelStats: rebuilt.modelStats,
+    profileStats: rebuilt.profileStats,
+    metricCount: rebuilt.metricPromotion.metricCount,
+    scorecardEligibleMetricCount: rebuilt.metricPromotion.scorecardEligibleCount,
+    metricPromotionClassCounts: rebuilt.metricPromotion.byClass,
+    scorecardEligibleMetricClassCounts: rebuilt.metricPromotion.scorecardEligibleByClass,
+    evaluationCoverage: rebuilt.evaluationCoverage,
     benchmarkStatistics,
     episodes: result.episodes.map((episode) => {
       const artifact = artifactsByIndex.get(episode.index);
@@ -3038,6 +3100,7 @@ function buildTournamentSummaryMarkdown(
     artifactRecords: TournamentMatchArtifactRecord[];
     integrity: ReturnType<typeof aggregateIntegrityRecords>;
     failures: ReturnType<typeof aggregateFailureRecords>;
+    rebuiltLeaderboard: RebuiltTournamentLeaderboard;
   }
 ): string {
   const warningSummary = summarizeEvaluationWarnings(
@@ -3056,7 +3119,7 @@ function buildTournamentSummaryMarkdown(
     },
     { nativeSteps: 0, committedSteps: 0, rejectedSteps: 0 }
   );
-  const promotionSummary = summarizeTournamentMetricPromotions(result);
+  const promotionSummary = options.rebuiltLeaderboard.metricPromotion;
   const lines = [
     `# Tournament Summary: ${markdownText(options.experimentId)}`,
     "",
@@ -3109,7 +3172,7 @@ function buildTournamentSummaryMarkdown(
     "",
     markdownTable(
       ["model", "seat_games", "seat_wins", "win_rate", "avg_reward", "turns", "errors", "native", "committed", "rejected"],
-      Object.values(result.modelStats).map((stats) => [
+      Object.values(options.rebuiltLeaderboard.modelStats).map((stats) => [
         stats.model,
         String(stats.seatGames),
         String(stats.seatWins),
@@ -3127,7 +3190,7 @@ function buildTournamentSummaryMarkdown(
     "",
     markdownTable(
       ["profile", "model", "policy", "seat_games", "seat_wins", "win_rate", "avg_reward", "native", "committed", "rejected"],
-      Object.values(result.profileStats).map((stats) => [
+      Object.values(options.rebuiltLeaderboard.profileStats).map((stats) => [
         stats.profileId,
         stats.model,
         stats.policyName ?? "",
@@ -3304,9 +3367,12 @@ function metricCsvRows(result: TournamentResult, redactTruth = false): Array<Rec
   );
 }
 
-function leaderboardCsvRows(result: TournamentResult, redactTruth = false): Array<Record<string, CsvCell>> {
+function leaderboardCsvRows(
+  rebuilt: RebuiltTournamentLeaderboard,
+  redactTruth = false
+): Array<Record<string, CsvCell>> {
   return [
-    ...Object.values(result.modelStats).map((stats) => ({
+    ...Object.values(rebuilt.modelStats).map((stats) => ({
       subject_type: "model",
       subject_id: stats.model,
       model: stats.model,
@@ -3330,7 +3396,7 @@ function leaderboardCsvRows(result: TournamentResult, redactTruth = false): Arra
       reward_total: stats.rewardTotal,
       average_reward: stats.averageReward
     })),
-    ...Object.values(result.profileStats).map((stats) => ({
+    ...Object.values(rebuilt.profileStats).map((stats) => ({
       subject_type: "profile",
       subject_id: stats.profileId,
       model: stats.model,
