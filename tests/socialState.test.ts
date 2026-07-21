@@ -30,6 +30,7 @@ import {
   createTrustRepairLedger,
   createRelationshipGraph,
   createReputationLedger,
+  createSocialMessageIngestionState,
   pushGoal,
   pushSocialGoal,
   recordSocialStateMutation,
@@ -66,7 +67,7 @@ const evidence: EvidenceRef = {
 };
 
 describe("agent social state stores", () => {
-  it("composes social state from per-store factories without changing serialized shape", () => {
+  it("composes serializable social state from per-store factories", () => {
     const state = createAgentSocialState({
       agentId: "a",
       profile: { id: "profile-a", model: "stub-model" },
@@ -76,6 +77,7 @@ describe("agent social state stores", () => {
     expect(state).toEqual({
       agentId: "a",
       profile: { id: "profile-a", model: "stub-model" },
+      messageIngestion: createSocialMessageIngestionState(),
       memory: createMemoryStore(7),
       beliefs: createBeliefStore(),
       relationships: createRelationshipGraph(),

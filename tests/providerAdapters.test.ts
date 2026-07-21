@@ -5,7 +5,8 @@ import {
   modelClientFromEnv,
   optionalAnthropicMessagesBaseUrlFromEnv,
   optionalResponsesBaseUrlFromEnv,
-  providerConfigSummaryFromEnv
+  providerConfigSummaryFromEnv,
+  providerDiagnosticSummaryFromEnv
 } from "../src/agents/providerRegistry";
 import { normalizeModelList } from "../src/agents/schema";
 
@@ -39,6 +40,21 @@ describe("standard provider protocol adapters", () => {
       endpoint: "https://provider.test/v1/responses",
       configured: true,
       models: ["model-a"]
+    });
+    expect(providerDiagnosticSummaryFromEnv({
+      LLM_PROVIDER_PROTOCOL: "openai-responses",
+      LLM_RESPONSES_URL: "https://provider.test/v1/responses",
+      LLM_API_KEY: "unit-test-key",
+      LLM_MODELS: "model-a"
+    } as NodeJS.ProcessEnv)).toEqual({
+      protocol: "openai-responses",
+      configured: true
+    });
+    expect(providerDiagnosticSummaryFromEnv({
+      LLM_PROVIDER_PROTOCOL: "unsupported-provider"
+    } as NodeJS.ProcessEnv)).toEqual({
+      protocol: null,
+      configured: false
     });
     expect(() =>
       modelClientFromEnv({

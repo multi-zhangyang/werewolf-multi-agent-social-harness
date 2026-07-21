@@ -8,6 +8,7 @@ import { createServerApp } from "../src/server/index";
 import { clearServerStoreForTests } from "../src/server/store";
 import { validateMatchArtifactIntegrity } from "../src/harness/artifacts";
 import type { HarnessReasoner } from "../src/harness/types";
+import { countSocialStepCommits } from "../src/harness/social";
 
 const fakeReasoner: HarnessReasoner = {
   async think(input) {
@@ -65,6 +66,7 @@ describe("server-owned match artifact persistence", () => {
           seed: "server-match-persisted-rehydrate",
           status: artifact.status,
           relativeFile: matchRelativeFile(matchId),
+          nativeSteps: countSocialStepCommits(artifact.socialEpisode.steps).nativeSteps,
           trajectorySteps: artifact.trajectory.length,
           socialMessages: artifact.socialEpisode.messages.length
         })
@@ -84,6 +86,7 @@ describe("server-owned match artifact persistence", () => {
       truncationReason: artifact.truncationReason ?? null,
       hasArtifact: true,
       checkpointCount: 0,
+      nativeSteps: countSocialStepCommits(artifact.socialEpisode.steps).nativeSteps,
       trajectorySteps: artifact.trajectory.length
     });
     assertPublicMatchResponse(listed.body[0]);
@@ -99,10 +102,10 @@ describe("server-owned match artifact persistence", () => {
     assertPublicMatchResponse(detail.body);
     expectNoMatchPathLeak(detail.body, matchArtifactBaseDir);
 
-    const restoredArtifact = await requestJson(restartedBaseUrl, "GET", `/api/matches/${matchId}/artifact`);
+    const restoredArtifact = await requestJson(restartedBaseUrl, "GET", `/api/matches/${matchId}/artifact?view=full`);
     expect(restoredArtifact.status).toBe(200);
     expect(restoredArtifact.body).toMatchObject({
-      artifactVersion: "harness.match.v1",
+      artifactVersion: "harness.match.v2",
       kind: "match",
       runId: matchId,
       matchId,
@@ -126,8 +129,9 @@ describe("server-owned match artifact persistence", () => {
       restoredArtifact.body.socialEpisode.steps.every(
         (step: any) =>
           !("actorSnapshotsAfterStep" in step) &&
-          typeof step.actorSnapshotsHashAfterStep === "string" &&
-          restoredFrameIds.has(step.actorSnapshotFrameIdAfterStep)
+          (step.actorSnapshotsHashAfterStep === undefined
+            ? step.actorSnapshotFrameIdAfterStep === undefined
+            : typeof step.actorSnapshotsHashAfterStep === "string" && restoredFrameIds.has(step.actorSnapshotFrameIdAfterStep))
       )
     ).toBe(true);
     expectNoMatchPathLeak(restoredArtifact.body, matchArtifactBaseDir);
@@ -138,7 +142,7 @@ describe("server-owned match artifact persistence", () => {
     const records = parseJsonl(trajectory.text);
     expect(records[0]).toMatchObject({
       type: "header",
-      artifactVersion: "harness.match.v1",
+      artifactVersion: "harness.match.v2",
       kind: "match",
       runId: matchId,
       matchId
@@ -160,20 +164,18 @@ describe("server-owned match artifact persistence", () => {
     expect(JSON.stringify(frameRecords)).not.toMatch(/privateMemos|journal|beliefs|social/i);
     expectNoMatchPathLeak(trajectory.text, matchArtifactBaseDir);
 
-    const replayed = await requestJson(restartedBaseUrl, "POST", `/api/matches/${matchId}/replay`, {
-      artifact: { initialState: null, trajectory: [] },
-      initialState: null,
-      trajectory: []
-    });
+    const replayed = await requestJson(restartedBaseUrl, "POST", `/api/matches/${matchId}/replay`, {});
     expect(replayed.status).toBe(200);
     expect(replayed.body.summary).toMatchObject({
       kind: "replay",
+      authority: "native-social-episode",
       ok: true,
       source: "server-owned-match-artifact",
       matchId,
       runId: matchId,
-      replayedCommands: artifact.trajectory.length,
-      trajectorySteps: artifact.trajectory.length,
+      nativeSteps: countSocialStepCommits(artifact.socialEpisode.steps).nativeSteps,
+      committedSteps: countSocialStepCommits(artifact.socialEpisode.steps).committedSteps,
+      rejectedSteps: countSocialStepCommits(artifact.socialEpisode.steps).rejectedSteps,
       finalHashMatchesArtifact: true,
       mismatchCount: 0
     });
@@ -194,7 +196,7 @@ describe("server-owned match artifact persistence", () => {
     expect(checkpointResponse.status).toBe(201);
     const checkpointId = checkpointResponse.body.summary.checkpointId as string;
 
-    const checkpointArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${checkpointId}/artifact`);
+    const checkpointArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${checkpointId}/artifact?view=full`);
     expect(checkpointArtifact.status).toBe(200);
 
     const forked = await requestJson(baseUrl, "POST", `/api/checkpoints/${checkpointId}/fork`, {
@@ -210,13 +212,13 @@ describe("server-owned match artifact persistence", () => {
         checkpointId,
         parentRunId: parentMatchId,
         parentMatchId,
-        parentTraceRef: expect.any(String),
+        parentBoundaryTraceRef: expect.any(String),
         parentStateHash: checkpointArtifact.body.source.stateHash,
-        parentTrajectoryLength: checkpointArtifact.body.source.trajectoryLength,
+        parentNativeStepCount: checkpointArtifact.body.source.nativeStepCount,
         reason: "persisted fork child"
       }
     });
-    expect(forked.body.summary.forkOf).not.toHaveProperty("parentTraceId");
+    expect(forked.body.summary.forkOf).not.toHaveProperty("parentBoundaryTraceId");
     expectNoMatchPathLeak(forked.body, matchArtifactBaseDir);
 
     const childCheckpointResponse = await requestJson(baseUrl, "POST", `/api/matches/${forkMatchId}/checkpoints`, {
@@ -240,6 +242,7 @@ describe("server-owned match artifact persistence", () => {
       id: parentMatchId,
       hasArtifact: true,
       checkpointCount: 1,
+      nativeSteps: countSocialStepCommits(parentArtifact.socialEpisode.steps).nativeSteps,
       trajectorySteps: parentArtifact.trajectory.length
     });
     assertPublicMatchResponse(parentDetail.body);
@@ -260,7 +263,7 @@ describe("server-owned match artifact persistence", () => {
     expect(checkpointForks.status).toBe(200);
     expect(checkpointForks.body.summary).toMatchObject({
       kind: "checkpoint-forks",
-      schemaVersion: "server.checkpoint-forks-summary.v1",
+      schemaVersion: "server.checkpoint-forks-summary.v2",
       ok: true,
       childCount: 1,
       checkpoint: {
@@ -269,7 +272,7 @@ describe("server-owned match artifact persistence", () => {
         source: {
           runId: parentMatchId,
           matchId: parentMatchId,
-          traceRef: expect.any(String),
+          boundaryTraceRef: expect.any(String),
           stateHash: checkpointArtifact.body.source.stateHash
         }
       },
@@ -281,7 +284,7 @@ describe("server-owned match artifact persistence", () => {
             checkpointId,
             parentRunId: parentMatchId,
             parentMatchId,
-            parentTraceRef: expect.any(String)
+            parentBoundaryTraceRef: expect.any(String)
           },
           lineage: {
             kind: "fork-lineage",
@@ -295,9 +298,9 @@ describe("server-owned match artifact persistence", () => {
         }
       ]
     });
-    expect(checkpointForks.body.summary.checkpoint.source).not.toHaveProperty("traceId");
-    expect(checkpointForks.body.summary.forks[0].forkOf).not.toHaveProperty("parentTraceId");
-    expect(JSON.stringify(checkpointForks.body)).not.toContain("parentTraceId");
+    expect(checkpointForks.body.summary.checkpoint.source).not.toHaveProperty("boundaryTraceId");
+    expect(checkpointForks.body.summary.forks[0].forkOf).not.toHaveProperty("parentBoundaryTraceId");
+    expect(JSON.stringify(checkpointForks.body)).not.toContain("parentBoundaryTraceId");
     expect(JSON.stringify(checkpointForks.body)).not.toContain("\"players\"");
     expect(JSON.stringify(checkpointForks.body)).not.toContain("\"privateMemo\"");
     expect(JSON.stringify(checkpointForks.body)).not.toContain("\"socialMessages\":[");
@@ -308,7 +311,7 @@ describe("server-owned match artifact persistence", () => {
     expect(branchTree.status).toBe(200);
     expect(branchTree.body.summary).toMatchObject({
       kind: "checkpoint-branch-tree",
-      schemaVersion: "server.checkpoint-branch-tree-summary.v1",
+      schemaVersion: "server.checkpoint-branch-tree-summary.v2",
       ok: true,
       okScope: "returned",
       rootCheckpointId: checkpointId,
@@ -346,7 +349,7 @@ describe("server-owned match artifact persistence", () => {
         source: {
           runId: forkMatchId,
           matchId: forkMatchId,
-          traceRef: expect.any(String)
+          boundaryTraceRef: expect.any(String)
         }
       }
     });
@@ -356,7 +359,7 @@ describe("server-owned match artifact persistence", () => {
       parentCheckpointId: checkpointId,
       forkOf: {
         checkpointId,
-        parentTraceRef: expect.any(String)
+        parentBoundaryTraceRef: expect.any(String)
       }
     });
     expect(matchNodes.get(grandchildMatchId)).toMatchObject({
@@ -364,7 +367,7 @@ describe("server-owned match artifact persistence", () => {
       parentCheckpointId: childCheckpointId,
       forkOf: {
         checkpointId: childCheckpointId,
-        parentTraceRef: expect.any(String)
+        parentBoundaryTraceRef: expect.any(String)
       }
     });
     expect(branchTree.body.summary.edges).toEqual(
@@ -374,29 +377,31 @@ describe("server-owned match artifact persistence", () => {
         expect.objectContaining({ kind: "checkpoint-fork", fromCheckpointId: childCheckpointId, toRunId: grandchildMatchId })
       ])
     );
-    expect(JSON.stringify(branchTree.body)).not.toContain("parentTraceId");
-    expect(JSON.stringify(branchTree.body)).not.toContain("\"traceId\"");
+    expect(JSON.stringify(branchTree.body)).not.toContain("parentBoundaryTraceId");
+    expect(JSON.stringify(branchTree.body)).not.toContain("\"boundaryTraceId\"");
     expect(JSON.stringify(branchTree.body)).not.toContain("\"players\"");
     expect(JSON.stringify(branchTree.body)).not.toContain("\"privateMemo\"");
     expect(JSON.stringify(branchTree.body)).not.toContain("\"socialMessages\":[");
     expectNoMatchPathLeak(branchTree.body, matchArtifactBaseDir);
     expectNoCheckpointPathLeak(branchTree.body, checkpointArtifactBaseDir);
 
-    const forkArtifact = await requestJson(restartedBaseUrl, "GET", `/api/matches/${forkMatchId}/artifact`);
+    const forkArtifact = await requestJson(restartedBaseUrl, "GET", `/api/matches/${forkMatchId}/artifact?view=full`);
     expect(forkArtifact.status).toBe(200);
     expect(forkArtifact.body.forkOf).toMatchObject({
       checkpointId,
       parentRunId: parentMatchId,
       parentMatchId,
-      parentTraceId: checkpointArtifact.body.source.traceId,
+      parentBoundaryTraceId: checkpointArtifact.body.source.boundaryTraceId,
       parentStateHash: checkpointArtifact.body.source.stateHash,
-      parentTrajectoryHash: checkpointArtifact.body.source.trajectoryHash,
+      parentExecutionPrefixHash: checkpointArtifact.body.source.executionPrefixHash,
       parentAgentsHash: checkpointArtifact.body.source.agentsHash,
-      parentSocialMessagesHash: checkpointArtifact.body.source.socialMessagesHash,
-      parentTrajectoryLength: checkpointArtifact.body.source.trajectoryLength,
+      parentChannelsHash: checkpointArtifact.body.source.channelsHash,
+      parentMessagesHash: checkpointArtifact.body.source.messagesHash,
+      parentNativeStepCount: checkpointArtifact.body.source.nativeStepCount,
+      parentMessageCount: checkpointArtifact.body.source.messageCount,
       reason: "persisted fork child"
     });
-    expect(forkArtifact.body.forkOf).not.toHaveProperty("parentTraceRef");
+    expect(forkArtifact.body.forkOf).not.toHaveProperty("parentBoundaryTraceRef");
     expect(validateMatchArtifactIntegrity(forkArtifact.body)).toEqual([]);
     expectNoMatchPathLeak(forkArtifact.body, matchArtifactBaseDir);
     expectNoCheckpointPathLeak(forkArtifact.body, checkpointArtifactBaseDir);
@@ -413,7 +418,7 @@ describe("server-owned match artifact persistence", () => {
       mismatchCount: 0
     });
     expectNoMatchPathLeak(replayed.body, matchArtifactBaseDir);
-  });
+  }, 20_000);
 
   it("ignores malformed persisted match files during directory rehydrate", async () => {
     const matchArtifactBaseDir = await makeTempDir();
@@ -551,7 +556,7 @@ describe("server-owned match artifact persistence", () => {
       expect(replay.status).toBe(404);
       expectNoMatchPathLeak(replay.body, matchArtifactBaseDir);
     }
-  });
+  }, 20_000);
 
   it("ignores stale and malicious match index records during rehydrate and repairs the index", async () => {
     const matchArtifactBaseDir = await makeTempDir();
@@ -1004,15 +1009,23 @@ async function createPersistedMatch(baseUrl: string, seed: string, maxTransition
     summary: {
       kind: "match",
       seed,
-      trajectorySteps: expect.any(Number)
+      nativeSteps: expect.any(Number),
+      committedSteps: expect.any(Number),
+      rejectedSteps: expect.any(Number),
+      trajectorySteps: expect.any(Number),
+      evaluation: expect.objectContaining({
+        nativeSteps: expect.any(Number),
+        committedSteps: expect.any(Number),
+        rejectedSteps: expect.any(Number)
+      })
     }
   });
   expect(response.body.summary.resolvedAssignments).toHaveLength(response.body.state.players.length);
   const matchId = response.body.id as string;
-  const artifact = await requestJson(baseUrl, "GET", `/api/matches/${matchId}/artifact`);
+  const artifact = await requestJson(baseUrl, "GET", `/api/matches/${matchId}/artifact?view=full`);
   expect(artifact.status).toBe(200);
   expect(artifact.body).toMatchObject({
-    artifactVersion: "harness.match.v1",
+    artifactVersion: "harness.match.v2",
     kind: "match",
     runId: matchId,
     matchId,
@@ -1073,7 +1086,7 @@ function matchRelativeFile(matchId: string): string {
   return `${MATCH_DIR}/${matchId}.json`;
 }
 
-function assertPublicMatchResponse(body: any): void {
+function assertPublicMatchResponse(body: unknown): void {
   expect(body).toMatchObject({
     id: expect.any(String),
     createdAt: expect.any(String),
@@ -1083,6 +1096,9 @@ function assertPublicMatchResponse(body: any): void {
     hasArtifact: expect.any(Boolean),
     checkpointCount: expect.any(Number),
     profileCount: expect.any(Number),
+    nativeSteps: expect.any(Number),
+    committedSteps: expect.any(Number),
+    rejectedSteps: expect.any(Number),
     trajectorySteps: expect.any(Number)
   });
   expect(body).toHaveProperty("harnessStatus");

@@ -1,13 +1,17 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ModelCallError } from "../src/agents/schema";
-import { appendHarnessTurn, applyCommand, computeMetrics, getPendingActions } from "../src/core/engine";
-import type { GameEvent, GameState, MatchMetrics, PendingAction, PlayerState, Role } from "../src/core/types";
-import type { MatchArtifact } from "../src/harness/artifacts";
+import type { GameEvent } from "../src/core/types";
+import { buildMatchArtifact } from "../src/harness/artifacts";
+import { describeResolvedAssignments, profilesFromModels, resolveAgentConfigs } from "../src/harness/profiles";
+import { runHarnessMatch } from "../src/harness/runtime";
 import type { HarnessReasoner } from "../src/harness/types";
 import { createServerApp } from "../src/server/index";
-import { clearServerStoreForTests, createMatchRecord, saveMatch } from "../src/server/store";
+import { clearServerStoreForTests, createMatchRecord, getMatch, saveMatch } from "../src/server/store";
 
 const fakeReasoner: HarnessReasoner = {
   async think(input) {
@@ -31,6 +35,7 @@ const fakeReasoner: HarnessReasoner = {
 describe("public match API redaction", () => {
   let server: Server;
   let baseUrl: string;
+  const tempDirs: string[] = [];
 
   beforeEach(async () => {
     clearServerStoreForTests();
@@ -42,11 +47,12 @@ describe("public match API redaction", () => {
 
   afterEach(async () => {
     await close(server);
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
     clearServerStoreForTests();
   });
 
   it("redacts hidden night state, private events, postgame traces, and source ids from match detail and list views", async () => {
-    const record = createSensitiveStoredMatch("server-public-redaction-detail");
+    const record = await createSensitiveStoredMatch("server-public-redaction-detail");
 
     const detail = await requestJson(baseUrl, "GET", `/api/matches/${record.id}`);
     expect(detail.status).toBe(200);
@@ -56,7 +62,8 @@ describe("public match API redaction", () => {
     expect(detail.body.state).not.toHaveProperty("hunterResume");
     expect(detail.body).not.toHaveProperty("metrics");
     expect(detail.body.state.pendingActionCount).toEqual(expect.any(Number));
-    expect(detail.body.state.harnessTurnCount).toBeGreaterThan(0);
+    expect(detail.body.state).not.toHaveProperty("harnessTurnCount");
+    expect(detail.body.state).not.toHaveProperty("harnessErrorCount");
     expect(detail.body.state.publicEventCount).toBe(detail.body.state.events.length);
 
     const listed = await requestJson(baseUrl, "GET", "/api/matches");
@@ -65,33 +72,88 @@ describe("public match API redaction", () => {
     assertPublicMatchResponse(listed.body[0]);
   });
 
-  it("keeps full postgame truth behind the artifact route", async () => {
-    const record = createSensitiveStoredMatch("server-public-redaction-artifact");
+  it("defaults artifact reads to a private-evidence-redacted projection and keeps full postgame truth explicit", async () => {
+    const record = await createSensitiveStoredMatch("server-public-redaction-artifact");
 
     const detail = await requestJson(baseUrl, "GET", `/api/matches/${record.id}`);
     expect(detail.status).toBe(200);
     assertPublicMatchResponse(detail.body);
 
-    const artifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact`);
+    const defaultArtifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact`);
+    expect(defaultArtifact.status).toBe(200);
+    expect(defaultArtifact.headers.get("cache-control")).toContain("no-store");
+    expect(defaultArtifact.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(defaultArtifact.body.projection).toMatchObject({
+      view: "postgame-redacted",
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: false
+    });
+    const defaultArtifactJson = JSON.stringify(defaultArtifact.body);
+    for (const agent of record.artifact!.agents) {
+      for (const memo of agent.privateMemos) expect(defaultArtifactJson).not.toContain(memo);
+    }
+
+    const artifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=full`);
     expect(artifact.status).toBe(200);
+    expect(artifact.headers.get("cache-control")).toContain("no-store");
+    expect(artifact.headers.get("x-robots-tag")).toContain("noindex");
     expect(artifact.body.finalState.night.seerInspection).toMatchObject({
       resultTeam: expect.any(String)
     });
     expect(artifact.body.finalState.night.wolfVotes).not.toEqual({});
-    expect(artifact.body.finalState.events.some((event: GameEvent) => event.type === "harness.turn")).toBe(true);
-    expect(JSON.stringify(artifact.body)).toContain("privateMemo");
-    expect(JSON.stringify(artifact.body)).toContain("sourceId");
+  });
+
+  it("rejects full artifact views on every artifact-bearing route when the embedded server is not loopback-bound", async () => {
+    await close(server);
+    const restrictedApp = createServerApp({
+      createReasoner: () => fakeReasoner,
+      artifactAccessBindHost: "0.0.0.0"
+    });
+    server = await listen(restrictedApp);
+    const address = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${address.port}`;
+    const record = await createSensitiveStoredMatch("server-public-full-view-local-only");
+    const candidate = await createSensitiveStoredMatch("server-public-full-view-local-only-candidate");
+    const safeComparison = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${record.id}/compare/${candidate.id}?view=postgame-redacted`
+    );
+    expect(safeComparison.status).toBe(200);
+    const checkpoint = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/checkpoints`, {
+      reason: "restricted full-view regression"
+    });
+    expect(checkpoint.status).toBe(201);
+
+    const fullViewPaths = [
+      `/api/matches/${record.id}/artifact?view=full`,
+      `/api/matches/${record.id}/compare/${candidate.id}?view=full`,
+      "/api/comparisons?view=full",
+      `/api/comparisons/${encodeURIComponent(safeComparison.body.comparisonId)}?view=full`,
+      `/api/matches/${record.id}/trajectory.jsonl?view=full`,
+      `/api/checkpoints/${checkpoint.body.summary.checkpointId}/artifact?view=full`
+    ];
+
+    for (const path of fullViewPaths) {
+      const response = await requestJson(baseUrl, "GET", path);
+      expect(response.status).toBe(403);
+      expect(response.body).toMatchObject({ code: "full_artifact_view_local_only" });
+      expect(JSON.stringify(response.body)).not.toContain("seerInspection");
+    }
+
+    const defaultProjection = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact`);
+    expect(defaultProjection.status).toBe(200);
+    expect(defaultProjection.body.projection).toMatchObject({ view: "postgame-redacted" });
   });
 
   it("serves a server-side postgame artifact projection with private evidence redacted", async () => {
-    const record = createSensitiveStoredMatch("server-postgame-artifact-projection");
-    addProjectionSentinels(record);
+    const record = await createSensitiveStoredMatch("server-postgame-artifact-projection");
 
-    const fullArtifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact`);
+    const fullArtifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=full`);
     expect(fullArtifact.status).toBe(200);
-    expect(JSON.stringify(fullArtifact.body)).toContain("projection secret reasoner output");
-    expect(JSON.stringify(fullArtifact.body)).toContain("projection private social message");
-    expect(JSON.stringify(fullArtifact.body)).toContain("projection memory secret");
+    expect(fullArtifact.body.trajectory.length).toBeGreaterThan(0);
+    expect(fullArtifact.body.socialEpisode.messages.some((message: any) => message.visibility !== "public")).toBe(true);
+    expect(fullArtifact.body.agents.some((agent: any) => agent.privateMemos.length > 0)).toBe(true);
 
     const projected = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=postgame-redacted`);
     expect(projected.status).toBe(200);
@@ -103,64 +165,260 @@ describe("public match API redaction", () => {
     expect(projected.body.finalState.night.seerInspection).toMatchObject({
       resultTeam: expect.any(String)
     });
-    expect(projected.body.trajectory).toHaveLength(1);
-    expect(projected.body.trajectory[0]).not.toHaveProperty("agentSnapshotsAfterStep");
-    expect(projected.body.trajectory[0].reasonerOutput.content).toBe("[REDACTED model reasoning output]");
-    expect(projected.body.socialEpisode.messages[0].content).toBe("[REDACTED private social message]");
-    expect(projected.body.socialEpisode.steps[0].observation).toBe("[REDACTED private social observation]");
+    expect(projected.body.trajectory).toHaveLength(record.artifact!.trajectory.length);
+    expect(projected.body.trajectory.every((step: any) => !("agentSnapshotsAfterStep" in step))).toBe(true);
+    expect(projected.body.trajectory.every((step: any) => step.reasonerOutput.content === "[REDACTED model reasoning output]")).toBe(true);
+    expect(
+      projected.body.socialEpisode.messages
+        .filter((message: any) => message.visibility !== "public")
+        .every((message: any) => message.content === "[REDACTED private social message]")
+    ).toBe(true);
+    expect(projected.body.socialEpisode.steps.every((step: any) => step.observation === "[REDACTED private social observation]")).toBe(true);
     expect(projected.body.socialEpisode.exposureSummary).toMatchObject({
       schemaVersion: "server.social-exposure-summary.v1",
       source: "scoped_observation",
       privateEvidenceRedacted: true,
-      recordCount: 1,
-      messageCount: 1,
-      sourceCount: 1,
-      observerCount: 1,
-      byVisibility: expect.objectContaining({ private: 1 })
+      recordCount: projected.body.socialEpisode.exposureRecords.length,
+      messageCount: expect.any(Number),
+      sourceCount: expect.any(Number),
+      observerCount: expect.any(Number),
+      byVisibility: expect.any(Object)
     });
-    expect(projected.body.socialEpisode.exposureRecords).toHaveLength(1);
-    expect(projected.body.socialEpisode.exposureRecords[0]).toMatchObject({
-      messageId: "projection-private-message",
-      messageSeq: 1,
-      sourceId: record.artifact!.socialEpisode.messages[0].senderId,
-      observerId: record.artifact!.socialEpisode.steps[0].actorId,
-      observedAtTraceId: "projection-social-step",
-      observedAtTurnIndex: 0,
-      observedAtActionKind: "speech",
-      channelId: "wolf-chat",
-      visibility: "private",
-      kind: "private-strategy",
-      evidenceRefs: expect.arrayContaining([
-        expect.objectContaining({ artifact: "message", id: "projection-private-message", seq: 1 }),
-        expect.objectContaining({ artifact: "delivery_receipt", id: "projection-private-message-receipt", seq: 1 }),
-        expect.objectContaining({ artifact: "trace", traceId: "projection-social-step", seq: 0 }),
-        expect.objectContaining({ artifact: "observation", traceId: "projection-social-step", seq: 0 })
-      ])
-    });
-    expect(projected.body.socialEpisode.exposureRecords[0]).not.toHaveProperty("deliveryReceipt");
-    expect(projected.body.socialEpisode.exposureRecords[0].evidenceRefs.some((ref: { description?: string }) => ref.description)).toBe(false);
-    expect(projected.body.agents[0].social.memory.entries[0].content).toBe("[REDACTED private memory]");
-    expect(projected.body.agents[0].social.goals.goals[0].description).toBe("[REDACTED private goal]");
-    expect(projected.body.agents[0].social.beliefs.claims.claim1.value).toBe("[REDACTED private belief value]");
+    expect(projected.body.socialEpisode.exposureRecords.every((exposure: any) => exposure.deliveryReceipt === undefined)).toBe(true);
+    expect(
+      projected.body.socialEpisode.exposureRecords.every((exposure: any) =>
+        exposure.evidenceRefs.every((ref: { description?: string }) => ref.description === undefined)
+      )
+    ).toBe(true);
+    expect(projected.body.agents.every((agent: any) => agent.privateMemos.every((memo: string) => memo === "[REDACTED private memo]"))).toBe(true);
+    expect(projected.body.agents.every((agent: any) => agent.social.messageIngestion.seenMessageIds.length === 0)).toBe(true);
+    expect(
+      projected.body.agents.every((agent: any) =>
+        agent.social.memory.entries.every((entry: any) => !entry.content || entry.content === "[REDACTED private memory]")
+      )
+    ).toBe(true);
+    for (const step of projected.body.trajectory) {
+      expect(Object.keys(step.pendingAction).sort()).toEqual(
+        expect.arrayContaining(["actorId", "kind", "phase", "redacted"])
+      );
+      expect(step.pendingAction).not.toHaveProperty("legalTargetIds");
+      expect(step.pendingAction).not.toHaveProperty("legalPoisonTargetIds");
+      expect(step.pendingAction).not.toHaveProperty("legalPressureTargetIds");
+      expect(step.pendingAction).not.toHaveProperty("teamActorIds");
+      expect(step.pendingAction).not.toHaveProperty("nightVictimId");
+      expect(step.command).not.toHaveProperty("targetId");
+      expect(step.command).not.toHaveProperty("saveTargetId");
+      expect(step.command).not.toHaveProperty("poisonTargetId");
+      expect(step.policyPlan).not.toHaveProperty("targetId");
+      expect(step.policyPlan).not.toHaveProperty("pressureTargetId");
+      expect(step.policyPlan).not.toHaveProperty("arbitration");
+      expect(step.reasonerOutput).not.toHaveProperty("providerRequestId");
+      expect(step.reasonerOutput).not.toHaveProperty("retryHistory");
+      expect(step.reasonerOutput).not.toHaveProperty("stream");
+      expect(step.turnTrace).not.toHaveProperty("providerRequestId");
+      expect(step.turnTrace).not.toHaveProperty("retryHistory");
+      expect(step.turnTrace).not.toHaveProperty("stream");
+    }
+    for (const step of projected.body.socialEpisode.steps) {
+      expect(step.pendingAction).not.toHaveProperty("legalTargetIds");
+      expect(step.pendingAction).not.toHaveProperty("legalPoisonTargetIds");
+      expect(step.pendingAction).not.toHaveProperty("legalPressureTargetIds");
+      expect(step.pendingAction).not.toHaveProperty("teamActorIds");
+      expect(step.pendingAction).not.toHaveProperty("nightVictimId");
+      expect(step.action.command).not.toHaveProperty("targetId");
+      expect(step.action.command).not.toHaveProperty("saveTargetId");
+      expect(step.action.command).not.toHaveProperty("poisonTargetId");
+      expect(step).not.toHaveProperty("infosByAgent");
+    }
+    for (const message of projected.body.socialEpisode.messages.filter((candidate: any) => candidate.visibility !== "public")) {
+      expect(Object.keys(message.metadata ?? {}).sort()).toEqual(
+        expect.arrayContaining(["redacted"])
+      );
+      expect(message.metadata).not.toHaveProperty("targetId");
+      expect(message.metadata).not.toHaveProperty("saveTargetId");
+      expect(message.metadata).not.toHaveProperty("poisonTargetId");
+      expect(message.metadata).not.toHaveProperty("providerRequestId");
+      for (const speechAct of message.speechActs ?? []) {
+        expect(speechAct).not.toHaveProperty("targetId");
+        expect(speechAct).not.toHaveProperty("value");
+        expect(speechAct).not.toHaveProperty("metadata");
+        expect(
+          (speechAct.evidenceRefs ?? []).every((ref: { description?: string }) => ref.description === undefined)
+        ).toBe(true);
+      }
+      for (const receipt of message.deliveryReceipts ?? []) {
+        expect(receipt.redactionPolicy).toBe("[REDACTED delivery redaction policy]");
+      }
+    }
+    for (const agent of projected.body.agents) {
+      for (const entry of agent.social.memory.entries) {
+        const metadata = entry.metadata ?? {};
+        expect(metadata).not.toHaveProperty("intent");
+        expect(metadata).not.toHaveProperty("targetId");
+        expect(metadata).not.toHaveProperty("pressureTargetId");
+        expect(metadata).not.toHaveProperty("providerRequestId");
+        expect(metadata).not.toHaveProperty("retryHistory");
+        expect(metadata).not.toHaveProperty("stream");
+        expect((entry.evidenceRefs ?? []).every((ref: { description?: string }) => ref.description === undefined)).toBe(true);
+      }
+      for (const entry of agent.social.journal?.entries ?? []) {
+        const metadata = entry.metadata ?? {};
+        expect(metadata).not.toHaveProperty("providerRequestId");
+        expect(metadata).not.toHaveProperty("retryHistory");
+        expect(metadata).not.toHaveProperty("stream");
+        if (metadata.visibility === "private" || metadata.visibility === "team") {
+          expect(metadata).not.toHaveProperty("targetId");
+        }
+        expect((entry.evidenceRefs ?? []).every((ref: { description?: string }) => ref.description === undefined)).toBe(true);
+      }
+      assertNoEvidenceRefDescriptions(agent.social);
+    }
     const projectedJson = JSON.stringify(projected.body);
-    expect(projectedJson).not.toContain("projection secret reasoner output");
-    expect(projectedJson).not.toContain("projection private turn memo");
-    expect(projectedJson).not.toContain("projection private social message");
-    expect(projectedJson).not.toContain("projection social observation secret");
-    expect(projectedJson).not.toContain("projection receipt redaction policy secret");
-    expect(projectedJson).not.toContain("projection memory secret");
-    expect(projectedJson).not.toContain("projection goal secret");
-    expect(projectedJson).not.toContain("projection belief value");
+    expect(projectedJson).not.toContain('"privateInfo"');
+    expect(projectedJson).not.toContain('"legalTargetIds"');
+    expect(projectedJson).not.toContain('"legalPoisonTargetIds"');
+    expect(projectedJson).not.toContain('"legalPressureTargetIds"');
+    expect(projectedJson).not.toContain('"providerRequestId"');
+    expect(projectedJson).not.toContain('"retryHistory"');
+    expect(projectedJson).not.toContain('"stream"');
+    for (const step of record.artifact!.trajectory) expect(projectedJson).not.toContain(step.reasonerOutput.content);
+    for (const message of record.artifact!.socialEpisode.messages.filter((message) => message.visibility !== "public")) {
+      expect(projectedJson).not.toContain(message.content);
+    }
+    for (const agent of record.artifact!.agents) {
+      for (const memo of agent.privateMemos) expect(projectedJson).not.toContain(memo);
+    }
+
+    const projectedTrajectory = await requestText(
+      baseUrl,
+      "GET",
+      `/api/matches/${record.id}/trajectory.jsonl?view=postgame-redacted`
+    );
+    expect(projectedTrajectory.status).toBe(200);
+    expect(projectedTrajectory.text).not.toContain('"privateInfo"');
+    expect(projectedTrajectory.text).not.toContain('"legalTargetIds"');
+    expect(projectedTrajectory.text).not.toContain('"legalPoisonTargetIds"');
+    expect(projectedTrajectory.text).not.toContain('"legalPressureTargetIds"');
+    expect(projectedTrajectory.text).not.toContain('"providerRequestId"');
+    expect(projectedTrajectory.text).not.toContain('"retryHistory"');
+    expect(projectedTrajectory.text).not.toContain('"stream"');
+    const projectedTrajectoryLines = projectedTrajectory.text
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(
+      projectedTrajectoryLines
+        .filter((line: any) => line.type === "social_step")
+        .every((line: any) => !("infosByAgent" in line))
+    ).toBe(true);
+    expect(
+      projectedTrajectoryLines
+        .filter((line: any) => line.type === "social_speech_act")
+        .filter((line: any) => line.visibility !== "public")
+        .every(
+          (line: any) =>
+            line.targetId === null &&
+            line.value === null &&
+            line.metadata === null &&
+            line.evidenceRefs.every((ref: { description?: string }) => ref.description === undefined)
+        )
+    ).toBe(true);
+    expect(
+      projectedTrajectoryLines
+        .filter((line: any) => line.type === "social_delivery_receipt")
+        .every((line: any) => line.redactionPolicy === "[REDACTED delivery redaction policy]")
+    ).toBe(true);
 
     const unsupported = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=private-chat`);
     expect(unsupported.status).toBe(400);
   });
 
+  it("serves a truth-redacted artifact projection without postgame role team night or winner truth", async () => {
+    const record = await createSensitiveStoredMatch("server-truth-redacted-artifact-projection");
+
+    const fullArtifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=full`);
+    expect(fullArtifact.status).toBe(200);
+    expect(fullArtifact.body.finalState.players.some((player: { role?: string }) => Boolean(player.role))).toBe(true);
+    expect(fullArtifact.body.finalState.night).toBeTruthy();
+
+    const projected = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=truth-redacted`);
+    expect(projected.status).toBe(200);
+    expect(projected.body.projection).toMatchObject({
+      view: "truth-redacted",
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: true
+    });
+    expect(projected.body).not.toHaveProperty("seed");
+    expect(projected.body.initialState).not.toHaveProperty("id");
+    expect(projected.body.initialState).not.toHaveProperty("seed");
+    expect(projected.body.initialState).not.toHaveProperty("night");
+    expect(projected.body.finalState).not.toHaveProperty("id");
+    expect(projected.body.finalState).not.toHaveProperty("seed");
+    expect(projected.body.finalState).not.toHaveProperty("night");
+    expect(projected.body.finalState.winner).toBeUndefined();
+    expect(projected.body.metrics).toEqual({});
+    expect(projected.body.evaluation).toEqual({});
+    for (const player of projected.body.finalState.players) {
+      expect(player).not.toHaveProperty("role");
+      expect(player).not.toHaveProperty("team");
+      expect(player).not.toHaveProperty("ability");
+    }
+    expect(projected.body.models).toEqual([]);
+    expect(projected.body.profiles).toEqual([]);
+    expect(projected.body).not.toHaveProperty("assignment");
+    expect(projected.body.trajectory).toEqual([]);
+    expect(projected.body.agents).toEqual([]);
+    expect(projected.body).not.toHaveProperty("agentSnapshotFrames");
+    for (const assignment of projected.body.resolvedAssignments) expect(Object.keys(assignment).sort()).toEqual(["playerId", "seat"]);
+    expect(projected.body.socialEpisode.profiles).toEqual([]);
+    expect(projected.body.socialEpisode.steps).toEqual([]);
+    expect(projected.body.socialEpisode.exposureRecords).toEqual([]);
+    expect(projected.body.evaluationReport).toEqual({});
+    const projectedJson = JSON.stringify(projected.body);
+    expect(projectedJson).not.toContain("resultTeam");
+    expect(projectedJson).not.toContain("seerInspection");
+    expect(projectedJson).not.toContain(record.artifact!.seed);
+    expect(projectedJson).not.toContain("wolf-deceiver");
+    expect(projectedJson).not.toContain("seer-information");
+    expect(projectedJson).not.toContain("werewolf.killVote");
+    expect(projectedJson).not.toContain("seer.inspect");
+    expect(projectedJson).not.toContain("witch.act");
+    expect(projectedJson).not.toContain("hunter.shoot");
+    expect(projectedJson).not.toContain("\"policyName\"");
+    // config.roles is public roster composition, not seat-level postgame truth.
+    expect(projected.body.config.roles).toEqual(expect.arrayContaining(["werewolf", "villager", "seer"]));
+    expect(projected.body.socialEpisode.exposureSummary.privateEvidenceRedacted).toBe(true);
+    assertTruthRedactedSocialTopology(projected.body.socialEpisode);
+
+    const second = await createSensitiveStoredMatch("server-truth-redacted-compare-candidate");
+    const truthCompared = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${record.id}/compare/${second.id}?view=truth-redacted`
+    );
+    if (truthCompared.status !== 200) throw new Error(`truth comparison response: ${JSON.stringify(truthCompared.body)}`);
+    expect(truthCompared.status).toBe(200);
+    expect(truthCompared.body.projection).toMatchObject({
+      view: "truth-redacted",
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: true
+    });
+    const compareJson = JSON.stringify(truthCompared.body);
+    expect(compareJson).not.toContain("resultTeam");
+    expect(compareJson).not.toContain("seerInspection");
+    expect(compareJson).not.toContain(record.id);
+    expect(compareJson).not.toContain(second.id);
+    expect(compareJson).not.toContain(record.artifact!.seed);
+    expect(compareJson).not.toContain("evaluation_metrics");
+    expect(truthCompared.body.baseline).not.toHaveProperty("runId");
+    expect(truthCompared.body.baseline).not.toHaveProperty("seed");
+    expect(truthCompared.body.candidate).not.toHaveProperty("runId");
+    expect(truthCompared.body.candidate).not.toHaveProperty("seed");
+  });
+
   it("serves a server-side postgame-redacted match comparison without private projection sentinels", async () => {
-    const baseline = createSensitiveStoredMatch("server-compare-baseline");
-    const candidate = createSensitiveStoredMatch("server-compare-candidate");
-    addProjectionSentinels(baseline);
-    addProjectionSentinels(candidate);
+    const baseline = await createSensitiveStoredMatch("server-compare-baseline");
+    const candidate = await createSensitiveStoredMatch("server-compare-candidate");
 
     const compared = await requestJson(baseUrl, "GET", `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted`);
     expect(compared.status).toBe(200);
@@ -182,8 +440,8 @@ describe("public match API redaction", () => {
           privateEvidenceRedacted: true,
           postgameTruthRedacted: false
         },
-        trajectorySteps: 1,
-        socialMessages: 1
+        trajectorySteps: baseline.artifact!.trajectory.length,
+        socialMessages: baseline.artifact!.socialEpisode.messages.length
       },
       candidate: {
         matchId: candidate.id,
@@ -194,13 +452,42 @@ describe("public match API redaction", () => {
           privateEvidenceRedacted: true,
           postgameTruthRedacted: false
         },
-        trajectorySteps: 1,
-        socialMessages: 1
+        trajectorySteps: candidate.artifact!.trajectory.length,
+        socialMessages: candidate.artifact!.socialEpisode.messages.length
       },
       summary: {
         rowCount: expect.any(Number),
         changedRowCount: expect.any(Number),
         numericDeltaCount: expect.any(Number),
+        promotionChangedMetricCount: expect.any(Number),
+        scorecardMetricDelta: expect.any(Number),
+        diagnosticMetricDelta: expect.any(Number),
+        benchmarkOnlyMetricDelta: expect.any(Number),
+        metricKeysCompared: expect.any(Number),
+        metricKeysEmitted: expect.any(Number),
+        metricKeysTruncated: expect.any(Number),
+        scorecardMetricKeysCompared: expect.any(Number),
+        scorecardMetricKeysEmitted: expect.any(Number),
+        scorecardMetricKeysTruncated: expect.any(Number),
+        diagnosticMetricKeysCompared: expect.any(Number),
+        diagnosticMetricKeysEmitted: expect.any(Number),
+        diagnosticMetricKeysTruncated: expect.any(Number),
+        benchmarkOnlyMetricKeysCompared: expect.any(Number),
+        benchmarkOnlyMetricKeysEmitted: expect.any(Number),
+        benchmarkOnlyMetricKeysTruncated: expect.any(Number),
+        evidenceIdentityChangedMetricCount: expect.any(Number),
+        evidenceIdentityOnlyBaselineRefCount: expect.any(Number),
+        evidenceIdentityOnlyCandidateRefCount: expect.any(Number),
+        metricRowsMax: expect.any(Number),
+        baselineSocialSteps: expect.any(Number),
+        candidateSocialSteps: expect.any(Number),
+        baselineCommittedSteps: expect.any(Number),
+        candidateCommittedSteps: expect.any(Number),
+        baselineRejectedSteps: expect.any(Number),
+        candidateRejectedSteps: expect.any(Number),
+        socialStepsDelta: expect.any(Number),
+        committedStepsDelta: expect.any(Number),
+        rejectedStepsDelta: expect.any(Number),
         baselineHash: expect.any(String),
         candidateHash: expect.any(String)
       }
@@ -211,24 +498,22 @@ describe("public match API redaction", () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: "trajectory_steps",
-          baseline: 1,
-          candidate: 1,
+          baseline: baseline.artifact!.trajectory.length,
+          candidate: candidate.artifact!.trajectory.length,
           delta: 0,
           changed: false
         }),
         expect.objectContaining({
           id: "social_messages",
-          baseline: 1,
-          candidate: 1,
+          baseline: baseline.artifact!.socialEpisode.messages.length,
+          candidate: candidate.artifact!.socialEpisode.messages.length,
           delta: 0,
           changed: false
         }),
         expect.objectContaining({
           id: "social_exposures",
-          baseline: 1,
-          candidate: 1,
-          delta: 0,
-          changed: false
+          baseline: expect.any(Number),
+          candidate: expect.any(Number)
         })
       ])
     );
@@ -237,15 +522,262 @@ describe("public match API redaction", () => {
     expect(compared.body.candidate.artifactHash).toBe(compared.body.summary.candidateHash);
 
     const comparedJson = JSON.stringify(compared.body);
-    expect(comparedJson).not.toContain("projection secret reasoner output");
-    expect(comparedJson).not.toContain("projection private turn memo");
-    expect(comparedJson).not.toContain("projection private social message");
-    expect(comparedJson).not.toContain("projection social action message secret");
-    expect(comparedJson).not.toContain("projection social observation secret");
-    expect(comparedJson).not.toContain("projection receipt redaction policy secret");
-    expect(comparedJson).not.toContain("projection memory secret");
-    expect(comparedJson).not.toContain("projection goal secret");
-    expect(comparedJson).not.toContain("projection belief value");
+    expect(comparedJson).not.toContain('"privateInfo"');
+    expect(comparedJson).not.toContain('"legalTargetIds"');
+    expect(comparedJson).not.toContain('"providerRequestId"');
+    expect(comparedJson).not.toContain('"retryHistory"');
+    expect(comparedJson).not.toContain('"stream"');
+    for (const artifact of [baseline.artifact!, candidate.artifact!]) {
+      for (const step of artifact.trajectory) expect(comparedJson).not.toContain(step.reasonerOutput.content);
+      for (const message of artifact.socialEpisode.messages.filter((message) => message.visibility !== "public")) {
+        expect(comparedJson).not.toContain(message.content);
+      }
+    }
+
+    const markdown = await requestText(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted&format=markdown`
+    );
+    expect(markdown.status).toBe(200);
+    expect(markdown.headers.get("content-type") ?? "").toContain("text/markdown");
+    expect(markdown.text).toContain("# Match Comparison");
+    expect(markdown.text).toContain(compared.body.comparisonId);
+    expect(markdown.text).not.toContain('"privateInfo"');
+    for (const artifact of [baseline.artifact!, candidate.artifact!]) {
+      for (const step of artifact.trajectory) expect(markdown.text).not.toContain(step.reasonerOutput.content);
+      for (const message of artifact.socialEpisode.messages.filter((message) => message.visibility !== "public")) {
+        expect(markdown.text).not.toContain(message.content);
+      }
+    }
+
+    const markdownDownload = await requestText(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted&format=markdown&download=1`
+    );
+    expect(markdownDownload.status).toBe(200);
+    expect(markdownDownload.headers.get("content-disposition") ?? "").toContain("attachment");
+    expect(markdownDownload.headers.get("content-disposition") ?? "").toContain("-comparison.md");
+    expect(markdownDownload.text).toContain("# Match Comparison");
+
+    const jsonDownload = await requestText(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted&format=json&download=1`
+    );
+    expect(jsonDownload.status).toBe(200);
+    expect(jsonDownload.headers.get("content-disposition") ?? "").toContain("attachment");
+    expect(jsonDownload.headers.get("content-disposition") ?? "").toContain("-comparison.json");
+    expect(JSON.parse(jsonDownload.text)).toMatchObject({
+      artifactVersion: "harness.match-comparison.v1",
+      kind: "match-comparison",
+      comparisonId: compared.body.comparisonId
+    });
+
+    const registry = await requestJson(baseUrl, "GET", "/api/comparisons");
+    expect(registry.status).toBe(200);
+    expect(registry.body.comparisons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          comparisonId: compared.body.comparisonId,
+          view: "postgame-redacted",
+          baseline: expect.objectContaining({
+            matchId: baseline.id,
+            runId: baseline.id
+          }),
+          candidate: expect.objectContaining({
+            matchId: candidate.id,
+            runId: candidate.id
+          }),
+          summary: expect.objectContaining({
+            rowCount: compared.body.summary.rowCount,
+            changedRowCount: compared.body.summary.changedRowCount,
+            numericDeltaCount: compared.body.summary.numericDeltaCount,
+            promotionChangedMetricCount: compared.body.summary.promotionChangedMetricCount,
+            scorecardMetricDelta: compared.body.summary.scorecardMetricDelta,
+            diagnosticMetricDelta: compared.body.summary.diagnosticMetricDelta,
+            benchmarkOnlyMetricDelta: compared.body.summary.benchmarkOnlyMetricDelta,
+            evidenceIdentityChangedMetricCount: compared.body.summary.evidenceIdentityChangedMetricCount,
+            evidenceIdentityOnlyBaselineRefCount: compared.body.summary.evidenceIdentityOnlyBaselineRefCount,
+            evidenceIdentityOnlyCandidateRefCount: compared.body.summary.evidenceIdentityOnlyCandidateRefCount,
+            metricKeysCompared: compared.body.summary.metricKeysCompared,
+            metricKeysEmitted: compared.body.summary.metricKeysEmitted,
+            metricKeysTruncated: compared.body.summary.metricKeysTruncated,
+            scorecardMetricKeysCompared: compared.body.summary.scorecardMetricKeysCompared,
+            scorecardMetricKeysEmitted: compared.body.summary.scorecardMetricKeysEmitted,
+            scorecardMetricKeysTruncated: compared.body.summary.scorecardMetricKeysTruncated,
+            diagnosticMetricKeysCompared: compared.body.summary.diagnosticMetricKeysCompared,
+            diagnosticMetricKeysEmitted: compared.body.summary.diagnosticMetricKeysEmitted,
+            diagnosticMetricKeysTruncated: compared.body.summary.diagnosticMetricKeysTruncated,
+            benchmarkOnlyMetricKeysCompared: compared.body.summary.benchmarkOnlyMetricKeysCompared,
+            benchmarkOnlyMetricKeysEmitted: compared.body.summary.benchmarkOnlyMetricKeysEmitted,
+            benchmarkOnlyMetricKeysTruncated: compared.body.summary.benchmarkOnlyMetricKeysTruncated,
+            metricRowsMax: compared.body.summary.metricRowsMax,
+            baselineSocialSteps: compared.body.summary.baselineSocialSteps,
+            candidateSocialSteps: compared.body.summary.candidateSocialSteps,
+            baselineCommittedSteps: compared.body.summary.baselineCommittedSteps,
+            candidateCommittedSteps: compared.body.summary.candidateCommittedSteps,
+            baselineRejectedSteps: compared.body.summary.baselineRejectedSteps,
+            candidateRejectedSteps: compared.body.summary.candidateRejectedSteps,
+            socialStepsDelta: compared.body.summary.socialStepsDelta,
+            committedStepsDelta: compared.body.summary.committedStepsDelta,
+            rejectedStepsDelta: compared.body.summary.rejectedStepsDelta,
+            baselineHash: compared.body.summary.baselineHash,
+            candidateHash: compared.body.summary.candidateHash
+          })
+        })
+      ])
+    );
+
+    const filteredByBaseline = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/comparisons?baselineId=${encodeURIComponent(baseline.id)}`
+    );
+    expect(filteredByBaseline.status).toBe(200);
+    expect(filteredByBaseline.body.comparisons.every((entry: { baseline: { matchId?: string; runId: string } }) => entry.baseline.matchId === baseline.id || entry.baseline.runId === baseline.id)).toBe(true);
+
+    const filteredByPackMatchIds = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/comparisons?matchIds=${encodeURIComponent(`${baseline.id},${candidate.id}`)}`
+    );
+    expect(filteredByPackMatchIds.status).toBe(200);
+    expect(filteredByPackMatchIds.body.comparisons.length).toBeGreaterThanOrEqual(1);
+    expect(
+      filteredByPackMatchIds.body.comparisons.every(
+        (entry: {
+          baseline: { matchId?: string; runId: string };
+          candidate: { matchId?: string; runId: string };
+        }) => {
+          const baselineIds = [entry.baseline.matchId, entry.baseline.runId].filter(
+            (value): value is string => typeof value === "string" && value.length > 0
+          );
+          const candidateIds = [entry.candidate.matchId, entry.candidate.runId].filter(
+            (value): value is string => typeof value === "string" && value.length > 0
+          );
+          return (
+            baselineIds.some((id) => id === baseline.id) &&
+            candidateIds.some((id) => id === candidate.id)
+          );
+        }
+      )
+    ).toBe(true);
+
+    const filteredBySingleMatchId = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/comparisons?matchIds=${encodeURIComponent(baseline.id)}`
+    );
+    expect(filteredBySingleMatchId.status).toBe(200);
+    // Fewer than two pack ids leaves the pack filter inactive; baseline-only
+    // filtering still requires the explicit baselineId query.
+    expect(Array.isArray(filteredBySingleMatchId.body.comparisons)).toBe(true);
+
+
+    const loaded = await requestJson(baseUrl, "GET", `/api/comparisons/${encodeURIComponent(compared.body.comparisonId)}`);
+    expect(loaded.status).toBe(200);
+    expect(loaded.body).toMatchObject({
+      artifactVersion: "harness.match-comparison.v1",
+      kind: "match-comparison",
+      comparisonId: compared.body.comparisonId,
+      view: "postgame-redacted",
+      summary: {
+        baselineHash: compared.body.summary.baselineHash,
+        candidateHash: compared.body.summary.candidateHash
+      }
+    });
+    expect(JSON.stringify(loaded.body)).not.toContain('"privateInfo"');
+
+    const missing = await requestJson(baseUrl, "GET", "/api/comparisons/missing-comparison-id");
+    expect(missing.status).toBe(404);
+    expect(missing.body.error).toContain("comparison not found");
+
+
+
+    const filtered = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted&filtered=1&group=metric_evidence&evidenceIdentity=changed`
+    );
+    expect(filtered.status).toBe(200);
+    expect(filtered.body).toMatchObject({
+      artifactVersion: "harness.match-comparison.filtered.v1",
+      kind: "match-comparison-filtered",
+      sourceComparisonId: compared.body.comparisonId,
+      view: "postgame-redacted",
+      filter: {
+        group: "metric_evidence",
+        changedOnly: false,
+        promotion: "all",
+        evidenceIdentity: "changed",
+        numericDelta: "all"
+      },
+      source: {
+        comparisonId: compared.body.comparisonId
+      }
+    });
+    expect(Array.isArray(filtered.body.rows)).toBe(true);
+    expect(
+      filtered.body.rows.every(
+        (row: { evidence?: { onlyBaselineIds?: string[]; onlyCandidateIds?: string[] } }) => {
+          const onlyBaseline = row.evidence?.onlyBaselineIds?.length ?? 0;
+          const onlyCandidate = row.evidence?.onlyCandidateIds?.length ?? 0;
+          return onlyBaseline > 0 || onlyCandidate > 0;
+        }
+      )
+    ).toBe(true);
+    expect(JSON.stringify(filtered.body)).not.toContain('"privateInfo"');
+
+    const filteredMarkdown = await requestText(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted&format=markdown&filtered=1&group=metric_evidence&evidenceIdentity=changed`
+    );
+    expect(filteredMarkdown.status).toBe(200);
+    expect(filteredMarkdown.headers.get("content-type") ?? "").toContain("text/markdown");
+    expect(filteredMarkdown.text).toContain("# Match Comparison Filtered View");
+    expect(filteredMarkdown.text).toContain(compared.body.comparisonId);
+    expect(filteredMarkdown.text).toContain("evidenceIdentity=changed");
+
+    const filteredDownload = await requestText(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted&format=json&download=1&filtered=1&group=metric_evidence&evidenceIdentity=changed`
+    );
+    expect(filteredDownload.status).toBe(200);
+    expect(filteredDownload.headers.get("content-disposition") ?? "").toContain("attachment");
+    expect(filteredDownload.headers.get("content-disposition") ?? "").toContain("-comparison-filtered.json");
+    expect(JSON.parse(filteredDownload.text)).toMatchObject({
+      artifactVersion: "harness.match-comparison.filtered.v1",
+      kind: "match-comparison-filtered",
+      sourceComparisonId: compared.body.comparisonId
+    });
+
+    const badGroup = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted&group=private`
+    );
+    expect(badGroup.status).toBe(400);
+
+    const badNumericDelta = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted&numericDelta=private`
+    );
+    expect(badNumericDelta.status).toBe(400);
+    expect(badNumericDelta.body.error).toContain('numericDelta must be "all" or "changed"');
+    expect(badGroup.body.error).toContain('group must be "all", "summary", "metric", or "metric_evidence"');
+
+    const badFormat = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted&format=csv`
+    );
+    expect(badFormat.status).toBe(400);
+    expect(badFormat.body.error).toContain('format must be "json" or "markdown"');
 
     const unsupported = await requestJson(baseUrl, "GET", `/api/matches/${baseline.id}/compare/${candidate.id}?view=private-chat`);
     expect(unsupported.status).toBe(400);
@@ -256,63 +788,234 @@ describe("public match API redaction", () => {
     expect(missingCandidate.body).toMatchObject({ error: "match not found" });
   });
 
+  it("keeps explicit full comparisons request-local and gates the comparison registry", async () => {
+    const baseline = await createSensitiveStoredMatch("server-full-comparison-local-baseline");
+    const candidate = await createSensitiveStoredMatch("server-full-comparison-local-candidate");
+    const full = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=full`
+    );
+    expect(full.status).toBe(200);
+    expect(full.body).toMatchObject({
+      artifactVersion: "harness.match-comparison.v1",
+      kind: "match-comparison",
+      view: "full",
+      projection: {
+        view: "full"
+      }
+    });
+    expect(full.headers.get("cache-control")).toContain("no-store");
+    expect(full.headers.get("x-robots-tag")).toContain("noindex");
+
+    const registry = await requestJson(baseUrl, "GET", "/api/comparisons");
+    expect(registry.status).toBe(200);
+    expect(registry.body.comparisons).toEqual([]);
+    expect(JSON.stringify(registry.body)).not.toContain(full.body.comparisonId);
+
+    const fullRegistry = await requestJson(baseUrl, "GET", "/api/comparisons?view=full");
+    expect(fullRegistry.status).toBe(200);
+    expect(fullRegistry.body.comparisons).toEqual([]);
+
+    const missingSaved = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/comparisons/${encodeURIComponent(full.body.comparisonId)}`
+    );
+    expect(missingSaved.status).toBe(404);
+    expect(missingSaved.body).toEqual({ error: "comparison not found" });
+  });
+
+  it("persists safe comparisons to disk and rehydrates the registry after store clear", async () => {
+    await close(server);
+    clearServerStoreForTests();
+    const comparisonArtifactBaseDir = await mkdtemp(path.join(tmpdir(), "werewolf-comparisons-"));
+    tempDirs.push(comparisonArtifactBaseDir);
+    const app = createServerApp({
+      createReasoner: () => fakeReasoner,
+      comparisonArtifactBaseDir
+    });
+    server = await listen(app);
+    const address = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const baseline = await createSensitiveStoredMatch("server-compare-persist-baseline");
+    const candidate = await createSensitiveStoredMatch("server-compare-persist-candidate");
+    const compared = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${baseline.id}/compare/${candidate.id}?view=postgame-redacted`
+    );
+    expect(compared.status).toBe(200);
+    expect(compared.body.comparisonId).toEqual(expect.stringMatching(/^match-comparison:[a-f0-9]{24}$/i));
+
+    const stem = String(compared.body.comparisonId).slice("match-comparison:".length);
+    const relativeFile = path.join("comparisons", `${stem}.json`);
+    const disk = JSON.parse(await readFile(path.join(comparisonArtifactBaseDir, relativeFile), "utf8"));
+    expect(disk).toMatchObject({
+      artifactVersion: "harness.match-comparison.v1",
+      kind: "match-comparison",
+      comparisonId: compared.body.comparisonId,
+      view: "postgame-redacted"
+    });
+    const index = JSON.parse(await readFile(path.join(comparisonArtifactBaseDir, "comparisons.index.json"), "utf8"));
+    expect(index).toMatchObject({
+      artifactVersion: "harness.comparison-artifact-index.v1",
+      kind: "comparison-artifact-index",
+      comparisons: [
+        expect.objectContaining({
+          comparisonId: compared.body.comparisonId,
+          relativeFile: `comparisons/${stem}.json`,
+          rowCount: compared.body.summary.rowCount
+        })
+      ]
+    });
+    expect(JSON.stringify(index)).not.toContain(comparisonArtifactBaseDir);
+
+    clearServerStoreForTests();
+    const listed = await requestJson(baseUrl, "GET", "/api/comparisons");
+    expect(listed.status).toBe(200);
+    expect(listed.body.comparisons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          comparisonId: compared.body.comparisonId,
+          view: "postgame-redacted",
+          baseline: expect.objectContaining({ matchId: baseline.id, runId: baseline.id }),
+          candidate: expect.objectContaining({ matchId: candidate.id, runId: candidate.id })
+        })
+      ])
+    );
+
+    const loaded = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/comparisons/${encodeURIComponent(compared.body.comparisonId)}`
+    );
+    expect(loaded.status).toBe(200);
+    expect(loaded.body).toMatchObject({
+      comparisonId: compared.body.comparisonId,
+      summary: {
+        baselineHash: compared.body.summary.baselineHash,
+        candidateHash: compared.body.summary.candidateHash
+      }
+    });
+    expect(JSON.stringify(loaded.body)).not.toContain(comparisonArtifactBaseDir);
+  });
+
+
   it("redacts provider failure strings from explicit artifact and trajectory routes", async () => {
-    const record = createSensitiveStoredMatch("server-public-redaction-provider-artifact");
+    const record = await createSensitiveStoredMatch("server-public-redaction-provider-artifact");
     const rawToken = "Bearer artifact-route-token-should-not-appear";
     if (!record.artifact) throw new Error("Expected stored artifact.");
     record.artifact.failureReason = `provider failed with ${rawToken}`;
-    record.artifact.events.push({
-      id: `${record.id}:provider-secret`,
-      seq: record.artifact.events.length + 1,
-      day: record.state.day,
-      phase: record.state.phase,
-      type: "harness.error",
-      actorId: "p1",
-      visibility: "postgame",
-      payload: {
-        model: "alpha",
-        actionKind: "speech",
-        message: `provider payload leaked ${rawToken}`,
-        traceId: "provider-secret-trace",
-        providerFailure: {
-          failureKind: "http",
-          providerStage: "http_response",
-          status: 502,
-          providerRequestId: rawToken,
-          retryCause: `retry leaked ${rawToken}`,
-          abortReason: `abort leaked ${rawToken}`,
-          causeName: `Error ${rawToken}`
-        }
-      },
-      createdAt: record.createdAt
-    });
+    const firstStep = record.artifact.trajectory[0];
+    if (!firstStep) throw new Error("Expected a committed player step in the real artifact fixture.");
+    firstStep.reasonerOutput.providerRequestId = "private-provider-request-id";
+    firstStep.reasonerOutput.retryHistory = [
+      {
+        attempt: 1,
+        retryable: false,
+        message: "private provider retry diagnostic"
+      }
+    ];
+    firstStep.reasonerOutput.stream = { enabled: true, completed: true, completedBy: "reader_done" };
+    firstStep.turnTrace.providerRequestId = "private-provider-request-id";
+    firstStep.turnTrace.retryHistory = [
+      {
+        attempt: 1,
+        retryable: false,
+        message: "private provider retry diagnostic"
+      }
+    ];
+    firstStep.turnTrace.stream = { enabled: true, completed: true, completedBy: "reader_done" };
     saveMatch(record);
 
-    const artifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact`);
+    const artifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=full`);
     expect(artifact.status).toBe(200);
     const artifactJson = JSON.stringify(artifact.body);
     expect(artifactJson).not.toContain("artifact-route-token-should-not-appear");
     expect(artifactJson).toContain("Bearer [REDACTED]");
     expect(artifactJson).toContain("privateMemo");
-    expect(artifactJson).toContain("sourceId");
 
-    const trajectory = await requestText(baseUrl, "GET", `/api/matches/${record.id}/trajectory.jsonl`);
+    const trajectory = await requestText(baseUrl, "GET", `/api/matches/${record.id}/trajectory.jsonl?view=full`);
     expect(trajectory.status).toBe(200);
     expect(trajectory.text).not.toContain("artifact-route-token-should-not-appear");
     expect(trajectory.text).toContain("Bearer [REDACTED]");
+
+    const projectedArtifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=postgame-redacted`);
+    expect(projectedArtifact.status).toBe(200);
+    const projectedArtifactJson = JSON.stringify(projectedArtifact.body);
+    expect(projectedArtifactJson).not.toContain("private-provider-request-id");
+    expect(projectedArtifactJson).not.toContain("private provider retry diagnostic");
+    expect(projectedArtifactJson).not.toContain('"providerRequestId"');
+    expect(projectedArtifactJson).not.toContain('"retryHistory"');
+    expect(projectedArtifactJson).not.toContain('"stream"');
+
+    const projectedTrajectory = await requestText(
+      baseUrl,
+      "GET",
+      `/api/matches/${record.id}/trajectory.jsonl?view=postgame-redacted`
+    );
+    expect(projectedTrajectory.status).toBe(200);
+    expect(projectedTrajectory.text).not.toContain("private-provider-request-id");
+    expect(projectedTrajectory.text).not.toContain("private provider retry diagnostic");
+    expect(projectedTrajectory.text).not.toContain('"providerRequestId"');
+    expect(projectedTrajectory.text).not.toContain('"retryHistory"');
+    expect(projectedTrajectory.text).not.toContain('"stream"');
   });
 
-  it("redacts command responses and post-run public summaries while preserving safe counts", async () => {
-    const created = createMatchRecord({ seed: "server-public-command", models: ["alpha", "beta"] });
-    const commanded = await requestJson(baseUrl, "POST", `/api/matches/${created.id}/command`, {
-      type: "system.advance",
-      actorId: "system"
-    });
-    expect(commanded.status).toBe(200);
-    assertPublicMatchResponse(commanded.body);
-    expect(commanded.body.state).not.toHaveProperty("night");
-    expect(commanded.body).not.toHaveProperty("metrics");
+  it("sets download disposition for trajectory and optional match artifact downloads", async () => {
+    const record = await createSensitiveStoredMatch("server-download-disposition");
 
+    const normalArtifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=truth-redacted`);
+    expect(normalArtifact.status).toBe(200);
+    expect(normalArtifact.headers.get("content-disposition")).toBeNull();
+    expect(normalArtifact.body.projection).toMatchObject({
+      view: "truth-redacted",
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: true
+    });
+
+    const downloadArtifact = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${record.id}/artifact?view=truth-redacted&download=1`
+    );
+    expect(downloadArtifact.status).toBe(200);
+    expect(downloadArtifact.headers.get("content-disposition")).toContain(
+      `attachment; filename="${record.id.slice(0, 8)}-match-truth-redacted.json"`
+    );
+
+    const trajectory = await requestText(
+      baseUrl,
+      "GET",
+      `/api/matches/${record.id}/trajectory.jsonl?view=truth-redacted`
+    );
+    expect(trajectory.status).toBe(200);
+    expect(trajectory.headers.get("content-disposition")).toContain(
+      `attachment; filename="${record.id.slice(0, 8)}-trajectory-truth-redacted.jsonl"`
+    );
+    expect(trajectory.text).toContain('"artifactVersion"');
+    const trajectoryRecords = trajectory.text
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const trajectoryJson = JSON.stringify(trajectoryRecords);
+    const header = trajectoryRecords.find((line) => line.type === "header");
+    const evaluation = trajectoryRecords.find((line) => line.type === "evaluation_report");
+    expect(header).not.toHaveProperty("seed");
+    expect(header).not.toHaveProperty("runId");
+    expect(header).not.toHaveProperty("matchId");
+    expect(header).not.toHaveProperty("forkOf");
+    expect(evaluation).toMatchObject({ evaluatorIds: [], evaluatorRegistry: [], warnings: [], summary: null });
+    expect(trajectoryRecords.some((line) => line.type === "metric")).toBe(false);
+    expect(trajectoryJson).not.toContain("werewolf-team");
+    expect(trajectoryJson).not.toContain("providerRequestId");
+    expect(trajectoryJson).not.toContain("deliveryReceipts");
+  });
+
+  it("redacts post-run public summaries while preserving safe counts", async () => {
     const run = await requestJson(baseUrl, "POST", "/api/matches/run", {
       models: ["alpha", "beta"],
       profiles: [
@@ -342,7 +1045,15 @@ describe("public match API redaction", () => {
 	      status: "truncated",
 	      truncationReason: expect.stringContaining("maxTransitions"),
 	      profileCount: 3,
-	      modelCount: 2
+	      modelCount: 2,
+	      nativeSteps: expect.any(Number),
+	      committedSteps: expect.any(Number),
+	      rejectedSteps: expect.any(Number),
+	      evaluation: expect.objectContaining({
+	        nativeSteps: expect.any(Number),
+	        committedSteps: expect.any(Number),
+	        rejectedSteps: expect.any(Number)
+	      })
 	    });
 	    expect(run.body.summary).not.toHaveProperty("profiles");
 	    const publicRunSummary = JSON.stringify(run.body.summary);
@@ -359,6 +1070,18 @@ describe("public match API redaction", () => {
     });
     expect(run.body.summary.assignment).not.toHaveProperty("roles");
     expect(run.body.summary.evaluationReport).toMatchObject({
+      metricCount: expect.any(Number),
+      scorecardEligibleMetricCount: expect.any(Number),
+      metricPromotionClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      }),
+      scorecardEligibleMetricClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      }),
       warningCount: expect.any(Number),
       warningCodes: expect.any(Array),
       warningSeverityCounts: {
@@ -474,6 +1197,110 @@ describe("public match API redaction", () => {
     const matches = await requestJson(baseUrl, "GET", "/api/matches");
     expect(matches.status).toBe(200);
     expect(matches.body).toHaveLength(0);
+  });
+
+  it("accepts jointPhaseScheduler parallel and rejects invalid scheduler values", async () => {
+    const rejected = await requestJson(baseUrl, "POST", "/api/matches/run", {
+      models: ["alpha"],
+      profiles: [{ id: "alpha-profile", model: "alpha", temperature: 0.3 }],
+      assignment: { strategy: "profile-rotation" },
+      seed: "server-run-invalid-joint",
+      maxTransitions: 1,
+      jointPhaseScheduler: "simultaneous-batch"
+    });
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.error).toContain("jointPhaseScheduler");
+    expect(rejected.body.summary.limits.jointPhaseScheduler).toBe("aec-batched-decision");
+
+    const tooLow = await requestJson(baseUrl, "POST", "/api/matches/run", {
+      models: ["alpha"],
+      profiles: [{ id: "alpha-profile", model: "alpha", temperature: 0.3 }],
+      assignment: { strategy: "profile-rotation" },
+      seed: "server-run-parallel-too-low",
+      maxTransitions: 3,
+      jointPhaseScheduler: "parallel"
+    });
+    expect(tooLow.status).toBe(400);
+    expect(tooLow.body.error).toContain("maxTransitions >= 4");
+    expect(tooLow.body.summary.limits).toMatchObject({
+      maxTransitions: 3,
+      jointPhaseScheduler: "parallel"
+    });
+
+    const run = await requestJson(baseUrl, "POST", "/api/matches/run", {
+      models: ["alpha", "beta"],
+      profiles: [
+        { id: "wolf-profile", model: "alpha", temperature: 0.3 },
+        { id: "seer-profile", model: "beta", temperature: 0.3 },
+        { id: "fallback-profile", model: "alpha", temperature: 0.3 }
+      ],
+      assignment: {
+        strategy: "role",
+        roles: {
+          werewolf: "wolf-profile",
+          seer: "seer-profile"
+        },
+        fallback: "profile-rotation"
+      },
+      seed: "server-run-joint-parallel",
+      maxTransitions: 4,
+      jointPhaseScheduler: "parallel"
+    });
+    expect([200, 207]).toContain(run.status);
+    expect(run.body.summary.limits).toMatchObject({
+      maxTransitions: 4,
+      jointPhaseScheduler: "parallel"
+    });
+
+    const artifact = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${run.body.id}/artifact?view=postgame-redacted`
+    );
+    expect(artifact.status).toBe(200);
+    const killSteps = (artifact.body.socialEpisode?.steps ?? []).filter(
+      (step: { action?: { kind?: string }; schedulerMode?: string }) => step.action?.kind === "kill"
+    );
+    if (killSteps.length > 0) {
+      expect(killSteps.every((step: { schedulerMode?: string }) => step.schedulerMode === "parallel")).toBe(true);
+    }
+  });
+
+  it("defaults jointPhaseScheduler to aec-batched-decision when omitted", async () => {
+    const run = await requestJson(baseUrl, "POST", "/api/matches/run", {
+      models: ["alpha", "beta"],
+      profiles: [
+        { id: "wolf-profile", model: "alpha", temperature: 0.3 },
+        { id: "seer-profile", model: "beta", temperature: 0.3 },
+        { id: "fallback-profile", model: "alpha", temperature: 0.3 }
+      ],
+      assignment: {
+        strategy: "role",
+        roles: {
+          werewolf: "wolf-profile",
+          seer: "seer-profile"
+        },
+        fallback: "profile-rotation"
+      },
+      seed: "server-run-joint-default",
+      maxTransitions: 4
+    });
+    expect([200, 207]).toContain(run.status);
+    expect(run.body.summary.limits.jointPhaseScheduler).toBe("aec-batched-decision");
+
+    const artifact = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${run.body.id}/artifact?view=postgame-redacted`
+    );
+    expect(artifact.status).toBe(200);
+    const killSteps = (artifact.body.socialEpisode?.steps ?? []).filter(
+      (step: { action?: { kind?: string }; schedulerMode?: string }) => step.action?.kind === "kill"
+    );
+    if (killSteps.length > 0) {
+      expect(killSteps.every((step: { schedulerMode?: string }) => step.schedulerMode === "aec-batched-decision")).toBe(true);
+      expect(killSteps.some((step: { schedulerMode?: string }) => step.schedulerMode === "parallel")).toBe(false);
+    }
   });
 
   it("keeps harness probe diagnostic results out of persisted public matches", async () => {
@@ -618,6 +1445,89 @@ describe("public match API redaction", () => {
     expect(json).not.toContain("\"action\":");
   });
 
+  it("keeps persisted failed-match summaries structured without relaying raw provider failure text", async () => {
+    const rawToken = "Bearer raw-failed-match-token-should-not-appear";
+    const record = await createSensitiveStoredMatch("server-public-failed-match");
+    if (!record.artifact) throw new Error("Expected stored artifact.");
+    const firstStep = record.artifact.socialEpisode.steps[0];
+    if (!firstStep) throw new Error("Expected a native social step.");
+    const rawFailure = `upstream failed-match body leaked ${rawToken}`;
+    record.artifact.status = "failed";
+    record.artifact.socialEpisode.status = "failed";
+    record.artifact.failureReason = rawFailure;
+    record.artifact.socialEpisode.failureReason = rawFailure;
+    record.artifact.socialEpisode.error = rawFailure;
+    firstStep.failure = {
+      stage: "actor_decide",
+      message: rawFailure,
+      metadata: {
+        model: "alpha",
+        actionKind: firstStep.action.kind,
+        message: rawFailure,
+        traceId: firstStep.traceId,
+        providerFailure: {
+          failureKind: "http",
+          providerStage: "http_response",
+          status: 503,
+          retryable: true,
+          attempts: 1,
+          maxAttempts: 2,
+          providerRequestId: "failed-public-match-request",
+          retryCause: `failed-match retry body leaked ${rawToken}`
+        }
+      }
+    };
+    record.error = rawFailure;
+    saveMatch(record);
+
+    const detail = await requestJson(baseUrl, "GET", `/api/matches/${record.id}`);
+    const detailJson = JSON.stringify(detail.body);
+    expect(detail.status).toBe(200);
+    expect(detail.body).toMatchObject({
+      id: record.id,
+      status: "failed",
+      harnessStatus: "failed",
+      hasArtifact: true,
+      error: expect.stringContaining("Model provider failure"),
+      providerFailure: {
+        failureKind: "http",
+        providerStage: "http_response",
+        status: 503,
+        attempts: 1,
+        maxAttempts: 2,
+        providerRequestId: "failed-public-match-request"
+      }
+    });
+    expect(detailJson).not.toContain("raw-failed-match-token-should-not-appear");
+    expect(detailJson).not.toContain("upstream failed-match body leaked");
+    expect(detailJson).not.toContain("failed-match retry body leaked");
+    expect(detailJson).not.toContain("retryCause");
+
+    const listed = await requestJson(baseUrl, "GET", "/api/matches");
+    const listedJson = JSON.stringify(listed.body);
+    expect(listed.status).toBe(200);
+    expect(listed.body).toHaveLength(1);
+    expect(listed.body[0]).toMatchObject({
+      id: record.id,
+      status: "failed",
+      harnessStatus: "failed",
+      hasArtifact: true,
+      error: expect.stringContaining("Model provider failure"),
+      providerFailure: expect.objectContaining({
+        failureKind: "http",
+        status: 503
+      })
+    });
+    expect(listedJson).not.toContain("raw-failed-match-token-should-not-appear");
+    expect(listedJson).not.toContain("upstream failed-match body leaked");
+    expect(listedJson).not.toContain("failed-match retry body leaked");
+
+    const defaultArtifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact`);
+    expect(defaultArtifact.status).toBe(200);
+    expect(defaultArtifact.body.projection).toMatchObject({ view: "postgame-redacted" });
+    expect(JSON.stringify(defaultArtifact.body)).not.toContain("upstream failed-match body leaked");
+  });
+
   it("redacts provider failure body and header details from failed probe responses", async () => {
     await close(server);
     clearServerStoreForTests();
@@ -675,400 +1585,31 @@ describe("public match API redaction", () => {
   });
 });
 
-function createSensitiveStoredMatch(seed: string) {
+async function createSensitiveStoredMatch(seed: string) {
   const record = createMatchRecord({ seed, models: ["alpha", "beta"] });
-  const initialState = record.state;
-  let state = initialState;
-  state = applyCommand(state, { type: "system.advance", actorId: "system" });
-
-  const inspect = pendingByKind(state, "inspect")[0];
-  state = applyCommand(state, { type: "seer.inspect", actorId: inspect.actorId, targetId: inspect.legalTargetIds[0] });
-
-  const kill = pendingByKind(state, "kill")[0];
-  state = applyCommand(state, { type: "werewolf.killVote", actorId: kill.actorId, targetId: kill.legalTargetIds[0] });
-
-  const witch = playerByRole(state, "witch");
-  const poisonTarget = state.players.find((player) => player.id !== witch.id && player.alive);
-  if (!poisonTarget) throw new Error("Expected poison target.");
-  state = addPublicDeathWithHiddenSource(state, witch, poisonTarget);
-
-  state = appendHarnessTurn(state, {
-    traceId: "redaction-trace",
-    playerId: inspect.actorId,
-    model: "alpha",
-    actionKind: "inspect",
-    confidence: 1,
-    intent: "private inspection trace",
-    beliefs: {},
-    policyName: "seer-information",
-    privateMemo: "privateMemo should stay out of public match summaries",
-    commandType: "seer.inspect",
-    latencyMs: 1
+  const profiles = profilesFromModels(record.models, 0.3);
+  const agents = resolveAgentConfigs(record.state.players, profiles, 0, 0.3);
+  const result = await runHarnessMatch({
+    initialState: record.state,
+    agents,
+    reasoner: fakeReasoner,
+    maxTransitions: 3,
+    recordAgentSnapshots: true
   });
-
-  record.state = state;
-  record.metrics = buildMetrics(state);
-  record.status = "completed";
-  record.artifact = {
-    artifactVersion: "harness.match.v1",
-    kind: "match",
+  const artifact = buildMatchArtifact({
     runId: record.id,
     matchId: record.id,
     createdAt: record.createdAt,
-    seed,
-    config: initialState.config,
+    seed: record.state.seed,
     models: record.models,
-    profiles: [],
-    resolvedAssignments: [
-      {
-        playerId: inspect.actorId,
-        seat: state.players.find((player) => player.id === inspect.actorId)?.seat ?? 0,
-        role: "seer",
-        team: "village",
-        profileId: "alpha-1",
-        model: "alpha",
-        temperature: 0.3,
-        policyName: "seer-information"
-      }
-    ],
-    status: "completed",
-    initialState,
-    finalState: state,
-    trajectory: [],
-    socialEpisode: {
-      id: "redaction-social",
-      status: "completed",
-      schedulerMode: "aec",
-      profiles: [],
-      channels: [],
-      initialState,
-      finalState: state,
-      steps: [],
-      messages: []
-    },
-    events: state.events,
-    metrics: record.metrics,
-    evaluation: {
-      teamRewards: { village: 0, werewolves: 0 },
-      agentRewards: [],
-      voteAccuracyByAgent: {},
-      influenceByAgent: {},
-      deceptionByAgent: {},
-      trajectory: []
-    },
-    evaluationReport: {
-      id: "redaction-report",
-      createdAt: record.createdAt,
-      evaluatorIds: [],
-      evaluatorRegistry: [],
-      outputs: {},
-      metrics: [],
-      metricCount: 0,
-      summary: {
-        teamScores: {},
-        agentScores: {},
-        profileScores: {},
-        modelScores: {}
-      }
-    },
-    agents: []
-  } satisfies MatchArtifact;
-  saveMatch(record);
-  return record;
-}
-
-function addProjectionSentinels(record: ReturnType<typeof createSensitiveStoredMatch>): void {
-  if (!record.artifact) throw new Error("Expected stored artifact.");
-  const actorId = record.artifact.resolvedAssignments[0]?.playerId ?? "p1";
-  const observerId = record.artifact.finalState.players.find((player) => player.id !== actorId)?.id ?? "p2";
-  record.artifact.trajectory = [
-    {
-      traceId: "projection-trace",
-      turnIndex: 0,
-      actorId,
-      profileId: "projection-profile",
-      model: "alpha",
-      pendingAction: {
-        kind: "speech",
-        phase: "day_speech",
-        actorId,
-        legalPressureTargetIds: ["p2"]
-      },
-      observation: {
-        playerId: actorId,
-        phase: "day_speech",
-        day: record.state.day,
-        self: { id: actorId },
-        players: [],
-        events: [],
-        speeches: [],
-        votes: [],
-        deaths: []
-      },
-      decisionStateHash: "projection-decision-hash",
-      preStateHash: "projection-pre-hash",
-      policyPlan: {
-        policyName: "seer-information",
-        command: { type: "speech.submit", actorId, text: "projection secret command speech" },
-        intent: "projection secret policy intent",
-        confidence: 0.8,
-        strategyTags: ["projection-secret-tag"],
-        targetId: "p2"
-      },
-      reasonerOutput: {
-        content: "projection secret reasoner output",
-        latencyMs: 1,
-        promptTokens: 2,
-        completionTokens: 3,
-        providerRequestId: "projection-provider-request"
-      },
-      command: { type: "speech.submit", actorId, text: "projection secret command speech" },
-      turnTrace: {
-        traceId: "projection-trace",
-        playerId: actorId,
-        profileId: "projection-profile",
-        model: "alpha",
-        actionKind: "speech",
-        policyName: "seer-information",
-        commandType: "speech.submit",
-        intent: "projection secret turn intent",
-        targetId: "p2",
-        confidence: 0.8,
-        strategyTags: ["projection-secret-tag"],
-        beliefs: {
-          p2: {
-            wolfProb: 0.7,
-            rationaleTags: ["projection secret belief rationale"]
-          }
-        },
-        privateMemo: "projection private turn memo",
-        publicSpeech: "projection generated public speech",
-        latencyMs: 1,
-        promptTokens: 2,
-        completionTokens: 3,
-        providerRequestId: "projection-provider-request"
-      },
-      agentSnapshotsAfterStep: [
-        {
-          playerId: actorId,
-          model: "alpha",
-          temperature: 0.3,
-          policyName: "seer-information",
-          turns: 1,
-          observations: 1,
-          beliefs: {},
-          privateMemos: ["projection private snapshot memo"],
-          lastIntent: "projection secret snapshot intent"
-        }
-      ],
-      postStateHash: "projection-post-hash",
-      eventSeqRange: [1, 1],
-      messageSeqRange: [1, 1]
-    } as any
-  ];
-  record.artifact.socialEpisode.messages = [
-    {
-      id: "projection-private-message",
-      seq: 1,
-      channelId: "wolf-chat",
-      senderId: actorId,
-      recipientIds: [observerId],
-      visibility: "private",
-      content: "projection private social message",
-      createdAt: record.createdAt,
-      deliveryReceipts: [
-        {
-          id: "projection-private-message-receipt",
-          messageId: "projection-private-message",
-          messageSeq: 1,
-          channelId: "wolf-chat",
-          senderId: actorId,
-          observerId,
-          visibility: "private",
-          deliveredAtTurn: 0,
-          observationTraceId: "projection-social-step",
-          redactionPolicy: "projection receipt redaction policy secret"
-        }
-      ],
-      metadata: { kind: "private-strategy" }
-    }
-  ];
-  record.artifact.socialEpisode.channels = [
-    {
-      id: "wolf-chat",
-      kind: "private",
-      participantIds: [actorId, observerId],
-      readableBy: "participants"
-    }
-  ];
-  record.artifact.socialEpisode.steps = [
-    {
-      traceId: "projection-social-step",
-      turnIndex: 0,
-      actorId: observerId,
-      schedulerMode: "aec",
-      batchId: "projection-batch",
-      batchIndex: 0,
-      batchSize: 1,
-      pendingAction: { kind: "speech", actorId: observerId },
-      observation: {
-        agentId: observerId,
-        visibleMessages: [record.artifact.socialEpisode.messages[0]],
-        secret: "projection social observation secret"
-      },
-      action: {
-        actorId: observerId,
-        kind: "speech",
-        command: { type: "speech.submit", actorId: observerId, text: "projection social command secret" },
-        messages: [
-          {
-            channelId: "wolf-chat",
-            senderId: observerId,
-            recipientIds: [actorId],
-            visibility: "private",
-            content: "projection social action message secret"
-          }
-        ]
-      },
-      preStateHash: "projection-social-pre",
-      postStateHash: "projection-social-post"
-    } as any
-  ];
-  record.artifact.agents = [
-    {
-      playerId: actorId,
-      profileId: "projection-profile",
-      model: "alpha",
-      temperature: 0.3,
-      policyName: "seer-information",
-      turns: 1,
-      observations: 1,
-      beliefs: {},
-      privateMemos: ["projection private agent memo"],
-      lastIntent: "projection secret last intent",
-      socialStateHash: "projection-social-state-hash",
-      social: {
-        agentId: actorId,
-        profile: { id: "projection-profile", model: "alpha", temperature: 0.3 },
-        memory: {
-          nextSeq: 2,
-          maxEntries: 10,
-          entries: [
-            {
-              seq: 1,
-              kind: "memo",
-              source: "projection-test",
-              visibility: "private",
-              content: "projection memory secret",
-              salience: 0.9,
-              importance: 0.8,
-              evidenceRefs: [{ artifact: "trace", traceId: "projection-trace" }],
-              tags: ["projection-secret-memory-tag"],
-              createdAt: record.createdAt
-            }
-          ]
-        },
-        beliefs: {
-          claims: {
-            claim1: {
-              id: "claim1",
-              subject: "p2",
-              predicate: "projection secret predicate",
-              value: "projection belief value",
-              confidence: 0.9,
-              evidenceRefs: [{ artifact: "trace", traceId: "projection-trace" }],
-              contradictions: [],
-              updatedAt: record.createdAt
-            }
-          }
-        },
-        relationships: { edges: {} },
-        norms: { norms: {} },
-        reputation: { records: {} },
-        goals: {
-          goals: [
-            {
-              id: "projection-goal",
-              kind: "tactical",
-              description: "projection goal secret",
-              priority: 0.9,
-              status: "active",
-              evidenceRefs: [{ artifact: "trace", traceId: "projection-trace" }],
-              createdAt: record.createdAt,
-              updatedAt: record.createdAt
-            }
-          ]
-        },
-        lastPlan: { secret: "projection plan secret" },
-        journal: {
-          schemaVersion: "harness.social-state-journal.v1",
-          nextSeq: 2,
-          maxEntries: 10,
-          entries: [
-            {
-              journalSeq: 1,
-              agentId: actorId,
-              traceId: "projection-trace",
-              turnIndex: 0,
-              store: "memory",
-              mutationKind: "memory.appended",
-              beforeSummary: { secret: "projection journal before secret" },
-              afterSummary: { secret: "projection journal after secret" },
-              deltaSummary: { secret: "projection journal delta secret" },
-              evidenceRefs: [{ artifact: "trace", traceId: "projection-trace" }],
-              redactionClass: "agent_private_summary",
-              hiddenTruthUsed: false,
-              createdAt: record.createdAt
-            }
-          ]
-        }
-      }
-    } as any
-  ];
-  saveMatch(record);
-}
-
-function buildMetrics(state: GameState): MatchMetrics {
-  const coreMetrics = computeMetrics(state);
-  return {
-    winner: state.winner,
-    days: state.day,
-    totalDeaths: state.deaths.length,
-    totalSpeeches: state.speeches.length,
-    totalVotes: state.votes.length,
-    harnessTurnCount: state.events.filter((event) => event.type === "harness.turn").length,
-    harnessErrorCount: state.events.filter((event) => event.type === "harness.error").length,
-    averageLatencyMs: 0,
-    wolfVoteAccuracy: coreMetrics.wolfVoteAccuracy,
-    villageVoteAccuracy: coreMetrics.villageVoteAccuracy,
-    deceptionSurvivalScore: coreMetrics.deceptionSurvivalScore,
-    modelUsage: {}
-  };
-}
-
-function addPublicDeathWithHiddenSource(state: GameState, source: PlayerState, target: PlayerState): GameState {
-  const next: GameState = JSON.parse(JSON.stringify(state)) as GameState;
-  const nextTarget = next.players.find((player) => player.id === target.id);
-  if (!nextTarget) throw new Error("Missing target after clone.");
-  nextTarget.alive = false;
-  nextTarget.eliminatedAt = { day: next.day, phase: next.phase, reason: "poison" };
-  next.deaths.push({ day: next.day, playerId: target.id, reason: "poison", sourceId: source.id });
-  next.events.push({
-    id: `${next.id}:manual-death`,
-    seq: next.events.length + 1,
-    day: next.day,
-    phase: next.phase,
-    type: "player.died",
-    actorId: source.id,
-    visibility: "public",
-    payload: {
-      playerId: target.id,
-      reason: "poison",
-      sourceId: source.id
-    },
-    createdAt: new Date().toISOString()
+    profiles,
+    resolvedAssignments: describeResolvedAssignments(record.state.players, agents),
+    result
   });
-  return next;
+  saveMatch({ ...record, artifact });
+  const stored = getMatch(record.id);
+  if (!stored?.artifact) throw new Error("Expected a validated artifact-backed match.");
+  return stored;
 }
 
 function assertPublicMatchResponse(body: any): void {
@@ -1100,15 +1641,39 @@ function assertPublicMatchResponse(body: any): void {
   }
 }
 
-function playerByRole(state: GameState, role: Role): PlayerState {
-  const player = state.players.find((candidate) => candidate.role === role);
-  if (!player) throw new Error(`Missing role ${role}.`);
-  return player;
+function assertNoEvidenceRefDescriptions(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoEvidenceRefDescriptions(item);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "evidenceRefs" && Array.isArray(item)) {
+      expect(item.every((ref) => !ref || typeof ref !== "object" || !("description" in ref))).toBe(true);
+    }
+    assertNoEvidenceRefDescriptions(item);
+  }
 }
 
-function pendingByKind<K extends PendingAction["kind"]>(state: GameState, kind: K): Extract<PendingAction, { kind: K }>[] {
-  return getPendingActions(state).filter((action): action is Extract<PendingAction, { kind: K }> => action.kind === kind);
+function assertTruthRedactedSocialTopology(episode: any): void {
+  expect(episode.channels.length).toBeGreaterThan(0);
+  expect(episode.channels.every((channel: any) => channel.kind === "public" && channel.readableBy === "all")).toBe(true);
+  expect(episode.profiles).toEqual([]);
+  expect(episode.steps).toEqual([]);
+  expect(episode.exposureRecords).toEqual([]);
+  expect(episode.messages.every((message: any) => message.visibility === "public")).toBe(true);
+  expect(
+    episode.messages.every((message: any) => episode.channels.some((channel: any) => channel.id === message.channelId))
+  ).toBe(true);
+  for (const message of episode.messages) {
+    expect(message.recipientIds).toEqual([]);
+    expect(message).not.toHaveProperty("metadata");
+    expect(message).not.toHaveProperty("deliveryReceipts");
+    expect(message.speechActs?.every((act: any) => Array.isArray(act.evidenceRefs) && act.evidenceRefs.length === 0)).toBe(true);
+  }
+  expect(JSON.stringify(episode)).not.toContain("werewolf-team");
 }
+
 
 async function listen(app: ReturnType<typeof createServerApp>): Promise<Server> {
   return new Promise((resolve, reject) => {
@@ -1124,7 +1689,12 @@ async function close(server: Server): Promise<void> {
   });
 }
 
-async function requestJson(baseUrl: string, method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+async function requestJson(
+  baseUrl: string,
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<{ status: number; body: any; headers: Headers }> {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: body === undefined ? undefined : { "content-type": "application/json" },
@@ -1133,14 +1703,20 @@ async function requestJson(baseUrl: string, method: string, path: string, body?:
   const text = await response.text();
   return {
     status: response.status,
-    body: text ? JSON.parse(text) : null
+    body: text ? JSON.parse(text) : null,
+    headers: response.headers
   };
 }
 
-async function requestText(baseUrl: string, method: string, path: string): Promise<{ status: number; text: string }> {
+async function requestText(
+  baseUrl: string,
+  method: string,
+  path: string
+): Promise<{ status: number; text: string; headers: Headers }> {
   const response = await fetch(`${baseUrl}${path}`, { method });
   return {
     status: response.status,
-    text: await response.text()
+    text: await response.text(),
+    headers: response.headers
   };
 }

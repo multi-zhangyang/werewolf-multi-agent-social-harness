@@ -1,7 +1,7 @@
-import type { GameConfig, GameEvent, GameState, MatchMetrics } from "../core/types";
+import type { GameCommand, GameConfig, GameEvent, GameState, MatchMetrics } from "../core/types";
 import type { HarnessAssignmentConfig, ResolvedAgentAssignment } from "./profiles";
 import { summarizeEvaluationWarnings } from "./evaluation";
-import { deriveSocialExposureRecords, validateSocialEpisodeArtifact, type SocialEpisodeArtifact, type SocialMessage } from "./social";
+import { deriveSocialExposureRecords, isSocialStepCommitted, type SocialEpisodeArtifact, type SocialMessage } from "./social";
 import type {
   AdversarialEvaluation,
   AgentHarnessState,
@@ -14,22 +14,41 @@ import type {
   HarnessStepRecord
 } from "./types";
 import { hashStableState } from "./hash";
-import { replayHarnessTrajectory } from "./replay";
+import { harnessFailureEvidenceFromEpisode } from "./executionEvidence";
+import { werewolfHarnessTurnEvidenceFromEpisode } from "./werewolfExecutionEvidence";
+import { replayWerewolfSocialEpisode } from "./replay";
 import { redactSecrets } from "./redaction";
+import {
+  HARNESS_AGENT_SNAPSHOT_FRAME_VERSION,
+  harnessAgentSnapshotFrameId,
+  validateHarnessCheckpointEnvelope,
+  validateHarnessCheckpointReplay,
+  validateHarnessEpisodeArtifactEnvelope,
+  type HarnessAgentSnapshotFrame,
+  type HarnessCheckpointEnvelope,
+  type HarnessCheckpointSource,
+  type HarnessEpisodeArtifactEnvelope
+} from "./episodeArtifacts";
 
-export const MATCH_ARTIFACT_VERSION = "harness.match.v1";
-export const HARNESS_CHECKPOINT_VERSION = "harness.checkpoint.v1";
-export const AGENT_SNAPSHOT_FRAME_VERSION = "harness.agent-snapshot-frame.v1";
+export const MATCH_ARTIFACT_VERSION = "harness.match.v2";
+export const HARNESS_CHECKPOINT_VERSION = "harness.checkpoint.v2";
+export const AGENT_SNAPSHOT_FRAME_VERSION = HARNESS_AGENT_SNAPSHOT_FRAME_VERSION;
 
-export interface AgentSnapshotFrame {
+export interface AgentSnapshotFrame extends HarnessAgentSnapshotFrame<AgentHarnessState> {
   artifactVersion: typeof AGENT_SNAPSHOT_FRAME_VERSION;
   kind: "agent-snapshot-frame";
-  frameId: string;
-  agentsHash: string;
-  agents: AgentHarnessState[];
 }
 
-export interface MatchArtifact {
+/** Werewolf specialization of the domain-neutral social episode envelope. */
+export interface MatchArtifact
+  extends HarnessEpisodeArtifactEnvelope<
+    GameState,
+    unknown,
+    unknown,
+    unknown,
+    AgentHarnessState,
+    HarnessForkProvenance
+  > {
   artifactVersion: typeof MATCH_ARTIFACT_VERSION;
   kind: "match";
   runId: string;
@@ -48,8 +67,10 @@ export interface MatchArtifact {
   forkOf?: HarnessForkProvenance;
   initialState: GameState;
   finalState: GameState;
+  /** Legacy Werewolf committed-command projection retained for checkpoint migration. */
   trajectory: HarnessStepRecord[];
-  socialEpisode: SocialEpisodeArtifact;
+  /** Native generic scheduler/environment/message-bus execution authority. */
+  socialEpisode: SocialEpisodeArtifact<GameState, unknown, unknown, unknown>;
   events: GameEvent[];
   evaluation: AdversarialEvaluation;
   evaluationReport: HarnessEvaluationReport;
@@ -58,38 +79,86 @@ export interface MatchArtifact {
   agentSnapshotFrames?: AgentSnapshotFrame[];
 }
 
-export interface HarnessCheckpoint {
+export type TrajectoryJsonlStepSource = Omit<
+  HarnessStepRecord,
+  "pendingAction" | "observation" | "policyPlan" | "reasonerOutput" | "command"
+> & {
+  pendingAction: unknown;
+  observation: unknown;
+  policyPlan: unknown;
+  reasonerOutput: unknown;
+  command: unknown;
+};
+
+/**
+ * An export view may deliberately omit evaluator truth. JSONL is a rendered
+ * artifact surface, not replay authority, so it must model that redaction
+ * honestly instead of pretending every source is a canonical match artifact.
+ */
+export type TrajectoryJsonlEvaluationReportSource = Partial<
+  Pick<
+    HarnessEvaluationReport,
+    "id" | "createdAt" | "evaluatorIds" | "evaluatorRegistry" | "metricCount" | "warnings" | "summary" | "metrics"
+  >
+>;
+
+/**
+ * JSONL export consumes a rendered artifact view and never requires canonical
+ * replay authority. Optional identity, evaluation, metric, and trajectory
+ * fields allow a server-owned truth-redacted projection to omit sensitive
+ * postgame evidence rather than smuggling it back in as a fallback.
+ */
+export interface TrajectoryJsonlSource {
+  artifactVersion?: string;
+  kind?: string;
+  runId?: string;
+  matchId?: string;
+  createdAt?: string;
+  seed?: string;
+  models?: unknown;
+  profiles?: unknown;
+  assignment?: unknown;
+  resolvedAssignments?: unknown;
+  status?: unknown;
+  truncationReason?: string;
+  failureReason?: string;
+  failureStateHash?: string;
+  forkOf?: unknown;
+  metrics?: unknown;
+  evaluationReport?: TrajectoryJsonlEvaluationReportSource;
+  socialEpisode: Pick<SocialEpisodeArtifact, "id" | "channels" | "steps" | "messages" | "exposureRecords">;
+  trajectory?: readonly TrajectoryJsonlStepSource[];
+  events?: readonly GameEvent[];
+  agents?: readonly AgentHarnessState[];
+  agentSnapshotFrames?: readonly Pick<AgentSnapshotFrame, "frameId" | "agentsHash" | "agents">[];
+}
+
+export interface WerewolfHarnessCheckpointSource extends HarnessCheckpointSource {
+  sourceArtifactVersion: typeof MATCH_ARTIFACT_VERSION;
+  matchId?: string;
+  seed: string;
+  status: HarnessRunResult["status"];
+}
+
+/** Werewolf specialization of the generic checkpoint envelope. */
+export interface HarnessCheckpoint
+  extends HarnessCheckpointEnvelope<
+    GameState,
+    AgentHarnessState,
+    unknown,
+    unknown,
+    GameCommand,
+    WerewolfHarnessCheckpointSource
+  > {
   artifactVersion: typeof HARNESS_CHECKPOINT_VERSION;
   kind: "checkpoint";
-  checkpointId: string;
-  createdAt: string;
-  reason?: string;
-  source: {
-    runId: string;
-    matchId?: string;
-    seed: string;
-    status: HarnessRunResult["status"];
-    traceId?: string;
-    turnIndex?: number;
-    trajectoryLength: number;
-    messageSeq?: number;
-    stateHash: string;
-    trajectoryHash: string;
-    agentsHash: string;
-    socialMessagesHash: string;
-    failureReason?: string;
-    truncationReason?: string;
-  };
-  state: GameState;
-  agents: AgentHarnessState[];
-  trajectory: HarnessStepRecord[];
-  socialMessages: SocialMessage[];
+  executionPrefix: SocialEpisodeArtifact<GameState, unknown, unknown, GameCommand>;
 }
 
 export interface HarnessCheckpointPrefixSelector {
   traceId?: string;
-  turnIndex?: number;
-  trajectoryLength?: number;
+  nativeTurnIndex?: number;
+  nativeStepCount?: number;
 }
 
 export type HarnessCheckpointSelectionErrorCode =
@@ -154,7 +223,7 @@ export function buildMatchArtifact(options: {
     agents: cloneJson(options.result.agents),
     agentSnapshotFrames: agentSnapshotFrames.length ? agentSnapshotFrames : undefined
   };
-  const redacted = redactSecrets(artifact) as MatchArtifact;
+  const redacted = redactSecrets(artifact);
   normalizeAgentSnapshotFramesAfterRedaction(redacted);
   return redacted;
 }
@@ -175,7 +244,7 @@ function extractAgentSnapshotFrames(options: {
     if (agentsHash !== providedHash) {
       throw new Error(`Agent snapshot hash mismatch: expected ${agentsHash}, received ${providedHash}.`);
     }
-    const frameId = agentSnapshotFrameId(agentsHash);
+    const frameId = harnessAgentSnapshotFrameId(agentsHash);
     const existing = framesById.get(frameId);
     if (existing) return existing;
     const frame: AgentSnapshotFrame = {
@@ -217,7 +286,7 @@ function normalizeAgentSnapshotFramesAfterRedaction(artifact: MatchArtifact): vo
     const oldFrameId = frame.frameId;
     const oldAgentsHash = frame.agentsHash;
     const agentsHash = hashStableState(frame.agents);
-    const frameId = agentSnapshotFrameId(agentsHash);
+    const frameId = harnessAgentSnapshotFrameId(agentsHash);
     const canonical = dedupedFramesById.get(frameId) ?? {
       artifactVersion: AGENT_SNAPSHOT_FRAME_VERSION,
       kind: "agent-snapshot-frame" as const,
@@ -259,11 +328,11 @@ function findAgentSnapshotFrame(artifact: MatchArtifact, step: HarnessStepRecord
   return frames.find((frame) => frame.agentsHash === step.agentSnapshotsHashAfterStep);
 }
 
-function agentSnapshotFrameId(agentsHash: string): string {
-  return `agent-snapshot:${agentsHash}`;
-}
-
-export function toTrajectoryJsonl(artifact: MatchArtifact): string {
+export function toTrajectoryJsonl(artifact: TrajectoryJsonlSource): string {
+  const evaluationReport = artifact.evaluationReport;
+  const evaluationWarnings = evaluationReport?.warnings ?? [];
+  const evaluationMetrics = evaluationReport?.metrics ?? [];
+  const hasExportIdentity = artifact.runId !== undefined || artifact.matchId !== undefined || artifact.seed !== undefined;
   const lines: unknown[] = [
     {
       type: "header",
@@ -281,7 +350,7 @@ export function toTrajectoryJsonl(artifact: MatchArtifact): string {
       truncationReason: artifact.truncationReason ?? null,
       failureReason: artifact.failureReason ?? null,
       failureStateHash: artifact.failureStateHash ?? null,
-      forkOf: artifact.forkOf ?? null
+      ...(artifact.forkOf === undefined ? (hasExportIdentity ? { forkOf: null } : {}) : { forkOf: artifact.forkOf })
     },
     {
       type: "match_metrics",
@@ -293,14 +362,14 @@ export function toTrajectoryJsonl(artifact: MatchArtifact): string {
       type: "evaluation_report",
       runId: artifact.runId,
       matchId: artifact.matchId,
-      id: artifact.evaluationReport.id,
-      createdAt: artifact.evaluationReport.createdAt,
-      evaluatorIds: artifact.evaluationReport.evaluatorIds,
-      evaluatorRegistry: artifact.evaluationReport.evaluatorRegistry ?? [],
-      metricCount: artifact.evaluationReport.metricCount,
-      warnings: artifact.evaluationReport.warnings ?? [],
-      warningSummary: summarizeEvaluationWarnings(artifact.evaluationReport.warnings),
-      summary: artifact.evaluationReport.summary
+      id: evaluationReport?.id ?? null,
+      createdAt: evaluationReport?.createdAt ?? null,
+      evaluatorIds: evaluationReport?.evaluatorIds ?? [],
+      evaluatorRegistry: evaluationReport?.evaluatorRegistry ?? [],
+      metricCount: evaluationReport?.metricCount ?? null,
+      warnings: evaluationWarnings,
+      warningSummary: summarizeEvaluationWarnings(evaluationWarnings),
+      summary: evaluationReport?.summary ?? null
     },
     ...artifact.socialEpisode.channels.map((channel) => ({
       type: "channel",
@@ -324,6 +393,7 @@ export function toTrajectoryJsonl(artifact: MatchArtifact): string {
       pendingAction: step.pendingAction,
       observation: step.observation,
       action: step.action,
+      commitStatus: step.commitStatus ?? (step.error ? "rejected" : "committed"),
       decisionStateHash: step.decisionStateHash ?? null,
       preStateHash: step.preStateHash ?? null,
       postStateHash: step.postStateHash ?? null,
@@ -335,14 +405,15 @@ export function toTrajectoryJsonl(artifact: MatchArtifact): string {
       terminationsByAgent: step.terminationsByAgent ?? null,
       truncationsByAgent: step.truncationsByAgent ?? null,
       doneByAgent: step.doneByAgent ?? null,
-      infosByAgent: step.infosByAgent ?? null,
+      ...(step.infosByAgent === undefined ? {} : { infosByAgent: step.infosByAgent }),
       episodeTerminated: step.episodeTerminated ?? null,
       episodeTruncated: step.episodeTruncated ?? null,
       terminationReason: step.terminationReason ?? null,
       truncationReason: step.truncationReason ?? null,
-      error: step.error ?? null
+      error: step.error ?? null,
+      failure: step.failure ?? null
     })),
-    ...artifact.trajectory.map((step) => ({
+    ...(artifact.trajectory ?? []).map((step) => ({
       type: "step",
       traceId: step.traceId,
       turnIndex: step.turnIndex,
@@ -363,21 +434,21 @@ export function toTrajectoryJsonl(artifact: MatchArtifact): string {
       policyPlan: step.policyPlan,
       reasonerOutput: step.reasonerOutput
     })),
-    ...artifact.trajectory.map((step) => ({
+    ...werewolfHarnessTurnEvidenceFromEpisode(artifact.socialEpisode).map(({ step, trace }) => ({
       type: "trace",
-      traceId: step.traceId,
+      traceId: trace.traceId,
       turnIndex: step.turnIndex,
       actorId: step.actorId,
-      profileId: step.profileId,
-      model: step.model,
-      actionKind: step.pendingAction.kind,
-      commandType: step.command.type,
-      policyPlan: step.policyPlan,
-      reasonerOutput: step.reasonerOutput,
-      turnTrace: step.turnTrace,
-      agentStateHash: step.agentStateHash,
-      agentSnapshotsHashAfterStep: step.agentSnapshotsHashAfterStep ?? null,
-      agentSnapshotFrameIdAfterStep: step.agentSnapshotFrameIdAfterStep ?? null,
+      profileId: trace.profileId,
+      model: trace.model,
+      actionKind: trace.actionKind,
+      commandType: trace.commandType,
+      policyPlan: (step.action.metadata as Record<string, unknown> | undefined)?.policyPlan ?? null,
+      reasonerOutput: (step.action.metadata as Record<string, unknown> | undefined)?.reasonerOutput ?? null,
+      turnTrace: trace,
+      agentStateHash: trace.agentStateHash,
+      agentSnapshotsHashAfterStep: step.actorSnapshotsHashAfterStep ?? null,
+      agentSnapshotFrameIdAfterStep: step.actorSnapshotFrameIdAfterStep ?? null,
       decisionStateHash: step.decisionStateHash,
       preStateHash: step.preStateHash,
       postStateHash: step.postStateHash,
@@ -432,24 +503,22 @@ export function toTrajectoryJsonl(artifact: MatchArtifact): string {
       matchId: artifact.matchId,
       ...exposure
     })),
-    ...artifact.events.map((event) => ({
+    ...(artifact.events ?? []).map((event) => ({
       ...event,
       type: "event",
       eventType: event.type
     })),
-    ...artifact.events
-      .filter((event) => event.type === "harness.error")
-      .map((event) => ({
+    ...harnessFailureEvidenceFromEpisode(artifact.socialEpisode)
+      .map(({ step, failure, payload }) => ({
         type: "error",
-        eventId: event.id,
-        eventSeq: event.seq,
-        day: event.day,
-        phase: event.phase,
-        actorId: event.actorId ?? null,
-        failureReason: failureReasonFromEventPayload(event.payload),
-        payload: event.payload
+        traceId: step.traceId,
+        turnIndex: step.turnIndex,
+        actorId: step.actorId,
+        failureStage: failure.stage,
+        failureReason: failure.message,
+        payload: payload ?? failure.metadata ?? null
       })),
-    ...artifact.agents.map((agent) => ({
+    ...(artifact.agents ?? []).map((agent) => ({
       type: "agent_state",
       runId: artifact.runId,
       matchId: artifact.matchId,
@@ -471,7 +540,7 @@ export function toTrajectoryJsonl(artifact: MatchArtifact): string {
       agentsHash: frame.agentsHash,
       agentCount: frame.agents.length
     })),
-    ...artifact.agents.flatMap((agent) =>
+    ...(artifact.agents ?? []).flatMap((agent) =>
       (agent.social?.journal?.entries ?? []).map((entry) => ({
         type: "social_state_mutation",
         runId: artifact.runId,
@@ -503,9 +572,9 @@ export function toTrajectoryJsonl(artifact: MatchArtifact): string {
         metadata: entry.metadata ?? null
       }))
     ),
-    ...artifact.evaluationReport.metrics.map((metric) => ({
+    ...evaluationMetrics.map((metric) => ({
       type: "metric",
-      evaluationReportId: artifact.evaluationReport.id,
+      evaluationReportId: evaluationReport?.id ?? null,
       ...metric
     }))
   ];
@@ -513,11 +582,13 @@ export function toTrajectoryJsonl(artifact: MatchArtifact): string {
 }
 
 export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[] {
-  const errors: string[] = [];
+  const errors = validateHarnessEpisodeArtifactEnvelope(artifact);
   if (artifact.artifactVersion !== MATCH_ARTIFACT_VERSION) errors.push(`artifactVersion must be ${MATCH_ARTIFACT_VERSION}.`);
   if (artifact.kind !== "match") errors.push("kind must be match.");
-  if (artifact.socialEpisode.status !== artifact.status) {
-    errors.push(`socialEpisode.status mismatch: expected ${artifact.status}, received ${artifact.socialEpisode.status}.`);
+  if (artifact.forkOf) {
+    if (artifact.forkOf.checkpointArtifactVersion !== HARNESS_CHECKPOINT_VERSION) {
+      errors.push(`forkOf.checkpointArtifactVersion must be ${HARNESS_CHECKPOINT_VERSION}.`);
+    }
   }
 
   const finalEvents = artifact.finalState.events ?? [];
@@ -534,7 +605,7 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
     }
   }
 
-  errors.push(...validateSocialEpisodeArtifact(artifact.socialEpisode).map((error) => `socialEpisode.${error}`));
+  validateNativeSocialExecution(artifact, errors);
 
   const socialStepByTrace = new Map(artifact.socialEpisode.steps.map((step) => [step.traceId, step]));
   const messageSeqs = new Set(artifact.socialEpisode.messages.map((message) => message.seq));
@@ -575,7 +646,9 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
       continue;
     }
     if (socialStep.actorId !== step.actorId) errors.push(`trajectory[${index}] actorId mismatch with socialEpisode step ${step.traceId}.`);
-    if (socialStep.turnIndex !== step.turnIndex) errors.push(`trajectory[${index}] turnIndex mismatch with socialEpisode step ${step.traceId}.`);
+    if (socialStep.commitStatus && socialStep.commitStatus !== "committed") {
+      errors.push(`trajectory[${index}] references non-committed socialEpisode step ${step.traceId}.`);
+    }
     if (socialStep.preStateHash !== step.preStateHash) errors.push(`trajectory[${index}] preStateHash mismatch with socialEpisode step ${step.traceId}.`);
     if (socialStep.postStateHash !== step.postStateHash) errors.push(`trajectory[${index}] postStateHash mismatch with socialEpisode step ${step.traceId}.`);
     if (!sameRange(socialStep.eventSeqRange, step.eventSeqRange)) {
@@ -615,7 +688,10 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
   }
 
   const seenAgentIds = new Set<string>();
-  const traceIds = new Set([...artifact.trajectory.map((step) => step.traceId), ...artifact.socialEpisode.steps.map((step) => step.traceId)]);
+  const traceIds = new Set([
+    ...artifact.trajectory.map((step) => step.traceId),
+    ...artifact.socialEpisode.steps.map((step) => step.traceId)
+  ]);
   for (const [index, agent] of artifact.agents.entries()) {
     if (seenAgentIds.has(agent.playerId)) errors.push(`agents[${index}] duplicates playerId ${agent.playerId}.`);
     seenAgentIds.add(agent.playerId);
@@ -663,8 +739,200 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
       `evaluationReport.metricCount mismatch: expected ${artifact.evaluationReport.metrics.length}, received ${artifact.evaluationReport.metricCount}.`
     );
   }
+  validateEvaluationPromotionIntegrity(artifact.evaluationReport, errors);
 
   return errors;
+}
+
+function validateEvaluationPromotionIntegrity(report: HarnessEvaluationReport, errors: string[]): void {
+  const promotion = report.summary?.promotion;
+  const recordedDecisionCount = report.metrics.filter((metric) => Boolean(metric.promotionDecision)).length;
+  const usesRecordedDecisionContract = promotion?.decisionStorage === "per_metric_recorded";
+  if (!usesRecordedDecisionContract && !recordedDecisionCount) return;
+  const identityFields = [
+    "policyId",
+    "policyVersion",
+    "policyHash",
+    "catalogId",
+    "catalogVersion",
+    "catalogHash",
+    "catalogDomainId"
+  ] as const;
+
+  for (const field of identityFields) {
+    if (typeof promotion?.[field] !== "string" || !promotion[field]) {
+      errors.push(`evaluationReport.summary.promotion.${field} is required for recorded metric decisions.`);
+    }
+  }
+
+  for (const [index, metric] of report.metrics.entries()) {
+    const decision = metric.promotionDecision;
+    if (!decision) {
+      errors.push(`evaluationReport.metrics[${index}] is missing promotionDecision for recorded catalog ${promotion?.catalogId ?? "unknown"}.`);
+      continue;
+    }
+
+    if (decision.resolution !== "recorded") {
+      errors.push(`evaluationReport.metrics[${index}].promotionDecision.resolution must be recorded.`);
+    }
+    if (
+      decision.promotionClass !== "scorecard" &&
+      decision.promotionClass !== "diagnostic" &&
+      decision.promotionClass !== "benchmark_only"
+    ) {
+      errors.push(`evaluationReport.metrics[${index}].promotionDecision has invalid promotionClass ${String(decision.promotionClass)}.`);
+    }
+    if (typeof decision.eligibleForScorecard !== "boolean") {
+      errors.push(`evaluationReport.metrics[${index}].promotionDecision.eligibleForScorecard must be boolean.`);
+    }
+    if (
+      !Array.isArray(decision.reasons) ||
+      !decision.reasons.length ||
+      decision.reasons.some((reason) => typeof reason !== "string" || !reason)
+    ) {
+      errors.push(`evaluationReport.metrics[${index}].promotionDecision.reasons must be a nonempty string array.`);
+    }
+    if (metric.promotionClass !== decision.promotionClass) {
+      errors.push(
+        `evaluationReport.metrics[${index}].promotionClass must match promotionDecision.promotionClass: ${String(metric.promotionClass)} !== ${decision.promotionClass}.`
+      );
+    }
+    if (decision.eligibleForScorecard) {
+      if (decision.promotionClass !== "scorecard") {
+        errors.push(`evaluationReport.metrics[${index}].promotionDecision can only be scorecard-eligible with scorecard class.`);
+      }
+      if (typeof metric.value !== "number" || !Number.isFinite(metric.value)) {
+        errors.push(`evaluationReport.metrics[${index}] scorecard-eligible decision requires a finite numeric value.`);
+      }
+      if (typeof metric.weight !== "number" || !Number.isFinite(metric.weight) || metric.weight <= 0) {
+        errors.push(`evaluationReport.metrics[${index}] scorecard-eligible decision requires a positive finite weight.`);
+      }
+      if (!(metric.evidenceRefs?.length ?? 0)) {
+        errors.push(`evaluationReport.metrics[${index}] scorecard-eligible decision requires evidenceRefs.`);
+      }
+    }
+
+    for (const field of identityFields) {
+      const expected = promotion?.[field];
+      if (typeof expected !== "string" || !expected) {
+        errors.push(`evaluationReport.summary.promotion.${field} is required to validate recorded metric decision ${index}.`);
+        continue;
+      }
+      if (decision[field] !== expected) {
+        errors.push(
+          `evaluationReport.metrics[${index}].promotionDecision.${field} mismatch: expected ${expected}, received ${String(decision[field])}.`
+        );
+      }
+    }
+  }
+
+  if (!promotion) return;
+  const decisions = report.metrics.flatMap((metric) => (metric.promotionDecision ? [{ metric, decision: metric.promotionDecision }] : []));
+  const scorecardMetricCount = decisions.filter(({ decision }) => decision.eligibleForScorecard).length;
+  const diagnosticMetricCount = decisions.filter(({ decision }) => !decision.eligibleForScorecard).length;
+  const weightedMetrics = report.metrics.filter(
+    (metric) => typeof metric.weight === "number" && Number.isFinite(metric.weight) && metric.weight > 0
+  );
+  const excludedWeighted = decisions.filter(
+    ({ metric, decision }) =>
+      typeof metric.weight === "number" && Number.isFinite(metric.weight) && metric.weight > 0 && !decision.eligibleForScorecard
+  );
+  const excludedWeightedMetricIds = [...new Set(excludedWeighted.map(({ metric }) => metric.id))].sort();
+  if (promotion.scorecardMetricCount !== scorecardMetricCount) {
+    errors.push(
+      `evaluationReport.summary.promotion.scorecardMetricCount mismatch: expected ${scorecardMetricCount}, received ${promotion.scorecardMetricCount}.`
+    );
+  }
+  if (promotion.diagnosticMetricCount !== diagnosticMetricCount) {
+    errors.push(
+      `evaluationReport.summary.promotion.diagnosticMetricCount mismatch: expected ${diagnosticMetricCount}, received ${promotion.diagnosticMetricCount}.`
+    );
+  }
+  if (promotion.weightedMetricCount !== weightedMetrics.length) {
+    errors.push(
+      `evaluationReport.summary.promotion.weightedMetricCount mismatch: expected ${weightedMetrics.length}, received ${promotion.weightedMetricCount}.`
+    );
+  }
+  if (promotion.excludedWeightedMetricCount !== excludedWeighted.length) {
+    errors.push(
+      `evaluationReport.summary.promotion.excludedWeightedMetricCount mismatch: expected ${excludedWeighted.length}, received ${promotion.excludedWeightedMetricCount}.`
+    );
+  }
+  if (
+    promotion.excludedWeightedMetricIds.length !== excludedWeightedMetricIds.length ||
+    promotion.excludedWeightedMetricIds.some((metricId, index) => metricId !== excludedWeightedMetricIds[index])
+  ) {
+    errors.push("evaluationReport.summary.promotion.excludedWeightedMetricIds must match the sorted unique excluded weighted metric ids.");
+  }
+}
+
+function validateNativeSocialExecution(artifact: MatchArtifact, errors: string[]): void {
+  const execution = artifact.socialEpisode;
+  if (!execution.execution) {
+    errors.push("socialEpisode.execution metadata is required for harness.match.v2.");
+  } else {
+    if (execution.execution.schemaVersion !== "harness.social-execution.v1") {
+      errors.push(`socialEpisode.execution.schemaVersion must be harness.social-execution.v1.`);
+    }
+    const initialMessageCount = execution.execution.initialMessageCount;
+    if (!Number.isInteger(initialMessageCount) || initialMessageCount < 0 || initialMessageCount > execution.messages.length) {
+      errors.push(`socialEpisode.execution.initialMessageCount is invalid: ${initialMessageCount}.`);
+    } else {
+      const initialMessages = execution.messages.slice(0, initialMessageCount);
+      const expectedInitialMessagesHash = hashStableState(initialMessages);
+      if (!execution.execution.initialMessagesHash) {
+        errors.push("socialEpisode.execution.initialMessagesHash is required.");
+      } else if (execution.execution.initialMessagesHash !== expectedInitialMessagesHash) {
+        errors.push(
+          `socialEpisode.execution.initialMessagesHash mismatch: expected ${expectedInitialMessagesHash}, received ${execution.execution.initialMessagesHash}.`
+        );
+      }
+      if (artifact.forkOf?.parentMessagesHash && execution.execution.initialMessagesHash !== artifact.forkOf.parentMessagesHash) {
+        errors.push("socialEpisode initial message prefix does not match forkOf.parentMessagesHash.");
+      }
+      if (artifact.forkOf && initialMessageCount !== artifact.forkOf.parentMessageCount) {
+        errors.push("socialEpisode initial message count does not match forkOf.parentMessageCount.");
+      }
+    }
+  }
+
+  if (artifact.forkOf?.parentChannelsHash && hashStableState(execution.channels) !== artifact.forkOf.parentChannelsHash) {
+    errors.push("socialEpisode channels do not match forkOf.parentChannelsHash.");
+  }
+  if (artifact.forkOf?.parentStateHash && hashStableState(execution.initialState) !== artifact.forkOf.parentStateHash) {
+    errors.push("socialEpisode initial state does not match forkOf.parentStateHash.");
+  }
+
+  if (hashStableState(execution.initialState) !== hashStableState(artifact.initialState)) {
+    errors.push("socialEpisode.initialState does not match artifact.initialState.");
+  }
+  if (hashStableState(execution.finalState) !== hashStableState(artifact.finalState)) {
+    errors.push("socialEpisode.finalState does not match artifact.finalState.");
+  }
+
+  for (const [index, step] of execution.steps.entries()) {
+    const committed = isSocialStepCommitted(step);
+    if (committed && (!step.preStateHash || !step.postStateHash)) {
+      errors.push(`socialEpisode.steps[${index}] committed step requires preStateHash and postStateHash.`);
+    }
+    if (!committed && step.messageSeqRange) {
+      errors.push(`socialEpisode.steps[${index}] rejected step cannot reference committed messages.`);
+    }
+    validateAgentSnapshotFrameReference({
+      frames: artifact.agentSnapshotFrames ?? [],
+      frameId: step.actorSnapshotFrameIdAfterStep,
+      snapshotHash: step.actorSnapshotsHashAfterStep,
+      label: `socialEpisode.steps[${index}]`,
+      fieldName: "actorSnapshotFrameIdAfterStep",
+      hashFieldName: "actorSnapshotsHashAfterStep",
+      errors
+    });
+  }
+
+  const replay = replayWerewolfSocialEpisode(execution as SocialEpisodeArtifact<GameState, unknown, unknown, GameCommand>, {
+    stopOnMismatch: false
+  });
+  for (const mismatch of replay.mismatches) errors.push(`socialEpisode replay: ${mismatch}`);
 }
 
 export function assertValidMatchArtifactIntegrity(artifact: MatchArtifact): void {
@@ -678,45 +946,24 @@ export function buildFinalHarnessCheckpoint(options: {
   createdAt?: string;
   reason?: string;
 }): HarnessCheckpoint {
-  const trajectory = cloneJson(options.artifact.trajectory);
-  const lastStep = trajectory.at(-1);
-  const lastMessage = options.artifact.socialEpisode.messages.at(-1);
-  const stateHash = hashStableState(options.artifact.finalState);
-  const replayablePrefixHash = lastStep?.postStateHash ?? hashStableState(options.artifact.initialState);
-  if (options.artifact.status === "failed" && replayablePrefixHash !== stateHash) {
-    throw new Error("Cannot build final replay checkpoint from failed artifact whose final state is beyond the replayable trajectory prefix.");
-  }
-  const agentsHash = hashStableState(options.artifact.agents);
-  stripAgentSnapshotEvidenceFromTrajectory(trajectory);
-  const trajectoryHash = hashStableState(trajectory);
-  const socialMessagesHash = hashStableState(options.artifact.socialEpisode.messages);
-  return {
-    artifactVersion: HARNESS_CHECKPOINT_VERSION,
-    kind: "checkpoint",
-    checkpointId: options.checkpointId ?? `${options.artifact.runId}:checkpoint:${options.artifact.trajectory.length}`,
-    createdAt: options.createdAt ?? new Date().toISOString(),
+  assertValidMatchArtifactIntegrity(options.artifact);
+  const executionPrefix = cloneJson(options.artifact.socialEpisode) as HarnessCheckpoint["executionPrefix"];
+  delete executionPrefix.exposureRecords;
+  delete executionPrefix.exposureSummary;
+  const finalAgentsHash = hashStableState(options.artifact.agents);
+  const finalAgentSnapshotFrameId = options.artifact.agentSnapshotFrames?.find((frame) => frame.agentsHash === finalAgentsHash)?.frameId;
+  const checkpoint = buildNativeCheckpointRecord({
+    artifact: options.artifact,
+    checkpointId: options.checkpointId ?? `${options.artifact.runId}:checkpoint:native:${executionPrefix.steps.length}`,
+    createdAt: options.createdAt,
     reason: options.reason,
-    source: {
-      runId: options.artifact.runId,
-      matchId: options.artifact.matchId,
-      seed: options.artifact.seed,
-      status: options.artifact.status,
-      traceId: lastStep?.traceId,
-      turnIndex: lastStep?.turnIndex,
-      trajectoryLength: options.artifact.trajectory.length,
-      messageSeq: lastMessage?.seq,
-      stateHash,
-      trajectoryHash,
-      agentsHash,
-      socialMessagesHash,
-      failureReason: options.artifact.failureReason,
-      truncationReason: options.artifact.truncationReason
-    },
+    executionPrefix,
     state: cloneJson(options.artifact.finalState),
     agents: cloneJson(options.artifact.agents),
-    trajectory,
-    socialMessages: cloneJson(options.artifact.socialEpisode.messages)
-  };
+    agentSnapshotFrameId: finalAgentSnapshotFrameId
+  });
+  assertValidHarnessCheckpoint(checkpoint);
+  return checkpoint;
 }
 
 export function buildHarnessCheckpointAtPrefix(options: {
@@ -728,83 +975,77 @@ export function buildHarnessCheckpointAtPrefix(options: {
 }): HarnessCheckpoint {
   const selected = resolveCheckpointPrefixSelection(options.artifact, options.selector);
   assertSafeCheckpointBoundary(options.artifact, selected.index);
-  const agents = resolveAgentSnapshotsAfterStep(options.artifact, selected.step);
-  const trajectory = cloneJson(options.artifact.trajectory.slice(0, selected.index + 1));
-  stripAgentSnapshotEvidenceFromTrajectory(trajectory);
-  const selectedStep = trajectory.at(-1);
-  if (!selectedStep) {
-    throw new HarnessCheckpointSelectionError("selector_not_found", "Prefix checkpoint requires at least one committed trajectory step.");
-  }
-  if (!agents || !selected.step.agentSnapshotsHashAfterStep) {
+  const agents = resolveAgentSnapshotsAfterNativeStep(options.artifact, selected.step);
+  if (!agents || !selected.step.actorSnapshotsHashAfterStep) {
     throw new HarnessCheckpointSelectionError(
       "missing_agent_snapshots",
-      `Cannot build prefix checkpoint at trajectoryLength ${trajectory.length}: agent snapshots are not recorded for this boundary.`
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: agent snapshots are not recorded for this boundary.`
     );
   }
   const agentsHash = hashStableState(agents);
-  if (agentsHash !== selected.step.agentSnapshotsHashAfterStep) {
+  if (agentsHash !== selected.step.actorSnapshotsHashAfterStep) {
     throw new HarnessCheckpointSelectionError(
       "missing_agent_snapshots",
-      `Cannot build prefix checkpoint at trajectoryLength ${trajectory.length}: agent snapshot hash mismatch.`
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: agent snapshot hash mismatch.`
     );
   }
-  const evidenceErrors: string[] = [];
-  validateSnapshotEvidenceWithinArtifactPrefix({
-    snapshots: agents,
-    trajectory: options.artifact.trajectory,
-    stepIndex: selected.index,
-    label: `trajectory[${selected.index}].agentSnapshotsAfterStep`,
-    errors: evidenceErrors
-  });
-  if (evidenceErrors.length) {
+  const steps = cloneJson(options.artifact.socialEpisode.steps.slice(0, selected.index + 1));
+  const messageSeq = latestMessageSeqForNativePrefix(options.artifact.socialEpisode, steps);
+  const messages = cloneJson(options.artifact.socialEpisode.messages.filter((message) => message.seq <= messageSeq));
+  const snapshotEvidenceErrors: string[] = [];
+  const maxEventSeq = steps.reduce((max, step) => (step.eventSeqRange ? Math.max(max, step.eventSeqRange[1]) : max), 0);
+  const futureTraceIds = new Set(options.artifact.socialEpisode.steps.slice(selected.index + 1).map((step) => step.traceId));
+  for (const [agentIndex, agent] of agents.entries()) {
+    validateAgentEvidenceNotBeyondBoundary({
+      agent,
+      maxMessageSeq: messageSeq,
+      maxEventSeq,
+      futureTraceIds,
+      label: `nativeSnapshot[${agentIndex}]`,
+      errors: snapshotEvidenceErrors
+    });
+  }
+  if (snapshotEvidenceErrors.length) {
     throw new HarnessCheckpointSelectionError(
       "missing_agent_snapshots",
-      `Cannot build prefix checkpoint at trajectoryLength ${trajectory.length}: ${evidenceErrors.join(" ")}`
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: ${snapshotEvidenceErrors.join(" ")}`
     );
   }
-  const replay = replayHarnessTrajectory({
-    initialState: options.artifact.initialState,
-    trajectory,
-    expectedFinalHash: selectedStep.postStateHash
-  });
-  if (!replay.ok) {
+  const executionPrefix = cloneJson({
+    ...options.artifact.socialEpisode,
+    status: "truncated",
+    truncationReason: `checkpoint boundary after native step ${selected.index + 1}`,
+    terminationReason: undefined,
+    failureReason: undefined,
+    error: undefined,
+    finalState: options.artifact.initialState,
+    steps,
+    messages,
+    exposureRecords: undefined,
+    exposureSummary: undefined,
+    metrics: undefined
+  }) as HarnessCheckpoint["executionPrefix"];
+  const firstReplay = replayWerewolfSocialEpisode(executionPrefix, { stopOnMismatch: false });
+  const nonFinalHashMismatches = firstReplay.mismatches.filter((mismatch) => !mismatch.startsWith("Replay final state hash mismatch"));
+  if (nonFinalHashMismatches.length) {
     throw new HarnessCheckpointSelectionError(
       "prefix_replay_mismatch",
-      `Cannot build prefix checkpoint at trajectoryLength ${trajectory.length}: trajectory prefix replay failed.`
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: ${nonFinalHashMismatches.join(" ")}`
     );
   }
-  const messageSeq = latestMessageSeqForTrajectoryPrefix(trajectory);
-  const socialMessages = cloneJson(options.artifact.socialEpisode.messages.filter((message) => message.seq <= messageSeq));
-  const stateHash = hashStableState(replay.finalState);
-  const trajectoryHash = hashStableState(trajectory);
-  const socialMessagesHash = hashStableState(socialMessages);
-  return {
-    artifactVersion: HARNESS_CHECKPOINT_VERSION,
-    kind: "checkpoint",
-    checkpointId: options.checkpointId ?? `${options.artifact.runId}:checkpoint:${trajectory.length}`,
-    createdAt: options.createdAt ?? new Date().toISOString(),
+  executionPrefix.finalState = cloneJson(firstReplay.finalState);
+  const checkpoint = buildNativeCheckpointRecord({
+    artifact: options.artifact,
+    checkpointId: options.checkpointId ?? `${options.artifact.runId}:checkpoint:native:${steps.length}`,
+    createdAt: options.createdAt,
     reason: options.reason,
-    source: {
-      runId: options.artifact.runId,
-      matchId: options.artifact.matchId,
-      seed: options.artifact.seed,
-      status: options.artifact.status,
-      traceId: selectedStep.traceId,
-      turnIndex: selectedStep.turnIndex,
-      trajectoryLength: trajectory.length,
-      messageSeq: socialMessages.at(-1)?.seq,
-      stateHash,
-      trajectoryHash,
-      agentsHash,
-      socialMessagesHash,
-      failureReason: options.artifact.failureReason,
-      truncationReason: options.artifact.truncationReason
-    },
-    state: cloneJson(replay.finalState),
+    executionPrefix,
+    state: cloneJson(firstReplay.finalState),
     agents,
-    trajectory,
-    socialMessages
-  };
+    agentSnapshotFrameId: selected.step.actorSnapshotFrameIdAfterStep
+  });
+  assertValidHarnessCheckpoint(checkpoint);
+  return checkpoint;
 }
 
 export function forkHarnessRunOptions(options: {
@@ -819,22 +1060,28 @@ export function forkHarnessRunOptions(options: {
   return {
     initialState: cloneJson(options.checkpoint.state),
     initialAgentStates: cloneJson(options.checkpoint.agents),
-    initialSocialMessages: cloneJson(options.checkpoint.socialMessages),
+    initialSocialChannels: cloneJson(options.checkpoint.executionPrefix.channels),
+    initialSocialMessages: cloneJson(options.checkpoint.executionPrefix.messages),
     agents: cloneJson(options.agents ?? agentConfigsFromCheckpoint(options.checkpoint)),
     reasoner: options.reasoner,
     maxTransitions: options.maxTransitions,
     forkOf: {
+      schemaVersion: "harness.fork-provenance.v2",
+      checkpointArtifactVersion: HARNESS_CHECKPOINT_VERSION,
       checkpointId: options.checkpoint.checkpointId,
       parentRunId: options.checkpoint.source.runId,
+      parentArtifactId: options.checkpoint.source.matchId ?? options.checkpoint.source.runId,
       parentMatchId: options.checkpoint.source.matchId,
-      parentTraceId: options.checkpoint.source.traceId,
+      parentBoundaryTraceId: options.checkpoint.source.boundaryTraceId,
       parentEvidenceTraceIds: inheritedEvidenceTraceIdsFromCheckpoint(options.checkpoint),
-      parentTurnIndex: options.checkpoint.source.turnIndex,
+      parentBoundaryTurnIndex: options.checkpoint.source.boundaryTurnIndex,
       parentStateHash: options.checkpoint.source.stateHash,
-      parentTrajectoryHash: options.checkpoint.source.trajectoryHash,
+      parentExecutionPrefixHash: options.checkpoint.source.executionPrefixHash,
       parentAgentsHash: options.checkpoint.source.agentsHash,
-      parentSocialMessagesHash: options.checkpoint.source.socialMessagesHash,
-      parentTrajectoryLength: options.checkpoint.source.trajectoryLength,
+      parentChannelsHash: options.checkpoint.source.channelsHash,
+      parentMessagesHash: options.checkpoint.source.messagesHash,
+      parentNativeStepCount: options.checkpoint.source.nativeStepCount,
+      parentMessageCount: options.checkpoint.source.messageCount,
       createdAt: options.createdAt ?? new Date().toISOString(),
       reason: options.reason
     }
@@ -842,71 +1089,18 @@ export function forkHarnessRunOptions(options: {
 }
 
 export function validateHarnessCheckpoint(checkpoint: HarnessCheckpoint): string[] {
-  const errors: string[] = [];
+  const errors = validateHarnessCheckpointEnvelope(checkpoint);
   if (checkpoint.artifactVersion !== HARNESS_CHECKPOINT_VERSION) {
     errors.push(`artifactVersion must be ${HARNESS_CHECKPOINT_VERSION}.`);
   }
   if (checkpoint.kind !== "checkpoint") {
     errors.push("kind must be checkpoint.");
   }
-  const actualStateHash = hashStableState(checkpoint.state);
-  if (checkpoint.source.stateHash !== actualStateHash) {
-    errors.push(`source.stateHash mismatch: expected ${actualStateHash}, received ${checkpoint.source.stateHash}.`);
+  if (checkpoint.source.sourceArtifactVersion !== MATCH_ARTIFACT_VERSION) {
+    errors.push(`source.sourceArtifactVersion must be ${MATCH_ARTIFACT_VERSION}.`);
   }
-  const actualTrajectoryHash = hashStableState(checkpoint.trajectory);
-  if (checkpoint.source.trajectoryHash !== actualTrajectoryHash) {
-    errors.push(`source.trajectoryHash mismatch: expected ${actualTrajectoryHash}, received ${checkpoint.source.trajectoryHash ?? "undefined"}.`);
-  }
-  const actualAgentsHash = hashStableState(checkpoint.agents);
-  if (checkpoint.source.agentsHash !== actualAgentsHash) {
-    errors.push(`source.agentsHash mismatch: expected ${actualAgentsHash}, received ${checkpoint.source.agentsHash ?? "undefined"}.`);
-  }
-  const actualSocialMessagesHash = hashStableState(checkpoint.socialMessages);
-  if (checkpoint.source.socialMessagesHash !== actualSocialMessagesHash) {
-    errors.push(
-      `source.socialMessagesHash mismatch: expected ${actualSocialMessagesHash}, received ${checkpoint.source.socialMessagesHash ?? "undefined"}.`
-    );
-  }
-  if (checkpoint.source.trajectoryLength !== checkpoint.trajectory.length) {
-    errors.push(`source.trajectoryLength mismatch: expected ${checkpoint.trajectory.length}, received ${checkpoint.source.trajectoryLength}.`);
-  }
-
-  const lastStep = checkpoint.trajectory.at(-1);
-  if (lastStep) {
-    if (checkpoint.source.traceId !== lastStep.traceId) {
-      errors.push(`source.traceId mismatch: expected ${lastStep.traceId}, received ${checkpoint.source.traceId ?? "undefined"}.`);
-    }
-    if (checkpoint.source.turnIndex !== lastStep.turnIndex) {
-      errors.push(`source.turnIndex mismatch: expected ${lastStep.turnIndex}, received ${checkpoint.source.turnIndex ?? "undefined"}.`);
-    }
-    if (lastStep.postStateHash !== checkpoint.source.stateHash) {
-      errors.push(`last trajectory postStateHash mismatch: expected ${checkpoint.source.stateHash}, received ${lastStep.postStateHash}.`);
-    }
-  } else {
-    if (checkpoint.source.traceId !== undefined) errors.push("source.traceId must be undefined when trajectory is empty.");
-    if (checkpoint.source.turnIndex !== undefined) errors.push("source.turnIndex must be undefined when trajectory is empty.");
-  }
-
-  const lastMessage = checkpoint.socialMessages.at(-1);
-  const messageIds = new Set<string>();
-  for (const [index, message] of checkpoint.socialMessages.entries()) {
-    const expectedSeq = index + 1;
-    if (message.seq !== expectedSeq) {
-      errors.push(`socialMessages sequence mismatch: expected ${expectedSeq}, received ${message.seq}.`);
-    }
-    if (!message.id) {
-      errors.push(`socialMessages[${index}] is missing id.`);
-    } else if (messageIds.has(message.id)) {
-      errors.push(`Duplicate social message id ${message.id}.`);
-    }
-    messageIds.add(message.id);
-  }
-  if (lastMessage) {
-    if (checkpoint.source.messageSeq !== lastMessage.seq) {
-      errors.push(`source.messageSeq mismatch: expected ${lastMessage.seq}, received ${checkpoint.source.messageSeq ?? "undefined"}.`);
-    }
-  } else if (checkpoint.source.messageSeq !== undefined) {
-    errors.push("source.messageSeq must be undefined when socialMessages is empty.");
+  if (checkpoint.source.seed !== checkpoint.state.seed) {
+    errors.push(`source.seed mismatch: expected ${checkpoint.state.seed}, received ${checkpoint.source.seed}.`);
   }
 
   const playerIds = new Set(checkpoint.state.players.map((player) => player.id));
@@ -925,6 +1119,11 @@ export function validateHarnessCheckpoint(checkpoint: HarnessCheckpoint): string
       errors.push(`Missing restored agent state for ${playerId}.`);
     }
   }
+  errors.push(
+    ...validateHarnessCheckpointReplay(checkpoint, (executionPrefix) =>
+      replayWerewolfSocialEpisode(executionPrefix, { stopOnMismatch: false })
+    )
+  );
   validateCheckpointAgentEvidence(checkpoint, errors);
 
   return errors;
@@ -947,14 +1146,72 @@ function agentConfigsFromCheckpoint(checkpoint: HarnessCheckpoint): HarnessRunOp
   }));
 }
 
+function buildNativeCheckpointRecord(options: {
+  artifact: MatchArtifact;
+  checkpointId: string;
+  createdAt?: string;
+  reason?: string;
+  executionPrefix: HarnessCheckpoint["executionPrefix"];
+  state: GameState;
+  agents: AgentHarnessState[];
+  agentSnapshotFrameId?: string;
+}): HarnessCheckpoint {
+  const boundary = options.executionPrefix.steps.at(-1);
+  const lastMessage = options.executionPrefix.messages.at(-1);
+  return {
+    artifactVersion: HARNESS_CHECKPOINT_VERSION,
+    kind: "checkpoint",
+    checkpointId: options.checkpointId,
+    createdAt: options.createdAt ?? new Date().toISOString(),
+    reason: options.reason,
+    source: {
+      sourceArtifactVersion: MATCH_ARTIFACT_VERSION,
+      runId: options.artifact.runId,
+      matchId: options.artifact.matchId,
+      seed: options.artifact.seed,
+      status: options.artifact.status,
+      boundaryTraceId: boundary?.traceId,
+      boundaryTurnIndex: boundary?.turnIndex,
+      boundaryBatchId: boundary?.batchId,
+      boundaryBatchIndex: boundary?.batchIndex,
+      boundarySchedulerMode: boundary?.schedulerMode,
+      nativeStepCount: options.executionPrefix.steps.length,
+      messageCount: options.executionPrefix.messages.length,
+      lastMessageSeq: lastMessage?.seq,
+      stateHash: hashStableState(options.state),
+      executionPrefixHash: hashStableState(options.executionPrefix),
+      agentsHash: hashStableState(options.agents),
+      channelsHash: hashStableState(options.executionPrefix.channels),
+      messagesHash: hashStableState(options.executionPrefix.messages),
+      agentSnapshotFrameId: options.agentSnapshotFrameId,
+      failureReason: options.artifact.failureReason,
+      truncationReason: options.artifact.truncationReason
+    },
+    state: cloneJson(options.state),
+    agents: cloneJson(options.agents),
+    executionPrefix: cloneJson(options.executionPrefix)
+  };
+}
+
+function resolveAgentSnapshotsAfterNativeStep(
+  artifact: MatchArtifact,
+  step: MatchArtifact["socialEpisode"]["steps"][number]
+): AgentHarnessState[] | undefined {
+  if (Array.isArray(step.actorSnapshotsAfterStep)) return cloneJson(step.actorSnapshotsAfterStep) as AgentHarnessState[];
+  if (!step.actorSnapshotFrameIdAfterStep) return undefined;
+  const frame = artifact.agentSnapshotFrames?.find((candidate) => candidate.frameId === step.actorSnapshotFrameIdAfterStep);
+  if (!frame || frame.agentsHash !== step.actorSnapshotsHashAfterStep) return undefined;
+  return cloneJson(frame.agents);
+}
+
 function resolveCheckpointPrefixSelection(
   artifact: MatchArtifact,
   selector: HarnessCheckpointPrefixSelector
-): { index: number; step: HarnessStepRecord } {
+): { index: number; step: SocialEpisodeArtifact["steps"][number] } {
   const selectors = [
     selector.traceId !== undefined ? "traceId" : undefined,
-    selector.turnIndex !== undefined ? "turnIndex" : undefined,
-    selector.trajectoryLength !== undefined ? "trajectoryLength" : undefined
+    selector.nativeTurnIndex !== undefined ? "nativeTurnIndex" : undefined,
+    selector.nativeStepCount !== undefined ? "nativeStepCount" : undefined
   ].filter((value): value is string => Boolean(value));
   if (selectors.length !== 1) {
     throw new HarnessCheckpointSelectionError(
@@ -966,105 +1223,65 @@ function resolveCheckpointPrefixSelection(
   }
   let index = -1;
   if (selector.traceId !== undefined) {
-    index = artifact.trajectory.findIndex((step) => step.traceId === selector.traceId);
-  } else if (selector.turnIndex !== undefined) {
-    index = artifact.trajectory.findIndex((step) => step.turnIndex === selector.turnIndex);
-  } else if (selector.trajectoryLength !== undefined) {
-    index = selector.trajectoryLength - 1;
+    index = artifact.socialEpisode.steps.findIndex((step) => step.traceId === selector.traceId);
+  } else if (selector.nativeTurnIndex !== undefined) {
+    index = artifact.socialEpisode.steps.findIndex((step) => step.turnIndex === selector.nativeTurnIndex);
+  } else if (selector.nativeStepCount !== undefined) {
+    index = selector.nativeStepCount - 1;
   }
-  const step = artifact.trajectory[index];
+  const step = artifact.socialEpisode.steps[index];
   if (!step) {
-    throw new HarnessCheckpointSelectionError("selector_not_found", "Prefix checkpoint selector did not match a committed trajectory step.");
+    throw new HarnessCheckpointSelectionError("selector_not_found", "Prefix checkpoint selector did not match a native social execution step.");
   }
   return { index, step };
 }
 
 function assertSafeCheckpointBoundary(artifact: MatchArtifact, stepIndex: number): void {
-  const step = artifact.trajectory[stepIndex];
+  const step = artifact.socialEpisode.steps[stepIndex];
   if (!step) {
-    throw new HarnessCheckpointSelectionError("selector_not_found", "Prefix checkpoint selector did not match a committed trajectory step.");
+    throw new HarnessCheckpointSelectionError("selector_not_found", "Prefix checkpoint selector did not match a native social execution step.");
   }
-  if (!resolveAgentSnapshotsAfterStep(artifact, step) || step.agentSnapshotsHashAfterStep === undefined) {
+  if (!resolveAgentSnapshotsAfterNativeStep(artifact, step) || step.actorSnapshotsHashAfterStep === undefined) {
     throw new HarnessCheckpointSelectionError(
       "missing_agent_snapshots",
-      `Cannot build prefix checkpoint at trajectoryLength ${stepIndex + 1}: agent snapshots are not recorded for this boundary.`
+      `Cannot build native prefix checkpoint at step ${stepIndex + 1}: agent snapshots are not recorded for this boundary.`
     );
   }
-  const socialStep = artifact.socialEpisode.steps.find((candidate) => candidate.traceId === step.traceId);
-  if (socialStep?.schedulerMode === "parallel" || socialStep?.atomic) {
+  if (!isSafeNativeCheckpointBoundary(artifact.socialEpisode.steps, stepIndex)) {
     throw new HarnessCheckpointSelectionError(
       "unsafe_batch_boundary",
-      "Prefix checkpoint cannot be built from a parallel or atomic step without batch snapshot evidence."
-    );
-  }
-  if (!isSafeCheckpointBoundaryIndex(artifact, stepIndex)) {
-    throw new HarnessCheckpointSelectionError(
-      "unsafe_batch_boundary",
-      "Prefix checkpoint cannot be built from the middle of an aec-batched-decision batch."
+      "Prefix checkpoint cannot be built from the middle of a native scheduler batch."
     );
   }
 }
 
-function isSafeCheckpointBoundaryIndex(artifact: MatchArtifact, stepIndex: number): boolean {
-  const step = artifact.trajectory[stepIndex];
+function isSafeNativeCheckpointBoundary(steps: SocialEpisodeArtifact["steps"], stepIndex: number): boolean {
+  if (stepIndex < 0) return steps.length === 0;
+  const step = steps[stepIndex];
   if (!step) return false;
-  const socialStep = artifact.socialEpisode.steps.find((candidate) => candidate.traceId === step.traceId);
-  if (socialStep?.schedulerMode === "parallel" || socialStep?.atomic) return false;
-  const nextStep = artifact.trajectory[stepIndex + 1];
-  const nextSocialStep = nextStep ? artifact.socialEpisode.steps.find((candidate) => candidate.traceId === nextStep.traceId) : undefined;
-  if (
-    socialStep?.schedulerMode === "aec-batched-decision" &&
-    socialStep.batchId &&
-    nextSocialStep?.batchId === socialStep.batchId
-  ) {
-    return false;
-  }
-  return true;
+  const nextStep = steps[stepIndex + 1];
+  if (!step.batchId || nextStep?.batchId !== step.batchId) return true;
+  return step.schedulerMode === "aec" && !step.atomic;
 }
 
-function latestMessageSeqForTrajectoryPrefix(trajectory: HarnessStepRecord[]): number {
-  let messageSeq = 0;
-  for (const step of trajectory) {
+function latestMessageSeqForNativePrefix(
+  episode: MatchArtifact["socialEpisode"],
+  steps: MatchArtifact["socialEpisode"]["steps"]
+): number {
+  let messageSeq = episode.execution?.initialMessageCount ?? 0;
+  for (const step of steps) {
     if (step.messageSeqRange) messageSeq = Math.max(messageSeq, step.messageSeqRange[1]);
   }
   return messageSeq;
 }
 
-function latestEventSeqForTrajectoryPrefix(trajectory: HarnessStepRecord[]): number {
-  let eventSeq = 0;
-  for (const step of trajectory) {
-    if (step.eventSeqRange) eventSeq = Math.max(eventSeq, step.eventSeqRange[1]);
-  }
-  return eventSeq;
-}
-
-function validateSnapshotEvidenceWithinArtifactPrefix(input: {
-  snapshots: AgentHarnessState[];
-  trajectory: HarnessStepRecord[];
-  stepIndex: number;
-  label: string;
-  errors: string[];
-}): void {
-  const prefix = input.trajectory.slice(0, input.stepIndex + 1);
-  const futureTraceIds = new Set(input.trajectory.slice(input.stepIndex + 1).map((step) => step.traceId));
-  const maxMessageSeq = latestMessageSeqForTrajectoryPrefix(prefix);
-  const maxEventSeq = latestEventSeqForTrajectoryPrefix(prefix);
-  for (const [agentIndex, agent] of input.snapshots.entries()) {
-    validateAgentEvidenceNotBeyondBoundary({
-      agent,
-      maxMessageSeq,
-      maxEventSeq,
-      futureTraceIds,
-      label: `${input.label}[${agentIndex}]`,
-      errors: input.errors
-    });
-  }
-}
-
 function validateCheckpointAgentEvidence(checkpoint: HarnessCheckpoint, errors: string[]): void {
   const futureTraceIds = new Set<string>();
-  const maxMessageSeq = checkpoint.source.messageSeq ?? 0;
-  const maxEventSeq = latestEventSeqForTrajectoryPrefix(checkpoint.trajectory);
+  const maxMessageSeq = checkpoint.source.lastMessageSeq ?? 0;
+  const maxEventSeq = checkpoint.executionPrefix.steps.reduce(
+    (max, step) => (step.eventSeqRange ? Math.max(max, step.eventSeqRange[1]) : max),
+    0
+  );
   for (const [agentIndex, agent] of checkpoint.agents.entries()) {
     validateAgentEvidenceNotBeyondBoundary({
       agent,
@@ -1074,14 +1291,6 @@ function validateCheckpointAgentEvidence(checkpoint: HarnessCheckpoint, errors: 
       label: `agents[${agentIndex}]`,
       errors
     });
-  }
-}
-
-function stripAgentSnapshotEvidenceFromTrajectory(trajectory: HarnessStepRecord[]): void {
-  for (const step of trajectory) {
-    delete step.agentSnapshotsAfterStep;
-    delete step.agentSnapshotsHashAfterStep;
-    delete step.agentSnapshotFrameIdAfterStep;
   }
 }
 
@@ -1166,7 +1375,7 @@ function validateAgentSnapshotFrames(artifact: MatchArtifact, playerIds: Set<str
     if (frame.agentsHash !== hashStableState(frame.agents)) {
       errors.push(`${label}.agentsHash mismatch.`);
     }
-    if (frame.frameId !== agentSnapshotFrameId(frame.agentsHash)) {
+    if (frame.frameId !== harnessAgentSnapshotFrameId(frame.agentsHash)) {
       errors.push(`${label}.frameId mismatch for agentsHash.`);
     }
     if (!referencedFrameIds.has(frame.frameId)) {
@@ -1309,8 +1518,8 @@ function isForkParentTraceRef(artifact: MatchArtifact, traceId: string): boolean
 
 function inheritedEvidenceTraceIdsFromCheckpoint(checkpoint: HarnessCheckpoint): string[] {
   const traceIds = new Set<string>();
-  if (checkpoint.source.traceId) traceIds.add(checkpoint.source.traceId);
-  for (const step of checkpoint.trajectory) {
+  if (checkpoint.source.boundaryTraceId) traceIds.add(checkpoint.source.boundaryTraceId);
+  for (const step of checkpoint.executionPrefix.steps) {
     if (step.traceId) traceIds.add(step.traceId);
   }
   for (const agent of checkpoint.agents) {

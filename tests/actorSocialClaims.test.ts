@@ -1938,6 +1938,56 @@ describe("Werewolf agent social claim ingestion", () => {
     expect(JSON.stringify(plan.arbitration)).not.toContain(rawVisibleLedgerText);
     expect(JSON.stringify(plan.arbitration)).not.toContain(rawHiddenLedgerText);
   });
+
+  it("preserves visible-message exact-once ingestion when a Werewolf actor is restored after memory trimming", () => {
+    const firstMessage = socialMessage({
+      id: "msg-werewolf-durable-first",
+      seq: 12,
+      senderId: "voter",
+      visibility: "public",
+      content: "explicit relationship consequence",
+      metadata: {
+        socialFacts: [
+          {
+            kind: "relationship",
+            targetId: "target-a",
+            deltas: { suspicion: 0.25 }
+          }
+        ]
+      }
+    });
+    const secondMessage = socialMessage({
+      id: "msg-werewolf-durable-second",
+      seq: 13,
+      senderId: "hunter",
+      visibility: "public",
+      content: "ordinary visible follow-up"
+    });
+    const actor = new WerewolfAgentActor(agentState("observer"));
+    if (!actor.state.social) throw new Error("Expected initialized social state.");
+    actor.state.social.memory.maxEntries = 2;
+
+    actor.observe(viewFor("observer", [firstMessage]), { traceId: "trace-durable-first", turnIndex: 19 });
+    actor.observe(viewFor("observer", [firstMessage, secondMessage]), { traceId: "trace-durable-second", turnIndex: 20 });
+
+    expect(actor.state.social.memory.entries.some((entry) => entry.evidenceRefs.some((ref) => ref.id === firstMessage.id))).toBe(false);
+    expect(actor.state.social.relationships.edges["target-a"].suspicion).toBe(0.25);
+    expect(actor.state.social.messageIngestion?.seenMessageIds).toEqual([firstMessage.id, secondMessage.id]);
+    const restoredState = JSON.parse(JSON.stringify(actor.state)) as AgentHarnessState;
+    const restoredHash = restoredState.socialStateHash;
+    const restored = new WerewolfAgentActor(restoredState);
+
+    expect(restored.state.socialStateHash).toBe(restoredHash);
+    restored.observe(viewFor("observer", [firstMessage, secondMessage]), { traceId: "trace-durable-restored", turnIndex: 21 });
+
+    expect(restored.state.social?.relationships.edges["target-a"].suspicion).toBe(0.25);
+    expect(restored.state.social?.messageIngestion?.seenMessageIds).toEqual([firstMessage.id, secondMessage.id]);
+    expect(
+      restored.state.social?.journal?.entries.filter(
+        (entry) => entry.store === "relationships" && entry.metadata?.messageId === firstMessage.id
+      )
+    ).toHaveLength(1);
+  });
 });
 
 function agentState(playerId: string): AgentHarnessState {
@@ -1981,8 +2031,6 @@ function socialMessage(input: {
 
 function viewFor(observerId: string, messages: SocialMessage[]): HarnessPlayerView {
   return {
-    gameId: "social-claim-ingestion",
-    seed: "social-claim-ingestion",
     phase: "day_vote",
     day: 3,
     you: {

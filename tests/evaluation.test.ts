@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { applyCommand, createGame, getPendingActions } from "../src/core/engine";
 import { buildMatchArtifact } from "../src/harness/artifacts";
-import { metric, runEvaluationRegistry } from "../src/harness/evaluation";
+import {
+  DEFAULT_METRIC_PROMOTION_POLICY,
+  decideMetricPromotion,
+  metric,
+  metricPromotionCatalogEntry,
+  resolveRecordedMetricPromotion,
+  runEvaluationRegistry,
+  summarizeResearchMetricPromotionRows
+} from "../src/harness/evaluation";
+import { SOCIAL_METRIC_PROMOTION_POLICY } from "../src/harness/socialMetricPromotion";
+import {
+  WEREWOLF_METRIC_PROMOTION_CATALOG_ID,
+  WEREWOLF_METRIC_PROMOTION_POLICY
+} from "../src/harness/werewolfMetricPromotion";
 import { deriveSocialExposureRecords } from "../src/harness/social";
 import {
   WEREWOLF_ADVERSARIAL_EVALUATOR_ID,
@@ -17,7 +30,9 @@ import {
   createWerewolfDeceptionEvaluator,
   createWerewolfSocialCalibrationEvaluator,
   evaluateAdversarialMatch,
+  metricsFromWerewolfDeceptionEvaluation,
   metricsFromWerewolfInfluenceEvaluation,
+  metricsFromWerewolfVoteAccuracyEvaluation,
   WEREWOLF_INFLUENCE_EVALUATOR_ID,
   WEREWOLF_INFLUENCE_METRIC_IDS,
   WEREWOLF_OUTCOME_EVALUATOR_ID,
@@ -143,7 +158,8 @@ describe("generic evaluation registry", () => {
               scope: "episode",
               value: context.finalState.ok ? 1 : 0,
               weight: 1,
-              source: "generic.social-test"
+              source: "generic.social-test",
+              evidenceRefs: [{ artifact: "state", description: "final_state.ok" }]
             }),
             metric({
               id: "agent.score",
@@ -152,7 +168,8 @@ describe("generic evaluation registry", () => {
               subjectId: "a1",
               value: 0.2,
               weight: 1,
-              source: "generic.social-test"
+              source: "generic.social-test",
+              evidenceRefs: [{ artifact: "trace", traceId: "a1-turn-1" }]
             }),
             metric({
               id: "agent.score",
@@ -161,7 +178,8 @@ describe("generic evaluation registry", () => {
               subjectId: "a1",
               value: 0.8,
               weight: 3,
-              source: "generic.social-test"
+              source: "generic.social-test",
+              evidenceRefs: [{ artifact: "trace", traceId: "a1-turn-2" }]
             })
           ],
           output: { checked: true }
@@ -206,6 +224,457 @@ describe("generic evaluation registry", () => {
     expect(report.outputs["generic.social-test"]).toEqual({ checked: true });
     expect(report.summary.episodeScore).toBe(1);
     expect(report.summary.agentScores.a1).toBe(0.65);
+  });
+
+  it("applies evaluation.metric-promotion.v1 so zero-weight and unevidenced weights stay off scorecards", () => {
+    const evaluator: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.promotion-policy",
+      label: "Promotion policy evaluator",
+      version: "1.0.0",
+      evaluate() {
+        return {
+          evaluatorId: "generic.promotion-policy",
+          label: "Promotion policy evaluator",
+          version: "1.0.0",
+          metrics: [
+            metric({
+              id: "episode.scorecard_ready",
+              label: "Scorecard ready",
+              scope: "episode",
+              value: 1,
+              weight: 2,
+              source: "generic.promotion-policy",
+              evidenceRefs: [{ artifact: "event", seq: 1 }]
+            }),
+            metric({
+              id: "agent.temporal_diagnostic",
+              label: "Temporal diagnostic",
+              scope: "agent",
+              subjectId: "a1",
+              value: 0.9,
+              weight: 0,
+              source: "generic.promotion-policy",
+              evidenceRefs: [{ artifact: "message", seq: 2 }],
+              promotionClass: "diagnostic"
+            }),
+            metric({
+              id: "agent.positive_weight_no_evidence",
+              label: "Positive weight no evidence",
+              scope: "agent",
+              subjectId: "a1",
+              value: 0.5,
+              weight: 4,
+              source: "generic.promotion-policy"
+            }),
+            metric({
+              id: "agent.explicit_scorecard",
+              label: "Explicit scorecard",
+              scope: "agent",
+              subjectId: "a2",
+              value: 0.25,
+              weight: 1,
+              source: "generic.promotion-policy",
+              promotionClass: "scorecard",
+              evidenceRefs: [{ artifact: "trace", traceId: "a2-decision" }]
+            }),
+            metric({
+              id: "model.benchmark_only",
+              label: "Benchmark only",
+              scope: "model",
+              subjectId: "model-a",
+              value: 0.8,
+              weight: 3,
+              source: "generic.promotion-policy",
+              promotionClass: "benchmark_only",
+              evidenceRefs: [{ artifact: "state", description: "benchmark seed" }]
+            })
+          ]
+        };
+      }
+    };
+
+    const report = runEvaluationRegistry({
+      id: "promotion-policy-eval",
+      createdAt: new Date(0).toISOString(),
+      context: genericContext("promotion-policy-eval"),
+      evaluators: [evaluator]
+    });
+
+    expect(report.summary.episodeScore).toBe(1);
+    expect(report.summary.agentScores).toEqual({ a2: 0.25 });
+    expect(report.summary.modelScores).toEqual({});
+    expect(report.summary.promotion).toMatchObject({
+      policyId: "evaluation.metric-promotion.v1",
+      catalogId: "harness.metric-promotion.generic.v1",
+      catalogDomainId: "harness.generic",
+      catalogEntryCount: 0,
+      catalogRuleCount: 0,
+      catalogRuleIds: [],
+      catalogScorecardMetricIds: [],
+      catalogDiagnosticMetricIds: [],
+      catalogBenchmarkOnlyMetricIds: [],
+      scorecardMetricCount: 2,
+      diagnosticMetricCount: 3,
+      weightedMetricCount: 4,
+      excludedWeightedMetricCount: 2,
+      excludedWeightedMetricIds: ["agent.positive_weight_no_evidence", "model.benchmark_only"],
+      scorecardRequiresEvidence: true,
+      scorecardRequiresPositiveWeight: true,
+      uncatalogedMetricPolicy: "implicit_positive_weight_with_evidence"
+    });
+    expect(report.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "metric.weighted_excluded_from_scorecard",
+          metricId: "agent.positive_weight_no_evidence"
+        }),
+        expect.objectContaining({
+          code: "metric.weighted_excluded_from_scorecard",
+          metricId: "model.benchmark_only",
+          metadata: expect.objectContaining({
+            promotionClass: "benchmark_only"
+          })
+        })
+      ])
+    );
+  });
+
+  it("projects research topMetrics rows with promotion decisions without inventing scorecard eligibility", () => {
+    const rows = summarizeResearchMetricPromotionRows(
+      [
+        metric({
+          id: "agent.reward",
+          label: "Agent reward",
+          scope: "agent",
+          subjectId: "a1",
+          value: 1,
+          weight: 1,
+          source: "werewolf.outcome.v1",
+          evidenceRefs: [{ artifact: "state", id: "final" }]
+        }),
+        metric({
+          id: "agent.social.commitment_speech_act_ingest_link_count",
+          label: "Commitment ingest",
+          scope: "agent",
+          subjectId: "a1",
+          value: 2,
+          weight: 0,
+          source: "evaluation.social-fact-ingest-evidence.v1",
+          evidenceRefs: [{ artifact: "message", seq: 3 }]
+        }),
+        metric({
+          id: "agent.extra",
+          label: "Extra",
+          scope: "agent",
+          subjectId: "a2",
+          value: 0,
+          weight: 0,
+          source: "generic"
+        })
+      ],
+      2,
+      WEREWOLF_METRIC_PROMOTION_POLICY
+    );
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      id: "agent.reward",
+      subjectId: "a1",
+      promotionClass: "scorecard",
+      scorecardEligible: true
+    });
+    expect(rows[0]?.promotionDecisionId).toBe(`${WEREWOLF_METRIC_PROMOTION_CATALOG_ID}#agent.reward`);
+    expect(rows[1]).toMatchObject({
+      id: "agent.social.commitment_speech_act_ingest_link_count",
+      promotionClass: "diagnostic",
+      scorecardEligible: false
+    });
+    expect(rows[1]?.promotionDecisionId).toBe(
+      `${WEREWOLF_METRIC_PROMOTION_CATALOG_ID}#agent.social.commitment_speech_act_ingest_link_count`
+    );
+  });
+
+  it("keeps exact catalog diagnostic decisions for all social metric id constants", () => {
+    const socialMetricIds = [
+      ...SOCIAL_STATE_METRIC_IDS,
+      ...SOCIAL_DYNAMICS_METRIC_IDS,
+      ...SOCIAL_FACT_INGEST_EVIDENCE_METRIC_IDS,
+      ...COMMITMENT_COALITION_ASSOCIATION_METRIC_IDS,
+      ...COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS
+    ];
+
+    for (const metricId of socialMetricIds) {
+      const entry = metricPromotionCatalogEntry(metricId, SOCIAL_METRIC_PROMOTION_POLICY);
+      expect(entry, metricId).toBeDefined();
+      expect(entry?.promotionClass).toBe("diagnostic");
+      // Exact catalog entries use metric-id decision ids; prefix/include rules use rule ids.
+      expect(entry?.decisionId).toBe(`harness.social.metric-promotion.catalog.v1#${metricId}`);
+    }
+
+    // Guard the previously missing ingest-link family explicitly.
+    expect(metricPromotionCatalogEntry("agent.social.commitment_speech_act_ingest_link_count", SOCIAL_METRIC_PROMOTION_POLICY)).toMatchObject({
+      promotionClass: "diagnostic",
+      decisionId: "harness.social.metric-promotion.catalog.v1#agent.social.commitment_speech_act_ingest_link_count"
+    });
+  });
+
+  it("never promotes social metric constants to scorecard even with weight and evidence", () => {
+    const socialMetricIds = [
+      ...SOCIAL_STATE_METRIC_IDS,
+      ...SOCIAL_DYNAMICS_METRIC_IDS,
+      ...SOCIAL_FACT_INGEST_EVIDENCE_METRIC_IDS,
+      ...COMMITMENT_COALITION_ASSOCIATION_METRIC_IDS,
+      ...COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS
+    ];
+
+    for (const metricId of socialMetricIds) {
+      const decision = decideMetricPromotion(
+        metric({
+          id: metricId,
+          label: metricId,
+          scope: "agent",
+          subjectId: "a1",
+          value: 1,
+          weight: 1,
+          source: "test.social-anti-promotion",
+          evidenceRefs: [{ artifact: "agent_state", seq: 1 }]
+        }),
+        SOCIAL_METRIC_PROMOTION_POLICY
+      );
+      expect(decision, metricId).toMatchObject({
+        eligibleForScorecard: false,
+        promotionClass: "diagnostic",
+        catalogDecisionId: `harness.social.metric-promotion.catalog.v1#${metricId}`
+      });
+      expect(decision.reasons).toEqual(expect.arrayContaining(["catalog_diagnostic"]));
+    }
+
+    // Scorecard metrics remain eligible under the same weight/evidence conditions.
+    expect(
+      decideMetricPromotion(
+        metric({
+          id: "agent.reward",
+          label: "Agent reward",
+          scope: "agent",
+          subjectId: "a1",
+          value: 1,
+          weight: 1,
+          source: "test.social-anti-promotion",
+          evidenceRefs: [{ artifact: "event", seq: 1 }]
+        }),
+        WEREWOLF_METRIC_PROMOTION_POLICY
+      )
+    ).toMatchObject({
+      eligibleForScorecard: true,
+      promotionClass: "scorecard"
+    });
+  });
+
+  it("covers all Werewolf metric id constants with exact catalog decisions", () => {
+    const scorecardMetricIds = new Set([
+      "episode.completed_with_winner",
+      "team.reward",
+      "agent.reward",
+      "profile.agent_reward",
+      "model.agent_reward",
+      "agent.vote_accuracy",
+      "agent.deception_score"
+    ]);
+    const werewolfMetricIds = [
+      ...WEREWOLF_OUTCOME_METRIC_IDS,
+      ...WEREWOLF_VOTE_ACCURACY_METRIC_IDS,
+      ...WEREWOLF_ROLE_SURVIVAL_METRIC_IDS,
+      ...WEREWOLF_INFLUENCE_METRIC_IDS,
+      ...WEREWOLF_DECEPTION_METRIC_IDS,
+      ...WEREWOLF_SOCIAL_CALIBRATION_METRIC_IDS,
+      ...DECEPTION_BELIEF_SHIFT_METRIC_IDS,
+      ...DECEPTION_REPUTATION_ASSOCIATION_METRIC_IDS
+    ];
+
+    for (const metricId of werewolfMetricIds) {
+      const entry = metricPromotionCatalogEntry(metricId, WEREWOLF_METRIC_PROMOTION_POLICY);
+      expect(entry, metricId).toBeDefined();
+      expect(entry?.decisionId).toBe(`${WEREWOLF_METRIC_PROMOTION_CATALOG_ID}#${metricId}`);
+      if (scorecardMetricIds.has(metricId)) {
+        expect(entry?.promotionClass, metricId).toBe("scorecard");
+        expect(
+          decideMetricPromotion(
+            metric({
+              id: metricId,
+              label: metricId,
+              scope: "agent",
+              subjectId: "a1",
+              value: 1,
+              weight: 1,
+              source: "test.werewolf-catalog",
+              evidenceRefs: [{ artifact: "event", seq: 1 }]
+            }),
+            WEREWOLF_METRIC_PROMOTION_POLICY
+          )
+        ).toMatchObject({
+          eligibleForScorecard: true,
+          promotionClass: "scorecard"
+        });
+      } else {
+        expect(entry?.promotionClass, metricId).toBe("diagnostic");
+        expect(
+          decideMetricPromotion(
+            metric({
+              id: metricId,
+              label: metricId,
+              scope: "agent",
+              subjectId: "a1",
+              value: 1,
+              weight: 1,
+              source: "test.werewolf-catalog",
+              evidenceRefs: [{ artifact: "event", seq: 1 }]
+            }),
+            WEREWOLF_METRIC_PROMOTION_POLICY
+          )
+        ).toMatchObject({
+          eligibleForScorecard: false,
+          promotionClass: "diagnostic",
+          catalogDecisionId: `${WEREWOLF_METRIC_PROMOTION_CATALOG_ID}#${metricId}`
+        });
+      }
+    }
+  });
+
+
+
+
+  it("applies formal metric promotion catalog decisions for known Werewolf metric ids", () => {
+    const evaluator: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.catalog-promotion",
+      label: "Catalog promotion evaluator",
+      version: "1.0.0",
+      evaluate() {
+        return {
+          evaluatorId: "generic.catalog-promotion",
+          label: "Catalog promotion evaluator",
+          version: "1.0.0",
+          metrics: [
+            metric({
+              id: "agent.reward",
+              label: "Agent reward",
+              scope: "agent",
+              subjectId: "a1",
+              value: 0.8,
+              weight: 1,
+              source: "generic.catalog-promotion",
+              evidenceRefs: [{ artifact: "event", seq: 1 }]
+            }),
+            metric({
+              id: "agent.survival_rate",
+              label: "Survival",
+              scope: "agent",
+              subjectId: "a1",
+              value: 1,
+              weight: 0,
+              source: "generic.catalog-promotion",
+              evidenceRefs: [{ artifact: "state", description: "alive" }]
+            }),
+            metric({
+              id: "agent.false_role_claim_belief_temporal_association_rate",
+              label: "Belief temporal rate",
+              scope: "agent",
+              subjectId: "a1",
+              value: 0.5,
+              weight: 0,
+              source: "generic.catalog-promotion",
+              evidenceRefs: [{ artifact: "message", seq: 2 }]
+            }),
+            metric({
+              id: "agent.social.memory_count",
+              label: "Social memory count",
+              scope: "agent",
+              subjectId: "a1",
+              value: 4,
+              weight: 0,
+              source: "generic.catalog-promotion",
+              evidenceRefs: [{ artifact: "agent_state", description: "memory" }]
+            }),
+            metric({
+              id: "agent.future_temporal_association_probe",
+              label: "Future temporal probe",
+              scope: "agent",
+              subjectId: "a1",
+              value: 0.1,
+              weight: 0,
+              source: "generic.catalog-promotion",
+              evidenceRefs: [{ artifact: "trace", traceId: "future-temporal" }]
+            })
+          ]
+        };
+      }
+    };
+
+    const report = runEvaluationRegistry({
+      id: "catalog-promotion-eval",
+      createdAt: new Date(0).toISOString(),
+      context: genericContext("catalog-promotion-eval"),
+      evaluators: [evaluator],
+      promotionPolicy: WEREWOLF_METRIC_PROMOTION_POLICY
+    });
+
+    expect(resolveRecordedMetricPromotion(report.metrics[0]!)).toMatchObject({
+      eligibleForScorecard: true,
+      promotionClass: "scorecard",
+      reasons: ["catalog_scorecard"],
+      catalogDecisionId: `${WEREWOLF_METRIC_PROMOTION_CATALOG_ID}#agent.reward`
+    });
+    expect(resolveRecordedMetricPromotion(report.metrics[1]!)).toMatchObject({
+      eligibleForScorecard: false,
+      promotionClass: "diagnostic",
+      reasons: ["catalog_diagnostic"],
+      catalogDecisionId: `${WEREWOLF_METRIC_PROMOTION_CATALOG_ID}#agent.survival_rate`
+    });
+    expect(resolveRecordedMetricPromotion(report.metrics[2]!)).toMatchObject({
+      eligibleForScorecard: false,
+      promotionClass: "diagnostic",
+      reasons: ["catalog_diagnostic"],
+      catalogDecisionId:
+        `${WEREWOLF_METRIC_PROMOTION_CATALOG_ID}#agent.false_role_claim_belief_temporal_association_rate`
+    });
+    expect(resolveRecordedMetricPromotion(report.metrics[3]!)).toMatchObject({
+      eligibleForScorecard: false,
+      promotionClass: "diagnostic",
+      reasons: ["catalog_diagnostic"],
+      catalogDecisionId: `${WEREWOLF_METRIC_PROMOTION_CATALOG_ID}#agent.social.memory_count`
+    });
+    expect(resolveRecordedMetricPromotion(report.metrics[4]!)).toMatchObject({
+      eligibleForScorecard: false,
+      promotionClass: "diagnostic",
+      reasons: ["catalog_diagnostic"],
+      catalogDecisionId: `${WEREWOLF_METRIC_PROMOTION_CATALOG_ID}#includes:temporal_association`
+    });
+    expect(report.summary.agentScores).toEqual({ a1: 0.8 });
+    expect(report.summary.promotion.catalogScorecardMetricIds).toContain("agent.reward");
+    expect(report.summary.promotion.catalogRuleCount).toBe(3);
+    expect(report.summary.promotion.catalogRuleIds).toEqual([
+      "prefix:agent.social.",
+      "includes:temporal_association",
+      "includes:temporal_evaluable"
+    ]);
+    expect(report.summary.promotion.catalogDiagnosticMetricIds).toEqual(
+      expect.arrayContaining([
+        "agent.survival_rate",
+        "agent.false_role_claim_belief_temporal_association_rate",
+        "agent.social.memory_count"
+      ])
+    );
   });
 
   it("normalizes defaults and preserves explicit additive metric fields", () => {
@@ -383,20 +852,16 @@ describe("generic evaluation registry", () => {
     });
 
     expect(report.outputs["generic.result-id"]).toEqual({ ordinal: 2 });
+    const warningCodes = (report.warnings ?? []).map((warning) => warning.code);
+    expect(warningCodes).toEqual(
+      expect.arrayContaining([
+        "evaluator.identity_mismatch",
+        "manifest.metric_id_undeclared",
+        "manifest.metric_id_declared_not_emitted"
+      ])
+    );
     expect(report.warnings).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          code: "evaluator.identity_mismatch",
-          severity: "warning",
-          evaluatorId: "generic.result-id",
-          evaluatorVersion: "1.0.0"
-        }),
-        expect.objectContaining({
-          code: "evaluator.duplicate_output_key",
-          severity: "warning",
-          evaluatorId: "generic.result-id",
-          metadata: expect.objectContaining({ count: 2 })
-        }),
         expect.objectContaining({
           code: "manifest.metric_id_undeclared",
           severity: "warning",
@@ -408,6 +873,11 @@ describe("generic evaluation registry", () => {
           severity: "info",
           evaluatorId: "generic.result-id",
           metricId: "episode.missing"
+        }),
+        expect.objectContaining({
+          code: "evaluator.identity_mismatch",
+          severity: "warning",
+          evaluatorId: "generic.result-id"
         })
       ])
     );
@@ -492,12 +962,36 @@ describe("generic evaluation registry", () => {
 
     expect(report.summary.episodeScore).toBe(0.75);
     expect(Number.isFinite(report.summary.episodeScore)).toBe(true);
+    expect(report.summary.agentScores.a1).toBeUndefined();
+    expect(report.summary.promotion).toMatchObject({
+      policyId: DEFAULT_METRIC_PROMOTION_POLICY.id,
+      catalogId: DEFAULT_METRIC_PROMOTION_POLICY.catalog.id,
+      catalogEntryCount: 0,
+      catalogRuleCount: 0,
+      catalogRuleIds: [],
+      scorecardMetricCount: 1,
+      weightedMetricCount: 3,
+      excludedWeightedMetricCount: 2,
+      scorecardRequiresEvidence: true,
+      scorecardRequiresPositiveWeight: true,
+      uncatalogedMetricPolicy: "implicit_positive_weight_with_evidence"
+    });
+    expect(report.summary.promotion.excludedWeightedMetricIds).toEqual(
+      expect.arrayContaining(["agent.weighted_missing_evidence", "episode.invalid_nan"])
+    );
     expect(report.warnings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           code: "metric.weighted_without_evidence",
           metricId: "agent.weighted_missing_evidence",
           subjectId: "a1"
+        }),
+        expect.objectContaining({
+          code: "metric.weighted_excluded_from_scorecard",
+          metricId: "agent.weighted_missing_evidence",
+          metadata: expect.objectContaining({
+            reasons: expect.arrayContaining(["missing_evidence_refs"])
+          })
         }),
         expect.objectContaining({
           code: "metric.non_episode_missing_subject",
@@ -3147,7 +3641,7 @@ describe("generic evaluation registry", () => {
             id: "act-coalition-linked",
             kind: "coalition_signal",
             targetId: "p3",
-            value: "pressure p3",
+            value: "werewolf.killVote",
             confidence: 0.8,
             evidenceRefs: [{ artifact: "message", id: "msg-coalition-linked", seq: 2 }],
             metadata: { coalitionId: "coalition-linked", memberIds: ["p1", "p2"], sharedGoal: "pressure p3" }
@@ -3822,10 +4316,16 @@ describe("social dynamics evaluator", () => {
     expect(exposureByAgent.find((item) => item.subjectId === "p2")).toMatchObject({
       value: 1,
       denominator: 3,
+      subject: {
+        actorId: "p2",
+        playerId: "p2",
+        policyId: "balanced",
+        policyName: "balanced"
+      },
       evidenceRefs: expect.arrayContaining([
         expect.objectContaining({ artifact: "message", id: "msg-1", seq: 1 }),
         expect.objectContaining({ artifact: "trace", traceId: "trace-p2", seq: 1 }),
-        expect.objectContaining({ artifact: "trace", traceId: "trace-p2", description: expect.stringContaining("observation:") })
+        expect.objectContaining({ artifact: "observation", traceId: "trace-p2", description: expect.stringContaining("observation") })
       ]),
       metadata: expect.objectContaining({
         exposureRecords: 1,
@@ -3842,7 +4342,7 @@ describe("social dynamics evaluator", () => {
       evidenceRefs: expect.arrayContaining([
         expect.objectContaining({ artifact: "message", id: "msg-1", seq: 1 }),
         expect.objectContaining({ artifact: "message", id: "msg-2", seq: 2 }),
-        expect.objectContaining({ artifact: "trace", traceId: "trace-p3", description: expect.stringContaining("observation:") })
+        expect.objectContaining({ artifact: "observation", traceId: "trace-p3", description: expect.stringContaining("observation") })
       ]),
       metadata: expect.objectContaining({
         exposureRecords: 2,
@@ -4163,7 +4663,7 @@ describe("werewolf deception evaluator", () => {
       evidenceRefs: expect.arrayContaining([
         expect.objectContaining({ artifact: "message", id: "msg-1", seq: 1 }),
         expect.objectContaining({ artifact: "trace", traceId: "trace-observer-one", seq: 2 }),
-        expect.objectContaining({ artifact: "trace", traceId: "trace-observer-one", description: expect.stringContaining("observation:") }),
+        expect.objectContaining({ artifact: "observation", traceId: "trace-observer-one", description: expect.stringContaining("observation") }),
         expect.objectContaining({ artifact: "state", description: `postgame role truth for ${speaker.id}` })
       ]),
       metadata: expect.objectContaining({
@@ -4185,7 +4685,7 @@ describe("werewolf deception evaluator", () => {
       evidenceRefs: expect.arrayContaining([
         expect.objectContaining({ artifact: "message", id: "msg-1", seq: 1 }),
         expect.objectContaining({ artifact: "message", id: "msg-4", seq: 4 }),
-        expect.objectContaining({ artifact: "trace", traceId: "trace-observer-two", description: expect.stringContaining("observation:") }),
+        expect.objectContaining({ artifact: "observation", traceId: "trace-observer-two", description: expect.stringContaining("observation") }),
         expect.objectContaining({ artifact: "state", description: `postgame role truth for ${speaker.id}` }),
         expect.objectContaining({ artifact: "state", description: `postgame role truth for ${secondSpeaker.id}` })
       ]),
@@ -5072,7 +5572,7 @@ describe("werewolf deception evaluator", () => {
       evidenceRefs: expect.arrayContaining([
         expect.objectContaining({ artifact: "message", id: "msg-1", seq: 1 }),
         expect.objectContaining({ artifact: "trace", traceId: "trace-follower-vote", description: "vote.cast" }),
-        expect.objectContaining({ artifact: "trace", traceId: "trace-resister-vote", description: expect.stringContaining("observation:") }),
+        expect.objectContaining({ artifact: "observation", traceId: "trace-resister-vote", description: expect.stringContaining("observation") }),
         expect.objectContaining({ artifact: "event", id: "event-vote-followed", description: "vote.cast" }),
         expect.objectContaining({ artifact: "event", id: "event-vote-resisted", description: "vote.cast" }),
         expect.objectContaining({ artifact: "state", description: `postgame role truth for ${speaker.id}` })
@@ -5230,8 +5730,8 @@ describe("werewolf social calibration evaluator", () => {
       weight: 0,
       aggregation: "average_brier_score",
       evidenceRefs: expect.arrayContaining([
-        expect.objectContaining({ artifact: "trace", traceId: "trace-belief-wolf", description: expect.stringContaining("observation:") }),
-        expect.objectContaining({ artifact: "trace", traceId: "trace-belief-village", description: expect.stringContaining("observation:") }),
+        expect.objectContaining({ artifact: "observation", traceId: "trace-belief-wolf", description: "belief update for p2" }),
+        expect.objectContaining({ artifact: "observation", traceId: "trace-belief-village", description: "belief update for p1" }),
         expect.objectContaining({ artifact: "agent_state", id: observer!.id, description: "socialStateHash:hash-social-calibration" }),
         expect.objectContaining({ artifact: "state", description: "postgame team truth for wolf belief calibration" })
       ]),
@@ -5302,46 +5802,30 @@ describe("werewolf evaluation report integration", () => {
         SOCIAL_STATE_EVALUATOR_ID,
         COMMITMENT_COALITION_ASSOCIATION_EVALUATOR_ID,
         COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
+        DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID,
         SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_ID,
         SOCIAL_DYNAMICS_EVALUATOR_ID
       ])
     );
-    expect(result.evaluationReport.evaluatorIds).not.toContain(NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(artifact.evaluationReport.evaluatorIds).not.toContain(NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(result.evaluationReport.evaluatorIds).not.toContain(GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(artifact.evaluationReport.evaluatorIds).not.toContain(GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    for (const metricId of GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_METRIC_IDS) {
-      expect(result.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-      expect(artifact.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-    }
-    expect(result.evaluationReport.evaluatorIds).not.toContain(TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(artifact.evaluationReport.evaluatorIds).not.toContain(TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    for (const metricId of TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS) {
-      expect(result.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-      expect(artifact.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-    }
-    expect(result.evaluationReport.evaluatorIds).not.toContain(TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(artifact.evaluationReport.evaluatorIds).not.toContain(TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    for (const metricId of TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_METRIC_IDS) {
-      expect(result.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-      expect(artifact.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-    }
-    expect(result.evaluationReport.evaluatorIds).not.toContain(TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(artifact.evaluationReport.evaluatorIds).not.toContain(TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    for (const metricId of TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS) {
-      expect(result.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-      expect(artifact.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-    }
-    expect(result.evaluationReport.evaluatorIds).not.toContain(BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(artifact.evaluationReport.evaluatorIds).not.toContain(BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    for (const metricId of BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS) {
-      expect(result.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-      expect(artifact.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-    }
-    const defaultRegistryIds = result.evaluationReport.evaluatorRegistry?.map((entry) => entry.id) ?? [];
-    expect(defaultRegistryIds).not.toContain(TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(defaultRegistryIds).not.toContain(TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(defaultRegistryIds).not.toContain(BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
+    expect(artifact.evaluationReport.evaluatorIds).toEqual(
+      expect.arrayContaining([
+        NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
+        DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID
+      ])
+    );
     expect(result.evaluationReport.evaluatorRegistry).toEqual(
       expect.arrayContaining([
         {
@@ -5482,6 +5966,143 @@ describe("werewolf evaluation report integration", () => {
           visibility: "postgame"
         },
         {
+          id: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          label: "Norm-sanction lifecycle temporal association evaluator",
+          version: "1.0.0",
+          inputSchema: "harness.norm-sanction-lifecycle-temporal-association.evaluation-context.v1",
+          outputSchema: "harness.norm-sanction-lifecycle-temporal-association.summary.v1",
+          mode: "deterministic",
+          metricIds: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          rubric: expect.any(String),
+          dependencies: {
+            mutationJournal:
+              "AgentSocialState.journal.entries with subjectId, mutationKind, turnIndex, deltaSummary, evidenceRefs, and hiddenTruthUsed=false",
+            socialState: "AgentSocialState.norms and AgentSocialState.normSanctions for record denominators"
+          },
+          aggregation: "zero_weight_norm_sanction_lifecycle_temporal_association_by_agent",
+          visibility: "postgame"
+        },
+        {
+          id: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          label: "Gossip-exposure temporal association evaluator",
+          version: "1.0.0",
+          inputSchema: "harness.gossip-exposure-temporal-association.evaluation-context.v1",
+          outputSchema: "harness.gossip-exposure-temporal-association.summary.v1",
+          mode: "deterministic",
+          metricIds: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          rubric: expect.any(String),
+          dependencies: {
+            socialExposure: "SocialExposureRecord records from deriveSocialExposureRecords() over SocialEpisodeArtifact steps/messages",
+            mutationJournal:
+              "AgentSocialState.journal.entries with store gossip, mutationKind gossip.added, subjectId, turnIndex, hiddenTruthUsed, and evidenceRefs",
+            socialState: "AgentSocialState.gossip records for record denominators"
+          },
+          aggregation: "zero_weight_gossip_exposure_temporal_association_by_agent",
+          visibility: "postgame"
+        },
+        {
+          id: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          label: "Trust-repair lifecycle temporal association evaluator",
+          version: "1.0.0",
+          inputSchema: "harness.trust-repair-lifecycle-temporal-association.evaluation-context.v1",
+          outputSchema: "harness.trust-repair-lifecycle-temporal-association.summary.v1",
+          mode: "deterministic",
+          metricIds: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          rubric: expect.any(String),
+          dependencies: {
+            mutationJournal:
+              "AgentSocialState.journal.entries with subjectId, mutationKind, turnIndex, deltaSummary, hiddenTruthUsed, and evidenceRefs",
+            socialState: "AgentSocialState.trustRepairs records for record denominators"
+          },
+          aggregation: "zero_weight_trust_repair_lifecycle_temporal_association_by_agent",
+          visibility: "postgame"
+        },
+        {
+          id: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          label: "Trust-repair relationship temporal association evaluator",
+          version: "1.0.0",
+          inputSchema: "harness.trust-repair-relationship-temporal-association.evaluation-context.v1",
+          outputSchema: "harness.trust-repair-relationship-temporal-association.summary.v1",
+          mode: "deterministic",
+          metricIds: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          rubric: expect.any(String),
+          dependencies: {
+            mutationJournal:
+              "AgentSocialState.journal.entries with store trustRepairs/relationships, mutationKind trust_repair.added/relationship.updated, subjectId, turnIndex, deltaSummary, hiddenTruthUsed, and evidenceRefs",
+            socialState: "AgentSocialState.trustRepairs records and AgentSocialState.relationships edges for record denominators"
+          },
+          aggregation: "zero_weight_trust_repair_relationship_temporal_association_by_agent",
+          visibility: "postgame"
+        },
+        {
+          id: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          label: "Trust-repair reputation temporal association evaluator",
+          version: "1.0.0",
+          inputSchema: "harness.trust-repair-reputation-temporal-association.evaluation-context.v1",
+          outputSchema: "harness.trust-repair-reputation-temporal-association.summary.v1",
+          mode: "deterministic",
+          metricIds: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          rubric: expect.any(String),
+          dependencies: {
+            mutationJournal:
+              "AgentSocialState.journal.entries with store trustRepairs/reputation, mutationKind trust_repair.added/reputation.updated, subjectId, turnIndex, deltaSummary, hiddenTruthUsed, and evidenceRefs",
+            socialState: "AgentSocialState.trustRepairs records and AgentSocialState.reputation records for record denominators"
+          },
+          aggregation: "zero_weight_trust_repair_reputation_temporal_association_by_agent",
+          visibility: "postgame"
+        },
+        {
+          id: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          label: "Betrayal lifecycle temporal association evaluator",
+          version: "1.0.0",
+          inputSchema: "harness.betrayal-lifecycle-temporal-association.evaluation-context.v1",
+          outputSchema: "harness.betrayal-lifecycle-temporal-association.summary.v1",
+          mode: "deterministic",
+          metricIds: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          rubric: expect.any(String),
+          dependencies: {
+            mutationJournal:
+              "AgentSocialState.journal.entries with store betrayals, mutationKind betrayal.added/betrayal.evidence.recorded, subjectId, turnIndex, deltaSummary, hiddenTruthUsed, and evidenceRefs",
+            socialState: "AgentSocialState.betrayals records for record denominators"
+          },
+          aggregation: "zero_weight_betrayal_lifecycle_temporal_association_by_agent",
+          visibility: "postgame"
+        },
+        {
+          id: DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
+          label: "Deception belief-shift temporal association evaluator",
+          version: "1.0.0",
+          inputSchema: "werewolf.deception-belief-shift.evaluation-context.v1",
+          outputSchema: "evaluation.deception-belief-shift.temporal-association.v1",
+          mode: "deterministic",
+          metricIds: DECEPTION_BELIEF_SHIFT_METRIC_IDS,
+          rubric: expect.any(String),
+          dependencies: {
+            exposureRecords: "SocialExposureRecord from deriveSocialExposureRecords()",
+            mutationJournal: "AgentSocialState.journal.entries",
+            falseClaimTruth: "postgame role truth for claim classification only"
+          },
+          aggregation: "zero_weight_temporal_association_by_agent",
+          visibility: "postgame"
+        },
+        {
+          id: DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID,
+          label: "Deception reputation temporal association evaluator",
+          version: "1.0.0",
+          inputSchema: "werewolf.deception-reputation-association.evaluation-context.v1",
+          outputSchema: "evaluation.deception-reputation-association.temporal-association.v1",
+          mode: "deterministic",
+          metricIds: DECEPTION_REPUTATION_ASSOCIATION_METRIC_IDS,
+          rubric: expect.any(String),
+          dependencies: {
+            exposureRecords: "SocialExposureRecord from deriveSocialExposureRecords()",
+            mutationJournal: "AgentSocialState.journal.entries",
+            falseClaimTruth: "postgame role truth for claim classification only"
+          },
+          aggregation: "zero_weight_reputation_temporal_association_by_agent",
+          visibility: "postgame"
+        },
+        {
           id: SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_ID,
           label: "Social fact ingest evidence evaluator",
           version: "1.0.0",
@@ -5516,10 +6137,32 @@ describe("werewolf evaluation report integration", () => {
     );
     expect(result.evaluationReport.metricCount).toBeGreaterThan(result.evaluation.agentRewards.length);
     expect(result.evaluationReport.metrics.every((item) => item.evaluatorId && item.evaluatorVersion && Array.isArray(item.evidenceRefs))).toBe(true);
-    for (const metricId of NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS) {
-      expect(result.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
-      expect(artifact.evaluationReport.metrics.map((item) => item.id)).not.toContain(metricId);
+    for (const evaluatorId of [
+      NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+      GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+      TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+      TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+      TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+      BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+      DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
+      DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID
+    ]) {
+      expect(result.evaluationReport.evaluatorIds).toContain(evaluatorId);
+      expect(artifact.evaluationReport.evaluatorIds).toContain(evaluatorId);
+      expect(result.evaluationReport.evaluatorRegistry?.some((entry) => entry.id === evaluatorId)).toBe(true);
     }
+    const newlyWiredMetricIds = new Set([
+      ...NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+      ...DECEPTION_BELIEF_SHIFT_METRIC_IDS,
+      ...DECEPTION_REPUTATION_ASSOCIATION_METRIC_IDS
+    ]);
+    const newlyWiredMetrics = result.evaluationReport.metrics.filter((item) => newlyWiredMetricIds.has(item.id));
+    expect(newlyWiredMetrics.every((item) => (item.weight ?? 0) === 0)).toBe(true);
     expect(result.evaluationReport.metrics.map((item) => item.id)).toEqual(
       expect.arrayContaining([
         "team.reward",
@@ -5541,7 +6184,7 @@ describe("werewolf evaluation report integration", () => {
     expect(result.evaluationReport.metrics.find((item) => item.id === "agent.reward")).toMatchObject({
       evaluatorId: WEREWOLF_OUTCOME_EVALUATOR_ID,
       evaluatorVersion: "1.0.0",
-      evidenceRefs: expect.arrayContaining([expect.objectContaining({ artifact: "event" })])
+      evidenceRefs: expect.arrayContaining([expect.objectContaining({ artifact: "trace", traceId: expect.any(String) })])
     });
     expect(result.evaluationReport.metrics.find((item) => item.id === "agent.survival_rate")).toMatchObject({
       evaluatorId: WEREWOLF_ROLE_SURVIVAL_EVALUATOR_ID,
@@ -5779,6 +6422,110 @@ describe("legacy influence reward guardrail", () => {
         limitation: "legacy_global_speech_vote_proxy_without_scoped_exposure"
       })
     });
+  });
+});
+
+describe("werewolf evidence fallback precision", () => {
+  it("uses vote and pressure records with player ids when event evidence is missing", () => {
+    const state = createGame({ id: "evidence-fallback-precision", seed: "evidence-fallback-precision" });
+    const voter = state.players.find((player) => player.team === "village")!;
+    const target = state.players.find((player) => player.id !== voter.id && player.team === "village")!;
+    const current = {
+      ...state,
+      votes: [
+        {
+          day: 1,
+          voterId: voter.id,
+          targetId: target.id,
+          abstain: false,
+          weight: 1
+        }
+      ],
+      speeches: [
+        {
+          day: 1,
+          playerId: voter.id,
+          text: "pressure without event",
+          pressureTargetId: target.id,
+          strategyTags: []
+        }
+      ]
+    };
+
+    const voteAccuracy = metricsFromWerewolfVoteAccuracyEvaluation(
+      {
+        winner: "village",
+        teamRewards: { village: 1, werewolves: 0 },
+        agentRewards: [],
+        voteAccuracyByAgent: {
+          [voter.id]: { votes: 1, correct: 0, accuracy: 0 }
+        },
+        influenceByAgent: {},
+        deceptionByAgent: {},
+        trajectory: []
+      },
+      current
+    ).find((metric) => metric.id === "agent.vote_accuracy" && metric.subjectId === voter.id);
+
+    expect(voteAccuracy?.evidenceRefs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          artifact: "state",
+          id: `${voter.id}:vote:d1:1`,
+          description: expect.stringContaining(`vote records for ${voter.id}`)
+        })
+      ])
+    );
+
+    const influence = metricsFromWerewolfInfluenceEvaluation(
+      {
+        winner: "village",
+        teamRewards: { village: 1, werewolves: 0 },
+        agentRewards: [],
+        voteAccuracyByAgent: {},
+        influenceByAgent: {
+          [voter.id]: { pressureCount: 1, voteFollowCount: 0, influenceRate: 0 }
+        },
+        deceptionByAgent: {},
+        trajectory: []
+      },
+      current
+    ).find((metric) => metric.id === "agent.influence_rate" && metric.subjectId === voter.id);
+
+    expect(influence?.evidenceRefs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          artifact: "state",
+          id: `${voter.id}:pressure:d1:1`,
+          description: expect.stringContaining(`pressure speeches for ${voter.id}`)
+        })
+      ])
+    );
+
+    const deception = metricsFromWerewolfDeceptionEvaluation(
+      {
+        winner: "village",
+        teamRewards: { village: 1, werewolves: 0 },
+        agentRewards: [],
+        voteAccuracyByAgent: {},
+        influenceByAgent: {},
+        deceptionByAgent: {
+          [voter.id]: { wolfSurvivalDays: 1, misdirectVotes: 1, score: 0.2 }
+        },
+        trajectory: []
+      },
+      current
+    ).find((metric) => metric.id === "agent.deception_score" && metric.subjectId === voter.id);
+
+    expect(deception?.evidenceRefs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          artifact: "state",
+          id: `${voter.id}:misdirect:d1:1`,
+          description: expect.stringContaining("village-on-village misdirect votes")
+        })
+      ])
+    );
   });
 });
 

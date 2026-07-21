@@ -18,7 +18,11 @@ import type {
   VoteRecord
 } from "./types";
 
-const now = () => new Date().toISOString();
+// Event timestamps are part of GameState and therefore part of replay hashes.
+// Derive them from the event sequence instead of wall-clock time so identical
+// seeds and commands produce byte-identical state regardless of execution day.
+const DETERMINISTIC_EVENT_EPOCH_MS = 0;
+const eventTimestamp = (seq: number): string => new Date(DETERMINISTIC_EVENT_EPOCH_MS + seq * 1000).toISOString();
 
 export function createGame(options: {
   id: string;
@@ -262,28 +266,6 @@ export function applyCommand(state: GameState, command: GameCommand): GameState 
   }
 
   return state;
-}
-
-export function appendHarnessTurn(state: GameState, payload: unknown): GameState {
-  return appendEvent(state, {
-    type: "harness.turn",
-    actorId: typeof payload === "object" && payload && "playerId" in payload ? String(payload.playerId) : undefined,
-    visibility: "postgame",
-    payload
-  });
-}
-
-export function appendHarnessError(
-  state: GameState,
-  actorId: string,
-  payload: { model: string; actionKind: string; message: string; traceId: string; [key: string]: unknown }
-): GameState {
-  return appendEvent(state, {
-    type: "harness.error",
-    actorId,
-    visibility: "postgame",
-    payload
-  });
 }
 
 export function computeMetrics(state: GameState): {
@@ -684,7 +666,7 @@ function appendEvent(
     seq,
     day: next.day,
     phase: next.phase,
-    createdAt: now(),
+    createdAt: eventTimestamp(seq),
     ...event
   });
   return next;

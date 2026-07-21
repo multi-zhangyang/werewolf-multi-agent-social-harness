@@ -1,9 +1,28 @@
-import { ModelCallError } from "../agents/schema";
+import { ModelCallError, isProviderFailureKind as schemaIsProviderFailureKind } from "../agents/schema";
 import { redactSecretText } from "./redaction";
 import type { ProviderFailureSummary } from "./types";
 
 export function describeError(error: unknown): string {
   return redactSecretText(error instanceof Error ? error.message : String(error));
+}
+
+/**
+ * Returns a diagnostics-safe failure label without relaying provider response
+ * bodies, request identifiers, retry text, or arbitrary exception content.
+ */
+export function safeProviderFailureMessage(error: unknown, fallback: string): string {
+  const failure = providerFailureFromError(error);
+  if (!failure) return fallback;
+  const details = [
+    `kind=${failure.failureKind}`,
+    failure.providerStage ? `stage=${failure.providerStage}` : null,
+    failure.status !== undefined ? `status=${failure.status}` : null,
+    failure.timeoutMs !== undefined ? `timeoutMs=${failure.timeoutMs}` : null,
+    failure.attempts !== undefined
+      ? `attempts=${failure.attempts}${failure.maxAttempts !== undefined ? `/${failure.maxAttempts}` : ""}`
+      : null
+  ].filter((detail): detail is string => detail !== null);
+  return `Model provider failure (${details.join(", ")}).`;
 }
 
 export function providerFailureFromError(error: unknown): ProviderFailureSummary | undefined {
@@ -69,18 +88,7 @@ function errorCause(error: unknown): unknown {
 }
 
 function isProviderFailureKind(value: string | undefined): value is ProviderFailureSummary["failureKind"] {
-  return (
-    value === "http" ||
-    value === "timeout" ||
-    value === "abort" ||
-    value === "stream_invalid_json" ||
-    value === "stream_empty" ||
-    value === "stream_missing_body" ||
-    value === "non_json" ||
-    value === "empty_content" ||
-    value === "network" ||
-    value === "unknown"
-  );
+  return schemaIsProviderFailureKind(value);
 }
 
 function isProviderFailureStage(value: string | undefined): value is NonNullable<ProviderFailureSummary["providerStage"]> {

@@ -135,6 +135,35 @@ describe("OpenAI-compatible client provider telemetry", () => {
     });
   });
 
+  it("classifies nginx HTML gateway auth failures as gateway_html", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        "<html>\r\n<head><title>401 Authorization Required</title></head>\r\n<body>\r\n<center><h1>401 Authorization Required</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n",
+        {
+          status: 401,
+          headers: { "content-type": "text/html" }
+        }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await captureModelCallError(() => client({ maxRetries: 1 }).complete(request()));
+    const raw = error.raw as Record<string, unknown>;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(error.message).toContain("gateway returned HTML");
+    expect(error.message).not.toMatch(/sk-|Bearer\s+/i);
+    expect(raw).toMatchObject({
+      failureKind: "gateway_html",
+      providerStage: "http_response",
+      status: 401,
+      retryable: false,
+      attempts: 1,
+      maxAttempts: 2
+    });
+  });
+
   it("records reader_done when a stream succeeds without a DONE sentinel", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock.mockResolvedValueOnce(streamResponse([chunk({ id: "reader-done", choices: [{ delta: { content: "partial but valid" } }] })]));

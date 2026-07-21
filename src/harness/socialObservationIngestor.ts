@@ -8,6 +8,7 @@ import {
   addSocialNormSanction,
   addSocialTrustRepair,
   appendSocialMemory,
+  ensureSocialMessageIngestionState,
   recordSocialBetrayalEvidence,
   recordSocialCoalitionEvidence,
   updateSocialCommitmentStatus,
@@ -65,22 +66,21 @@ export interface VisibleSocialMessageIngestionResult {
 export function ingestVisibleSocialMessages<TObservation = unknown, TPending = unknown, TCommand = unknown>(
   options: VisibleSocialMessageIngestionOptions<TObservation, TPending, TCommand>
 ): VisibleSocialMessageIngestionResult {
+  const seenMessageIds = hydrateSeenSocialMessageIds(options.social, options.seenMessageIds);
   let ingestedMessageCount = 0;
   let skippedDuplicateMessageCount = 0;
   const messageIds: string[] = [];
 
   for (const message of options.messages) {
-    if (options.seenMessageIds?.has(message.id)) {
+    if (seenMessageIds.has(message.id)) {
       skippedDuplicateMessageCount += 1;
       continue;
     }
-    options.seenMessageIds?.add(message.id);
-    ingestedMessageCount += 1;
-    messageIds.push(message.id);
-
+    const stagedSocial = cloneJson(options.social);
+    const stagedSeenMessageIds = new Set(seenMessageIds);
     const evidence = messageEvidenceRef(message);
     const context = messageMutationContext(options.context, message);
-    appendSocialMemory(options.social, {
+    appendSocialMemory(stagedSocial, {
       kind: "message",
       source: message.senderId,
       visibility: message.visibility,
@@ -100,14 +100,19 @@ export function ingestVisibleSocialMessages<TObservation = unknown, TPending = u
       }
     }, context);
     options.onMessageIngested?.({
-      social: options.social,
+      social: stagedSocial,
       observerId: options.observerId,
       message,
       evidence,
       context
     });
-    recordStructuredSocialFacts(options.social, message, evidence, options.observerId, context);
-    recordSpeechActSocialFacts(options.social, message, evidence, options.observerId, context);
+    recordStructuredSocialFacts(stagedSocial, message, evidence, options.observerId, context);
+    recordSpeechActSocialFacts(stagedSocial, message, evidence, options.observerId, context);
+    rememberSeenSocialMessageId(stagedSocial, stagedSeenMessageIds, message.id);
+    commitStagedSocialState(options.social, stagedSocial);
+    seenMessageIds.add(message.id);
+    ingestedMessageCount += 1;
+    messageIds.push(message.id);
   }
 
   return {
@@ -125,13 +130,36 @@ export function extractVisibleSocialMessagesFromObservation(observation: unknown
 }
 
 export function hydrateSeenSocialMessageIds(state: AgentSocialState, target = new Set<string>()): Set<string> {
+  const ingestion = ensureSocialMessageIngestionState(state);
+  for (const messageId of ingestion.seenMessageIds) {
+    if (isStableMessageId(messageId)) target.add(messageId);
+  }
   for (const entry of state.memory.entries) {
     if (entry.kind !== "message") continue;
     for (const evidence of entry.evidenceRefs) {
-      if (evidence.artifact === "message" && evidence.id) target.add(evidence.id);
+      if (evidence.artifact === "message" && isStableMessageId(evidence.id)) target.add(evidence.id);
     }
   }
+  ingestion.seenMessageIds = [...target];
   return target;
+}
+
+function rememberSeenSocialMessageId(state: AgentSocialState, seenMessageIds: Set<string>, messageId: string): void {
+  if (!isStableMessageId(messageId)) return;
+  seenMessageIds.add(messageId);
+  const ingestion = ensureSocialMessageIngestionState(state);
+  ingestion.seenMessageIds.push(messageId);
+}
+
+function commitStagedSocialState(target: AgentSocialState, staged: AgentSocialState): void {
+  for (const key of Object.keys(target) as Array<keyof AgentSocialState>) {
+    delete target[key];
+  }
+  Object.assign(target, staged);
+}
+
+function isStableMessageId(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 export function messageEvidenceRef(message: SocialMessage): EvidenceRef {
@@ -316,7 +344,6 @@ function recordSpeechActCoalitionRecord(
   observerId: string,
   context?: SocialStateMutationContext
 ): void {
-  if (act.value === "werewolf.killVote") return;
   const memberIds = stringArrayMetadata(act.metadata?.memberIds);
   if (!memberIds?.length) return;
   const targetId = stringMetadata(act.targetId) ?? stringMetadata(act.metadata?.targetId);

@@ -41,6 +41,7 @@ Provider integration policy:
 - Anthropic support is implemented as a separate `anthropic-messages` protocol adapter with Messages/SDK-shaped `system`, `messages`, `stream`, and `content_block_delta` events. Anthropic Messages requires explicit `ANTHROPIC_MAX_TOKENS`; this is not sent by the default Chat Completions adapter.
 - Concrete model ids are runtime configuration, not project defaults.
 - Select the adapter explicitly with `LLM_PROVIDER_PROTOCOL`; never infer protocol from a model string.
+- Default `agent:probe`, `arena:match`, and `arena:tournament` CLI summaries expose only provider protocol/configuration state, bounded metrics, safe failure classification, and stream-completion status. They deliberately omit provider endpoints, provider request ids, and raw provider errors. `--json=full` is explicit local/debug output and must not be published without applying the artifact redaction policy.
 
 ## Commands
 
@@ -49,7 +50,6 @@ npm test              # deterministic engine tests
 npm run agent:probe   # real OpenAI-compatible model calls inside one harness turn
 npm run arena:match   # full multi-agent harness match using the configured models
 npm run arena:tournament -- --games=3 --maxTransitions=8 --timeout=5m
-npm run arena:matrix -- --spec=experiments/matrix-smoke.json --outputDir=/tmp/werewolf-matrix-smoke --overwrite
 npm run build         # typecheck and production build
 ```
 
@@ -137,17 +137,22 @@ curl -X POST http://localhost:8787/api/tournaments/run \
   -d '{"models":["model-a","model-b"],"games":1,"maxTransitions":2,"timeout":"90s"}'
 ```
 
-Probe and match commands print a JSON `summary` with the harness turn, policy, command, model latency, and any real failure reason. Full match output includes a `MatchArtifact`; its `trajectory` and `socialEpisode` are the harness replay/evaluation surfaces.
+Probe and match commands print a JSON `summary` with the harness turn, policy,
+command, model latency, and any real failure reason. Full match output uses
+`harness.match.v2`. Its `socialEpisode.steps` are the native execution, replay,
+and integrity authority. `trajectory` remains only a legacy migration/debug
+projection and must not be used to reconstruct missing native system or rejected
+steps.
 
 Artifact export is available through stdout or explicit files:
 
 ```bash
 npm run arena:match -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --maxTransitions=24 --json=full
-npm run arena:match -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --maxTransitions=24 --export=match-artifact.json --exportJsonl=trajectory.jsonl
-npm run arena:tournament -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --games=3 --json=full > tournament-artifacts.json
+npm run arena:match -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --maxTransitions=24 --export=artifacts/match-artifact.json --exportJsonl=artifacts/trajectory.jsonl
+npm run arena:tournament -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --games=3 --json=full > artifacts/tournament-artifacts.json
 ```
 
-`arena:match -- --json=full` prints `{ summary, artifact }`. If you redirect stdout, unwrap `.artifact` before passing the file to `arena:replay`; `--export` writes the artifact object directly.
+`arena:match -- --json=full` prints `{ summary, artifact }`. If you redirect stdout, unwrap `.artifact` before passing the file to `arena:replay`; `--export` writes the artifact object directly. Full artifacts can contain private observations and reasoner evidence, so keep local exports under the ignored `artifacts/` directory or outside the repository.
 `socialEpisode.messages[*]` may include top-level `speechActs` and `deliveryReceipts`; these are evaluator-ready typed facts, not only display metadata. JSONL exports include flat `social_speech_act`, `social_delivery_receipt`, and derived `social_exposure` records for analysis.
 
 Tournament directory export is the paper/reproduction artifact pack. Use
@@ -162,103 +167,102 @@ analysis exports (`episodes.csv`, `agents.csv`, `metrics.csv`,
 `leaderboard.csv`). CSV files are derived from recorded harness artifacts; they
 do not replace replay or JSONL evidence.
 
-Experiment matrix runs are the next layer above tournament runs. A matrix spec
-expands either explicit cells or dimensions into normalized tournament cells,
-runs each cell through the same harness/tournament path, and aggregates
-seat-level outcome statistics across cells:
-
-```bash
-npm run arena:matrix -- --spec=experiments/matrix-smoke.json --json=summary
-
-npm run arena:matrix -- \
-  --spec=experiments/matrix-smoke.json \
-  --outputDir=/tmp/werewolf-matrix-smoke \
-  --overwrite \
-  --json=summary
-```
-
-`experiments/matrix-smoke.json` is intentionally small: one cell, one game, two
-transitions, and the configured `kimi-k2.7` model. The two-transition budget is
-deliberate: it advances past setup and reaches an agent decision, so the
-artifact should include real provider request ids and completed streaming
-telemetry without pretending to finish a full Werewolf game. For paper-scale
-runs, increase `cells`, `dimensions`, `games`, and `maxTransitions`
-deliberately.
-
-Matrix artifact directories contain:
-
-- `manifest.json`
-- `spec.normalized.json`
-- `cells.jsonl`
-- `statistics.json`
-- `summary.md`
-- `model_stats.csv`
-- `profile_stats.csv`
-- `pairwise_model_comparisons.csv`
-- nested tournament manifests under `tournaments/<cellId>/manifest.json`
-
-The matrix statistics include model/profile win rates, Wilson 95% intervals,
-reward means, reward standard errors, and pairwise model comparisons using an
-unpaired seat-level two-proportion z-test with Holm correction. The statistic is
-descriptive screening only: seat rows inside the same game are not independent,
-and the artifact explicitly sets `superiorityClaims: false`.
-
-The API equivalent is:
-
-```bash
-curl -X POST http://localhost:8787/api/experiments/matrix/run \
-  -H 'content-type: application/json' \
-  -d '{"spec":{"version":"harness.experiment-matrix.v1","id":"api-matrix","kind":"matrix","base":{"models":["model-a"],"games":1,"maxTransitions":1,"timeout":"5m"}}}'
-```
-
-To export matrix artifacts through the API/cockpit, configure either
-`MATRIX_ARTIFACT_BASE_DIR` or `TOURNAMENT_ARTIFACT_BASE_DIR`; matrix artifact
-sets default under the matrix base, or under
-`<TOURNAMENT_ARTIFACT_BASE_DIR>/matrices` when only the tournament base exists.
-Without a configured matrix artifact base, the cockpit still runs real matrix
-experiments but does not request artifact export.
-
 The API also stores a `MatchArtifact` for completed `/api/matches/run` records:
 
 ```bash
-curl http://localhost:8787/api/matches/<match-id>/artifact
 curl 'http://localhost:8787/api/matches/<match-id>/artifact?view=postgame-redacted'
-curl http://localhost:8787/api/matches/<match-id>/trajectory.jsonl
+curl 'http://localhost:8787/api/matches/<match-id>/artifact?view=truth-redacted'
+curl 'http://localhost:8787/api/matches/<match-id>/artifact?view=full'
+curl 'http://localhost:8787/api/matches/<match-id>/trajectory.jsonl?view=postgame-redacted'
 ```
 
-Ordinary cockpit flows use `view=postgame-redacted`. That server projection
-redacts private observations, private messages, private agent state, and private
-model reasoning while preserving sanitized `socialEpisode.exposureRecords` and
-`socialEpisode.exposureSummary` derived from scoped observations. Fetch the full
-artifact or JSONL only for explicit postgame/debug/export work.
+A finished server match has exactly one validated `MatchArtifact` as its
+canonical stored value; response summaries, counters, public state, trajectory
+JSONL, and cockpit views are derived projections. The domain `GameState` and
+`GameEvent` stream contain only Werewolf facts. Reasoner memos, provider
+telemetry, harness traces, and harness failures live in the native execution
+artifact and do not alter the domain-state hash.
 
-Replay has CLI, API, and programmatic entries:
+Omitting `view` for a match artifact or trajectory JSONL is equivalent to
+`view=postgame-redacted`. That server projection redacts private observations,
+private messages, private agent state, and private model reasoning while
+preserving sanitized `socialEpisode.exposureRecords` and
+`socialEpisode.exposureSummary` derived from scoped observations.
+`view=truth-redacted` is the narrower public/share projection. Fetch an
+artifact or JSONL with `view=full` only for explicit local postgame/debug/export
+work; it is not the API default.
+
+The redacted route now returns an honest `PostgameMatchProjectionDto`, not a
+structurally redacted object cast back to `MatchArtifact`. Its redacted harness
+step, social step/message, command/pending-action, failure, delivery/speech-act,
+agent-state, and snapshot-frame DTOs make omitted private fields explicit in the
+type contract. Comparison and trajectory JSONL use their own structural source
+types, so they can consume either canonical artifacts or server-owned redacted
+projections without treating a projection as replay authority. The projection
+uses deep whitelists: legal targets and provider request/stream telemetry are
+removed, `infosByAgent` is omitted, private/team speech acts are not exposed,
+nested agent metadata is stripped, and evidence-ref descriptions are removed.
+
+Replay has CLI, server-owned API, and programmatic entries:
 
 ```bash
-npm run arena:replay -- --artifact=match-artifact.json
+npm run arena:replay -- --artifact=artifacts/match-artifact.json
 ```
 
-```bash
-curl -X POST http://localhost:8787/api/replay \
-  -H 'content-type: application/json' \
-  -d @match-artifact.json
-```
+Use `POST /api/matches/:id/replay` for a server-owned match artifact. The server
+does not accept client-submitted state or trajectories as replay truth.
 
 ```ts
-import { replayHarnessTrajectory } from "./src/harness/replay";
+import { replayWerewolfSocialEpisode } from "./src/harness/replay";
 
-const replay = replayHarnessTrajectory({
-  initialState: artifact.initialState,
-  trajectory: artifact.trajectory,
+const replay = replayWerewolfSocialEpisode(artifact.socialEpisode, {
   stopOnMismatch: true
 });
 ```
 
-Replay re-applies recorded typed commands from `trajectory` and checks hashes. It should not call the model provider; re-querying a model is a new run, not a replay.
-The public API replay response returns hash, command-count, and mismatch
+Native replay starts from the recorded `socialEpisode.initialState`, applies
+explicit recorded system steps and only committed player steps, validates
+domain event/message ranges and hashes, and skips rejected proposals. It does
+not call actors, policies, reasoners, or model providers. Re-querying a model is
+a new fork/rerun, not replay. `replayHarnessTrajectory()` remains a legacy
+projection verifier, not the `harness.match.v2` authority.
+The server-owned replay response returns hash, command-count, and mismatch
 summaries by default; it does not return the replayed `finalState`. Full
 postgame/debug truth remains available through explicit artifact routes such as
 `GET /api/matches/:id/artifact`.
+
+Persisted checkpoints use `harness.checkpoint.v2` and bind a batch-safe native
+`executionPrefix` together with domain state, agent snapshots, channel topology,
+message prefix, hashes, and boundary metadata. Forks use
+`harness.fork-provenance.v2`; they restore that native prefix state and record
+parent native-step/message/hash provenance. Legacy trajectory length is not a
+checkpoint selector or lineage authority.
+
+`GET /api/checkpoints/:id/artifact` defaults to `view=truth-redacted`; explicit
+`view=full` is local/debug access only. Fork execution always restores the
+canonical validated checkpoint stored by the server, not an API projection.
+
+Latest end-to-end validation on 2026-07-14 used the user-specified configured
+OpenAI-compatible endpoint and `tencent/hy3:free`. The streaming probe passed
+1/1. A first match with a 40-second bound timed out and correctly remained a
+failed/rejected native step with zero commits; this failure is part of the
+validation record, not discarded. A second `maxTransitions=2` match completed
+its model stream with `completedBy: provider_stop_event`, committed one model
+turn with zero harness errors, then ended with the expected bounded `truncated`
+status. Its two native steps replayed with matching state/message hashes, zero
+mismatches, and full artifact integrity success.
+
+The production Express-backed Playwright cockpit passed 1/1 and treats HTTP 207
+or any reported harness failure as test failure. The first real tournament run
+exposed a model-list parser bug: `splitModels()` incorrectly split slash-bearing
+model ids. The delimiter was narrowed from `/[,\s/]+/` to `/[,\s]+/` and an
+experiment regression test was added. The second real tournament completed one
+game with zero failed games, one harness turn, zero harness errors, and 641
+metrics. Final deterministic validation passed 24 test files / 253 tests,
+TypeScript typecheck, production build, and `git diff --check`. The existing
+large-chunk build warning and intentional invalid-streaming-JSON parser-test
+stderr remained non-fatal. No provider request id, credential, or raw sensitive
+provider output is part of these records.
 
 Useful CLI limits:
 
@@ -280,8 +284,6 @@ export TOURNAMENT_GAMES=3
 export TOURNAMENT_TIMEOUT_MS=600000
 ```
 
-The API route `POST /api/matches/run` accepts `models`, `profiles`, `assignment`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, and optional game `config`; completed responses include public state, summary, `hasArtifact`, and artifact counters. Ordinary UI reads redacted artifact projections with sanitized exposure records; full private/postgame truth remains behind explicit artifact/JSONL routes. `POST /api/harness/probe` accepts `model`, `timeoutMs`/`timeout`, and optional `seed`. `POST /api/tournaments/run` accepts `models`, `profiles`, `assignment`, `games`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, `continueOnError`, and optional game `config`; it returns `episodes`, whose completed entries include `trajectory`, `socialEpisode`, `assignment`, and `resolvedAssignments`. `POST /api/experiments/matrix/run` accepts a matrix spec plus the same top-level tournament override fields; it returns summary, cells, statistics, and optional artifact set metadata.
+The API route `POST /api/matches/run` accepts `models`, `profiles`, `assignment`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, and optional game `config`; completed responses include public state, summary, `hasArtifact`, and artifact counters. Ordinary UI reads the default `postgame-redacted` artifact projections with sanitized exposure records; `truth-redacted` is the public/share projection, while full private/postgame truth requires an explicit `view=full` artifact or JSONL request. `POST /api/harness/probe` accepts `model`, `timeoutMs`/`timeout`, and optional `seed`. `POST /api/tournaments/run` accepts `models`, `profiles`, `assignment`, `games`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, `continueOnError`, and optional game `config`; it returns bounded, redaction-safe episode summaries plus `gamesCompleted`, `gamesTruncated`, and `gamesFailed`. `gamesCompleted` means the domain reached a terminal outcome; `gamesTruncated` means an auditable run hit a configured bound; `gamesFailed` is an execution failure. `ok: true` means no failures, not that every game reached terminal state. Full trajectory/social evidence remains server-owned in match artifacts and tournament packs.
 
 `POST /api/tournaments/run` also accepts `{ "spec": { ... } }`; top-level request fields such as `games`, `maxTransitions`, `timeout`, `profiles`, and `assignment` override the embedded spec using the same normalizer as `arena:tournament -- --spec`.
-`POST /api/experiments/matrix/run` follows the same override rule, but applies
-top-level fields to the matrix base before cell normalization.

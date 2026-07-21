@@ -28,6 +28,12 @@ Core objects:
 
 This layer is domain-neutral. It does not import Werewolf rules.
 
+For `harness.match.v2`, `SocialEpisodeArtifact.steps` is also the native
+execution authority. It records explicit system steps, committed player steps,
+rejected proposals, scheduler/batch metadata, scoped observations, commands,
+message/event ranges, failures, and hashes. The Werewolf `trajectory` field is a
+legacy migration/debug projection only.
+
 ## Agent Scaffold And Scorer Registry
 
 The generic agent scaffold lives in `src/harness/scaffold.ts`. It represents an
@@ -101,6 +107,21 @@ by the environment's atomic batch transition.
 `Promise.all()` over actor/model calls is only an execution optimization. It is
 not true parallel environment semantics.
 
+Before environment preflight, the generic runner verifies that a scheduled
+actor owns the returned `SocialAction.actorId` and every message draft's
+`senderId`. This prevents one actor from impersonating another through a
+generic action or social channel. Command-payload identity remains a domain
+adapter responsibility because a generic command does not necessarily carry an
+actor field.
+
+`SocialEnvironment.step()` and `SocialParallelEnvironment.stepBatch()` are
+atomic contracts: a throw must leave `snapshot()` unchanged. The runner cannot
+roll back arbitrary domain state. When a hash-visible adapter violates that
+contract, it records `environment_non_atomic_failure`; the failure remains
+diagnostic evidence but is not valid replay authority. The communication bus
+also prepares and validates a complete message batch before the environment
+commits, then appends that batch atomically.
+
 ## Werewolf Adapter
 
 Werewolf currently acts as one domain adapter:
@@ -124,6 +145,19 @@ Werewolf currently acts as one domain adapter:
   `social.messages` present in each actor's `HarnessPlayerView`. It does not
   read a global transcript, infer exposure from public visibility or
   `recipientIds`, or use hidden truth.
+- `AgentSocialState.messageIngestion` persists the exact actor-consumed message
+  ids behind the reusable ingestor. The actor-local `seenMessageIds` set is only
+  a performance cache: snapshot/checkpoint/fork restoration hydrates it from
+  the versioned private tracker, and legacy snapshots best-effort migrate ids
+  still present in retained message memory. Bounded-memory trimming therefore
+  cannot make a restored actor reapply relationship, reputation, ledger,
+  memory, or journal consequences from the same message.
+- The tracker uses exact ids rather than a message-sequence high-watermark, so a
+  lower-sequence message that becomes legally visible later is still ingested.
+  Only messages already present in the actor-scoped observation enter the
+  tracker; hidden/global transcript ids are never inferred. Ordinary
+  `postgame-redacted` API projections retain the schema marker but clear the
+  private consumed-message identities.
 - Tested top-level `role_claim`, `accusation`, `vote_intent`, `role_action`,
   `claim`, `commitment`, and non-kill `coalition_signal` acts update private
   actor social state through existing evidence-backed memory, belief, gossip,
@@ -345,7 +379,17 @@ A serious multi-agent adversarial harness must preserve:
 - evaluator output
 - redacted server exposure projections for ordinary cockpit/API views
 
-The Werewolf adapter now emits these through `HarnessRunResult.trajectory` and `HarnessRunResult.socialEpisode`.
+The Werewolf adapter emits the native record through
+`HarnessRunResult.socialEpisode`. `HarnessRunResult.trajectory` is retained as a
+legacy migration/debug projection and is not the execution, replay, checkpoint,
+or fork authority.
+
+`GameState` and `GameEvent` contain only deterministic Werewolf domain facts.
+Harness turn evidence, reasoner/provider telemetry, rejected proposals, and
+structured failure evidence belong to `socialEpisode`; they never change the
+domain-state hash. Agent proposal state is staged until the environment accepts
+the command, and committed actor state is snapshotted only after actor-scoped
+feedback.
 
 ## Export and Replay
 
@@ -353,19 +397,39 @@ CLI export is available through stdout or explicit files:
 
 ```bash
 npm run arena:match -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --maxTransitions=24 --json=full
-npm run arena:match -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --maxTransitions=24 --export=match-artifact.json --exportJsonl=trajectory.jsonl
-npm run arena:tournament -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --games=3 --json=full > tournament-artifacts.json
+npm run arena:match -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --maxTransitions=24 --export=artifacts/match-artifact.json --exportJsonl=artifacts/trajectory.jsonl
+npm run arena:tournament -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --games=3 --json=full > artifacts/tournament-artifacts.json
 ```
 
-`arena:match -- --json=full` prints `{ summary, artifact }`. The artifact contains `initialState`, `finalState`, `trajectory`, `socialEpisode`, `events`, `evaluation`, `assignment`, and `resolvedAssignments`. `--export` writes that artifact object directly. `arena:tournament -- --json=full` includes `episodes`; completed episodes carry `trajectory`, `socialEpisode`, `assignment`, and `resolvedAssignments`.
+`arena:match -- --json=full` prints `{ summary, artifact }`. The artifact contains `initialState`, `finalState`, `trajectory`, `socialEpisode`, `events`, `evaluation`, `assignment`, and `resolvedAssignments`. `--export` writes that artifact object directly. `arena:tournament -- --json=full` includes full episode records; both terminal and bounded (`truncated`) episodes remain auditable. A `failed` episode retains structured failure evidence rather than being silently dropped.
+
+Tournament lifecycle accounting is deliberately three-way:
+
+- `gamesCompleted`: games that reached the domain's terminal rule.
+- `gamesTruncated`: bounded, replayable but non-terminal games (for example a `maxTransitions` cap).
+- `gamesFailed`: preparation or harness execution failures.
+
+Model reward and win-rate aggregates are completed-only. Denominator, artifact,
+and benchmark records preserve all three statuses. A tournament response with
+`ok: true` / HTTP 200 means that no episode failed; it does **not** claim that
+every episode reached a domain terminal state.
 
 Current API behavior:
 
-- `POST /api/matches/run` stores a `MatchArtifact` on completed match records and returns public state, summary, `hasArtifact`, and artifact counters.
-- `GET /api/matches/:id/artifact` returns the stored `MatchArtifact`; `?view=postgame-redacted` returns a server projection with private observations, private message content, private agent state, and provider/private reasoning redacted.
+- `POST /api/matches/run` stores exactly one integrity-validated `MatchArtifact`
+  as the authority for each finished match and returns public state, summary,
+  `hasArtifact`, and artifact counters derived from it. Pre-artifact lifecycle
+  records are separate and cannot masquerade as completed matches.
+- `GET /api/matches/:id/artifact` defaults to the server-owned `postgame-redacted` projection. It redacts private observations, private message content, private agent state, and provider/private reasoning while retaining postgame truth for research analysis. `?view=full` is explicit local/debug access only; it is not the default response.
 - `GET /api/matches/:id/artifact?view=postgame-redacted` includes sanitized `socialEpisode.exposureRecords` and `socialEpisode.exposureSummary`, derived server-side from full scoped observations before redaction.
-- `GET /api/matches/:id/trajectory.jsonl` returns a JSONL projection with header, step, trace, message, `social_speech_act`, `social_delivery_receipt`, `social_exposure`, social-state mutation, event, agent-state, and metric lines. Redacted projections use materialized exposure records instead of re-deriving from redacted observations.
-- `POST /api/tournaments/run` returns `episodes`; completed entries include `trajectory`, `socialEpisode`, `assignment`, and `resolvedAssignments`.
+- `GET /api/checkpoints/:id/artifact` defaults to the narrower `truth-redacted` projection. `?view=full` is explicit local/debug access; fork execution continues to read the canonical server-side checkpoint rather than any public projection.
+- Artifact, checkpoint, and comparison projections set `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. Explicit full views also set a no-index robots directive. Full match-pair comparisons are request-local and are not saved into the comparison registry.
+- `GET /api/matches/:id/trajectory.jsonl` defaults to the `postgame-redacted` JSONL projection. `?view=full` is explicit local/debug export access only. The JSONL contains header, step, trace, message, `social_speech_act`, `social_delivery_receipt`, `social_exposure`, social-state mutation, event, agent-state, and metric lines. Redacted projections use materialized exposure records instead of re-deriving from redacted observations.
+- `POST /api/tournaments/run` returns redaction-safe episode summaries with
+  `status` and `harnessStatus`; full trajectories and agent/social evidence are
+  read from server-owned match artifacts or the registered tournament artifact
+  pack. This keeps the response bounded and does not make UI state execution
+  authority.
 
 Default match evaluation includes `social.state.v1`,
 `evaluation.commitment-coalition-association.v1`,
@@ -376,32 +440,90 @@ evaluators exist as deterministic zero-weight contracts, but they are not
 promoted into the default runtime/tournament registry unless a future change
 wires them explicitly.
 
-Replay is available through CLI, API, and TypeScript entries:
+Replay is available through CLI, server-owned API, and TypeScript entries:
 
 ```bash
-npm run arena:replay -- --artifact=match-artifact.json
+npm run arena:replay -- --artifact=artifacts/match-artifact.json
 ```
 
-```bash
-curl -X POST http://localhost:8787/api/replay \
-  -H 'content-type: application/json' \
-  -d @match-artifact.json
-```
+Use `POST /api/matches/:id/replay` for a server-owned match artifact. The server
+does not accept client-submitted state or trajectories as replay truth.
 
 ```ts
-import { replayHarnessTrajectory } from "./src/harness/replay";
+import { replayWerewolfSocialEpisode } from "./src/harness/replay";
 
-const result = replayHarnessTrajectory({
-  initialState: artifact.initialState,
-  trajectory: artifact.trajectory,
+const result = replayWerewolfSocialEpisode(artifact.socialEpisode, {
   stopOnMismatch: true
 });
 ```
 
-Replay expects `initialState` plus the recorded `trajectory`. It advances deterministic system phases, re-applies recorded commands, records the saved harness trace, and checks pre/post state hashes. It does not call the reasoner or model provider.
-The public API replay route returns redaction-safe summary evidence by default:
+Native replay expects the recorded `socialEpisode`. It starts from the recorded
+initial domain state, applies explicit system transitions and only steps marked
+`commitStatus: "committed"`, skips rejected proposals, validates event/message
+ranges and pre/post hashes, rejects non-atomic environment failure records, and
+never invents missing system transitions. It
+does not create actors or call policies, reasoners, or model providers. Parallel
+artifacts require an environment with an atomic `stepBatch()` implementation.
+`replayHarnessTrajectory()` remains available only for legacy projection
+verification.
+The server-owned replay route returns redaction-safe summary evidence by default:
 hashes, command counts, and mismatch counts. It does not return the replayed
 `finalState`; full postgame/debug state belongs behind explicit artifact routes.
+
+## Checkpoint And Fork Authority
+
+New checkpoints use `harness.checkpoint.v2`. A checkpoint stores domain state,
+agent snapshots, and a native `executionPrefix` containing the exact
+`socialEpisode` step/message/channel prefix. Its source metadata binds the
+boundary trace/native turn/batch, native step and message counts, state,
+execution-prefix, agent, channel, and message hashes. Ordinary prefixes must end
+at a complete scheduler batch; a terminal rejected failure may be preserved as
+an explicit failed-run boundary.
+
+Forks use `harness.fork-provenance.v2`. A fork restores the checkpoint's domain
+state, agent states, channel topology, and committed message prefix, then starts
+a new lineage that cites the parent native boundary and hashes. Neither
+trajectory length nor a legacy trajectory prefix is a checkpoint selector,
+replay input, or fork-provenance authority.
+
+`GET /api/checkpoints/:id/artifact` defaults to `truth-redacted`. Explicit
+`?view=full` is local/debug access only; the fork endpoint restores the
+canonical validated checkpoint from the server store rather than a serialized
+public projection.
+
+## Honest Postgame Projection DTOs
+
+Postgame redaction no longer casts a structurally different object back to the
+full `MatchArtifact` contract. `src/server/artifactProjection.ts` defines
+`PostgameMatchProjectionDto`, `MatchArtifactViewDto`, redacted harness/social
+step DTOs, redacted social message/draft/speech-act/delivery/failure DTOs, and
+redacted agent/social-state/snapshot-frame DTOs. Redacted observation strings,
+commands, and pending actions therefore have honest structural types rather than
+pretending to be complete private runtime values.
+
+`MatchComparisonSource` and `TrajectoryJsonlSource` are structural read-only
+inputs for comparison and JSONL projection. They accept canonical artifacts or
+the corresponding server-owned redacted DTO without weakening
+`harness.match.v2` replay/integrity authority.
+
+The projection boundary uses deep whitelists, not shallow top-level deletion:
+
+- pending-action and command DTOs omit legal target ids and private target
+  payloads;
+- reasoner/turn-trace/action metadata omit provider request ids, retry history,
+  stream details, private beliefs, arbitration, targets, and memos;
+- social steps omit `infosByAgent`, actor snapshots, raw observations, and raw
+  failure metadata;
+- private/team message speech acts are omitted, while public speech acts remove
+  nested metadata and evidence-ref descriptions;
+- nested agent profile, memory, belief, relationship, reputation, and journal
+  metadata are removed, and private ledgers remain unavailable in the ordinary
+  projection.
+
+Focused validation recorded for this DTO slice passed the public-view suite
+11/11, a further focused DTO/comparison/JSONL set of 18 tests, and TypeScript
+typecheck. Those focused results do not imply a new full-suite, E2E, or live
+provider validation run.
 
 ## Next Engineering Steps
 
@@ -409,7 +531,4 @@ hashes, command counts, and mismatch counts. It does not return the replayed
   diagnostic beyond the current commitment/coalition speech-act and
   relationship/reputation structured-fact slice only after preserving scoped
   exposure, journal evidence refs, and zero-weight/non-causal semantics.
-- Define server-owned redacted DTOs for social ledger summaries before React
-  renders detailed commitment, coalition, gossip, sanction, repair, betrayal,
-  relationship, or reputation records.
 - Add UI controls for profiles, assignment strategy, tournament size, and artifact export.

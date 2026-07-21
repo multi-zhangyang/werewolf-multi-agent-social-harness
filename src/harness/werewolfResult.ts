@@ -1,15 +1,29 @@
 import type { AgentPendingAction } from "../core/pending";
 import type { GameCommand, GameState, MatchMetrics } from "../core/types";
-import { createWerewolfEvaluationSuite, WEREWOLF_ADVERSARIAL_EVALUATOR_ID } from "./evaluator";
-import { runEvaluationRegistry } from "./evaluation";
-import { hashStableState } from "./hash";
-import type { SocialChannel, SocialEpisodeArtifact, SocialHarnessStep, SocialMessage } from "./social";
 import {
+  createDeceptionBeliefShiftEvaluator,
+  createDeceptionReputationAssociationEvaluator,
+  createWerewolfEvaluationSuite,
+  WEREWOLF_ADVERSARIAL_EVALUATOR_ID
+} from "./evaluator";
+import { runEvaluationRegistry } from "./evaluation";
+import { WEREWOLF_METRIC_PROMOTION_POLICY } from "./werewolfMetricPromotion";
+import { hashStableState } from "./hash";
+import { harnessFailureEvidenceFromEpisode } from "./executionEvidence";
+import { werewolfHarnessTurnEvidenceFromEpisode } from "./werewolfExecutionEvidence";
+import { isSocialStepCommitted, type SocialChannel, type SocialEpisodeArtifact, type SocialHarnessStep, type SocialMessage } from "./social";
+import {
+  createBetrayalLifecycleTemporalAssociationEvaluator,
   createCommitmentCoalitionAssociationEvaluator,
   createCommitmentCoalitionLifecycleTemporalAssociationEvaluator,
+  createGossipExposureTemporalAssociationEvaluator,
+  createNormSanctionLifecycleTemporalAssociationEvaluator,
   createSocialDynamicsEvaluator,
   createSocialFactIngestEvidenceEvaluator,
-  createSocialStateEvaluator
+  createSocialStateEvaluator,
+  createTrustRepairLifecycleTemporalAssociationEvaluator,
+  createTrustRepairRelationshipTemporalAssociationEvaluator,
+  createTrustRepairReputationTemporalAssociationEvaluator
 } from "./socialEvaluator";
 import type {
   AdversarialEvaluation,
@@ -19,7 +33,8 @@ import type {
   HarnessRunResult,
   HarnessRunStatus,
   HarnessStepRecord,
-  HarnessTurnTrace
+  HarnessTurnTrace,
+  WerewolfHarnessObservation
 } from "./types";
 
 export type WerewolfResultSocialStep = SocialHarnessStep<HarnessPlayerView, AgentPendingAction, GameCommand>;
@@ -32,30 +47,22 @@ export interface BuildWerewolfHarnessRunResultOptions {
   finalState: GameState;
   agentStates: AgentHarnessState[];
   trajectory: HarnessStepRecord[];
-  socialSteps: WerewolfResultSocialStep[];
-  messages: SocialMessage[];
-  channels: SocialChannel[];
+  socialEpisode: SocialEpisodeArtifact<GameState, WerewolfHarnessObservation, import("../core/types").PendingAction, GameCommand>;
   forkOf?: HarnessForkProvenance;
 }
 
 export function buildWerewolfHarnessRunResultFromParts(options: BuildWerewolfHarnessRunResultOptions): HarnessRunResult {
   const state = cloneJson(options.finalState);
   const agentStates = cloneJson(options.agentStates);
-  const metrics = collectWerewolfHarnessMetrics(state);
-  const socialEpisode = buildWerewolfSocialEpisode({
-    id: state.id,
-    status: options.status,
-    truncationReason: options.truncationReason,
-    failureReason: options.failureReason,
-    initialState: options.initialState,
-    finalState: state,
-    agents: agentStates,
-    trajectory: options.trajectory,
-    socialSteps: options.socialSteps,
-    messages: options.messages,
-    channels: options.channels,
-    metrics
-  });
+  const socialEpisode = cloneJson(options.socialEpisode);
+  const metrics = collectWerewolfHarnessMetrics(state, socialEpisode);
+  socialEpisode.metrics = {
+    ...(socialEpisode.metrics ?? {}),
+    winner: metrics.winner ?? null,
+    days: metrics.days,
+    harnessTurnCount: metrics.harnessTurnCount,
+    harnessErrorCount: metrics.harnessErrorCount
+  };
   const evaluationReport = runEvaluationRegistry({
     id: `${state.id}:evaluation`,
     context: {
@@ -73,9 +80,18 @@ export function buildWerewolfHarnessRunResultFromParts(options: BuildWerewolfHar
       createSocialStateEvaluator(),
       createCommitmentCoalitionAssociationEvaluator(),
       createCommitmentCoalitionLifecycleTemporalAssociationEvaluator(),
+      createNormSanctionLifecycleTemporalAssociationEvaluator(),
+      createGossipExposureTemporalAssociationEvaluator(),
+      createTrustRepairLifecycleTemporalAssociationEvaluator(),
+      createTrustRepairRelationshipTemporalAssociationEvaluator(),
+      createTrustRepairReputationTemporalAssociationEvaluator(),
+      createBetrayalLifecycleTemporalAssociationEvaluator(),
+      createDeceptionBeliefShiftEvaluator(),
+      createDeceptionReputationAssociationEvaluator(),
       createSocialFactIngestEvidenceEvaluator(),
       createSocialDynamicsEvaluator()
-    ]
+    ],
+    promotionPolicy: WEREWOLF_METRIC_PROMOTION_POLICY
   });
   const evaluation = evaluationReport.outputs[WEREWOLF_ADVERSARIAL_EVALUATOR_ID] as AdversarialEvaluation;
   return {
@@ -95,13 +111,14 @@ export function buildWerewolfHarnessRunResultFromParts(options: BuildWerewolfHar
   };
 }
 
-export function collectWerewolfHarnessMetrics(state: GameState): MatchMetrics {
-  const turns = state.events.filter((event) => event.type === "harness.turn");
-  const errors = state.events.filter((event) => event.type === "harness.error");
+export function collectWerewolfHarnessMetrics(state: GameState, socialEpisode?: unknown): MatchMetrics {
+  const allTurns = werewolfHarnessTurnEvidenceFromEpisode(socialEpisode);
+  const turns = allTurns.filter(({ step }) => isSocialStepCommitted(step));
+  const errors = harnessFailureEvidenceFromEpisode(socialEpisode);
   const usage: MatchMetrics["modelUsage"] = {};
   let totalLatency = 0;
-  for (const event of turns) {
-    const payload = event.payload as HarnessTurnTrace;
+  for (const event of allTurns) {
+    const payload = event.trace;
     usage[payload.model] ??= { calls: 0, promptTokens: 0, completionTokens: 0, latencyMs: 0 };
     usage[payload.model].calls += 1;
     usage[payload.model].promptTokens += payload.promptTokens ?? 0;
@@ -126,7 +143,7 @@ export function collectWerewolfHarnessMetrics(state: GameState): MatchMetrics {
     totalVotes: state.votes.length,
     harnessTurnCount: turns.length,
     harnessErrorCount: errors.length,
-    averageLatencyMs: turns.length ? Math.round(totalLatency / turns.length) : 0,
+    averageLatencyMs: allTurns.length ? Math.round(totalLatency / allTurns.length) : 0,
     wolfVoteAccuracy: wolfVotes.length
       ? wolfVotes.filter((vote) => byId.get(vote.targetId ?? "")?.team === "village").length / wolfVotes.length
       : 0,
@@ -137,49 +154,6 @@ export function collectWerewolfHarnessMetrics(state: GameState): MatchMetrics {
       ? wolfSurvivalDays.reduce((sum, days) => sum + days, 0) / wolfSurvivalDays.length
       : 0,
     modelUsage: usage
-  };
-}
-
-export function buildWerewolfSocialEpisode(options: {
-  id: string;
-  status: HarnessRunStatus;
-  truncationReason?: string;
-  failureReason?: string;
-  initialState: GameState;
-  finalState: GameState;
-  agents: AgentHarnessState[];
-  trajectory: HarnessStepRecord[];
-  socialSteps: WerewolfResultSocialStep[];
-  channels: SocialChannel[];
-  messages: SocialMessage[];
-  metrics: MatchMetrics;
-}): SocialEpisodeArtifact<GameState, HarnessPlayerView, AgentPendingAction, GameCommand> {
-  return {
-    id: options.id,
-    status: options.status,
-    schedulerMode: "aec",
-    profiles: options.agents.map((agent) => ({
-      id: agent.profileId ?? agent.playerId,
-      model: agent.model,
-      temperature: agent.temperature,
-      role: options.initialState.players.find((player) => player.id === agent.playerId)?.role,
-      team: options.initialState.players.find((player) => player.id === agent.playerId)?.team,
-      policyId: agent.policyName
-    })),
-    channels: cloneJson(options.channels),
-    initialState: cloneJson(options.initialState),
-    finalState: cloneJson(options.finalState),
-    steps: cloneJson(options.socialSteps),
-    messages: cloneJson(options.messages),
-    metrics: {
-      winner: options.metrics.winner ?? null,
-      days: options.metrics.days,
-      harnessTurnCount: options.metrics.harnessTurnCount,
-      harnessErrorCount: options.metrics.harnessErrorCount
-    },
-    truncationReason: options.truncationReason,
-    failureReason: options.failureReason,
-    error: options.failureReason
   };
 }
 

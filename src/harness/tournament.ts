@@ -1,5 +1,5 @@
 import { createGame } from "../core/engine";
-import type { GameConfig, MatchMetrics, Role, Team } from "../core/types";
+import type { GameConfig, GameState, MatchMetrics, Role, Team } from "../core/types";
 import { TOURNAMENT_EXPERIMENT_VERSION, type NormalizedTournamentExperiment } from "./experiment";
 import {
   buildProfileBalancedAgents,
@@ -22,7 +22,8 @@ import type {
   HarnessStepRecord,
   PolicyName
 } from "./types";
-import type { SocialEpisodeArtifact } from "./social";
+import { countSocialStepCommitsByActor, isSocialStepCommitted, type SocialEpisodeArtifact } from "./social";
+import { runTournamentEpisodes } from "./tournamentRunner";
 
 export interface TournamentOptions {
   models: string[];
@@ -53,7 +54,8 @@ export interface TournamentEpisode {
   seed: string;
   runId?: string;
   matchId?: string;
-  status: "completed" | "failed";
+  /** Tournament-level status preserves the harness lifecycle outcome. */
+  status: HarnessRunResult["status"] | "failed";
   harnessStatus?: HarnessRunResult["status"];
   winner?: Team;
   phase?: string;
@@ -93,6 +95,9 @@ export interface TournamentModelStats {
   roleWins: Record<Role, number>;
   harnessTurns: number;
   harnessErrors: number;
+  nativeSteps: number;
+  committedSteps: number;
+  rejectedSteps: number;
   promptTokens: number;
   completionTokens: number;
   latencyMs: number;
@@ -113,12 +118,30 @@ export interface TournamentResult {
   gamesRequested: number;
   gamesCompleted: number;
   gamesFailed: number;
+  /** Present on new results; optional for legacy artifact inputs. */
+  gamesTruncated?: number;
   maxTransitions?: number;
   assignment?: HarnessAssignmentConfig;
   episodes: TournamentEpisode[];
   modelStats: Record<string, TournamentModelStats>;
   profileStats: Record<string, TournamentProfileStats>;
   artifacts?: TournamentMatchArtifactRecord[];
+}
+
+interface WerewolfTournamentPreparedEpisode {
+  initialState: GameState;
+  agents: HarnessAgentConfig[];
+  resolvedAssignments: ResolvedAgentAssignment[];
+  runId: string;
+}
+
+interface WerewolfTournamentExecution {
+  result: HarnessRunResult;
+  artifactInfo?: {
+    runId: string;
+    matchId: string;
+    artifact?: MatchArtifact;
+  };
 }
 
 export async function runTournament(options: TournamentOptions): Promise<TournamentResult> {
@@ -135,79 +158,101 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
   const modelStats = initializeModelStats(models);
   const profileStats = initializeProfileStats(profiles);
 
-  for (let index = 0; index < options.games; index += 1) {
-    const seed = `${options.seed}:g${index + 1}`;
-    const initialState = createGame({
-      id: `tournament-${sanitizeId(options.seed)}-${index + 1}`,
-      seed,
-      config: options.config
-    });
-    const agents = resolveAgentConfigs(initialState.players, profiles, index, defaultTemperature, assignment);
-    const resolvedAssignments = describeResolvedAssignments(initialState.players, agents);
-    const runId = initialState.id;
-
-    try {
-      const result = await runHarnessMatch({
+  const control = await runTournamentEpisodes<WerewolfTournamentPreparedEpisode, WerewolfTournamentExecution>({
+    games: options.games,
+    seed: options.seed,
+    continueOnError: options.continueOnError,
+    prepareEpisode: ({ index, seed }) => {
+      const initialState = createGame({
+        id: `tournament-${sanitizeId(options.seed)}-${index + 1}`,
+        seed,
+        config: options.config
+      });
+      const agents = resolveAgentConfigs(initialState.players, profiles, index, defaultTemperature, assignment);
+      return {
         initialState,
         agents,
+        resolvedAssignments: describeResolvedAssignments(initialState.players, agents),
+        runId: initialState.id
+      };
+    },
+    runEpisode: async (prepared, { index, seed }) => {
+      const result = await runHarnessMatch({
+        initialState: prepared.initialState,
+        agents: prepared.agents,
         reasoner: options.reasoner,
         maxTransitions: options.maxTransitions
       });
       let artifactRecord: TournamentMatchArtifactRecord | undefined;
       if (options.includeArtifacts || options.artifactSink) {
         const artifact = buildMatchArtifact({
-          runId,
+          runId: prepared.runId,
           matchId: result.state.id,
           seed,
           models,
           profiles,
           assignment,
-          resolvedAssignments,
+          resolvedAssignments: prepared.resolvedAssignments,
           result
         });
         artifactRecord = {
           index,
           seed,
-          runId,
+          runId: prepared.runId,
           matchId: result.state.id,
           artifact
         };
         if (options.includeArtifacts) artifactRecords.push(artifactRecord);
         await options.artifactSink?.(artifactRecord);
       }
-      const episode = summarizeEpisode(index, seed, result, agents, assignment, resolvedAssignments, {
-        runId,
-        matchId: result.state.id,
-        artifact: options.includeArtifacts ? artifactRecord?.artifact : undefined
-      });
-      episodes.push(episode);
-      if (episode.status === "completed") {
-        accumulateCompletedEpisode(modelStats, profileStats, episode);
-      } else if (!options.continueOnError) {
-        break;
-      }
-    } catch (error) {
-      const episode: TournamentEpisode = {
-        index,
-        seed,
-        runId,
-        matchId: initialState.id,
-        status: "failed",
-        assignment,
-        resolvedAssignments,
-        agents: initialState.players.map((player) => ({
-          playerId: player.id,
-          seat: player.seat,
-          role: player.role,
-          team: player.team,
-          profileId: agents.find((agent) => agent.playerId === player.id)?.profileId,
-          model: agents.find((agent) => agent.playerId === player.id)?.model ?? "unknown"
-        })),
-        error: error instanceof Error ? error.message : String(error)
+      return {
+        result,
+        artifactInfo: {
+          runId: prepared.runId,
+          matchId: result.state.id,
+          ...(options.includeArtifacts && artifactRecord ? { artifact: artifactRecord.artifact } : {})
+        }
       };
+    },
+    statusOf: (execution) => execution.result.status
+  });
+
+  for (const record of control.episodes) {
+    if (record.prepared && record.result) {
+      const episode = summarizeEpisode(
+        record.index,
+        record.seed,
+        record.result.result,
+        record.prepared.agents,
+        assignment,
+        record.prepared.resolvedAssignments,
+        record.result.artifactInfo
+      );
       episodes.push(episode);
-      if (!options.continueOnError) break;
+      if (episode.status === "completed") accumulateCompletedEpisode(modelStats, profileStats, episode);
+      continue;
     }
+
+    const prepared = record.prepared;
+    const initialState = prepared?.initialState;
+    const agents = prepared?.agents ?? [];
+    episodes.push({
+      index: record.index,
+      seed: record.seed,
+      ...(prepared ? { runId: prepared.runId, matchId: prepared.initialState.id } : {}),
+      status: "failed",
+      assignment,
+      resolvedAssignments: prepared?.resolvedAssignments ?? [],
+      agents: (initialState?.players ?? []).map((player) => ({
+        playerId: player.id,
+        seat: player.seat,
+        role: player.role,
+        team: player.team,
+        profileId: agents.find((agent) => agent.playerId === player.id)?.profileId,
+        model: agents.find((agent) => agent.playerId === player.id)?.model ?? "unknown"
+      })),
+      error: record.error ?? "Tournament episode failed before producing a harness result."
+    });
   }
 
   return {
@@ -216,8 +261,9 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
     models,
     profiles,
     gamesRequested: options.games,
-    gamesCompleted: episodes.filter((episode) => episode.status === "completed").length,
-    gamesFailed: episodes.filter((episode) => episode.status === "failed").length,
+    gamesCompleted: control.gamesCompleted,
+    gamesFailed: control.gamesFailed,
+    gamesTruncated: control.gamesTruncated,
     maxTransitions: options.maxTransitions,
     assignment,
     episodes,
@@ -285,7 +331,7 @@ function summarizeEpisode(
     seed,
     runId: artifactInfo?.runId,
     matchId: artifactInfo?.matchId,
-    status: result.status === "failed" ? "failed" : "completed",
+    status: result.status,
     harnessStatus: result.status,
     winner: result.state.winner,
     phase: result.state.phase,
@@ -346,6 +392,45 @@ function accumulateCompletedEpisode(
   for (const profile of Object.values(profileStats)) {
     profile.harnessErrors += episode.metrics?.harnessErrorCount ?? 0;
   }
+
+  accumulateSocialStepDensity(modelStats, profileStats, episode);
+}
+
+function accumulateSocialStepDensity(
+  modelStats: Record<string, TournamentModelStats>,
+  profileStats: Record<string, TournamentProfileStats>,
+  episode: TournamentEpisode
+): void {
+  const modelByPlayer = new Map(episode.agents.map((agent) => [agent.playerId, agent.model]));
+  const profileByPlayer = new Map(
+    episode.agents
+      .filter((agent): agent is typeof agent & { profileId: string } => Boolean(agent.profileId))
+      .map((agent) => [agent.playerId, agent.profileId])
+  );
+  const steps = episode.socialEpisode?.steps ?? [];
+  const densityByActor = countSocialStepCommitsByActor(steps);
+  for (const [actorId, density] of densityByActor) {
+    const modelName = modelByPlayer.get(actorId);
+    if (!modelName) continue;
+    const model = modelStats[modelName] ??= createEmptyStats(modelName);
+    model.nativeSteps += density.nativeSteps;
+    model.committedSteps += density.committedSteps;
+    model.rejectedSteps += density.rejectedSteps;
+  }
+  for (const step of steps) {
+    if (step.actorId === "system") continue;
+    const profileId = step.profileId || profileByPlayer.get(step.actorId);
+    if (!profileId) continue;
+    const profile =
+      profileStats[profileId] ??=
+        createEmptyProfileStats({
+          id: profileId,
+          model: modelByPlayer.get(step.actorId) ?? "unknown"
+        });
+    profile.nativeSteps += 1;
+    if (isSocialStepCommitted(step)) profile.committedSteps += 1;
+    else profile.rejectedSteps += 1;
+  }
 }
 
 function accumulateAgentStats(stats: TournamentModelStats, agent: TournamentEpisode["agents"][number]): void {
@@ -388,6 +473,9 @@ function createEmptyStats(model: string): TournamentModelStats {
     roleWins: emptyRoleRecord(),
     harnessTurns: 0,
     harnessErrors: 0,
+    nativeSteps: 0,
+    committedSteps: 0,
+    rejectedSteps: 0,
     promptTokens: 0,
     completionTokens: 0,
     latencyMs: 0,

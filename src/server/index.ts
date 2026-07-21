@@ -31,18 +31,7 @@ import {
   type NormalizedTournamentExperiment,
   type TournamentExperimentSpecV1
 } from "../harness/experiment";
-import {
-  mergeMatrixExperimentOverrides,
-  normalizeMatrixExperimentSpec,
-  runExperimentMatrix,
-  writeExperimentMatrixArtifactDirectory,
-  MATRIX_ARTIFACT_VERSION,
-  type ExperimentMatrixCellResult,
-  type ExperimentMatrixArtifactWriteResult,
-  type ExperimentMatrixResult,
-  type NormalizedMatrixExperiment
-} from "../harness/experimentMatrix";
-import { summarizeEvaluationWarnings } from "../harness/evaluation";
+import { legacyMetricPromotionPolicyFromSummary, summarizeEvaluationWarnings } from "../harness/evaluation";
 import {
   assertAssignmentProfileReferences,
   assignmentFromUnknown,
@@ -55,64 +44,133 @@ import {
   type ResolvedAgentAssignment
 } from "../harness/profiles";
 import { OpenAIHarnessReasoner } from "../harness/reasoner";
-import { replayHarnessTrajectory } from "../harness/replay";
+import { replayWerewolfSocialEpisode } from "../harness/replay";
 import { probeHarnessTurn, runHarnessMatch } from "../harness/runtime";
 import { hashStableState } from "../harness/hash";
-import { buildMatchComparisonArtifact } from "../harness/matchComparison";
+import {
+  buildMatchComparisonArtifact,
+  formatFilteredMatchComparisonMarkdown,
+  formatMatchComparisonMarkdown,
+  MATCH_COMPARISON_ARTIFACT_VERSION,
+  parseComparisonMatchIdsQuery,
+  projectFilteredMatchComparison,
+  type MatchComparisonArtifact,
+  type MatchComparisonEvidenceIdentityFilter,
+  type MatchComparisonNumericDeltaFilter,
+  type MatchComparisonPromotionFilter,
+  type MatchComparisonRowFilter,
+  type MatchComparisonRowGroup,
+  type MatchComparisonView
+} from "../harness/matchComparison";
 import { providerFailureFromError } from "../harness/providerFailure";
+import { harnessFailureEvidenceFromEpisode } from "../harness/executionEvidence";
 import { redactSecrets } from "../harness/redaction";
-import { deriveSocialExposureRecords, type SocialExposureRecord, type SocialMessage } from "../harness/social";
+import { countSocialStepCommits, countSocialStepCommitsByActor, deriveSocialExposureRecords, type SocialExposureRecord, type SocialMessage } from "../harness/social";
+import {
+  averageTeamRewards,
+  summarizeModelRewardsWithDensity
+} from "../harness/tournamentEvaluationSummary";
+import type { EvidenceRef } from "../harness/socialState";
 import { runTournament, type TournamentEpisode, type TournamentResult } from "../harness/tournament";
-import { TOURNAMENT_ARTIFACT_VERSION, writeTournamentArtifactDirectory, type TournamentArtifactWriteResult } from "../harness/tournamentArtifacts";
+import {
+  assertPublicTournamentMatchArtifact,
+  summarizeTournamentMetricPromotionsFromMetrics,
+  summarizeTournamentMetricPromotionsFromReports,
+  PUBLIC_TOURNAMENT_ARTIFACT_VERSION,
+  TOURNAMENT_ARTIFACT_VERSION,
+  writeTournamentArtifactDirectory,
+  type PublicTournamentArtifactFiles,
+  type TournamentArtifactWriteResult
+} from "../harness/tournamentArtifacts";
 import type {
   AdversarialEvaluation,
   HarnessAgentConfig,
   HarnessAgentProfile,
+  HarnessEvaluationReport,
   HarnessForkProvenance,
   HarnessReasoner,
   HarnessRunResult,
   HarnessTurnTrace,
   ProviderFailureSummary
 } from "../harness/types";
+import { DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER, WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS } from "../harness/types";
 import {
   countCheckpointsForMatch,
   createMatchRecord,
   createMatchRecordFromState,
+  createTournamentPublicShare,
+  recordTournamentPublicShareDetailView,
+  recordTournamentPublicShareDownload,
+  pruneAllTournamentPublicShareEvents,
+  retainDownloadEvents,
+  retainTimestampEvents,
+  DEFAULT_TOURNAMENT_PUBLIC_SHARE_EVENT_RETENTION,
+  deleteTournamentPublicShare,
   getCheckpoint,
-  getExperimentMatrixArtifactSet,
+  getComparison,
   getMatch,
   getTournamentArtifactSet,
+  getTournamentPublicShare,
   listArtifactRecoveryAuditRecords,
   listCheckpoints,
-  listExperimentMatrixArtifactSets,
+  listComparisons,
   listMatches,
   listTournamentArtifactSets,
+  listTournamentPublicShares,
   saveArtifactRecoveryAuditRecord,
   saveCheckpoint,
-  saveExperimentMatrixArtifactSet,
+  saveComparison,
   saveMatch,
   saveTournamentArtifactSet,
+  saveTournamentPublicShare,
   type StoredArtifactRecoveryAuditRecord,
-  type StoredExperimentMatrixArtifactFiles,
-  type StoredExperimentMatrixArtifactSet,
   type StoredTournamentArtifactFiles,
+  type StoredPublicTournamentArtifactFiles,
+  type StoredResearchTournamentArtifactFiles,
   type StoredTournamentArtifactSet,
-  type StoredMatch
+  type StoredTournamentPublicShare,
+  type StoredMatch,
+  type TournamentPublicShareEventRetentionPolicy
 } from "./store";
+import {
+  REDACTED_DELIVERY_POLICY,
+  REDACTED_PRIVATE_OBSERVATION,
+  REDACTED_PRIVATE_SOCIAL_OBSERVATION,
+  REDACTED_SOCIAL_STEP_FAILURE,
+  type MatchArtifactView,
+  type MatchArtifactViewDto,
+  type PostgameMatchProjectionDto,
+  type RedactedAgentStateDto,
+  type RedactedCommandDto,
+  type RedactedHarnessStepDto,
+  type RedactedPendingActionDto,
+  type RedactedSocialEpisodeDto,
+  type RedactedSocialMessageDraftDto,
+  type RedactedSocialMessageDto,
+  type RedactedSocialStepFailureDto
+} from "./artifactProjection";
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOURNAMENT_ARTIFACT_SET_INDEX_FILE = "artifact_sets.index.json";
-const MATRIX_ARTIFACT_SET_INDEX_FILE = "matrix_artifact_sets.index.json";
+const TOURNAMENT_PUBLIC_SHARE_INDEX_FILE = "tournament_public_shares.index.json";
 const CHECKPOINT_ARTIFACT_INDEX_FILE = "checkpoints.index.json";
 const CHECKPOINT_ARTIFACT_DIR = "checkpoints";
 const MATCH_ARTIFACT_INDEX_FILE = "matches.index.json";
 const MATCH_ARTIFACT_DIR = "matches";
+const COMPARISON_ARTIFACT_INDEX_FILE = "comparisons.index.json";
+const COMPARISON_ARTIFACT_DIR = "comparisons";
+
+let activePublicShareEventRetention: TournamentPublicShareEventRetentionPolicy = {
+  ...DEFAULT_TOURNAMENT_PUBLIC_SHARE_EVENT_RETENTION
+};
 const ARTIFACT_RECOVERY_AUDIT_FILE = "artifact_recovery_audits.jsonl";
 const ARTIFACT_RECOVERY_AUDIT_VERSION = "server.artifact-recovery-audit.v1";
 const GENERATED_ARTIFACT_SET_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** Server-owned match file stems: UUID v4 or safe tournament/episode ids. */
+const PERSISTED_MATCH_ARTIFACT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 const ARTIFACT_RECOVERY_AUDIT_MAX_LIMIT = 500;
 const CHECKPOINT_BRANCH_TREE_MAX_DEPTH_LIMIT = 100;
 const CHECKPOINT_BRANCH_TREE_MAX_NODES_LIMIT = 1000;
@@ -133,27 +191,56 @@ interface CheckpointBranchTreeQuery {
 
 export interface ServerAppDependencies {
   createReasoner?: (abortSignal: AbortSignal) => HarnessReasoner;
+  /**
+   * Actual listener host when embedding the app. Full artifacts remain local
+   * debug-only and are denied unless this is a loopback bind target.
+   */
+  artifactAccessBindHost?: string;
   tournamentArtifactBaseDir?: string;
-  matrixArtifactBaseDir?: string;
   checkpointArtifactBaseDir?: string;
   matchArtifactBaseDir?: string;
-}
+  comparisonArtifactBaseDir?: string;
+  /**
+   * Optional override for public share download rate limiting.
+   * Defaults come from TOURNAMENT_PUBLIC_SHARE_DOWNLOAD_RATE_LIMIT /
+   * TOURNAMENT_PUBLIC_SHARE_DOWNLOAD_RATE_WINDOW_MS.
+   */
+  publicShareDownloadRateLimit?: {
+    maxDownloads: number;
+    windowMs: number;
+    now?: () => number;
+  };
+  /**
+   * Optional override for public-share analytics event retention.
+   * Defaults:
+   * - TOURNAMENT_PUBLIC_SHARE_EVENT_MAX=100
+   * - TOURNAMENT_PUBLIC_SHARE_EVENT_MAX_AGE_MS=2592000000 (30d)
+   */
+  publicShareEventRetention?: TournamentPublicShareEventRetentionPolicy;
+ }
 
 export function createServerApp(dependencies: ServerAppDependencies = {}): express.Express {
 const app = express();
+const artifactAccessBindHost = dependencies.artifactAccessBindHost ?? host;
 const createReasoner =
   dependencies.createReasoner ??
   ((abortSignal: AbortSignal): HarnessReasoner => new OpenAIHarnessReasoner(modelClientFromEnv(process.env, { abortSignal })));
 const tournamentArtifactBaseDir = normalizeOptionalDirectory(dependencies.tournamentArtifactBaseDir ?? process.env.TOURNAMENT_ARTIFACT_BASE_DIR);
-const matrixArtifactBaseDir = normalizeOptionalDirectory(
-  dependencies.matrixArtifactBaseDir ??
-    process.env.MATRIX_ARTIFACT_BASE_DIR ??
-    (dependencies.tournamentArtifactBaseDir ?? process.env.TOURNAMENT_ARTIFACT_BASE_DIR
-      ? path.join(String(dependencies.tournamentArtifactBaseDir ?? process.env.TOURNAMENT_ARTIFACT_BASE_DIR), "matrices")
-      : undefined)
-);
 const checkpointArtifactBaseDir = normalizeOptionalDirectory(dependencies.checkpointArtifactBaseDir ?? process.env.CHECKPOINT_ARTIFACT_BASE_DIR);
 const matchArtifactBaseDir = normalizeOptionalDirectory(dependencies.matchArtifactBaseDir ?? process.env.MATCH_ARTIFACT_BASE_DIR);
+const comparisonArtifactBaseDir = normalizeOptionalDirectory(
+  dependencies.comparisonArtifactBaseDir ?? process.env.COMPARISON_ARTIFACT_BASE_DIR
+);
+const publicShareDownloadRateLimit = resolvePublicShareDownloadRateLimit(
+  dependencies.publicShareDownloadRateLimit,
+  process.env
+);
+const publicShareEventRetention = resolvePublicShareEventRetention(
+  dependencies.publicShareEventRetention,
+  process.env
+);
+activePublicShareEventRetention = publicShareEventRetention;
+const publicShareDownloadBuckets = new Map<string, number[]>();
 
 app.use(express.json({ limit: "2mb" }));
 
@@ -176,13 +263,7 @@ app.get("/api/config", (_req, res) => {
     policyNames: POLICY_NAMES,
     defaultProfiles: profilesFromModels(provider.models, Number(process.env.AGENT_TEMPERATURE ?? 0.7)),
     provider,
-    chatCompletionsUrl: provider.protocol === "openai-chat-completions" ? provider.endpoint : null,
-    artifactExport: {
-      tournamentConfigured: Boolean(tournamentArtifactBaseDir),
-      matrixConfigured: Boolean(matrixArtifactBaseDir),
-      checkpointConfigured: Boolean(checkpointArtifactBaseDir),
-      matchConfigured: Boolean(matchArtifactBaseDir)
-    }
+    chatCompletionsUrl: provider.protocol === "openai-chat-completions" ? provider.endpoint : null
   });
 });
 
@@ -190,6 +271,7 @@ app.get("/api/artifact-recovery-audits", async (req, res, next) => {
   try {
     await loadServerArtifactStores();
     await loadTournamentArtifactSetIndex(tournamentArtifactBaseDir);
+    await loadTournamentPublicShareIndex(tournamentArtifactBaseDir);
     const query = artifactRecoveryAuditQueryFromRequest(req.query);
     const filteredRecords = listArtifactRecoveryAuditRecords()
       .filter((record) => artifactRecoveryAuditRecordMatchesQuery(record, query))
@@ -224,20 +306,6 @@ app.get("/api/matches", async (_req, res, next) => {
   }
 });
 
-app.post("/api/matches", (req, res, next) => {
-  try {
-    const models = normalizeModelList(req.body?.models?.join?.(",") ?? process.env.LLM_MODELS);
-    const record = createMatchRecord({
-      seed: req.body?.seed,
-      config: req.body?.config as Partial<GameConfig> | undefined,
-      models
-    });
-    res.status(201).json(serializeStoredMatch(record));
-  } catch (error) {
-    next(error);
-  }
-});
-
 app.get("/api/matches/:id", async (req, res, next) => {
   try {
     await loadServerArtifactStores();
@@ -264,7 +332,14 @@ app.get("/api/matches/:id/artifact", async (req, res, next) => {
       res.status(404).json({ error: "match artifact not available" });
       return;
     }
-    res.json(projectMatchArtifactForView(match.artifact, artifactViewFromQuery(req.query)));
+    const view = artifactViewFromQuery(req.query, req, artifactAccessBindHost);
+    const projected = projectMatchArtifactForView(match.artifact, view);
+    setArtifactProjectionResponseHeaders(res, view);
+    if (downloadRequested(req.query)) {
+      const shortId = match.id.slice(0, 8);
+      res.setHeader("Content-Disposition", `attachment; filename="${shortId}-match-${view}.json"`);
+    }
+    res.json(projected);
   } catch (error) {
     next(error);
   }
@@ -273,7 +348,10 @@ app.get("/api/matches/:id/artifact", async (req, res, next) => {
 app.get("/api/matches/:id/compare/:candidateId", async (req, res, next) => {
   try {
     await loadMatchArtifactIndex(matchArtifactBaseDir);
-    const view = artifactViewFromQuery(req.query);
+    const view = artifactViewFromQuery(req.query, req, artifactAccessBindHost);
+    const format = comparisonFormatFromQuery(req.query);
+    const rowFilter = comparisonRowFilterFromQuery(req.query);
+    const filteredRequested = filteredComparisonRequested(req.query, rowFilter);
     const baseline = getMatch(req.params.id);
     const candidate = getMatch(req.params.candidateId);
     if (!baseline || !candidate) {
@@ -284,18 +362,171 @@ app.get("/api/matches/:id/compare/:candidateId", async (req, res, next) => {
       res.status(404).json({ error: "match artifact not available" });
       return;
     }
-    const baselineArtifact = projectMatchArtifactForView(baseline.artifact, view) as MatchArtifact;
-    const candidateArtifact = projectMatchArtifactForView(candidate.artifact, view) as MatchArtifact;
-    res.json(
-      redactSecrets(
-        buildMatchComparisonArtifact({
-          baseline: baselineArtifact,
-          candidate: candidateArtifact,
-          view,
-          createdAt: new Date(0).toISOString()
-        })
-      )
+    const baselineArtifact = projectMatchArtifactForView(baseline.artifact, view);
+    const candidateArtifact = projectMatchArtifactForView(candidate.artifact, view);
+    const comparison = redactSecrets(
+      buildMatchComparisonArtifact({
+        baseline: baselineArtifact,
+        candidate: candidateArtifact,
+        view,
+        createdAt: new Date(0).toISOString()
+      })
     );
+    // Registry artifacts are an API-visible truth surface. A full/debug
+    // comparison may be requested explicitly, but must remain request-local so
+    // a later registry read cannot expose it without the same explicit intent.
+    // Filtered projections are also request-local pure views.
+    if (!filteredRequested && view !== "full") {
+      saveComparison(comparison);
+      await persistComparisonArtifact(comparison, comparisonArtifactBaseDir);
+      await writeComparisonArtifactIndex(comparisonArtifactBaseDir);
+    }
+    const payload = filteredRequested
+      ? redactSecrets(
+          projectFilteredMatchComparison(comparison, rowFilter, {
+            createdAt: new Date(0).toISOString()
+          })
+        )
+      : comparison;
+    const shortBaseline = baseline.id.slice(0, 8);
+    const shortCandidate = candidate.id.slice(0, 8);
+    const filenameStem = filteredRequested
+      ? `${shortBaseline}-vs-${shortCandidate}-comparison-filtered`
+      : `${shortBaseline}-vs-${shortCandidate}-comparison`;
+    setArtifactProjectionResponseHeaders(res, view);
+    if (format === "markdown") {
+      const markdown = filteredRequested
+        ? formatFilteredMatchComparisonMarkdown(payload as ReturnType<typeof projectFilteredMatchComparison>)
+        : formatMatchComparisonMarkdown(comparison);
+      if (downloadRequested(req.query)) {
+        res.setHeader("Content-Disposition", `attachment; filename="${filenameStem}.md"`);
+      }
+      res.type("text/markdown; charset=utf-8").send(markdown);
+      return;
+    }
+    if (downloadRequested(req.query)) {
+      res.setHeader("Content-Disposition", `attachment; filename="${filenameStem}.json"`);
+    }
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/comparisons", async (req, res, next) => {
+  try {
+    await loadComparisonArtifactIndex(comparisonArtifactBaseDir);
+    const view = artifactViewFromQuery(req.query, req, artifactAccessBindHost);
+    const baselineId = typeof req.query.baselineId === "string" ? req.query.baselineId.trim() : "";
+    const candidateId = typeof req.query.candidateId === "string" ? req.query.candidateId.trim() : "";
+    const packMatchIds = parseComparisonMatchIdsQuery(req.query.matchIds);
+    const comparisons = listComparisons({
+      ...(baselineId ? { baselineId } : {}),
+      ...(candidateId ? { candidateId } : {}),
+      ...(packMatchIds ? { packMatchIds } : {})
+    })
+      .filter((comparison) => comparisonIsVisibleInRegistry(comparison, view))
+      .map((comparison) => ({
+      comparisonId: comparison.comparisonId,
+      createdAt: comparison.createdAt,
+      view: comparison.view,
+      projection: comparison.projection,
+      baseline: {
+        matchId: comparison.baseline.matchId,
+        runId: comparison.baseline.runId,
+        seed: comparison.baseline.seed
+      },
+      candidate: {
+        matchId: comparison.candidate.matchId,
+        runId: comparison.candidate.runId,
+        seed: comparison.candidate.seed
+      },
+      summary: {
+        rowCount: comparison.summary.rowCount,
+        changedRowCount: comparison.summary.changedRowCount,
+        numericDeltaCount: comparison.summary.numericDeltaCount,
+        promotionChangedMetricCount: comparison.summary.promotionChangedMetricCount,
+        scorecardMetricDelta: comparison.summary.scorecardMetricDelta,
+        diagnosticMetricDelta: comparison.summary.diagnosticMetricDelta,
+        benchmarkOnlyMetricDelta: comparison.summary.benchmarkOnlyMetricDelta,
+        evidenceIdentityChangedMetricCount: comparison.summary.evidenceIdentityChangedMetricCount,
+        evidenceIdentityOnlyBaselineRefCount: comparison.summary.evidenceIdentityOnlyBaselineRefCount,
+        evidenceIdentityOnlyCandidateRefCount: comparison.summary.evidenceIdentityOnlyCandidateRefCount,
+        metricKeysCompared: comparison.summary.metricKeysCompared,
+        metricKeysEmitted: comparison.summary.metricKeysEmitted,
+        metricKeysTruncated: comparison.summary.metricKeysTruncated,
+        scorecardMetricKeysCompared: comparison.summary.scorecardMetricKeysCompared,
+        scorecardMetricKeysEmitted: comparison.summary.scorecardMetricKeysEmitted,
+        scorecardMetricKeysTruncated: comparison.summary.scorecardMetricKeysTruncated,
+        diagnosticMetricKeysCompared: comparison.summary.diagnosticMetricKeysCompared,
+        diagnosticMetricKeysEmitted: comparison.summary.diagnosticMetricKeysEmitted,
+        diagnosticMetricKeysTruncated: comparison.summary.diagnosticMetricKeysTruncated,
+        benchmarkOnlyMetricKeysCompared: comparison.summary.benchmarkOnlyMetricKeysCompared,
+        benchmarkOnlyMetricKeysEmitted: comparison.summary.benchmarkOnlyMetricKeysEmitted,
+        benchmarkOnlyMetricKeysTruncated: comparison.summary.benchmarkOnlyMetricKeysTruncated,
+        metricRowsMax: comparison.summary.metricRowsMax,
+        baselineSocialSteps: comparison.summary.baselineSocialSteps,
+        candidateSocialSteps: comparison.summary.candidateSocialSteps,
+        baselineCommittedSteps: comparison.summary.baselineCommittedSteps,
+        candidateCommittedSteps: comparison.summary.candidateCommittedSteps,
+        baselineRejectedSteps: comparison.summary.baselineRejectedSteps,
+        candidateRejectedSteps: comparison.summary.candidateRejectedSteps,
+        socialStepsDelta: comparison.summary.socialStepsDelta,
+        committedStepsDelta: comparison.summary.committedStepsDelta,
+        rejectedStepsDelta: comparison.summary.rejectedStepsDelta,
+        baselineHash: comparison.summary.baselineHash,
+        candidateHash: comparison.summary.candidateHash
+      }
+    }));
+    setArtifactProjectionResponseHeaders(res, view);
+    res.json({ comparisons });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/comparisons/:id", async (req, res, next) => {
+  try {
+    await loadComparisonArtifactIndex(comparisonArtifactBaseDir);
+    const comparison = getComparison(req.params.id);
+    if (!comparison) {
+      res.status(404).json({ error: "comparison not found" });
+      return;
+    }
+    const view = artifactViewFromQuery(req.query, req, artifactAccessBindHost);
+    if (!comparisonIsVisibleInRegistry(comparison, view)) {
+      // Do not disclose a legacy full comparison through the default safe
+      // route. A caller that intentionally needs a locally stored full record
+      // must explicitly request view=full.
+      res.status(404).json({ error: "comparison not found" });
+      return;
+    }
+    if (view === "full" && comparison.view !== "full") {
+      throw new HttpError(
+        409,
+        "Stored comparison is not available in the requested full view; regenerate it from the match pair with view=full.",
+        "comparison_view_unavailable"
+      );
+    }
+    const format = comparisonFormatFromQuery(req.query);
+    setArtifactProjectionResponseHeaders(res, view);
+    if (format === "markdown") {
+      if (downloadRequested(req.query)) {
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="${req.params.id.slice(0, 24)}-comparison.md"`
+        );
+      }
+      res.type("text/markdown; charset=utf-8").send(formatMatchComparisonMarkdown(comparison));
+      return;
+    }
+    if (downloadRequested(req.query)) {
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${req.params.id.slice(0, 24)}-comparison.json"`
+      );
+    }
+    res.json(comparison);
   } catch (error) {
     next(error);
   }
@@ -313,7 +544,12 @@ app.get("/api/matches/:id/trajectory.jsonl", async (req, res, next) => {
       res.status(404).send("match artifact not available");
       return;
     }
-    const artifact = projectMatchArtifactForView(match.artifact, artifactViewFromQuery(req.query)) as MatchArtifact;
+    const view = artifactViewFromQuery(req.query, req, artifactAccessBindHost);
+    const artifact = projectMatchArtifactForView(match.artifact, view);
+    const shortId = match.id.slice(0, 8);
+    // trajectory.jsonl is always a downloadable export surface.
+    setArtifactProjectionResponseHeaders(res, view);
+    res.setHeader("Content-Disposition", `attachment; filename="${shortId}-trajectory-${view}.jsonl"`);
     res.type("application/x-ndjson").send(toTrajectoryJsonl(artifact));
   } catch (error) {
     next(error);
@@ -333,24 +569,25 @@ app.post("/api/matches/:id/replay", async (req, res, next) => {
       res.status(404).json({ error: "match artifact not available" });
       return;
     }
-    const expectedFinalHash = hashStableState(match.artifact.finalState);
-    const replay = replayHarnessTrajectory({
-      initialState: match.artifact.initialState,
-      trajectory: match.artifact.trajectory,
-      stopOnMismatch: req.body?.stopOnMismatch !== false,
-      expectedFinalHash
+    const body = requestBodyObject(req.body);
+    assertAllowedBodyFields(body, ["stopOnMismatch"], "server-owned replay");
+    const replay = replayWerewolfSocialEpisode(match.artifact.socialEpisode, {
+      stopOnMismatch: body.stopOnMismatch !== false
     });
     res.status(replay.ok ? 200 : 409).json(
-      serializeReplayResult(replay, {
+      serializeSocialReplayResult(replay, {
         source: "server-owned-match-artifact",
         matchId: match.id,
         runId: match.artifact.runId,
-        trajectorySteps: match.artifact.trajectory.length,
-        expectedFinalHash,
-        finalHashMatchesArtifact: replay.finalHash === expectedFinalHash
-      }, { includeFinalState: false })
+        ...countSocialStepCommits(match.artifact.socialEpisode.steps),
+        finalHashMatchesArtifact: replay.finalHash === replay.expectedFinalHash
+      })
     );
   } catch (error) {
+    if (error instanceof HttpError) {
+      next(error);
+      return;
+    }
     if (!match?.artifact) {
       next(error);
       return;
@@ -375,7 +612,7 @@ app.post("/api/matches/:id/checkpoints", async (req, res, next) => {
   try {
     const body = requestBodyObject(req.body);
     assertForbiddenBodyFields(body, FORBIDDEN_CHECKPOINT_BODY_FIELDS, "checkpoint creation");
-    assertAllowedBodyFields(body, ["reason", "trajectoryLength", "traceId", "turnIndex"], "checkpoint creation");
+    assertAllowedBodyFields(body, ["reason", "nativeStepCount", "traceId", "nativeTurnIndex"], "checkpoint creation");
     await loadServerArtifactStores();
     const match = getMatch(req.params.id);
     if (!match) {
@@ -502,7 +739,10 @@ app.get("/api/checkpoints/:id/artifact", async (req, res, next) => {
       res.status(404).json({ error: "checkpoint not found" });
       return;
     }
-    res.json(redactSecrets(checkpoint));
+    const view = checkpointArtifactViewFromQuery(req.query, req, artifactAccessBindHost);
+    const projected = projectHarnessCheckpointForView(checkpoint, view);
+    setArtifactProjectionResponseHeaders(res, view);
+    res.json(projected);
   } catch (error) {
     next(error);
   }
@@ -553,6 +793,7 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
     ? setTimeout(() => abortController.abort(new Error(`Fork timeout exceeded ${timeoutMs}ms.`)), timeoutMs)
     : undefined;
   timeout?.unref();
+  let artifactFinalized = false;
 
   try {
     const forkOptions = forkHarnessRunOptions({
@@ -574,22 +815,14 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
       result
     });
     await persistMatchArtifact(artifact, matchArtifactBaseDir);
-    record.status = result.status === "failed" ? "failed" : "completed";
-    record.error = result.status === "failed" ? result.failureReason : undefined;
-    record.state = result.state;
-    record.metrics = result.metrics;
     record.artifact = artifact;
-    record.initialState = result.initialState;
-    record.trajectory = result.trajectory;
-    record.socialEpisode = result.socialEpisode;
-    record.evaluation = result.evaluation;
-    record.evaluationReport = result.evaluationReport;
-    record.profiles = profiles;
-    record.resolvedAssignments = resolvedAssignments;
     saveMatch(record);
+    artifactFinalized = true;
+    const completedRecord = getMatch(record.id);
+    if (!completedRecord?.artifact) throw new Error(`Finalized fork ${record.id} was not stored as an artifact-backed match.`);
     await writeMatchArtifactIndex(matchArtifactBaseDir);
     res.status(result.status === "failed" ? 207 : 200).json({
-      ...serializeStoredMatch(record),
+      ...serializeStoredMatch(completedRecord),
       summary: {
         ...buildMatchSummary(result, {
           seed: result.initialState.seed,
@@ -606,10 +839,14 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
       }
     });
   } catch (error) {
+    if (artifactFinalized) {
+      next(error);
+      return;
+    }
     const failure = publicApiFailureFromError(error);
+    delete record.artifact;
     record.status = "failed";
     record.error = failure.message;
-    clearMatchArtifactFields(record);
     saveMatch(record);
     res.status(500).json({
       ...serializeStoredMatch(record),
@@ -639,21 +876,6 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
   }
 });
 
-app.post("/api/matches/:id/command", (req, res, next) => {
-  try {
-    const match = getMatch(req.params.id);
-    if (!match) {
-      res.status(404).json({ error: "match not found" });
-      return;
-    }
-    match.state = applyCommand(match.state, req.body as GameCommand);
-    saveMatch(match);
-    res.json(serializeStoredMatch(match));
-  } catch (error) {
-    next(error);
-  }
-});
-
 app.post("/api/matches/run", async (req, res, next) => {
   const startedAt = performance.now();
   let models: string[] = [];
@@ -662,6 +884,7 @@ app.post("/api/matches/run", async (req, res, next) => {
   let assignment: HarnessAssignmentConfig | undefined;
   let maxTransitions: number | undefined;
   let timeoutMs: number | undefined;
+  let jointPhaseScheduler: "aec-batched-decision" | "parallel" | undefined;
   try {
     models = normalizeModelList(Array.isArray(req.body?.models) ? req.body.models.join(",") : process.env.LLM_MODELS);
     temperature = parseTemperature(process.env.AGENT_TEMPERATURE ?? req.body?.temperature ?? 0.7);
@@ -671,6 +894,15 @@ app.post("/api/matches/run", async (req, res, next) => {
     assertAssignmentProfileReferences(assignment, profiles);
     maxTransitions = parseOptionalPositiveInteger(req.body?.maxTransitions, "maxTransitions");
     timeoutMs = parseOptionalDurationMs(req.body?.timeoutMs ?? req.body?.timeout, "timeoutMs");
+    jointPhaseScheduler = parseOptionalJointPhaseScheduler(req.body?.jointPhaseScheduler);
+    if (
+      jointPhaseScheduler === "parallel" &&
+      (maxTransitions === undefined || maxTransitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS)
+    ) {
+      throw new Error(
+        `jointPhaseScheduler=parallel requires maxTransitions >= ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS} (system.advance + seer.inspect + joint wolf batch).`
+      );
+    }
     const validationState = createGame({
       id: "match-request-validation",
       seed: typeof req.body?.seed === "string" && req.body.seed.trim() ? req.body.seed : "match-request-validation",
@@ -695,7 +927,8 @@ app.post("/api/matches/run", async (req, res, next) => {
         resolvedAssignments: [],
         limits: {
           maxTransitions: maxTransitions ?? null,
-          timeoutMs: timeoutMs ?? null
+          timeoutMs: timeoutMs ?? null,
+          jointPhaseScheduler: jointPhaseScheduler ?? DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER
         },
         elapsedMs: Math.round(performance.now() - startedAt),
         timedOut: false,
@@ -726,6 +959,7 @@ app.post("/api/matches/run", async (req, res, next) => {
     ? setTimeout(() => abortController.abort(new Error(`Match timeout exceeded ${timeoutMs}ms.`)), timeoutMs)
     : undefined;
   timeout?.unref();
+  let artifactFinalized = false;
 
   try {
     const agents: HarnessAgentConfig[] = resolveAgentConfigs(record.state.players, profiles, 0, temperature, assignment);
@@ -734,7 +968,8 @@ app.post("/api/matches/run", async (req, res, next) => {
       initialState: record.state,
       agents,
       reasoner: createReasoner(abortController.signal),
-      maxTransitions
+      maxTransitions,
+      jointPhaseScheduler
     });
     const artifact = buildMatchArtifact({
       runId: record.id,
@@ -748,23 +983,14 @@ app.post("/api/matches/run", async (req, res, next) => {
       result
     });
     await persistMatchArtifact(artifact, matchArtifactBaseDir);
-    record.status = result.status === "failed" ? "failed" : "completed";
-    record.error = result.status === "failed" ? result.failureReason : undefined;
-    record.state = result.state;
-    record.metrics = result.metrics;
     record.artifact = artifact;
-    record.initialState = result.initialState;
-    record.trajectory = result.trajectory;
-    record.socialEpisode = result.socialEpisode;
-    record.evaluation = result.evaluation;
-    record.evaluationReport = result.evaluationReport;
-    record.profiles = profiles;
-    record.assignment = assignment;
-    record.resolvedAssignments = resolvedAssignments;
     saveMatch(record);
+    artifactFinalized = true;
+    const completedRecord = getMatch(record.id);
+    if (!completedRecord?.artifact) throw new Error(`Finalized match ${record.id} was not stored as an artifact-backed match.`);
     await writeMatchArtifactIndex(matchArtifactBaseDir);
     res.status(result.status === "failed" ? 207 : 200).json({
-      ...serializeStoredMatch(record),
+      ...serializeStoredMatch(completedRecord),
       summary: buildMatchSummary(result, {
         seed: record.state.seed,
         models,
@@ -773,14 +999,19 @@ app.post("/api/matches/run", async (req, res, next) => {
         resolvedAssignments,
         maxTransitions,
         timeoutMs,
+        jointPhaseScheduler,
         elapsedMs: Math.round(performance.now() - startedAt)
       })
     });
   } catch (error) {
+    if (artifactFinalized) {
+      next(error);
+      return;
+    }
     const failure = publicApiFailureFromError(error);
+    delete record.artifact;
     record.status = "failed";
     record.error = failure.message;
-    clearMatchArtifactFields(record);
     saveMatch(record);
     res.status(500).json({
       ...serializeStoredMatch(record),
@@ -796,7 +1027,8 @@ app.post("/api/matches/run", async (req, res, next) => {
         resolvedAssignments: [],
         limits: {
           maxTransitions: maxTransitions ?? null,
-          timeoutMs: timeoutMs ?? null
+          timeoutMs: timeoutMs ?? null,
+          jointPhaseScheduler: jointPhaseScheduler ?? DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER
         },
         elapsedMs: Math.round(performance.now() - startedAt),
         timedOut: abortController.signal.aborted,
@@ -808,44 +1040,6 @@ app.post("/api/matches/run", async (req, res, next) => {
     });
   } finally {
     if (timeout) clearTimeout(timeout);
-  }
-});
-
-app.post("/api/replay", (req, res) => {
-  try {
-    const initialState = req.body?.initialState ?? req.body?.artifact?.initialState;
-    const trajectory = req.body?.trajectory ?? req.body?.artifact?.trajectory;
-    if (!initialState || !Array.isArray(trajectory)) {
-      res.status(400).json({ error: "Replay requires initialState and trajectory, or artifact with those fields." });
-      return;
-    }
-    const expectedFinalHash =
-      typeof req.body?.expectedFinalHash === "string"
-        ? req.body.expectedFinalHash
-        : req.body?.artifact?.finalState
-          ? hashStableState(req.body.artifact.finalState as GameState)
-          : undefined;
-    const replay = replayHarnessTrajectory({
-      initialState: initialState as GameState,
-      trajectory,
-      stopOnMismatch: req.body?.stopOnMismatch !== false,
-      expectedFinalHash
-    });
-    res.status(replay.ok ? 200 : 409).json(
-      serializeReplayResult(replay, { source: "client-submitted-diagnostic", expectedFinalHash }, { includeFinalState: false })
-    );
-  } catch (error) {
-    const failure = publicApiFailureFromError(error);
-    res.status(500).json({
-      summary: {
-        kind: "replay",
-        ok: false,
-        source: "client-submitted-diagnostic",
-        failureReason: failure.message,
-        providerFailure: failure.providerFailure ?? null
-      },
-      error: failure.message
-    });
   }
 });
 
@@ -1029,140 +1223,9 @@ app.post("/api/tournaments/run", async (req, res) => {
   }
 });
 
-app.post("/api/experiments/matrix/run", async (req, res) => {
-  let experiment: NormalizedMatrixExperiment;
-  let exportArtifacts = false;
+app.get("/api/tournament-artifacts", async (req, res, next) => {
   try {
-    const body = requestBodyObject(req.body);
-    assertForbiddenMatrixRequestFields(body, "experiment matrix run");
-    exportArtifacts = parseOptionalBoolean(body.exportArtifacts, "exportArtifacts") ?? false;
-    if (exportArtifacts && !matrixArtifactBaseDir) {
-      throw new HttpError(400, "Experiment matrix artifact export requires configured MATRIX_ARTIFACT_BASE_DIR or TOURNAMENT_ARTIFACT_BASE_DIR.");
-    }
-    experiment = normalizeMatrixExperimentRequest(body);
-  } catch (error) {
-    const status = error instanceof HttpError ? error.status : 400;
-    const failure = publicApiFailureFromError(error);
-    res.status(status).json({
-      summary: {
-        kind: "experiment-matrix",
-        ok: false,
-        endpoint: providerConfigSummaryFromEnv().endpoint,
-        failureReason: failure.message,
-        providerFailure: failure.providerFailure ?? null
-      },
-      error: failure.message
-    });
-    return;
-  }
-  const timeoutMs = matrixExperimentTimeoutMs(experiment);
-  const abortController = new AbortController();
-  const timeout = timeoutMs ? setTimeout(() => abortController.abort(new Error(`Matrix timeout exceeded ${timeoutMs}ms.`)), timeoutMs) : undefined;
-  timeout?.unref();
-  const startedAt = performance.now();
-
-  try {
-    const result = await runExperimentMatrix({
-      experiment,
-      includeArtifacts: exportArtifacts,
-      reasoner: createReasoner(abortController.signal)
-    });
-    const artifactSet = exportArtifacts
-      ? await persistExperimentMatrixArtifactSet({
-          result,
-          baseDir: matrixArtifactBaseDir
-        })
-      : null;
-    res.status(result.cellsFailed || result.gamesFailed ? 207 : 200).json({
-      summary: {
-        ...buildExperimentMatrixSummary(result, {
-          timeoutMs,
-          elapsedMs: Math.round(performance.now() - startedAt),
-          timedOut: abortController.signal.aborted
-        }),
-        artifacts: artifactSet ? serializeExperimentMatrixArtifactSet(artifactSet) : null
-      },
-      artifacts: artifactSet ? serializeExperimentMatrixArtifactSet(artifactSet) : null,
-      cells: result.cells.map(serializeExperimentMatrixCellSummaryForApi),
-      statistics: result.statistics
-    });
-  } catch (error) {
-    const failure = publicApiFailureFromError(error);
-    res.status(500).json({
-      summary: {
-        kind: "experiment-matrix",
-        ok: false,
-        endpoint: providerConfigSummaryFromEnv().endpoint,
-        matrixId: experiment.id,
-        cellsRequested: experiment.cells.length,
-        timeoutMs: timeoutMs ?? null,
-        elapsedMs: Math.round(performance.now() - startedAt),
-        timedOut: abortController.signal.aborted,
-        failureReason: failure.message,
-        providerFailure: failure.providerFailure ?? null
-      },
-      error: failure.message
-    });
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
-});
-
-app.get("/api/experiments/matrix/artifacts", async (_req, res, next) => {
-  try {
-    await loadExperimentMatrixArtifactSetIndex(matrixArtifactBaseDir);
-    res.json({
-      artifactSets: listExperimentMatrixArtifactSetsForBaseDir(matrixArtifactBaseDir).map(serializeExperimentMatrixArtifactSet)
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get(/^\/api\/experiments\/matrix\/artifacts\/([^/]+)\/files\/(.+)$/, async (req, res, next) => {
-  try {
-    const params = req.params as unknown as string[];
-    const artifactSetId = params[0];
-    const requestedPath = params[1];
-    await loadExperimentMatrixArtifactSetIndex(matrixArtifactBaseDir);
-    const artifactSet = getExperimentMatrixArtifactSetForBaseDir(artifactSetId, matrixArtifactBaseDir);
-    if (!artifactSet) {
-      res.status(404).json({ error: "experiment matrix artifact set not found" });
-      return;
-    }
-    const file = await resolveRegisteredExperimentMatrixArtifactFile(artifactSet, requestedPath, matrixArtifactBaseDir);
-    let content: Buffer;
-    try {
-      content = await readFile(file.absolutePath);
-    } catch (error) {
-      if (isFileReadNotFound(error)) {
-        res.status(404).json({ error: "experiment matrix artifact file not found" });
-        return;
-      }
-      throw new HttpError(500, "experiment matrix artifact file could not be read");
-    }
-    res.type(contentTypeForArtifactFile(file.relativePath)).send(content);
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get("/api/experiments/matrix/artifacts/:id", async (req, res, next) => {
-  try {
-    await loadExperimentMatrixArtifactSetIndex(matrixArtifactBaseDir);
-    const artifactSet = getExperimentMatrixArtifactSetForBaseDir(req.params.id, matrixArtifactBaseDir);
-    if (!artifactSet) {
-      res.status(404).json({ error: "experiment matrix artifact set not found" });
-      return;
-    }
-    res.json(serializeExperimentMatrixArtifactSet(artifactSet));
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get("/api/tournament-artifacts", async (_req, res, next) => {
-  try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
     await loadTournamentArtifactSetIndex(tournamentArtifactBaseDir);
     res.json({
       artifactSets: listTournamentArtifactSetsForBaseDir(tournamentArtifactBaseDir).map(serializeTournamentArtifactSet)
@@ -1174,6 +1237,7 @@ app.get("/api/tournament-artifacts", async (_req, res, next) => {
 
 app.get(/^\/api\/tournament-artifacts\/([^/]+)\/files\/(.+)$/, async (req, res, next) => {
   try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
     const params = req.params as unknown as string[];
     const artifactSetId = params[0];
     const requestedPath = params[1];
@@ -1202,6 +1266,7 @@ app.get(/^\/api\/tournament-artifacts\/([^/]+)\/files\/(.+)$/, async (req, res, 
 
 app.get("/api/tournament-artifacts/:id", async (req, res, next) => {
   try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
     await loadTournamentArtifactSetIndex(tournamentArtifactBaseDir);
     const artifactSet = getTournamentArtifactSetForBaseDir(req.params.id, tournamentArtifactBaseDir);
     if (!artifactSet) {
@@ -1209,6 +1274,182 @@ app.get("/api/tournament-artifacts/:id", async (req, res, next) => {
       return;
     }
     res.json(serializeTournamentArtifactSet(artifactSet));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tournament-artifacts/:id/shares", async (req, res, next) => {
+  try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
+    await loadTournamentArtifactSetIndex(tournamentArtifactBaseDir);
+    const artifactSet = getTournamentArtifactSetForBaseDir(req.params.id, tournamentArtifactBaseDir);
+    if (!artifactSet) {
+      res.status(404).json({ error: "tournament artifact set not found" });
+      return;
+    }
+    await assertVerifiedPublicTournamentArtifactSet(artifactSet, tournamentArtifactBaseDir);
+    const body = requestBodyObject(req.body);
+    assertForbiddenBodyFields(body, FORBIDDEN_TOURNAMENT_SHARE_BODY_FIELDS, "tournament share create");
+    const label = parseOptionalString(body.label, "label");
+    const expiresAt = parseOptionalShareExpiresAt(body.expiresAt);
+    const relativeFiles = parseOptionalShareRelativeFiles(body.relativeFiles, artifactSet);
+    const share = createTournamentPublicShare({
+      artifactSetId: artifactSet.id,
+      label,
+      expiresAt,
+      relativeFiles,
+      projection: artifactSet.projection
+    });
+    await loadTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    saveTournamentPublicShare(share);
+    await writeTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    res.status(201).json(serializeTournamentPublicShare(share));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/tournament-artifacts/:id/shares", async (req, res, next) => {
+  try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
+    await loadTournamentArtifactSetIndex(tournamentArtifactBaseDir);
+    await loadTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    const artifactSet = getTournamentArtifactSetForBaseDir(req.params.id, tournamentArtifactBaseDir);
+    if (!artifactSet) {
+      res.status(404).json({ error: "tournament artifact set not found" });
+      return;
+    }
+    res.json({
+      artifactSetId: artifactSet.id,
+      shares: listTournamentPublicShares(artifactSet.id).map(serializeTournamentPublicShare)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/tournament-public-shares", async (req, res, next) => {
+  try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
+    await loadTournamentArtifactSetIndex(tournamentArtifactBaseDir);
+    await loadTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    const shares = listTournamentPublicShares().map(serializeTournamentPublicShareInventory);
+    res.json({
+      count: shares.length,
+      activeCount: shares.filter((share) => !share.expired).length,
+      expiredCount: shares.filter((share) => share.expired).length,
+      shares
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/tournament-public-shares/summary", async (req, res, next) => {
+  try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
+    await loadTournamentArtifactSetIndex(tournamentArtifactBaseDir);
+    await loadTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    const format = typeof req.query.format === "string" ? req.query.format.trim().toLowerCase() : "json";
+    if (format !== "json" && format !== "markdown" && format !== "md") {
+      res.status(400).json({ error: 'format must be "json" or "markdown"' });
+      return;
+    }
+    const summary = buildTournamentPublicShareAnalyticsSummary();
+    if (format === "markdown" || format === "md") {
+      const markdown = renderTournamentPublicShareAnalyticsSummaryMarkdown(summary);
+      res.setHeader("content-disposition", 'attachment; filename="tournament-public-share-analytics.md"');
+      res.type("text/markdown; charset=utf-8").send(markdown);
+      return;
+    }
+    res.setHeader("content-disposition", 'attachment; filename="tournament-public-share-analytics.json"');
+    res.json(summary);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/public/tournament-shares/:shareId", async (req, res, next) => {
+  try {
+    await loadTournamentArtifactSetIndex(tournamentArtifactBaseDir);
+    await loadTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    const share = requireActiveTournamentPublicShare(req.params.shareId);
+    const artifactSet = getTournamentArtifactSetForBaseDir(share.artifactSetId, tournamentArtifactBaseDir);
+    if (!artifactSet) {
+      res.status(404).json({ error: "shared tournament artifact set not found" });
+      return;
+    }
+    await assertVerifiedPublicTournamentArtifactSet(artifactSet, tournamentArtifactBaseDir);
+    const viewed = recordTournamentPublicShareDetailView(share.id, new Date().toISOString(), activePublicShareEventRetention) ?? share;
+    await writeTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    res.json(serializeTournamentPublicShareDetail(viewed, artifactSet));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get(/^\/api\/public\/tournament-shares\/([^/]+)\/files\/(.+)$/, async (req, res, next) => {
+  try {
+    const params = req.params as unknown as string[];
+    const shareId = params[0];
+    const requestedPath = params[1];
+    await loadTournamentArtifactSetIndex(tournamentArtifactBaseDir);
+    await loadTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    const share = requireActiveTournamentPublicShare(shareId);
+    const artifactSet = getTournamentArtifactSetForBaseDir(share.artifactSetId, tournamentArtifactBaseDir);
+    if (!artifactSet) {
+      res.status(404).json({ error: "shared tournament artifact set not found" });
+      return;
+    }
+    await assertVerifiedPublicTournamentArtifactSet(artifactSet, tournamentArtifactBaseDir);
+    const rateKey = `${share.id}:${requestClientKey(req)}`;
+    const rate = consumePublicShareDownloadRateLimit(publicShareDownloadBuckets, rateKey, publicShareDownloadRateLimit);
+    if (!rate.allowed) {
+      res.setHeader("Retry-After", String(rate.retryAfterSeconds));
+      res.status(429).json({
+        error: "public share download rate limit exceeded",
+        retryAfterSeconds: rate.retryAfterSeconds,
+        limit: publicShareDownloadRateLimit.maxDownloads,
+        windowMs: publicShareDownloadRateLimit.windowMs
+      });
+      return;
+    }
+    const file = await resolveRegisteredTournamentArtifactFile(artifactSet, requestedPath, tournamentArtifactBaseDir);
+    if (share.relativeFiles && !share.relativeFiles.includes(file.relativePath)) {
+      res.status(404).json({ error: "shared tournament artifact file not found" });
+      return;
+    }
+    let content: Buffer;
+    try {
+      content = await readFile(file.absolutePath);
+    } catch (error) {
+      if (isFileReadNotFound(error)) {
+        res.status(404).json({ error: "shared tournament artifact file not found" });
+        return;
+      }
+      throw new HttpError(500, "shared tournament artifact file could not be read");
+    }
+    recordTournamentPublicShareDownload(share.id, file.relativePath, new Date().toISOString(), activePublicShareEventRetention);
+    await writeTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    res.type(contentTypeForArtifactFile(file.relativePath)).send(content);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/public/tournament-shares/:shareId", async (req, res, next) => {
+  try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
+    await loadTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    const share = getTournamentPublicShare(req.params.shareId);
+    if (!share) {
+      res.status(404).json({ error: "tournament public share not found" });
+      return;
+    }
+    deleteTournamentPublicShare(share.id);
+    await writeTournamentPublicShareIndex(tournamentArtifactBaseDir);
+    res.status(204).send();
   } catch (error) {
     next(error);
   }
@@ -1224,10 +1465,12 @@ function buildMatchSummary(
     resolvedAssignments: ResolvedAgentAssignment[];
     maxTransitions?: number;
     timeoutMs?: number;
+    jointPhaseScheduler?: "aec-batched-decision" | "parallel";
     elapsedMs: number;
   }
 ): object {
-  const harnessFailures = result.state.events.filter((event) => event.type === "harness.error").map(summarizeHarnessFailure);
+  const harnessFailures = harnessFailureEvidenceFromEpisode(result.socialEpisode).map(summarizeHarnessFailure);
+  const stepCounts = countSocialStepCommits(result.socialEpisode.steps);
   return {
     kind: "match",
     ok: result.status !== "failed" && harnessFailures.length === 0,
@@ -1243,7 +1486,8 @@ function buildMatchSummary(
     failureStateHash: result.failureStateHash ?? null,
     limits: {
       maxTransitions: options.maxTransitions ?? null,
-      timeoutMs: options.timeoutMs ?? null
+      timeoutMs: options.timeoutMs ?? null,
+      jointPhaseScheduler: options.jointPhaseScheduler ?? DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER
     },
     elapsedMs: options.elapsedMs,
     gameOver: result.state.phase === "game_over",
@@ -1251,14 +1495,14 @@ function buildMatchSummary(
     winner: result.state.winner ?? null,
     endReason: result.state.endReason ?? null,
     day: result.state.day,
-    phase: result.state.phase,
     harnessTurnCount: result.metrics.harnessTurnCount,
     harnessErrorCount: result.metrics.harnessErrorCount,
+    ...stepCounts,
+    socialSteps: stepCounts.nativeSteps,
     trajectorySteps: result.trajectory.length,
-    socialSteps: result.socialEpisode.steps.length,
     averageModelLatencyMs: result.metrics.averageLatencyMs,
     modelUsage: summarizeModelUsage(result.metrics),
-    evaluation: summarizeEvaluation(result.evaluation),
+    evaluation: summarizeEvaluation(result.evaluation, stepCounts),
     evaluationReport: summarizeEvaluationReport(result.evaluationReport),
     harnessFailureCount: harnessFailures.length,
     failureReason: publicHarnessFailureReason(result.failureReason, harnessFailures)
@@ -1279,11 +1523,17 @@ const FORBIDDEN_CHECKPOINT_BODY_FIELDS = [
   "agents",
   "initialAgentStates",
   "trajectory",
+  "socialEpisode",
+  "executionPrefix",
+  "channels",
   "socialMessages",
   "initialSocialMessages",
   "stateHash",
   "trajectoryHash",
+  "executionPrefixHash",
   "agentsHash",
+  "channelsHash",
+  "messagesHash",
   "socialMessagesHash",
   "agentSnapshots",
   "agentSnapshotFrames",
@@ -1309,6 +1559,18 @@ const FORBIDDEN_TOURNAMENT_BODY_FIELDS = [
   "baseDir",
   "manifestPath",
   "registryPath"
+];
+
+const FORBIDDEN_TOURNAMENT_SHARE_BODY_FIELDS = [
+  ...FORBIDDEN_TOURNAMENT_BODY_FIELDS,
+  "shareId",
+  "token",
+  "artifactSetId",
+  "id",
+  "downloads",
+  "files",
+  "projection",
+  "publicShareSafe"
 ];
 
 class HttpError extends Error {
@@ -1356,23 +1618,6 @@ function assertForbiddenTournamentRequestFields(body: Record<string, unknown>, c
   }
 }
 
-function assertForbiddenMatrixRequestFields(body: Record<string, unknown>, context: string): void {
-  assertForbiddenTournamentRequestFields(body, context);
-  const spec = isRecord(body.spec) ? body.spec : body;
-  if (isRecord(spec.base)) {
-    assertForbiddenBodyFields(spec.base, FORBIDDEN_TOURNAMENT_BODY_FIELDS, `${context} base`);
-  }
-  if (Array.isArray(spec.cells)) {
-    spec.cells.forEach((cell, index) => {
-      if (!isRecord(cell)) return;
-      assertForbiddenBodyFields(cell, FORBIDDEN_TOURNAMENT_BODY_FIELDS, `${context} cell ${index + 1}`);
-      if (isRecord(cell.spec)) {
-        assertForbiddenBodyFields(cell.spec, FORBIDDEN_TOURNAMENT_BODY_FIELDS, `${context} cell ${index + 1} spec`);
-      }
-    });
-  }
-}
-
 function parseOptionalString(value: unknown, name: string): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") throw new HttpError(400, `${name} must be a string.`);
@@ -1381,14 +1626,14 @@ function parseOptionalString(value: unknown, name: string): string | undefined {
 
 function checkpointPrefixSelectorFromBody(body: Record<string, unknown>): HarnessCheckpointPrefixSelector | undefined {
   const hasTraceId = body.traceId !== undefined && body.traceId !== null && body.traceId !== "";
-  const hasTurnIndex = body.turnIndex !== undefined && body.turnIndex !== null && body.turnIndex !== "";
-  const hasTrajectoryLength = body.trajectoryLength !== undefined && body.trajectoryLength !== null && body.trajectoryLength !== "";
-  const selectorCount = [hasTraceId, hasTurnIndex, hasTrajectoryLength].filter(Boolean).length;
+  const hasNativeTurnIndex = body.nativeTurnIndex !== undefined && body.nativeTurnIndex !== null && body.nativeTurnIndex !== "";
+  const hasNativeStepCount = body.nativeStepCount !== undefined && body.nativeStepCount !== null && body.nativeStepCount !== "";
+  const selectorCount = [hasTraceId, hasNativeTurnIndex, hasNativeStepCount].filter(Boolean).length;
   if (selectorCount === 0) return undefined;
   if (selectorCount > 1) throw new HttpError(400, "checkpoint creation request must include at most one prefix selector.");
   if (hasTraceId) return { traceId: parseOptionalString(body.traceId, "traceId") };
-  if (hasTurnIndex) return { turnIndex: parseOptionalPositiveInteger(body.turnIndex, "turnIndex") };
-  return { trajectoryLength: parseOptionalPositiveInteger(body.trajectoryLength, "trajectoryLength") };
+  if (hasNativeTurnIndex) return { nativeTurnIndex: parseOptionalPositiveInteger(body.nativeTurnIndex, "nativeTurnIndex") };
+  return { nativeStepCount: parseOptionalPositiveInteger(body.nativeStepCount, "nativeStepCount") };
 }
 
 function httpErrorFromCheckpointSelectionError(error: unknown): unknown {
@@ -1427,21 +1672,29 @@ function serializeCheckpointSummary(checkpoint: HarnessCheckpoint): object {
       matchId: checkpoint.source.matchId ?? null,
       seed: checkpoint.source.seed,
       status: checkpoint.source.status,
-      traceRef: checkpoint.source.traceId ? hashStableState({ traceId: checkpoint.source.traceId }).slice(0, 16) : null,
-      turnIndex: checkpoint.source.turnIndex ?? null,
-      trajectoryLength: checkpoint.source.trajectoryLength,
-      messageSeq: checkpoint.source.messageSeq ?? null,
+      boundaryTraceRef: checkpoint.source.boundaryTraceId
+        ? hashStableState({ traceId: checkpoint.source.boundaryTraceId }).slice(0, 16)
+        : null,
+      boundaryTurnIndex: checkpoint.source.boundaryTurnIndex ?? null,
+      boundaryBatchId: checkpoint.source.boundaryBatchId ?? null,
+      boundaryBatchIndex: checkpoint.source.boundaryBatchIndex ?? null,
+      boundarySchedulerMode: checkpoint.source.boundarySchedulerMode ?? null,
+      nativeStepCount: checkpoint.source.nativeStepCount,
+      messageCount: checkpoint.source.messageCount,
+      lastMessageSeq: checkpoint.source.lastMessageSeq ?? null,
       stateHash: checkpoint.source.stateHash,
-      trajectoryHash: checkpoint.source.trajectoryHash,
+      executionPrefixHash: checkpoint.source.executionPrefixHash,
       agentsHash: checkpoint.source.agentsHash,
-      socialMessagesHash: checkpoint.source.socialMessagesHash,
+      channelsHash: checkpoint.source.channelsHash,
+      messagesHash: checkpoint.source.messagesHash,
       failureReason: checkpoint.source.failureReason ? sanitizeApiErrorText(checkpoint.source.failureReason) : null,
       truncationReason: checkpoint.source.truncationReason ?? null
     },
     counts: {
       agents: checkpoint.agents.length,
-      trajectorySteps: checkpoint.trajectory.length,
-      socialMessages: checkpoint.socialMessages.length
+      ...countSocialStepCommits(checkpoint.executionPrefix.steps),
+      socialMessages: checkpoint.executionPrefix.messages.length,
+      channels: checkpoint.executionPrefix.channels.length
     }
   };
 }
@@ -1450,7 +1703,7 @@ function buildCheckpointForksSummary(checkpoint: HarnessCheckpoint, artifacts: M
   const forks = artifacts.map((artifact) => buildForkChildSummary(artifact, checkpoint));
   return {
     kind: "checkpoint-forks",
-    schemaVersion: "server.checkpoint-forks-summary.v1",
+    schemaVersion: "server.checkpoint-forks-summary.v2",
     ok: forks.every((fork) => isRecord(fork.lineage) && fork.lineage.ok === true),
     checkpoint: serializeCheckpointSummary(checkpoint),
     childCount: forks.length,
@@ -1618,7 +1871,7 @@ function buildCheckpointBranchTreeSummary(
   const maxDepth = [...checkpointList, ...matchList].reduce((max, node) => Math.max(max, checkpointNodeDepth(node) ?? 0), 0);
   return {
     kind: "checkpoint-branch-tree",
-    schemaVersion: "server.checkpoint-branch-tree-summary.v1",
+    schemaVersion: "server.checkpoint-branch-tree-summary.v2",
     ok: lineageOk,
     okScope: "returned",
     rootCheckpointId: rootCheckpoint.checkpointId,
@@ -1648,6 +1901,7 @@ function buildCheckpointBranchTreeSummary(
 
 function buildForkChildSummary(artifact: MatchArtifact, checkpoint: HarnessCheckpoint): Record<string, unknown> {
   const lineage = buildForkLineageSummary(artifact, checkpoint);
+  const stepCounts = countSocialStepCommits(artifact.socialEpisode.steps);
   return {
     runId: artifact.runId,
     matchId: artifact.matchId ?? null,
@@ -1655,7 +1909,10 @@ function buildForkChildSummary(artifact: MatchArtifact, checkpoint: HarnessCheck
     status: artifact.status,
     truncationReason: artifact.truncationReason ?? null,
     failureReason: artifact.failureReason ? sanitizeApiErrorText(artifact.failureReason) : null,
-    trajectoryLength: artifact.trajectory.length,
+    nativeStepCount: stepCounts.nativeSteps,
+    committedSteps: stepCounts.committedSteps,
+    rejectedSteps: stepCounts.rejectedSteps,
+    legacyProjectionSteps: artifact.trajectory.length,
     socialMessages: artifact.socialEpisode.messages.length,
     forkOf: artifact.forkOf ? summarizeForkProvenance(artifact.forkOf) : null,
     lineage
@@ -1680,9 +1937,10 @@ function branchNodeId(value: unknown): string {
 
 function buildForkLineageSummary(artifact: MatchArtifact, checkpoint?: HarnessCheckpoint): object {
   const forkOf = artifact.forkOf;
-  const firstStep = artifact.trajectory[0];
-  const finalStep = artifact.trajectory.at(-1);
+  const firstStep = artifact.socialEpisode.steps[0];
+  const finalStep = artifact.socialEpisode.steps.at(-1);
   const lastMessage = artifact.socialEpisode.messages.at(-1);
+  const stepCounts = countSocialStepCommits(artifact.socialEpisode.steps);
   const childSummary = {
     runId: artifact.runId,
     matchId: artifact.matchId ?? null,
@@ -1690,20 +1948,22 @@ function buildForkLineageSummary(artifact: MatchArtifact, checkpoint?: HarnessCh
     status: artifact.status,
     truncationReason: artifact.truncationReason ?? null,
     failureReason: artifact.failureReason ? sanitizeApiErrorText(artifact.failureReason) : null,
-    trajectoryLength: artifact.trajectory.length,
-    socialSteps: artifact.socialEpisode.steps.length,
+    nativeStepCount: stepCounts.nativeSteps,
+    committedSteps: stepCounts.committedSteps,
+    rejectedSteps: stepCounts.rejectedSteps,
+    legacyProjectionSteps: artifact.trajectory.length,
     socialMessages: artifact.socialEpisode.messages.length,
     firstStepPreStateHash: firstStep?.preStateHash ?? null,
     finalStepPostStateHash: finalStep?.postStateHash ?? null,
     finalStateHash: hashStableState(artifact.finalState),
-    firstNewMessageSeq: checkpoint ? artifact.socialEpisode.messages[checkpoint.socialMessages.length]?.seq ?? null : null,
+    firstNewMessageSeq: checkpoint ? artifact.socialEpisode.messages[checkpoint.executionPrefix.messages.length]?.seq ?? null : null,
     lastMessageSeq: lastMessage?.seq ?? null
   };
 
   if (!forkOf) {
     return {
       kind: "fork-lineage",
-      schemaVersion: "server.fork-lineage-summary.v1",
+      schemaVersion: "server.fork-lineage-summary.v2",
       ok: true,
       isFork: false,
       runId: artifact.runId,
@@ -1717,7 +1977,9 @@ function buildForkLineageSummary(artifact: MatchArtifact, checkpoint?: HarnessCh
         stateHashMatches: null,
         checkpointSourceMatchesForkOf: null,
         messagePrefixMatchesCheckpoint: null,
-        newTrajectorySteps: artifact.trajectory.length,
+        newNativeSteps: stepCounts.nativeSteps,
+        newCommittedSteps: stepCounts.committedSteps,
+        newRejectedSteps: stepCounts.rejectedSteps,
         newSocialMessages: null
       }
     };
@@ -1733,11 +1995,11 @@ function buildForkLineageSummary(artifact: MatchArtifact, checkpoint?: HarnessCh
     stateHashMatches,
     hasChildStep: Boolean(firstStep)
   });
-  const newSocialMessages = checkpoint ? artifact.socialEpisode.messages.length - checkpoint.socialMessages.length : null;
+  const newSocialMessages = checkpoint ? artifact.socialEpisode.messages.length - checkpoint.executionPrefix.messages.length : null;
 
   return {
     kind: "fork-lineage",
-    schemaVersion: "server.fork-lineage-summary.v1",
+    schemaVersion: "server.fork-lineage-summary.v2",
     ok: boundaryStatus !== "mismatch",
     isFork: true,
     runId: artifact.runId,
@@ -1747,14 +2009,18 @@ function buildForkLineageSummary(artifact: MatchArtifact, checkpoint?: HarnessCh
       checkpointId: forkOf.checkpointId,
       runId: forkOf.parentRunId ?? null,
       matchId: forkOf.parentMatchId ?? null,
-      traceRef: forkOf.parentTraceId ? hashStableState({ traceId: forkOf.parentTraceId }).slice(0, 16) : null,
-      turnIndex: forkOf.parentTurnIndex ?? null,
-      trajectoryLength: forkOf.parentTrajectoryLength,
-      messageSeq: checkpoint?.source.messageSeq ?? null,
+      boundaryTraceRef: forkOf.parentBoundaryTraceId
+        ? hashStableState({ traceId: forkOf.parentBoundaryTraceId }).slice(0, 16)
+        : null,
+      boundaryTurnIndex: forkOf.parentBoundaryTurnIndex ?? null,
+      nativeStepCount: forkOf.parentNativeStepCount,
+      messageCount: forkOf.parentMessageCount,
+      lastMessageSeq: checkpoint?.source.lastMessageSeq ?? null,
       stateHash: forkOf.parentStateHash,
-      trajectoryHash: forkOf.parentTrajectoryHash ?? null,
-      agentsHash: forkOf.parentAgentsHash ?? null,
-      socialMessagesHash: forkOf.parentSocialMessagesHash ?? null,
+      executionPrefixHash: forkOf.parentExecutionPrefixHash,
+      agentsHash: forkOf.parentAgentsHash,
+      channelsHash: forkOf.parentChannelsHash,
+      messagesHash: forkOf.parentMessagesHash,
       checkpointFound: Boolean(checkpoint)
     },
     child: childSummary,
@@ -1764,7 +2030,9 @@ function buildForkLineageSummary(artifact: MatchArtifact, checkpoint?: HarnessCh
       stateHashMatches,
       checkpointSourceMatchesForkOf,
       messagePrefixMatchesCheckpoint,
-      newTrajectorySteps: artifact.trajectory.length,
+      newNativeSteps: stepCounts.nativeSteps,
+      newCommittedSteps: stepCounts.committedSteps,
+      newRejectedSteps: stepCounts.rejectedSteps,
       newSocialMessages
     }
   };
@@ -1775,20 +2043,22 @@ function checkpointSourceMatchesForkProvenance(checkpoint: HarnessCheckpoint, fo
     checkpoint.checkpointId === forkOf.checkpointId &&
     checkpoint.source.runId === forkOf.parentRunId &&
     (checkpoint.source.matchId ?? null) === (forkOf.parentMatchId ?? null) &&
-    (checkpoint.source.traceId ?? null) === (forkOf.parentTraceId ?? null) &&
-    (checkpoint.source.turnIndex ?? null) === (forkOf.parentTurnIndex ?? null) &&
+    (checkpoint.source.boundaryTraceId ?? null) === (forkOf.parentBoundaryTraceId ?? null) &&
+    (checkpoint.source.boundaryTurnIndex ?? null) === (forkOf.parentBoundaryTurnIndex ?? null) &&
     checkpoint.source.stateHash === forkOf.parentStateHash &&
-    (checkpoint.source.trajectoryHash ?? null) === (forkOf.parentTrajectoryHash ?? null) &&
-    (checkpoint.source.agentsHash ?? null) === (forkOf.parentAgentsHash ?? null) &&
-    (checkpoint.source.socialMessagesHash ?? null) === (forkOf.parentSocialMessagesHash ?? null) &&
-    checkpoint.source.trajectoryLength === forkOf.parentTrajectoryLength
+    checkpoint.source.executionPrefixHash === forkOf.parentExecutionPrefixHash &&
+    checkpoint.source.agentsHash === forkOf.parentAgentsHash &&
+    checkpoint.source.channelsHash === forkOf.parentChannelsHash &&
+    checkpoint.source.messagesHash === forkOf.parentMessagesHash &&
+    checkpoint.source.nativeStepCount === forkOf.parentNativeStepCount &&
+    checkpoint.source.messageCount === forkOf.parentMessageCount
   );
 }
 
 function socialMessagePrefixMatchesCheckpoint(artifact: MatchArtifact, checkpoint: HarnessCheckpoint): boolean {
-  if (artifact.socialEpisode.messages.length < checkpoint.socialMessages.length) return false;
-  const prefix = artifact.socialEpisode.messages.slice(0, checkpoint.socialMessages.length);
-  return hashStableState(prefix) === checkpoint.source.socialMessagesHash;
+  if (artifact.socialEpisode.messages.length < checkpoint.executionPrefix.messages.length) return false;
+  const prefix = artifact.socialEpisode.messages.slice(0, checkpoint.executionPrefix.messages.length);
+  return hashStableState(prefix) === checkpoint.source.messagesHash;
 }
 
 function forkBoundaryStatus(input: {
@@ -1836,15 +2106,20 @@ function profilesFromCheckpoint(checkpoint: HarnessCheckpoint): HarnessAgentProf
 async function loadServerArtifactStores(): Promise<void> {
   await loadMatchArtifactIndex(matchArtifactBaseDir);
   await loadCheckpointArtifactIndex(checkpointArtifactBaseDir);
+  await loadComparisonArtifactIndex(comparisonArtifactBaseDir);
 }
 
 async function persistMatchArtifact(artifact: MatchArtifact, baseDir: string | undefined): Promise<void> {
-  if (!baseDir) return;
   assertValidMatchArtifactIntegrity(artifact);
+  if (!baseDir) return;
   const root = path.resolve(baseDir);
   const file = matchArtifactAbsoluteFile(root, matchArtifactId(artifact));
   await ensureWritableArtifactSubdirectory(root, matchArtifactDirectory(root), "Match artifact directory is not safe.");
-  await writeFile(file, `${JSON.stringify(redactSecrets(artifact), null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+  // Overwrite is intentional for deterministic tournament episode ids so a re-export
+  // under the same seed/episode replaces the prior match store entry.
+  await writeFile(file, `${JSON.stringify(redactSecrets(artifact), null, 2)}\n`, {
+    encoding: "utf8"
+  });
 }
 
 async function loadMatchArtifactIndex(baseDir: string | undefined): Promise<void> {
@@ -1920,9 +2195,10 @@ async function writeMatchArtifactIndex(baseDir: string | undefined): Promise<voi
   for (const match of listMatches()) {
     if (!match.artifact) continue;
     const id = matchArtifactId(match.artifact);
-    if (!GENERATED_ARTIFACT_SET_ID_PATTERN.test(id)) continue;
+    if (!isPersistedMatchArtifactId(id)) continue;
     const artifact = await matchArtifactFromFile(root, id, matchArtifactRelativeFile(id));
     if (!artifact) continue;
+    const stepCounts = countSocialStepCommits(artifact.socialEpisode.steps);
     matches.push({
       matchId: matchArtifactId(artifact),
       runId: artifact.runId,
@@ -1932,6 +2208,9 @@ async function writeMatchArtifactIndex(baseDir: string | undefined): Promise<voi
       stateHash: hashStableState(artifact.finalState),
       trajectoryHash: hashStableState(artifact.trajectory),
       agentCount: artifact.agents.length,
+      nativeSteps: stepCounts.nativeSteps,
+      committedSteps: stepCounts.committedSteps,
+      rejectedSteps: stepCounts.rejectedSteps,
       trajectorySteps: artifact.trajectory.length,
       socialMessages: artifact.socialEpisode.messages.length,
       relativeFile: matchArtifactRelativeFile(matchArtifactId(artifact))
@@ -1972,13 +2251,13 @@ async function loadMatchArtifactsFromDirectory(baseDir: string, skipIds: Set<str
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const matchId = entry.name.slice(0, -".json".length);
-    if (!GENERATED_ARTIFACT_SET_ID_PATTERN.test(matchId)) {
+    if (!isPersistedMatchArtifactId(matchId)) {
       await recordArtifactRecoveryAudit(baseDir, {
         store: "match",
         source: "directory",
         code: "file_name_rejected",
         relativeFile: `${MATCH_ARTIFACT_DIR}/${entry.name}`,
-        message: "Match artifact file name was not a generated UUID JSON artifact."
+        message: "Match artifact file name was not a server-owned match artifact id."
       });
       continue;
     }
@@ -2011,7 +2290,7 @@ async function matchArtifactFromFile(baseDir: string, matchId: string, relativeF
 
 async function readMatchArtifactFromFile(baseDir: string, matchId: string, relativeFile: string): Promise<ArtifactRecoveryReadResult<MatchArtifact>> {
   try {
-    if (!GENERATED_ARTIFACT_SET_ID_PATTERN.test(matchId)) return { ok: false, code: "file_identity_mismatch" };
+    if (!isPersistedMatchArtifactId(matchId)) return { ok: false, code: "file_identity_mismatch" };
     const normalized = normalizeRequestedArtifactPath(relativeFile);
     if (normalized !== matchArtifactRelativeFile(matchId)) return { ok: false, code: "file_identity_mismatch" };
     const absolutePath = resolveUnderDirectory(baseDir, normalized);
@@ -2076,8 +2355,16 @@ function matchArtifactAbsoluteFile(baseDir: string, matchId: string): string {
 }
 
 function matchArtifactRelativeFile(matchId: string): string {
-  if (!GENERATED_ARTIFACT_SET_ID_PATTERN.test(matchId)) throw new HttpError(500, "generated match artifact id is invalid");
+  if (!isPersistedMatchArtifactId(matchId)) throw new HttpError(500, "server-owned match artifact id is invalid");
   return `${MATCH_ARTIFACT_DIR}/${matchId}.json`;
+}
+
+function isPersistedMatchArtifactId(matchId: string): boolean {
+  if (!matchId || matchId.length > 160) return false;
+  if (matchId.includes("..") || matchId.startsWith(".") || matchId.endsWith(".")) return false;
+  if (GENERATED_ARTIFACT_SET_ID_PATTERN.test(matchId)) return true;
+  // Tournament episode ids such as tournament-<seed>-N and other safe stems.
+  return PERSISTED_MATCH_ARTIFACT_ID_PATTERN.test(matchId);
 }
 
 function matchArtifactId(artifact: MatchArtifact): string {
@@ -2085,8 +2372,8 @@ function matchArtifactId(artifact: MatchArtifact): string {
 }
 
 async function persistCheckpointArtifact(checkpoint: HarnessCheckpoint, baseDir: string | undefined): Promise<void> {
-  if (!baseDir) return;
   assertValidHarnessCheckpoint(checkpoint);
+  if (!baseDir) return;
   const root = path.resolve(baseDir);
   const file = checkpointArtifactAbsoluteFile(root, checkpoint.checkpointId);
   await ensureWritableArtifactSubdirectory(root, checkpointArtifactDirectory(root), "Checkpoint artifact directory is not safe.");
@@ -2122,7 +2409,12 @@ async function loadCheckpointArtifactIndex(baseDir: string | undefined): Promise
   }
 
   if (indexExists) {
-    if (!isRecord(parsed) || parsed.kind !== "checkpoint-artifact-index" || !Array.isArray(parsed.checkpoints)) {
+    if (
+      !isRecord(parsed) ||
+      parsed.artifactVersion !== "harness.checkpoint-artifact-index.v2" ||
+      parsed.kind !== "checkpoint-artifact-index" ||
+      !Array.isArray(parsed.checkpoints)
+    ) {
       await recordArtifactRecoveryAudit(root, {
         store: "checkpoint",
         source: "index",
@@ -2174,14 +2466,15 @@ async function writeCheckpointArtifactIndex(baseDir: string | undefined): Promis
       sourceMatchId: persisted.source.matchId ?? null,
       seed: persisted.source.seed,
       stateHash: persisted.source.stateHash,
-      trajectoryHash: persisted.source.trajectoryHash,
+      executionPrefixHash: persisted.source.executionPrefixHash,
       agentsHash: persisted.source.agentsHash,
-      socialMessagesHash: persisted.source.socialMessagesHash,
+      channelsHash: persisted.source.channelsHash,
+      messagesHash: persisted.source.messagesHash,
       relativeFile: checkpointArtifactRelativeFile(persisted.checkpointId)
     });
   }
   const index = {
-    artifactVersion: "harness.checkpoint-artifact-index.v1",
+    artifactVersion: "harness.checkpoint-artifact-index.v2",
     kind: "checkpoint-artifact-index",
     updatedAt: new Date().toISOString(),
     checkpoints
@@ -2308,20 +2601,214 @@ function checkpointArtifactRelativeFile(checkpointId: string): string {
   return `${CHECKPOINT_ARTIFACT_DIR}/${checkpointId}.json`;
 }
 
-function clearMatchArtifactFields(record: StoredMatch): void {
-  delete record.metrics;
-  delete record.artifact;
-  delete record.initialState;
-  delete record.trajectory;
-  delete record.socialEpisode;
-  delete record.evaluation;
-  delete record.evaluationReport;
-  delete record.profiles;
-  delete record.assignment;
-  delete record.resolvedAssignments;
+async function persistComparisonArtifact(
+  comparison: MatchComparisonArtifact,
+  baseDir: string | undefined
+): Promise<void> {
+  if (!baseDir) return;
+  const root = path.resolve(baseDir);
+  const file = comparisonArtifactAbsoluteFile(root, comparison.comparisonId);
+  await ensureWritableArtifactSubdirectory(
+    root,
+    comparisonArtifactDirectory(root),
+    "Comparison artifact directory is not safe."
+  );
+  // Overwrite is intentional for deterministic comparison ids so recompute
+  // under the same baseline/candidate/view replaces the prior registry entry.
+  await writeFile(file, `${JSON.stringify(redactSecrets(comparison), null, 2)}\n`, {
+    encoding: "utf8"
+  });
 }
 
+async function loadComparisonArtifactIndex(baseDir: string | undefined): Promise<void> {
+  if (!baseDir) return;
+  const root = path.resolve(baseDir);
+  let parsed: unknown;
+  let shouldRewriteIndex = false;
+  const loadedIds = new Set<string>();
+  let indexExists = true;
+  try {
+    parsed = JSON.parse(await readFile(comparisonArtifactIndexPath(root), "utf8"));
+  } catch (error) {
+    if (isFileReadNotFound(error)) {
+      indexExists = false;
+    } else if (error instanceof SyntaxError) {
+      indexExists = false;
+      shouldRewriteIndex = true;
+    } else {
+      throw new HttpError(500, "Comparison artifact index could not be read.");
+    }
+  }
+
+  if (indexExists) {
+    if (
+      !isRecord(parsed) ||
+      parsed.artifactVersion !== "harness.comparison-artifact-index.v1" ||
+      parsed.kind !== "comparison-artifact-index" ||
+      !Array.isArray(parsed.comparisons)
+    ) {
+      shouldRewriteIndex = true;
+    } else {
+      for (const record of parsed.comparisons) {
+        const comparison = await comparisonFromIndexRecord(root, record);
+        if (comparison) {
+          saveComparison(comparison);
+          loadedIds.add(comparison.comparisonId);
+        } else {
+          shouldRewriteIndex = true;
+        }
+      }
+    }
+  }
+
+  const scannedIds = await loadComparisonArtifactsFromDirectory(root, loadedIds);
+  if (scannedIds.length > 0 || shouldRewriteIndex || !indexExists) {
+    await writeComparisonArtifactIndex(root);
+  }
+}
+
+async function writeComparisonArtifactIndex(baseDir: string | undefined): Promise<void> {
+  if (!baseDir) return;
+  const root = path.resolve(baseDir);
+  await mkdir(comparisonArtifactDirectory(root), { recursive: true });
+  const comparisons = [];
+  for (const comparison of listComparisons()) {
+    const relativeFile = comparisonArtifactRelativeFile(comparison.comparisonId);
+    const absolute = comparisonArtifactAbsoluteFile(root, comparison.comparisonId);
+    try {
+      await lstat(absolute);
+    } catch {
+      // Skip registry entries that no longer have files.
+      continue;
+    }
+    comparisons.push({
+      comparisonId: comparison.comparisonId,
+      createdAt: comparison.createdAt,
+      view: comparison.view,
+      baselineRunId: comparison.baseline.runId,
+      baselineMatchId: comparison.baseline.matchId ?? null,
+      candidateRunId: comparison.candidate.runId,
+      candidateMatchId: comparison.candidate.matchId ?? null,
+      baselineHash: comparison.summary.baselineHash,
+      candidateHash: comparison.summary.candidateHash,
+      rowCount: comparison.summary.rowCount,
+      changedRowCount: comparison.summary.changedRowCount,
+      relativeFile
+    });
+  }
+  const index = {
+    artifactVersion: "harness.comparison-artifact-index.v1",
+    kind: "comparison-artifact-index",
+    updatedAt: new Date().toISOString(),
+    comparisons
+  };
+  await writeFile(comparisonArtifactIndexPath(root), `${JSON.stringify(redactSecrets(index), null, 2)}\n`, "utf8");
+}
+
+async function comparisonFromIndexRecord(
+  baseDir: string,
+  value: unknown
+): Promise<MatchComparisonArtifact | null> {
+  try {
+    if (!isRecord(value)) return null;
+    const comparisonId = stringField(value, "comparisonId");
+    const relativeFile = stringField(value, "relativeFile");
+    if (!comparisonId || !relativeFile) return null;
+    if (relativeFile !== comparisonArtifactRelativeFile(comparisonId)) return null;
+    return comparisonArtifactFromFile(baseDir, comparisonId, relativeFile);
+  } catch {
+    return null;
+  }
+}
+
+async function loadComparisonArtifactsFromDirectory(
+  baseDir: string,
+  skipIds: Set<string>
+): Promise<string[]> {
+  const dir = comparisonArtifactDirectory(baseDir);
+  let entries: Array<{ isFile(): boolean; name: string }>;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (error) {
+    if (isFileReadNotFound(error)) return [];
+    throw new HttpError(500, "Comparison artifact directory could not be read.");
+  }
+  const loadedIds: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const fileStem = entry.name.slice(0, -".json".length);
+    const comparisonId = `match-comparison:${fileStem}`;
+    if (skipIds.has(comparisonId)) continue;
+    const comparison = await comparisonArtifactFromFile(
+      baseDir,
+      comparisonId,
+      comparisonArtifactRelativeFile(comparisonId)
+    );
+    if (!comparison) continue;
+    saveComparison(comparison);
+    skipIds.add(comparison.comparisonId);
+    loadedIds.push(comparison.comparisonId);
+  }
+  return loadedIds;
+}
+
+async function comparisonArtifactFromFile(
+  baseDir: string,
+  comparisonId: string,
+  relativeFile: string
+): Promise<MatchComparisonArtifact | null> {
+  try {
+    const absolute = resolveUnderDirectory(baseDir, relativeFile);
+    const stats = await lstat(absolute);
+    if (!stats.isFile() || stats.isSymbolicLink()) return null;
+    const real = await realpath(absolute);
+    const rootReal = await realpath(path.resolve(baseDir));
+    if (!real.startsWith(rootReal + path.sep) && real !== rootReal) return null;
+    const parsed: unknown = JSON.parse(await readFile(absolute, "utf8"));
+    if (!isRecord(parsed)) return null;
+    if (parsed.artifactVersion !== MATCH_COMPARISON_ARTIFACT_VERSION || parsed.kind !== "match-comparison") {
+      return null;
+    }
+    const parsedId = stringField(parsed, "comparisonId");
+    if (!parsedId || parsedId !== comparisonId) return null;
+    // Store path revalidates required comparison identity fields.
+    const candidate = parsed as unknown as MatchComparisonArtifact;
+    saveComparison(candidate);
+    return getComparison(comparisonId) ?? null;
+  } catch {
+    return null;
+  }
+}
+function comparisonArtifactIndexPath(baseDir: string): string {
+  return path.join(path.resolve(baseDir), COMPARISON_ARTIFACT_INDEX_FILE);
+}
+
+function comparisonArtifactDirectory(baseDir: string): string {
+  return resolveUnderDirectory(baseDir, COMPARISON_ARTIFACT_DIR);
+}
+
+function comparisonArtifactAbsoluteFile(baseDir: string, comparisonId: string): string {
+  return resolveUnderDirectory(baseDir, comparisonArtifactRelativeFile(comparisonId));
+}
+
+function comparisonArtifactRelativeFile(comparisonId: string): string {
+  const prefix = "match-comparison:";
+  if (!comparisonId.startsWith(prefix)) {
+    throw new HttpError(500, "comparison artifact id is invalid");
+  }
+  const stem = comparisonId.slice(prefix.length);
+  if (!/^[a-f0-9]{24}$/i.test(stem)) {
+    throw new HttpError(500, "comparison artifact id is invalid");
+  }
+  return `${COMPARISON_ARTIFACT_DIR}/${stem}.json`;
+}
+
+
 function serializeStoredMatch(match: StoredMatch): object {
+  const steps = match.socialEpisode?.steps ?? match.artifact?.socialEpisode.steps ?? [];
+  const { nativeSteps, committedSteps, rejectedSteps } = countSocialStepCommits(steps);
+  const legacyProjectionSteps = match.trajectory?.length ?? match.artifact?.trajectory.length ?? 0;
+  const failure = publicStoredMatchFailure(match);
   return {
     id: match.id,
     createdAt: match.createdAt,
@@ -2330,65 +2817,744 @@ function serializeStoredMatch(match: StoredMatch): object {
     status: match.status,
     harnessStatus: match.artifact?.status ?? null,
     truncationReason: match.artifact?.truncationReason ?? null,
-    error: match.error ? sanitizeApiErrorText(match.error) : undefined,
+    error: failure?.message,
+    ...(failure?.providerFailure ? { providerFailure: failure.providerFailure } : {}),
     hasArtifact: Boolean(match.artifact),
     checkpointCount: countCheckpointsForMatch(match.id),
     profileCount: match.profiles?.length ?? 0,
-    trajectorySteps: match.trajectory?.length ?? 0
+    /** Native socialEpisode.steps length; authoritative execution progress. */
+    nativeSteps,
+    /** Native steps with commitStatus committed (or legacy no-error). */
+    committedSteps,
+    /** Native steps that are rejected/failed and not part of committed replay. */
+    rejectedSteps,
+    /** Legacy committed-command projection length; not native authority. */
+    trajectorySteps: legacyProjectionSteps,
+    legacyProjectionSteps
   };
 }
 
-type MatchArtifactView = "full" | "postgame-redacted";
+/**
+ * A finished artifact can retain raw failure evidence for deterministic audit
+ * and explicit local debugging. Match list/detail responses are cockpit
+ * summaries, though, so never relay that raw error text as their `error`.
+ */
+function publicStoredMatchFailure(match: StoredMatch): PublicApiFailure | undefined {
+  if (!match.artifact) {
+    return match.error ? { message: sanitizeApiErrorText(match.error) } : undefined;
+  }
 
-function artifactViewFromQuery(query: unknown): MatchArtifactView {
+  const providerFailure = harnessFailureEvidenceFromEpisode(match.artifact.socialEpisode)
+    .map((evidence) => evidence.payload?.providerFailure)
+    .find((candidate): candidate is ProviderFailureSummary => candidate !== undefined);
+  if (providerFailure) {
+    const safeProviderFailure = publicProviderFailureSummary(providerFailure);
+    return {
+      message: providerFailureApiMessage(safeProviderFailure),
+      providerFailure: safeProviderFailure
+    };
+  }
+
+  if (match.artifact.status === "failed" || match.artifact.failureReason || match.error) {
+    return {
+      message: "Harness execution failed. Inspect the redacted artifact for structured failure-stage evidence."
+    };
+  }
+  return undefined;
+}
+
+function artifactViewFromQuery(
+  query: unknown,
+  request: express.Request,
+  artifactAccessBindHost: string
+): MatchArtifactView {
   const record = isRecord(query) ? query : {};
   const view = optionalSingleQueryString(record, "view");
-  if (view === undefined || view === "full") return "full";
+  // API callers must opt in to private/debug evidence. Cockpit and download
+  // routes share this parser, so an omitted view cannot silently become a
+  // full artifact export on one of the sibling endpoints.
+  if (view === undefined) return "postgame-redacted";
+  if (view === "full") {
+    assertLocalFullArtifactAccess(request, artifactAccessBindHost);
+    return "full";
+  }
   if (view === "postgame-redacted") return "postgame-redacted";
+  if (view === "truth-redacted") return "truth-redacted";
   throw new HttpError(400, `Unsupported artifact view: ${view}`);
 }
 
-function projectMatchArtifactForView(artifact: MatchArtifact, view: MatchArtifactView): unknown {
+function checkpointArtifactViewFromQuery(
+  query: unknown,
+  request: express.Request,
+  artifactAccessBindHost: string
+): MatchArtifactView {
+  const record = isRecord(query) ? query : {};
+  if (optionalSingleQueryString(record, "view") === undefined) return "truth-redacted";
+  return artifactViewFromQuery(query, request, artifactAccessBindHost);
+}
+
+function assertLocalFullArtifactAccess(request: express.Request, artifactAccessBindHost: string): void {
+  if (isLoopbackBindHost(artifactAccessBindHost) && isLoopbackAddress(request.socket.remoteAddress)) return;
+  throw new HttpError(
+    403,
+    "Full artifact view is available only through a loopback-only local debug server.",
+    "full_artifact_view_local_only"
+  );
+}
+
+function assertLocalResearchArtifactAccess(request: express.Request, artifactAccessBindHost: string): void {
+  if (isLoopbackBindHost(artifactAccessBindHost) && isLoopbackAddress(request.socket.remoteAddress)) return;
+  throw new HttpError(
+    403,
+    "Tournament research artifacts are available only through a loopback-only local debug server.",
+    "tournament_research_artifacts_local_only"
+  );
+}
+
+function isLoopbackBindHost(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
+}
+
+function isLoopbackAddress(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "127.0.0.1" || normalized === "::1" || normalized === "::ffff:127.0.0.1";
+}
+
+function setArtifactProjectionResponseHeaders(res: express.Response, view: MatchArtifactView): void {
+  // Even the redacted research projection may contain postgame truth. Do not
+  // leave any artifact projection in browser or intermediary caches.
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  if (view === "full") res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+}
+
+/**
+ * The comparison registry is a discoverable API surface. Safe projections can
+ * be listed together because truth-redacted is strictly narrower than the
+ * default postgame-redacted research view; full/debug records require an
+ * explicit view=full request and are never newly persisted by this server.
+ */
+function comparisonIsVisibleInRegistry(comparison: MatchComparisonArtifact, requestedView: MatchComparisonView): boolean {
+  if (requestedView === "full") return true;
+  if (comparison.view === "full") return false;
+  if (requestedView === "truth-redacted") return comparison.view === "truth-redacted";
+  return true;
+}
+
+function downloadRequested(query: unknown): boolean {
+  const record = isRecord(query) ? query : {};
+  const raw = optionalSingleQueryString(record, "download");
+  if (raw === undefined) return false;
+  const normalized = raw.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "download";
+}
+
+function comparisonFormatFromQuery(query: unknown): "json" | "markdown" {
+  const record = isRecord(query) ? query : {};
+  const raw = optionalSingleQueryString(record, "format");
+  if (raw === undefined || raw === "json") return "json";
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "markdown" || normalized === "md") return "markdown";
+  throw new HttpError(400, 'format must be "json" or "markdown"');
+}
+
+
+
+function filteredComparisonRequested(
+  query: unknown,
+  filter: Required<MatchComparisonRowFilter>
+): boolean {
+  const record = isRecord(query) ? query : {};
+  const raw = optionalSingleQueryString(record, "filtered");
+  if (raw !== undefined) {
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "filtered") {
+      return true;
+    }
+    if (normalized === "0" || normalized === "false" || normalized === "no") {
+      return false;
+    }
+    throw new HttpError(400, 'filtered must be "1", "true", "yes", "0", "false", or "no"');
+  }
+  return (
+    filter.group !== "all" ||
+    filter.changedOnly ||
+    filter.promotion !== "all" ||
+    filter.evidenceIdentity !== "all" ||
+    filter.numericDelta !== "all"
+  );
+}
+
+function comparisonRowFilterFromQuery(query: unknown): Required<MatchComparisonRowFilter> {
+  const record = isRecord(query) ? query : {};
+  return {
+    group: comparisonGroupFilterFromQuery(record),
+    changedOnly: comparisonChangedOnlyFromQuery(record),
+    promotion: comparisonPromotionFilterFromQuery(record),
+    evidenceIdentity: comparisonEvidenceIdentityFilterFromQuery(record),
+    numericDelta: comparisonNumericDeltaFilterFromQuery(record)
+  };
+}
+
+function comparisonGroupFilterFromQuery(
+  query: Record<string, unknown>
+): "all" | MatchComparisonRowGroup {
+  const raw = optionalSingleQueryString(query, "group");
+  if (raw === undefined || raw === "all") return "all";
+  if (raw === "summary" || raw === "metric" || raw === "metric_evidence") return raw;
+  throw new HttpError(400, 'group must be "all", "summary", "metric", or "metric_evidence"');
+}
+
+function comparisonChangedOnlyFromQuery(query: Record<string, unknown>): boolean {
+  const raw = optionalSingleQueryString(query, "changedOnly");
+  if (raw === undefined) return false;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "1" || normalized === "true" || normalized === "yes") return true;
+  if (normalized === "0" || normalized === "false" || normalized === "no") return false;
+  throw new HttpError(400, 'changedOnly must be "1", "true", "yes", "0", "false", or "no"');
+}
+
+function comparisonPromotionFilterFromQuery(
+  query: Record<string, unknown>
+): MatchComparisonPromotionFilter {
+  const raw = optionalSingleQueryString(query, "promotion");
+  if (raw === undefined || raw === "all") return "all";
+  if (
+    raw === "changed" ||
+    raw === "scorecard" ||
+    raw === "diagnostic" ||
+    raw === "benchmark_only" ||
+    raw === "missing"
+  ) {
+    return raw;
+  }
+  throw new HttpError(
+    400,
+    'promotion must be "all", "changed", "scorecard", "diagnostic", "benchmark_only", or "missing"'
+  );
+}
+
+function comparisonEvidenceIdentityFilterFromQuery(
+  query: Record<string, unknown>
+): MatchComparisonEvidenceIdentityFilter {
+  const raw = optionalSingleQueryString(query, "evidenceIdentity");
+  if (raw === undefined || raw === "all") return "all";
+  if (raw === "changed") return raw;
+  throw new HttpError(400, 'evidenceIdentity must be "all" or "changed"');
+}
+
+function comparisonNumericDeltaFilterFromQuery(
+  query: Record<string, unknown>
+): MatchComparisonNumericDeltaFilter {
+  const raw = optionalSingleQueryString(query, "numericDelta");
+  if (raw === undefined || raw === "all") return "all";
+  if (raw === "changed") return raw;
+  throw new HttpError(400, 'numericDelta must be "all" or "changed"');
+}
+
+
+function projectMatchArtifactForView(artifact: MatchArtifact, view: MatchArtifactView): MatchArtifactViewDto {
+  // Stored artifacts are validated on write and recovery. Revalidate at this
+  // projection boundary so a future store implementation cannot turn a
+  // malformed canonical record into an API-visible partial truth.
+  try {
+    assertValidMatchArtifactIntegrity(artifact);
+  } catch {
+    throw new HttpError(409, "Stored match artifact failed integrity validation.", "artifact_integrity_invalid");
+  }
   if (view === "full") return redactSecrets(artifact);
+  const privateProjected = projectPostgameRedactedArtifact(artifact);
+  if (view === "postgame-redacted") return privateProjected;
+  return redactSecrets(projectTruthRedactedArtifact(privateProjected));
+}
+
+/**
+ * A checkpoint is execution authority for a future fork, but its raw state and
+ * prefix contain the same private observations, role truth, and model evidence
+ * as a match artifact. The API therefore projects it before serialization;
+ * fork execution continues to read the canonical checkpoint from the store.
+ */
+function projectHarnessCheckpointForView(
+  checkpoint: HarnessCheckpoint,
+  view: MatchArtifactView
+): HarnessCheckpoint | Record<string, unknown> {
+  try {
+    assertValidHarnessCheckpoint(checkpoint);
+  } catch {
+    throw new HttpError(409, "Stored checkpoint failed integrity validation.", "checkpoint_integrity_invalid");
+  }
+  if (view === "full") return redactSecrets(checkpoint);
+
+  const source = cloneJson(checkpoint);
+  const privateState = redactStatePrivateEvents(source.state);
+  const privateAgents = source.agents.map((agent) => redactAgentPrivateEvidence(agent));
+  const privatePrefix = redactSocialEpisodePrivateEvidence(
+    source.executionPrefix as MatchArtifact["socialEpisode"]
+  );
+  const privateProjection = {
+    ...source,
+    source: {
+      ...source.source,
+      failureReason: source.source.failureReason ? "[REDACTED checkpoint failure detail]" : undefined
+    },
+    state: privateState,
+    agents: privateAgents,
+    executionPrefix: privatePrefix,
+    projection: {
+      view,
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: view === "truth-redacted",
+      generatedAt: new Date(0).toISOString()
+    }
+  };
+  if (view === "postgame-redacted") return redactSecrets(privateProjection);
+
+  const truthExecutionPrefix = redactSocialTopologyForTruthView({
+    ...privatePrefix,
+    initialState: redactPostgameTruthFromState(privatePrefix.initialState as GameState),
+    finalState: redactPostgameTruthFromState(privatePrefix.finalState as GameState)
+  });
+  return redactSecrets({
+    artifactVersion: source.artifactVersion,
+    kind: source.kind,
+    checkpointId: source.checkpointId,
+    createdAt: source.createdAt,
+    source: redactHarnessCheckpointSourceForTruthView(source.source),
+    state: redactPostgameTruthFromState(privateState),
+    // Agent snapshots and native steps are fork authority, not public game
+    // observations. Keeping them would expose role-specific scheduling and
+    // policy identity even after role/team fields have been removed.
+    agents: [],
+    executionPrefix: truthExecutionPrefix,
+    projection: {
+      view: "truth-redacted",
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: true,
+      generatedAt: new Date(0).toISOString()
+    }
+  });
+}
+
+function projectPostgameRedactedArtifact(artifact: MatchArtifact): PostgameMatchProjectionDto {
   const exposureRecords = projectSocialExposureRecords(deriveSocialExposureRecords(artifact.socialEpisode));
   const exposureSummary = summarizeProjectedSocialExposureRecords(exposureRecords);
-  const projected = cloneJson(artifact) as MatchArtifact & {
-    projection?: {
-      view: MatchArtifactView;
-      privateEvidenceRedacted: boolean;
-      postgameTruthRedacted: boolean;
-      generatedAt: string;
-    };
+  const source = cloneJson(artifact);
+  const socialEpisode: RedactedSocialEpisodeDto = {
+    ...redactSocialEpisodePrivateEvidence(source.socialEpisode),
+    exposureRecords,
+    exposureSummary
   };
-  projected.projection = {
-    view,
-    privateEvidenceRedacted: true,
-    postgameTruthRedacted: false,
-    generatedAt: new Date(0).toISOString()
-  };
-  projected.trajectory = projected.trajectory.map(redactHarnessStepPrivateEvidence);
-  projected.socialEpisode = redactSocialEpisodePrivateEvidence(projected.socialEpisode);
-  projected.socialEpisode.exposureRecords = exposureRecords;
-  projected.socialEpisode.exposureSummary = exposureSummary;
-  projected.initialState = redactStatePrivateEvents(projected.initialState);
-  projected.finalState = redactStatePrivateEvents(projected.finalState);
-  projected.events = redactGameEventsPrivateEvidence(projected.events);
-  projected.evaluation = {
-    ...projected.evaluation,
-    trajectory: projected.evaluation.trajectory.map((step) => ({
-      ...step,
-      intent: "[REDACTED private evaluation intent]",
-      targetId: undefined
-    }))
-  };
-  projected.agents = projected.agents.map(redactAgentPrivateEvidence);
-  if (projected.agentSnapshotFrames) {
-    projected.agentSnapshotFrames = projected.agentSnapshotFrames.map((frame) => ({
+  return {
+    ...source,
+    failureReason: source.failureReason ? "[REDACTED harness failure detail]" : undefined,
+    projection: {
+      view: "postgame-redacted",
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: false,
+      generatedAt: new Date(0).toISOString()
+    },
+    trajectory: source.trajectory.map(redactHarnessStepPrivateEvidence),
+    socialEpisode,
+    initialState: redactStatePrivateEvents(source.initialState),
+    finalState: redactStatePrivateEvents(source.finalState),
+    events: redactGameEventsPrivateEvidence(source.events),
+    evaluation: {
+      ...source.evaluation,
+      trajectory: source.evaluation.trajectory.map((step) => ({
+        ...step,
+        intent: "[REDACTED private evaluation intent]",
+        targetId: undefined
+      }))
+    },
+    agents: source.agents.map(redactAgentPrivateEvidence),
+    agentSnapshotFrames: source.agentSnapshotFrames?.map((frame) => ({
       ...frame,
       agents: frame.agents.map(redactAgentPrivateEvidence)
-    }));
+    }))
+  };
+}
+
+function projectTruthRedactedArtifact(artifact: PostgameMatchProjectionDto): PostgameMatchProjectionDto {
+  const source = cloneJson(artifact);
+  const initialState = redactPostgameTruthFromState(source.initialState);
+  const finalState = redactPostgameTruthFromState(source.finalState);
+  const socialEpisode = redactSocialTopologyForTruthView({
+    ...source.socialEpisode,
+    initialState: redactPostgameTruthFromState(source.socialEpisode.initialState as MatchArtifact["finalState"]) as RedactedSocialEpisodeDto["initialState"],
+    finalState: redactPostgameTruthFromState(source.socialEpisode.finalState as MatchArtifact["finalState"]) as RedactedSocialEpisodeDto["finalState"]
+  });
+  // This is a public observation DTO, not a replay/fork record.  Omit ids and
+  // deterministic seeds rather than replacing them with stable aliases: the
+  // current Werewolf run ids are derived from the seed and can reconstruct a
+  // hidden role assignment.
+  return {
+    artifactVersion: source.artifactVersion,
+    kind: source.kind,
+    createdAt: source.createdAt,
+    config: cloneJson(source.config),
+    models: [],
+    profiles: [],
+    resolvedAssignments: redactTruthResolvedAssignments(source.resolvedAssignments),
+    status: source.status,
+    truncationReason: undefined,
+    failureReason: undefined,
+    failureStateHash: undefined,
+    initialState,
+    finalState,
+    // Policy/trace trajectories contain private action kinds and model-backed
+    // agent state. Public messages and domain events below are the allowed
+    // public record instead.
+    trajectory: [],
+    socialEpisode,
+    events: cloneJson((finalState as unknown as { events?: GameEvent[] }).events ?? []),
+    // Evaluation/reward records are derived from canonical postgame truth.
+    // They are intentionally absent from a public in-progress observation.
+    evaluation: {} as MatchArtifact["evaluation"],
+    evaluationReport: {} as MatchArtifact["evaluationReport"],
+    metrics: {} as MatchArtifact["metrics"],
+    agents: [],
+    agentSnapshotFrames: undefined,
+    projection: {
+      view: "truth-redacted",
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: true,
+      generatedAt: new Date(0).toISOString()
+    }
+  } as unknown as PostgameMatchProjectionDto;
+}
+
+/**
+ * A public tournament pack does not reuse the broad MatchArtifact DTO.  This
+ * is a domain-owned observation record with table-seat identities only; it
+ * has no canonical run identity, assignment, execution trace, evaluator
+ * result, channel topology, or provider evidence.
+ */
+function projectPublicTournamentMatchArtifact(artifact: MatchArtifact, episodeIndex: number): Record<string, unknown> {
+  const projected = projectMatchArtifactForView(artifact, "truth-redacted") as PostgameMatchProjectionDto;
+  const finalState = projected.finalState as unknown as {
+    phase?: string;
+    day?: number;
+    players?: Array<{
+      id?: string;
+      seat?: number;
+      name?: string;
+      alive?: boolean;
+      isSheriff?: boolean;
+      eliminatedAt?: { day?: number; reason?: string };
+    }>;
+    currentSpeakerSeat?: number;
+    pendingActionCount?: number;
+    publicEventCount?: number;
+  };
+  const seatByPlayerId = new Map<string, number>();
+  for (const player of finalState.players ?? []) {
+    if (typeof player.id === "string" && typeof player.seat === "number") {
+      seatByPlayerId.set(player.id, player.seat);
+    }
   }
-  return redactSecrets(projected);
+  const socialEpisode = projected.socialEpisode as unknown as {
+    messages?: Array<{ seq?: number; senderId?: string; content?: string }>;
+  };
+  return {
+    artifactVersion: "harness.match.public.v1",
+    kind: "public-match",
+    episodeIndex,
+    status: projected.status,
+    state: {
+      phase: finalState.phase ?? "unknown",
+      day: finalState.day ?? 0,
+      players: (finalState.players ?? [])
+        .filter((player) => typeof player.seat === "number" && typeof player.alive === "boolean")
+        .map((player) => ({
+          seat: player.seat as number,
+          name: player.name ?? `Seat ${player.seat as number}`,
+          alive: player.alive as boolean,
+          isSheriff: Boolean(player.isSheriff),
+          ...(player.eliminatedAt
+            ? {
+                eliminatedAt: {
+                  day: player.eliminatedAt.day,
+                  reason: player.eliminatedAt.reason
+                }
+              }
+            : {})
+        }))
+        .sort((left, right) => left.seat - right.seat),
+      ...(typeof finalState.currentSpeakerSeat === "number" ? { currentSpeakerSeat: finalState.currentSpeakerSeat } : {}),
+      pendingActionCount: finalState.pendingActionCount ?? 0,
+      publicEventCount: finalState.publicEventCount ?? 0
+    },
+    events: (projected.events ?? []).map((event) => ({
+      seq: event.seq,
+      day: event.day,
+      type: event.type
+    })),
+    messages: (socialEpisode.messages ?? [])
+      .filter((message) => typeof message.seq === "number" && typeof message.content === "string")
+      .map((message) => ({
+        seq: message.seq,
+        senderSeat: message.senderId ? seatByPlayerId.get(message.senderId) ?? null : null,
+        content: message.content
+      }))
+  };
+}
+
+/**
+ * A truth-redacted artifact is suitable for an untrusted/public reader.  It
+ * must not retain a private or team communication topology, because channel
+ * membership and delivery metadata can reveal hidden factions even after role
+ * fields have been removed from game state.
+ */
+function redactSocialTopologyForTruthView(episode: RedactedSocialEpisodeDto): RedactedSocialEpisodeDto {
+  const publicChannels = episode.channels
+    .filter((channel) => channel.kind === "public" && channel.readableBy === "all")
+    .map((channel) => ({
+      id: channel.id,
+      kind: channel.kind,
+      readableBy: channel.readableBy
+    })) as unknown as RedactedSocialEpisodeDto["channels"];
+  const publicChannelIds = new Set(publicChannels.map((channel) => channel.id));
+  const isPublicMessage = (message: Pick<SocialMessage, "channelId" | "visibility">): boolean =>
+    message.visibility === "public" && publicChannelIds.has(message.channelId);
+  const canonicalInitialMessageCount = Math.min(
+    Math.max(episode.execution?.initialMessageCount ?? 0, 0),
+    episode.messages.length
+  );
+  const initialPublicMessageIds = new Set(
+    episode.messages
+      .slice(0, canonicalInitialMessageCount)
+      .filter(isPublicMessage)
+      .map((message) => message.id)
+  );
+  const messages = episode.messages
+    .filter(isPublicMessage)
+    .map(redactPublicSocialMessageForTruthView);
+  const exposureRecords: SocialExposureRecord[] = [];
+
+  return {
+    domainId: episode.domainId,
+    status: episode.status,
+    execution: episode.execution
+      ? {
+          schemaVersion: episode.execution.schemaVersion,
+          started: episode.execution.started,
+          initialMessageCount: messages.filter((message) => initialPublicMessageIds.has(message.id)).length
+        }
+      : undefined,
+    schedulerMode: episode.schedulerMode,
+    // Profiles can carry role-derived policy ids. They are not public game
+    // observations, unlike the public channel/messages preserved below.
+    profiles: [],
+    channels: publicChannels,
+    initialState: cloneJson(episode.initialState),
+    finalState: cloneJson(episode.finalState),
+    // A native step is private execution evidence. Even a redacted action
+    // kind/actor pair identifies special roles in a hidden-information game.
+    steps: [],
+    messages,
+    exposureRecords,
+    exposureSummary: summarizeProjectedSocialExposureRecords(exposureRecords)
+  } as unknown as RedactedSocialEpisodeDto;
+}
+
+function redactPublicSocialMessageForTruthView(message: RedactedSocialMessageDto): RedactedSocialMessageDto {
+  return {
+    id: message.id,
+    seq: message.seq,
+    channelId: message.channelId,
+    senderId: message.senderId,
+    // A public channel is already the complete audience declaration. Avoid
+    // retaining per-message routing fields that a future domain may use for a
+    // narrower observer subset.
+    recipientIds: [],
+    visibility: "public",
+    content: message.content,
+    speechActs: message.speechActs?.map((act) => ({
+      id: act.id,
+      kind: act.kind,
+      subjectId: act.subjectId,
+      targetId: act.targetId,
+      value: cloneJson(act.value),
+      confidence: act.confidence,
+      evidenceRefs: []
+    })),
+    createdAt: message.createdAt
+  };
+}
+
+function redactHarnessCheckpointSourceForTruthView(source: HarnessCheckpoint["source"]): Record<string, unknown> {
+  return {
+    sourceArtifactVersion: source.sourceArtifactVersion,
+    runId: source.runId,
+    matchId: source.matchId,
+    status: source.status
+  };
+}
+
+function redactTruthResolvedAssignments(
+  assignments: MatchArtifact["resolvedAssignments"]
+): MatchArtifact["resolvedAssignments"] {
+  return assignments.map(({ playerId, seat }) => ({ playerId, seat })) as MatchArtifact["resolvedAssignments"];
+}
+
+function redactPostgameTruthFromState(state: MatchArtifact["finalState"]): MatchArtifact["finalState"] {
+  const publicState = serializePublicState(cloneJson(state));
+  const publicObservation: Record<string, unknown> = { ...publicState };
+  for (const key of ["id", "seed", "night", "winner", "endReason"]) {
+    delete publicObservation[key];
+  }
+  return {
+    ...publicObservation,
+    // `serializePublicState()` is the domain's public-state boundary. The
+    // truth artifact is intentionally stricter still: it does not publish
+    // postgame winner/end truth or role reveals, even if a game config would
+    // reveal a role to seated players after death.
+    players: publicState.players.map(({ revealedRole: _revealedRole, ...player }) => player),
+    events: redactPostgameTruthFromEvents(publicState.events),
+  } as unknown as MatchArtifact["finalState"];
+}
+function redactPostgameTruthFromEvents(events: GameEvent[]): GameEvent[] {
+  return events
+    .filter((event) => event.visibility === "public")
+    .map((event) => {
+      const cloned = cloneJson(event);
+      if (!isRecord(cloned.payload)) return cloned;
+      const payload = { ...cloned.payload };
+      for (const key of [
+        "role",
+        "team",
+        "resultTeam",
+        "winner",
+        "sourceId",
+        "seerInspection",
+        "wolfVotes",
+        "witch",
+        "ability",
+        "trueRole",
+        "actualRole"
+      ]) {
+        delete payload[key];
+      }
+      if (Array.isArray(payload.deaths)) {
+        payload.deaths = payload.deaths.map((death) => {
+          if (!isRecord(death)) return death;
+          const nextDeath = { ...death };
+          delete nextDeath.sourceId;
+          delete nextDeath.role;
+          delete nextDeath.team;
+          return nextDeath;
+        });
+      }
+      return {
+        ...cloned,
+        payload
+      };
+    });
+}
+
+function redactPostgameTruthFromEvaluation(evaluation: MatchArtifact["evaluation"]): MatchArtifact["evaluation"] {
+  // Evaluation is computed from canonical final truth. Per-agent reward and
+  // metric structures are therefore postgame evidence, not an observation a
+  // public reader may receive while the game remains hidden-information.
+  return {
+    winner: undefined,
+    teamRewards: {
+      village: 0,
+      werewolves: 0
+    },
+    agentRewards: [],
+    voteAccuracyByAgent: {},
+    influenceByAgent: {},
+    deceptionByAgent: {},
+    trajectory: []
+  };
+}
+
+function redactPostgameTruthFromEvaluationReport(
+  report: MatchArtifact["evaluationReport"]
+): MatchArtifact["evaluationReport"] {
+  return {
+    id: report.id,
+    createdAt: report.createdAt,
+    evaluatorIds: [],
+    evaluatorRegistry: [],
+    metricCount: 0,
+    metrics: [],
+    outputs: {},
+    warnings: [],
+    summary: {
+      teamScores: {},
+      agentScores: {},
+      profileScores: {},
+      modelScores: {},
+      // Catalog ids and metric ids can encode role-specific evaluator names.
+      // The truth view exposes no evaluation results, so retain only a stable
+      // non-authoritative placeholder that keeps the cockpit DTO shape intact.
+      promotion: {
+        policyId: "public-redacted",
+        policyVersion: "1",
+        policyHash: "public-redacted",
+        catalogId: "public-redacted",
+        catalogVersion: "1",
+        catalogHash: "public-redacted",
+        catalogDomainId: "public",
+        catalogEntryCount: 0,
+        catalogRuleCount: 0,
+        catalogRuleIds: [],
+        catalogScorecardMetricIds: [],
+        catalogDiagnosticMetricIds: [],
+        catalogBenchmarkOnlyMetricIds: [],
+        scorecardMetricCount: 0,
+        diagnosticMetricCount: 0,
+        weightedMetricCount: 0,
+        excludedWeightedMetricCount: 0,
+        excludedWeightedMetricIds: [],
+        scorecardRequiresEvidence: true,
+        scorecardRequiresPositiveWeight: true,
+        uncatalogedMetricPolicy: "legacy_conservative_diagnostic",
+        decisionStorage: "per_metric_recorded"
+      }
+    }
+  };
+}
+
+function redactPostgameTruthFromMetrics(metrics: MatchMetrics): MatchMetrics {
+  return {
+    winner: undefined,
+    days: metrics.days,
+    totalDeaths: metrics.totalDeaths,
+    totalSpeeches: metrics.totalSpeeches,
+    totalVotes: metrics.totalVotes,
+    harnessTurnCount: 0,
+    harnessErrorCount: 0,
+    averageLatencyMs: 0,
+    wolfVoteAccuracy: 0,
+    villageVoteAccuracy: 0,
+    deceptionSurvivalScore: 0,
+    modelUsage: {}
+  };
+}
+
+function redactPostgameTruthFromAgent(agent: RedactedAgentStateDto): RedactedAgentStateDto {
+  const next = cloneJson(agent);
+  if (next.social?.beliefs?.claims) {
+    next.social.beliefs.claims = Object.fromEntries(
+      Object.entries(next.social.beliefs.claims).map(([id, claim]) => {
+        if (!isRecord(claim)) return [id, claim];
+        const claimRecord: Record<string, unknown> = { ...claim };
+        delete claimRecord.actualRole;
+        delete claimRecord.trueRole;
+        delete claimRecord.resultTeam;
+        if (claimRecord.predicate === "role" || claimRecord.predicate === "team") {
+          claimRecord.value = "[REDACTED postgame claim value]";
+        }
+        return [id, claimRecord as typeof claim];
+      })
+    );
+  }
+  return next;
 }
 
 function projectSocialExposureRecords(records: SocialExposureRecord[]): SocialExposureRecord[] {
@@ -2412,7 +3578,7 @@ function projectSocialExposureRecords(records: SocialExposureRecord[]): SocialEx
   }));
 }
 
-function summarizeProjectedSocialExposureRecords(records: SocialExposureRecord[]): NonNullable<MatchArtifact["socialEpisode"]["exposureSummary"]> {
+function summarizeProjectedSocialExposureRecords(records: SocialExposureRecord[]): NonNullable<RedactedSocialEpisodeDto["exposureSummary"]> {
   const byVisibility: Record<SocialMessage["visibility"], number> = {
     private: 0,
     team: 0,
@@ -2439,86 +3605,250 @@ function sanitizeSocialExposureKind(kind: string | undefined): string | undefine
   return /^[A-Za-z0-9_.:-]{1,80}$/.test(kind) ? kind : undefined;
 }
 
-function redactHarnessStepPrivateEvidence(step: MatchArtifact["trajectory"][number]): MatchArtifact["trajectory"][number] {
+function redactHarnessStepPrivateEvidence(step: MatchArtifact["trajectory"][number]): RedactedHarnessStepDto {
   return {
     ...step,
     pendingAction: redactPendingAction(step.pendingAction),
-    observation: {
-      ...step.observation,
-      privateNotes: undefined,
-      legalActions: undefined
-    } as typeof step.observation,
+    observation: REDACTED_PRIVATE_OBSERVATION,
     policyPlan: {
-      ...step.policyPlan,
+      policyName: step.policyPlan.policyName,
       intent: "[REDACTED private policy intent]",
-      targetId: undefined,
-      pressureTargetId: undefined,
-      arbitration: undefined,
+      confidence: step.policyPlan.confidence,
+      strategyTags: [...step.policyPlan.strategyTags],
+      claimedRole: step.policyPlan.claimedRole,
       command: redactCommandPayload(step.policyPlan.command)
     },
-    reasonerOutput: {
-      ...step.reasonerOutput,
-      content: "[REDACTED model reasoning output]"
-    },
+    reasonerOutput: redactReasonerOutput(step.reasonerOutput),
     command: redactCommandPayload(step.command),
     turnTrace: {
-      ...step.turnTrace,
+      traceId: step.turnTrace.traceId,
+      playerId: step.turnTrace.playerId,
+      profileId: step.turnTrace.profileId,
+      model: step.turnTrace.model,
+      actionKind: step.turnTrace.actionKind,
+      policyName: step.turnTrace.policyName,
+      commandType: step.turnTrace.commandType,
       intent: "[REDACTED private turn intent]",
-      targetId: undefined,
+      confidence: step.turnTrace.confidence,
+      strategyTags: [...step.turnTrace.strategyTags],
       beliefs: {},
       privateMemo: "[REDACTED private memo]",
-      publicSpeech: step.turnTrace.publicSpeech ? "[REDACTED generated speech]" : undefined
-    } as typeof step.turnTrace,
+      publicSpeech: step.turnTrace.publicSpeech ? "[REDACTED generated speech]" : undefined,
+      latencyMs: step.turnTrace.latencyMs,
+      promptTokens: step.turnTrace.promptTokens,
+      completionTokens: step.turnTrace.completionTokens,
+      attempts: step.turnTrace.attempts,
+      agentStateHash: step.turnTrace.agentStateHash
+    },
     agentSnapshotsAfterStep: undefined
   };
 }
 
-function redactPendingAction<T extends { kind: string; actorId?: string; phase?: string }>(action: T): T {
+function redactReasonerOutput(value: MatchArtifact["trajectory"][number]["reasonerOutput"]): RedactedHarnessStepDto["reasonerOutput"] {
   return {
-    kind: action.kind,
-    actorId: action.actorId,
-    phase: action.phase,
-    redacted: true
-  } as unknown as T;
+    content: "[REDACTED model reasoning output]",
+    latencyMs: value.latencyMs,
+    promptTokens: value.promptTokens,
+    completionTokens: value.completionTokens,
+    attempts: value.attempts
+  };
 }
 
-function redactCommandPayload<T extends { type: string; actorId?: string }>(command: T): T {
+function redactPendingAction(action: unknown): RedactedPendingActionDto {
+  const record = isRecord(action) ? action : {};
   return {
-    type: command.type,
-    actorId: command.actorId,
+    kind: safeMetadataString(record.kind) ?? "unknown",
+    actorId: safeMetadataString(record.actorId),
+    phase: safeMetadataString(record.phase),
     redacted: true
-  } as unknown as T;
+  };
 }
 
-function redactSocialEpisodePrivateEvidence(episode: MatchArtifact["socialEpisode"]): MatchArtifact["socialEpisode"] {
+function redactCommandPayload(command: unknown): RedactedCommandDto {
+  const record = isRecord(command) ? command : {};
+  return {
+    type: safeMetadataString(record.type) ?? "unknown",
+    actorId: safeMetadataString(record.actorId),
+    redacted: true
+  };
+}
+
+function redactSocialEpisodePrivateEvidence(episode: MatchArtifact["socialEpisode"]): RedactedSocialEpisodeDto {
   return {
     ...episode,
-    initialState: redactStatePrivateEvents(episode.initialState as GameState),
-    finalState: redactStatePrivateEvents(episode.finalState as GameState),
+    failureReason: episode.failureReason ? "[REDACTED social episode failure detail]" : undefined,
+    error: episode.error ? "[REDACTED social episode error]" : undefined,
+    initialState: redactStatePrivateEvents(episode.initialState),
+    finalState: redactStatePrivateEvents(episode.finalState),
     steps: episode.steps.map((step) => ({
       ...step,
-      observation: "[REDACTED private social observation]",
+      pendingAction: redactPendingAction(step.pendingAction),
+      observation: REDACTED_PRIVATE_SOCIAL_OBSERVATION,
       action: {
         ...step.action,
-        command: redactCommandPayload(step.action.command as { type: string; actorId?: string }),
-        messages: step.action.messages?.map(redactSocialMessagePrivateEvidence)
-      }
+        command: redactCommandPayload(step.action.command),
+        messages: step.action.messages?.map(redactSocialMessageDraftPrivateEvidence),
+        metadata: redactSocialActionMetadata(step.action.metadata)
+      },
+      failure: redactSocialStepFailure(step.failure),
+      error: step.error ? "[REDACTED social step error]" : undefined,
+      actorSnapshotsAfterStep: undefined,
+      infosByAgent: undefined
     })),
     messages: episode.messages.map(redactSocialMessagePrivateEvidence)
   };
 }
 
-function redactSocialMessagePrivateEvidence<T extends { visibility: SocialMessage["visibility"]; content: string; deliveryReceipts?: SocialMessage["deliveryReceipts"] }>(
-  message: T
-): T {
+function redactSocialMessagePrivateEvidence(message: SocialMessage): RedactedSocialMessageDto {
   return {
     ...message,
     content: message.visibility === "public" ? message.content : "[REDACTED private social message]",
+    speechActs: redactSocialSpeechActs(message.speechActs, message.visibility),
+    metadata: redactSocialMessageMetadata(message.metadata, message.visibility),
     deliveryReceipts: message.deliveryReceipts?.map((receipt) => ({
       ...receipt,
-      redactionPolicy: "[REDACTED delivery redaction policy]"
+      redactionPolicy: REDACTED_DELIVERY_POLICY
     }))
   };
+}
+
+function redactSocialMessageDraftPrivateEvidence(
+  message: Omit<SocialMessage, "id" | "seq" | "createdAt">
+): RedactedSocialMessageDraftDto {
+  return {
+    ...message,
+    content: message.visibility === "public" ? message.content : "[REDACTED private social message]",
+    speechActs: redactSocialSpeechActs(message.speechActs, message.visibility),
+    metadata: redactSocialMessageMetadata(message.metadata, message.visibility),
+    deliveryReceipts: message.deliveryReceipts?.map((receipt) => ({
+      ...receipt,
+      redactionPolicy: REDACTED_DELIVERY_POLICY
+    }))
+  };
+}
+
+function redactSocialSpeechActs(
+  speechActs: SocialMessage["speechActs"],
+  visibility: SocialMessage["visibility"]
+): RedactedSocialMessageDto["speechActs"] {
+  if (visibility !== "public") return undefined;
+  return speechActs?.map((act) => ({
+    id: act.id,
+    kind: act.kind,
+    subjectId: act.subjectId,
+    targetId: act.targetId,
+    value: cloneJson(act.value),
+    confidence: act.confidence,
+    evidenceRefs: act.evidenceRefs.map((ref) => ({
+      artifact: ref.artifact,
+      id: ref.id,
+      seq: ref.seq,
+      traceId: ref.traceId
+    }))
+  }));
+}
+
+function redactSocialActionMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const trace = isRecord(value.turnTrace) ? value.turnTrace : undefined;
+  const reasoner = isRecord(value.reasonerOutput) ? value.reasonerOutput : undefined;
+  const policy = isRecord(value.policyPlan) ? value.policyPlan : undefined;
+  return compactRecord({
+    kind: safeMetadataString(value.kind),
+    turnIndex: safeMetadataNumber(value.turnIndex),
+    agentStateHash: safeMetadataString(value.agentStateHash),
+    policyPlan: policy
+      ? compactRecord({
+          policyName: safeMetadataString(policy.policyName),
+          intent: "[REDACTED private policy intent]",
+          confidence: safeMetadataNumber(policy.confidence),
+          strategyTags: safeMetadataStringArray(policy.strategyTags),
+          command: isRecord(policy.command)
+            ? redactCommandPayload(policy.command)
+            : undefined
+        })
+      : undefined,
+    reasonerOutput: reasoner
+      ? compactRecord({
+          content: "[REDACTED model reasoning output]",
+          latencyMs: safeMetadataNumber(reasoner.latencyMs),
+          promptTokens: safeMetadataNumber(reasoner.promptTokens),
+          completionTokens: safeMetadataNumber(reasoner.completionTokens),
+          attempts: safeMetadataNumber(reasoner.attempts)
+        })
+      : undefined,
+    turnTrace: trace
+      ? compactRecord({
+          traceId: safeMetadataString(trace.traceId),
+          playerId: safeMetadataString(trace.playerId),
+          profileId: safeMetadataString(trace.profileId),
+          model: safeMetadataString(trace.model),
+          actionKind: safeMetadataString(trace.actionKind),
+          policyName: safeMetadataString(trace.policyName),
+          commandType: safeMetadataString(trace.commandType),
+          intent: "[REDACTED private turn intent]",
+          confidence: safeMetadataNumber(trace.confidence),
+          strategyTags: safeMetadataStringArray(trace.strategyTags),
+          beliefs: {},
+          privateMemo: "[REDACTED private memo]",
+          publicSpeech: trace.publicSpeech ? "[REDACTED generated speech]" : undefined,
+          latencyMs: safeMetadataNumber(trace.latencyMs),
+          promptTokens: safeMetadataNumber(trace.promptTokens),
+          completionTokens: safeMetadataNumber(trace.completionTokens),
+          attempts: safeMetadataNumber(trace.attempts),
+          agentStateHash: safeMetadataString(trace.agentStateHash)
+        })
+      : undefined
+  });
+}
+
+function redactSocialStepFailure(
+  value: MatchArtifact["socialEpisode"]["steps"][number]["failure"]
+): RedactedSocialStepFailureDto | undefined {
+  if (!value) return undefined;
+  return {
+    stage: value.stage,
+    message: REDACTED_SOCIAL_STEP_FAILURE,
+    causeName: safeCauseName(value.causeName),
+    metadata: undefined
+  };
+}
+
+function safeCauseName(value: string | undefined): string | undefined {
+  return value && /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(value) ? value : undefined;
+}
+
+function redactSocialMessageMetadata(
+  value: Record<string, unknown> | undefined,
+  visibility: SocialMessage["visibility"]
+): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  return compactRecord({
+    kind: safeMetadataString(value.kind),
+    traceId: safeMetadataString(value.traceId),
+    turnIndex: safeMetadataNumber(value.turnIndex),
+    actionKind: safeMetadataString(value.actionKind),
+    phase: safeMetadataString(value.phase),
+    day: safeMetadataNumber(value.day),
+    redacted: visibility === "public" ? undefined : true
+  });
+}
+
+function safeMetadataString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length <= 200 ? value : undefined;
+}
+
+function safeMetadataNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function safeMetadataStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.length <= 100)) return undefined;
+  return value.slice(0, 50);
+}
+
+function compactRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
 }
 
 function redactStatePrivateEvents<TState>(state: TState): TState {
@@ -2530,91 +3860,146 @@ function redactStatePrivateEvents<TState>(state: TState): TState {
 }
 
 function redactGameEventsPrivateEvidence(events: GameEvent[]): GameEvent[] {
-  return events.map((event) => {
-    if (event.type !== "harness.turn" && event.type !== "harness.error") return event;
-    return {
-      ...event,
-      payload: redactHarnessEventPayload(event.payload)
-    };
-  });
+  return events.map((event) => cloneJson(event));
 }
 
-function redactHarnessEventPayload(payload: unknown): Record<string, unknown> {
-  const record = isRecord(payload) ? payload : {};
+function redactAgentPrivateEvidence(agent: MatchArtifact["agents"][number]): RedactedAgentStateDto {
+  const source = cloneJson(agent);
   return {
-    traceId: stringField(record, "traceId"),
-    playerId: stringField(record, "playerId"),
-    actorId: stringField(record, "actorId"),
-    model: stringField(record, "model"),
-    actionKind: stringField(record, "actionKind"),
-    policyName: stringField(record, "policyName"),
-    commandType: stringField(record, "commandType"),
-    confidence: numberField(record, "confidence"),
-    latencyMs: numberField(record, "latencyMs"),
-    promptTokens: numberField(record, "promptTokens"),
-    completionTokens: numberField(record, "completionTokens"),
-    agentStateHash: stringField(record, "agentStateHash"),
-    providerFailure: redactSecrets(record.providerFailure ?? null),
-    redacted: true
+    ...source,
+    beliefs: {},
+    privateMemos: source.privateMemos.map(() => "[REDACTED private memo]"),
+    lastIntent: source.lastIntent ? "[REDACTED private intent]" : undefined,
+    social: source.social ? redactAgentSocialStatePrivateEvidence(source.social) : undefined
   };
 }
 
-function redactAgentPrivateEvidence(agent: MatchArtifact["agents"][number]): MatchArtifact["agents"][number] {
-  const next = cloneJson(agent) as MatchArtifact["agents"][number];
-  next.beliefs = {};
-  next.privateMemos = next.privateMemos.map(() => "[REDACTED private memo]");
-  next.lastIntent = next.lastIntent ? "[REDACTED private intent]" : undefined;
-  if (next.social) next.social = redactAgentSocialStatePrivateEvidence(next.social);
-  return next;
+function redactAgentSocialStatePrivateEvidence(
+  social: NonNullable<MatchArtifact["agents"][number]["social"]>
+): NonNullable<RedactedAgentStateDto["social"]> {
+  const source = cloneJson(social);
+  return {
+    agentId: source.agentId,
+    profile: {
+      id: source.profile.id,
+      model: source.profile.model,
+      temperature: source.profile.temperature,
+      policyId: source.profile.policyId
+    },
+    messageIngestion: source.messageIngestion
+      ? {
+          ...source.messageIngestion,
+          seenMessageIds: []
+        }
+      : undefined,
+    memory: {
+      ...source.memory,
+      entries: source.memory.entries.map((entry) => ({
+        seq: entry.seq,
+        kind: entry.kind,
+        source: entry.source,
+        visibility: entry.visibility,
+        content: entry.content ? "[REDACTED private memory]" : undefined,
+        salience: entry.salience,
+        importance: entry.importance,
+        evidenceRefs: redactEvidenceRefs(entry.evidenceRefs),
+        tags: [],
+        createdAt: entry.createdAt
+      }))
+    },
+    beliefs: {
+      claims: Object.fromEntries(
+        Object.entries(source.beliefs.claims).map(([id, claim]) => [
+          id,
+          {
+            id: claim.id,
+            subject: "[REDACTED private belief subject]",
+            predicate: "[REDACTED private belief predicate]",
+            value: "[REDACTED private belief value]",
+            confidence: claim.confidence,
+            evidenceRefs: redactEvidenceRefs(claim.evidenceRefs),
+            contradictions: [],
+            updatedAt: claim.updatedAt
+          }
+        ])
+      )
+    },
+    relationships: {
+      edges: Object.fromEntries(
+        Object.entries(source.relationships.edges).map(([id, edge]) => [
+          id,
+          {
+            targetId: edge.targetId,
+            trust: edge.trust,
+            suspicion: edge.suspicion,
+            affinity: edge.affinity,
+            influence: edge.influence,
+            debt: edge.debt,
+            respect: edge.respect,
+            threat: edge.threat,
+            evidenceRefs: redactEvidenceRefs(edge.evidenceRefs),
+            updatedAt: edge.updatedAt
+          }
+        ])
+      )
+    },
+    norms: {
+      norms: {}
+    },
+    reputation: {
+      records: Object.fromEntries(
+        Object.entries(source.reputation.records).map(([id, record]) => [
+          id,
+          {
+            subjectId: record.subjectId,
+            honesty: record.honesty,
+            competence: record.competence,
+            cooperation: record.cooperation,
+            threat: record.threat,
+            normCompliance: record.normCompliance,
+            evidenceRefs: redactEvidenceRefs(record.evidenceRefs),
+            updatedAt: record.updatedAt
+          }
+        ])
+      )
+    },
+    goals: {
+      goals: []
+    },
+    lastPlan: source.lastPlan === undefined ? undefined : "[REDACTED private plan]",
+    journal: source.journal
+      ? {
+          ...source.journal,
+          entries: source.journal.entries.map((entry) => ({
+            journalSeq: entry.journalSeq,
+            agentId: entry.agentId,
+            profileId: entry.profileId,
+            traceId: entry.traceId,
+            turnIndex: entry.turnIndex,
+            phase: entry.phase,
+            day: entry.day,
+            store: entry.store,
+            mutationKind: entry.mutationKind,
+            subjectId: entry.subjectId,
+            evidenceRefs: redactEvidenceRefs(entry.evidenceRefs),
+            messageSeqRange: entry.messageSeqRange,
+            eventSeqRange: entry.eventSeqRange,
+            redactionClass: entry.redactionClass,
+            hiddenTruthUsed: entry.hiddenTruthUsed,
+            createdAt: entry.createdAt
+          }))
+        }
+      : undefined
+  };
 }
 
-function redactAgentSocialStatePrivateEvidence<T extends NonNullable<MatchArtifact["agents"][number]["social"]>>(social: T): T {
-  const next = cloneJson(social) as T;
-  next.memory.entries = next.memory.entries.map((entry) => ({
-    ...entry,
-    observation: undefined,
-    pendingAction: undefined,
-    action: undefined,
-    content: entry.content ? "[REDACTED private memory]" : undefined
+function redactEvidenceRefs(refs: EvidenceRef[]): EvidenceRef[] {
+  return refs.map((ref) => ({
+    artifact: ref.artifact,
+    id: ref.id,
+    seq: ref.seq,
+    traceId: ref.traceId
   }));
-  next.beliefs.claims = Object.fromEntries(
-    Object.entries(next.beliefs.claims).map(([id, claim]) => [
-      id,
-      {
-        ...claim,
-        predicate: "[REDACTED private belief predicate]",
-        value: "[REDACTED private belief value]",
-        contradictions: []
-      }
-    ])
-  );
-  next.goals.goals = next.goals.goals.map((goal) => ({
-    ...goal,
-    description: "[REDACTED private goal]"
-  }));
-  next.lastPlan = next.lastPlan === undefined ? undefined : "[REDACTED private plan]";
-  if (next.journal) {
-    next.journal.entries = next.journal.entries.map((entry) => ({
-      journalSeq: entry.journalSeq,
-      agentId: entry.agentId,
-      profileId: entry.profileId,
-      traceId: entry.traceId,
-      turnIndex: entry.turnIndex,
-      phase: entry.phase,
-      day: entry.day,
-      store: entry.store,
-      mutationKind: entry.mutationKind,
-      subjectId: entry.subjectId,
-      evidenceRefs: entry.evidenceRefs,
-      messageSeqRange: entry.messageSeqRange,
-      eventSeqRange: entry.eventSeqRange,
-      redactionClass: entry.redactionClass,
-      hiddenTruthUsed: entry.hiddenTruthUsed,
-      createdAt: entry.createdAt,
-      metadata: entry.metadata
-    }));
-  }
-  return next;
 }
 
 function cloneJson<T>(value: T): T {
@@ -2898,11 +4283,11 @@ function artifactRecoveryAuditMessageForCode(
     return null;
   }
   if (store === "match" && source === "directory") {
-    if (code === "file_name_rejected") return "Match artifact file name was not a generated UUID JSON artifact.";
+    if (code === "file_name_rejected") return "Match artifact file name was not a server-owned match artifact id.";
     if (code === "file_not_regular") return "Match artifact file was not a safe regular server-owned file.";
     if (code === "file_invalid_json") return "Match artifact file contained invalid JSON.";
     if (code === "file_invalid_shape") return "Match artifact file shape or version was invalid.";
-    if (code === "file_identity_mismatch") return "Match artifact file identity did not match its generated artifact id.";
+    if (code === "file_identity_mismatch") return "Match artifact file identity did not match its server-owned match artifact id.";
     if (code === "file_integrity_invalid") return "Match artifact file failed structural integrity validation.";
     if (code === "file_rejected") return "Match artifact file failed version, identity, filesystem, or integrity validation.";
   }
@@ -2941,7 +4326,9 @@ function safeArtifactRecoveryAuditDetailKey(value: string | null): string | unde
 }
 
 function normalizeAuditArtifactId(artifactId: string): string {
-  return GENERATED_ARTIFACT_SET_ID_PATTERN.test(artifactId) ? artifactId : "<rejected>";
+  return isPersistedMatchArtifactId(artifactId) || GENERATED_ARTIFACT_SET_ID_PATTERN.test(artifactId)
+    ? artifactId
+    : "<rejected>";
 }
 
 function normalizeAuditRelativeFile(store: StoredArtifactRecoveryAuditRecord["store"], source: StoredArtifactRecoveryAuditRecord["source"], relativeFile: string): string {
@@ -2960,7 +4347,7 @@ function normalizeAuditRelativeFile(store: StoredArtifactRecoveryAuditRecord["st
     if (relativeFile.startsWith(`${MATCH_ARTIFACT_DIR}/`)) {
       if (!relativeFile.endsWith(".json")) return "<rejected>";
       const matchId = relativeFile.slice(MATCH_ARTIFACT_DIR.length + 1, -".json".length);
-      return GENERATED_ARTIFACT_SET_ID_PATTERN.test(matchId) ? relativeFile : "<rejected>";
+      return isPersistedMatchArtifactId(matchId) ? relativeFile : "<rejected>";
     }
     return "<rejected>";
   }
@@ -3140,41 +4527,45 @@ function buildProbePublicDiagnostic(trace: HarnessTurnTrace): object {
   };
 }
 
-function serializeReplayResult(
-  replay: ReturnType<typeof replayHarnessTrajectory>,
-  metadata: Record<string, unknown> = {},
-  options: { includeFinalState?: boolean } = {}
+function serializeSocialReplayResult(
+  replay: ReturnType<typeof replayWerewolfSocialEpisode>,
+  metadata: Record<string, unknown> = {}
 ): object {
-  const replayPayload = options.includeFinalState === false ? omitReplayFinalState(replay) : replay;
   return {
     summary: {
       kind: "replay",
+      authority: "native-social-episode",
       ok: replay.ok,
       ...metadata,
-      replayedCommands: replay.replayedCommands,
+      replayedSteps: replay.replayedSteps,
+      replayedBatches: replay.replayedBatches,
+      rejectedSteps: replay.rejectedSteps,
       finalHash: replay.finalHash,
       expectedFinalHash: replay.expectedFinalHash,
-      finalHashMatchesExpected: replay.expectedFinalHash ? replay.finalHash === replay.expectedFinalHash : undefined,
+      finalHashMatchesExpected: replay.finalHash === replay.expectedFinalHash,
+      messagesHash: replay.messagesHash,
+      expectedMessagesHash: replay.expectedMessagesHash,
+      messagesHashMatchesExpected: replay.messagesHash === replay.expectedMessagesHash,
       mismatchCount: replay.mismatches.length,
       mismatchCodes: summarizeReplayMismatchCodes(replay.mismatches)
     },
-    replay: replayPayload
-  };
-}
-
-function omitReplayFinalState(replay: ReturnType<typeof replayHarnessTrajectory>): object {
-  const { finalState: _finalState, mismatches, ...summary } = replay;
-  return {
-    ...summary,
-    mismatches: mismatches.map(sanitizeReplayMismatch),
-    mismatchCodes: summarizeReplayMismatchCodes(mismatches),
-    redaction: {
-      finalStateRedacted: true,
-      mismatchDetailsRedacted: true,
-      traceIdsRedacted: true,
-      actorIdsRedacted: true,
-      commandPayloadsRedacted: true,
-      rawHashesRedacted: true
+    replay: {
+      ok: replay.ok,
+      replayedSteps: replay.replayedSteps,
+      replayedBatches: replay.replayedBatches,
+      rejectedSteps: replay.rejectedSteps,
+      finalHash: replay.finalHash,
+      expectedFinalHash: replay.expectedFinalHash,
+      messagesHash: replay.messagesHash,
+      expectedMessagesHash: replay.expectedMessagesHash,
+      mismatches: replay.mismatches.map(sanitizeReplayMismatch),
+      mismatchCodes: summarizeReplayMismatchCodes(replay.mismatches),
+      redaction: {
+        finalStateRedacted: true,
+        messagesRedacted: true,
+        mismatchDetailsRedacted: true,
+        rawHashesRedacted: true
+      }
     }
   };
 }
@@ -3237,8 +4628,21 @@ function buildTournamentSummary(
       seed: episode.seed,
       error: sanitizeApiErrorText(episode.error ?? "Tournament episode failed.")
     }));
+  const stepTotals = result.episodes.reduce(
+    (totals, episode) => {
+      const stepCounts = countSocialStepCommits(episode.socialEpisode?.steps ?? []);
+      totals.nativeSteps += stepCounts.nativeSteps;
+      totals.committedSteps += stepCounts.committedSteps;
+      totals.rejectedSteps += stepCounts.rejectedSteps;
+      return totals;
+    },
+    { nativeSteps: 0, committedSteps: 0, rejectedSteps: 0 }
+  );
+  const gamesTruncated = result.gamesTruncated ?? result.episodes.filter((episode) => episode.status === "truncated").length;
+  const status = result.gamesFailed > 0 ? "failed" : gamesTruncated > 0 ? "truncated" : "completed";
   return {
     kind: "tournament",
+    status,
     ok: result.gamesFailed === 0,
     endpoint: providerConfigSummaryFromEnv().endpoint,
     experimentId: options.experimentId ?? null,
@@ -3250,6 +4654,10 @@ function buildTournamentSummary(
     gamesRequested: options.games,
     gamesCompleted: result.gamesCompleted,
     gamesFailed: result.gamesFailed,
+    gamesTruncated,
+    nativeSteps: stepTotals.nativeSteps,
+    committedSteps: stepTotals.committedSteps,
+    rejectedSteps: stepTotals.rejectedSteps,
     limits: {
       maxTransitions: options.maxTransitions ?? null,
       timeoutMs: options.timeoutMs ?? null
@@ -3260,51 +4668,6 @@ function buildTournamentSummary(
     evaluationReports: summarizeTournamentEvaluationReports(result.episodes),
     failures,
     failureReason: failures.length ? failures.map((failure) => `${failure.seed}: ${failure.error}`).join(" | ") : null
-  };
-}
-
-function buildExperimentMatrixSummary(
-  result: ExperimentMatrixResult,
-  options: {
-    timeoutMs?: number;
-    elapsedMs: number;
-    timedOut: boolean;
-  }
-): object {
-  const failures = result.cells
-    .filter((cell) => cell.status === "failed")
-    .map((cell) => ({
-      index: cell.index,
-      id: cell.id,
-      label: cell.label,
-      group: cell.group,
-      error: sanitizeApiErrorText(cell.error ?? "Experiment matrix cell failed."),
-      gamesFailed: cell.tournament?.gamesFailed ?? 0
-    }));
-  return {
-    kind: "experiment-matrix",
-    ok: result.status === "completed",
-    endpoint: providerConfigSummaryFromEnv().endpoint,
-    matrixId: result.experiment.id,
-    status: result.status,
-    cellsRequested: result.cellsRequested,
-    cellsCompleted: result.cellsCompleted,
-    cellsFailed: result.cellsFailed,
-    gamesRequested: result.gamesRequested,
-    gamesCompleted: result.gamesCompleted,
-    gamesFailed: result.gamesFailed,
-    limits: {
-      timeoutMs: options.timeoutMs ?? null
-    },
-    elapsedMs: options.elapsedMs,
-    timedOut: options.timedOut,
-    denominatorPolicy: result.statistics.denominatorPolicy,
-    statisticStatus: result.statistics.status,
-    modelStats: result.statistics.modelStats,
-    profileStats: result.statistics.profileStats,
-    pairwiseModelComparisons: result.statistics.pairwiseModelComparisons,
-    failures,
-    failureReason: failures.length ? failures.map((failure) => `${failure.id}: ${failure.error}`).join(" | ") : null
   };
 }
 
@@ -3321,319 +4684,84 @@ async function persistTournamentArtifactSet(options: {
   const baseDir = path.resolve(options.baseDir);
   const outputDir = resolveGeneratedArtifactDirectory(baseDir, id);
   const createdAt = new Date().toISOString();
-  let written: TournamentArtifactWriteResult;
+  let written: TournamentArtifactWriteResult<PublicTournamentArtifactFiles>;
   try {
     written = await writeTournamentArtifactDirectory(options.result, {
       outputDir,
       experimentId: options.experimentId,
       createdAt,
-      overwrite: false
+      overwrite: false,
+      // Server-exported tournament packs are downloadable through the public API.
+      // Match files and trajectory streams use truth-redacted projections; assignment
+      // role/team truth is stripped. The public writer has an independent
+      // allowlist schema; research CLI exports keep full artifacts by default.
+      visibility: "public",
+      matchArtifactView: "truth-redacted",
+      redactAssignmentTruth: true,
+      projectPublicMatchArtifact: (artifact, episodeIndex) => projectPublicTournamentMatchArtifact(artifact, episodeIndex)
     });
   } catch {
     throw new HttpError(500, "Tournament artifact export failed.");
   }
+  const density = await tournamentDensityFromManifestFile(written.files.manifest);
   const set: StoredTournamentArtifactSet = {
     id,
     createdAt,
-    experimentId: options.experimentId,
-    seed: options.seed,
+    // The store/index is queryable through the same public artifact surface.
+    // Do not let it reintroduce canonical experiment identity or a seed that
+    // the on-disk public manifest intentionally omitted.
+    experimentId: id,
+    seed: "[REDACTED deterministic seed]",
     outputDir: written.outputDir,
     files: written.files,
-    relativeFiles: relativeTournamentArtifactFiles(written)
+    relativeFiles: relativeTournamentArtifactFiles(written),
+    nativeSteps: density?.nativeSteps,
+    committedSteps: density?.committedSteps,
+    rejectedSteps: density?.rejectedSteps,
+    metricCount: density?.metricCount,
+    scorecardEligibleMetricCount: density?.scorecardEligibleMetricCount,
+    metricPromotionClassCounts: density?.metricPromotionClassCounts,
+    scorecardEligibleMetricClassCounts: density?.scorecardEligibleMetricClassCounts,
+    projection: {
+      visibility: "public",
+      matchArtifactView: "truth-redacted",
+      assignmentTruthRedacted: true,
+      publicShareSafe: true
+    }
   };
   await loadTournamentArtifactSetIndex(baseDir);
   saveTournamentArtifactSet(set);
   await writeTournamentArtifactSetIndex(baseDir);
+  // Register episode match artifacts into the match store so seeded pairwise
+  // comparisons can hydrate baseline/candidate artifacts through /api/matches.
+  await registerTournamentMatchArtifacts(options.result);
+  // A public tournament bundle is intentionally not a comparison bundle.
+  // Comparison construction needs canonical evaluation and identity records;
+  // feeding it truth-redacted display DTOs either fails or pressures the public
+  // projection to retain forbidden fields. Operators can build a scoped
+  // comparison from registered canonical matches through the local route.
   return set;
 }
 
-async function persistExperimentMatrixArtifactSet(options: {
-  result: ExperimentMatrixResult;
-  baseDir: string | undefined;
-}): Promise<StoredExperimentMatrixArtifactSet> {
-  if (!options.baseDir) {
-    throw new HttpError(400, "Experiment matrix artifact export requires configured MATRIX_ARTIFACT_BASE_DIR or TOURNAMENT_ARTIFACT_BASE_DIR.");
-  }
-  const id = randomUUID();
-  const baseDir = path.resolve(options.baseDir);
-  const outputDir = resolveGeneratedArtifactDirectory(baseDir, id);
-  const createdAt = new Date().toISOString();
-  let written: ExperimentMatrixArtifactWriteResult;
-  try {
-    written = await writeExperimentMatrixArtifactDirectory(options.result, {
-      outputDir,
-      createdAt,
-      overwrite: false
-    });
-  } catch {
-    throw new HttpError(500, "Experiment matrix artifact export failed.");
-  }
-  const set: StoredExperimentMatrixArtifactSet = {
-    id,
-    createdAt,
-    matrixId: options.result.experiment.id,
-    outputDir: written.outputDir,
-    files: written.files,
-    relativeFiles: relativeExperimentMatrixArtifactFiles(written)
-  };
-  await loadExperimentMatrixArtifactSetIndex(baseDir);
-  saveExperimentMatrixArtifactSet(set);
-  await writeExperimentMatrixArtifactSetIndex(baseDir);
-  return set;
-}
-
-async function loadExperimentMatrixArtifactSetIndex(baseDir: string | undefined): Promise<void> {
-  if (!baseDir) return;
-  const root = path.resolve(baseDir);
-  let parsed: unknown;
-  let shouldRewriteIndex = false;
-  const loadedIds = new Set<string>();
-  try {
-    const content = await readFile(experimentMatrixArtifactSetIndexPath(root), "utf8");
-    parsed = JSON.parse(content);
-  } catch (error) {
-    if (isFileReadNotFound(error)) {
-      const scannedIds = await loadExperimentMatrixArtifactSetsFromManifests(root, loadedIds);
-      if (scannedIds.length > 0) await writeExperimentMatrixArtifactSetIndex(root);
-      return;
-    }
-    if (error instanceof SyntaxError) {
-      shouldRewriteIndex = true;
-    } else {
-      throw new HttpError(500, "Experiment matrix artifact set index could not be read.");
-    }
-  }
-  if (parsed !== undefined && (!isRecord(parsed) || parsed.kind !== "experiment-matrix-artifact-set-index" || !Array.isArray(parsed.artifactSets))) {
-    shouldRewriteIndex = true;
-  } else if (isRecord(parsed) && Array.isArray(parsed.artifactSets)) {
-    for (const record of parsed.artifactSets) {
-      const set = await storedExperimentMatrixArtifactSetFromIndexRecord(root, record);
-      if (set) {
-        saveExperimentMatrixArtifactSet(set);
-        loadedIds.add(set.id);
-      } else {
-        shouldRewriteIndex = true;
-      }
-    }
-  }
-  const scannedIds = await loadExperimentMatrixArtifactSetsFromManifests(root, loadedIds);
-  if (scannedIds.length > 0 || shouldRewriteIndex) {
-    await writeExperimentMatrixArtifactSetIndex(root);
-  }
-}
-
-async function writeExperimentMatrixArtifactSetIndex(baseDir: string): Promise<void> {
-  const root = path.resolve(baseDir);
-  await mkdir(root, { recursive: true });
-  const artifactSets = listExperimentMatrixArtifactSetsForBaseDir(root).map((set) => ({
-    id: set.id,
-    createdAt: set.createdAt,
-    matrixId: set.matrixId,
-    relativeFiles: set.relativeFiles
-  }));
-  const index = {
-    artifactVersion: "harness.experiment-matrix-artifact-set-index.v1",
-    kind: "experiment-matrix-artifact-set-index",
-    updatedAt: new Date().toISOString(),
-    artifactSets
-  };
-  await writeFile(experimentMatrixArtifactSetIndexPath(root), `${JSON.stringify(redactSecrets(index), null, 2)}\n`, "utf8");
-}
-
-function experimentMatrixArtifactSetIndexPath(baseDir: string): string {
-  return path.join(path.resolve(baseDir), MATRIX_ARTIFACT_SET_INDEX_FILE);
-}
-
-async function storedExperimentMatrixArtifactSetFromIndexRecord(baseDir: string, value: unknown): Promise<StoredExperimentMatrixArtifactSet | null> {
-  if (!isRecord(value)) return null;
-  const id = typeof value.id === "string" ? value.id : null;
-  const relativeFiles = experimentMatrixArtifactFilesFromUnknown(value.relativeFiles);
-  if (!id || !relativeFiles) return null;
-  try {
-    const set = await storedExperimentMatrixArtifactSetFromManifestDirectory(baseDir, id);
-    if (!set) return null;
-    return equalExperimentMatrixArtifactFiles(set.relativeFiles, relativeFiles) ? set : null;
-  } catch {
-    return null;
-  }
-}
-
-async function loadExperimentMatrixArtifactSetsFromManifests(baseDir: string, skipIds: Set<string>): Promise<string[]> {
-  let entries: Array<{ isDirectory(): boolean; name: string }>;
-  try {
-    entries = await readdir(path.resolve(baseDir), { withFileTypes: true });
-  } catch (error) {
-    if (isFileReadNotFound(error)) return [];
-    throw new HttpError(500, "Experiment matrix artifact set directory could not be read.");
-  }
-  const loadedIds: string[] = [];
-  for (const entry of entries) {
-    if (!GENERATED_ARTIFACT_SET_ID_PATTERN.test(entry.name)) continue;
-    if (!entry.isDirectory() || skipIds.has(entry.name)) continue;
-    const setResult = await readExperimentMatrixArtifactSetFromManifestDirectory(baseDir, entry.name);
-    if (!setResult.ok) continue;
-    const set = setResult.artifact;
-    saveExperimentMatrixArtifactSet(set);
-    skipIds.add(set.id);
-    loadedIds.push(set.id);
-  }
-  return loadedIds;
-}
-
-async function storedExperimentMatrixArtifactSetFromManifestDirectory(baseDir: string, id: string): Promise<StoredExperimentMatrixArtifactSet | null> {
-  const result = await readExperimentMatrixArtifactSetFromManifestDirectory(baseDir, id);
-  return result.ok ? result.artifact : null;
-}
-
-async function readExperimentMatrixArtifactSetFromManifestDirectory(
-  baseDir: string,
-  id: string
-): Promise<ArtifactRecoveryReadResult<StoredExperimentMatrixArtifactSet>> {
-  try {
-    if (!GENERATED_ARTIFACT_SET_ID_PATTERN.test(id)) return { ok: false, code: "manifest_identity_mismatch" };
-    const root = path.resolve(baseDir);
-    const outputDir = resolveGeneratedArtifactDirectory(root, id);
+async function registerTournamentMatchArtifacts(result: TournamentResult): Promise<void> {
+  const records = result.artifacts ?? [];
+  if (!records.length) return;
+  let wroteDiskArtifact = false;
+  for (const record of records) {
+    const artifact = record.artifact;
+    saveMatch(storedMatchFromMatchArtifact(artifact));
+    const id = matchArtifactId(artifact);
+    if (!matchArtifactBaseDir || !isPersistedMatchArtifactId(id)) continue;
     try {
-      await assertExistingArtifactSetDirectoryInsideBase(root, outputDir);
+      await persistMatchArtifact(artifact, matchArtifactBaseDir);
+      wroteDiskArtifact = true;
     } catch {
-      return { ok: false, code: "manifest_directory_rejected" };
+      // Keep memory registration even if disk persistence is unavailable.
     }
-    const manifestPath = resolveUnderDirectory(outputDir, "manifest.json");
-    try {
-      await assertRegularFileInsideArtifactSet({ baseDir: root, outputDir, absolutePath: manifestPath });
-    } catch {
-      return { ok: false, code: "manifest_file_not_regular" };
-    }
-    let manifest: unknown;
-    try {
-      manifest = JSON.parse(await readFile(manifestPath, "utf8")) as unknown;
-    } catch (error) {
-      return { ok: false, code: error instanceof SyntaxError ? "manifest_invalid_json" : "manifest_file_not_regular" };
-    }
-    if (!isRecord(manifest)) return { ok: false, code: "manifest_invalid_shape" };
-    if (manifest.artifactVersion !== MATRIX_ARTIFACT_VERSION || manifest.kind !== "experiment-matrix") {
-      return { ok: false, code: "manifest_invalid_shape" };
-    }
-    const createdAt = stringField(manifest, "createdAt");
-    const matrixId = stringField(manifest, "matrixId");
-    const relativeFiles = experimentMatrixArtifactFileShapeFromUnknown(manifest.files);
-    if (!createdAt || !matrixId || !relativeFiles) return { ok: false, code: "manifest_invalid_shape" };
-    if (!isExpectedExperimentMatrixArtifactFileSet(relativeFiles)) return { ok: false, code: "manifest_file_set_invalid" };
-    return {
-      ok: true,
-      artifact: {
-        id,
-        createdAt,
-        matrixId,
-        outputDir,
-        files: absoluteExperimentMatrixArtifactFiles(outputDir, relativeFiles),
-        relativeFiles
-      }
-    };
-  } catch {
-    return { ok: false, code: "manifest_identity_mismatch" };
   }
-}
-
-function experimentMatrixArtifactFilesFromUnknown(value: unknown): StoredExperimentMatrixArtifactFiles | null {
-  const files = experimentMatrixArtifactFileShapeFromUnknown(value);
-  return files && isExpectedExperimentMatrixArtifactFileSet(files) ? files : null;
-}
-
-function experimentMatrixArtifactFileShapeFromUnknown(value: unknown): StoredExperimentMatrixArtifactFiles | null {
-  if (!isRecord(value)) return null;
-  const manifest = stringField(value, "manifest");
-  const specNormalized = stringField(value, "specNormalized");
-  const cells = stringField(value, "cells");
-  const statistics = stringField(value, "statistics");
-  const summaryMarkdown = stringField(value, "summaryMarkdown");
-  const modelStatsCsv = stringField(value, "modelStatsCsv");
-  const profileStatsCsv = stringField(value, "profileStatsCsv");
-  const pairwiseModelComparisonsCsv = stringField(value, "pairwiseModelComparisonsCsv");
-  const tournaments = experimentMatrixTournamentFilesFromUnknown(value.tournaments);
-  if (
-    !manifest ||
-    !specNormalized ||
-    !cells ||
-    !statistics ||
-    !summaryMarkdown ||
-    !modelStatsCsv ||
-    !profileStatsCsv ||
-    !pairwiseModelComparisonsCsv ||
-    !tournaments
-  ) {
-    return null;
+  if (wroteDiskArtifact) {
+    await writeMatchArtifactIndex(matchArtifactBaseDir);
   }
-  return {
-    manifest,
-    specNormalized,
-    cells,
-    statistics,
-    summaryMarkdown,
-    modelStatsCsv,
-    profileStatsCsv,
-    pairwiseModelComparisonsCsv,
-    tournaments
-  };
-}
-
-function experimentMatrixTournamentFilesFromUnknown(value: unknown): StoredExperimentMatrixArtifactFiles["tournaments"] | null {
-  if (!Array.isArray(value)) return null;
-  const tournaments: StoredExperimentMatrixArtifactFiles["tournaments"] = [];
-  for (const item of value) {
-    if (!isRecord(item)) return null;
-    const cellId = stringField(item, "cellId");
-    const manifest = stringField(item, "manifest");
-    if (!cellId || !manifest) return null;
-    tournaments.push({ cellId, manifest });
-  }
-  return tournaments;
-}
-
-function isExpectedExperimentMatrixArtifactFileSet(files: StoredExperimentMatrixArtifactFiles): boolean {
-  return (
-    files.manifest === "manifest.json" &&
-    files.specNormalized === "spec.normalized.json" &&
-    files.cells === "cells.jsonl" &&
-    files.statistics === "statistics.json" &&
-    files.summaryMarkdown === "summary.md" &&
-    files.modelStatsCsv === "model_stats.csv" &&
-    files.profileStatsCsv === "profile_stats.csv" &&
-    files.pairwiseModelComparisonsCsv === "pairwise_model_comparisons.csv" &&
-    files.tournaments.every((file) => isWriterExperimentMatrixTournamentManifest(file))
-  );
-}
-
-function isWriterExperimentMatrixTournamentManifest(file: { cellId: string; manifest: string }): boolean {
-  if (!/^[A-Za-z0-9_.-]+$/.test(file.cellId)) return false;
-  const segments = file.manifest.split("/");
-  return segments.length === 3 && segments[0] === "tournaments" && segments[1] === file.cellId && segments[2] === "manifest.json";
-}
-
-function absoluteExperimentMatrixArtifactFiles(
-  outputDir: string,
-  files: StoredExperimentMatrixArtifactFiles
-): ExperimentMatrixArtifactWriteResult["files"] {
-  const resolve = (relativePath: string) => resolveUnderDirectory(outputDir, normalizeRequestedArtifactPath(relativePath));
-  return {
-    manifest: resolve(files.manifest),
-    specNormalized: resolve(files.specNormalized),
-    cells: resolve(files.cells),
-    statistics: resolve(files.statistics),
-    summaryMarkdown: resolve(files.summaryMarkdown),
-    modelStatsCsv: resolve(files.modelStatsCsv),
-    profileStatsCsv: resolve(files.profileStatsCsv),
-    pairwiseModelComparisonsCsv: resolve(files.pairwiseModelComparisonsCsv),
-    tournamentsDir: resolveUnderDirectory(outputDir, "tournaments"),
-    tournaments: files.tournaments.map((file) => ({
-      cellId: file.cellId,
-      manifest: resolve(file.manifest)
-    }))
-  };
-}
-
-function equalExperimentMatrixArtifactFiles(left: StoredExperimentMatrixArtifactFiles, right: StoredExperimentMatrixArtifactFiles): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 async function loadTournamentArtifactSetIndex(baseDir: string | undefined): Promise<void> {
@@ -3706,7 +4834,15 @@ async function writeTournamentArtifactSetIndex(baseDir: string): Promise<void> {
     createdAt: set.createdAt,
     experimentId: set.experimentId,
     seed: set.seed,
-    relativeFiles: set.relativeFiles
+    relativeFiles: set.relativeFiles,
+    nativeSteps: set.nativeSteps ?? null,
+    committedSteps: set.committedSteps ?? null,
+    rejectedSteps: set.rejectedSteps ?? null,
+    metricCount: set.metricCount ?? null,
+    scorecardEligibleMetricCount: set.scorecardEligibleMetricCount ?? null,
+    metricPromotionClassCounts: set.metricPromotionClassCounts ?? null,
+    scorecardEligibleMetricClassCounts: set.scorecardEligibleMetricClassCounts ?? null,
+    projection: set.projection ?? null
   }));
   const index = {
     artifactVersion: "harness.tournament-artifact-set-index.v1",
@@ -3810,15 +4946,23 @@ async function readTournamentArtifactSetFromManifestDirectory(
       return { ok: false, code: error instanceof SyntaxError ? "manifest_invalid_json" : "manifest_file_not_regular" };
     }
     if (!isRecord(manifest)) return { ok: false, code: "manifest_invalid_shape" };
+    if (
+      manifest.artifactVersion === PUBLIC_TOURNAMENT_ARTIFACT_VERSION &&
+      manifest.kind === "public-tournament" &&
+      manifest.visibility === "public"
+    ) {
+      return readPublicTournamentArtifactSetFromManifest({ root, outputDir, id, manifest });
+    }
     if (manifest.artifactVersion !== TOURNAMENT_ARTIFACT_VERSION || manifest.kind !== "tournament") {
       return { ok: false, code: "manifest_invalid_shape" };
     }
     const createdAt = stringField(manifest, "createdAt");
     const experimentId = stringField(manifest, "experimentId");
     const seed = stringField(manifest, "seed");
-    const relativeFiles = tournamentArtifactFileShapeFromUnknown(manifest.files);
+    const relativeFiles = researchTournamentArtifactFileShapeFromUnknown(manifest.files);
     if (!createdAt || !experimentId || !seed || !relativeFiles) return { ok: false, code: "manifest_invalid_shape" };
     if (!isExpectedTournamentArtifactFileSet(relativeFiles)) return { ok: false, code: "manifest_file_set_invalid" };
+    const density = tournamentDensityFromUnknown(manifest);
     return {
       ok: true,
       artifact: {
@@ -3828,7 +4972,15 @@ async function readTournamentArtifactSetFromManifestDirectory(
         seed,
         outputDir,
         files: absoluteTournamentArtifactFiles(outputDir, relativeFiles),
-        relativeFiles
+        relativeFiles,
+        nativeSteps: density?.nativeSteps,
+        committedSteps: density?.committedSteps,
+        rejectedSteps: density?.rejectedSteps,
+        metricCount: density?.metricCount,
+        scorecardEligibleMetricCount: density?.scorecardEligibleMetricCount,
+        metricPromotionClassCounts: density?.metricPromotionClassCounts,
+        scorecardEligibleMetricClassCounts: density?.scorecardEligibleMetricClassCounts,
+        projection: tournamentProjectionFromUnknown(manifest.projection)
       }
     };
   } catch {
@@ -3836,12 +4988,219 @@ async function readTournamentArtifactSetFromManifestDirectory(
   }
 }
 
-function tournamentArtifactFilesFromUnknown(value: unknown): StoredTournamentArtifactFiles | null {
-  const files = tournamentArtifactFileShapeFromUnknown(value);
-  return files && isExpectedTournamentArtifactFileSet(files) ? files : null;
+async function readPublicTournamentArtifactSetFromManifest(input: {
+  root: string;
+  outputDir: string;
+  id: string;
+  manifest: Record<string, unknown>;
+}): Promise<ArtifactRecoveryReadResult<StoredTournamentArtifactSet>> {
+  const createdAt = stringField(input.manifest, "createdAt");
+  const relativeFiles = publicTournamentArtifactFileShapeFromUnknown(input.manifest.files);
+  if (!createdAt || !relativeFiles || !isExpectedPublicTournamentArtifactFileSet(relativeFiles)) {
+    return { ok: false, code: "manifest_invalid_shape" };
+  }
+  const validated = await validatePublicTournamentArtifactDirectory({
+    baseDir: input.root,
+    outputDir: input.outputDir,
+    manifest: input.manifest,
+    files: relativeFiles
+  });
+  if (!validated) return { ok: false, code: "public_projection_invalid" };
+  return {
+    ok: true,
+    artifact: {
+      id: input.id,
+      createdAt,
+      experimentId: input.id,
+      seed: "[REDACTED deterministic seed]",
+      outputDir: input.outputDir,
+      files: absolutePublicTournamentArtifactFiles(input.outputDir, relativeFiles),
+      relativeFiles,
+      projection: {
+        visibility: "public",
+        matchArtifactView: "truth-redacted",
+        assignmentTruthRedacted: true,
+        publicShareSafe: true
+      }
+    }
+  };
 }
 
-function tournamentArtifactFileShapeFromUnknown(value: unknown): StoredTournamentArtifactFiles | null {
+async function validatePublicTournamentArtifactDirectory(input: {
+  baseDir: string;
+  outputDir: string;
+  manifest: Record<string, unknown>;
+  files: StoredPublicTournamentArtifactFiles;
+}): Promise<boolean> {
+  try {
+    if (!isPublicTournamentManifest(input.manifest, input.files)) return false;
+    if (!(await hasExactPublicTournamentArtifactFileSet(input))) return false;
+    const episodePath = resolveUnderDirectory(input.outputDir, input.files.episodes);
+    await assertRegularFileInsideArtifactSet({
+      baseDir: input.baseDir,
+      outputDir: input.outputDir,
+      absolutePath: episodePath
+    });
+    const episodeRecords = (await readFile(episodePath, "utf8"))
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as unknown);
+    if (episodeRecords.length !== input.files.matches.length) return false;
+    const expectedByPath = new Map<string, Record<string, unknown>>();
+    for (const record of episodeRecords) {
+      if (!isPublicTournamentEpisodeRecord(record)) return false;
+      const value = record as Record<string, unknown>;
+      const matchPath = value.match;
+      if (typeof matchPath !== "string" || expectedByPath.has(matchPath)) return false;
+      expectedByPath.set(matchPath, value);
+    }
+    for (const matchPath of input.files.matches) {
+      const episode = expectedByPath.get(matchPath);
+      if (!episode) return false;
+      const expectedEpisodeIndex = publicEpisodeIndexFromMatchPath(matchPath);
+      if (expectedEpisodeIndex === null || expectedEpisodeIndex !== episode.episodeIndex) return false;
+      const absolutePath = resolveUnderDirectory(input.outputDir, matchPath);
+      await assertRegularFileInsideArtifactSet({
+        baseDir: input.baseDir,
+        outputDir: input.outputDir,
+        absolutePath
+      });
+      const match = JSON.parse(await readFile(absolutePath, "utf8")) as unknown;
+      assertPublicTournamentMatchArtifact(match);
+      const publicMatch = match as Record<string, unknown>;
+      if (publicMatch.episodeIndex !== episode.episodeIndex || publicMatch.status !== episode.status) return false;
+      if (!Array.isArray(publicMatch.messages) || publicMatch.messages.length !== episode.publicMessageCount) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function hasExactPublicTournamentArtifactFileSet(input: {
+  baseDir: string;
+  outputDir: string;
+  files: StoredPublicTournamentArtifactFiles;
+}): Promise<boolean> {
+  try {
+    await assertExistingArtifactSetDirectoryInsideBase(input.baseDir, input.outputDir);
+    const rootEntries = await readdir(input.outputDir, { withFileTypes: true });
+    const expectedRootEntries = new Set(["manifest.json", "episodes.jsonl", "matches"]);
+    if (rootEntries.length !== expectedRootEntries.size || rootEntries.some((entry) => !expectedRootEntries.has(entry.name))) {
+      return false;
+    }
+    const matchesDirectory = resolveUnderDirectory(input.outputDir, "matches");
+    const matchesInfo = await lstat(matchesDirectory);
+    if (!matchesInfo.isDirectory() || matchesInfo.isSymbolicLink()) return false;
+    const expectedMatchNames = new Set(input.files.matches.map((file) => path.basename(file)));
+    if (expectedMatchNames.size !== input.files.matches.length) return false;
+    const matchEntries = await readdir(matchesDirectory, { withFileTypes: true });
+    if (
+      matchEntries.length !== expectedMatchNames.size ||
+      matchEntries.some((entry) => !entry.isFile() || entry.isSymbolicLink() || !expectedMatchNames.has(entry.name))
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function publicEpisodeIndexFromMatchPath(matchPath: string): number | null {
+  const match = /^matches\/episode-([1-9][0-9]*)\.json$/.exec(matchPath);
+  if (!match) return null;
+  const index = Number(match[1]) - 1;
+  return Number.isSafeInteger(index) && index >= 0 ? index : null;
+}
+
+async function assertVerifiedPublicTournamentArtifactSet(
+  set: StoredTournamentArtifactSet,
+  baseDir: string | undefined
+): Promise<void> {
+  if (!baseDir || "registry" in set.relativeFiles) {
+    throw new HttpError(409, "Tournament artifact set is not a verified public publication.", "public_tournament_artifact_invalid");
+  }
+  const files = set.relativeFiles as StoredPublicTournamentArtifactFiles;
+  if (!isExpectedPublicTournamentArtifactFileSet(files)) {
+    throw new HttpError(409, "Tournament artifact set is not a verified public publication.", "public_tournament_artifact_invalid");
+  }
+  try {
+    const manifestPath = resolveUnderDirectory(set.outputDir, files.manifest);
+    await assertRegularFileInsideArtifactSet({ baseDir, outputDir: set.outputDir, absolutePath: manifestPath });
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as unknown;
+    if (!isRecord(manifest)) throw new Error("invalid manifest");
+    const valid = await validatePublicTournamentArtifactDirectory({
+      baseDir,
+      outputDir: set.outputDir,
+      manifest,
+      files
+    });
+    if (!valid) throw new Error("invalid public projection");
+  } catch {
+    throw new HttpError(409, "Tournament public publication failed verification.", "public_tournament_artifact_invalid");
+  }
+}
+
+function isPublicTournamentManifest(
+  manifest: Record<string, unknown>,
+  files: StoredPublicTournamentArtifactFiles
+): boolean {
+  const keys = Object.keys(manifest).sort();
+  const expected = ["artifactVersion", "createdAt", "files", "games", "kind", "visibility"];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return false;
+  if (
+    manifest.artifactVersion !== PUBLIC_TOURNAMENT_ARTIFACT_VERSION ||
+    manifest.kind !== "public-tournament" ||
+    manifest.visibility !== "public" ||
+    typeof manifest.createdAt !== "string" ||
+    !Number.isFinite(Date.parse(manifest.createdAt))
+  ) {
+    return false;
+  }
+  if (!isRecord(manifest.games)) return false;
+  const gameKeys = Object.keys(manifest.games).sort();
+  if (
+    gameKeys.length !== 4 ||
+    gameKeys[0] !== "completed" ||
+    gameKeys[1] !== "failed" ||
+    gameKeys[2] !== "requested" ||
+    gameKeys[3] !== "truncated" ||
+    !Object.values(manifest.games).every((value) => typeof value === "number" && Number.isInteger(value) && value >= 0)
+  ) {
+    return false;
+  }
+  const manifestFiles = publicTournamentArtifactFileShapeFromUnknown(manifest.files);
+  return Boolean(manifestFiles && equalTournamentArtifactFiles(manifestFiles, files));
+}
+
+function isPublicTournamentEpisodeRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value).sort();
+  const expected = ["episodeIndex", "kind", "match", "publicMessageCount", "status"];
+  return (
+    keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index]) &&
+    value.kind === "public-episode" &&
+    typeof value.episodeIndex === "number" &&
+    Number.isInteger(value.episodeIndex) &&
+    value.episodeIndex >= 0 &&
+    typeof value.status === "string" &&
+    typeof value.match === "string" &&
+    typeof value.publicMessageCount === "number" &&
+    Number.isInteger(value.publicMessageCount) &&
+    value.publicMessageCount >= 0
+  );
+}
+
+function tournamentArtifactFilesFromUnknown(value: unknown): StoredTournamentArtifactFiles | null {
+  const publicFiles = publicTournamentArtifactFileShapeFromUnknown(value);
+  if (publicFiles && isExpectedPublicTournamentArtifactFileSet(publicFiles)) return publicFiles;
+  const researchFiles = researchTournamentArtifactFileShapeFromUnknown(value);
+  return researchFiles && isExpectedTournamentArtifactFileSet(researchFiles) ? researchFiles : null;
+}
+
+function researchTournamentArtifactFileShapeFromUnknown(value: unknown): StoredResearchTournamentArtifactFiles | null {
   if (!isRecord(value)) return null;
   const manifest = stringField(value, "manifest");
   const registry = stringField(value, "registry");
@@ -3855,6 +5214,8 @@ function tournamentArtifactFileShapeFromUnknown(value: unknown): StoredTournamen
   const costLatency = stringField(value, "costLatency");
   const leaderboard = stringField(value, "leaderboard");
   const benchmarkStatistics = stringField(value, "benchmarkStatistics");
+  const tournamentComparison = stringField(value, "tournamentComparison");
+  const tournamentComparisonMarkdown = stringField(value, "tournamentComparisonMarkdown");
   const summaryMarkdown = stringField(value, "summaryMarkdown");
   const episodesCsv = stringField(value, "episodesCsv");
   const agentsCsv = stringField(value, "agentsCsv");
@@ -3875,6 +5236,8 @@ function tournamentArtifactFileShapeFromUnknown(value: unknown): StoredTournamen
     !costLatency ||
     !leaderboard ||
     !benchmarkStatistics ||
+    !tournamentComparison ||
+    !tournamentComparisonMarkdown ||
     !summaryMarkdown ||
     !episodesCsv ||
     !agentsCsv ||
@@ -3898,6 +5261,8 @@ function tournamentArtifactFileShapeFromUnknown(value: unknown): StoredTournamen
     costLatency,
     leaderboard,
     benchmarkStatistics,
+    tournamentComparison,
+    tournamentComparisonMarkdown,
     summaryMarkdown,
     episodesCsv,
     agentsCsv,
@@ -3906,10 +5271,22 @@ function tournamentArtifactFileShapeFromUnknown(value: unknown): StoredTournamen
     matches,
     matchesJsonl
   };
-  return files;
+  return files satisfies StoredResearchTournamentArtifactFiles;
 }
 
-function isExpectedTournamentArtifactFileSet(files: StoredTournamentArtifactFiles): boolean {
+function publicTournamentArtifactFileShapeFromUnknown(value: unknown): StoredPublicTournamentArtifactFiles | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value).sort();
+  const expected = ["episodes", "manifest", "matches"];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null;
+  const manifest = stringField(value, "manifest");
+  const episodes = stringField(value, "episodes");
+  const matches = stringArrayField(value, "matches");
+  if (!manifest || !episodes || !matches) return null;
+  return { manifest, episodes, matches };
+}
+
+function isExpectedTournamentArtifactFileSet(files: StoredResearchTournamentArtifactFiles): boolean {
   return (
     files.manifest === "manifest.json" &&
     files.registry === "registry.json" &&
@@ -3923,6 +5300,8 @@ function isExpectedTournamentArtifactFileSet(files: StoredTournamentArtifactFile
     files.costLatency === "cost_latency.json" &&
     files.leaderboard === "leaderboard.json" &&
     files.benchmarkStatistics === "benchmark_statistics.json" &&
+    files.tournamentComparison === "tournament_comparison.json" &&
+    files.tournamentComparisonMarkdown === "tournament_comparison.md" &&
     files.summaryMarkdown === "summary.md" &&
     files.episodesCsv === "episodes.csv" &&
     files.agentsCsv === "agents.csv" &&
@@ -3933,13 +5312,24 @@ function isExpectedTournamentArtifactFileSet(files: StoredTournamentArtifactFile
   );
 }
 
+function isExpectedPublicTournamentArtifactFileSet(files: StoredPublicTournamentArtifactFiles): boolean {
+  return (
+    files.manifest === "manifest.json" &&
+    files.episodes === "episodes.jsonl" &&
+    files.matches.every((file) => /^matches\/episode-[1-9][0-9]*\.json$/.test(file))
+  );
+}
+
 function isWriterTournamentMatchArtifactFile(file: string, extension: ".json" | ".jsonl"): boolean {
   if (!file.startsWith("matches/") || !file.endsWith(extension)) return false;
   const matchStem = file.slice("matches/".length, -extension.length);
   return /^tournament-[A-Za-z0-9_.-]+-[1-9][0-9]*$/.test(matchStem);
 }
 
-function absoluteTournamentArtifactFiles(outputDir: string, files: StoredTournamentArtifactFiles): TournamentArtifactWriteResult["files"] {
+function absoluteTournamentArtifactFiles(
+  outputDir: string,
+  files: StoredResearchTournamentArtifactFiles
+): TournamentArtifactWriteResult["files"] {
   const resolve = (relativePath: string) => resolveUnderDirectory(outputDir, normalizeRequestedArtifactPath(relativePath));
   return {
     manifest: resolve(files.manifest),
@@ -3954,6 +5344,8 @@ function absoluteTournamentArtifactFiles(outputDir: string, files: StoredTournam
     costLatency: resolve(files.costLatency),
     leaderboard: resolve(files.leaderboard),
     benchmarkStatistics: resolve(files.benchmarkStatistics),
+    tournamentComparison: resolve(files.tournamentComparison),
+    tournamentComparisonMarkdown: resolve(files.tournamentComparisonMarkdown),
     summaryMarkdown: resolve(files.summaryMarkdown),
     episodesCsv: resolve(files.episodesCsv),
     agentsCsv: resolve(files.agentsCsv),
@@ -3962,6 +5354,19 @@ function absoluteTournamentArtifactFiles(outputDir: string, files: StoredTournam
     matchesDir: resolveUnderDirectory(outputDir, "matches"),
     matches: files.matches.map(resolve),
     matchesJsonl: files.matchesJsonl.map(resolve)
+  };
+}
+
+function absolutePublicTournamentArtifactFiles(
+  outputDir: string,
+  files: StoredPublicTournamentArtifactFiles
+): PublicTournamentArtifactFiles {
+  const resolve = (relativePath: string) => resolveUnderDirectory(outputDir, normalizeRequestedArtifactPath(relativePath));
+  return {
+    manifest: resolve(files.manifest),
+    episodes: resolve(files.episodes),
+    matchesDir: resolveUnderDirectory(outputDir, "matches"),
+    matches: files.matches.map(resolve)
   };
 }
 
@@ -3987,27 +5392,109 @@ function isTournamentArtifactSetInsideBaseDir(set: StoredTournamentArtifactSet, 
   return outputDir !== root && outputDir.startsWith(root + path.sep);
 }
 
-function listExperimentMatrixArtifactSetsForBaseDir(baseDir: string | undefined): StoredExperimentMatrixArtifactSet[] {
-  if (!baseDir) return listExperimentMatrixArtifactSets();
-  return listExperimentMatrixArtifactSets().filter((set) => isExperimentMatrixArtifactSetInsideBaseDir(set, baseDir));
-}
-
-function getExperimentMatrixArtifactSetForBaseDir(id: string, baseDir: string | undefined): StoredExperimentMatrixArtifactSet | undefined {
-  const set = getExperimentMatrixArtifactSet(id);
-  if (!set) return undefined;
-  if (baseDir && !isExperimentMatrixArtifactSetInsideBaseDir(set, baseDir)) return undefined;
-  return set;
-}
-
-function isExperimentMatrixArtifactSetInsideBaseDir(set: StoredExperimentMatrixArtifactSet, baseDir: string): boolean {
-  const root = path.resolve(baseDir);
-  const outputDir = path.resolve(set.outputDir);
-  return outputDir !== root && outputDir.startsWith(root + path.sep);
-}
-
 function stringField(source: Record<string, unknown>, key: string): string | null {
   const value = source[key];
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function tournamentDensityFromUnknown(
+  value: unknown
+): {
+  nativeSteps: number;
+  committedSteps: number;
+  rejectedSteps: number;
+  metricCount?: number;
+  scorecardEligibleMetricCount?: number;
+  metricPromotionClassCounts?: StoredTournamentArtifactSet["metricPromotionClassCounts"];
+  scorecardEligibleMetricClassCounts?: StoredTournamentArtifactSet["scorecardEligibleMetricClassCounts"];
+} | undefined {
+  if (!isRecord(value)) return undefined;
+  const nativeSteps = numberField(value, "nativeSteps");
+  const committedSteps = numberField(value, "committedSteps");
+  const rejectedSteps = numberField(value, "rejectedSteps");
+  if (nativeSteps === null || committedSteps === null || rejectedSteps === null) return undefined;
+  if (nativeSteps < 0 || committedSteps < 0 || rejectedSteps < 0) return undefined;
+  const metricCount = numberField(value, "metricCount");
+  const scorecardEligibleMetricCount = numberField(value, "scorecardEligibleMetricCount");
+  const metricPromotionClassCounts = tournamentPromotionClassCountsFromUnknown(value.metricPromotionClassCounts);
+  const scorecardEligibleMetricClassCounts = tournamentPromotionClassCountsFromUnknown(
+    value.scorecardEligibleMetricClassCounts
+  );
+  return {
+    nativeSteps,
+    committedSteps,
+    rejectedSteps,
+    ...(metricCount !== null && metricCount >= 0 ? { metricCount } : {}),
+    ...(scorecardEligibleMetricCount !== null && scorecardEligibleMetricCount >= 0
+      ? { scorecardEligibleMetricCount }
+      : {}),
+    ...(metricPromotionClassCounts ? { metricPromotionClassCounts } : {}),
+    ...(scorecardEligibleMetricClassCounts ? { scorecardEligibleMetricClassCounts } : {})
+  };
+}
+
+function tournamentPromotionClassCountsFromUnknown(
+  value: unknown
+): StoredTournamentArtifactSet["metricPromotionClassCounts"] | undefined {
+  if (!isRecord(value)) return undefined;
+  const scorecard = numberField(value, "scorecard");
+  const diagnostic = numberField(value, "diagnostic");
+  const benchmarkOnly = numberField(value, "benchmark_only");
+  if (scorecard === null || diagnostic === null || benchmarkOnly === null) return undefined;
+  if (scorecard < 0 || diagnostic < 0 || benchmarkOnly < 0) return undefined;
+  return {
+    scorecard,
+    diagnostic,
+    benchmark_only: benchmarkOnly
+  };
+}
+
+async function tournamentDensityFromManifestFile(
+  manifestPath: string
+): Promise<
+  | {
+      nativeSteps: number;
+      committedSteps: number;
+      rejectedSteps: number;
+      metricCount?: number;
+      scorecardEligibleMetricCount?: number;
+      metricPromotionClassCounts?: StoredTournamentArtifactSet["metricPromotionClassCounts"];
+      scorecardEligibleMetricClassCounts?: StoredTournamentArtifactSet["scorecardEligibleMetricClassCounts"];
+    }
+  | undefined
+> {
+  try {
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as unknown;
+    return tournamentDensityFromUnknown(manifest);
+  } catch {
+    return undefined;
+  }
+}
+
+function tournamentProjectionFromUnknown(
+  value: unknown
+): StoredTournamentArtifactSet["projection"] | undefined {
+  if (!isRecord(value)) return undefined;
+  const visibility = stringField(value, "visibility");
+  const matchArtifactView = stringField(value, "matchArtifactView");
+  if (
+    matchArtifactView !== "full" &&
+    matchArtifactView !== "postgame-redacted" &&
+    matchArtifactView !== "truth-redacted"
+  ) {
+    return undefined;
+  }
+  if (typeof value.assignmentTruthRedacted !== "boolean") return undefined;
+  if (visibility !== "research-full" && visibility !== "postgame-research" && visibility !== "public") return undefined;
+  if (typeof value.publicShareSafe !== "boolean") return undefined;
+  return {
+    visibility,
+    matchArtifactView,
+    assignmentTruthRedacted: value.assignmentTruthRedacted,
+    // A stored boolean is never authority for public sharing.  The public
+    // manifest schema and its file set are validated during recovery.
+    publicShareSafe: visibility === "public" && value.publicShareSafe
+  };
 }
 
 function numberField(source: Record<string, unknown>, key: string): number | null {
@@ -4029,27 +5516,550 @@ function serializeTournamentArtifactSet(set: StoredTournamentArtifactSet): objec
     experimentId: set.experimentId,
     seed: set.seed,
     files: set.relativeFiles,
-    downloads: tournamentArtifactDownloads(set)
+    downloads: tournamentArtifactDownloads(set),
+    nativeSteps: set.nativeSteps ?? null,
+    committedSteps: set.committedSteps ?? null,
+    rejectedSteps: set.rejectedSteps ?? null,
+    metricCount: set.metricCount ?? null,
+    scorecardEligibleMetricCount: set.scorecardEligibleMetricCount ?? null,
+    metricPromotionClassCounts: set.metricPromotionClassCounts ?? null,
+    scorecardEligibleMetricClassCounts: set.scorecardEligibleMetricClassCounts ?? null,
+    projection: set.projection ?? null
   };
 }
 
-function serializeExperimentMatrixArtifactSet(set: StoredExperimentMatrixArtifactSet): object {
+function serializeTournamentPublicShare(share: StoredTournamentPublicShare): object {
   return {
-    artifactSetId: set.id,
-    id: set.id,
-    createdAt: set.createdAt,
-    matrixId: set.matrixId,
-    files: set.relativeFiles,
-    downloads: experimentMatrixArtifactDownloads(set)
+    shareId: share.id,
+    id: share.id,
+    artifactSetId: share.artifactSetId,
+    createdAt: share.createdAt,
+    expiresAt: share.expiresAt,
+    label: share.label ?? null,
+    relativeFiles: share.relativeFiles ?? null,
+    projection: share.projection ?? null,
+    expired: isTournamentPublicShareExpired(share),
+    analytics: {
+      detailViewCount: Math.max(0, share.detailViewCount ?? 0),
+      downloadCount: Math.max(0, share.downloadCount ?? 0),
+      downloadsByFile: normalizeDownloadsByFile(share.downloadsByFile),
+      downloadEvents: normalizeDownloadEvents(share.downloadEvents),
+      detailViewEvents: normalizeTimestampEvents(share.detailViewEvents),
+      downloadsByMinute: bucketEventsByMinute(normalizeDownloadEvents(share.downloadEvents).map((event) => event.at)),
+      detailViewsByMinute: bucketEventsByMinute(normalizeTimestampEvents(share.detailViewEvents)),
+      lastDetailViewedAt: share.lastDetailViewedAt ?? null,
+      lastDownloadedAt: share.lastDownloadedAt ?? null,
+      lastDownloadedFile: share.lastDownloadedFile ?? null
+    },
+    urls: {
+      detail: `/api/public/tournament-shares/${encodeURIComponent(share.id)}`,
+      filesBase: `/api/public/tournament-shares/${encodeURIComponent(share.id)}/files`
+    }
   };
+}
+
+function publicTournamentArtifactSetForShare(share: StoredTournamentPublicShare): StoredTournamentArtifactSet | undefined {
+  const set = getTournamentArtifactSetForBaseDir(share.artifactSetId, tournamentArtifactBaseDir);
+  return set && !("registry" in set.relativeFiles) ? set : undefined;
+}
+
+function serializeTournamentPublicShareInventory(share: StoredTournamentPublicShare): {
+  expired: boolean;
+  [key: string]: unknown;
+} {
+  const artifactSet = publicTournamentArtifactSetForShare(share);
+  return {
+    ...serializeTournamentPublicShare(share),
+    expired: isTournamentPublicShareExpired(share),
+    packFound: Boolean(artifactSet),
+    packCreatedAt: artifactSet?.createdAt ?? null
+  };
+}
+
+function serializeTournamentPublicShareDetail(
+  share: StoredTournamentPublicShare,
+  artifactSet: StoredTournamentArtifactSet
+): object {
+  const shareableFiles = shareableTournamentArtifactFiles(share, artifactSet);
+  return {
+    ...serializeTournamentPublicShare(share),
+    packCreatedAt: artifactSet.createdAt,
+    files: shareableFiles,
+    downloads: mapTournamentArtifactFileList(shareableFiles, (relativePath) =>
+      tournamentPublicShareDownloadUrl(share.id, relativePath)
+    )
+  };
+}
+
+function tournamentPublicShareDownloadUrl(shareId: string, relativePath: string): string {
+  return `/api/public/tournament-shares/${encodeURIComponent(shareId)}/files/${relativePath
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/")}`;
+}
+
+function shareableTournamentArtifactFiles(
+  share: StoredTournamentPublicShare,
+  artifactSet: StoredTournamentArtifactSet
+): string[] {
+  const registered = flattenTournamentArtifactFiles(artifactSet.relativeFiles);
+  if (!share.relativeFiles) return registered;
+  const allow = new Set(share.relativeFiles);
+  return registered.filter((file) => allow.has(file));
+}
+
+function mapTournamentArtifactFileList(
+  files: string[],
+  mapFile: (relativePath: string) => string
+): string[] {
+  return files.map(mapFile);
+}
+
+function resolvePublicShareDownloadRateLimit(
+  override: ServerAppDependencies["publicShareDownloadRateLimit"] | undefined,
+  env: NodeJS.ProcessEnv
+): { maxDownloads: number; windowMs: number; now: () => number } {
+  const maxDownloads =
+    override?.maxDownloads ??
+    parseEnvPositiveInteger(env.TOURNAMENT_PUBLIC_SHARE_DOWNLOAD_RATE_LIMIT, 60);
+  const windowMs =
+    override?.windowMs ??
+    parseEnvPositiveInteger(env.TOURNAMENT_PUBLIC_SHARE_DOWNLOAD_RATE_WINDOW_MS, 60_000);
+  return {
+    maxDownloads,
+    windowMs,
+    now: override?.now ?? (() => Date.now())
+  };
+}
+
+
+function resolvePublicShareEventRetention(
+  override: TournamentPublicShareEventRetentionPolicy | undefined,
+  env: NodeJS.ProcessEnv
+): TournamentPublicShareEventRetentionPolicy {
+  const maxEvents =
+    override?.maxEvents ??
+    parseEnvPositiveInteger(env.TOURNAMENT_PUBLIC_SHARE_EVENT_MAX, DEFAULT_TOURNAMENT_PUBLIC_SHARE_EVENT_RETENTION.maxEvents);
+  let maxAgeMs: number | null | undefined = override?.maxAgeMs;
+  if (maxAgeMs === undefined) {
+    const raw = env.TOURNAMENT_PUBLIC_SHARE_EVENT_MAX_AGE_MS;
+    if (raw === undefined || raw === null || raw === "") {
+      maxAgeMs = DEFAULT_TOURNAMENT_PUBLIC_SHARE_EVENT_RETENTION.maxAgeMs ?? null;
+    } else if (raw === "0" || raw.toLowerCase() === "none" || raw.toLowerCase() === "off") {
+      maxAgeMs = null;
+    } else {
+      maxAgeMs = parseEnvPositiveInteger(raw, DEFAULT_TOURNAMENT_PUBLIC_SHARE_EVENT_RETENTION.maxAgeMs ?? 30 * 24 * 60 * 60 * 1000);
+    }
+  }
+  return {
+    maxEvents,
+    maxAgeMs: maxAgeMs ?? null
+  };
+}
+function parseEnvPositiveInteger(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function requestClientKey(req: express.Request): string {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0]?.trim() || "unknown";
+  }
+  if (Array.isArray(forwarded) && forwarded[0]) {
+    return String(forwarded[0]).split(",")[0]?.trim() || "unknown";
+  }
+  return req.ip || req.socket.remoteAddress || "unknown";
+}
+
+function consumePublicShareDownloadRateLimit(
+  buckets: Map<string, number[]>,
+  key: string,
+  config: { maxDownloads: number; windowMs: number; now: () => number }
+): { allowed: boolean; retryAfterSeconds: number } {
+  const now = config.now();
+  const windowStart = now - config.windowMs;
+  const recent = (buckets.get(key) ?? []).filter((timestamp) => timestamp > windowStart);
+  if (recent.length >= config.maxDownloads) {
+    const oldest = recent[0] ?? now;
+    const retryAfterMs = Math.max(1, oldest + config.windowMs - now);
+    buckets.set(key, recent);
+    return { allowed: false, retryAfterSeconds: Math.ceil(retryAfterMs / 1000) };
+  }
+  recent.push(now);
+  buckets.set(key, recent);
+  // Bound memory for long-running processes: drop empty/stale keys opportunistically.
+  if (buckets.size > 10_000) {
+    for (const [bucketKey, timestamps] of buckets) {
+      const kept = timestamps.filter((timestamp) => timestamp > windowStart);
+      if (!kept.length) buckets.delete(bucketKey);
+      else buckets.set(bucketKey, kept);
+    }
+  }
+  return { allowed: true, retryAfterSeconds: 0 };
+}
+
+function requireActiveTournamentPublicShare(shareId: string): StoredTournamentPublicShare {
+  const share = getTournamentPublicShare(shareId);
+  if (!share) throw new HttpError(404, "tournament public share not found");
+  if (isTournamentPublicShareExpired(share)) throw new HttpError(410, "tournament public share expired");
+  return share;
+}
+
+function isTournamentPublicShareExpired(share: StoredTournamentPublicShare, now = Date.now()): boolean {
+  if (!share.expiresAt) return false;
+  const expiresAtMs = Date.parse(share.expiresAt);
+  return !Number.isFinite(expiresAtMs) || expiresAtMs <= now;
+}
+
+interface TournamentPublicShareAnalyticsSummaryShare {
+  shareId: string;
+  artifactSetId: string;
+  label: string | null;
+  expired: boolean;
+  packFound: boolean;
+  packCreatedAt: string | null;
+  detailViewCount: number;
+  downloadCount: number;
+  topFiles: Array<{ file: string; count: number }>;
+  lastDetailViewedAt: string | null;
+  lastDownloadedAt: string | null;
+  lastDownloadedFile: string | null;
+}
+
+interface TournamentPublicShareAnalyticsSummary {
+  artifactVersion: "harness.tournament-public-share-analytics.v1";
+  kind: "tournament-public-share-analytics";
+  createdAt: string;
+  totals: {
+    shareCount: number;
+    activeShareCount: number;
+    expiredShareCount: number;
+    packMissingCount: number;
+    detailViewCount: number;
+    downloadCount: number;
+  };
+  topFiles: Array<{ file: string; count: number }>;
+  downloadsByMinute: Array<{ minute: string; count: number }>;
+  detailViewsByMinute: Array<{ minute: string; count: number }>;
+  shares: TournamentPublicShareAnalyticsSummaryShare[];
+}
+
+function buildTournamentPublicShareAnalyticsSummary(now = Date.now()): TournamentPublicShareAnalyticsSummary {
+  const shares = listTournamentPublicShares().map((share) => {
+    const artifactSet = publicTournamentArtifactSetForShare(share);
+    const downloadsByFile = normalizeDownloadsByFile(share.downloadsByFile);
+    const topFiles = Object.entries(downloadsByFile)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 5)
+      .map(([file, count]) => ({ file, count }));
+    return {
+      shareId: share.id,
+      artifactSetId: share.artifactSetId,
+      label: share.label ?? null,
+      expired: isTournamentPublicShareExpired(share, now),
+      packFound: Boolean(artifactSet),
+      packCreatedAt: artifactSet?.createdAt ?? null,
+      detailViewCount: Math.max(0, share.detailViewCount ?? 0),
+      downloadCount: Math.max(0, share.downloadCount ?? 0),
+      topFiles,
+      lastDetailViewedAt: share.lastDetailViewedAt ?? null,
+      lastDownloadedAt: share.lastDownloadedAt ?? null,
+      lastDownloadedFile: share.lastDownloadedFile ?? null,
+      downloadEvents: normalizeDownloadEvents(share.downloadEvents),
+      detailViewEvents: normalizeTimestampEvents(share.detailViewEvents)
+    };
+  });
+
+  const allDownloadEvents = shares.flatMap((share) => share.downloadEvents);
+  const allDetailViewEvents = shares.flatMap((share) => share.detailViewEvents);
+  const topFiles = new Map<string, number>();
+  for (const share of shares) {
+    for (const entry of share.topFiles) {
+      topFiles.set(entry.file, (topFiles.get(entry.file) ?? 0) + entry.count);
+    }
+  }
+
+  return {
+    artifactVersion: "harness.tournament-public-share-analytics.v1",
+    kind: "tournament-public-share-analytics",
+    createdAt: new Date(now).toISOString(),
+    totals: {
+      shareCount: shares.length,
+      activeShareCount: shares.filter((share) => !share.expired).length,
+      expiredShareCount: shares.filter((share) => share.expired).length,
+      packMissingCount: shares.filter((share) => !share.packFound).length,
+      detailViewCount: shares.reduce((sum, share) => sum + share.detailViewCount, 0),
+      downloadCount: shares.reduce((sum, share) => sum + share.downloadCount, 0)
+    },
+    topFiles: [...topFiles.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 10)
+      .map(([file, count]) => ({ file, count })),
+    downloadsByMinute: bucketEventsByMinute(allDownloadEvents.map((event) => event.at)),
+    detailViewsByMinute: bucketEventsByMinute(allDetailViewEvents),
+    shares: shares.map(({ downloadEvents: _downloadEvents, detailViewEvents: _detailViewEvents, ...share }) => share)
+  };
+}
+
+
+function renderTournamentPublicShareAnalyticsSummaryMarkdown(summary: TournamentPublicShareAnalyticsSummary): string {
+  const lines = [
+    "# Tournament Public Share Analytics",
+    "",
+    `- artifactVersion: \`${summary.artifactVersion}\``,
+    `- createdAt: \`${summary.createdAt}\``,
+    "",
+    "## Totals",
+    "",
+    `| metric | value |`,
+    `| --- | ---: |`,
+    `| shares | ${summary.totals.shareCount} |`,
+    `| active | ${summary.totals.activeShareCount} |`,
+    `| expired | ${summary.totals.expiredShareCount} |`,
+    `| pack missing | ${summary.totals.packMissingCount} |`,
+    `| detail views | ${summary.totals.detailViewCount} |`,
+    `| downloads | ${summary.totals.downloadCount} |`,
+    "",
+    "## Top Files",
+    ""
+  ];
+  if (!summary.topFiles.length) {
+    lines.push("_No downloads recorded._", "");
+  } else {
+    lines.push("| file | downloads |", "| --- | ---: |");
+    for (const entry of summary.topFiles) {
+      lines.push(`| \`${entry.file}\` | ${entry.count} |`);
+    }
+    lines.push("");
+  }
+  lines.push("## Shares", "");
+  if (!summary.shares.length) {
+    lines.push("_No public shares registered._", "");
+  } else {
+    lines.push(
+      "| share | label | pack | views | downloads | last file | status |",
+      "| --- | --- | --- | ---: | ---: | --- | --- |"
+    );
+    for (const share of summary.shares) {
+      const status = share.expired ? "expired" : share.packFound ? "active" : "pack-missing";
+      lines.push(
+        `| \`${share.shareId.slice(0, 12)}\` | ${share.label ?? "-"} | \`${share.artifactSetId.slice(0, 12)}\` | ${share.detailViewCount} | ${share.downloadCount} | \`${share.lastDownloadedFile ?? "-"}\` | ${status} |`
+      );
+    }
+    lines.push("");
+  }
+  lines.push("## Recent Download Minutes", "");
+  if (!summary.downloadsByMinute.length) {
+    lines.push("_No download minute buckets._", "");
+  } else {
+    lines.push("| minute | downloads |", "| --- | ---: |");
+    for (const bucket of summary.downloadsByMinute.slice(-20)) {
+      lines.push(`| \`${bucket.minute}\` | ${bucket.count} |`);
+    }
+    lines.push("");
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function parseOptionalShareExpiresAt(value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") throw new HttpError(400, "expiresAt must be an ISO-8601 string or null.");
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) throw new HttpError(400, "expiresAt must be a valid ISO-8601 timestamp.");
+  if (ms <= Date.now()) throw new HttpError(400, "expiresAt must be in the future.");
+  return new Date(ms).toISOString();
+}
+
+function parseOptionalShareRelativeFiles(
+  value: unknown,
+  artifactSet: StoredTournamentArtifactSet
+): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const files = stringArrayField({ relativeFiles: value }, "relativeFiles");
+  if (!files) throw new HttpError(400, "relativeFiles must be a non-empty string array when provided.");
+  const registered = new Set(flattenTournamentArtifactFiles(artifactSet.relativeFiles));
+  const unique = [...new Set(files.map((file) => normalizeRequestedArtifactPath(file)))];
+  for (const file of unique) {
+    if (!registered.has(file)) {
+      throw new HttpError(400, "relativeFiles must only include registered tournament artifact files.");
+    }
+  }
+  return unique;
+}
+
+async function loadTournamentPublicShareIndex(baseDir: string | undefined): Promise<void> {
+  if (!baseDir) return;
+  const root = path.resolve(baseDir);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(tournamentPublicShareIndexPath(root), "utf8")) as unknown;
+  } catch (error) {
+    if (isFileReadNotFound(error)) return;
+    throw new HttpError(500, "Tournament public share index could not be read.");
+  }
+  if (!isRecord(parsed) || parsed.kind !== "tournament-public-share-index" || !Array.isArray(parsed.shares)) {
+    return;
+  }
+  for (const record of parsed.shares) {
+    const share = tournamentPublicShareFromUnknown(record);
+    if (!share) continue;
+    if (!getTournamentPublicShare(share.id)) {
+      saveTournamentPublicShare(share);
+    }
+  }
+  pruneAllTournamentPublicShareEvents(activePublicShareEventRetention);
+}
+
+async function writeTournamentPublicShareIndex(baseDir: string | undefined): Promise<void> {
+  if (!baseDir) return;
+  const root = path.resolve(baseDir);
+  await mkdir(root, { recursive: true });
+  const shares = listTournamentPublicShares().map((share) => ({
+    id: share.id,
+    artifactSetId: share.artifactSetId,
+    createdAt: share.createdAt,
+    expiresAt: share.expiresAt,
+    label: share.label ?? null,
+    relativeFiles: share.relativeFiles ?? null,
+    projection: share.projection ?? null,
+    detailViewCount: Math.max(0, share.detailViewCount ?? 0),
+    downloadCount: Math.max(0, share.downloadCount ?? 0),
+    downloadsByFile: normalizeDownloadsByFile(share.downloadsByFile),
+    downloadEvents: normalizeDownloadEvents(share.downloadEvents),
+    detailViewEvents: normalizeTimestampEvents(share.detailViewEvents),
+    lastDetailViewedAt: share.lastDetailViewedAt ?? null,
+    lastDownloadedAt: share.lastDownloadedAt ?? null,
+    lastDownloadedFile: share.lastDownloadedFile ?? null
+  }));
+  const index = {
+    artifactVersion: "harness.tournament-public-share-index.v1",
+    kind: "tournament-public-share-index",
+    updatedAt: new Date().toISOString(),
+    shares
+  };
+  await writeFile(tournamentPublicShareIndexPath(root), `${JSON.stringify(redactSecrets(index), null, 2)}\n`, "utf8");
+}
+
+function tournamentPublicShareIndexPath(baseDir: string): string {
+  return path.join(path.resolve(baseDir), TOURNAMENT_PUBLIC_SHARE_INDEX_FILE);
+}
+
+function tournamentPublicShareFromUnknown(value: unknown): StoredTournamentPublicShare | null {
+  if (!isRecord(value)) return null;
+  const id = stringField(value, "id");
+  const artifactSetId = stringField(value, "artifactSetId");
+  const createdAt = stringField(value, "createdAt");
+  if (!id || !artifactSetId || !createdAt) return null;
+  if (!/^[0-9a-f]{48}$/i.test(id)) return null;
+  const expiresAtRaw = value.expiresAt;
+  let expiresAt: string | null = null;
+  if (expiresAtRaw !== null && expiresAtRaw !== undefined) {
+    if (typeof expiresAtRaw !== "string" || !Number.isFinite(Date.parse(expiresAtRaw))) return null;
+    expiresAt = expiresAtRaw;
+  }
+  const label = typeof value.label === "string" && value.label.length > 0 ? value.label : undefined;
+  let relativeFiles: string[] | undefined;
+  if (value.relativeFiles !== null && value.relativeFiles !== undefined) {
+    const parsed = stringArrayField(value, "relativeFiles");
+    if (!parsed) return null;
+    relativeFiles = parsed;
+  }
+  const detailViewCount = nonNegativeIntegerField(value, "detailViewCount") ?? 0;
+  const downloadCount = nonNegativeIntegerField(value, "downloadCount") ?? 0;
+  const downloadsByFile = normalizeDownloadsByFile(value.downloadsByFile);
+  const downloadEvents = normalizeDownloadEvents(value.downloadEvents);
+  const detailViewEvents = normalizeTimestampEvents(value.detailViewEvents);
+  const lastDetailViewedAt = optionalIsoTimestampField(value, "lastDetailViewedAt");
+  const lastDownloadedAt = optionalIsoTimestampField(value, "lastDownloadedAt");
+  const lastDownloadedFile =
+    typeof value.lastDownloadedFile === "string" && value.lastDownloadedFile.length > 0
+      ? value.lastDownloadedFile
+      : null;
+  return {
+    id,
+    artifactSetId,
+    createdAt,
+    expiresAt,
+    label,
+    relativeFiles,
+    projection: tournamentProjectionFromUnknown(value.projection),
+    detailViewCount,
+    downloadCount,
+    downloadsByFile,
+    downloadEvents,
+    detailViewEvents,
+    lastDetailViewedAt,
+    lastDownloadedAt,
+    lastDownloadedFile
+  };
+}
+
+function normalizeDownloadsByFile(value: unknown): Record<string, number> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!key || typeof key !== "string") continue;
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0) continue;
+    out[key] = raw;
+  }
+  return out;
+}
+
+function normalizeDownloadEvents(value: unknown): Array<{ at: string; file: string }> {
+  if (!Array.isArray(value)) return [];
+  const out: Array<{ at: string; file: string }> = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const at = typeof item.at === "string" && Number.isFinite(Date.parse(item.at)) ? item.at : null;
+    const file = typeof item.file === "string" && item.file.length > 0 ? item.file : null;
+    if (!at || !file) continue;
+    out.push({ at, file });
+  }
+  return retainDownloadEvents(out, activePublicShareEventRetention);
+}
+
+function normalizeTimestampEvents(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string" || !Number.isFinite(Date.parse(item))) continue;
+    out.push(item);
+  }
+  return retainTimestampEvents(out, activePublicShareEventRetention);
+}
+
+function bucketEventsByMinute(timestamps: string[]): Array<{ minute: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const timestamp of timestamps) {
+    const ms = Date.parse(timestamp);
+    if (!Number.isFinite(ms)) continue;
+    const minute = new Date(Math.floor(ms / 60_000) * 60_000).toISOString();
+    counts.set(minute, (counts.get(minute) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([minute, count]) => ({ minute, count }));
+}
+
+function nonNegativeIntegerField(source: Record<string, unknown>, key: string): number | null {
+  const value = source[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return null;
+  return value;
+}
+
+function optionalIsoTimestampField(source: Record<string, unknown>, key: string): string | null {
+  const value = source[key];
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return null;
+  return value;
 }
 
 function tournamentArtifactDownloads(set: StoredTournamentArtifactSet): StoredTournamentArtifactFiles {
   return mapTournamentArtifactFiles(set.relativeFiles, (relativePath) => tournamentArtifactDownloadUrl(set.id, relativePath));
-}
-
-function experimentMatrixArtifactDownloads(set: StoredExperimentMatrixArtifactSet): StoredExperimentMatrixArtifactFiles {
-  return mapExperimentMatrixArtifactFiles(set.relativeFiles, (relativePath) => experimentMatrixArtifactDownloadUrl(set.id, relativePath));
 }
 
 function tournamentArtifactDownloadUrl(artifactSetId: string, relativePath: string): string {
@@ -4059,14 +6069,14 @@ function tournamentArtifactDownloadUrl(artifactSetId: string, relativePath: stri
     .join("/")}`;
 }
 
-function experimentMatrixArtifactDownloadUrl(artifactSetId: string, relativePath: string): string {
-  return `/api/experiments/matrix/artifacts/${encodeURIComponent(artifactSetId)}/files/${relativePath
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/")}`;
-}
-
 function relativeTournamentArtifactFiles(written: TournamentArtifactWriteResult): StoredTournamentArtifactFiles {
+  if (!("registry" in written.files)) {
+    return {
+      manifest: relativeArtifactPath(written.outputDir, written.files.manifest),
+      episodes: relativeArtifactPath(written.outputDir, written.files.episodes),
+      matches: written.files.matches.map((file) => relativeArtifactPath(written.outputDir, file))
+    } satisfies StoredPublicTournamentArtifactFiles;
+  }
   return {
     manifest: relativeArtifactPath(written.outputDir, written.files.manifest),
     registry: relativeArtifactPath(written.outputDir, written.files.registry),
@@ -4080,6 +6090,8 @@ function relativeTournamentArtifactFiles(written: TournamentArtifactWriteResult)
     costLatency: relativeArtifactPath(written.outputDir, written.files.costLatency),
     leaderboard: relativeArtifactPath(written.outputDir, written.files.leaderboard),
     benchmarkStatistics: relativeArtifactPath(written.outputDir, written.files.benchmarkStatistics),
+    tournamentComparison: relativeArtifactPath(written.outputDir, written.files.tournamentComparison),
+    tournamentComparisonMarkdown: relativeArtifactPath(written.outputDir, written.files.tournamentComparisonMarkdown),
     summaryMarkdown: relativeArtifactPath(written.outputDir, written.files.summaryMarkdown),
     episodesCsv: relativeArtifactPath(written.outputDir, written.files.episodesCsv),
     agentsCsv: relativeArtifactPath(written.outputDir, written.files.agentsCsv),
@@ -4087,24 +6099,7 @@ function relativeTournamentArtifactFiles(written: TournamentArtifactWriteResult)
     leaderboardCsv: relativeArtifactPath(written.outputDir, written.files.leaderboardCsv),
     matches: written.files.matches.map((file) => relativeArtifactPath(written.outputDir, file)),
     matchesJsonl: written.files.matchesJsonl.map((file) => relativeArtifactPath(written.outputDir, file))
-  };
-}
-
-function relativeExperimentMatrixArtifactFiles(written: ExperimentMatrixArtifactWriteResult): StoredExperimentMatrixArtifactFiles {
-  return {
-    manifest: relativeArtifactPath(written.outputDir, written.files.manifest),
-    specNormalized: relativeArtifactPath(written.outputDir, written.files.specNormalized),
-    cells: relativeArtifactPath(written.outputDir, written.files.cells),
-    statistics: relativeArtifactPath(written.outputDir, written.files.statistics),
-    summaryMarkdown: relativeArtifactPath(written.outputDir, written.files.summaryMarkdown),
-    modelStatsCsv: relativeArtifactPath(written.outputDir, written.files.modelStatsCsv),
-    profileStatsCsv: relativeArtifactPath(written.outputDir, written.files.profileStatsCsv),
-    pairwiseModelComparisonsCsv: relativeArtifactPath(written.outputDir, written.files.pairwiseModelComparisonsCsv),
-    tournaments: written.files.tournaments.map((file) => ({
-      cellId: file.cellId,
-      manifest: normalizeWriterRelativeArtifactPath(file.manifest)
-    }))
-  };
+  } satisfies StoredResearchTournamentArtifactFiles;
 }
 
 function relativeArtifactPath(rootDir: string, absolutePath: string): string {
@@ -4115,14 +6110,17 @@ function relativeArtifactPath(rootDir: string, absolutePath: string): string {
   return relativePath.split(path.sep).join("/");
 }
 
-function normalizeWriterRelativeArtifactPath(relativePath: string): string {
-  return normalizeRequestedArtifactPath(relativePath.split(path.sep).join("/"));
-}
-
 function mapTournamentArtifactFiles(
   files: StoredTournamentArtifactFiles,
   mapFile: (relativePath: string) => string
 ): StoredTournamentArtifactFiles {
+  if (!("registry" in files)) {
+    return {
+      manifest: mapFile(files.manifest),
+      episodes: mapFile(files.episodes),
+      matches: files.matches.map(mapFile)
+    } satisfies StoredPublicTournamentArtifactFiles;
+  }
   return {
     manifest: mapFile(files.manifest),
     registry: mapFile(files.registry),
@@ -4136,6 +6134,8 @@ function mapTournamentArtifactFiles(
     costLatency: mapFile(files.costLatency),
     leaderboard: mapFile(files.leaderboard),
     benchmarkStatistics: mapFile(files.benchmarkStatistics),
+    tournamentComparison: mapFile(files.tournamentComparison),
+    tournamentComparisonMarkdown: mapFile(files.tournamentComparisonMarkdown),
     summaryMarkdown: mapFile(files.summaryMarkdown),
     episodesCsv: mapFile(files.episodesCsv),
     agentsCsv: mapFile(files.agentsCsv),
@@ -4143,27 +6143,7 @@ function mapTournamentArtifactFiles(
     leaderboardCsv: mapFile(files.leaderboardCsv),
     matches: files.matches.map(mapFile),
     matchesJsonl: files.matchesJsonl.map(mapFile)
-  };
-}
-
-function mapExperimentMatrixArtifactFiles(
-  files: StoredExperimentMatrixArtifactFiles,
-  mapFile: (relativePath: string) => string
-): StoredExperimentMatrixArtifactFiles {
-  return {
-    manifest: mapFile(files.manifest),
-    specNormalized: mapFile(files.specNormalized),
-    cells: mapFile(files.cells),
-    statistics: mapFile(files.statistics),
-    summaryMarkdown: mapFile(files.summaryMarkdown),
-    modelStatsCsv: mapFile(files.modelStatsCsv),
-    profileStatsCsv: mapFile(files.profileStatsCsv),
-    pairwiseModelComparisonsCsv: mapFile(files.pairwiseModelComparisonsCsv),
-    tournaments: files.tournaments.map((file) => ({
-      cellId: file.cellId,
-      manifest: mapFile(file.manifest)
-    }))
-  };
+  } satisfies StoredResearchTournamentArtifactFiles;
 }
 
 async function resolveRegisteredTournamentArtifactFile(
@@ -4181,30 +6161,14 @@ async function resolveRegisteredTournamentArtifactFile(
   return { relativePath, absolutePath };
 }
 
-async function resolveRegisteredExperimentMatrixArtifactFile(
-  set: StoredExperimentMatrixArtifactSet,
-  requestedPath: string | undefined,
-  baseDir: string | undefined
-): Promise<{ relativePath: string; absolutePath: string }> {
-  const relativePath = normalizeRequestedArtifactPath(requestedPath);
-  const registered = registeredExperimentMatrixArtifactFiles(set);
-  if (!registered.has(relativePath)) {
-    throw new HttpError(404, "experiment matrix artifact file not found");
-  }
-  const absolutePath = resolveUnderDirectory(set.outputDir, relativePath);
-  await assertRegularFileInsideArtifactSet({ baseDir, outputDir: set.outputDir, absolutePath });
-  return { relativePath, absolutePath };
-}
-
 function registeredTournamentArtifactFiles(set: StoredTournamentArtifactSet): Set<string> {
   return new Set(flattenTournamentArtifactFiles(set.relativeFiles));
 }
 
-function registeredExperimentMatrixArtifactFiles(set: StoredExperimentMatrixArtifactSet): Set<string> {
-  return new Set(flattenExperimentMatrixArtifactFiles(set.relativeFiles));
-}
-
 function flattenTournamentArtifactFiles(files: StoredTournamentArtifactFiles): string[] {
+  if (!("registry" in files)) {
+    return [files.manifest, files.episodes, ...files.matches];
+  }
   return [
     files.manifest,
     files.registry,
@@ -4218,6 +6182,8 @@ function flattenTournamentArtifactFiles(files: StoredTournamentArtifactFiles): s
     files.costLatency,
     files.leaderboard,
     files.benchmarkStatistics,
+    files.tournamentComparison,
+    files.tournamentComparisonMarkdown,
     files.summaryMarkdown,
     files.episodesCsv,
     files.agentsCsv,
@@ -4225,20 +6191,6 @@ function flattenTournamentArtifactFiles(files: StoredTournamentArtifactFiles): s
     files.leaderboardCsv,
     ...files.matches,
     ...files.matchesJsonl
-  ];
-}
-
-function flattenExperimentMatrixArtifactFiles(files: StoredExperimentMatrixArtifactFiles): string[] {
-  return [
-    files.manifest,
-    files.specNormalized,
-    files.cells,
-    files.statistics,
-    files.summaryMarkdown,
-    files.modelStatsCsv,
-    files.profileStatsCsv,
-    files.pairwiseModelComparisonsCsv,
-    ...files.tournaments.map((file) => file.manifest)
   ];
 }
 
@@ -4372,6 +6324,11 @@ function isFileReadNotFound(error: unknown): boolean {
 }
 
 function serializeTournamentEpisodeSummaryForApi(episode: TournamentEpisode): object {
+  const stepCounts = countSocialStepCommits(episode.socialEpisode?.steps ?? []);
+  const promotionSummary = summarizeTournamentMetricPromotionsFromMetrics(
+    episode.evaluationReport?.metrics ?? [],
+    legacyMetricPromotionPolicyFromSummary(episode.evaluationReport?.summary.promotion)
+  );
   return {
     index: episode.index,
     seed: episode.seed,
@@ -4383,6 +6340,13 @@ function serializeTournamentEpisodeSummaryForApi(episode: TournamentEpisode): ob
     phase: episode.phase ?? null,
     day: episode.day ?? null,
     forkOf: episode.forkOf ? summarizeForkProvenance(episode.forkOf) : null,
+    nativeSteps: stepCounts.nativeSteps,
+    committedSteps: stepCounts.committedSteps,
+    rejectedSteps: stepCounts.rejectedSteps,
+    metricCount: episode.evaluationReport?.metricCount ?? promotionSummary.metricCount,
+    scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
+    metricPromotionClassCounts: promotionSummary.byClass,
+    scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
     metricSummary: episode.metrics
       ? {
           harnessTurnCount: episode.metrics.harnessTurnCount,
@@ -4390,14 +6354,18 @@ function serializeTournamentEpisodeSummaryForApi(episode: TournamentEpisode): ob
           totalSpeeches: episode.metrics.totalSpeeches,
           totalVotes: episode.metrics.totalVotes,
           totalDeaths: episode.metrics.totalDeaths,
-          averageLatencyMs: episode.metrics.averageLatencyMs
+          averageLatencyMs: episode.metrics.averageLatencyMs,
+          ...stepCounts
         }
-      : null,
+      : episode.socialEpisode
+        ? stepCounts
+        : null,
     evaluationSummary: episode.evaluation
       ? {
           winner: episode.evaluation.winner ?? null,
           trajectorySteps: episode.evaluation.trajectory.length,
-          agentRewardCount: episode.evaluation.agentRewards.length
+          agentRewardCount: episode.evaluation.agentRewards.length,
+          ...stepCounts
         }
       : null,
     evaluationReportSummary: episode.evaluationReport
@@ -4405,14 +6373,30 @@ function serializeTournamentEpisodeSummaryForApi(episode: TournamentEpisode): ob
           id: episode.evaluationReport.id,
           evaluatorIds: episode.evaluationReport.evaluatorIds,
           metricCount: episode.evaluationReport.metricCount,
+          scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
+          metricPromotionClassCounts: promotionSummary.byClass,
+          scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
           ...summarizeEvaluationWarnings(episode.evaluationReport.warnings)
         }
       : null,
     agentCount: episode.agents.length,
-    agents: episode.agents.map((agent) => ({
-      playerId: agent.playerId,
-      seat: agent.seat
-    })),
+    agents: (() => {
+      const densityByActor = countSocialStepCommitsByActor(episode.socialEpisode?.steps ?? []);
+      return episode.agents.map((agent) => {
+        const density = densityByActor.get(agent.playerId) ?? {
+          nativeSteps: 0,
+          committedSteps: 0,
+          rejectedSteps: 0
+        };
+        return {
+          playerId: agent.playerId,
+          seat: agent.seat,
+          nativeSteps: density.nativeSteps,
+          committedSteps: density.committedSteps,
+          rejectedSteps: density.rejectedSteps
+        };
+      });
+    })(),
     error: episode.error ? sanitizeApiErrorText(episode.error) : undefined,
     hasArtifact: Boolean(episode.artifact)
   };
@@ -4420,16 +6404,22 @@ function serializeTournamentEpisodeSummaryForApi(episode: TournamentEpisode): ob
 
 function summarizeForkProvenance(forkOf: HarnessForkProvenance): object {
   return {
+    schemaVersion: forkOf.schemaVersion,
+    checkpointArtifactVersion: forkOf.checkpointArtifactVersion,
     checkpointId: forkOf.checkpointId,
     parentRunId: forkOf.parentRunId,
     parentMatchId: forkOf.parentMatchId,
-    parentTraceRef: forkOf.parentTraceId ? hashStableState({ traceId: forkOf.parentTraceId }).slice(0, 16) : null,
-    parentTurnIndex: forkOf.parentTurnIndex,
+    parentBoundaryTraceRef: forkOf.parentBoundaryTraceId
+      ? hashStableState({ traceId: forkOf.parentBoundaryTraceId }).slice(0, 16)
+      : null,
+    parentBoundaryTurnIndex: forkOf.parentBoundaryTurnIndex,
     parentStateHash: forkOf.parentStateHash,
-    parentTrajectoryHash: forkOf.parentTrajectoryHash ?? null,
-    parentAgentsHash: forkOf.parentAgentsHash ?? null,
-    parentSocialMessagesHash: forkOf.parentSocialMessagesHash ?? null,
-    parentTrajectoryLength: forkOf.parentTrajectoryLength,
+    parentExecutionPrefixHash: forkOf.parentExecutionPrefixHash,
+    parentAgentsHash: forkOf.parentAgentsHash,
+    parentChannelsHash: forkOf.parentChannelsHash,
+    parentMessagesHash: forkOf.parentMessagesHash,
+    parentNativeStepCount: forkOf.parentNativeStepCount,
+    parentMessageCount: forkOf.parentMessageCount,
     createdAt: forkOf.createdAt,
     reason: forkOf.reason
   };
@@ -4445,20 +6435,54 @@ function summarizeTournamentEvaluation(episodes: TournamentEpisodes): object {
     return evaluation ? [{ episode, evaluation }] : [];
   });
   const evaluations = evaluated.map((item) => item.evaluation);
+  const stepTotals = episodes.reduce(
+    (totals, episode) => {
+      const stepCounts = countSocialStepCommits(episode.socialEpisode?.steps ?? []);
+      totals.nativeSteps += stepCounts.nativeSteps;
+      totals.committedSteps += stepCounts.committedSteps;
+      totals.rejectedSteps += stepCounts.rejectedSteps;
+      return totals;
+    },
+    { nativeSteps: 0, committedSteps: 0, rejectedSteps: 0 }
+  );
+  const promotionSummary = summarizeTournamentMetricPromotionsFromReports(
+    episodes.flatMap((episode) => (episode.evaluationReport ? [episode.evaluationReport] : []))
+  );
 
   return {
     gamesEvaluated: evaluations.length,
     gamesWithoutEvaluation: completed.length - evaluations.length,
     teamRewards: averageTeamRewards(evaluations),
-    modelRewards: summarizeModelRewards(evaluations),
-    episodes: evaluated.map(({ episode, evaluation }) => ({
-      index: episode.index,
-      seed: episode.seed,
-      winner: evaluation.winner ?? episode.winner ?? null,
-      teamRewards: evaluation.teamRewards,
-      agentRewardCount: evaluation.agentRewards.length,
-      trajectorySteps: evaluation.trajectory.length
-    }))
+    modelRewards: summarizeModelRewardsWithDensity(evaluated),
+    // Public tournament summaries must not expose raw profile ids or policy names.
+    // Profile-level density remains available through leaderboard/profileStats and CLI research exports.
+    nativeSteps: stepTotals.nativeSteps,
+    committedSteps: stepTotals.committedSteps,
+    rejectedSteps: stepTotals.rejectedSteps,
+    metricCount: promotionSummary.metricCount,
+    scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
+    metricPromotionClassCounts: promotionSummary.byClass,
+    scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
+    episodes: evaluated.map(({ episode, evaluation }) => {
+      const stepCounts = countSocialStepCommits(episode.socialEpisode?.steps ?? []);
+      const episodePromotion = summarizeTournamentMetricPromotionsFromMetrics(
+        episode.evaluationReport?.metrics ?? [],
+        legacyMetricPromotionPolicyFromSummary(episode.evaluationReport?.summary.promotion)
+      );
+      return {
+        index: episode.index,
+        seed: episode.seed,
+        winner: evaluation.winner ?? episode.winner ?? null,
+        teamRewards: evaluation.teamRewards,
+        agentRewardCount: evaluation.agentRewards.length,
+        trajectorySteps: evaluation.trajectory.length,
+        metricCount: episode.evaluationReport?.metricCount ?? episodePromotion.metricCount,
+        scorecardEligibleMetricCount: episodePromotion.scorecardEligibleCount,
+        metricPromotionClassCounts: episodePromotion.byClass,
+        scorecardEligibleMetricClassCounts: episodePromotion.scorecardEligibleByClass,
+        ...stepCounts
+      };
+    })
   };
 }
 
@@ -4479,7 +6503,10 @@ function isAdversarialEvaluation(value: unknown): value is AdversarialEvaluation
   );
 }
 
-function summarizeEvaluation(evaluation: AdversarialEvaluation | undefined): object | null {
+function summarizeEvaluation(
+  evaluation: AdversarialEvaluation | undefined,
+  stepCounts?: { nativeSteps: number; committedSteps: number; rejectedSteps: number }
+): object | null {
   if (!evaluation) return null;
   return {
     winner: evaluation.winner ?? null,
@@ -4488,16 +6515,24 @@ function summarizeEvaluation(evaluation: AdversarialEvaluation | undefined): obj
     agentRewardCount: evaluation.agentRewards.length,
     voteAccuracyAgentCount: Object.keys(evaluation.voteAccuracyByAgent).length,
     influenceAgentCount: Object.keys(evaluation.influenceByAgent).length,
-    deceptionAgentCount: Object.keys(evaluation.deceptionByAgent).length
+    deceptionAgentCount: Object.keys(evaluation.deceptionByAgent).length,
+    ...(stepCounts ?? {})
   };
 }
 
-function summarizeEvaluationReport(report: import("../harness/types").HarnessEvaluationReport | undefined): object | null {
+function summarizeEvaluationReport(report: HarnessEvaluationReport | undefined): object | null {
   if (!report) return null;
+  const promotionSummary = summarizeTournamentMetricPromotionsFromMetrics(
+    report.metrics ?? [],
+    legacyMetricPromotionPolicyFromSummary(report.summary.promotion)
+  );
   return {
     id: report.id,
     evaluatorIds: report.evaluatorIds,
     metricCount: report.metricCount,
+    scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
+    metricPromotionClassCounts: promotionSummary.byClass,
+    scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
     ...summarizeEvaluationWarnings(report.warnings)
   };
 }
@@ -4505,9 +6540,13 @@ function summarizeEvaluationReport(report: import("../harness/types").HarnessEva
 function summarizeTournamentEvaluationReports(episodes: TournamentEpisodes): object {
   const reports = episodes.flatMap((episode) => (episode.evaluationReport ? [episode.evaluationReport] : []));
   const warningSummary = summarizeEvaluationWarnings(reports.flatMap((report) => report.warnings ?? []));
+  const promotionSummary = summarizeTournamentMetricPromotionsFromReports(reports);
   return {
     reports: reports.length,
     metricCount: reports.reduce((sum, report) => sum + report.metricCount, 0),
+    scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
+    metricPromotionClassCounts: promotionSummary.byClass,
+    scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
     ...warningSummary,
     reportsWithWarnings: reports.filter((report) => (report.warnings?.length ?? 0) > 0).length,
     evaluatorIds: Array.from(new Set(reports.flatMap((report) => report.evaluatorIds))),
@@ -4515,37 +6554,6 @@ function summarizeTournamentEvaluationReports(episodes: TournamentEpisodes): obj
   };
 }
 
-function averageTeamRewards(evaluations: AdversarialEvaluation[]): AdversarialEvaluation["teamRewards"] | null {
-  if (!evaluations.length) return null;
-  return {
-    village: round3(evaluations.reduce((sum, evaluation) => sum + evaluation.teamRewards.village, 0) / evaluations.length),
-    werewolves: round3(evaluations.reduce((sum, evaluation) => sum + evaluation.teamRewards.werewolves, 0) / evaluations.length)
-  };
-}
-
-function summarizeModelRewards(evaluations: AdversarialEvaluation[]): Record<string, object> {
-  const byModel = new Map<string, { games: number; wins: number; reward: number }>();
-  for (const evaluation of evaluations) {
-    for (const agentReward of evaluation.agentRewards) {
-      const stats = byModel.get(agentReward.model) ?? { games: 0, wins: 0, reward: 0 };
-      stats.games += 1;
-      if (agentReward.won) stats.wins += 1;
-      stats.reward += agentReward.reward;
-      byModel.set(agentReward.model, stats);
-    }
-  }
-  return Object.fromEntries(
-    [...byModel.entries()].map(([model, stats]) => [
-      model,
-      {
-        agentGames: stats.games,
-        wins: stats.wins,
-        winRate: stats.games ? round3(stats.wins / stats.games) : 0,
-        averageReward: stats.games ? round3(stats.reward / stats.games) : 0
-      }
-    ])
-  );
-}
 
 function summarizePublicAssignmentConfig(assignment: HarnessAssignmentConfig | undefined): object | null {
   if (!assignment) return null;
@@ -4584,46 +6592,7 @@ function summarizeModelUsage(metrics: MatchMetrics): Record<string, object> {
   );
 }
 
-function summarizeHarnessTurn(event: GameEvent): {
-  seq: number;
-  harnessTurn: string;
-  day: number;
-  phase: string;
-  actorId: string | null;
-  model: string | null;
-  actionKind: string | null;
-  policy: string | null;
-  command: string | null;
-  intent: string | null;
-  targetId: string | null;
-  confidence: number | null;
-  modelLatencyMs: number | null;
-  promptTokens: number | null;
-  completionTokens: number | null;
-  providerRequestId: string | null;
-} {
-  const trace = event.payload as Partial<HarnessTurnTrace>;
-  return {
-    seq: event.seq,
-    harnessTurn: trace.traceId ?? String(event.seq),
-    day: event.day,
-    phase: event.phase,
-    actorId: trace.playerId ?? event.actorId ?? null,
-    model: trace.model ?? null,
-    actionKind: trace.actionKind ?? null,
-    policy: trace.policyName ?? null,
-    command: trace.commandType ?? null,
-    intent: trace.intent ?? null,
-    targetId: trace.targetId ?? null,
-    confidence: trace.confidence ?? null,
-    modelLatencyMs: trace.latencyMs ?? null,
-    promptTokens: trace.promptTokens ?? null,
-    completionTokens: trace.completionTokens ?? null,
-    providerRequestId: trace.providerRequestId ?? null
-  };
-}
-
-function summarizeHarnessFailure(event: GameEvent): {
+function summarizeHarnessFailure(failure: ReturnType<typeof harnessFailureEvidenceFromEpisode>[number]): {
   seq: number;
   day: number;
   phase: string;
@@ -4633,19 +6602,29 @@ function summarizeHarnessFailure(event: GameEvent): {
   failureReason: string;
   providerFailure?: PublicProviderFailureSummary;
 } {
-  const payload = isRecord(event.payload) ? event.payload : {};
+  const payload = isRecord(failure.payload ?? failure.failure.metadata) ? (failure.payload ?? failure.failure.metadata) as Record<string, unknown> : {};
   const providerFailure = publicProviderFailureFromUnknown(payload.providerFailure);
-  const rawMessage = typeof payload.message === "string" ? payload.message : JSON.stringify(event.payload);
+  const rawMessage = typeof payload.message === "string" ? payload.message : failure.failure.message;
+  const observation = isRecord(failure.step.observation) ? failure.step.observation : {};
+  const view = isRecord(observation.view) ? observation.view : observation;
   return {
-    seq: event.seq,
-    day: event.day,
-    phase: event.phase,
-    actorId: event.actorId ?? null,
+    seq: failure.turnIndex,
+    day: typeof view.day === "number" ? view.day : 0,
+    phase: typeof view.phase === "string" ? view.phase : "unknown",
+    actorId: failure.actorId ?? null,
     model: typeof payload.model === "string" ? payload.model : null,
     actionKind: typeof payload.actionKind === "string" ? payload.actionKind : null,
     failureReason: providerFailure ? providerFailureApiMessage(providerFailure) : sanitizeApiErrorText(rawMessage),
     ...(providerFailure ? { providerFailure } : {})
   };
+}
+
+function parseOptionalJointPhaseScheduler(
+  value: unknown
+): "aec-batched-decision" | "parallel" | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (value === "aec-batched-decision" || value === "parallel") return value;
+  throw new Error('jointPhaseScheduler must be "aec-batched-decision" or "parallel".');
 }
 
 function parseOptionalPositiveInteger(value: unknown, name: string): number | undefined {
@@ -4683,34 +6662,6 @@ function parseOptionalDurationMs(value: unknown, name: string): number | undefin
   return ms;
 }
 
-function normalizeMatrixExperimentRequest(body: unknown): NormalizedMatrixExperiment {
-  const record = isRecord(body) ? body : {};
-  const specInput = record.spec ?? record;
-  const overrides = removeUndefined({
-    models: record.models,
-    profiles: record.profiles,
-    assignment: record.assignment as TournamentExperimentSpecV1["assignment"],
-    seed: typeof record.seed === "string" ? record.seed : undefined,
-    games: record.games,
-    maxTransitions: record.maxTransitions ?? record.steps,
-    timeout: record.timeoutMs ?? record.timeout,
-    temperature: record.temperature,
-    json: record.json as TournamentExperimentSpecV1["json"],
-    continueOnError: record.continueOnError,
-    config: record.config as TournamentExperimentSpecV1["config"]
-  }) as Partial<TournamentExperimentSpecV1>;
-  const merged = mergeMatrixExperimentOverrides(specInput, overrides);
-  return normalizeMatrixExperimentSpec(merged, {
-    models: normalizeModelList(process.env.LLM_MODELS),
-    profiles: process.env.AGENT_PROFILES,
-    assignment: process.env.AGENT_ASSIGNMENT,
-    games: 3,
-    maxTransitions: process.env.MATCH_MAX_TRANSITIONS,
-    timeout: process.env.TOURNAMENT_TIMEOUT_MS,
-    temperature: process.env.AGENT_TEMPERATURE ?? 0.7
-  });
-}
-
 function normalizeTournamentExperimentRequest(body: unknown): NormalizedTournamentExperiment {
   const record = isRecord(body) ? body : {};
   const spec = record.spec ?? record;
@@ -4738,32 +6689,6 @@ function normalizeTournamentExperimentRequest(body: unknown): NormalizedTourname
     timeout: process.env.TOURNAMENT_TIMEOUT_MS,
     temperature: process.env.AGENT_TEMPERATURE ?? 0.7
   });
-}
-
-function matrixExperimentTimeoutMs(experiment: NormalizedMatrixExperiment): number | undefined {
-  const timeouts = experiment.cells.map((cell) => cell.tournament.timeoutMs);
-  if (timeouts.some((value) => typeof value !== "number" || !Number.isFinite(value) || value <= 0)) return undefined;
-  return (timeouts as number[]).reduce((sum, value) => sum + value, 0);
-}
-
-function serializeExperimentMatrixCellSummaryForApi(cell: ExperimentMatrixCellResult): object {
-  return {
-    index: cell.index,
-    id: cell.id,
-    label: cell.label,
-    group: cell.group,
-    status: cell.status,
-    elapsedMs: cell.elapsedMs,
-    tournamentSeed: cell.tournament?.seed ?? null,
-    gamesRequested: cell.tournament?.gamesRequested ?? 0,
-    gamesCompleted: cell.tournament?.gamesCompleted ?? 0,
-    gamesFailed: cell.tournament?.gamesFailed ?? 0,
-    models: cell.tournament?.models ?? [],
-    profileCount: cell.tournament?.profiles.length ?? 0,
-    episodes: cell.tournament?.episodes.map(serializeTournamentEpisodeSummaryForApi) ?? [],
-    error: cell.error ? sanitizeApiErrorText(cell.error) : null,
-    hasArtifacts: Boolean(cell.tournament?.artifacts?.length)
-  };
 }
 
 function removeUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {

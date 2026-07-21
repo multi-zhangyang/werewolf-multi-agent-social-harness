@@ -11881,14 +11881,20 @@ Execution result:
 
 Backend/API behavior now established:
 
-- `GET /api/matches/:id/artifact?view=postgame-redacted` returns a server-side
-  artifact projection that redacts private evidence while preserving postgame
-  truth for research/postgame analysis.
-- `GET /api/matches/:id/artifact?view=full` returns the full postgame/debug
-  artifact after normal secret redaction.
+- `GET /api/matches/:id/artifact` defaults to the server-side
+  `postgame-redacted` projection, which redacts private evidence while
+  retaining postgame truth for research/postgame analysis.
+- `GET /api/matches/:id/artifact?view=full` is an explicit local/debug
+  projection after normal secret redaction; it is never the implicit default.
+- `GET /api/checkpoints/:id/artifact` defaults to the narrower
+  `truth-redacted` projection. Checkpoint `view=full` is likewise explicit
+  local/debug access only.
+- Full comparisons are request-local and are not newly persisted into the
+  comparison registry. A stored safe comparison cannot be reinterpreted as a
+  full comparison.
+- Artifact, checkpoint, and comparison projections use `Cache-Control:
+  no-store`; explicit full responses also carry a no-index robots directive.
 - Unsupported `view` values return `400`.
-- The default backend behavior without a `view` remains `full` for backward
-  compatibility, but React cockpit should use explicit `view` parameters.
 
 Frontend behavior now established:
 
@@ -13766,3 +13772,10814 @@ Live provider note:
   request shape, stream parsing, timeout/retry, prompt parsing, or model
   arbitration. Per repository policy, no live streaming model validation was
   required or run.
+
+## 13.23 Latest Native Execution, Checkpoint, And Store Authority Lock
+
+This section supersedes every older status statement in this file that describes
+`harness.turn` / `harness.error` as `GameEvent` variants, treats the legacy
+`trajectory` projection as replay/checkpoint/fork authority, names
+`harness.checkpoint.v1` or `harness.fork-provenance.v1` as the current persisted
+format, or describes a finished server match as several parallel mutable truth
+copies. Those passages remain only as historical build notes.
+
+Current completed architecture slices:
+
+```text
+harness.trace-domain-state-separation.v1
+agent.commit-after-environment-feedback.v1
+harness.native-social-replay.v1
+artifact.native-execution-integrity.v1
+server.finished-artifact-single-authority.v1
+api.native-execution-redaction-whitelist.v1
+harness.native-checkpoint.v2
+harness.native-fork-provenance.v2
+react.native-social-timeline.v1
+```
+
+Current authority model:
+
+- `GameState` and `GameEvent` contain only Werewolf domain facts. Provider
+  telemetry, reasoner memos, harness traces, rejected proposals, and harness
+  failures are native execution evidence and cannot change the domain hash.
+- `GameEvent.type` no longer includes `harness.turn` or `harness.error`.
+  `appendHarnessTurn()`, `appendHarnessError()`,
+  `WerewolfEnvironment.recordTurn()`, and `WerewolfEnvironment.recordError()`
+  have been removed.
+- The Werewolf-bound pseudo-generic `src/harness/contracts.ts` contract has been
+  removed. The actual domain-neutral actor/environment/scheduler/artifact
+  contract remains in `src/harness/social.ts`.
+- For `harness.match.v2`, `MatchArtifact.socialEpisode.steps` is the native
+  execution, replay, integrity, checkpoint, fork, evaluation-evidence, and React
+  timeline authority. `MatchArtifact.trajectory` is a legacy migration/debug
+  projection only. Native turn indexes and legacy committed-agent turn indexes
+  are different semantics and must not be forced to align.
+- Native steps record explicit system transitions, committed actions, rejected
+  proposals, scheduler/batch identity, observations, actions, state/event/message
+  ranges, hashes, and structured failure evidence. Only
+  `commitStatus === "committed"` steps are applied during replay. A rejected
+  proposal remains audit evidence but does not publish draft messages or mutate
+  committed actor decision state.
+- Agent planning stages a proposal. Decision memory, reasoner memo, turn count,
+  messages, and post-feedback agent snapshot become durable only after successful
+  environment validation/commit and actor-scoped feedback.
+- Native deterministic replay starts from the recorded initial domain state,
+  validates the initial message prefix, applies explicit recorded system steps
+  and committed player steps, skips rejected steps, and verifies state hashes,
+  event ranges, message ranges/envelopes, final state, and final message hash. It
+  creates no actor and calls no policy, reasoner, or provider. It never inserts a
+  missing system transition. Parallel artifacts require an environment-provided
+  atomic `stepBatch()`.
+
+Current checkpoint and fork authority:
+
+- New checkpoints use `harness.checkpoint.v2` and store `state`, agent snapshots,
+  and a native `executionPrefix` containing steps, messages, channels, scheduler
+  metadata, scoped observations/actions, initial state, and execution metadata.
+- Checkpoint selectors use native `traceId`, `nativeTurnIndex`, or
+  `nativeStepCount`. Legacy `trajectoryLength` / legacy `turnIndex` are not
+  native checkpoint selectors.
+- Checkpoint validation binds the source artifact/version, boundary trace/turn/
+  batch, state hash, execution-prefix hash, agent hash, channel hash, message
+  hash/count/last sequence, and agent snapshot frame. It performs zero-model
+  native replay and rejects an ordinary prefix that ends mid-batch. A failed
+  run's terminal rejected failure step may be preserved as an explicit terminal
+  boundary.
+- New fork lineage uses `harness.fork-provenance.v2`. Fork restoration includes
+  the checkpoint domain state, agent states, channel topology, and committed
+  message prefix. Provenance cites the parent native boundary, execution-prefix
+  hash, agent/channel/message hashes and counts, and parent evidence trace ids;
+  it does not use a legacy trajectory prefix as authority.
+- Checkpoint index and server lineage projections currently use
+  `harness.checkpoint-artifact-index.v2`, `server.fork-lineage-summary.v2`,
+  `server.checkpoint-forks-summary.v2`, and
+  `server.checkpoint-branch-tree-summary.v2`.
+
+Current server and projection authority:
+
+- Before artifact creation, the server may hold a pre-artifact lifecycle record.
+  A finished match holds exactly one integrity-validated `MatchArtifact` as the
+  canonical stored value. `getMatch()` / `listMatches()` expose detached derived
+  views; completed records without an artifact are rejected.
+- `persistMatchArtifact()` validates integrity even when filesystem persistence
+  is disabled. Artifact identity must match the server record identity.
+- Ordinary postgame-redacted projections whitelist native action metadata,
+  policy/reasoner evidence, turn trace, structured failure metadata, private/team
+  message metadata, and delivery redaction fields. Arbitrary native metadata must
+  not bypass redaction.
+- React's primary timeline, selection, progress, detail, and replay inspector use
+  `socialEpisode.steps`. The trajectory table is explicitly labeled
+  migration/debug only.
+
+Validation recorded for this refactor state on 2026-07-14:
+
+```bash
+npx vitest run tests/replay.test.ts tests/artifacts.test.ts tests/serverCheckpointApi.test.ts --reporter=dot
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm test -- --reporter=dot
+npm run build
+```
+
+Observed results:
+
+- Native replay/artifact/checkpoint focused suite passed: 3 files / 34 tests.
+- Typecheck passed.
+- Full deterministic Vitest suite passed: 24 files / 252 tests.
+- Production build passed. The existing large-chunk warning remained non-fatal.
+- The full suite emitted the expected invalid-streaming-JSON stderr line from
+  `tests/openaiClient.test.ts`; the parser failure classification test passed.
+- The React native-timeline E2E and final configured live streaming provider
+  probe/match were not rerun as part of this recorded refactor validation. Do not
+  claim those latest paths are validated until their separate runs complete.
+
+Completed typed-contract slice after this lock:
+
+```text
+api.postgame-projection-dto.v1
+```
+
+- `src/server/artifactProjection.ts` now defines the honest
+  `PostgameMatchProjectionDto` / `MatchArtifactViewDto` contract together with
+  redacted harness-step, social-step/action/message/draft/speech-act/delivery/
+  failure, command/pending-action, agent/social-state, and snapshot-frame DTOs.
+  Redacted strings and omitted fields are no longer cast to complete private
+  observation or canonical `MatchArtifact` types.
+- `projectMatchArtifactForView()` returns the DTO union directly.
+  `MatchComparisonSource` and `TrajectoryJsonlSource` are structural read inputs
+  for comparison and JSONL serialization, so these derived consumers can accept
+  canonical or redacted records without claiming replay authority.
+- Redaction remains whitelist-based through nested structures. It removes legal
+  targets and private command payloads; provider request ids, retry history, and
+  stream telemetry; `infosByAgent`; raw social failure metadata; private/team
+  speech acts; speech-act metadata; nested agent profile/memory/belief/
+  relationship/reputation/journal metadata; and evidence-ref descriptions.
+- Focused validation recorded for this DTO slice passed the public-view suite
+  11/11, a further focused DTO/comparison/JSONL set of 18 tests, and
+  `npx tsc --noEmit --pretty false --noErrorTruncation`.
+- No new full deterministic suite, production build, Playwright E2E, streaming
+  probe, live match, or live tournament result was produced by this DTO-only
+  validation. Do not upgrade the focused results into those broader claims.
+
+### 13.23.1 Final Live And Full Validation Update
+
+This update is later than the refactor and DTO-only validation notes above. It
+records the final configured live-provider, production E2E, tournament, replay,
+integrity, and full deterministic validation without exposing credentials,
+provider request ids, or raw sensitive provider output.
+
+Live streaming probe:
+
+- The real probe used the user-specified configured OpenAI-compatible endpoint
+  and model `tencent/hy3:free`.
+- Result: 1/1 probe passed through streaming completion and local parsing.
+
+Live bounded match sequence:
+
+- The first live match used a 40-second timeout. It timed out and correctly
+  produced a failed/rejected native step with zero committed transitions. This
+  failure is retained as validation evidence and must not be omitted from later
+  success summaries.
+- The second live match used `maxTransitions=2`. The command completed
+  successfully while the harness episode ended with the expected bounded
+  `truncated` status.
+- The second stream recorded `completedBy: provider_stop_event`.
+- It recorded one committed model turn, zero harness errors, and two native
+  social episode steps.
+- Zero-model native replay reproduced both the domain-state hash and message
+  hash with zero mismatches.
+- Full `harness.match.v2` artifact integrity validation passed.
+
+Production React/server E2E:
+
+- Playwright ran against the production Express-backed application path and
+  passed 1/1.
+- The E2E contract is strict: HTTP 207 or any returned harness failure causes
+  the test to fail. A partial/failure response cannot be counted as a successful
+  cockpit validation.
+
+Real tournament correction and rerun:
+
+- The first real tournament uncovered a genuine experiment parser defect:
+  `splitModels()` used `/[,\s/]+/`, which incorrectly split model ids containing
+  `/`, including `tencent/hy3:free`.
+- The delimiter was corrected to `/[,\s]+/`, preserving slash-bearing model ids,
+  and a focused experiment regression test was added.
+- The second real tournament completed with `gamesCompleted=1`, `gamesFailed=0`,
+  `harnessTurns=1`, `harnessErrors=0`, and `metricCount=641`.
+
+Final deterministic validation:
+
+- Full Vitest suite passed: 24 files / 253 tests.
+- TypeScript typecheck passed.
+- Production build passed.
+- `git diff --check` passed.
+- The existing Vite large-chunk warning remained non-fatal.
+- The expected invalid-streaming-JSON stderr line from
+  `tests/openaiClient.test.ts` remained intentional parser-failure coverage; the
+  test passed.
+
+Secret-handling lock:
+
+- Do not add the provider request id, API key, authorization header, raw provider
+  payload, or raw sensitive stream output to this file, README, tests, logs,
+  artifacts, screenshots, subagent prompts, or final answers.
+
+## 13.24 Independent Code Audit Correction: Native Progress Authority
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+This section records an independent code/test audit that deliberately did **not**
+treat earlier AGENTS narrative as proof. Source, tests, and typecheck were the
+authority. Several older AGENTS passages still mention shadcn/Tailwind cockpit
+work or treat `trajectorySteps` as the only progress signal; those passages are
+historical. Active UI framework and progress-authority rules are below.
+
+### 13.24.1 Verified Current Reality
+
+- Active React cockpit uses **Ant Design** (`antd`), not shadcn/Tailwind.
+  Evidence: `src/main.tsx` imports `antd/dist/reset.css`; `src/App.tsx` imports
+  from `antd`; `src/components/ui/*` is absent; `src/styles.css` is font imports
+  only.
+- Native execution authority remains:
+  `MatchArtifact.socialEpisode.steps` for scheduler/environment/message-bus
+  progress, replay, checkpoint/fork, and integrity.
+- `MatchArtifact.trajectory` remains a legacy committed-command projection only.
+  It may be shorter than native steps when system transitions or rejected
+  proposals exist, and must not be the only public progress field.
+- Server-owned replay already uses `replayWerewolfSocialEpisode(socialEpisode)`.
+- Checkpoint/fork already use `harness.checkpoint.v2` / `harness.fork-provenance.v2`
+  and native prefix selectors.
+
+### 13.24.2 Real Bugs Found And Fixed
+
+Goal id:
+
+```text
+api.native-progress-summary.v1
+```
+
+Problem:
+
+- Public match list/detail summaries exposed only `trajectorySteps`, which is a
+  legacy projection count. UI/e2e/run-registry consumers could undercount real
+  native execution progress.
+- Match artifact index records also stored only `trajectorySteps`.
+- Match run summaries exposed `trajectorySteps` / `socialSteps` but not a clear
+  `nativeSteps` field for clients that should prefer native authority.
+- Tournament `cost_latency.json` fell back to
+  `artifact.trajectory.length` / `episode.trajectory.length` when
+  `metrics.harnessTurnCount` was missing, which can undercount native committed
+  social steps.
+- Tournament `episodes.jsonl` episode records stored only `trajectorySteps`.
+- CLI match summary reported only `trajectorySteps`.
+- One heavy match-artifact rehydrate test could hit the default 5s timeout under
+  concurrent suite load.
+
+Fixes:
+
+- `src/server/index.ts`
+  - `serializeStoredMatch()` now emits:
+    - `nativeSteps` from `socialEpisode.steps.length`
+    - `trajectorySteps` / `legacyProjectionSteps` from legacy projection length
+  - match artifact index entries now include `nativeSteps`
+  - match run summary now includes `nativeSteps`
+- `src/harness/tournamentArtifacts.ts`
+  - cost/latency harnessTurns fallback uses committed native social steps, not
+    legacy trajectory length
+  - episode records include `nativeSteps` and keep `trajectorySteps` as the
+    legacy projection count
+- `src/scripts/runMatch.ts`
+  - CLI match summary includes `nativeSteps`
+- `src/App.tsx`
+  - run registry and match inspector prefer `nativeSteps`
+  - still show legacy projection separately when available
+- `e2e/cockpitInteraction.spec.ts`
+  - accepts `nativeSteps` (or summary/native fallback) as progress evidence
+- `tests/serverMatchArtifactsApi.test.ts`
+  - asserts public `nativeSteps`
+  - raises timeout for the heavy malformed-file rehydrate case to 20s
+- `tests/tournamentArtifacts.test.ts`
+  - expects episode `nativeSteps`
+
+### 13.24.3 Active Progress Field Contract
+
+```text
+nativeSteps
+  Authoritative public progress count = socialEpisode.steps.length
+  Includes system transitions and rejected/failed native steps that remain in
+  the social episode.
+
+trajectorySteps / legacyProjectionSteps
+  Legacy committed-command projection length only.
+  Useful for migration/debug and legacy projection parity.
+  Not the native execution authority.
+
+metrics.harnessTurnCount
+  Committed werewolf harness-turn evidence count derived from native social
+  episode turn metadata. Prefer this for cost/latency harness turn totals when
+  present.
+```
+
+Rules for future work:
+
+- Public/run-registry/UI progress displays should prefer `nativeSteps`.
+- Do not reintroduce trajectory-only progress as if it were native authority.
+- Keep `trajectory` fields only where legacy projection parity or migration
+  evidence is required.
+- Do not revive shadcn/Tailwind as the active UI framework unless a later user
+  instruction explicitly reopens that decision. Ant Design remains active.
+
+### 13.24.4 Validation For This Correction
+
+Focused validation:
+
+```bash
+npx vitest run tests/serverMatchArtifactsApi.test.ts tests/tournamentArtifacts.test.ts tests/serverPublicViewApi.test.ts tests/serverCheckpointApi.test.ts --reporter=dot
+npx vitest run tests/serverMatchArtifactsApi.test.ts -t "ignores malformed persisted match files" --reporter=verbose
+```
+
+Observed results:
+
+```text
+typecheck passed
+focused suites passed: 4 files / 43 tests
+malformed rehydrate test passed under 20s timeout
+full Vitest suite passed: 24 files / 253 tests
+production build passed
+```
+
+Broader validation for this slice is complete for deterministic paths. Live
+streaming provider revalidation was not required because this slice did not
+change provider clients, request shape, stream parsing, timeout/retry, or model
+arbitration.
+
+### 13.24.5 Remaining Real Gaps After This Audit
+
+These are still real and should not be papered over by AGENTS narrative:
+
+- Temporal-association evaluators are zero-weight diagnostics and are still not
+  reward or leaderboard authorities, even after the explicit
+  `evaluation.metric-promotion.v1` contract. Promoting any of them still needs a
+  separate denominator/uncertainty/failure decision. The cockpit now surfaces
+  promotion class/eligibility (section 13.33), but does not change promotion
+  policy.
+- Free-text society extraction is intentionally not implemented; stores require
+  explicit speech acts / structured social facts.
+- Werewolf joint-phase parallel is opt-in through
+  `jointPhaseScheduler: "parallel"` on the match-run API and cockpit Run Limits
+  control (section 13.34). Default production still uses
+  `aec-batched-decision`. Making parallel the default remains an explicit
+  policy decision with replay/artifact impact.
+- Live provider path depends on current runtime endpoint/key health and must be
+  revalidated with real streaming calls when provider/model behavior changes.
+- Tournament public packs, persistent public share links, multi-game export
+  presets, share expiry/revoke controls, share allowlist editing, bulk active
+  share revoke, cross-pack share inventory, share usage analytics, per-file
+  download histograms, public download rate limiting, minute-bucket
+  time-series analytics, exportable analytics summaries, and event retention
+  policies now exist (sections 13.31–13.42). Parallel joint-phase readiness
+  guardrails now fail closed below maxTransitions 4 (section 13.43). The
+  configured live OpenAI-compatible path was recovered to
+  `/v1/chat/completions` after a real nginx 401 on the bare `/chat/completions`
+  path (section 13.44). Provider adapters now classify nginx/HTML gateway
+  failures as `gateway_html` (section 13.45). Formal metric promotion catalog
+  decisions now exist for known scorecard/diagnostic metric ids (section
+  13.46), including full social-state/social-dynamics exact coverage and
+  temporal-association prefix/includes rules (section 13.47). Parallel joint
+  phase remains an explicit opt-in; production default is locked to
+  `aec-batched-decision` (section 13.48). Metric evidence now supports
+  first-class `observation` refs instead of remapping scoped exposure onto
+  `trace` (section 13.49). Match comparison now includes metric/evidence-ref
+  divergence rows, not only aggregate counts (section 13.50), and ranks changed
+  rows first (section 13.51). Postgame role-truth metric evidence now carries
+  player ids and optional `game.ended` event refs (section 13.51). The cockpit
+  comparison matrix can filter by group and changed-only status while remaining
+  a pure projection over server comparison artifacts (section 13.52). Vote and
+  pressure metric fallback evidence now cites concrete vote/speech records with
+  player ids when events are absent, and the cockpit can export the loaded
+  comparison artifact as JSON (section 13.53). Empty agent-scoped metric
+  evidence fallbacks now carry subject ids, and comparison Markdown export is a
+  pure harness projection (section 13.54). The comparison API now supports
+  `format=json|markdown` plus optional download headers over the same
+  server-owned comparison artifact (section 13.55). The cockpit export buttons
+  fetch that server route instead of re-serializing React state
+  (section 13.56). Metric comparison rows now carry promotion-class metadata and
+  explicit promotion-change rows, and empty final-game-state evidence fallbacks
+  attach match id/phase/day/winner descriptors (section 13.57). Comparison also
+  exposes scorecard/diagnostic gap summary rows and cockpit promotion filters
+  over server-owned comparison artifacts (section 13.58). Comparison summary now
+  also reports promotion-changed metric counts and scorecard/diagnostic deltas
+  (section 13.59). Comparison row inspector now shows promotion/evidence fields,
+  and empty misdirect-vote fallback evidence carries match id
+  (section 13.60). Comparison matrix header tags are clickable filters for
+  changed rows and promotion classes (section 13.61). Comparison also counts and
+  filters `benchmark_only` metrics with summary/header/inspector support
+  (section 13.62). Comparison metric-diff emission now reports compared/emitted/
+  truncated metric-key counts under the row cap (section 13.63). Metric
+  truncation is covered by a focused regression and exposed as comparison
+  summary rows (section 13.64). Under the metric-row emit cap, scorecard keys
+  are preferred before diagnostic/benchmark_only/missing keys
+  (section 13.65). Scorecard metric-key truncation stats are tracked and
+  exposed separately so reward-relevant coverage under the emit cap is
+  auditable (section 13.66). Diagnostic and benchmark_only truncation stats
+  complete the promotion-class coverage surface (section 13.67). Metric evidence
+  comparison now diffs structural evidence-ref identity sets, not only counts
+  and kinds (section 13.68), exposes aggregate identity-set divergence density
+  in comparison summary (section 13.69), supports pure matrix filtering by
+  evidence-identity changes (section 13.70), can export the current filtered
+  matrix as a versioned pure projection (section 13.71), shows filtered-view
+  density tags from that same pure projection (section 13.72), serves the
+  filtered projection from the server compare API (section 13.73), routes
+  filtered export busy/status through the parent cockpit channel
+  (section 13.74), shows filtered promotion-change density (section 13.75),
+  makes filtered density tags clickable filter shortcuts (section 13.76),
+  exposes a filtered-projection inspector plus filter reset controls
+  (section 13.77), supports numeric-delta matrix filtering end to end
+  (section 13.78), exposes filtered group density stats (section 13.79), makes
+  group density chips clickable group-filter shortcuts (section 13.80),
+  persists comparison matrix filters through pure URL deep links
+  (section 13.81), supports copyable filter deep links plus workspace URL
+  restore (section 13.82), restores baseline/candidate match ids from deep
+  links (section 13.83), keeps live compare URL state synchronized with
+  baseline/candidate selection (section 13.84), restores comparison projection
+  mode through `compareView` deep links (section 13.85), reloads the active
+  comparison pair when projection mode changes (section 13.86), surfaces a
+  pending-comparison reload banner when candidate selection and loaded
+  comparison identity diverge (section 13.87), treats baseline/view identity
+  mismatches as pending comparison state (section 13.88), auto-reloads the
+  comparison pair when the candidate changes (section 13.89), ignores stale
+  comparison responses under a request-sequence race guard (section 13.90),
+  blocks comparison exports while the loaded comparison is pending relative to
+  the current selection (section 13.91), auto-reloads the comparison pair after
+  baseline artifact loads (section 13.92), deep-link bootstrap uses that single
+  baseline-load path instead of a second explicit comparison load
+  (section 13.93), shows a ready-status identity summary when the loaded
+  comparison is current (section 13.94), includes the active filter fingerprint
+  plus shown-row count in that ready banner (section 13.95), exposes a
+  ready-banner copy action for the pure comparison deep link (section 13.96),
+  freezes the matrix whenever the loaded comparison is pending relative to the
+  current selection (section 13.97), disables matrix filter controls while the
+  comparison is pending or missing (section 13.98), persists full comparisons in
+  a server registry with list/load routes (section 13.99), optionally rehydrates
+  that registry from disk under `COMPARISON_ARTIFACT_BASE_DIR` (section 13.100),
+  emits tournament-level pairwise comparison aggregates in tournament packs
+  (section 13.101), exposes those aggregates through the packs cockpit
+  (section 13.102), can load the server-owned tournament comparison into the
+  inspector (section 13.103), emits multi-episode comparison plus markdown
+  projections (section 13.104), seeds pairwise tournament comparisons into the
+  comparison registry on pack export (section 13.105), refreshes that registry
+  from the cockpit after pack export (section 13.106), registers tournament
+  episode matches into the match store so seeded comparisons can hydrate
+  baseline/candidate artifacts (section 13.107), refreshes `/api/matches` from
+  the cockpit after pack export (section 13.108), can one-click load seeded
+  tournament pair comparisons into the compare workspace (section 13.109),
+  aligns tournament aggregate pair comparison ids with registry seeds
+  (section 13.110), persists tournament episode match artifacts under
+  `MATCH_ARTIFACT_BASE_DIR` for restart rehydrate (section 13.111), auto-loads a
+  seeded comparison after pack export (section 13.112), scopes that auto-load to
+  the just-exported pack episode ids (section 13.113), defaults cockpit pack
+  export to multi-episode so pairwise seeding is the common path
+  (section 13.114), auto-loads the first pair when inspecting a tournament
+  comparison aggregate (section 13.115), preserves the aggregate inspector and
+  remaining pair actions during that auto-load (section 13.116), preserves the
+  pack export inspector when export auto-loads a comparison (section 13.117),
+  extracts pack-scoped comparison selection as a pure tested helper while
+  highlighting the active pair in the aggregate inspector (section 13.118), keeps
+  the aggregate inspector/active-pair highlight when switching pairs
+  (section 13.119), marks a pair current only after matrix load succeeds
+  (section 13.120), race-guards registry comparison loads with a request sequence
+  so concurrent pair clicks cannot apply stale matrix/highlight state
+  (section 13.121), freezes pair actions with an explicit loading label while a
+  pair matrix load is in flight (section 13.122), multi-episode pack export opens
+  the tournament comparison aggregate inspect path for full pair navigation
+  (section 13.123), export initializes share allowlist from the newly selected
+  pack's registered files (section 13.124), pack export selects pack-scoped
+  comparisons via `GET /api/comparisons?matchIds=...` (section 13.125), pack
+  export still refreshes the full comparison registry for the compare workspace
+  while using the pack-scoped list only for pair selection (section 13.126), pack
+  export fetches full/pack-scoped comparison lists in parallel then falls back
+  from aggregate inspect to pairwise matrix load when needed (section 13.127),
+  full vs pack-scoped comparison fetch failures are isolated so one cannot cancel
+  the other (section 13.128), aggregate-inspect fallback status is explicit when
+  pairwise matrix load is used instead (section 13.129), export restores an
+  export-centered final status after inspect/fallback completes (section 13.130),
+  export prefers the just-exported pack object for aggregate inspect
+  (section 13.131), export merges the just-exported pack into the packs list when
+  list refresh is stale (section 13.132), post-export pack-list/share refresh
+  failures are isolated so they cannot mark a successful export as failed
+  (section 13.133), post-export degraded refresh notes are surfaced in status and
+  inspector fields (section 13.134), a successful-but-stale pack list refresh
+  surfaces `pack-list-stale` (section 13.135), pack-list merge rules live in a
+  pure harness helper with unit tests (section 13.136), pack-scoped empty or
+  no-match comparison lists fall back to the full registry with explicit notes
+  (section 13.137), pack inspector reports the real seeded comparison source plus
+  selected comparison id (section 13.138), single-episode packs report selection
+  source `none` from the pure helper (section 13.139), comparison registry
+  packMatchIds filtering has focused store unit tests (section 13.140), matchIds
+  query parsing is a pure harness helper with export selection status
+  (section 13.141), selection source type reuse plus baseline/candidate store
+  filters are covered (section 13.142), combined pack/baseline/candidate filters
+  plus clone isolation are covered (section 13.143), comparison save validation
+  plus getComparison clone isolation are covered (section 13.144), saveComparison
+  input clone isolation plus same-id overwrite are covered (section 13.145),
+  comparison list newest-first order plus clearServerStore isolation are covered
+  (section 13.146), comparison registry list summaries plus cockpit labels expose
+  changed/numeric/scorecard density (section 13.147), social-fact ingest metrics
+  have exact formal diagnostic catalog coverage without scorecard promotion
+  (section 13.148), social metric constants remain scorecard-ineligible even under
+  positive weight and evidence (section 13.149), all Werewolf metric id constants
+  including profile/model rewards have exact formal catalog decisions
+  (section 13.150), comparison registry labels plus scorecard catalog summaries
+  surface pair context and profile/model rewards (section 13.151), comparison
+  registry labels are a pure harness helper with unit tests (section 13.152),
+  registry labels use cmp-hash short ids plus truncation markers
+  (section 13.153), registry labels also surface diagnostic metric density
+  (section 13.154), registry list/labels expose evidence-identity plus
+  benchmark-only density (section 13.155), registry list/labels expose
+  promotion-class change density (section 13.156), registry list/labels expose
+  per-class truncation density (section 13.157), React no longer falls back from
+  nativeSteps to trajectorySteps for progress authority (section 13.158), Vitest
+  discovery excludes Playwright e2e (section 13.159), match list summaries expose
+  committed/rejected native step density (section 13.160), native step commit
+  counts are centralized through `countSocialStepCommits()` (section 13.161),
+  comparison registry list/labels expose full redaction-safe density summaries
+  (section 13.162), tournament episode/cost-latency outputs use the shared
+  commit-count helper (section 13.163), evaluator/werewolf metric filters use
+  shared `isSocialStepCommitted()` (section 13.164), replay/artifact integrity
+  use the same commit predicate (section 13.165), checkpoint summaries expose
+  committed/rejected native step density (section 13.166), fork-lineage /
+  match-index summaries expose the same density (section 13.167), match-run plus
+  CLI match/replay summaries expose shared commit density (section 13.168), React
+  timeline/inspectors use the shared commit helpers (section 13.169), remaining
+  React/fork-boundary progress surfaces expose the same density (section 13.170),
+  focused tests use the shared commit helpers (section 13.171), residual
+  match-summary / API native-count consistency is locked (section 13.172), match
+  comparison source/summary rows expose commit density (section 13.173),
+  tournament pairwise aggregates/markdown/inspector project pair commit density
+  (section 13.174), comparison artifact summaries plus registry list labels
+  expose commit density (section 13.175), comparison markdown /
+  filtered-markdown exports project commit density (section 13.176), the React
+  compare cockpit surfaces summary commit density tags/inspector fields
+  (section 13.177), ready-banner plus tournament pair-action labels surface the
+  same density (section 13.178), comparison load-status plus registry list tests
+  lock density fields (section 13.179), saved-registry / tournament-aggregate
+  load statuses surface density (section 13.180), tournament CLI summaries
+  project aggregate and per-episode commit density (section 13.181), match CLI
+  evaluation summaries include commit density (section 13.182), server match /
+  tournament evaluation summaries include commit density (section 13.183),
+  tournament episode metricSummary includes commit density (section 13.184),
+  tournament episode density fields are locked by API tests (section 13.185),
+  match-run summary evaluation density is locked by API tests (section 13.186),
+  tournament episodes.csv projects commit density columns (section 13.187),
+  tournament cost_latency.json projects commit density (section 13.188),
+  tournament summary.md projects commit density (section 13.189), tournament
+  failures.jsonl projects commit density (section 13.190), tournament
+  integrity.jsonl projects commit density (section 13.191), tournament
+  manifest.json projects commit density (section 13.192), tournament
+  assignment.json plus benchmark_statistics.json project commit density
+  (section 13.193), tournament leaderboard.json episode summaries project
+  commit density (section 13.194), tournament pack list/detail DTOs plus the
+  packs table project commit density (section 13.195), pack export/select
+  status plus inspector/download surfaces project density (section 13.196),
+  tournament episode API summaries expose top-level commit density
+  (section 13.197), tournament run summaries project aggregate commit density
+  (section 13.198), the packs cockpit prefers run-summary density in export
+  status/inspector (section 13.199), tournament evaluation summaries project
+  aggregate commit density (section 13.200), pack download tests lock density
+  across cost/benchmark/integrity/episode/assignment surfaces (section 13.201),
+  model/profile leaderboard stats plus leaderboard.csv project commit density
+  (section 13.202), summary.md leaderboard tables plus leaderboard.json
+  modelStats density are locked (section 13.203), profileStats plus pack
+  summary markdown density headers are locked (section 13.204), agents.csv
+  projects per-agent commit density (section 13.205), a shared actor density
+  helper plus match CLI agent density are locked (section 13.206), model density
+  helper reuse plus pack failures density locks are complete (section 13.207),
+  cost_latency byModel density plus tournament episode agent density are locked
+  (section 13.208), evaluation modelRewards density is locked (section 13.209),
+  CLI profileRewards density exists while public server summaries omit
+  profileRewards (section 13.210), assignment.json agents project per-agent
+  commit density (section 13.211), failures.jsonl agents project per-agent
+  commit density (section 13.212), episodes.jsonl agents project per-agent
+  commit density (section 13.213), benchmark agent-seat strata project commit
+  density (section 13.214), benchmark episode/harness-status strata project
+  commit density (section 13.215), shared model/profile reward density
+  summarizers are unit-tested and reused by CLI/server (section 13.216), the
+  React pack-export inspector surfaces evaluation and modelRewards density
+  (section 13.217), tournament metrics.csv/metrics.jsonl project formal
+  promotion-class decisions (section 13.218), tournament summary.md projects
+  metric-promotion aggregates (section 13.219), pack metrics.jsonl downloads
+  lock promotion fields without base-dir leakage (section 13.220), tournament
+  manifest.json projects metric-promotion aggregates (section 13.221), pack
+  list/detail DTOs project metric-promotion aggregates for cockpit surfaces
+  (section 13.222), leaderboard.json plus the packs table project
+  metric-promotion aggregates (section 13.223), registry.json plus
+  benchmark_statistics.json project metric-promotion policy/catalog aggregates
+  (section 13.224), episodes.jsonl plus episodes.csv project per-episode
+  metric-promotion aggregates (section 13.225), tournament run episode API
+  summaries project per-episode metric-promotion aggregates (section 13.226),
+  tournament evaluation/evaluation-report summaries project metric-promotion
+  aggregates for server and CLI (section 13.227), public match evaluation
+  report summaries plus React tournament evaluation promotion surfaces project
+  metric-promotion aggregates (section 13.228), the match CLI research
+  evaluationReport summary projects metric-promotion aggregates plus
+  promotion-aware topMetrics (section 13.229), the tournament CLI research
+  evaluationReports summary projects promotion-aware topMetrics plus
+  episodeReports while public server summaries remain redacted
+  (section 13.230), and match/tournament CLI research topMetrics rows share
+  `summarizeResearchMetricPromotionRows()` (section 13.231), pack export /
+  pack selection status messages surface metric-promotion aggregates
+  (section 13.232), public share detail/inventory/analytics surfaces project
+  pack density plus metric-promotion aggregates (section 13.233), and React share
+  tables/inspector surface pack metric-promotion aggregates (section 13.234),
+  share analytics markdown exports project pack metric-promotion aggregates
+  (section 13.235), share analytics totals aggregate unique-pack
+  metric-promotion density (section 13.236), and share inventory API/React
+  surfaces project unique-pack metric-promotion totals (section 13.237), and
+  inventory/analytics totals share `aggregateUniquePackMetricPromotion()`
+  (section 13.238), unique-pack metric-promotion aggregation lives in pure
+  `src/server/packMetricPromotion.ts` with unit tests (section 13.239),
+  inventory/analytics totals also aggregate unique-pack commit density
+  (section 13.240), share analytics markdown share rows project pack commit
+  density (section 13.241), and React share/inventory tables surface pack commit
+  density columns (section 13.242).
+  Remaining open harness gaps are free-text society extraction (intentional
+  non-goal) and future scorecard promotion decisions for individual social
+  metrics if evidence quality later justifies them.
+- Older AGENTS historical sections still contain shadcn-era narrative. Treat
+  sections 13.15, 13.24–13.242 as the active locks when they conflict with older
+  text.
+
+## 13.25 Independent Code Audit Correction: Zero-Weight Evaluator Runtime Wiring
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.zero-weight-runtime-wiring.v1
+```
+
+### 13.25.1 Problem Found By Code Audit
+
+These evaluators already existed with deterministic implementations, manifests,
+and focused unit tests, but they were intentionally left out of the default
+Werewolf runtime evaluation registry in `buildWerewolfHarnessRunResultFromParts()`:
+
+```text
+evaluation.norm-sanction-lifecycle-temporal-association.v1
+evaluation.gossip-exposure-temporal-association.v1
+evaluation.trust-repair-lifecycle-temporal-association.v1
+evaluation.trust-repair-relationship-temporal-association.v1
+evaluation.trust-repair-reputation-temporal-association.v1
+evaluation.betrayal-lifecycle-temporal-association.v1
+evaluation.deception-belief-shift.v1
+evaluation.deception-reputation-association.v1
+```
+
+That meant match artifacts, JSONL metrics, tournament `registry.json`, and
+tournament metrics streams could not carry those zero-weight diagnostics unless
+a custom evaluator list was supplied. The gap was real code/wiring debt, not a
+missing metric design.
+
+### 13.25.2 Fix
+
+- `src/harness/werewolfResult.ts` now registers the evaluators above in the
+  default runtime suite used by `runHarnessMatch()` / match artifacts /
+  tournament artifact writers.
+- The metrics remain zero-weight. This is registry visibility wiring, not a
+  reward/leaderboard promotion decision.
+- Tests updated so runtime, match artifact, and tournament registry paths expect
+  the evaluators to be present while still asserting `weight: 0` for any emitted
+  newly-wired metrics.
+
+### 13.25.3 Active Evaluator Wiring Rule
+
+```text
+Runtime registry presence:
+  zero-weight temporal-association evaluators may be present in default match
+  and tournament artifacts for audit/coverage.
+
+Reward / leaderboard authority:
+  still requires an explicit metric-promotion decision covering denominators,
+  failure policy, uncertainty, and scorecard semantics.
+
+Do not claim:
+  causal influence, successful deception, repair effectiveness, betrayal truth,
+  reward impact, or leaderboard superiority from these metrics.
+```
+
+### 13.25.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts -t "emits evaluator metrics through runtime" --reporter=verbose
+npx vitest run tests/tournamentArtifacts.test.ts -t "writes the required layout" --reporter=verbose
+npx vitest run tests/evaluation.test.ts tests/artifacts.test.ts tests/tournamentArtifacts.test.ts tests/werewolfAdapter.test.ts --reporter=dot
+npm test -- --reporter=dot
+npm run build
+```
+
+Observed results:
+
+```text
+typecheck passed
+runtime evaluation integration test passed
+tournament layout writer test passed
+full Vitest suite passed: 24 files / 253 tests
+production build passed
+```
+
+Live streaming provider revalidation was not required: this slice only changed
+deterministic evaluator registration and artifact registry expectations.
+
+## 13.26 Independent Code Audit Correction: Truth-Redacted Artifact Projection
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.truth-redacted-artifact-projection.v1
+```
+
+### 13.26.1 Problem
+
+`postgame-redacted` already redacted private evidence, but it still preserved
+postgame truth such as seat roles/teams, night internals, winners, and role/team
+assignment fields. That made the projection unsafe for untrusted public sharing.
+
+### 13.26.2 Fix
+
+- `MatchArtifactView` / `MatchComparisonView` now include `truth-redacted`.
+- Server projection path:
+  - `full`
+  - `postgame-redacted` = private evidence redacted, postgame truth retained
+  - `truth-redacted` = private evidence redacted **and** postgame truth redacted
+- Truth redaction strips or blanks:
+  - player `role` / `team` / `ability`
+  - night internals
+  - winner / end-reason postgame fields
+  - resolved assignment role/team
+  - evaluation winner / role-team-scoped metric subjects
+  - private/team night event payloads that reveal truth
+- Comparison API accepts `?view=truth-redacted` and sets
+  `projection.postgameTruthRedacted: true`.
+
+### 13.26.3 Active Projection Contract
+
+```text
+view=full
+  Full postgame/debug artifact after secret redaction.
+
+view=postgame-redacted
+  Private evidence redacted.
+  Postgame truth retained for research/debug analysis.
+
+view=truth-redacted
+  Private evidence redacted.
+  Postgame truth redacted for untrusted/public sharing.
+  config.roles roster composition may remain because it is not seat-level truth.
+```
+
+Rules:
+
+- Ordinary cockpit research views may keep using `postgame-redacted`.
+- Public/untrusted exports and share links should use `truth-redacted`.
+- Do not claim private-evidence redaction alone makes an artifact safe to share.
+
+### 13.26.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/matchComparison.test.ts --reporter=dot
+npm test -- --reporter=dot
+npm run build
+```
+
+Observed results:
+
+```text
+typecheck passed
+public projection/comparison focused tests passed
+full Vitest suite passed: 24 files / 254 tests
+production build passed
+```
+
+Live streaming provider revalidation was not required: this slice only changed
+server projection/redaction contracts and deterministic API tests.
+
+## 13.27 Comprehensive Optimization: Cockpit Truth-Redacted Projection Wiring
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.truth-redacted-projection-wiring.v1
+```
+
+### 13.27.1 Capability
+
+Wire the existing server `truth-redacted` artifact projection into the Ant Design
+cockpit as an explicit public/share projection mode, without making React a
+second truth authority.
+
+### 13.27.2 Changes
+
+- `src/App.tsx`
+  - `ArtifactView = "postgame-redacted" | "truth-redacted"`
+  - left-rail projection selector reloads the current match artifact with the
+    selected view
+  - compare/download/JSONL paths use the selected `artifactView`
+  - projection assertions accept both server-projected views and require
+    `postgameTruthRedacted` consistency
+  - social-graph exposure fail-closed for both redacted views when exposure
+    records are missing
+  - ArtifactSummary shows private/truth redaction status
+- `src/server/index.ts`
+  - truth-redacted evaluation report blanks `summary.teamScores`
+  - role/team metric splits are stripped under truth-redacted
+- `e2e/cockpitInteraction.spec.ts`
+  - switches research view -> public truth-redacted view -> back to research
+    view through real API artifact requests
+
+### 13.27.3 Active Cockpit Projection Rules
+
+```text
+default research cockpit:
+  view=postgame-redacted
+  private evidence redacted
+  postgame truth visible for analysis
+
+public/share cockpit mode:
+  view=truth-redacted
+  private evidence redacted
+  postgame truth redacted
+
+forbidden ordinary cockpit path:
+  view=full
+```
+
+React still does not invent winners, roles, private memos, or social exposure.
+It only selects a server projection and renders the returned DTO.
+
+### 13.27.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/matchComparison.test.ts tests/socialGraph.test.ts --reporter=dot
+npm test -- --reporter=dot
+npm run build
+```
+
+Live streaming provider revalidation was not required: this slice changed
+projection contracts, React projection selection, and deterministic tests only.
+
+## 13.28 Comprehensive Optimization: Metric Promotion Contract
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.metric-promotion.v1
+```
+
+### 13.28.1 Problem
+
+Score aggregates previously treated any finite metric with `weight > 0` as
+scorecard-eligible, even when the metric lacked evidence refs. That allowed
+unevidenced positive-weight metrics to pollute `evaluationReport.summary`
+agent/model/profile/team/episode scores.
+
+Zero-weight temporal-association evaluators were already diagnostic, but the
+repository lacked an explicit promotion contract separating:
+
+- diagnostic coverage / temporal-association metrics
+- scorecard-eligible reward metrics
+- benchmark-only metrics that must not move agentScores
+
+### 13.28.2 Fix
+
+- `HarnessMetricRecord.promotionClass?: "diagnostic" | "scorecard" | "benchmark_only"`
+- `decideMetricPromotion()` / `isScorecardEligibleMetric()` implement
+  `evaluation.metric-promotion.v1`
+- `summarizeMetrics()` only aggregates scorecard-eligible metrics into
+  `episodeScore` / `teamScores` / `agentScores` / `profileScores` / `modelScores`
+- `evaluationReport.summary.promotion` records policy id, scorecard counts,
+  excluded weighted metric ids, and the temporal-association default
+- warnings:
+  - existing `metric.weighted_without_evidence`
+  - new `metric.weighted_excluded_from_scorecard`
+- `emptyEvaluationSummary()` helper keeps fixtures and empty reports on the
+  same promotion contract
+
+### 13.28.3 Active Promotion Rules
+
+```text
+scorecard eligibility requires:
+  positive finite weight
+  finite numeric value
+  non-empty evidenceRefs
+  promotionClass is not diagnostic/benchmark_only
+
+explicit promotionClass:
+  diagnostic      -> never scorecard
+  benchmark_only  -> never scorecard
+  scorecard       -> still requires weight/evidence/value contracts
+
+implicit (no promotionClass):
+  weight > 0 + evidence + finite value -> scorecard
+  otherwise -> diagnostic
+
+temporal-association default:
+  diagnostic_zero_weight
+```
+
+This is not a silent metric promotion of society temporal-association
+evaluators. Those remain zero-weight diagnostics unless a future explicit
+promotion decision sets `promotionClass: "scorecard"` and positive weight with
+evidence.
+
+### 13.28.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts --reporter=dot
+npm test -- --reporter=dot
+npm run build
+```
+
+Live streaming provider revalidation was not required: this slice changed
+evaluation scorecard promotion contracts and deterministic tests only.
+
+## 13.29 Comprehensive Optimization: Werewolf True Parallel stepBatch
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+domain.werewolf-stepBatch.v1
+```
+
+### 13.29.1 Problem
+
+The generic social harness already supports true `parallel` only when an
+environment implements `stepBatch()`. Werewolf previously had no joint-action
+API, so votes and wolf kill votes could only use `aec-batched-decision`
+(shared decision state, sequential apply). That is useful, but it is not true
+parallel joint resolution.
+
+### 13.29.2 Fix
+
+- `WerewolfEnvironment.stepBatch(commandsByAgent)`
+  - requires the complete pending agent set
+  - validates every command against the shared pre-batch pending/legal set
+  - rejects system.advance, incomplete maps, unexpected actors, mixed kinds
+  - applies commands in pending-discovery order
+  - returns one post-batch snapshot after the joint apply
+- `WerewolfSocialEnvironment` now implements `SocialParallelEnvironment` and
+  forwards `stepBatch`
+- Tests cover:
+  - wolf kill joint apply with no intermediate open-kill pending
+  - incomplete/unexpected/system.advance rejection
+  - day_vote joint apply
+  - generic `runSocialEpisode(..., schedulerMode: "parallel")` over Werewolf
+    night wolves with `resolutionPolicy: "parallel-stepBatch"` and shared
+    pre/post hashes
+
+### 13.29.3 Semantics
+
+```text
+true parallel Werewolf batch:
+  1. snapshot pre-batch pending agent set
+  2. require exact command map coverage for that set
+  3. validate all commands against pre-batch legality
+  4. apply in pending order
+  5. maybeAutoAdvance may run only as part of applyCommand effects
+  6. no intermediate actor observation of sibling batch commands
+```
+
+This does not force production `runHarnessMatch()` to switch wolf/vote phases
+from `aec-batched-decision` to `parallel`. It removes the blocker that true
+parallel was impossible for Werewolf.
+
+### 13.29.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/harness.test.ts tests/werewolfAdapter.test.ts -t "stepBatch|true parallel" --reporter=dot
+npm test -- --reporter=dot
+npm run build
+```
+
+Live streaming provider revalidation was not required: this slice changed
+deterministic environment joint-action authority and tests only.
+
+## 13.30 Comprehensive Optimization: Joint Phase Scheduler And Public Download
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.joint-phase-scheduler.v1
+api.public-artifact-download.v1
+```
+
+### 13.30.1 Capability
+
+1. Production Werewolf runs can opt into true joint-phase parallel scheduling.
+2. Public cockpit can download projected match/jsonl artifacts with explicit
+   view-aware filenames.
+
+### 13.30.2 Joint Phase Scheduler
+
+- `HarnessRunOptions.jointPhaseScheduler?: "aec-batched-decision" | "parallel"`
+- Default remains `aec-batched-decision` for compatibility.
+- `createWerewolfJointPhaseSchedulerResolver()` selects the joint mode only for
+  homogeneous kill/vote pending sets.
+- `WerewolfSocialStepMetadata.schedulerMode` now includes `"parallel"`.
+- Production path:
+
+```text
+runHarnessMatch({ jointPhaseScheduler: "parallel" })
+  -> runWerewolfSocialHarnessPrefix
+  -> schedulerModeForBatch = createWerewolfJointPhaseSchedulerResolver("parallel")
+  -> night kill / day vote batches use environment.stepBatch
+```
+
+Important:
+
+- Parallel refuses partial batch application when `maxTransitions` lands inside
+  a joint batch. Tests use `maxTransitions: 4` for
+  `system.advance + seer.inspect + 2-wolf batch`.
+- Replay/artifact metadata preserves `parallel-stepBatch` resolution policy.
+
+### 13.30.3 Public Download Surface
+
+- `GET /api/matches/:id/trajectory.jsonl?view=...`
+  always sets `Content-Disposition: attachment` with view-aware filename.
+- `GET /api/matches/:id/artifact?view=...&download=1`
+  sets attachment disposition only when `download=1|true|yes|download`.
+- Ordinary cockpit artifact loads do **not** force download headers.
+- React timeline exports:
+  - `工件 JSON` -> projected match artifact with current view
+  - `JSONL` -> projected trajectory with current view
+
+### 13.30.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/werewolfAdapter.test.ts tests/serverPublicViewApi.test.ts -t "jointPhaseScheduler parallel|download disposition" --reporter=dot
+npm test -- --reporter=dot
+npm run build
+```
+
+Live streaming provider revalidation was not required: this slice changed
+deterministic scheduler options, projection download headers, and React export
+controls only.
+
+## 13.31 Comprehensive Optimization: Tournament Truth-Redacted Public Packs
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.public-pack-truth-redaction.v1
+api.tournament-artifact-public-share.v1
+```
+
+### 13.31.1 Capability
+
+Server-exported tournament artifact directories can be shared without leaking
+postgame role/team truth, private social evidence, assignment role/team maps,
+winner fields, role/team leaderboard strata, or failure role/team attributions.
+Research/CLI exports remain full-artifact by default.
+
+### 13.31.2 Writer contract
+
+`writeTournamentArtifactDirectory()` accepts optional public-pack controls:
+
+```ts
+projectMatchArtifact?: (artifact: MatchArtifact) => unknown;
+redactAssignmentTruth?: boolean;
+matchArtifactView?: "full" | "postgame-redacted" | "truth-redacted";
+```
+
+Behavior:
+
+- Research integrity still validates the full in-memory match artifact through
+  `aggregateIntegrityRecords()`.
+- Written `matches/*.json` and `matches/*.jsonl` use the projector when provided.
+- Aggregate `trajectory.jsonl` is built from projected match artifacts when a
+  projector is provided.
+- `assignment.json` strips seat `role` / `team` when `redactAssignmentTruth`.
+- `episodes.jsonl` strips agent `role` / `team` / `won`, resolved assignment
+  role/team, and `winner` when redacting.
+- `metrics.jsonl` strips agent role/team and metric subject role/team when
+  redacting.
+- `failures.jsonl` strips agent role/team/won and failure-attribution role/team
+  when redacting.
+- `leaderboard.json` blanks episode winners and village/werewolf seat splits.
+- `benchmark_statistics.json` omits `byRole` / `byTeam` strata under public packs.
+- CSV exports blank role/team/won/winner and village/werewolf seat columns under
+  the same flag.
+- `manifest.json` records:
+
+```json
+{
+  "projection": {
+    "matchArtifactView": "truth-redacted",
+    "assignmentTruthRedacted": true,
+    "publicShareSafe": true
+  }
+}
+```
+
+### 13.31.3 Server export path
+
+`persistTournamentArtifactSet()` writes public packs with:
+
+```text
+matchArtifactView: "truth-redacted"
+redactAssignmentTruth: true
+projectMatchArtifact: artifact => projectMatchArtifactForView(artifact, "truth-redacted")
+```
+
+CLI/research writers that omit these options keep full match artifacts and full
+assignment/leaderboard truth.
+
+### 13.31.4 Active public-share rule
+
+- Untrusted tournament downloads must not expose role/team assignment maps,
+  final winners, private memos, private observations, or postgame truth players.
+- `publicShareSafe` is true only when match files are `truth-redacted` and
+  assignment role/team truth is redacted.
+- Leaderboard/benchmark strata omit `byRole` / `byTeam` under public packs and
+  zero village/werewolf seat splits on model/profile stats.
+- Failure attributions also drop role/team when redacting.
+
+### 13.31.5 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts -t "truth-redacted public packs|required layout|explicit top-level profiles" --reporter=dot
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Live streaming provider revalidation was not required: this slice changed
+deterministic tournament artifact projection and public assignment redaction
+only.
+
+## 13.32 Comprehensive Optimization: Tournament Public Share Links
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-public-share-links.v1
+```
+
+### 13.32.1 Capability
+
+Truth-redacted tournament artifact packs can mint durable public share links.
+Share links expose only registered pack files, never absolute host paths, and
+can optionally restrict the allowlisted file set and expiry.
+
+### 13.32.2 API surface
+
+```text
+POST   /api/tournament-artifacts/:id/shares
+GET    /api/tournament-artifacts/:id/shares
+GET    /api/public/tournament-shares/:shareId
+GET    /api/public/tournament-shares/:shareId/files/<relative-file>
+DELETE /api/public/tournament-shares/:shareId
+```
+
+Create body may include:
+
+- `label?: string`
+- `expiresAt?: string | null` ISO-8601 future timestamp
+- `relativeFiles?: string[]` allowlist of already-registered pack files
+
+Create rejects filesystem/path/token fields and rejects packs that are not
+`projection.publicShareSafe`.
+
+### 13.32.3 Persistence and authority
+
+- Share ids are 48-hex tokens generated server-side.
+- In-memory store lives in `src/server/store.ts`.
+- Disk index: `tournament_public_shares.index.json` under
+  `TOURNAMENT_ARTIFACT_BASE_DIR`.
+- File serving reuses the registered-file path containment checks for the
+  parent artifact set.
+- Expired shares return `410`; missing shares return `404`.
+- Absolute `outputDir` and host paths never appear in public share DTOs.
+
+### 13.32.4 Cockpit surface
+
+`src/App.tsx` adds a `公开包` workspace:
+
+- lists `/api/tournament-artifacts`
+- shows `publicShareSafe` projection badges
+- exports a bounded tournament pack through
+  `POST /api/tournaments/run` with `exportArtifacts: true`
+- supports multi-game export presets (`1/2/3/5`, capped at 10)
+- supports share expiry presets (`never/1h/24h/7d`) and immediate revoke
+- edits share file allowlists from registered pack paths before create
+- can bulk-revoke all active shares for the selected pack
+- lists/copies/revokes public share links
+- does not invent pack truth; React only selects server-owned pack/share DTOs
+
+### 13.32.5 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Live streaming provider revalidation was not required: this slice changed
+deterministic server public-share persistence, download routes, and a cockpit
+selection surface over those APIs only.
+
+## 13.33 Comprehensive Optimization: Metric Promotion Cockpit Surface
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.metric-promotion-cockpit.v1
+```
+
+### 13.33.1 Capability
+
+The evaluation cockpit now surfaces `evaluation.metric-promotion.v1` decisions
+so research users can distinguish scorecard-eligible metrics from zero-weight
+temporal-association diagnostics without inventing a second promotion policy in
+React.
+
+### 13.33.2 Behavior
+
+- Evaluation workspace imports `decideMetricPromotion()` from
+  `src/harness/evaluation.ts`.
+- Metric table columns include promotion class, scorecard eligibility, and weight.
+- KPI cards show scorecard/diagnostic/excluded-weighted counts from
+  `evaluationReport.summary.promotion` when present.
+- Metric inspector fields include `promotionClass`, `scorecardEligible`, and
+  `promotionReasons`.
+- Temporal-association metrics remain diagnostic by default when `weight` is 0;
+  React does not promote them into agentScores.
+
+### 13.33.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Live streaming provider revalidation was not required: this slice changed
+deterministic evaluation presentation over existing promotion contracts only.
+
+## 13.34 Comprehensive Optimization: Joint Phase Scheduler Cockpit Control
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.joint-phase-scheduler-control.v1
+react.joint-phase-scheduler-control.v1
+```
+
+### 13.34.1 Capability
+
+Expose the existing Werewolf `jointPhaseScheduler` harness option through the
+match-run API and research cockpit without making `parallel` the production
+default.
+
+### 13.34.2 Behavior
+
+- `POST /api/matches/run` accepts optional
+  `jointPhaseScheduler: "aec-batched-decision" | "parallel"`.
+- Invalid values return `400` with a redacted-safe failure summary.
+- Successful and failed match summaries include
+  `limits.jointPhaseScheduler`, defaulting to `aec-batched-decision`.
+- The value is forwarded to `runHarnessMatch({ jointPhaseScheduler })`.
+- React Run Limits includes an Ant Design Select for joint-phase scheduling.
+- Default cockpit/API behavior remains `aec-batched-decision`.
+- `parallel` still requires enough `maxTransitions` to cover whole joint
+  batches; partial parallel batches are refused by the harness.
+
+### 13.34.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/werewolfAdapter.test.ts --reporter=dot
+npm run build
+```
+
+Live streaming provider revalidation was not required: this slice changed
+deterministic match-run control-plane options and cockpit selection only.
+
+## 13.35 Comprehensive Optimization: Parallel Joint Message Range Integrity
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.parallel-message-seq-range.v1
+```
+
+### 13.35.1 Problem
+
+True `parallel` / `stepBatch` joint phases previously assigned one shared
+`messageSeqRange` to every actor step in the batch. Integrity validation then
+rejected multi-actor batches because `metadata.traceId` on messages only
+matched one step, and native social replay expected the same shared range on
+every actor.
+
+### 13.35.2 Fix
+
+- `applyParallelBatch()` publishes messages per decision actor in batch order
+  and stores actor-local `messageSeqRange` values.
+- `replaySocialEpisode()` publishes parallel-batch messages per actor in the
+  same order and validates per-actor ranges while still checking the batch-wide
+  envelope set.
+- Match-run API + cockpit joint-phase control remain opt-in
+  (`aec-batched-decision` default).
+
+### 13.35.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/social.test.ts tests/werewolfAdapter.test.ts tests/serverPublicViewApi.test.ts tests/replay.test.ts --reporter=dot
+npm run build
+```
+
+Observed: 4 files / 70 tests passed; production build passed.
+
+## 13.36 Comprehensive Optimization: Tournament Public Share Inventory
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-public-share-inventory.v1
+react.tournament-public-share-inventory.v1
+```
+
+### 13.36.1 Capability
+
+Add a server-owned inventory over all tournament public share links, and surface
+it in the cockpit packs workspace.
+
+### 13.36.2 Behavior
+
+- `GET /api/tournament-public-shares` returns:
+  - `count` / `activeCount` / `expiredCount`
+  - share summaries with pack join fields:
+    `packFound`, `packSeed`, `packExperimentId`, `packCreatedAt`,
+    `packProjection`
+- Absolute host paths never appear in inventory DTOs.
+- Cockpit `公开包` workspace can refresh and render the inventory table with
+  copy/revoke actions.
+- Inventory is research/control-plane UI over server share registry state, not a
+  second source of match/tournament truth.
+
+### 13.36.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: 2 files / 27 tests passed; production build passed.
+
+## 13.37 Comprehensive Optimization: Public Share Usage Analytics
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-public-share-analytics.v1
+react.tournament-public-share-analytics.v1
+```
+
+### 13.37.1 Capability
+
+Record and expose usage analytics for tournament public share links without
+leaking host paths or private pack contents.
+
+### 13.37.2 Behavior
+
+- `StoredTournamentPublicShare` now persists:
+  - `detailViewCount`
+  - `downloadCount`
+  - `lastDetailViewedAt`
+  - `lastDownloadedAt`
+  - `lastDownloadedFile`
+- Successful public detail views increment `detailViewCount`.
+- Successful public file downloads increment `downloadCount` and record the
+  relative file path.
+- Failed/blocked downloads (missing pack, allowlist miss, missing file) do not
+  increment download counts.
+- Analytics are written into the server-owned public-share index and survive
+  process restart/rehydrate.
+- Share list, detail, inventory, and cockpit tables expose a redacted
+  `analytics` object.
+
+### 13.37.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: 1 file / 13 tests passed; production build passed.
+Live streaming provider revalidation was not required: this slice changed
+deterministic public-share analytics only.
+
+## 13.38 Comprehensive Optimization: Share Download File Histogram
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-public-share-file-histogram.v1
+react.tournament-public-share-file-histogram.v1
+```
+
+### 13.38.1 Capability
+
+Extend public-share usage analytics with a per-file download histogram while
+keeping host paths and private pack contents out of public DTOs.
+
+### 13.38.2 Behavior
+
+- `StoredTournamentPublicShare.downloadsByFile` maps relative registered file
+  paths to successful download counts.
+- Each successful public file download increments both total `downloadCount` and
+  the corresponding `downloadsByFile[relativePath]`.
+- Histogram values persist through the public-share index and rehydrate after
+  process restart.
+- Share list/detail/inventory DTOs expose
+  `analytics.downloadsByFile` as a relative-path map only.
+- Cockpit inventory and inspector surfaces show top histogram entries.
+
+### 13.38.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: 1 file / 13 tests passed; production build passed.
+
+## 13.39 Comprehensive Optimization: Public Share Download Rate Limiting
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-public-share-download-rate-limit.v1
+```
+
+### 13.39.1 Capability
+
+Protect public tournament share file downloads with a per-share, per-client
+sliding-window rate limit while preserving successful-download analytics
+semantics.
+
+### 13.39.2 Behavior
+
+- Public file downloads through
+  `/api/public/tournament-shares/:shareId/files/*` are rate limited by
+  `(shareId, client key)`.
+- Client key prefers the first `X-Forwarded-For` hop, then `req.ip` /
+  socket address.
+- Defaults:
+  - `TOURNAMENT_PUBLIC_SHARE_DOWNLOAD_RATE_LIMIT=60`
+  - `TOURNAMENT_PUBLIC_SHARE_DOWNLOAD_RATE_WINDOW_MS=60000`
+- `createServerApp({ publicShareDownloadRateLimit })` can override limits for
+  tests.
+- Exceeded limits return HTTP `429` with `Retry-After`,
+  `retryAfterSeconds`, `limit`, and `windowMs`.
+
+### 13.39.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: 1 file / 14 tests passed; production build passed.
+Live streaming provider revalidation was not required: this slice changed
+deterministic public-share download rate limiting only.
+
+## 13.40 Comprehensive Optimization: Share Usage Time-Series Analytics
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-public-share-time-series.v1
+react.tournament-public-share-time-series.v1
+```
+
+### 13.40.1 Capability
+
+Add bounded recent-event time series for public share detail views and file
+downloads, with minute-bucket aggregates for research cockpit inspection.
+
+### 13.40.2 Behavior
+
+- `StoredTournamentPublicShare` persists:
+  - `downloadEvents: Array<{ at, file }>` (max 100)
+  - `detailViewEvents: string[]` (max 100)
+- Successful detail views append ISO timestamps.
+- Successful downloads append `{ at, file }` events and keep the existing
+  totals/histogram fields in sync.
+- Public DTOs expose:
+  - `analytics.downloadEvents`
+  - `analytics.detailViewEvents`
+  - `analytics.downloadsByMinute`
+  - `analytics.detailViewsByMinute`
+- Minute buckets are derived server-side from the bounded event lists.
+- Events rehydrate through the public-share index and survive process restart.
+- Cockpit inventory/inspector surfaces show recent minute buckets.
+
+### 13.40.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: 1 file / 14 tests passed; production build passed.
+Live streaming provider revalidation was not required: this slice changed
+deterministic public-share analytics only.
+
+## 13.41 Comprehensive Optimization: Exportable Share Analytics Summary
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-public-share-analytics-export.v1
+react.tournament-public-share-analytics-export.v1
+```
+
+### 13.41.1 Capability
+
+Export a server-owned, path-safe public-share analytics summary for research
+packs as JSON or Markdown.
+
+### 13.41.2 Behavior
+
+- `GET /api/tournament-public-shares/summary?format=json|markdown`
+  returns a downloadable aggregate summary.
+- Summary artifact version:
+  `harness.tournament-public-share-analytics.v1`
+- Includes totals, top files, minute buckets, and per-share rows with labels,
+  pack seed, views/downloads, and status.
+- Absolute host paths never appear in the summary.
+- Cockpit inventory card can export JSON/Markdown through browser download.
+
+### 13.41.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: 1 file / 15 tests passed; production build passed.
+Live streaming provider revalidation was not required: this slice changed
+deterministic public-share analytics export only.
+
+## 13.42 Comprehensive Optimization: Share Event Retention Policy
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-public-share-event-retention.v1
+```
+
+### 13.42.1 Capability
+
+Bound long-lived public-share analytics event logs by count and age while
+preserving aggregate counters and file histograms.
+
+### 13.42.2 Behavior
+
+- `TournamentPublicShareEventRetentionPolicy` supports:
+  - `maxEvents` (default 100 via `TOURNAMENT_PUBLIC_SHARE_EVENT_MAX`)
+  - `maxAgeMs` (default 30d via `TOURNAMENT_PUBLIC_SHARE_EVENT_MAX_AGE_MS`;
+    `0`/`none`/`off` disables age pruning)
+- `retainTimestampEvents()` / `retainDownloadEvents()` prune invalid, stale,
+  and excess events.
+- Detail/download recorders apply retention on every append.
+- Index load prunes all stored shares through
+  `pruneAllTournamentPublicShareEvents()`.
+- Aggregate fields remain authoritative:
+  `detailViewCount`, `downloadCount`, and `downloadsByFile` are not reduced by
+  event pruning.
+- `createServerApp({ publicShareEventRetention })` can override policy for
+  tests.
+
+### 13.42.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverStore.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: 2 files / 20 tests passed; production build passed.
+Live streaming provider revalidation was not required: this slice changed
+deterministic public-share analytics retention only.
+
+## 13.43 Comprehensive Optimization: Parallel Joint-Phase Readiness Guard
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.parallel-joint-phase-readiness.v1
+react.parallel-joint-phase-readiness.v1
+```
+
+### 13.43.1 Capability
+
+Fail closed when a Werewolf match requests `jointPhaseScheduler=parallel` with
+too few `maxTransitions` to cover the first joint batch path.
+
+### 13.43.2 Behavior
+
+- Exported constant:
+  `WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS = 4`
+  (`system.advance + seer.inspect + 2-wolf kill batch`).
+- `POST /api/matches/run` rejects
+  `jointPhaseScheduler=parallel` when `maxTransitions` is missing or `< 4`
+  with HTTP 400 and a clear failure reason.
+- Default production scheduler remains `aec-batched-decision`.
+- Cockpit Run Limits shows the minimum requirement and a danger notice when
+  the current form value is insufficient.
+- Cockpit run path also blocks the request client-side with the same threshold.
+
+### 13.43.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/werewolfAdapter.test.ts tests/serverStore.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: 4 files / 58 tests passed; production build passed.
+Live streaming provider revalidation was not required: this slice changed
+deterministic match-run readiness guardrails and cockpit form validation only.
+
+## 13.44 Comprehensive Optimization: Live Provider Path Recovery
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+provider.live-openai-compatible-path-recovery.v1
+```
+
+### 13.44.1 Capability
+
+Restore the configured OpenAI-compatible live streaming path after an nginx
+401 on the wrong chat-completions resource path.
+
+### 13.44.2 Diagnosis
+
+- Live probe against the configured provider failed with HTTP 401 and an nginx
+  HTML body when `LLM_CHAT_COMPLETIONS_URL` ended in `/chat/completions`.
+- Direct path comparison with the same key and model showed:
+  - `/v1/chat/completions` -> HTTP 200 chat.completion JSON
+  - `/chat/completions` -> HTTP 401 nginx HTML
+  - `/openai/v1/chat/completions` -> HTTP 401 nginx HTML
+- This was a runtime endpoint path mismatch, not a missing API key and not a
+  provider-specific adapter branch.
+- Protocol default remains standard `openai-chat-completions` when
+  `LLM_PROVIDER_PROTOCOL` is unset. No code change was required for protocol
+  selection.
+
+### 13.44.3 Fix
+
+- Updated local runtime env only:
+  `LLM_CHAT_COMPLETIONS_URL=https://api.2go.live/v1/chat/completions`
+- Checked-in examples already used the generic `/v1/chat/completions` path and
+  did not need a source change.
+- No provider-name special-case was added. URL handling remains standard
+  OpenAI-compatible baseURL + `/chat/completions` resource suffix stripping.
+
+### 13.44.4 Validation
+
+```bash
+LLM_STREAM=true LLM_TIMEOUT_MS=90000 LLM_RETRY_COUNT=0 \
+  npm run agent:probe -- --models=tencent/hy3:free --timeout=90s
+
+LLM_STREAM=true LLM_TIMEOUT_MS=180000 LLM_RETRY_COUNT=0 \
+  npm run arena:match -- --models=tencent/hy3:free --maxTransitions=2 --timeout=180s --json=summary
+```
+
+Observed:
+
+- Probe: `ok: true`, endpoint `https://api.2go.live/v1/chat/completions`,
+  model `tencent/hy3:free`, committed `seer.inspect` harness turn, stream path
+  completed, latency about 75s, usage recorded.
+- Bounded match: `ok: true`, `status: truncated` because
+  `maxTransitions=2`, `harnessTurns: 1`, `harnessErrors: 0`, native social
+  steps `2`, legacy trajectory steps `1`, artifact version
+  `harness.match.v2`.
+- Secrets, provider request ids, and raw provider payloads are not copied into
+  this file.
+
+### 13.44.5 Residual gaps after this recovery
+
+- Formal metric promotion decisions remain open.
+- Whether `parallel` becomes the production joint-phase default remains an
+  explicit policy decision; readiness already fails closed below
+  `maxTransitions=4`.
+- Free-text society extraction remains an intentional non-goal.
+- Future provider endpoint changes should re-run bounded streaming probe/match
+  validation and record path failures honestly rather than inventing
+  provider-specific adapters.
+
+## 13.45 Comprehensive Optimization: Gateway HTML Failure Classification
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+provider.gateway-html-failure-classification.v1
+```
+
+### 13.45.1 Capability
+
+Classify OpenAI-compatible, OpenAI Responses, and Anthropic Messages failures
+that return nginx/HTML gateway pages as a distinct
+`failureKind: "gateway_html"` instead of a generic HTTP body dump.
+
+### 13.45.2 Behavior
+
+- Added `gateway_html` to `ProviderFailureKind`.
+- Shared helpers:
+  - `PROVIDER_FAILURE_KINDS`
+  - `isProviderFailureKind()`
+  - `looksLikeHtmlGatewayPayload()`
+- Chat Completions, Responses, and Anthropic Messages adapters map HTML
+  gateway HTTP errors to `gateway_html` with a redaction-safe message:
+  `gateway returned HTML (likely wrong endpoint path or gateway auth failure)`.
+- Non-HTML HTTP failures remain `failureKind: "http"`.
+- Retryability is unchanged: 401 remains non-retryable.
+- Tournament/provider-failure allowlists accept `gateway_html`.
+
+### 13.45.3 Why it matters
+
+The live path recovery in section 13.44 failed first as an nginx HTML 401 on
+the wrong `/chat/completions` path. Without this classification, artifacts and
+public API summaries could only report a generic HTTP failure and a large HTML
+snippet. `gateway_html` makes endpoint-path/gateway misconfiguration visible in
+provider telemetry and failure attribution without provider-name special cases.
+
+### 13.45.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/openaiClient.test.ts tests/providerAdapters.test.ts --reporter=dot
+```
+
+Observed: 2 files / 17 tests passed, including the nginx HTML 401 classification
+test. No live streaming revalidation was required for this deterministic
+failure-classification slice; live path recovery remains recorded in section
+13.44.
+
+## 13.46 Comprehensive Optimization: Formal Metric Promotion Catalog
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.metric-promotion.catalog.v1
+```
+
+### 13.46.1 Capability
+
+Make scorecard vs diagnostic promotion an explicit, durable catalog of metric
+ids rather than only an implicit weight/evidence heuristic.
+
+### 13.46.2 Behavior
+
+- Added `METRIC_PROMOTION_CATALOG_ID` and
+  `METRIC_PROMOTION_CATALOG` in `src/harness/evaluation.ts`.
+- Known Werewolf/social metric ids now carry formal decisions:
+  - scorecard: `episode.completed_with_winner`, `team.reward`, `agent.reward`,
+    `agent.vote_accuracy`, `agent.deception_score`
+  - diagnostic: survival, influence, false-claim counts/rates, scoped exposure,
+    pressure follow, belief/reputation temporal association, and Brier
+    calibration metrics
+- `decideMetricPromotion()` consults the catalog when a metric does not set an
+  explicit `promotionClass`.
+- Scorecard eligibility still requires positive weight, finite value, and
+  evidence refs even for catalog scorecard ids.
+- `evaluationReport.summary.promotion` now embeds catalog snapshot fields:
+  `catalogId`, `catalogEntryCount`, `catalogScorecardMetricIds`,
+  `catalogDiagnosticMetricIds`, and `catalogBenchmarkOnlyMetricIds`.
+- React metric promotion panel surfaces `catalogId` and catalog entry count.
+
+### 13.46.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts -t "promotion|catalog" --reporter=dot
+npx vitest run tests/evaluation.test.ts tests/openaiClient.test.ts tests/providerAdapters.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused promotion/catalog tests 2/2; broader
+evaluation/provider suite 3 files / 47 tests passed; production build passed.
+
+## 13.47 Comprehensive Optimization: Social Metric Promotion Catalog Expansion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.metric-promotion.catalog.social.v1
+```
+
+### 13.47.1 Capability
+
+Expand the formal metric promotion catalog so social-state, social-dynamics,
+and temporal-association metrics have durable diagnostic decisions rather than
+only implicit zero-weight heuristics.
+
+### 13.47.2 Behavior
+
+- Exact catalog now covers all known `agent|team|episode|role.*` metric ids
+  emitted by `evaluator.ts` and `socialEvaluator.ts` (104 exact entries).
+- Added catalog rules for future-proofing:
+  - `prefix:agent.social.` -> diagnostic
+  - `includes:temporal_association` -> diagnostic
+  - `includes:temporal_evaluable` -> diagnostic
+- `metricPromotionCatalogEntry()` resolves exact ids first, then rules.
+- `evaluationReport.summary.promotion` now includes:
+  - `catalogRuleCount`
+  - `catalogRuleIds`
+- React metric promotion panel surfaces `catalogRules`.
+- No social/temporal metric is promoted into scorecard by this expansion.
+  Scorecard remains limited to the previously formalized outcome/skill set.
+
+### 13.47.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts -t "promotion|catalog" --reporter=dot
+npx vitest run tests/evaluation.test.ts tests/openaiClient.test.ts tests/providerAdapters.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused promotion/catalog tests 2/2; broader
+evaluation/provider suite 3 files / 47 tests passed; production build passed.
+Exact catalog coverage for known agent/team/episode/role metric ids: 104/104.
+
+## 13.48 Comprehensive Optimization: Parallel Joint Scheduler Opt-In Lock
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.joint-phase-parallel-opt-in.v1
+```
+
+### 13.48.1 Capability
+
+Make the production Werewolf joint-phase scheduler default an explicit shared
+constant and keep `parallel` opt-in only.
+
+### 13.48.2 Behavior
+
+- Added `DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER = "aec-batched-decision"`.
+- Adapter, server match summaries, and React cockpit defaults all use that
+  constant.
+- `createWerewolfJointPhaseSchedulerResolver()` defaults to the shared constant
+  and only returns `parallel` when callers explicitly pass it.
+- API still rejects `jointPhaseScheduler=parallel` when
+  `maxTransitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS`.
+- Regression tests cover:
+  - omitted `jointPhaseScheduler` on `POST /api/matches/run`
+  - default resolver/runtime kill-vote scheduler mode
+  - explicit `parallel` still works when requested
+
+### 13.48.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/werewolfAdapter.test.ts tests/serverPublicViewApi.test.ts -t "jointPhaseScheduler|opt-in|defaults jointPhase" --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused joint-phase tests 4/4; production build
+recorded with this slice.
+
+## 13.49 Comprehensive Optimization: First-Class Observation Metric Evidence
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.metric-evidence.observation.v1
+```
+
+### 13.49.1 Capability
+
+Make scoped observation evidence a first-class metric evidence artifact kind
+instead of remapping observation exposure refs onto `trace` with an
+`observation:` description prefix.
+
+### 13.49.2 Behavior
+
+- `HarnessMetricEvidenceRef.artifact` now includes `"observation"`.
+- Social dynamics, false-role-claim exposure, and pressure-follow evidence
+  mappers preserve:
+  - `artifact: "observation"`
+  - optional `traceId` for the decision/observation turn
+  - original observation description when present
+- Fallback non-message/non-trace exposure refs now also use
+  `artifact: "observation"` rather than `trace`.
+- Social-state evidence mappers accept `observation` without collapsing it into
+  `agent_state` or `trace`.
+- This preserves the distinction between:
+  - a decision trace
+  - a scoped observation that actually contained a message
+
+### 13.49.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts -t "exposure|false role|deception|social dynamics|pressure|social calibration" --reporter=dot
+npx vitest run tests/evaluation.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused exposure/deception/social-dynamics/calibration
+tests 10/10; full evaluation suite 30/30; production build passed.
+
+## 13.50 Comprehensive Optimization: Metric Evidence Comparison Rows
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.metric-evidence.v1
+```
+
+### 13.50.1 Capability
+
+Extend server-owned match comparison artifacts from aggregate summary counts to
+metric-level and evidence-ref-level divergence rows.
+
+### 13.50.2 Behavior
+
+- `MatchComparisonRow` now supports:
+  - `group: "summary" | "metric" | "metric_evidence"`
+  - optional `metricId` / `subjectId`
+  - optional `evidence` summary (`baselineRefs`, `candidateRefs`, kinds)
+- Summary rows now include:
+  - `scorecard_metrics`
+  - `diagnostic_metrics`
+  - `metrics_with_evidence`
+  - `metric_evidence_refs`
+- Metric-diff rows compare evaluation-report metrics by
+  `metricId + subjectId`.
+- Identical shared metrics with identical evidence are omitted so the matrix
+  stays focused on divergence.
+- Missing metrics are represented with `baseline: null` or `candidate: null`
+  and numeric deltas when values are numeric.
+- Evidence-kind changes produce separate `metric_evidence_kinds:*` rows.
+- Metric-diff section is bounded by `MATCH_COMPARISON_MAX_METRIC_ROWS = 64`.
+- React comparison table renders `group` and evidence summary columns.
+
+### 13.50.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts --reporter=dot
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts tests/evaluation.test.ts -t "compare|comparison|promotion" --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; match comparison tests 2/2; broader focused
+compare/promotion suite 4/4; production build passed.
+
+## 13.51 Comprehensive Optimization: Sharper Truth Evidence And Changed-First Comparison
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.evidence.postgame-truth-id.v1
+artifact.match-comparison.changed-first.v1
+```
+
+### 13.51.1 Capability
+
+1. Make postgame role-truth metric evidence refs more precise by attaching the
+   player id and, when available, the terminal `game.ended` event.
+2. Sort match-comparison rows so changed rows appear before unchanged summary
+   rows, improving research cockpit scanability.
+
+### 13.51.2 Behavior
+
+- Added `postgameRoleTruthEvidence(state, playerId)`:
+  - always emits a `state` evidence ref with stable description
+    `postgame role truth for <playerId>`
+  - attaches `id: playerId`
+  - prepends `game.ended` event evidence when present
+- Role-claim consistency, false-claim exposure, and pressure vote-follow paths
+  now use id-bearing postgame truth refs.
+- `stateEvidence()` accepts optional `{ id, description }` while preserving the
+  original description contract used by existing tests.
+- Match comparison rows are sorted by:
+  1. `changed` first
+  2. group order: summary → metric → metric_evidence
+  3. stable `id`
+
+### 13.51.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts tests/matchComparison.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; evaluation + comparison suites 32/32 then comparison
+2/2 after sort assertion; production build passed.
+
+## 13.52 Comprehensive Optimization: Comparison Matrix Group Filters
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.group-filter.v1
+```
+
+### 13.52.1 Capability
+
+Let the research cockpit filter match-comparison matrix rows by group and by
+changed-only status without inventing frontend comparison truth.
+
+### 13.52.2 Behavior
+
+- `CompareWorkspace` keeps the server-owned comparison artifact as authority.
+- Local UI filters only:
+  - group: `all | summary | metric | metric_evidence`
+  - changed-only toggle
+- Matrix header shows both:
+  - changed `changedRowCount/rowCount`
+  - currently shown `filteredRows.length/rows.length`
+- Filtering never recomputes deltas, evidence refs, or metric values.
+
+### 13.52.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/evaluation.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; evaluation + comparison suites 32/32; production
+build passed.
+
+## 13.53 Comprehensive Optimization: Vote Fallback Evidence And Comparison Export
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.evidence.vote-pressure-fallback.v1
+react.match-comparison.json-export.v1
+```
+
+### 13.53.1 Capability
+
+1. When event-level vote/pressure evidence is missing, metric evidence refs fall
+   back to concrete `state.votes` / `state.speeches` records with player ids and
+   day/target descriptors instead of opaque description-only state refs.
+2. Research cockpit can export the server-owned match-comparison artifact as a
+   local JSON download without inventing comparison truth.
+
+### 13.53.2 Behavior
+
+- `voteEvidenceForPlayer()` prefers `vote.cast` events; otherwise emits one
+  `state` ref per matching `state.votes` row with
+  `id = <playerId>:vote:d<day>:<n>`.
+- `speechEvidenceForPlayer()` prefers pressure `speech.submitted` events;
+  otherwise emits one `state` ref per pressure speech row with
+  `id = <playerId>:pressure:d<day>:<n>`.
+- `misdirectVoteEvidence()` prefers village-on-village `vote.cast` events;
+  otherwise emits per-record state refs with
+  `id = <voterId>:misdirect:d<day>:<n>`.
+- Compare matrix card exports the already-loaded comparison artifact via a
+  client-side JSON download. The artifact remains server-owned authority; the
+  download is a pure projection/export of that record.
+
+### 13.53.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts tests/matchComparison.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused fallback evidence test passed; evaluation +
+comparison suites and production build were revalidated in the same turn.
+
+## 13.54 Comprehensive Optimization: Empty Evidence Ids And Comparison Markdown
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.evidence.empty-fallback-id.v1
+artifact.match-comparison.markdown-export.v1
+```
+
+### 13.54.1 Capability
+
+1. Empty/no-record metric evidence fallbacks carry subject player ids where the
+   metric is agent-scoped, so zero-count diagnostics remain auditable.
+2. Match-comparison artifacts can be exported as Markdown from a pure harness
+   formatter, with the research cockpit offering both JSON and Markdown
+   downloads of the already-loaded server comparison artifact.
+
+### 13.54.2 Behavior
+
+- Empty false-role-claim exposure, pressure vote-follow, belief temporal, and
+  reputation temporal fallback refs now include `id: playerId` / `speakerId`
+  when available.
+- Calibration team-truth state evidence attaches `id: agent.playerId`.
+- `formatMatchComparisonMarkdown()` is a pure projection over
+  `MatchComparisonArtifact` (sources, changed rows, all rows). It does not
+  recompute deltas, invent hidden truth, or read private stores.
+- Cockpit compare matrix offers `导出 JSON` and `导出 Markdown` over the loaded
+  comparison artifact only.
+
+### 13.54.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts tests/matchComparison.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; evaluation + comparison suites 33/33; production
+build passed.
+
+## 13.55 Comprehensive Optimization: Server Comparison Format And Download
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.match-comparison.format-download.v1
+```
+
+### 13.55.1 Capability
+
+Serve the existing server-owned match-comparison artifact as JSON or Markdown,
+with optional Content-Disposition download headers, without inventing
+comparison truth on the client.
+
+### 13.55.2 Behavior
+
+- `GET /api/matches/:id/compare/:candidateId` accepts:
+  - `view=full|postgame-redacted|truth-redacted` (existing)
+  - `format=json|markdown|md` (default `json`)
+  - `download=1|true|yes|download` (optional attachment)
+- Markdown uses pure `formatMatchComparisonMarkdown()` over the already
+  redacted comparison artifact.
+- Unsupported formats return `400` with
+  `format must be "json" or "markdown"`.
+- Download filenames remain id-based:
+  `<baseline8>-vs-<candidate8>-comparison.json|.md`.
+- Ordinary JSON responses without `download` stay inline API payloads so the
+  research cockpit can continue consuming them directly.
+
+### 13.55.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/matchComparison.test.ts tests/evaluation.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 3 files / 48 tests passed; production build
+passed.
+
+## 13.56 Comprehensive Optimization: Cockpit Server-Backed Comparison Export
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.server-download.v1
+```
+
+### 13.56.1 Capability
+
+Research cockpit comparison export no longer serializes local React comparison
+state into download blobs. Export buttons fetch the same server-owned
+comparison route used by the matrix, with explicit `format` and `download`
+query parameters.
+
+### 13.56.2 Behavior
+
+- `handleDownloadComparison(format)` requires a loaded baseline/candidate and an
+  already-loaded comparison artifact identity context.
+- Download URL:
+  `/api/matches/:baselineId/compare/:candidateId?view=<artifactView>&format=json|markdown&download=1`
+- Busy states:
+  - `download-compare-json`
+  - `download-compare-md`
+- Local `formatMatchComparisonMarkdown` import was removed from `App.tsx`; the
+  formatter remains a harness/server projection utility.
+- Help text documents that both matrix load and export share the compare API.
+
+### 13.56.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/matchComparison.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 17 tests passed; production build
+passed.
+
+## 13.57 Comprehensive Optimization: Promotion-Aware Metric Comparison
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.promotion-class.v1
+evaluation.evidence.final-game-state-id.v1
+```
+
+### 13.57.1 Capability
+
+1. Match-comparison metric rows carry formal metric-promotion class metadata
+   (`scorecard` / `diagnostic` / `benchmark_only` / `missing`) and emit explicit
+   promotion-change rows when baseline and candidate classes diverge.
+2. Empty final-game-state evidence fallbacks attach match id plus phase/day/
+   winner descriptors instead of opaque description-only state refs.
+
+### 13.57.2 Behavior
+
+- `MatchComparisonRow.promotion` is optional metadata derived from
+  `decideMetricPromotion()` on each side.
+- Metric row emission skip rule now also considers promotion-class changes, so
+  same-value metrics with class divergence remain visible.
+- Promotion-change rows use id `metric_promotion:<metricKey>` and group
+  `metric`.
+- Markdown export and cockpit table surfaces show `baseline→candidate`
+  promotion classes.
+- `finalEventEvidence()` empty fallback uses
+  `stateEvidence("final game state", { id: state.id, description: phase/day/winner })`.
+
+### 13.57.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/evaluation.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; evaluation + comparison suites 33/33 then comparison
+2/2 after promotion assertions; production build passed.
+
+## 13.58 Comprehensive Optimization: Promotion Filter And Gap Summary
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.promotion-filter.v1
+artifact.match-comparison.scorecard-diagnostic-gap.v1
+```
+
+### 13.58.1 Capability
+
+1. Comparison matrix can filter rows by promotion class presence or promotion
+   class change, without inventing frontend promotion authority.
+2. Comparison summary includes a scorecard-vs-diagnostic gap count so research
+   scans can see how scorecard density diverges between runs.
+
+### 13.58.2 Behavior
+
+- Summary row `scorecard_to_diagnostic_gap` =
+  `scorecardMetricCount - diagnosticMetricCount` for each side.
+- Comparison fixtures now use `summarizeMetrics(metrics)` so promotion summary
+  counts reflect real metric weights/evidence rather than empty defaults.
+- Cockpit matrix adds a promotion filter:
+  - all
+  - promotion changed
+  - contains scorecard
+  - contains diagnostic
+  - contains missing
+- Filtering remains a pure UI projection over server comparison rows.
+
+### 13.58.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/evaluation.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 3 files / 48 tests passed; production build passed.
+
+## 13.59 Comprehensive Optimization: Promotion Change Summary Counts
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.promotion-summary.v1
+```
+
+### 13.59.1 Capability
+
+Match-comparison artifacts expose promotion-change density in the top-level
+summary so research tooling can scan scorecard/diagnostic divergence without
+scanning every metric row.
+
+### 13.59.2 Behavior
+
+- `MatchComparisonArtifact.summary` now includes:
+  - `promotionChangedMetricCount`
+  - `scorecardMetricDelta`
+  - `diagnosticMetricDelta`
+- Markdown export header includes those fields.
+- Cockpit matrix header tags show:
+  - `promotionΔ`
+  - `scorecardΔ`
+  - `diagnosticΔ`
+- Comparison inspector includes the same summary fields.
+
+### 13.59.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 17 tests passed; production build passed.
+
+## 13.60 Comprehensive Optimization: Comparison Row Inspector Promotion Evidence
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.row-inspector-promotion.v1
+evaluation.evidence.misdirect-empty-id.v1
+```
+
+### 13.60.1 Capability
+
+1. Comparison row inspector surfaces group, metric/subject ids, promotion class
+   transition, and evidence ref/kind summaries for research drill-down.
+2. Empty village-on-village misdirect fallback evidence carries the match id.
+
+### 13.60.2 Behavior
+
+- `inspectorFromComparisonRow()` now includes:
+  - group
+  - metricId / subjectId
+  - promotion `baseline→candidate`
+  - evidence refs and kinds
+- `misdirectVoteEvidence()` empty fallback uses
+  `stateEvidence("village-on-village misdirect votes", { id: state.id })`.
+
+### 13.60.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/evaluation.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; evaluation + comparison suites 33/33; production
+build passed.
+
+## 13.61 Comprehensive Optimization: Clickable Comparison Summary Filters
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.clickable-summary-filters.v1
+```
+
+### 13.61.1 Capability
+
+Comparison matrix header tags act as one-click research filters over the loaded
+server-owned comparison artifact without recomputing metric truth in React.
+
+### 13.61.2 Behavior
+
+- `changed` tag toggles `changedOnly`.
+- `promotionΔ` tag toggles promotion filter `changed`.
+- `scorecardΔ` tag toggles promotion filter `scorecard`.
+- `diagnosticΔ` tag toggles promotion filter `diagnostic`.
+- Active filter state is reflected by tag color; clicking again restores `all` /
+  full display for that control.
+- Filtering remains a pure UI projection over comparison rows already returned
+  by the compare API.
+
+### 13.61.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build passed.
+
+## 13.62 Comprehensive Optimization: Benchmark-Only Comparison Support
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.benchmark-only.v1
+react.match-comparison.benchmark-only-filter.v1
+```
+
+### 13.62.1 Capability
+
+Match comparison and cockpit filters treat `benchmark_only` as a first-class
+promotion class beside scorecard/diagnostic/missing, without inventing frontend
+promotion authority.
+
+### 13.62.2 Behavior
+
+- `countPromotionClass()` counts metric rows by
+  `decideMetricPromotion(...).promotionClass`.
+- Summary row `benchmark_only_metrics` compares benchmark-only metric counts.
+- `MatchComparisonArtifact.summary.benchmarkOnlyMetricDelta` records candidate
+  minus baseline benchmark-only density.
+- Markdown export header includes `benchmarkOnlyDelta`.
+- Cockpit promotion filter includes `含 benchmark_only`.
+- Clickable `benchmarkΔ` header tag toggles the `benchmark_only` filter.
+- Comparison inspector surfaces `benchmark_only metric delta`.
+
+### 13.62.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 17 tests passed; production build passed.
+
+## 13.63 Comprehensive Optimization: Metric Comparison Truncation Stats
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.metric-truncation-stats.v1
+```
+
+### 13.63.1 Capability
+
+Match-comparison artifacts report how many metric keys were compared, emitted,
+and truncated under `MATCH_COMPARISON_MAX_METRIC_ROWS`, so research tooling can
+detect incomplete metric-diff coverage.
+
+### 13.63.2 Behavior
+
+- `buildMetricEvidenceRows()` now returns:
+  - `metricKeysCompared`
+  - `metricKeysEmitted`
+  - `metricKeysTruncated`
+- Truncation is counted by unique metric keys after the emit cap, not by raw
+  row objects (one key may emit value/promotion/evidence rows).
+- `MatchComparisonArtifact.summary` includes those fields plus `metricRowsMax`.
+- Markdown export header surfaces the same truncation stats.
+- Cockpit matrix header shows
+  `metric keys emitted/compared · truncated N` when truncation occurs.
+- Comparison inspector includes the same metric-key coverage summary.
+
+### 13.63.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 17 tests passed; production build passed.
+
+## 13.64 Comprehensive Optimization: Metric Truncation Regression And Summary Rows
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.metric-truncation-regression.v1
+```
+
+### 13.64.1 Capability
+
+Prove and surface metric-key truncation when changed metric keys exceed
+`MATCH_COMPARISON_MAX_METRIC_ROWS`, both as summary fields and as comparison
+matrix summary rows.
+
+### 13.64.2 Behavior
+
+- Summary rows now include:
+  - `metric_keys_compared`
+  - `metric_keys_emitted`
+  - `metric_keys_truncated`
+  - `metric_rows_max`
+- These rows use the same values on baseline/candidate because truncation is a
+  comparison-artifact property, not a per-run property.
+- Focused regression covers
+  `evaluationMetricCount = MATCH_COMPARISON_MAX_METRIC_ROWS + 8` and asserts:
+  - `metricKeysEmitted === MATCH_COMPARISON_MAX_METRIC_ROWS`
+  - `metricKeysTruncated > 0`
+  - `metricKeysCompared - metricKeysEmitted === metricKeysTruncated`
+  - value-level `metric:` rows do not exceed the emit cap
+
+### 13.64.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 18 tests passed; production build passed.
+
+## 13.65 Comprehensive Optimization: Scorecard-First Metric Truncation
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.scorecard-first-truncation.v1
+```
+
+### 13.65.1 Capability
+
+When metric-diff emission hits `MATCH_COMPARISON_MAX_METRIC_ROWS`, prefer
+scorecard metrics over benchmark_only/diagnostic/missing keys so research
+comparisons retain reward-relevant divergences under truncation pressure.
+
+### 13.65.2 Behavior
+
+- `sortMetricKeysForEmission()` orders keys by:
+  1. promotion priority: scorecard → benchmark_only → diagnostic → missing
+  2. changed value first
+  3. stable key id
+- Truncation regression renames a late diagnostic metric to
+  `zzz.scorecard.metric` with positive weight + evidence and asserts it remains
+  emitted after the cap is hit.
+- Unchanged shared keys remain skipped before the emit cap and are neither
+  counted as emitted nor truncated.
+
+### 13.65.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; comparison suite 3/3; production build passed.
+
+## 13.66 Comprehensive Optimization: Scorecard Truncation Stats
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.scorecard-truncation-stats.v1
+```
+
+### 13.66.1 Capability
+
+Track and expose how many scorecard metric keys were compared, emitted, and
+truncated under the metric-row emit cap, so research tooling can prove that
+scorecard-first emission is protecting reward-relevant divergences.
+
+### 13.66.2 Behavior
+
+- Metric emission now classifies emit-eligible keys before the cap:
+  unchanged shared keys remain skipped and do not count as truncated.
+- Summary fields:
+  - `scorecardMetricKeysCompared`
+  - `scorecardMetricKeysEmitted`
+  - `scorecardMetricKeysTruncated`
+- Summary rows:
+  - `scorecard_metric_keys_compared`
+  - `scorecard_metric_keys_emitted`
+  - `scorecard_metric_keys_truncated`
+- Markdown export header includes scorecard key coverage.
+- Cockpit matrix shows `scorecard keys emitted/compared · truncated N`.
+- Comparison inspector surfaces the same scorecard-key coverage summary.
+- Truncation regression asserts scorecard keys are fully emitted
+  (`scorecardMetricKeysTruncated === 0`) while overall metric keys remain
+  truncated.
+
+### 13.66.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 18 tests passed; production build passed.
+
+## 13.67 Comprehensive Optimization: Promotion-Class Truncation Stats
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.promotion-class-truncation-stats.v1
+```
+
+### 13.67.1 Capability
+
+Track and expose metric-key coverage under the emit cap for every promotion
+class used by comparison emission ordering: scorecard, diagnostic, and
+benchmark_only. This proves scorecard-first emission and makes diagnostic /
+benchmark truncation visible without inventing frontend comparison truth.
+
+### 13.67.2 Behavior
+
+- Emit-eligible keys continue to skip unchanged shared metrics before the cap.
+- Summary fields now include:
+  - `diagnosticMetricKeysCompared|Emitted|Truncated`
+  - `benchmarkOnlyMetricKeysCompared|Emitted|Truncated`
+- Summary rows:
+  - `diagnostic_metric_keys_compared|emitted|truncated`
+  - `benchmark_only_metric_keys_compared|emitted|truncated`
+- Markdown export header includes diagnostic/benchmark key coverage.
+- Cockpit matrix tags show diagnostic and benchmark keys with truncation counts.
+- Comparison inspector surfaces the same promotion-class coverage fields.
+- Truncation regression asserts scorecard keys remain fully emitted while
+  diagnostic keys are truncated under the cap.
+
+### 13.67.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 18 tests passed; production build passed.
+
+## 13.68 Comprehensive Optimization: Evidence-Ref Identity Set Diffs
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.evidence-identity-set-diffs.v1
+```
+
+### 13.68.1 Capability
+
+Compare metric evidence at the structural identity-set level, not only by
+counts and artifact kinds. Two metrics with the same evidence count/kind but
+different message/trace/state identities now produce an auditable comparison
+row without inventing frontend truth or leaking private description text.
+
+### 13.68.2 Behavior
+
+- `MatchComparisonRow.evidence` now includes:
+  - `baselineIds` / `candidateIds`
+  - `onlyBaselineIds` / `onlyCandidateIds`
+- Evidence identity is structural only:
+  `artifact`, optional `id`, optional `seq`, optional `traceId`.
+  Descriptions are intentionally excluded so private narrative/sentinels cannot
+  leak through comparison artifacts.
+- `evidenceChanged` now treats identity-set deltas as first-class divergence.
+- When identity sets diverge, comparison emits
+  `metric_evidence_ids:<metricKey>` rows in the `metric_evidence` group.
+- Markdown changed-rows evidence column shows `Δids onlyBaseline→onlyCandidate`.
+- Cockpit matrix evidence column shows the same `Δids` summary.
+- Comparison row inspector surfaces full baseline/candidate id sets and
+  only-baseline / only-candidate identity lists.
+- Shared-metric fixtures use run-stable evidence identities so unchanged shared
+  metrics remain omitted from the metric-diff section.
+
+### 13.68.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 19 tests passed; production build passed.
+
+## 13.69 Comprehensive Optimization: Evidence Identity Summary Stats
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.evidence-identity-summary-stats.v1
+```
+
+### 13.69.1 Capability
+
+Expose aggregate evidence-ref identity-set divergence density on the
+server-owned match-comparison artifact so research tooling can scan
+identity-level evidence drift without opening every metric row.
+
+### 13.69.2 Behavior
+
+- Summary fields:
+  - `evidenceIdentityChangedMetricCount`
+  - `evidenceIdentityOnlyBaselineRefCount`
+  - `evidenceIdentityOnlyCandidateRefCount`
+- Summary rows:
+  - `evidence_identity_changed_metrics`
+  - `evidence_identity_only_baseline_refs`
+  - `evidence_identity_only_candidate_refs`
+- Counts are derived only from emit-eligible metric keys that actually emit
+  `metric_evidence_ids:*` rows (post-cap).
+- Markdown header includes the three identity summary counts.
+- Cockpit matrix shows `evidence idΔ N · onlyBaseline→onlyCandidate`.
+- Comparison inspector surfaces the same aggregate fields.
+- Identity-set regression asserts summary counts `1 / 1 / 1` for a single
+  shared metric whose message evidence id diverges while counts/kinds match.
+
+### 13.69.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 19 tests passed; production build passed.
+
+## 13.70 Comprehensive Optimization: Evidence Identity Matrix Filter
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.evidence-identity-filter.v1
+```
+
+### 13.70.1 Capability
+
+Filter server-owned match-comparison matrix rows by evidence-ref identity-set
+divergence through a pure harness helper, so the research cockpit can focus on
+identity-level evidence drift without recomputing comparison truth in React.
+
+### 13.70.2 Behavior
+
+- `filterMatchComparisonRows()` is exported from
+  `src/harness/matchComparison.ts` with:
+  - `group`
+  - `changedOnly`
+  - `promotion`
+  - `evidenceIdentity: "all" | "changed"`
+- `evidenceIdentity: "changed"` keeps only rows whose evidence payload has
+  non-empty `onlyBaselineIds` or `onlyCandidateIds`.
+- `CompareWorkspace` uses the pure helper instead of inline filter logic.
+- Cockpit adds:
+  - clickable `evidence idΔ` summary tag toggle
+  - `Select` control for evidence identity filtering
+- Filter semantics remain a pure projection over already-built comparison rows.
+  React still does not invent metric values, promotion classes, or evidence
+  identities.
+
+### 13.70.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 20 tests passed; production build passed.
+
+## 13.71 Comprehensive Optimization: Filtered Comparison Projection Export
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.filtered-projection-export.v1
+```
+
+### 13.71.1 Capability
+
+Export the current research-cockpit comparison matrix filter as a pure
+projection over a server-owned match-comparison artifact. The filtered view is
+auditable, versioned, and does not recompute metric values, promotion classes,
+or evidence identities in React.
+
+### 13.71.2 Behavior
+
+- `projectFilteredMatchComparison()` builds:
+  - `artifactVersion: harness.match-comparison.filtered.v1`
+  - `kind: match-comparison-filtered`
+  - normalized filter (`group`, `changedOnly`, `promotion`, `evidenceIdentity`)
+  - source comparison identity/summary
+  - filtered rows
+  - filtered-view summary counts, including evidence-identity density over the
+    filtered `metric_evidence_ids:*` rows only
+- `formatFilteredMatchComparisonMarkdown()` renders the filtered projection
+  without inventing comparison truth.
+- Full comparison export remains server-backed:
+  `GET /api/matches/:id/compare/:candidateId?format=json|markdown&download=1`
+- Filtered export is an explicit local pure projection of the already-loaded
+  server comparison artifact for the current cockpit filters.
+- Cockpit buttons:
+  - `导出 JSON` / `导出 Markdown` → full server comparison
+  - `导出过滤 JSON` / `导出过滤 Markdown` → current filtered projection
+
+### 13.71.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 21 tests passed; production build passed.
+
+## 13.72 Comprehensive Optimization: Filtered Comparison Density Cockpit
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.filtered-density-cockpit.v1
+```
+
+### 13.72.1 Capability
+
+Surface the current filtered comparison-view density in the research cockpit
+from the pure filtered projection, not from ad-hoc React recomputation of
+metric truth.
+
+### 13.72.2 Behavior
+
+- `CompareWorkspace` builds one `projectFilteredMatchComparison()` projection
+  for the active filter and reuses it for:
+  - matrix `dataSource`
+  - filtered export JSON/Markdown
+  - filtered density tags
+- Matrix tags now show:
+  - `shown filteredRows/sourceRows`
+  - `filtered changed filteredChanged/sourceChanged`
+  - `filtered evidence idΔ count · onlyBaseline→onlyCandidate`
+  - active filter fingerprint `group/promotion/evidenceIdentity[/changedOnly]`
+- Density remains a pure projection over the already-loaded server comparison
+  artifact. React still does not invent metric values, promotion classes, or
+  evidence identities.
+
+### 13.72.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 21 tests passed; production build passed.
+
+## 13.73 Comprehensive Optimization: Server Filtered Comparison Projection API
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.match-comparison.filtered-projection-api.v1
+```
+
+### 13.73.1 Capability
+
+Serve filtered match-comparison projections from the existing server-owned
+compare route so research exports of the current matrix filter remain
+server-authoritative pure projections, not browser-invented comparison truth.
+
+### 13.73.2 Behavior
+
+- `GET /api/matches/:id/compare/:candidateId` still builds the full comparison
+  from projected match artifacts.
+- Optional filter query params:
+  - `filtered=1|true|yes`
+  - `group=all|summary|metric|metric_evidence`
+  - `changedOnly=0|1|true|false|yes|no`
+  - `promotion=all|changed|scorecard|diagnostic|benchmark_only|missing`
+  - `evidenceIdentity=all|changed`
+- If any non-default filter field is present, the route returns a filtered
+  projection even without `filtered=1`.
+- Filtered payload uses:
+  - `projectFilteredMatchComparison()`
+  - `formatFilteredMatchComparisonMarkdown()`
+  - `artifactVersion: harness.match-comparison.filtered.v1`
+  - `kind: match-comparison-filtered`
+- Download filenames use `-comparison-filtered.json|.md`.
+- Full comparison export path remains unchanged when filters are default/absent.
+- Cockpit `导出过滤 JSON/Markdown` now fetches the server filtered projection
+  with the active matrix filter params.
+
+### 13.73.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 21 tests passed; production build passed.
+
+## 13.74 Comprehensive Optimization: Parent-Owned Filtered Export Status
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.parent-filtered-export-status.v1
+```
+
+### 13.74.1 Capability
+
+Route filtered comparison exports through the parent cockpit busy/status
+channel so research operators get the same authoritative success/failure
+feedback as full comparison downloads.
+
+### 13.74.2 Behavior
+
+- Parent `handleDownloadFilteredComparison(format, filter)` owns:
+  - busy keys `download-compare-filtered-json` / `download-compare-filtered-md`
+  - server filtered compare fetch with active matrix filter params
+  - action-status success/failure messaging
+- `CompareWorkspace` no longer performs a fail-soft local filtered download.
+  It only passes the active filter into the parent callback.
+- Full comparison export remains parent-owned and server-backed.
+- Filtered export remains a pure projection of the server comparison artifact;
+  React still does not invent comparison truth.
+
+### 13.74.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 21 tests passed; production build passed.
+
+## 13.75 Comprehensive Optimization: Filtered Promotion Density Tag
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.filtered-promotion-density.v1
+```
+
+### 13.75.1 Capability
+
+Show the current filtered comparison view's promotion-change density from the
+pure filtered projection summary, so operators can see how many
+`metric_promotion:*` rows remain after matrix filters without recomputing
+comparison truth in React.
+
+### 13.75.2 Behavior
+
+- Matrix extra tags now include:
+  - `filtered promotionΔ N`
+- `N` comes from
+  `projectFilteredMatchComparison(...).summary.promotionChangedMetricCount`.
+- The tag remains a pure projection over the already-loaded server comparison
+  artifact and active cockpit filters.
+
+### 13.75.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 21 tests passed; production build passed.
+
+## 13.76 Comprehensive Optimization: Clickable Filtered Density Tags
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.clickable-filtered-density-tags.v1
+```
+
+### 13.76.1 Capability
+
+Make filtered-view density tags act as pure UI shortcuts that toggle the
+corresponding matrix filters, while still deriving density numbers only from
+the pure filtered comparison projection.
+
+### 13.76.2 Behavior
+
+- Matrix extra tags now include:
+  - `filtered changed A/B` (click toggles `changedOnly`)
+  - `filtered numericΔ N`
+  - `filtered promotionΔ N` (click toggles promotion=`changed`)
+  - `filtered evidence idΔ N · onlyBaseline→onlyCandidate`
+    (click toggles evidenceIdentity=`changed`)
+- Density values continue to come from
+  `projectFilteredMatchComparison(...).summary`.
+- Clicking a density tag only mutates local filter state. React still does not
+  invent metric values, promotion classes, or evidence identities.
+
+### 13.76.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 21 tests passed; production build passed.
+
+## 13.77 Comprehensive Optimization: Filtered Projection Inspector And Reset
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.filtered-projection-inspector-reset.v1
+```
+
+### 13.77.1 Capability
+
+Inspect the current pure filtered comparison projection from the research
+cockpit and reset matrix filters without inventing comparison truth in React.
+
+### 13.77.2 Behavior
+
+- `inspectorFromFilteredComparison()` exposes:
+  - source comparison id
+  - baseline/candidate ids
+  - active filter fingerprint
+  - filtered/source row and changed counts
+  - numeric/promotion/evidence-identity density
+  - full filtered projection JSON
+- Matrix controls:
+  - `shown A/B` density tag opens the filtered-projection inspector
+  - `重置过滤` clears group/promotion/evidenceIdentity/changedOnly
+  - `检查过滤投影` opens the same pure projection inspector
+- Density and inspector payloads remain pure projections over the already-loaded
+  server comparison artifact.
+
+### 13.77.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 21 tests passed; production build passed.
+
+## 13.78 Comprehensive Optimization: Numeric Delta Matrix Filter
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.numeric-delta-filter.v1
+```
+
+### 13.78.1 Capability
+
+Filter server-owned match-comparison matrix rows by numeric-delta presence
+through the pure filter/projection path, so research tooling can focus on rows
+with concrete numeric deltas without inventing comparison truth in React.
+
+### 13.78.2 Behavior
+
+- `MatchComparisonRowFilter.numericDelta: "all" | "changed"`
+- `filterMatchComparisonRows()` keeps only rows with `delta !== undefined`
+  when `numericDelta="changed"`.
+- Filtered projections, markdown fingerprints, server compare query params, and
+  cockpit export/status all carry `numericDelta`.
+- Cockpit surfaces:
+  - clickable `filtered numericΔ N` density tag toggle
+  - `Select` control for numeric-delta filtering
+- Server rejects invalid `numericDelta` values with HTTP 400.
+
+### 13.78.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 21 tests passed; production build passed.
+
+## 13.79 Comprehensive Optimization: Filtered Group Density Stats
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+artifact.match-comparison.filtered-group-density.v1
+```
+
+### 13.79.1 Capability
+
+Expose group-level density for the current pure filtered comparison projection,
+so research tooling can see how many summary/metric/metric_evidence rows remain
+after matrix filters without inventing comparison truth.
+
+### 13.79.2 Behavior
+
+- Filtered projection summary now includes:
+  - `summaryRowCount`
+  - `metricRowCount`
+  - `metricEvidenceRowCount`
+- Markdown filtered summary includes the same group density fields.
+- Cockpit matrix shows `groups S#/M#/E#` from the pure filtered projection.
+- Filtered-projection inspector exposes a `groups` field with the same counts.
+
+### 13.79.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 21 tests passed; production build passed.
+
+## 13.80 Comprehensive Optimization: Clickable Group Density Tags
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.clickable-group-density-tags.v1
+```
+
+### 13.80.1 Capability
+
+Make filtered group density tags act as pure UI shortcuts that toggle the
+matrix group filter among `summary`, `metric`, and `metric_evidence`, while
+still deriving density counts only from the pure filtered comparison projection.
+
+### 13.80.2 Behavior
+
+- Matrix extra tags now include separate clickable group density chips:
+  - `S#` toggles `group=summary`
+  - `M#` toggles `group=metric`
+  - `E#` toggles `group=metric_evidence`
+- Active group filter highlights the corresponding chip.
+- Density values continue to come from
+  `projectFilteredMatchComparison(...).summary.summaryRowCount|metricRowCount|metricEvidenceRowCount`.
+- Clicking a group density tag only mutates local filter state. React still does
+  not invent metric values, promotion classes, or evidence identities.
+
+### 13.80.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 21 tests passed; production build passed.
+
+## 13.81 Comprehensive Optimization: Comparison Filter URL Deep Links
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.filter-url-deep-links.v1
+```
+
+### 13.81.1 Capability
+
+Persist and restore comparison matrix filter state through pure URL query
+params, so research deep links can reproduce the same filtered projection
+without inventing comparison truth in React.
+
+### 13.81.2 Behavior
+
+- Pure helpers in `src/harness/matchComparison.ts`:
+  - `defaultMatchComparisonRowFilter()`
+  - `parseMatchComparisonRowFilterFromSearchParams()`
+  - `applyMatchComparisonRowFilterToSearchParams()`
+- Query params:
+  - `compareGroup`
+  - `compareChangedOnly`
+  - `comparePromotion`
+  - `compareEvidenceIdentity`
+  - `compareNumericDelta`
+- Invalid values fall back to defaults instead of inventing filter truth.
+- Default filters omit themselves from the URL.
+- `CompareWorkspace` bootstraps filter state from `window.location.search` and
+  syncs subsequent filter changes with `history.replaceState`.
+- URL sync only mutates local filter state and the browser location. Metric
+  values, promotion classes, and evidence identities remain server-owned
+  comparison truth.
+
+### 13.81.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 23 tests passed; production build passed.
+
+## 13.82 Comprehensive Optimization: Copy Filter Deep Link And Workspace URL
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.copy-filter-deep-link.v1
+```
+
+### 13.82.1 Capability
+
+Let researchers copy a pure comparison-filter deep link that also targets the
+compare workspace, and restore workspace selection from URL query params without
+inventing comparison truth in React.
+
+### 13.82.2 Behavior
+
+- Pure helper `buildMatchComparisonFilterDeepLink()` composes:
+  - current origin/path/hash
+  - active comparison filter params
+  - `workspace=compare`
+  - removal of legacy `tab`
+- Cockpit `CompareWorkspace` exposes `复制过滤深链` and writes the deep link to
+  the clipboard.
+- App bootstrap accepts `workspace` (or legacy `tab`) query values for known
+  workspaces and syncs subsequent workspace changes into the URL with
+  `history.replaceState`.
+- Deep links only restore filter/workspace selection. Metric values, promotion
+  classes, evidence identities, winners, and private evidence remain
+  server/artifact authority.
+
+### 13.82.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 24 tests passed; production build passed.
+
+## 13.83 Comprehensive Optimization: Baseline And Candidate Deep Link Restore
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.baseline-candidate-deep-link.v1
+```
+
+### 13.83.1 Capability
+
+Persist and restore baseline/candidate match identities inside comparison filter
+deep links, so researchers can reopen the same compare context from a pure URL
+without inventing comparison truth in React.
+
+### 13.83.2 Behavior
+
+- Pure helpers:
+  - `buildMatchComparisonFilterDeepLink()` may include `compareBaseline` and
+    `compareCandidate`
+  - `parseMatchComparisonDeepLinkSelection()` reads those ids and strips hash
+    fragments before parsing
+- Cockpit copy action includes current baseline/candidate ids when available.
+- Bootstrap prefers deep-link baseline/candidate ids:
+  - loads the preferred baseline artifact when present
+  - restores candidate selection
+  - auto-loads the server comparison route when both ids are available
+  - switches workspace to `compare` after a successful restore
+- Deep-link restore still only selects server-owned artifacts/comparisons. It
+  does not invent winners, private evidence, metric values, or promotion classes.
+
+### 13.83.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 24 tests passed; production build passed.
+
+## 13.84 Comprehensive Optimization: Live Baseline Candidate URL Sync
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.live-baseline-candidate-url-sync.v1
+```
+
+### 13.84.1 Capability
+
+Keep the browser location synchronized with the active comparison filter and
+baseline/candidate selection while the researcher is inside the compare
+workspace, so a copied or refreshed URL remains a pure deep link.
+
+### 13.84.2 Behavior
+
+- `CompareWorkspace` URL sync now writes:
+  - active filter params through
+    `applyMatchComparisonRowFilterToSearchParams()`
+  - `compareBaseline` from the loaded baseline artifact identity
+  - `compareCandidate` from the selected candidate id
+  - `workspace=compare`
+- Default filter values continue to omit themselves from the URL.
+- Live URL mutation uses `history.replaceState` only. It does not invent metric
+  values, promotion classes, evidence identities, winners, or private evidence.
+- Pure deep-link builder coverage asserts that baseline/candidate ids survive
+  filter rebuilds from live search state.
+
+### 13.84.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 25 tests passed; production build passed.
+
+## 13.85 Comprehensive Optimization: Compare View Deep Link Restore
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.compare-view-deep-link.v1
+```
+
+### 13.85.1 Capability
+
+Persist and restore the comparison artifact projection mode through pure deep
+links so researchers reopen the same `postgame-redacted` or `truth-redacted`
+compare context without inventing projection truth in React.
+
+### 13.85.2 Behavior
+
+- Pure helpers:
+  - `buildMatchComparisonFilterDeepLink()` may include `compareView`
+  - default `postgame-redacted` omits itself from the URL
+  - `parseMatchComparisonDeepLinkSelection()` returns optional `view`
+- Cockpit:
+  - bootstraps `artifactView` from deep-link `compareView`
+  - restores baseline/candidate comparison loads with the preferred view
+  - syncs live compare URL with `compareView` when non-default
+  - includes `compareView` when copying a filter deep link
+- Deep-link restore still only selects server-owned artifact projections and
+  comparison responses. React does not invent winners, private evidence, metric
+  values, or promotion classes.
+
+### 13.85.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 25 tests passed; production build passed.
+
+## 13.86 Comprehensive Optimization: Artifact View Comparison Reload
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.artifact-view-reload.v1
+```
+
+### 13.86.1 Capability
+
+When the cockpit projection mode changes, reload both the baseline artifact and
+the currently selected comparison pair under the same server-owned view so the
+compare matrix never silently mixes projections.
+
+### 13.86.2 Behavior
+
+- Shared helper `loadComparisonPair()` loads candidate artifact + comparison
+  through the existing server routes for a given `view`.
+- `handleArtifactViewChange()`:
+  - reloads the selected baseline artifact with the new view
+  - preserves the selected candidate id
+  - reloads the comparison pair under the same view when a candidate is set
+- Deep-link restore and manual "加载对比工件" both reuse `loadComparisonPair()`.
+- React still only selects server projections; it does not invent comparison
+  truth when the projection mode changes.
+
+### 13.86.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 25 tests passed; production build passed.
+
+## 13.87 Comprehensive Optimization: Pending Comparison Reload Banner
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.pending-reload-banner.v1
+```
+
+### 13.87.1 Capability
+
+Surface an explicit cockpit state when a candidate run is selected but the
+current server-owned comparison artifact is missing or belongs to a different
+candidate, so researchers do not mistake stale or empty matrix data for a
+loaded comparison.
+
+### 13.87.2 Behavior
+
+- `CompareWorkspace` computes `pendingComparison` when:
+  - a candidate id is selected, and
+  - no comparison is loaded, or the loaded comparison candidate identity does
+    not match the selected candidate id.
+- Pending state shows:
+  - primary button label `加载/重载对比工件`
+  - Ant Design info banner with candidate id / view context
+  - one-click `立即加载` action that reuses the existing server comparison load
+    path
+- React still only selects and displays server comparison responses. The banner
+  does not invent comparison rows, metric deltas, or private evidence.
+
+### 13.87.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 25 tests passed; production build passed.
+
+## 13.88 Comprehensive Optimization: Baseline And View Pending Comparison Checks
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.pending-baseline-view-checks.v1
+```
+
+### 13.88.1 Capability
+
+Treat a comparison as pending not only when the candidate is missing/mismatched,
+but also when the loaded comparison baseline identity or projection view no
+longer matches the current cockpit selection.
+
+### 13.88.2 Behavior
+
+- `pendingComparison` is true when a candidate is selected and any of these fail:
+  - comparison is missing
+  - comparison candidate id mismatches selected candidate
+  - comparison baseline id mismatches current baseline artifact
+  - comparison `view` mismatches current `artifactView`
+- Banner reason text distinguishes the mismatch cause.
+- Banner still only prompts a server-owned reload; React does not invent
+  comparison rows or private evidence.
+
+### 13.88.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 25 tests passed; production build passed.
+
+## 13.89 Comprehensive Optimization: Candidate Change Auto-Reload
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.candidate-change-auto-reload.v1
+```
+
+### 13.89.1 Capability
+
+Automatically reload the server-owned comparison pair when the researcher
+selects a new candidate run, so the compare matrix does not remain pending or
+stale after a candidate switch.
+
+### 13.89.2 Behavior
+
+- `handleCandidateChange()` now:
+  - updates the selected candidate id
+  - clears the previous candidate artifact and comparison
+  - if a baseline is available and the candidate differs from the baseline,
+    immediately calls `loadComparisonPair()` under the current `artifactView`
+- Manual load remains available for recovery and for cases without a baseline.
+- Auto-reload still only consumes server comparison responses; React does not
+  invent comparison rows, metric deltas, or private evidence.
+
+### 13.89.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 25 tests passed; production build passed.
+
+## 13.90 Comprehensive Optimization: Comparison Load Race Guard
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.load-race-guard.v1
+```
+
+### 13.90.1 Capability
+
+Prevent stale comparison responses from overwriting newer candidate/view loads
+when researchers switch candidates or projection mode quickly.
+
+### 13.90.2 Behavior
+
+- `comparisonLoadSeqRef` tracks the latest comparison request sequence.
+- `loadComparisonPair()`:
+  - increments the sequence for every request
+  - ignores success/error commits when a newer request has already started
+  - clears `busy` only for the latest request
+- This keeps auto-reload, deep-link restore, artifact-view reload, and manual
+  load on the same fail-closed race boundary.
+- React still only commits server-owned comparison responses; it never invents
+  comparison truth from stale network results.
+
+### 13.90.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 25 tests passed; production build passed.
+
+## 13.91 Comprehensive Optimization: Pending Comparison Export Guards
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.pending-export-guards.v1
+```
+
+### 13.91.1 Capability
+
+Block comparison and filtered-comparison exports while the loaded comparison is
+pending relative to the current baseline/candidate/view selection, so the
+cockpit never downloads a stale server comparison under a mismatched UI
+selection.
+
+### 13.91.2 Behavior
+
+- Pure helper `isMatchComparisonSelectionCurrent()` decides whether a loaded
+  comparison still matches:
+  - baseline id (`matchId` or `runId`)
+  - candidate id (`matchId` or `runId`)
+  - optional projection `view`
+- `pendingComparison` now derives from that helper.
+- Export handlers for full and filtered comparison refuse the download when the
+  loaded comparison is not current.
+- Export buttons are disabled while `pendingComparison` is true.
+- React still only exports server-owned comparison responses; it does not invent
+  comparison truth to satisfy an export click.
+
+### 13.91.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 26 tests passed; production build passed.
+
+## 13.92 Comprehensive Optimization: Baseline Change Auto-Reload
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.baseline-change-auto-reload.v1
+```
+
+### 13.92.1 Capability
+
+Automatically reload the server-owned comparison pair after a new baseline
+artifact is loaded, so switching baseline runs does not leave the compare
+matrix pending or tied to the previous baseline identity.
+
+### 13.92.2 Behavior
+
+- `loadComparisonPair()` is defined before `loadArtifact()` so baseline loads
+  can reuse the shared comparison loader.
+- `loadArtifact()`:
+  - loads the selected baseline artifact under the requested view
+  - clears previous comparison/candidate artifact state
+  - if a candidate is already selected and differs from the new baseline,
+    immediately reloads the comparison pair under the same view
+- `handleArtifactViewChange()` now only reloads the baseline artifact; the
+  baseline-load path itself reloads the comparison pair when a candidate is set.
+- Auto-reload still only commits server comparison responses and remains under
+  the request-sequence race guard.
+
+### 13.92.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 26 tests passed; production build passed.
+
+## 13.93 Comprehensive Optimization: Deep-Link Bootstrap Single Comparison Load
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.bootstrap-single-load.v1
+```
+
+### 13.93.1 Capability
+
+Prevent deep-link bootstrap from loading the same comparison pair twice after
+baseline auto-reload was introduced.
+
+### 13.93.2 Behavior
+
+- Deep-link bootstrap still restores:
+  - preferred baseline artifact
+  - preferred candidate id from URL state
+  - preferred projection view
+  - compare workspace when a candidate is present
+- Because `loadArtifact()` already auto-reloads the comparison pair when a
+  candidate is selected, bootstrap no longer issues a second explicit
+  `loadComparisonPair()` after the baseline load.
+- This keeps deep-link restore under the same race-guarded single-load path as
+  ordinary baseline/candidate changes.
+
+### 13.93.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 26 tests passed; production build passed.
+
+## 13.94 Comprehensive Optimization: Comparison Ready Status Summary
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.ready-status-summary.v1
+```
+
+### 13.94.1 Capability
+
+Show an explicit success summary when the loaded comparison is current for the
+selected baseline/candidate/view, so researchers can verify identity and row
+count before reading the matrix or exporting.
+
+### 13.94.2 Behavior
+
+- When `pendingComparison` is false and a comparison is loaded, the compare card
+  shows a success alert:
+  - baseline id
+  - candidate id
+  - comparison view
+  - row count
+  - comparison id
+- Pending state continues to show the mismatch/reload banner instead.
+- The summary only renders server-owned comparison identity fields.
+
+### 13.94.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 26 tests passed; production build passed.
+
+## 13.95 Comprehensive Optimization: Ready Banner Filter Fingerprint
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.ready-banner-filter-fingerprint.v1
+```
+
+### 13.95.1 Capability
+
+Include the active pure filter fingerprint and shown-row count in the
+comparison ready banner, so researchers can verify both comparison identity and
+the currently applied matrix filter before export or deep-link sharing.
+
+### 13.95.2 Behavior
+
+- Ready banner description now includes:
+  - baseline/candidate ids
+  - comparison view
+  - full row count
+  - shown row count from the pure filtered projection
+  - filter fingerprint
+    `group/promotion/evidenceIdentity/numericDelta[/changedOnly]`
+  - comparison id
+- Pending mismatch banner remains separate and still prompts reload.
+- The banner only summarizes server comparison identity plus pure local filter
+  projection counts; it does not invent metric values or private evidence.
+
+### 13.95.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 26 tests passed after re-run of one
+transient server comparison timeout; production build passed.
+
+## 13.96 Comprehensive Optimization: Ready Banner Copy Deep Link
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.ready-banner-copy-deep-link.v1
+```
+
+### 13.96.1 Capability
+
+Expose a one-click copy of the current comparison filter deep link from the
+ready-status banner, so researchers can share the exact baseline/candidate/view
+and matrix filter context after verifying the loaded comparison is current.
+
+### 13.96.2 Behavior
+
+- Shared `copyFilterDeepLink()` builds the pure deep link with:
+  - active matrix filter
+  - `workspace=compare`
+  - baseline/candidate ids
+  - current `artifactView`
+- Ready banner includes a `复制过滤深链` action when comparison is current.
+- Filter controls reuse the same helper, keeping copy behavior consistent.
+- The copied URL remains a pure selection/filter deep link; metric values and
+  private evidence still come only from server-owned comparison responses.
+
+### 13.96.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 26 tests passed; production build passed.
+
+## 13.97 Comprehensive Optimization: Pending Comparison Matrix Freeze
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.pending-matrix-freeze.v1
+```
+
+### 13.97.1 Capability
+
+Freeze the comparison matrix whenever the loaded comparison is not current for
+the selected baseline/candidate/view, so researchers never inspect or export a
+stale matrix under a mismatched selection.
+
+### 13.97.2 Behavior
+
+- `currentComparison` is the loaded comparison only when
+  `isMatchComparisonSelectionCurrent(...)` is true.
+- Pure filtered projection and matrix rows are derived only from
+  `currentComparison`.
+- Matrix summary tags/extras render only for `currentComparison`.
+- While pending:
+  - matrix dataSource is empty
+  - empty text explains the freeze and asks for reload
+  - export buttons remain disabled
+- Ready banner continues to show only for a current comparison.
+
+### 13.97.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 26 tests passed; production build passed.
+
+## 13.98 Comprehensive Optimization: Pending Filter Control Freeze
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.match-comparison.pending-filter-control-freeze.v1
+```
+
+### 13.98.1 Capability
+
+Disable matrix filter controls while the loaded comparison is pending or
+missing, so researchers cannot believe they are filtering a live matrix when
+the comparison is frozen.
+
+### 13.98.2 Behavior
+
+- Group / promotion / evidence-identity / numeric-delta selects are disabled when
+  `pendingComparison || !currentComparison`.
+- Changed-only toggle and inspect-filtered-projection are likewise disabled.
+- Reset filter remains available only when an active filter exists and the
+  comparison is not pending.
+- Copy deep-link remains available so researchers can still share the intended
+  selection/filter context during pending reload.
+
+### 13.98.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 26 tests passed; production build passed.
+
+## 13.99 Comprehensive Optimization: Server Comparison Registry
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.match-comparison.registry.v1
+```
+
+### 13.99.1 Capability
+
+Persist full server-owned match comparison artifacts in an in-memory registry
+and expose list/load routes so research cockpit sessions can reload previously
+generated comparisons without recomputing them as pure UI state.
+
+### 13.99.2 Behavior
+
+- Store APIs:
+  - `saveComparison()`
+  - `getComparison()`
+  - `listComparisons({ baselineId?, candidateId? })`
+- `GET /api/matches/:id/compare/:candidateId` saves the full comparison when the
+  request is not a filtered projection.
+- Filtered projections remain request-local pure views and are not stored.
+- New routes:
+  - `GET /api/comparisons` returns redacted registry summaries
+  - `GET /api/comparisons/:id` returns the full saved comparison
+  - optional `format=markdown` and `download=1` on the detail route
+- Cockpit compare workspace can:
+  - refresh the registry
+  - select a saved `comparisonId`
+  - load the saved comparison plus candidate artifact under the comparison view
+- Comparison identity, metric rows, and hashes remain server-owned. React only
+  selects and displays registry records.
+
+### 13.99.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 26 tests passed; production build passed.
+
+## 13.100 Comprehensive Optimization: Comparison Disk Persistence
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.match-comparison.disk-persistence.v1
+```
+
+### 13.100.1 Capability
+
+Optionally persist full server-owned match comparison artifacts under a
+configured base directory, rehydrate the in-memory comparison registry after
+process/store clear, and keep filtered projections request-local.
+
+### 13.100.2 Behavior
+
+- Optional base dir:
+  - dependency: `comparisonArtifactBaseDir`
+  - env: `COMPARISON_ARTIFACT_BASE_DIR`
+- On full compare (`GET /api/matches/:id/compare/:candidateId` without filter):
+  - save to in-memory registry
+  - write `comparisons/<hash24>.json`
+  - rewrite `comparisons.index.json`
+- Filtered projections remain request-local pure views and are not stored.
+- `GET /api/comparisons` and `GET /api/comparisons/:id` load the disk index before
+  serving, so a cleared process-local store can rehydrate from disk.
+- Public responses expose only relative file names in the index and never expose
+  absolute base directories.
+- Deterministic comparison ids remain `match-comparison:<sha256prefix24>`.
+
+### 13.100.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 2 files / 27 tests passed; production build passed.
+
+## 13.101 Comprehensive Optimization: Tournament Comparison Aggregate
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.match-comparison.aggregate.v1
+```
+
+### 13.101.1 Capability
+
+Emit a pure tournament-level pairwise comparison aggregate from recorded match
+artifacts, so multi-episode tournament packs can expose cross-match comparison
+summaries without inventing winners, private evidence, or causal claims.
+
+### 13.101.2 Behavior
+
+- New harness builder:
+  - `buildTournamentComparisonAggregate()` in `src/harness/matchComparison.ts`
+  - artifact version `harness.tournament-comparison.v1`
+  - kind `tournament-comparison`
+- Tournament writer always emits `tournament_comparison.json`.
+- Aggregate fields include:
+  - ordered pairwise pair summaries
+  - changed-row / promotion / evidence-identity totals
+  - metric change frequency top-N
+  - deterministic `comparisonSetId`
+- Zero or one match artifact produces `pairCount: 0`.
+- Server tournament artifact registration, downloads, and rehydrate allowlists
+  include `tournament_comparison.json`.
+- Public responses still do not expose absolute host paths.
+
+### 13.101.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused suites passed; production build passed.
+
+## 13.102 Comprehensive Optimization: Tournament Comparison Cockpit Surface
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-comparison.surface.v1
+```
+
+### 13.102.1 Capability
+
+Expose the server-owned `tournament_comparison.json` aggregate in the React
+cockpit packs workspace so research operators can discover and open the
+tournament-level comparison file without inventing comparison truth client-side.
+
+### 13.102.2 Behavior
+
+- Packs workspace shows a registered aggregate-file table for the selected
+  tournament artifact set.
+- Preferred aggregate files include:
+  - `manifest.json`
+  - `leaderboard.json`
+  - `benchmark_statistics.json`
+  - `tournament_comparison.json`
+  - `summary.md`
+  - `cost_latency.json`
+  - `assignment.json`
+- Download links come only from server-provided `downloads` URLs.
+- Default public-share allowlist includes `tournament_comparison.json`.
+- React remains a pure projection consumer over server/harness artifact truth.
+
+### 13.102.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 3 files / 36 tests passed; production build passed.
+
+## 13.103 Comprehensive Optimization: Tournament Comparison Inspector
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-comparison.inspector.v1
+```
+
+### 13.103.1 Capability
+
+Allow the packs cockpit to load server-owned `tournament_comparison.json` into
+the right-side inspector as pure projection evidence.
+
+### 13.103.2 Behavior
+
+- Packs workspace can request the selected pack's registered
+  `tournament_comparison.json` download URL.
+- The loaded JSON is validated for:
+  - `kind: tournament-comparison`
+  - `artifactVersion: harness.tournament-comparison.v1`
+- Inspector summary shows pair counts, changed-row totals, promotion deltas,
+  evidence-identity totals, pair identity hash, and top changed metrics.
+- React does not recompute pair deltas; it only displays the server artifact.
+
+### 13.103.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused suites and production build validated in this slice.
+
+## 13.104 Comprehensive Optimization: Tournament Comparison Markdown And Multi-Episode Proof
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.match-comparison.markdown.v1
+```
+
+### 13.104.1 Capability
+
+Emit a pure markdown projection for tournament comparison aggregates, prove
+multi-episode pairwise emission, and expose the markdown artifact through the
+tournament writer, server registration/download path, and packs cockpit.
+
+### 13.104.2 Behavior
+
+- `formatTournamentComparisonMarkdown()` projects
+  `harness.tournament-comparison.v1` into human-readable markdown without inventing
+  winners, private evidence, or causal claims.
+- Tournament writer emits both:
+  - `tournament_comparison.json`
+  - `tournament_comparison.md`
+- Multi-episode tournament packs with two recorded match artifacts produce
+  `pairCount: 1` and ordered episode pair summaries.
+- Server tournament artifact registration, downloads, and rehydrate allowlists
+  include `tournament_comparison.md`.
+- Packs cockpit aggregate table and default share allowlist include the markdown
+  file.
+
+### 13.104.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 3 files / 38 tests passed; production build passed.
+
+## 13.105 Comprehensive Optimization: Tournament Pair Comparison Registry Seeding
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.tournament-pair-comparison.registry-seed.v1
+```
+
+### 13.105.1 Capability
+
+When a server tournament pack is exported, seed the pairwise match comparison
+artifacts into the comparison registry so the cockpit can reload them without
+recomputing client-side truth.
+
+### 13.105.2 Behavior
+
+- `persistTournamentArtifactSet()` still writes publicShareSafe tournament packs
+  with truth-redacted match files.
+- After pack registration, the server seeds pairwise comparisons from the
+  tournament's recorded match artifacts using `view=truth-redacted`.
+- Seeded comparisons:
+  - enter the in-memory comparison registry
+  - optionally persist under `COMPARISON_ARTIFACT_BASE_DIR`
+  - remain loadable through `/api/comparisons` and `/api/comparisons/:id`
+- Tournament pack files remain the pack authority; the comparison registry is a
+  reusable pairwise projection cache, not a second tournament truth source.
+- Single-match tournament packs seed zero pairwise comparisons.
+
+### 13.105.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused suites passed; production build passed.
+
+## 13.106 Comprehensive Optimization: Pack Export Comparison Registry Refresh
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.comparison-registry-refresh.v1
+```
+
+### 13.106.1 Capability
+
+After a successful cockpit tournament pack export, refresh the comparison
+registry so any server-seeded pairwise tournament comparisons become immediately
+selectable in the compare workspace.
+
+### 13.106.2 Behavior
+
+- `handleExportTournamentPack()` continues to export and select the public pack.
+- On success, the cockpit best-effort loads `/api/comparisons`.
+- Registry entries update local comparison-registry state and selected
+  `comparisonId` when available.
+- Pack export success is not blocked if comparison-registry refresh fails.
+- React still does not invent comparison truth; it only consumes server-owned
+  registry summaries.
+
+### 13.106.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts -t "seeds pairwise|exports tournament artifacts" --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused server tests and production build validated
+in this slice.
+
+## 13.107 Comprehensive Optimization: Tournament Match Store Registration
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.tournament-match.store-registration.v1
+```
+
+### 13.107.1 Capability
+
+Register tournament episode match artifacts into the server match store when a
+public tournament pack is exported, so seeded pairwise comparisons can hydrate
+baseline/candidate artifacts through `/api/matches` and the cockpit can load
+registry comparisons end to end.
+
+### 13.107.2 Behavior
+
+- `persistTournamentArtifactSet()` now calls
+  `registerTournamentMatchArtifacts()` before seeding pairwise comparisons.
+- Each tournament episode artifact is saved through
+  `storedMatchFromMatchArtifact()` into the process-local match store.
+- Disk match persistence is attempted only for generated UUID match ids when
+  `MATCH_ARTIFACT_BASE_DIR` is configured. Tournament episode ids such as
+  `tournament-<seed>-N` remain memory-registered and available for the current
+  process.
+- Cockpit `handleLoadSavedComparison()` now hydrates baseline/candidate
+  artifacts best-effort, refreshes `/api/matches` when needed, and still
+  renders the server comparison matrix if hydration is only partial.
+- Public list/detail responses remain redacted; full truth stays behind
+  artifact routes with explicit projection views.
+
+### 13.107.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts -t "seeds pairwise tournament comparisons" --reporter=dot
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused suites passed; production build passed.
+
+## 13.108 Comprehensive Optimization: Pack Export Match Registry Refresh
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.match-registry-refresh.v1
+```
+
+### 13.108.1 Capability
+
+After a successful cockpit tournament pack export, refresh `/api/matches` so
+tournament episode matches registered by the server become immediately visible
+as compare candidates and baseline/candidate hydration sources.
+
+### 13.108.2 Behavior
+
+- `handleExportTournamentPack()` best-effort calls `refreshMatches()` after pack
+  export succeeds.
+- The pack inspector and status text report `artifactBackedMatches`.
+- Comparison-registry refresh still happens afterward.
+- Pack export success is not blocked if match-registry refresh fails.
+- React remains a pure consumer of server-owned match and comparison registries.
+
+### 13.108.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts -t "seeds pairwise tournament comparisons" --reporter=dot
+npm run build
+```
+
+Observed: typecheck/build validated with the surrounding tournament match
+registration suite in this continuation.
+
+## 13.109 Comprehensive Optimization: Tournament Pair Registry One-Click Load
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-pair.registry-load.v1
+```
+
+### 13.109.1 Capability
+
+From a tournament comparison aggregate inspector, one-click load a seeded
+pairwise comparison artifact from the server comparison registry into the
+compare workspace.
+
+### 13.109.2 Behavior
+
+- Tournament comparison inspector lists up to 8 pair actions:
+  `加载 pair e{i}→e{j}`.
+- Each action loads `/api/comparisons/:comparisonId` through the shared
+  `loadSavedComparisonById()` path.
+- On success:
+  - hydrates baseline/candidate artifacts best-effort
+  - sets the loaded comparison matrix
+  - switches workspace to `compare`
+- Pair actions are only projections over server-owned registry ids; React does
+  not recompute comparison deltas.
+
+### 13.109.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build passed.
+
+## 13.110 Comprehensive Optimization: Tournament Pair Comparison Id Alignment
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.tournament-comparison.pair-id-alignment.v1
+```
+
+### 13.110.1 Capability
+
+Make tournament aggregate pair `comparisonId` values identical to the
+server-seeded comparison registry ids for public packs.
+
+### 13.110.2 Problem
+
+`tournament_comparison.json` previously hashed full match artifacts while the
+registry seed hashed `truth-redacted` projections. Pair one-click load from the
+packs inspector could therefore request a non-existent comparison id.
+
+### 13.110.3 Behavior
+
+- `buildTournamentComparisonExport()` now projects episode match artifacts with
+  the same `projectMatchArtifact` used for public pack files before computing
+  pair comparison ids.
+- Public packs (`truth-redacted`) and registry seeds therefore share stable
+  `match-comparison:<sha256prefix24>` identities.
+- Focused API tests assert that `tournament_comparison.json` pair ids are
+  present in `/api/comparisons` and load successfully.
+
+### 13.110.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts -t "seeds pairwise tournament comparisons" --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused suite passed; production build passed.
+
+## 13.111 Comprehensive Optimization: Tournament Match Disk Persistence
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.tournament-match.disk-persistence.v1
+```
+
+### 13.111.1 Capability
+
+Persist tournament episode match artifacts under `MATCH_ARTIFACT_BASE_DIR` using
+safe non-UUID ids such as `tournament-<seed>-N`, and rehydrate them after
+process restart so seeded pairwise comparisons remain hydratable.
+
+### 13.111.2 Problem
+
+Section 13.107 registered tournament matches into the process-local match store,
+but disk persistence still required UUID v4 ids. Tournament episode ids are
+deterministic stems like `tournament-server-tournament-pair-seed-1`. After a
+server restart, those matches vanished and comparison baseline/candidate
+hydration failed even when comparison artifacts rehydrated.
+
+### 13.111.3 Behavior
+
+- `isPersistedMatchArtifactId()` accepts:
+  - UUID v4 ids (existing live match path)
+  - safe stems matching `^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$` without path
+    traversal or leading/trailing dots
+- Match index write, directory scan, file read, relative-file construction, and
+  recovery-audit path normalization all use that helper.
+- `persistMatchArtifact()` overwrites deterministic tournament episode files so
+  re-export under the same seed/episode replaces the prior store entry.
+- `registerTournamentMatchArtifacts()` persists every safe episode id when
+  `MATCH_ARTIFACT_BASE_DIR` is configured.
+- Public responses still never expose absolute base directories.
+
+### 13.111.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts -t "seeds pairwise tournament comparisons" --reporter=dot
+npx vitest run tests/serverMatchArtifactsApi.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; focused suites passed (`27` tests across match +
+tournament server APIs); production build passed.
+
+## 13.112 Comprehensive Optimization: Pack Export Auto-Load Seeded Comparison
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.auto-load-seeded-comparison.v1
+```
+
+### 13.112.1 Capability
+
+After a successful cockpit tournament pack export, best-effort auto-load the
+newest seeded pairwise comparison from `/api/comparisons` into the compare
+workspace, hydrating baseline/candidate match artifacts when available.
+
+### 13.112.2 Behavior
+
+- `handleExportTournamentPack()` still refreshes `/api/matches` and
+  `/api/comparisons` after pack export.
+- It selects the newest comparison registry entry (`createdAt` desc).
+- When a comparison id is available, it calls
+  `loadSavedComparisonById(id, { switchToCompareWorkspace: true })`.
+- Pack export success is not blocked if comparison load fails.
+- Single-episode packs with zero seeded pairs remain on the packs workspace.
+
+### 13.112.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build passed.
+
+## 13.113 Comprehensive Optimization: Pack-Scoped Seeded Comparison Auto-Load
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.pack-scoped-auto-load.v1
+```
+
+### 13.113.1 Capability
+
+Auto-load after tournament pack export only selects a comparison whose baseline
+and candidate identities belong to the just-exported pack episode set, not the
+global newest registry entry.
+
+### 13.113.2 Problem
+
+Section 13.112 auto-loaded `listComparisons()[0]` by `createdAt` desc. When the
+process already held older seeded comparisons with the same or newer timestamps,
+or when multiple packs shared a registry, the cockpit could open a comparison
+that did not belong to the export just completed.
+
+### 13.113.3 Behavior
+
+- Tournament run responses already expose episode `matchId` / `runId` summaries.
+- `handleExportTournamentPack()` collects those episode ids into a pack id set.
+- `selectPackSeededComparisonId()` walks the comparison registry (createdAt
+  desc) and returns the first entry whose baseline and candidate both intersect
+  that pack id set.
+- Single-episode packs or missing pack-scoped pairs stay on the packs workspace
+  without loading an unrelated comparison.
+- Pack export success remains independent of comparison load.
+
+### 13.113.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build passed.
+
+## 13.114 Comprehensive Optimization: Multi-Episode Pack Default
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.multi-episode-default.v1
+```
+
+### 13.114.1 Capability
+
+Default cockpit tournament pack export to multi-episode (`games=2`) so pairwise
+comparison seeding, match-store registration, and pack-scoped auto-load become
+the common research path instead of a rare opt-in.
+
+### 13.114.2 Problem
+
+Sections 13.105–13.113 built a complete multi-episode comparison path, but the
+cockpit default remained `packGames="1"`. Single-episode packs never seed
+pairwise comparisons, so auto-load and pair inspectors usually had nothing to
+open unless the operator remembered to raise the game count.
+
+### 13.114.3 Behavior
+
+- Default `packGames` is `"2"`.
+- Operators can still choose 1/2/3/5 games from the packs control.
+- Pack export helper text states that `games≥2` seeds pairwise comparisons and
+  that `games=1` is a single-episode pack with no pair comparison.
+
+### 13.114.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated with surrounding App.tsx
+edits in this continuation.
+
+## 13.115 Comprehensive Optimization: Inspect Auto-Load First Pair
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-comparison.inspect-auto-load-first-pair.v1
+```
+
+### 13.115.1 Capability
+
+When the cockpit inspects a pack's `tournament_comparison.json`, automatically
+load the first pair comparison into the compare workspace instead of only
+showing an aggregate inspector detour.
+
+### 13.115.2 Problem
+
+Section 13.109 added pair action buttons on the tournament comparison inspector,
+but clicking "检视 tournament comparison" still required a second click on a
+pair action. For multi-episode research packs this made the primary inspect
+control feel incomplete even though pair comparison ids already exist in the
+server aggregate artifact.
+
+### 13.115.3 Behavior
+
+- `handleInspectTournamentComparison()` still loads and validates the server
+  aggregate artifact and still builds up to 8 pair inspector actions.
+- When `pairs[0].comparisonId` exists, it best-effort calls
+  `loadSavedComparisonById(firstPairId, { switchToCompareWorkspace: true })`.
+- Aggregate inspector content remains available; remaining pairs stay clickable
+  as inspector actions.
+- Single-episode packs with `pairCount=0` stay on aggregate inspect only.
+
+### 13.115.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.116 Comprehensive Optimization: Preserve Aggregate Inspector On Pair Auto-Load
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-comparison.preserve-aggregate-inspector.v1
+```
+
+### 13.116.1 Capability
+
+When tournament comparison inspect auto-loads the first pair matrix, keep the
+aggregate tournament comparison inspector and its remaining pair actions instead
+of replacing them with a pairwise comparison inspector.
+
+### 13.116.2 Problem
+
+Section 13.115 auto-loaded the first pair through `loadSavedComparisonById()`,
+which always called `setInspector(inspectorFromComparison(...))`. That wiped the
+aggregate inspector and left only the first-pair detail, so the remaining pair
+action buttons disappeared immediately after inspect.
+
+### 13.116.3 Behavior
+
+- `loadSavedComparisonById()` accepts `preserveInspector?: boolean`.
+- Inspect auto-load uses `preserveInspector: true` so the matrix/workspace still
+  switch to the first pair while the aggregate inspector remains.
+- Manual registry loads and explicit pair actions continue to replace the
+  inspector with the pairwise comparison detail.
+
+### 13.116.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.117 Comprehensive Optimization: Preserve Pack Inspector On Export Auto-Load
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.preserve-pack-inspector.v1
+```
+
+### 13.117.1 Capability
+
+When pack export auto-loads a pack-scoped seeded comparison into the compare
+workspace, keep the pack export inspector provenance instead of replacing it
+with the pairwise comparison inspector.
+
+### 13.117.2 Problem
+
+Section 13.116 fixed inspect auto-load, but pack export auto-load still called
+`loadSavedComparisonById(..., { switchToCompareWorkspace: true })` without
+`preserveInspector`. That wiped the just-built pack inspector fields such as
+`artifactSetId`, `publicShareSafe`, `packEpisodeIds`, and `seededComparisons`.
+
+### 13.117.3 Behavior
+
+- Pack export auto-load now uses `preserveInspector: true`.
+- The compare workspace and comparison matrix still open.
+- Pack provenance remains available in the evidence inspector rail.
+
+### 13.117.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.118 Comprehensive Optimization: Pack-Scoped Selection Helper And Active Pair UI
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.pack-seeded-comparison-selection.v1
+react.tournament-comparison.active-pair-highlight.v1
+```
+
+### 13.118.1 Capability
+
+Make pack-scoped seeded comparison selection a pure harness helper with unit
+tests, and highlight the currently loaded pair inside the tournament comparison
+aggregate inspector.
+
+### 13.118.2 Behavior
+
+- `selectPackSeededComparisonId()` lives in `src/harness/matchComparison.ts`.
+- It returns the first createdAt-desc registry entry whose baseline and
+  candidate both intersect the pack episode id set.
+- It returns `""` when fewer than two pack ids exist, no entry matches, or the
+  registry is empty.
+- React cockpit imports that pure helper instead of keeping a local copy.
+- Tournament comparison inspect marks the first/current pair as
+  `当前 pair ...`, disables that action, and shows `active pair` plus `*` in the
+  pairs summary.
+
+### 13.118.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "selectPackSeededComparisonId" --reporter=dot
+npm run build
+```
+
+Observed: typecheck passed; 3 focused helper tests passed; production build
+passed.
+
+## 13.119 Comprehensive Optimization: Active Pair Switch Keeps Aggregate Inspector
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-comparison.active-pair-switch.v1
+```
+
+### 13.119.1 Capability
+
+Switching pairs from the tournament comparison aggregate inspector loads the
+selected pair matrix while keeping the aggregate inspector and updating the
+active-pair highlight/disabled state.
+
+### 13.119.2 Problem
+
+Section 13.118 marked the first pair as current, but clicking another pair still
+called `loadSavedComparisonById` without `preserveInspector`, replacing the
+aggregate inspector and losing remaining pair actions/highlights.
+
+### 13.119.3 Behavior
+
+- Pair action clicks use `preserveInspector: true`.
+- After load, the aggregate inspector is rebuilt with the newly selected pair as
+  `当前 pair` / disabled.
+- First-pair auto-load on inspect continues to preserve the aggregate inspector.
+
+### 13.119.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.120 Comprehensive Optimization: Success-Gated Active Pair Highlight
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-comparison.success-gated-active-pair.v1
+```
+
+### 13.120.1 Capability
+
+Mark a tournament comparison pair as the current/active pair only after the
+comparison matrix load succeeds.
+
+### 13.120.2 Problem
+
+Section 13.119 preserved the aggregate inspector and refreshed the active-pair
+highlight after every pair click, including failed loads. A 404 or projection
+failure could still leave a pair labeled `当前 pair` and disabled even though
+the compare matrix never loaded.
+
+### 13.120.3 Behavior
+
+- `loadSavedComparisonById()` returns `Promise<boolean>`: `true` only after a
+  successful comparison load, `false` on missing id or load failure.
+- Inspect first-pair auto-load and later pair-switch clicks call
+  `renderAggregateInspector(activeId)` only when load returns `true`.
+- Inspect initially renders the aggregate inspector with no active pair until
+  the first successful load completes.
+
+### 13.120.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "selectPackSeededComparisonId" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused helper tests, and production build validated in
+this continuation.
+
+## 13.121 Comprehensive Optimization: Comparison Load Race Guard
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.comparison-load.sequence-guard.v1
+```
+
+### 13.121.1 Capability
+
+Guard registry comparison loads with the same request-sequence pattern used by
+baseline/candidate compare loads, so concurrent pair clicks or overlapping
+auto-loads cannot apply a stale comparison matrix or active-pair highlight.
+
+### 13.121.2 Problem
+
+`loadComparisonPair()` already used `comparisonLoadSeqRef`, but
+`loadSavedComparisonById()` did not. Tournament comparison inspect could start
+first-pair auto-load and a later pair click in parallel; the slower request
+could overwrite the newer matrix and mark the wrong pair as current.
+
+### 13.121.3 Behavior
+
+- `loadSavedComparisonById()` increments `comparisonLoadSeqRef` at start.
+- After each await, it aborts with `false` if a newer load has started.
+- State updates, busy clearing, and success/failure status only apply for the
+  latest request sequence.
+- Pair-switch and inspect auto-load continue to gate active-pair highlight on
+  that success boolean.
+
+### 13.121.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "selectPackSeededComparisonId" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused helper tests, and production build validated in
+this continuation.
+
+## 13.122 Comprehensive Optimization: Pair Action Loading Busy State
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-comparison.pair-action-loading.v1
+```
+
+### 13.122.1 Capability
+
+While a tournament comparison pair matrix load is in flight, freeze all pair
+actions and mark the target pair as loading so operators cannot start overlapping
+pair clicks even though the request-sequence race guard would drop stale loads.
+
+### 13.122.2 Problem
+
+Section 13.121 race-guards concurrent loads, but the aggregate inspector still
+left non-active pair buttons clickable during a load. Rapid clicks could start
+multiple network requests and briefly show confusing intermediate busy state
+before the race guard discarded older results.
+
+### 13.122.3 Behavior
+
+- `renderAggregateInspector({ activeComparisonId, loadingComparisonId })` labels
+  the in-flight pair as `加载中 e{i}→e{j}`.
+- While `loadingComparisonId` is set, every pair action is disabled.
+- After load success/failure, the inspector re-renders without a loading id and
+  only marks a pair current when load returned `true`.
+- First-pair inspect auto-load also starts in the loading state before the
+  matrix request completes.
+
+### 13.122.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "selectPackSeededComparisonId" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused helper tests, and production build validated in
+this continuation.
+
+## 13.123 Comprehensive Optimization: Export Opens Tournament Comparison Inspect
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.open-aggregate-inspect.v1
+```
+
+### 13.123.1 Capability
+
+After a multi-episode pack export, open the tournament comparison aggregate
+inspect path so operators immediately get pair navigation, loading busy state,
+and active-pair highlighting instead of only a single pairwise matrix load.
+
+### 13.123.2 Problem
+
+Sections 13.112–13.122 built a rich tournament comparison inspect flow, but pack
+export still auto-loaded only one pack-scoped pairwise comparison. That opened
+the compare matrix without the aggregate inspector's remaining pair actions.
+
+### 13.123.3 Behavior
+
+- Pack export still refreshes matches/comparison registry and records pack
+  provenance in the pack inspector first.
+- When the exported pack has at least two episode ids, export calls the same
+  inspect helper used by "检视 tournament comparison".
+- Single-episode packs fall back to the previous pairwise auto-load path when a
+  pack-scoped comparison exists.
+- A stable ref avoids circular `useCallback` dependencies between export and
+  inspect handlers.
+
+### 13.123.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build passed.
+
+## 13.124 Comprehensive Optimization: Export Pack Selection Parity
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.pack-selection-parity.v1
+```
+
+### 13.124.1 Capability
+
+After pack export selects the new pack, initialize the share allowlist from the
+pack's registered files exactly as the explicit pack-select path does.
+
+### 13.124.2 Problem
+
+Export already selected the new pack and loaded its shares, but it left
+`shareAllowlist` on the previous default/previous-pack selection. That made the
+post-export share UI potentially offer files the new pack did not register.
+
+### 13.124.3 Behavior
+
+- After export selects `pack.artifactSetId`, derive available files with
+  `flattenTournamentPackFiles(pack.files)`.
+- Prefer the intersection of `DEFAULT_SHARE_ALLOWLIST` with available files.
+- Fall back to the first eight available files when the preferred intersection is
+  empty.
+- Share list loading remains unchanged.
+
+### 13.124.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.125 Comprehensive Optimization: Pack MatchIds Comparison Filter
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.comparisons.pack-matchids-filter.v1
+react.tournament-export.pack-matchids-query.v1
+```
+
+### 13.125.1 Capability
+
+Filter `/api/comparisons` by a pack/episode match-id set so multi-episode pack
+export can refresh only comparisons whose baseline and candidate both belong to
+the just-exported pack.
+
+### 13.125.2 Problem
+
+Pack export refreshed the entire comparison registry and then client-filtered
+with `selectPackSeededComparisonId()`. That pulled unrelated historical
+comparisons into React state and made the pack-scoped selection depend only on
+client-side filtering of a global list.
+
+### 13.125.3 Behavior
+
+- `listComparisons({ packMatchIds })` returns only comparisons whose baseline
+  and candidate both intersect the provided id set when the set has at least two
+  ids.
+- `GET /api/comparisons?matchIds=a,b` accepts comma-separated ids (and repeated
+  query values). Fewer than two ids leaves the pack filter inactive.
+- Pack export requests
+  `/api/comparisons?matchIds=<pack episode ids>` when at least two episode ids
+  exist, then still runs `selectPackSeededComparisonId()` as a pure safety net.
+
+### 13.125.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts -t "comparison" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused comparison API tests, and production build
+validated in this continuation.
+
+## 13.126 Comprehensive Optimization: Full Registry After Pack-Scoped Selection
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.full-registry-after-pack-scope.v1
+```
+
+### 13.126.1 Capability
+
+After multi-episode pack export, keep the full comparison registry available in
+the compare workspace while still selecting the pack-scoped seeded comparison
+through `GET /api/comparisons?matchIds=...`.
+
+### 13.126.2 Problem
+
+Section 13.125 made pack export request the pack-scoped comparison list and then
+`setComparisonRegistry(entries)` with that filtered list. That correctly selected
+the export pair, but wiped the global registry UI so older comparisons disappeared
+from the compare workspace until a manual full refresh.
+
+### 13.126.3 Behavior
+
+- Pack export always refreshes the full `/api/comparisons` list into
+  `comparisonRegistry`.
+- When the export has at least two episode ids, it also requests
+  `/api/comparisons?matchIds=...` and uses that pack-scoped list only to choose
+  `autoLoadComparisonId`.
+- Single-episode exports continue to select from the full list.
+- `selectPackSeededComparisonId()` remains a pure safety net over the chosen list.
+
+### 13.126.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts -t "comparison" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused comparison API tests, and production build
+validated in this continuation.
+
+## 13.127 Comprehensive Optimization: Parallel Pack Comparison Fetch And Inspect Fallback
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.parallel-pack-comparison-fetch.v1
+react.tournament-export.aggregate-inspect-fallback.v1
+```
+
+### 13.127.1 Capability
+
+After multi-episode pack export, refresh the full comparison registry and the
+pack-scoped comparison list in parallel, open the tournament comparison aggregate
+inspect path when possible, and fall back to the pack-scoped pairwise matrix if
+aggregate inspect fails.
+
+### 13.127.2 Problem
+
+Section 13.126 correctly kept the full registry while using pack-scoped
+`matchIds` only for selection, but it still fetched the two lists serially. It
+also treated aggregate inspect as fire-and-forget: if `tournament_comparison.json`
+was missing or invalid, export never fell back to the pack-scoped pairwise
+comparison even when one was available.
+
+### 13.127.3 Behavior
+
+- Pack export uses `Promise.all` for full `/api/comparisons` and optional
+  `/api/comparisons?matchIds=...` when the pack has at least two episode ids.
+- Full registry still populates the compare workspace list.
+- Pack-scoped list still drives `selectPackSeededComparisonId()`.
+- `handleInspectTournamentComparison()` returns `Promise<boolean>` success.
+- Multi-episode export opens aggregate inspect first; if it returns false or
+  throws, export falls back to `loadSavedComparisonById(autoLoadComparisonId)`.
+
+### 13.127.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts -t "comparison" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused comparison API tests, and production build
+validated in this continuation.
+
+## 13.128 Comprehensive Optimization: Isolated Pack Comparison Fetch Failures
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.isolated-comparison-fetch.v1
+```
+
+### 13.128.1 Capability
+
+When pack export refreshes comparison lists in parallel, isolate full-registry
+and pack-scoped fetch failures so one request cannot cancel the other.
+
+### 13.128.2 Problem
+
+Section 13.127 used `Promise.all` for full `/api/comparisons` and optional
+pack-scoped `/api/comparisons?matchIds=...`. If the pack-scoped request failed,
+the whole `Promise.all` rejected and the outer catch skipped both the full
+registry refresh and pack-scoped selection, even when the full list had already
+succeeded on the network.
+
+### 13.128.3 Behavior
+
+- Full and pack-scoped fetches still start in parallel.
+- Each promise is settled independently via success/failure wrappers.
+- Full registry is updated only when the full list request succeeds.
+- Pack-scoped selection uses the pack-scoped list when available; otherwise it
+  falls back to the full list when that list is present.
+- Export success remains independent of either comparison refresh path.
+
+### 13.128.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts -t "comparison" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused comparison API tests, and production build
+validated in this continuation.
+
+## 13.129 Comprehensive Optimization: Aggregate Inspect Fallback Status
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.aggregate-fallback-status.v1
+```
+
+### 13.129.1 Capability
+
+When multi-episode pack export falls back from tournament comparison aggregate
+inspect to a pack-scoped pairwise matrix, surface that fallback explicitly in the
+status banner.
+
+### 13.129.2 Problem
+
+Section 13.127 already fell back to `loadSavedComparisonById()` when aggregate
+inspect returned false, but the status text still said only
+`opening tournament comparison`. Operators could not tell whether the aggregate
+path succeeded or the pairwise fallback was used.
+
+### 13.129.3 Behavior
+
+- Export still prefers aggregate inspect for multi-episode packs.
+- If aggregate inspect fails and a pack-scoped comparison id exists, status
+  becomes `aggregate inspect unavailable · loading pack comparison ...`.
+- If aggregate inspect fails and no pack-scoped comparison id exists, status
+  becomes `tournament comparison inspect unavailable`.
+
+### 13.129.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.130 Comprehensive Optimization: Export Final Status After Inspect
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.final-status-after-inspect.v1
+```
+
+### 13.130.1 Capability
+
+After pack export opens tournament comparison inspect or falls back to a
+pack-scoped pairwise matrix, restore an export-centered final status so the
+banner keeps pack provenance instead of ending only on the last nested load
+message.
+
+### 13.130.2 Problem
+
+Successful aggregate inspect set status like `已加载 tournament comparison...`,
+and pairwise fallback set `已加载注册表对比...`. Both erased the export banner
+fields such as `artifactSetId`, `publicShareSafe`, completed games, and match
+count.
+
+### 13.130.3 Behavior
+
+- Successful aggregate inspect ends with
+  `... · tournament comparison opened`.
+- Fallback pairwise success ends with
+  `... · aggregate inspect unavailable · pack comparison loaded <id>`.
+- Fallback pairwise failure ends with
+  `... · aggregate inspect unavailable · pack comparison load failed`.
+- Aggregate inspect unavailable with no pack-scoped id still reports
+  `tournament comparison inspect unavailable`.
+
+### 13.130.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.131 Comprehensive Optimization: Export Pack Inspect Preference
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.inspect-exported-pack.v1
+```
+
+### 13.131.1 Capability
+
+After multi-episode pack export, open tournament comparison inspect against the
+just-exported pack object, falling back to the refreshed pack list entry only
+when needed.
+
+### 13.131.2 Problem
+
+Export already had the exported `pack` summary from `/api/tournaments/run`, but
+aggregate inspect only used `packs.find(...)` from a subsequent list refresh. If
+the list was momentarily stale or missing the new artifact-set id, export skipped
+aggregate inspect even though the exported pack payload was already available.
+
+### 13.131.3 Behavior
+
+- Export uses `packs.find(...) ?? pack` as the inspect target.
+- Multi-episode export no longer requires the list refresh to contain the new
+  pack before attempting aggregate inspect.
+- Pairwise fallback and export final status behavior from sections 13.127–13.130
+  remain intact.
+
+### 13.131.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.132 Comprehensive Optimization: Export Pack List Merge
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.pack-list-merge.v1
+```
+
+### 13.132.1 Capability
+
+After tournament pack export, keep the just-exported pack visible in the packs
+workspace even if the subsequent `/api/tournament-artifacts` list refresh is
+momentarily stale.
+
+### 13.132.2 Problem
+
+Export selected `pack` from the run response, then replaced local packs state
+with only the list-refresh result. If that list omitted the new artifact-set id,
+the packs table could drop the just-exported pack until a later manual refresh,
+even though export had already succeeded.
+
+### 13.132.3 Behavior
+
+- If the refreshed list already contains the exported `artifactSetId`, use the
+  refreshed list as-is.
+- Otherwise prepend the exported pack summary to the refreshed list before
+  `setTournamentPacks`.
+- Aggregate inspect still prefers the refreshed entry when present and falls
+  back to the exported pack object (section 13.131).
+
+### 13.132.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.133 Comprehensive Optimization: Isolated Post-Export Pack List Refresh
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.isolated-pack-list-refresh.v1
+```
+
+### 13.133.1 Capability
+
+After a successful tournament pack export, keep the export path successful even
+when subsequent pack-list or share-inventory refresh requests fail.
+
+### 13.133.2 Problem
+
+Export already had a successful `pack` summary from `/api/tournaments/run`, but
+list refresh and share inventory refresh lived in the same outer try/catch. A
+transient `/api/tournament-artifacts` or shares failure could surface the whole
+export as failed even though the pack had already been written.
+
+### 13.133.3 Behavior
+
+- Pack-list refresh is best-effort. On failure, local packs state falls back to
+  `[pack]`.
+- Share inventory refresh is best-effort. On failure, local shares clear to `[]`.
+- Share allowlist still derives from the exported pack files.
+- Match/comparison registry refresh and aggregate inspect/fallback remain
+  best-effort as before.
+
+### 13.133.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.134 Comprehensive Optimization: Degraded Post-Export Refresh Notes
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.degraded-refresh-notes.v1
+```
+
+### 13.134.1 Capability
+
+When best-effort post-export refresh paths fail, keep the export successful and
+surface explicit degraded notes in the export status banner and inspector.
+
+### 13.134.2 Problem
+
+Sections 13.125–13.133 isolated many post-export refresh failures so they no
+longer mark export as failed, but the UI often still looked fully healthy. An
+operator could not tell whether pack-list, share, match, or comparison refresh
+had degraded.
+
+### 13.134.3 Behavior
+
+- Track degraded notes for:
+  - `pack-list-refresh-degraded`
+  - `share-refresh-degraded`
+  - `match-refresh-degraded`
+  - `comparison-registry-refresh-degraded`
+  - `pack-scoped-comparison-refresh-degraded`
+  - `comparison-refresh-degraded`
+- Append those notes to the export status base used by final success/fallback
+  banners.
+- Expose `postExportRefresh` in the pack inspector as `ok` or the joined note
+  list.
+
+### 13.134.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.135 Comprehensive Optimization: Pack List Stale Note
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.pack-list-stale-note.v1
+```
+
+### 13.135.1 Capability
+
+When post-export pack-list refresh succeeds but omits the just-exported pack,
+merge the exported pack into local packs state and surface an explicit
+`pack-list-stale` degraded note.
+
+### 13.135.2 Problem
+
+Section 13.132 already merged the exported pack when list refresh was stale, but
+the operator still saw only a clean success path. There was no signal that the
+server list was lagging behind the just-exported artifact set.
+
+### 13.135.3 Behavior
+
+- If refreshed list contains the exported `artifactSetId`, use it as-is.
+- If refresh succeeds but omits the exported pack, prepend the exported pack and
+  append `pack-list-stale` to degraded notes.
+- If refresh fails entirely, keep `pack-list-refresh-degraded`.
+- Degraded notes continue to appear in export status and inspector
+  `postExportRefresh`.
+
+### 13.135.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.136 Comprehensive Optimization: Pure Pack List Merge Helper
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.tournament-export.pack-list-merge-helper.v1
+```
+
+### 13.136.1 Capability
+
+Extract pack-list merge behavior into a pure harness helper so export UX can keep
+the just-exported pack visible without inventing pack truth, and so the merge
+rules are unit-tested outside React.
+
+### 13.136.2 Behavior
+
+- `mergeExportedTournamentPackList()` lives in `src/harness/matchComparison.ts`.
+- Inputs: exported pack, optional listed packs, optional list-refresh failure.
+- Outputs:
+  - `note: "ok"` when the refreshed list already contains the exported pack
+  - `note: "pack-list-stale"` when export pack is prepended to a successful but
+    incomplete list
+  - `note: "pack-list-refresh-degraded"` when list refresh failed and only the
+    exported pack remains
+- `src/App.tsx` uses the helper for both success and catch paths.
+
+### 13.136.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "mergeExportedTournamentPackList" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit tests, and production build validated in this
+continuation.
+
+## 13.137 Comprehensive Optimization: Pack-Scoped Empty Comparison Fallback
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.tournament-export.pack-scoped-empty-fallback.v1
+react.tournament-export.pack-scoped-empty-fallback.v1
+```
+
+### 13.137.1 Capability
+
+When multi-episode pack export receives a successful pack-scoped comparison
+registry response that is empty or has no usable pack pair, fall back to the
+full comparison registry while still intersecting baseline/candidate with the
+just-exported pack episode ids.
+
+### 13.137.2 Problem
+
+Section 13.126–13.128 preferred pack-scoped `/api/comparisons?matchIds=...` for
+pair selection. If that request succeeded with `comparisons: []` (for example
+because seeding lagged or ids had not yet rehydrated), export treated the empty
+list as authoritative and never consulted the full registry, so pairwise
+fallback after aggregate inspect could also miss a valid pack pair.
+
+### 13.137.3 Behavior
+
+- New pure helper `resolvePackSeededComparisonSelection()` in
+  `src/harness/matchComparison.ts`.
+- Prefer pack-scoped entries when they yield a pack pair.
+- On successful pack-scoped empty/no-match responses, fall back to full registry
+  entries with notes:
+  - `pack-scoped-comparison-empty-fallback`
+  - `pack-scoped-comparison-no-match-fallback`
+- On pack-scoped refresh failure, keep
+  `pack-scoped-comparison-refresh-degraded` and full-registry fallback.
+- Export UI uses the helper and appends its degraded notes to the existing
+  post-export refresh note surface.
+
+### 13.137.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "resolvePackSeededComparisonSelection|mergeExportedTournamentPackList|selectPackSeededComparisonId" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit tests, and production build validated in this
+continuation.
+
+## 13.138 Comprehensive Optimization: Seeded Comparison Source Inspector
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.seeded-comparison-source.v1
+```
+
+### 13.138.1 Capability
+
+After multi-episode pack export, surface the actual pack-seeded comparison
+selection source and selected comparison id in the pack inspector, instead of
+claiming every successful auto-load is pack-scoped.
+
+### 13.138.2 Problem
+
+Section 13.137 made empty pack-scoped comparison lists fall back to the full
+registry, but the pack inspector still set `seededComparisons` to
+`pack-scoped` whenever any comparison id was selected. That mislabeled
+full-registry fallbacks and hid whether selection was missing.
+
+### 13.138.3 Behavior
+
+- Track `seededComparisonSource` from
+  `resolvePackSeededComparisonSelection().source`.
+- Inspector fields:
+  - `seededComparisons`: `pack-scoped` | `full-registry-fallback` | `missing` |
+    `none`
+  - `seededComparisonId`: selected id or `none`
+- Single-episode packs remain `none` rather than inventing a pack-scoped hit.
+
+### 13.138.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "resolvePackSeededComparisonSelection" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit tests, and production build validated in this
+continuation.
+
+## 13.139 Comprehensive Optimization: Single-Episode Selection Source None
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.tournament-export.single-episode-selection-none.v1
+```
+
+### 13.139.1 Capability
+
+Make single-episode pack export selection source a pure helper result of
+`none`, so React does not remapped multi-episode `missing` vs single-episode
+`none` after the fact.
+
+### 13.139.2 Behavior
+
+- `ResolvePackSeededComparisonSource` includes `none`.
+- `resolvePackSeededComparisonSelection()` returns `source: "none"` when fewer
+  than two pack episode ids are present.
+- Multi-episode packs still use `pack-scoped`, `full-registry-fallback`, or
+  `missing`.
+- App inspector uses the helper source directly.
+
+### 13.139.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "resolvePackSeededComparisonSelection" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit tests, and production build validated in this
+continuation.
+
+## 13.140 Comprehensive Optimization: Comparison Registry PackMatchIds Tests
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.comparisons.pack-matchids-store-tests.v1
+```
+
+### 13.140.1 Capability
+
+Cover `listComparisons({ packMatchIds })` with focused store tests so the
+pack-scoped comparison filter used by export and `/api/comparisons?matchIds=`
+has unit-level authority beyond API integration coverage.
+
+### 13.140.2 Behavior
+
+- New tests in `tests/serverStore.test.ts`:
+  - keep only comparisons whose baseline and candidate both intersect the pack
+    id set
+  - ignore pack filters with fewer than two ids
+  - match `runId` when `matchId` is absent
+- Fixtures use minimal valid `harness.match-comparison.v1` records.
+
+### 13.140.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverStore.test.ts -t "packMatchIds" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused store tests, and production build validated in this
+continuation.
+
+## 13.141 Comprehensive Optimization: Pure MatchIds Query Parser And Selection Status
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.comparisons.parse-matchids-query.v1
+react.tournament-export.selection-status-banner.v1
+```
+
+### 13.141.1 Capability
+
+Move `/api/comparisons?matchIds=` parsing into a pure harness helper with unit
+tests, and surface the seeded comparison selection source on the export status
+banner.
+
+### 13.141.2 Behavior
+
+- `parseComparisonMatchIdsQuery()` lives in `src/harness/matchComparison.ts`.
+- Accepts a comma-separated string or repeated string query values.
+- Returns a `Set` only when at least two non-empty ids are present; otherwise
+  `null` so the pack filter stays inactive.
+- Server list route imports the harness helper instead of a local parser.
+- Export status includes `selection=<source>[:<shortId>]` for multi-episode
+  packs, while single-episode packs omit the selection suffix.
+
+### 13.141.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "parseComparisonMatchIdsQuery|resolvePackSeededComparisonSelection" --reporter=dot
+npx vitest run tests/serverPublicViewApi.test.ts -t "comparison" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit/API tests, and production build validated in
+this continuation.
+
+## 13.142 Comprehensive Optimization: Selection Source Type And Baseline Filters
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-export.selection-source-type.v1
+server.comparisons.baseline-candidate-store-tests.v1
+```
+
+### 13.142.1 Capability
+
+Reuse the pure `ResolvePackSeededComparisonSource` type in the React export path
+and cover `listComparisons({ baselineId, candidateId })` with focused store tests.
+
+### 13.142.2 Behavior
+
+- `src/App.tsx` imports `ResolvePackSeededComparisonSource` instead of
+  re-declaring the union inline.
+- Store tests prove:
+  - baseline-only filtering
+  - candidate-only filtering
+  - combined baseline+candidate filtering
+  - runId matching for baseline filters
+- CreatedAt-desc ordering is preserved by the existing list implementation.
+
+### 13.142.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverStore.test.ts -t "comparison registry" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused store tests, and production build validated in this
+continuation.
+
+## 13.143 Comprehensive Optimization: Combined Comparison Filters And Clone Isolation
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.comparisons.combined-filter-clone-tests.v1
+```
+
+### 13.143.1 Capability
+
+Prove `listComparisons()` can combine packMatchIds with baseline/candidate
+filters and returns detached clones rather than mutable registry references.
+
+### 13.143.2 Behavior
+
+- Combined filter tests cover:
+  - pack + baseline + candidate intersection
+  - pack + baseline that yields empty results
+- Clone isolation test mutates listed comparison summaries and verifies the
+  registry still returns the original values on the next list call.
+
+### 13.143.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverStore.test.ts -t "comparison registry" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused store tests, and production build validated in this
+continuation.
+
+## 13.144 Comprehensive Optimization: Comparison Save Validation And Get Clone
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.comparisons.save-validation-get-clone.v1
+```
+
+### 13.144.1 Capability
+
+Cover comparison registry write validation and `getComparison()` clone isolation
+so invalid artifacts cannot enter the store and callers cannot mutate stored
+comparison truth through returned references.
+
+### 13.144.2 Behavior
+
+- `saveComparison()` rejects:
+  - wrong `artifactVersion`
+  - wrong `kind`
+  - empty `comparisonId`
+- `getComparison()` returns a detached clone; mutating the returned object does
+  not affect subsequent reads.
+- Missing comparison ids return `undefined`.
+
+### 13.144.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverStore.test.ts -t "comparison registry" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused store tests, and production build validated in this
+continuation.
+
+## 13.145 Comprehensive Optimization: Comparison Save Input Clone Isolation
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.comparisons.save-input-clone-isolation.v1
+```
+
+### 13.145.1 Capability
+
+Prove `saveComparison()` clones the input payload on write, so later mutation of
+the caller-owned object cannot corrupt the comparison registry, and that saving
+the same comparison id replaces the previous stored artifact.
+
+### 13.145.2 Behavior
+
+- After `saveComparison(input)`, mutating `input.baseline`, `input.candidate`, or
+  `input.summary` does not change subsequent `getComparison()` results.
+- Re-saving the same `comparisonId` overwrites the previous stored comparison.
+- Registry list still returns only the latest comparison for that id.
+
+### 13.145.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverStore.test.ts -t "comparison registry" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused store tests, and production build validated in this
+continuation.
+
+## 13.146 Comprehensive Optimization: Comparison List Order And Clear Isolation
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.comparisons.list-order-clear-isolation.v1
+```
+
+### 13.146.1 Capability
+
+Prove `listComparisons()` returns newest-first ordering by `createdAt` and that
+`clearServerStoreForTests()` fully removes comparison registry entries used by
+export/API surfaces.
+
+### 13.146.2 Behavior
+
+- Newest-first order is independent of insertion order.
+- After `clearServerStoreForTests()`, `listComparisons()` is empty and
+  `getComparison()` returns `undefined` for previously stored ids.
+
+### 13.146.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverStore.test.ts -t "comparison registry" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused store tests, and production build validated in this
+continuation.
+
+## 13.147 Comprehensive Optimization: Comparison Registry List Summary Enrichment
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.comparisons.list-summary-enrichment.v1
+react.comparisons.registry-label-enrichment.v1
+```
+
+### 13.147.1 Capability
+
+Expose richer redaction-safe comparison summary fields on
+`GET /api/comparisons` so the cockpit registry selector can show changed-row,
+numeric-delta, and scorecard-delta density without loading full comparison
+artifacts first.
+
+### 13.147.2 Behavior
+
+- List summaries now include:
+  - `numericDeltaCount`
+  - `scorecardMetricDelta`
+  - `diagnosticMetricDelta`
+  - `metricKeysCompared`
+  - `metricKeysEmitted`
+  - `metricKeysTruncated`
+- Existing `rowCount`, `changedRowCount`, and hash fields remain.
+- React `ComparisonRegistrySummary` accepts the new optional summary fields.
+- Registry select labels show `Δchanged/total`, optional `numΔ`, and optional
+  `scoreΔ`.
+- API tests assert the richer summary fields are present and match the full
+  comparison artifact.
+
+### 13.147.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts -t "comparison" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused comparison API tests, and production build
+validated in this continuation.
+
+## 13.148 Comprehensive Optimization: Social Fact Ingest Catalog Coverage
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.metric-promotion.social-fact-ingest-catalog.v1
+```
+
+### 13.148.1 Capability
+
+Make every social evaluator metric id constant, including the social-fact ingest
+coverage family, an exact formal diagnostic entry in
+`evaluation.metric-promotion.catalog.v1`, without promoting any social metric to
+scorecard.
+
+### 13.148.2 Problem
+
+Social fact ingest metrics such as
+`agent.social.commitment_speech_act_ingest_link_*` and
+`agent.social.relationship_fact_ingest_link_*` were only covered by the
+`prefix:agent.social.` rule. Exact catalog decisions are preferred for known
+metric families so promotion intent and decision ids remain explicit.
+
+### 13.148.3 Behavior
+
+- `SOCIAL_DIAGNOSTIC_METRIC_IDS` now includes the social-fact ingest link metric
+  ids and restores any adjacent exact social diagnostic ids needed for full
+  coverage.
+- All social metric id constants resolve to exact
+  `evaluation.metric-promotion.catalog.v1#<metricId>` diagnostic decisions.
+- No social/temporal metric is promoted to scorecard.
+
+### 13.148.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts -t "exact catalog diagnostic decisions for all social metric" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused evaluation tests, and production build validated in
+this continuation.
+
+## 13.149 Comprehensive Optimization: Social Metric Anti-Scorecard Regression
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.metric-promotion.social-anti-scorecard.v1
+```
+
+### 13.149.1 Capability
+
+Lock the formal promotion policy so every social metric id constant remains
+scorecard-ineligible even when a caller assigns positive weight, finite value,
+and evidence refs.
+
+### 13.149.2 Problem
+
+Section 13.148 made social-fact ingest metrics exact catalog diagnostics. A
+remaining risk was that a future regression could treat those metrics as
+implicit scorecard candidates if catalog lookup failed or if weight/evidence
+were treated as sufficient overrides.
+
+### 13.149.3 Behavior
+
+- For every social metric id constant, `decideMetricPromotion()` returns:
+  - `eligibleForScorecard: false`
+  - `promotionClass: "diagnostic"`
+  - exact catalog decision id
+  - `catalog_diagnostic` reason
+- This holds even with `weight: 1`, finite `value`, and non-empty evidence refs.
+- Known scorecard metrics such as `agent.reward` remain scorecard-eligible under
+  the same weight/evidence conditions.
+
+### 13.149.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts -t "never promotes social metric constants|exact catalog diagnostic decisions" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused evaluation tests, and production build validated in
+this continuation.
+
+## 13.150 Comprehensive Optimization: Werewolf Metric Catalog Coverage
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.metric-promotion.werewolf-catalog-coverage.v1
+```
+
+### 13.150.1 Capability
+
+Make every Werewolf evaluator metric id constant an exact formal promotion
+catalog entry, including profile/model reward scorecard splits, without changing
+social/temporal diagnostic defaults.
+
+### 13.150.2 Problem
+
+`profile.agent_reward` and `model.agent_reward` are emitted by the Werewolf
+outcome evaluator with positive weight and evidence, but they were only covered
+by the implicit scorecard path. Exact catalog decisions are preferred for known
+outcome split metrics so scorecard intent is explicit and auditable.
+
+### 13.150.3 Behavior
+
+- Catalog now includes exact scorecard entries for:
+  - `profile.agent_reward`
+  - `model.agent_reward`
+- Coverage test walks all Werewolf metric id constants:
+  - outcome, vote accuracy, role survival, influence, deception, social
+    calibration, belief-shift, and reputation-association families
+- Scorecard metrics remain scorecard-eligible under positive weight + evidence.
+- Diagnostic Werewolf metrics remain scorecard-ineligible even with positive
+  weight + evidence.
+
+### 13.150.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts -t "covers all Werewolf metric id constants|never promotes social metric constants|exact catalog diagnostic decisions" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused evaluation tests, and production build validated in
+this continuation.
+
+## 13.151 Comprehensive Optimization: Registry Label Pair Context And Scorecard Summary
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.comparisons.registry-label-pair-context.v1
+evaluation.metric-promotion.scorecard-summary-profile-model.v1
+```
+
+### 13.151.1 Capability
+
+Make saved-comparison registry options show baseline→candidate pair context, and
+assert that profile/model reward metrics appear in formal scorecard catalog
+summaries.
+
+### 13.151.2 Behavior
+
+- New pure UI helper `comparisonRegistryEntryLabel()` formats:
+  - short comparison id
+  - view
+  - baseline→candidate short ids
+  - changed/total delta
+  - optional numeric and scorecard deltas
+- Promotion summary tests expect `profile.agent_reward` and `model.agent_reward`
+  in `catalogScorecardMetricIds`.
+
+### 13.151.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts -t "zero-weight and unevidenced weights stay off scorecards|covers all Werewolf metric id constants" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused evaluation tests, and production build validated in
+this continuation.
+
+## 13.152 Comprehensive Optimization: Pure Comparison Registry Label Helper
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.comparisons.registry-label-helper.v1
+react.comparisons.registry-label-helper-wire.v1
+```
+
+### 13.152.1 Capability
+
+Move comparison registry option-label formatting into a pure harness helper with
+unit tests, so cockpit labels stay redaction-safe and deterministic without
+living only inside `App.tsx`.
+
+### 13.152.2 Behavior
+
+- `formatComparisonRegistryEntryLabel()` lives in `src/harness/matchComparison.ts`.
+- Input is list-summary fields only: comparison id, view, baseline/candidate ids,
+  changed/total counts, optional numeric/scorecard deltas.
+- Output includes short ids, baseline→candidate pair context, and optional
+  density suffixes.
+- React select options call the harness helper instead of a local App-only
+  formatter.
+
+### 13.152.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "formatComparisonRegistryEntryLabel|resolvePackSeededComparisonSelection" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit tests, and production build validated in this
+continuation.
+
+## 13.153 Comprehensive Optimization: Registry Label Short Id And Truncation
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.comparisons.registry-label-shortid-truncation.v1
+```
+
+### 13.153.1 Capability
+
+Make comparison registry labels more scannable by shortening comparison ids as
+`cmp:<hashprefix>` and surfacing metric-key truncation counts when present.
+
+### 13.153.2 Behavior
+
+- `formatComparisonRegistryEntryLabel()` shortens:
+  - `match-comparison:<hash>` → `cmp:<hashprefix>`
+  - other long ids → first 8 characters
+  - short ids remain unchanged
+- Optional `summary.metricKeysTruncated > 0` appends ` · truncN`.
+- Existing changed/total, numeric, and scorecard density suffixes remain.
+
+### 13.153.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "formatComparisonRegistryEntryLabel" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit tests, and production build validated in this
+continuation.
+
+## 13.154 Comprehensive Optimization: Registry Label Diagnostic Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.comparisons.registry-label-diagnostic-delta.v1
+```
+
+### 13.154.1 Capability
+
+Surface diagnostic metric density in comparison registry option labels, using
+only redaction-safe list-summary fields already returned by
+`GET /api/comparisons`.
+
+### 13.154.2 Behavior
+
+- `formatComparisonRegistryEntryLabel()` now appends
+  ` · diagΔN` when `summary.diagnosticMetricDelta` is present.
+- Existing pair context, numeric, scorecard, and truncation suffixes remain.
+- No private evidence, winners, or invented comparison truth are introduced.
+
+### 13.154.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "formatComparisonRegistryEntryLabel" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit tests, and production build validated in this
+continuation.
+
+## 13.155 Comprehensive Optimization: Registry Evidence And Benchmark Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.comparisons.registry-evidence-benchmark-density.v1
+harness.comparisons.registry-label-evidence-benchmark.v1
+```
+
+### 13.155.1 Capability
+
+Expose evidence-identity and benchmark-only density in comparison registry list
+summaries and option labels, without inventing comparison truth in React.
+
+### 13.155.2 Behavior
+
+- `GET /api/comparisons` list summaries now include:
+  - `benchmarkOnlyMetricDelta`
+  - `evidenceIdentityChangedMetricCount`
+- `formatComparisonRegistryEntryLabel()` appends:
+  - ` · benchΔN` when benchmark-only density is present
+  - ` · evidΔN` when evidence-identity density is present
+- Existing pair context, numeric, scorecard, diagnostic, and truncation suffixes
+  remain.
+- Public list responses still omit private evidence, winners, absolute paths,
+  and invented deltas.
+
+### 13.155.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "formatComparisonRegistryEntryLabel" --reporter=dot
+npx vitest run tests/serverPublicViewApi.test.ts -t "builds server-owned comparison" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit/API tests, and production build validated in
+this continuation.
+
+## 13.156 Comprehensive Optimization: Registry Promotion Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.comparisons.registry-promotion-density.v1
+harness.comparisons.registry-label-promotion-density.v1
+```
+
+### 13.156.1 Capability
+
+Expose promotion-class change density in comparison registry list summaries and
+option labels, so researchers can scan scorecard/diagnostic promotion drift
+before loading a full comparison artifact.
+
+### 13.156.2 Behavior
+
+- `GET /api/comparisons` list summaries now include
+  `promotionChangedMetricCount`.
+- `formatComparisonRegistryEntryLabel()` appends ` · promoΔN` when that field is
+  present.
+- Existing pair context, numeric, scorecard, diagnostic, benchmark, evidence,
+  and truncation suffixes remain.
+- Public list responses still omit private evidence, winners, absolute paths,
+  and invented deltas.
+
+### 13.156.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "formatComparisonRegistryEntryLabel" --reporter=dot
+npx vitest run tests/serverPublicViewApi.test.ts -t "comparison" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit/API tests, and production build validated in
+this continuation.
+
+## 13.157 Comprehensive Optimization: Registry Per-Class Truncation Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.comparisons.registry-per-class-truncation.v1
+harness.comparisons.registry-label-per-class-truncation.v1
+```
+
+### 13.157.1 Capability
+
+Expose scorecard/diagnostic/benchmark-only truncation density in comparison
+registry list summaries and option labels so truncation pressure is visible
+before loading a full comparison artifact.
+
+### 13.157.2 Behavior
+
+- `GET /api/comparisons` list summaries now include:
+  - `scorecardMetricKeysTruncated`
+  - `diagnosticMetricKeysTruncated`
+  - `benchmarkOnlyMetricKeysTruncated`
+- `formatComparisonRegistryEntryLabel()` prefers class-specific truncation
+  markers (`scoreTruncN`, `diagTruncN`, `benchTruncN`) and falls back to the
+  aggregate `truncN` only when class fields are absent.
+- Existing pair context and density suffixes remain.
+- Public list responses still omit private evidence, winners, absolute paths,
+  and invented deltas.
+
+### 13.157.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "formatComparisonRegistryEntryLabel" --reporter=dot
+npx vitest run tests/serverPublicViewApi.test.ts -t "comparison" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit/API tests, and production build validated in
+this continuation.
+
+## 13.158 Comprehensive Optimization: Native Progress Authority In React
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.progress.native-steps-authority.v1
+```
+
+### 13.158.1 Capability
+
+Keep React cockpit progress labels honest about native execution authority.
+`nativeSteps` must never silently fall back to legacy trajectory projection
+counts.
+
+### 13.158.2 Problem
+
+Several cockpit surfaces displayed `match.nativeSteps ?? match.trajectorySteps`.
+That made a missing native count look like a valid native execution progress
+value when only the legacy projection length was available.
+
+### 13.158.3 Behavior
+
+- Run registry table `native steps` column now renders `nativeSteps` or `n/a`.
+- Match inspector `native steps` uses only `match.nativeSteps`.
+- Match inspector `legacy projection` uses `legacyProjectionSteps`, then
+  `trajectorySteps`, then `n/a`.
+- This preserves the section 13.24 lock: native social-episode steps are
+  authoritative execution progress; trajectory is migration/debug only.
+
+### 13.158.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation. No
+provider path changed, so no live streaming revalidation was required.
+
+## 13.159 Comprehensive Optimization: Vitest Excludes Playwright E2E
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tooling.vitest.exclude-playwright-e2e.v1
+```
+
+### 13.159.1 Capability
+
+Keep the deterministic Vitest suite isolated from Playwright e2e discovery so
+bare `npx vitest run` cannot fail on Playwright's `test()` API.
+
+### 13.159.2 Problem
+
+`e2e/cockpitInteraction.spec.ts` is a Playwright suite. When Vitest discovered
+it, the suite failed with:
+
+```text
+Playwright Test did not expect test() to be called here.
+```
+
+This polluted full-suite validation even though all deterministic tests passed.
+
+### 13.159.3 Behavior
+
+- New `vitest.config.ts` includes only `tests/**/*.{test,spec}.{ts,tsx,js,jsx}`.
+- Explicit excludes cover `e2e/**` and `**/*.e2e.*`.
+- Playwright remains available through `npm run test:e2e`.
+- Package script `npm test` already targeted `tests`, but bare Vitest discovery
+  now has the same boundary.
+
+### 13.159.4 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run --reporter=dot
+npm run build
+```
+
+Observed: typecheck, full deterministic Vitest suite, and production build
+validated in this continuation. No provider path changed.
+
+## 13.160 Comprehensive Optimization: Match List Commit Status Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.matches.committed-rejected-step-counts.v1
+react.matches.commit-status-columns.v1
+```
+
+### 13.160.1 Capability
+
+Expose native committed and rejected step counts on public match list/detail
+summaries so researchers can distinguish execution progress from replayable
+committed progress without loading full artifacts.
+
+### 13.160.2 Behavior
+
+- `serializeStoredMatch()` now returns:
+  - `nativeSteps`: all native social-episode steps
+  - `committedSteps`: native steps with `commitStatus === "committed"` (or
+    legacy no-error steps)
+  - `rejectedSteps`: `nativeSteps - committedSteps`
+  - `trajectorySteps` / `legacyProjectionSteps`: legacy projection only
+- React run registry shows native/committed/rejected columns.
+- Match inspector surfaces the same three counts without inventing values.
+- Missing counts remain `n/a`; native counts never fall back to trajectory.
+
+### 13.160.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverMatchArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused match artifact API tests, and production build
+validated in this continuation.
+
+## 13.161 Comprehensive Optimization: Shared Native Step Commit Counts
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.social.count-step-commits.v1
+api.matches.shared-step-commit-counts.v1
+```
+
+### 13.161.1 Capability
+
+Centralize native social-step commit counting so match list summaries, replay
+summaries, and future progress surfaces use one authority for
+`nativeSteps` / `committedSteps` / `rejectedSteps`.
+
+### 13.161.2 Behavior
+
+- New pure helper `countSocialStepCommits()` in `src/harness/social.ts`.
+- Counting rules:
+  - `commitStatus === "committed"` or legacy missing status without error →
+    committed
+  - `commitStatus === "rejected"` or legacy missing status with error →
+    rejected
+  - `nativeSteps` is always the step array length
+- Server `serializeStoredMatch()` and server-owned social replay responses use
+  the shared helper instead of ad hoc filters.
+- Unit tests cover mixed committed/rejected/legacy steps and empty lists.
+
+### 13.161.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/social.test.ts -t "countSocialStepCommits" --reporter=dot
+npx vitest run tests/serverMatchArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused social/match API tests, and production build
+validated in this continuation.
+
+## 13.162 Comprehensive Optimization: Full Registry Density Summary
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.comparisons.registry-full-density-summary.v1
+harness.comparisons.registry-label-keys-evid-only.v1
+```
+
+### 13.162.1 Capability
+
+Expose the remaining redaction-safe comparison density fields on registry list
+summaries and option labels, so researchers can scan truncation pressure,
+evidence-only asymmetries, and metric-key coverage before loading a full
+comparison artifact.
+
+### 13.162.2 Behavior
+
+- `GET /api/comparisons` list summaries now also include:
+  - `evidenceIdentityOnlyBaselineRefCount`
+  - `evidenceIdentityOnlyCandidateRefCount`
+  - `scorecardMetricKeysCompared` / `scorecardMetricKeysEmitted`
+  - `diagnosticMetricKeysCompared` / `diagnosticMetricKeysEmitted`
+  - `benchmarkOnlyMetricKeysCompared` / `benchmarkOnlyMetricKeysEmitted`
+  - `metricRowsMax`
+- `formatComparisonRegistryEntryLabel()` appends:
+  - ` · evidOnly A→B` when either side has only-side evidence refs
+  - ` · keys emitted/compared`
+  - ` · maxN` when truncation is present
+- Existing pair context, promotion/scorecard/diagnostic/benchmark/evidence, and
+  class truncation suffixes remain.
+- Public list responses still omit private evidence, winners, absolute paths,
+  and invented deltas.
+
+### 13.162.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts -t "formatComparisonRegistryEntryLabel" --reporter=dot
+npx vitest run tests/serverPublicViewApi.test.ts -t "comparison" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused unit/API tests, and production build validated in
+this continuation.
+
+## 13.163 Comprehensive Optimization: Tournament Episode Commit Counts
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.episodes.shared-step-commit-counts.v1
+tournament.cost-latency.committed-step-fallback.v1
+```
+
+### 13.163.1 Capability
+
+Use the shared `countSocialStepCommits()` helper in tournament artifact episode
+summaries and cost/latency harness-turn fallbacks so tournament outputs share
+the same native/committed/rejected progress authority as match list APIs.
+
+### 13.163.2 Behavior
+
+- `episodes.jsonl` episode records now include:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Cost/latency `harnessTurns` falls back to committed native steps when
+  `metrics.harnessTurnCount` is absent, not ad hoc local filters.
+- No free-text, winner, or private-evidence invention is introduced.
+
+### 13.163.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, tournament artifact tests, and production build validated
+in this continuation.
+
+## 13.164 Comprehensive Optimization: Shared Social Step Commit Predicate
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.social.is-step-committed.v1
+evaluation.werewolf.shared-commit-filter.v1
+```
+
+### 13.164.1 Capability
+
+Centralize the committed-step predicate used by progress counters, trajectory
+extraction, and Werewolf metric collection so native commit semantics do not
+drift across modules.
+
+### 13.164.2 Behavior
+
+- New pure helper `isSocialStepCommitted()` in `src/harness/social.ts`.
+- Rules:
+  - `commitStatus === "committed"` → committed
+  - `commitStatus === "rejected"` → not committed
+  - missing/unknown status → committed only when `error` is absent
+- `countSocialStepCommits()` now uses `isSocialStepCommitted()`.
+- `src/harness/evaluator.ts` trajectory/turn grouping and
+  `src/harness/werewolfResult.ts` metric turn filtering use the shared helper
+  instead of ad hoc status/error checks.
+
+### 13.164.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/social.test.ts -t "isSocialStepCommitted|countSocialStepCommits" --reporter=dot
+npx vitest run tests/evaluation.test.ts -t "covers all Werewolf metric id constants|never promotes social" --reporter=dot
+npx vitest run tests/werewolfAdapter.test.ts -t "emits a completed generic Werewolf|maxTransitions lands inside" --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused social/evaluation/adapter tests, and production
+build validated in this continuation.
+
+## 13.165 Comprehensive Optimization: Replay And Artifact Commit Predicate
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.replay.shared-commit-predicate.v1
+artifact.integrity.shared-commit-predicate.v1
+```
+
+### 13.165.1 Capability
+
+Use the shared `isSocialStepCommitted()` predicate in deterministic native
+replay and match-artifact integrity validation so committed/rejected semantics
+cannot drift from progress counters or evaluator filters.
+
+### 13.165.2 Behavior
+
+- `src/harness/replay.ts` sequential and parallel batch replay both use
+  `isSocialStepCommitted()`.
+- `src/harness/artifacts.ts` native execution integrity checks use
+  `isSocialStepCommitted()` when deciding whether a step must have hashes or
+  may not reference committed messages.
+- Production ad-hoc `commitStatus ? ... : !error` checks under `src/harness`
+  are removed in favor of the shared helper.
+
+### 13.165.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/replay.test.ts tests/artifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused replay/artifact tests, and production build
+validated in this continuation.
+
+## 13.166 Comprehensive Optimization: Checkpoint Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.checkpoints.committed-rejected-step-counts.v1
+react.checkpoints.commit-status-columns.v1
+```
+
+### 13.166.1 Capability
+
+Expose native committed and rejected step counts on public checkpoint summaries
+so researchers can distinguish full native prefix length from replayable
+committed progress without opening full checkpoint artifacts.
+
+### 13.166.2 Behavior
+
+- `serializeCheckpointSummary().counts` now includes:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+  via shared `countSocialStepCommits(checkpoint.executionPrefix.steps)`.
+- React checkpoint table and inspector surface committed/rejected density.
+- Public checkpoint responses remain summary-only and do not invent private
+  evidence or winners.
+
+### 13.166.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverCheckpointApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, checkpoint API tests, and production build validated in
+this continuation.
+
+## 13.167 Comprehensive Optimization: Fork Lineage Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.fork-lineage.committed-rejected-step-counts.v1
+api.match-artifact-index.commit-density.v1
+react.fork-lineage.child-commit-density.v1
+```
+
+### 13.167.1 Capability
+
+Expose native committed/rejected step density on fork-lineage child summaries
+and private match-artifact index records, so lineage and disk-index consumers
+share the same progress authority as match/checkpoint lists.
+
+### 13.167.2 Behavior
+
+- `buildForkChildSummary()` and `buildForkLineageSummary().child` now include:
+  - `nativeStepCount`
+  - `committedSteps`
+  - `rejectedSteps`
+  via shared `countSocialStepCommits(artifact.socialEpisode.steps)`.
+- Match artifact index records also include `committedSteps` / `rejectedSteps`.
+- React fork-lineage panel surfaces child committed/rejected counts.
+- Public responses remain free of private memos, hidden roles, and absolute
+  paths.
+
+### 13.167.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverCheckpointApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, checkpoint/fork API tests, and production build validated
+in this continuation.
+
+## 13.168 Comprehensive Optimization: Match And CLI Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.matches.run-summary-commit-density.v1
+cli.match-replay.commit-density.v1
+```
+
+### 13.168.1 Capability
+
+Propagate shared native commit density into match-run summaries and CLI
+match/replay summaries so researchers and operators see the same
+`nativeSteps` / `committedSteps` / `rejectedSteps` authority outside list and
+checkpoint surfaces.
+
+### 13.168.2 Behavior
+
+- Server `buildMatchSummary()` spreads
+  `countSocialStepCommits(result.socialEpisode.steps)`.
+- CLI `arena:match` summary spreads the same helper.
+- CLI `arena:replay` summary spreads the helper for artifact-native step density
+  while still reporting replayed step/batch counts from the replay engine.
+- No private evidence, winners, or absolute paths are introduced.
+
+### 13.168.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverMatchArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, match artifact API tests, and production build validated
+in this continuation.
+
+## 13.169 Comprehensive Optimization: React Shared Commit Helpers
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.progress.shared-commit-helpers.v1
+```
+
+### 13.169.1 Capability
+
+Make the React cockpit use the same social-step commit predicate and density
+helper as the harness/server, so UI commit tags and counts cannot drift from
+API progress authority.
+
+### 13.169.2 Behavior
+
+- `src/App.tsx` imports `isSocialStepCommitted` and `countSocialStepCommits`.
+- Timeline commit counts use `countSocialStepCommits(steps)`.
+- `readSocialCommitStatus()` now wraps `isSocialStepCommitted()`.
+- Artifact inspector fields/json include native/committed/rejected density from
+  the shared helper.
+
+### 13.169.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+
+## 13.170 Comprehensive Optimization: Remaining Progress Density Surfaces
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.progress.remaining-density-surfaces.v1
+api.fork-lineage.boundary-commit-density.v1
+```
+
+### 13.170.1 Capability
+
+Finish propagating shared native commit density into remaining React progress
+surfaces and fork-lineage boundary summaries so raw `steps.length` is no longer
+the only progress signal.
+
+### 13.170.2 Behavior
+
+- Artifact load status reports native/committed/rejected density.
+- Run context panel and compare identity card show committed/rejected counts.
+- KPI native-step statistic suffix includes committed/rejected density.
+- Fork-lineage boundary summaries expose:
+  - `newNativeSteps`
+  - `newCommittedSteps`
+  - `newRejectedSteps`
+- React lineage UI renders the new boundary density fields.
+
+### 13.170.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverCheckpointApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, checkpoint/fork API tests, and production build validated
+in this continuation.
+
+## 13.171 Comprehensive Optimization: Test Shared Commit Helpers
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tests.progress.shared-commit-helpers.v1
+```
+
+### 13.171.1 Capability
+
+Align focused tests with the shared social-step commit authority so replay,
+artifact, harness, adapter, and server tests no longer reimplement
+`commitStatus === "committed"` filters.
+
+### 13.171.2 Behavior
+
+- Replay, artifact, harness, and werewolf-adapter tests filter committed steps
+  with `isSocialStepCommitted()`.
+- Server checkpoint and match-artifact replay assertions use
+  `countSocialStepCommits()` for native/committed/rejected density.
+- This keeps test expectations synchronized with production progress/replay
+  semantics under sections 13.161–13.170.
+
+### 13.171.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverCheckpointApi.test.ts tests/serverMatchArtifactsApi.test.ts tests/replay.test.ts tests/artifacts.test.ts tests/harness.test.ts tests/werewolfAdapter.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (6 files / 83 tests), and production build
+validated in this continuation.
+
+## 13.172 Comprehensive Optimization: Remaining Native Count Consistency
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.progress.remaining-native-count-consistency.v1
+tests.progress.remaining-native-count-consistency.v1
+```
+
+### 13.172.1 Capability
+
+Keep residual match-summary and focused test native-step counts on the shared
+`countSocialStepCommits()` authority while preserving legacy
+`trajectorySteps` as a separate projection field.
+
+### 13.172.2 Behavior
+
+- Match-run summary spreads shared `nativeSteps` / `committedSteps` /
+  `rejectedSteps`, keeps `socialSteps` as an alias of native step count, and
+  still reports legacy `trajectorySteps`.
+- Checkpoint and match-artifact API tests assert native counts through
+  `countSocialStepCommits()` rather than raw `steps.length` filters.
+
+### 13.172.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverMatchArtifactsApi.test.ts --reporter=dot
+npx vitest run --reporter=dot
+npm run build
+```
+
+Observed in this continuation: typecheck, focused match-artifact API tests,
+and production build validated; full suite re-run after restoring
+`trajectorySteps`.
+
+## 13.173 Comprehensive Optimization: Comparison Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+comparison.progress.commit-density.v1
+```
+
+### 13.173.1 Capability
+
+Expose shared native commit density in match-comparison source summaries and
+summary rows so compare artifacts can distinguish total social steps from
+committed vs rejected execution.
+
+### 13.173.2 Behavior
+
+- `MatchComparisonSourceSummary` now includes `committedSteps` and
+  `rejectedSteps` alongside `socialSteps`.
+- Comparison summary rows include:
+  - `social_steps`
+  - `committed_steps`
+  - `rejected_steps`
+- Source markdown projection includes committed/rejected density.
+- Counts come only from `countSocialStepCommits()` over recorded social steps;
+  React and comparison exports still do not invent winners or private evidence.
+
+### 13.173.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverStore.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (3 files / 58 tests), and production build
+validated in this continuation.
+
+## 13.174 Comprehensive Optimization: Tournament Pair Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.comparison.pair-commit-density.v1
+```
+
+### 13.174.1 Capability
+
+Project shared native commit density into tournament pairwise comparison
+aggregates so pack-level comparison artifacts can distinguish total social steps
+from committed vs rejected execution across episode pairs.
+
+### 13.174.2 Behavior
+
+- `TournamentComparisonPairSummary` now includes:
+  - `baselineSocialSteps` / `candidateSocialSteps`
+  - `baselineCommittedSteps` / `candidateCommittedSteps`
+  - `baselineRejectedSteps` / `candidateRejectedSteps`
+  - `socialStepsDelta` / `committedStepsDelta` / `rejectedStepsDelta`
+- Aggregate `summary` includes:
+  - `totalSocialStepsDelta`
+  - `totalCommittedStepsDelta`
+  - `totalRejectedStepsDelta`
+- Pair deltas are pure projections from
+  `buildMatchComparisonArtifact(...).baseline/candidate` commit density fields
+  (section 13.173), not client-invented counts.
+- `formatTournamentComparisonMarkdown()` projects the new density into the
+  summary line and pairs table.
+- React tournament comparison inspector shows total social/committed/rejected
+  step deltas and per-pair `cΔ/rΔ` labels when present.
+
+### 13.174.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 37 tests), and production build
+validated in this continuation.
+
+## 13.175 Comprehensive Optimization: Comparison Summary And Registry Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+comparison.summary.registry-commit-density.v1
+```
+
+### 13.175.1 Capability
+
+Lift shared native commit density into match-comparison artifact summaries,
+`/api/comparisons` list DTOs, and redaction-safe registry labels so registry
+selection surfaces can distinguish social/committed/rejected step deltas without
+opening full comparison artifacts.
+
+### 13.175.2 Behavior
+
+- `MatchComparisonArtifact.summary` now includes:
+  - `baselineSocialSteps` / `candidateSocialSteps`
+  - `baselineCommittedSteps` / `candidateCommittedSteps`
+  - `baselineRejectedSteps` / `candidateRejectedSteps`
+  - `socialStepsDelta` / `committedStepsDelta` / `rejectedStepsDelta`
+- These summary fields are pure projections from
+  `summarizeSource(...).socialSteps|committedSteps|rejectedSteps`.
+- `GET /api/comparisons` list summaries expose the same density fields.
+- `formatComparisonRegistryEntryLabel()` appends `cΔN/rΔM` when committed and
+  rejected deltas are present, otherwise falls back to `sΔN` for social-step
+  delta only.
+- React `ComparisonRegistrySummary` accepts the new optional density fields so
+  label formatting can consume them.
+
+### 13.175.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts tests/serverStore.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (3 files / 58 tests), and production build
+validated in this continuation.
+
+## 13.176 Comprehensive Optimization: Comparison Markdown Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+comparison.markdown.commit-density.v1
+```
+
+### 13.176.1 Capability
+
+Project shared native commit density into match-comparison markdown exports and
+filtered-projection markdown so offline comparison artifacts carry the same
+social/committed/rejected step deltas as machine-readable summaries.
+
+### 13.176.2 Behavior
+
+- `formatMatchComparisonMarkdown()` summary line includes:
+  - `socialStepsDelta`
+  - `committedStepsDelta`
+  - `rejectedStepsDelta`
+- Source sections continue to project baseline/candidate
+  `committedSteps` / `rejectedSteps` via `formatSourceMarkdown()`.
+- `formatFilteredMatchComparisonMarkdown()` summary line includes:
+  - `sourceSocialStepsDelta`
+  - `sourceCommittedStepsDelta`
+  - `sourceRejectedStepsDelta`
+  sourced from the parent comparison summary, not recomputed from filtered
+  rows.
+- Markdown remains a pure projection over server-owned comparison artifacts and
+  does not invent winners, private evidence, or causality.
+
+### 13.176.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suite (1 file / 28 tests), and production build
+validated in this continuation.
+
+## 13.177 Comprehensive Optimization: Cockpit Comparison Commit Density Surface
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.comparison.cockpit-commit-density.v1
+```
+
+### 13.177.1 Capability
+
+Surface server-owned comparison commit density in the React compare cockpit so
+operators can see social/committed/rejected step deltas without inventing local
+truth or reopening full artifact payloads.
+
+### 13.177.2 Behavior
+
+- Compare matrix extra tags now show:
+  - `socialΔ`
+  - `cΔ/rΔ`
+  sourced from `currentComparison.summary.*StepsDelta`.
+- KPI `compare / replay` suffix shows `cΔ/rΔ` when a comparison is loaded.
+- `inspectorFromComparison()` fields include social/committed/rejected deltas
+  and baseline/candidate `s/c/r` step density.
+- `inspectorFromFilteredComparison()` fields include source comparison commit
+  density from `projection.source.summary`.
+- React remains a pure consumer of server comparison artifacts; it does not
+  recompute winners, private evidence, or commit counts from local guesses.
+
+### 13.177.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites, and production build validated in this
+continuation.
+
+## 13.178 Comprehensive Optimization: Ready Banner And Pair Action Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.comparison.ready-banner-pair-action-density.v1
+```
+
+### 13.178.1 Capability
+
+Expose server-owned comparison commit density in the compare ready banner and
+tournament pair action labels so operators can see social/committed/rejected
+step deltas before opening matrix details.
+
+### 13.178.2 Behavior
+
+- Ready banner description now includes:
+  - `socialΔ`
+  - `cΔ/rΔ`
+  from `comparison.summary.*StepsDelta`.
+- Tournament pair action labels include `cΔ/rΔ` when pair commit density fields
+  are present on the server tournament comparison aggregate.
+- React remains a pure consumer of server comparison projections and does not
+  invent winners, private evidence, or commit counts.
+
+### 13.178.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suite (1 file / 28 tests), and production build
+validated in this continuation.
+
+## 13.179 Comprehensive Optimization: Comparison Load Status And Registry Density Lock
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.comparison.load-status-density.v1
+api.comparisons.list-density-lock.v1
+```
+
+### 13.179.1 Capability
+
+Make comparison load status and registry list tests carry shared commit density
+so operators and CI both see social/committed/rejected step deltas after a
+server-owned comparison load.
+
+### 13.179.2 Behavior
+
+- `loadComparisonPair()` action status now appends:
+  - `socialΔ`
+  - `cΔ/rΔ`
+  from the just-loaded comparison summary.
+- `GET /api/comparisons` registry list tests assert the density fields against
+  the full comparison artifact summary, not only `expect.any(Number)`.
+- Full deterministic suite after sections 13.174–13.178 remained green:
+  `24 files / 318 tests`.
+
+### 13.179.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts --reporter=dot
+npx vitest run --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused public-view API tests (16), full suite
+(`24 files / 318 tests`), and production build validated in this continuation.
+
+## 13.180 Comprehensive Optimization: Saved And Tournament Load Status Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.comparison.saved-tournament-load-status-density.v1
+```
+
+### 13.180.1 Capability
+
+Surface server-owned comparison commit density in remaining comparison load
+status messages so registry-saved comparison loads and tournament aggregate
+inspect paths report social/committed/rejected deltas without inventing local
+truth.
+
+### 13.180.2 Behavior
+
+- `loadSavedComparisonById()` status now appends:
+  - `socialΔ`
+  - `cΔ/rΔ`
+  from the loaded comparison summary.
+- Tournament comparison inspect status now appends aggregate:
+  - `totalSocialStepsDelta`
+  - `totalCommittedStepsDelta`
+  - `totalRejectedStepsDelta`
+  when present on the server tournament comparison artifact.
+- React remains a pure consumer of server comparison projections.
+
+### 13.180.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/matchComparison.test.ts tests/serverPublicViewApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 44 tests), and production build
+validated in this continuation.
+
+## 13.181 Comprehensive Optimization: Tournament CLI Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+cli.tournament.commit-density.v1
+```
+
+### 13.181.1 Capability
+
+Surface shared native commit density in tournament CLI summaries so offline
+tournament runs report native/committed/rejected step totals without inventing
+progress from legacy trajectory length alone.
+
+### 13.181.2 Behavior
+
+- `src/scripts/runTournament.ts` tournament JSON summary now spreads aggregate:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+  over all episodes via `countSocialStepCommits()`.
+- Per-evaluated episode evaluation summaries also include the same density
+  fields alongside legacy `trajectorySteps`.
+- Match CLI and replay CLI already used shared commit density
+  (`runMatch.ts`, `replayMatch.ts`); this closes the tournament CLI gap.
+
+### 13.181.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournament.test.ts tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament suites (2 files / 12 tests), and
+production build validated in this continuation.
+
+## 13.182 Comprehensive Optimization: Match CLI Evaluation Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+cli.match.evaluation-commit-density.v1
+```
+
+### 13.182.1 Capability
+
+Include shared native commit density in match CLI evaluation summaries so
+`arena:match --json=summary` reports native/committed/rejected step counts next
+to legacy evaluation trajectory length.
+
+### 13.182.2 Behavior
+
+- `summarizeEvaluation()` in `src/scripts/runMatch.ts` now accepts social steps
+  and spreads `countSocialStepCommits(...)`.
+- Match CLI top-level summary already included commit density; evaluation nested
+  summary now does too, while preserving `trajectorySteps` and
+  `lastTrajectorySteps`.
+
+### 13.182.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournament.test.ts tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament suites (2 files / 12 tests), and
+production build validated in this continuation.
+
+## 13.183 Comprehensive Optimization: Server Evaluation Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.evaluation.commit-density.v1
+```
+
+### 13.183.1 Capability
+
+Surface shared native commit density in server match and tournament evaluation
+summaries so API consumers receive native/committed/rejected step counts next to
+legacy evaluation trajectory length.
+
+### 13.183.2 Behavior
+
+- Match-run summary `evaluation` now receives `stepCounts` from
+  `countSocialStepCommits(result.socialEpisode.steps)`.
+- Tournament episode API summaries include commit density in
+  `evaluationSummary`.
+- Tournament evaluation aggregate episode rows also include commit density.
+- `summarizeEvaluation()` accepts optional step-count fields and spreads them
+  when provided, preserving existing reward/agent-count fields.
+
+### 13.183.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused server suites (2 files / 32 tests), and production
+build validated in this continuation.
+
+## 13.184 Comprehensive Optimization: Tournament Episode MetricSummary Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament.episode-metric-summary-density.v1
+```
+
+### 13.184.1 Capability
+
+Include shared native commit density in tournament episode API metric summaries
+even when only social-episode evidence is available.
+
+### 13.184.2 Behavior
+
+- `serializeTournamentEpisodeSummaryForApi()` now spreads
+  `countSocialStepCommits(episode.socialEpisode?.steps ?? [])` into
+  `metricSummary` when metrics exist.
+- If metrics are absent but `socialEpisode` exists, `metricSummary` falls back
+  to the commit density object alone rather than `null`.
+- `evaluationSummary` already includes the same density fields (section 13.183).
+
+### 13.184.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused server suites (2 files / 32 tests), and production
+build validated in this continuation.
+
+## 13.185 Comprehensive Optimization: Tournament Episode Density Test Lock
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament.episode-density-test-lock.v1
+```
+
+### 13.185.1 Capability
+
+Lock tournament episode API metric and evaluation summary commit density in
+focused server tests so public pack export responses cannot silently drop
+native/committed/rejected step fields.
+
+### 13.185.2 Behavior
+
+- `tests/serverTournamentArtifactsApi.test.ts` now asserts
+  `episodes[0].metricSummary` and `episodes[0].evaluationSummary` contain:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- This locks the server projection behavior from sections 13.183–13.184 without
+  exposing private social episode payloads in public tournament responses.
+
+### 13.185.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament artifact API suite (1 file / 16 tests),
+and production build validated in this continuation.
+
+## 13.186 Comprehensive Optimization: Match Run Evaluation Density Test Lock
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.match.run-evaluation-density-test-lock.v1
+```
+
+### 13.186.1 Capability
+
+Lock match-run summary top-level and nested evaluation commit density in public
+API tests so `/api/matches/run` responses cannot silently drop
+native/committed/rejected step fields.
+
+### 13.186.2 Behavior
+
+- `tests/serverPublicViewApi.test.ts` asserts `run.body.summary` includes:
+  - top-level `nativeSteps` / `committedSteps` / `rejectedSteps`
+  - nested `evaluation.nativeSteps` / `committedSteps` / `rejectedSteps`
+- `tests/serverMatchArtifactsApi.test.ts` `createPersistedMatch()` helper now
+  requires the same density fields on every persisted match-run summary.
+- This locks the server evaluation density projection from section 13.183.
+
+### 13.186.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/serverMatchArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused server suites (2 files / 27 tests), and production
+build validated in this continuation.
+
+## 13.187 Comprehensive Optimization: Tournament Episode CSV Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.episode-csv.commit-density.v1
+```
+
+### 13.187.1 Capability
+
+Project shared native commit density into tournament `episodes.csv` so tabular
+analysis exports distinguish native/committed/rejected steps from legacy
+trajectory length.
+
+### 13.187.2 Behavior
+
+- `EPISODE_CSV_HEADERS` now includes:
+  - `native_steps`
+  - `committed_steps`
+  - `rejected_steps`
+  immediately before `trajectory_steps`.
+- `episodeCsvRows()` populates those columns through
+  `countSocialStepCommits(episode.socialEpisode?.steps ?? artifact?.socialEpisode.steps ?? [])`.
+- `episodes.jsonl` already carried density (section 13.163); CSV export now
+  matches that authority.
+- Focused tournament artifact tests lock the CSV header order.
+
+### 13.187.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament artifact suite (1 file / 9 tests), and
+production build validated in this continuation.
+
+## 13.188 Comprehensive Optimization: Tournament Cost Latency Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.cost-latency.commit-density.v1
+```
+
+### 13.188.1 Capability
+
+Project shared native commit density into tournament `cost_latency.json` so
+provider cost/latency reports distinguish native/committed/rejected execution
+steps from model-call `harnessTurns`.
+
+### 13.188.2 Behavior
+
+- Cost-latency stats now carry:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Episode stats accumulate those fields from
+  `countSocialStepCommits(socialEpisode.steps)`.
+- Tournament totals sum episode density fields.
+- `finalizeCostLatencyStats()` exposes density on totals, by-model, and episode
+  objects.
+- Focused tournament artifact tests lock totals and episode density fields.
+- `harnessTurns` remains model/provider turn accounting and may fall back to
+  committed steps only when metrics are absent.
+
+### 13.188.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament artifact suite (1 file / 9 tests), and
+production build validated in this continuation.
+
+## 13.189 Comprehensive Optimization: Tournament Summary Markdown Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.summary-markdown.commit-density.v1
+```
+
+### 13.189.1 Capability
+
+Project shared native commit density into tournament `summary.md` so the human
+run-set overview distinguishes native/committed/rejected execution steps from
+model-call leaderboard turns.
+
+### 13.189.2 Behavior
+
+- `buildTournamentSummaryMarkdown()` accumulates episode density through
+  `countSocialStepCommits(episode.socialEpisode?.steps ?? artifact?.socialEpisode.steps ?? [])`.
+- The `## Run Set` section now includes:
+  - `Native steps`
+  - `Committed steps`
+  - `Rejected steps`
+- Density is a pure projection over recorded social episode steps and does not
+  invent winners, private evidence, or scorecard promotions.
+- Focused tournament artifact tests lock the three density lines.
+
+### 13.189.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament artifact suite (1 file / 9 tests), and
+production build validated in this continuation.
+
+## 13.190 Comprehensive Optimization: Tournament Failure Record Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.failures-jsonl.commit-density.v1
+```
+
+### 13.190.1 Capability
+
+Project shared native commit density into tournament `failures.jsonl` so failed
+episode audit records distinguish native/committed/rejected execution steps
+from harness error counts and provider failure attribution.
+
+### 13.190.2 Behavior
+
+- `aggregateFailureRecords()` now includes:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Density is computed through
+  `countSocialStepCommits(episode.socialEpisode?.steps ?? artifact?.socialEpisode.steps ?? [])`.
+- Failure attribution, provider failure summaries, and partial artifact paths
+  remain unchanged.
+- Focused tournament artifact tests lock the density fields on failed episode
+  records.
+
+### 13.190.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament artifact suite (1 file / 9 tests), and
+production build validated in this continuation.
+
+## 13.191 Comprehensive Optimization: Tournament Integrity Record Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.integrity-jsonl.commit-density.v1
+```
+
+### 13.191.1 Capability
+
+Project shared native commit density into tournament `integrity.jsonl` so
+structural artifact-integrity audit records can be correlated with
+native/committed/rejected execution step counts without inventing runtime
+failures.
+
+### 13.191.2 Behavior
+
+- `aggregateIntegrityRecords()` now includes:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Density is computed through
+  `countSocialStepCommits(episode?.socialEpisode?.steps ?? record.artifact.socialEpisode.steps ?? [])`.
+- Integrity `ok` / `errorCount` / `errors` remain pure structural validation
+  results and are not mixed with runtime failure attribution.
+- Focused tournament artifact tests lock density for both healthy and corrupted
+  integrity records.
+
+### 13.191.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament artifact suite (1 file / 9 tests), and
+production build validated in this continuation.
+
+## 13.192 Comprehensive Optimization: Tournament Manifest Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.manifest.commit-density.v1
+```
+
+### 13.192.1 Capability
+
+Project shared native commit density into tournament `manifest.json` so the
+run-set registry distinguishes native/committed/rejected execution steps at both
+aggregate and per-match summary levels.
+
+### 13.192.2 Behavior
+
+- `buildManifest()` now includes top-level:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Aggregate totals are summed from
+  `countSocialStepCommits(episode.socialEpisode?.steps ?? artifact?.socialEpisode.steps ?? [])`.
+- Each `matches[]` entry also carries the same density fields for that episode.
+- Focused tournament artifact tests lock both aggregate and per-match density.
+
+### 13.192.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament artifact suite (1 file / 9 tests), and
+production build validated in this continuation.
+
+## 13.193 Comprehensive Optimization: Assignment And Benchmark Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.assignment-benchmark.commit-density.v1
+```
+
+### 13.193.1 Capability
+
+Project shared native commit density into tournament `assignment.json` and
+`benchmark_statistics.json` so assignment ledgers and benchmark denominators can
+correlate episode scheduling with native/committed/rejected execution steps.
+
+### 13.193.2 Behavior
+
+- `TournamentAssignmentEpisodeRecord` now includes:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- `buildAssignmentExport()` populates those fields through
+  `countSocialStepCommits(episode.socialEpisode?.steps ?? artifact?.socialEpisode.steps ?? [])`.
+- `buildBenchmarkStatistics()` adds the same totals under
+  `statusDenominators` and per-episode fields under `seedLedger`.
+- Density remains a pure projection over recorded social episode steps and does
+  not invent winners, private evidence, or scorecard promotions.
+- Focused tournament artifact tests lock assignment episodes, seed ledger, and
+  status denominators for both truncated and pre-harness failed episodes.
+
+### 13.193.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament artifact suite (1 file / 9 tests), and
+production build validated in this continuation.
+
+## 13.194 Comprehensive Optimization: Tournament Leaderboard Episode Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.leaderboard-episodes.commit-density.v1
+```
+
+### 13.194.1 Capability
+
+Project shared native commit density into tournament `leaderboard.json` episode
+summaries so leaderboard consumers can correlate episode outcomes with
+native/committed/rejected execution steps without opening full match artifacts.
+
+### 13.194.2 Behavior
+
+- `buildLeaderboard()` episode rows now include:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Density is computed through
+  `countSocialStepCommits(episode.socialEpisode?.steps ?? artifact?.socialEpisode.steps ?? [])`.
+- Winner redaction and fork provenance remain unchanged.
+- Focused tournament artifact tests lock the density fields on leaderboard
+  episode summaries.
+
+### 13.194.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused tournament artifact suite (1 file / 9 tests), and
+production build validated in this continuation.
+
+## 13.195 Comprehensive Optimization: Tournament Pack Summary Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.tournament-pack-summary.commit-density.v1
+```
+
+### 13.195.1 Capability
+
+Project shared native commit density into tournament pack list/detail DTOs and
+the React packs table so public pack inventory can show
+native/committed/rejected execution step totals without opening full match
+artifacts.
+
+### 13.195.2 Behavior
+
+- `StoredTournamentArtifactSet` now optionally stores:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Server pack export reads density from the written tournament `manifest.json`.
+- Child-manifest rehydrate and the server-owned pack index preserve the same
+  density fields.
+- `serializeTournamentArtifactSet()` exposes density as redaction-safe scalar
+  numbers or `null`.
+- React packs table renders `n{native}/c{committed}/r{rejected}` when present.
+- Focused server tournament artifact API tests lock pack summary density and
+  downloaded manifest density.
+
+### 13.195.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/tournamentArtifacts.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.196 Comprehensive Optimization: Pack Cockpit Density Surface
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-pack-density-surface.v1
+```
+
+### 13.196.1 Capability
+
+Surface tournament pack commit density in cockpit export/select status, pack
+inspector fields, and downloadable pack summary artifacts so operators can see
+native/committed/rejected step totals without opening match artifacts.
+
+### 13.196.2 Behavior
+
+- `formatPackCommitDensity()` formats pack DTO density as `nX/cY/rZ` or `n/a`.
+- Packs table density column reuses the same pure formatter.
+- Tournament pack export status and selected-pack status include density when
+  present.
+- Export inspector fields include a `density` row.
+- Server pack download tests lock `summary.md` density lines and
+  `episodes.csv` density headers.
+
+### 13.196.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused server tournament artifact suite (1 file / 16
+tests), and production build validated in this continuation.
+
+## 13.197 Comprehensive Optimization: Tournament Episode API Top-Level Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-episode-summary.commit-density.v1
+```
+
+### 13.197.1 Capability
+
+Expose shared native commit density as first-class tournament episode summary
+fields in `/api/tournaments/run` responses so clients can read
+native/committed/rejected step counts without depending on nested
+`metricSummary` or `evaluationSummary` shapes.
+
+### 13.197.2 Behavior
+
+- `serializeTournamentEpisodeSummaryForApi()` now includes top-level:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Nested `metricSummary` and `evaluationSummary` continue to spread the same
+  `countSocialStepCommits()` result for compatibility.
+- Child-manifest rehydrate tests assert pack density survives process-store
+  clear and index deletion.
+- Density remains a pure projection over recorded social episode steps.
+
+### 13.197.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused server tournament artifact suite (1 file / 16
+tests), and production build validated in this continuation.
+
+## 13.198 Comprehensive Optimization: Tournament Run Summary Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-run-summary.commit-density.v1
+```
+
+### 13.198.1 Capability
+
+Project shared native commit density into `/api/tournaments/run` summary so
+operators and cockpit surfaces can read aggregate native/committed/rejected
+step totals without opening per-episode records or match artifacts.
+
+### 13.198.2 Behavior
+
+- `buildTournamentSummary()` now includes top-level:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Aggregate totals sum `countSocialStepCommits(episode.socialEpisode?.steps ?? [])`
+  across all tournament episodes.
+- Density remains a pure projection over recorded social episode steps and does
+  not invent winners, private evidence, or scorecard promotions.
+- Focused server tournament artifact API tests lock the three density fields on
+  `exported.body.summary`.
+
+### 13.198.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused server tournament artifact suite (1 file / 16
+tests), and production build validated in this continuation.
+
+## 13.199 Comprehensive Optimization: Cockpit Run Summary Density Surface
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.tournament-run-summary-density-surface.v1
+```
+
+### 13.199.1 Capability
+
+Consume tournament run-summary commit density in the React packs export path so
+export status and inspector fields prefer server aggregate
+native/committed/rejected totals when available.
+
+### 13.199.2 Behavior
+
+- `TournamentRunResponse.summary` and episode DTOs now type:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Pack export status prefers `response.summary` density, falling back to pack
+  artifact-set density.
+- Pack export inspector includes both:
+  - `density` from the pack DTO
+  - `runSummaryDensity` from the tournament run summary
+- Density remains a pure projection over server-owned summary fields; React does
+  not invent winners, private evidence, or scorecard promotions.
+
+### 13.199.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused server tournament artifact suite (1 file / 16
+tests), and production build validated in this continuation.
+
+## 13.200 Comprehensive Optimization: Tournament Evaluation Summary Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-evaluation-summary.commit-density.v1
+```
+
+### 13.200.1 Capability
+
+Project shared native commit density into tournament evaluation summaries so
+server and CLI tournament evaluation objects report aggregate
+native/committed/rejected step totals alongside reward summaries.
+
+### 13.200.2 Behavior
+
+- Server `summarizeTournamentEvaluation()` now includes top-level:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- CLI `src/scripts/runTournament.ts` evaluation summarizer mirrors the same
+  aggregate density fields.
+- Aggregate totals sum `countSocialStepCommits(episode.socialEpisode?.steps ?? [])`
+  across all tournament episodes, not only evaluated completed games.
+- Per-episode evaluation rows continue to spread the same density helper.
+- Focused server tournament artifact API tests lock the evaluation density
+  fields on `exported.body.summary.evaluation`.
+
+### 13.200.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused server tournament artifact suite (1 file / 16
+tests), and production build validated in this continuation.
+
+## 13.201 Comprehensive Optimization: Pack Download Density Test Locks
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+api.tournament-pack-download-density-locks.v1
+```
+
+### 13.201.1 Capability
+
+Lock downloadable tournament pack artifacts for shared native commit density so
+public pack downloads preserve native/committed/rejected step totals across
+benchmark, integrity, episode, assignment, and cost-latency surfaces.
+
+### 13.201.2 Behavior
+
+- `tests/serverTournamentArtifactsApi.test.ts` now asserts density on:
+  - `cost_latency.json` totals and episodes
+  - `benchmark_statistics.json` status denominators and seed ledger
+  - `integrity.jsonl` records
+  - `episodes.jsonl` records
+  - `assignment.json` episode rows
+- Density remains a pure projection over recorded social episode steps and does
+  not invent winners, private evidence, or scorecard promotions.
+
+### 13.201.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused server tournament artifact suite (1 file / 16
+tests), and production build validated in this continuation.
+
+## 13.202 Comprehensive Optimization: Model Profile Leaderboard Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.model-profile-leaderboard.commit-density.v1
+```
+
+### 13.202.1 Capability
+
+Project shared native commit density into tournament model/profile leaderboard
+stats and `leaderboard.csv` so model and profile comparisons can distinguish
+native/committed/rejected execution steps from model-call `harnessTurns`.
+
+### 13.202.2 Behavior
+
+- `TournamentModelStats` / `TournamentProfileStats` now include:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- `accumulateCompletedEpisode()` accumulates density from
+  `episode.socialEpisode.steps` by actor/model/profile mapping.
+- System steps (`actorId === "system"`) are excluded.
+- `isSocialStepCommitted()` remains the commit/reject authority.
+- `leaderboard.csv` headers and rows include density columns after
+  `harness_errors`.
+- Focused tournament, tournament-artifact, and server pack download tests lock
+  the density fields.
+
+### 13.202.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournament.test.ts tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (3 files / 28 tests), and production build
+validated in this continuation.
+
+## 13.203 Comprehensive Optimization: Summary Markdown And Leaderboard JSON Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.summary-leaderboard-json.commit-density.v1
+```
+
+### 13.203.1 Capability
+
+Project model/profile commit density into tournament `summary.md` leaderboard
+tables and lock density on downloaded `leaderboard.json` model stats so human
+and machine leaderboard surfaces share the same native/committed/rejected step
+authority introduced in section 13.202.
+
+### 13.203.2 Behavior
+
+- `buildTournamentSummaryMarkdown()` model leaderboard columns now include:
+  - `native`
+  - `committed`
+  - `rejected`
+- Profile leaderboard columns include the same density fields after
+  `avg_reward`.
+- Density values come from `TournamentModelStats` /
+  `TournamentProfileStats` fields populated by social-step accumulation.
+- Focused tests lock:
+  - summary markdown density headers
+  - leaderboard.json modelStats density and
+    `nativeSteps === committedSteps + rejectedSteps`
+  - pack download `leaderboard.json` density
+
+### 13.203.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts tests/tournament.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (3 files / 28 tests), and production build
+validated in this continuation.
+
+## 13.204 Comprehensive Optimization: ProfileStats And Pack Summary Density Locks
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.profile-stats-pack-summary.density-locks.v1
+```
+
+### 13.204.1 Capability
+
+Lock profile-level commit density and pack-download summary markdown density
+headers so model and profile leaderboard surfaces remain symmetric under the
+shared native/committed/rejected authority.
+
+### 13.204.2 Behavior
+
+- Tournament artifact tests now assert
+  `leaderboard.profileStats[*].nativeSteps/committedSteps/rejectedSteps` and
+  `nativeSteps === committedSteps + rejectedSteps`.
+- Pack download tests assert the same density fields on
+  `leaderboard.json` `profileStats`.
+- Pack download `summary.md` assertions lock model and profile leaderboard
+  density headers introduced in section 13.203.
+- Density remains a pure projection over recorded social-step accumulation.
+
+### 13.204.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts tests/tournament.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (3 files / 28 tests), and production build
+validated in this continuation.
+
+## 13.205 Comprehensive Optimization: Agents CSV Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.agents-csv.commit-density.v1
+```
+
+### 13.205.1 Capability
+
+Project per-agent native/committed/rejected social-step density into
+`agents.csv` so tabular agent-level analysis can use the same commit authority
+as episode, model, and profile leaderboard surfaces.
+
+### 13.205.2 Behavior
+
+- `agentCsvRows()` now accepts optional `artifactsByIndex` and counts density
+  from `episode.socialEpisode.steps` or the matching match artifact steps.
+- System steps (`actorId === "system"`) are excluded.
+- `isSocialStepCommitted()` remains the commit/reject authority.
+- Agents with no actor steps export `0/0/0`.
+- `AGENT_CSV_HEADERS` appends:
+  - `native_steps`
+  - `committed_steps`
+  - `rejected_steps`
+- Focused writer and pack-download tests lock the density headers.
+
+### 13.205.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.206 Comprehensive Optimization: Shared Actor Density Helper And Match CLI
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+harness.actor-commit-density.helper.v1
+```
+
+### 13.206.1 Capability
+
+Centralize per-actor native/committed/rejected social-step density behind
+`countSocialStepCommitsByActor()` and project it into both tournament
+`agents.csv` and match CLI agent summaries so actor-level density cannot drift
+across surfaces.
+
+### 13.206.2 Behavior
+
+- `src/harness/social.ts` exports `countSocialStepCommitsByActor()`.
+- System steps (`actorId === "system"`) are excluded.
+- `isSocialStepCommitted()` remains the commit/reject authority.
+- `agentCsvRows()` now reuses the shared helper instead of a local loop.
+- Match CLI `summary.agents[]` now includes:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Unit tests cover multi-actor committed/rejected counts and empty/system-only
+  inputs.
+
+### 13.206.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/social.test.ts tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (3 files / 53 tests), and production build
+validated in this continuation.
+
+## 13.207 Comprehensive Optimization: Model Density Helper Reuse And Pack Failures Lock
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.model-density.helper-reuse.v1
+```
+
+### 13.207.1 Capability
+
+Reuse `countSocialStepCommitsByActor()` for tournament model-level commit
+density accumulation, keep profile accumulation step-profile-id aware, and lock
+pack-download `failures.jsonl` density fields so failure audit surfaces share
+the same native/committed/rejected authority.
+
+### 13.207.2 Behavior
+
+- `accumulateSocialStepDensity()` now:
+  - aggregates model density from `countSocialStepCommitsByActor()`
+  - still prefers `step.profileId` when accumulating profile density
+- Pack download tests assert each `failures.jsonl` record includes:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Density remains a pure projection over recorded social-step commit status.
+
+### 13.207.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournament.test.ts tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts tests/social.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (4 files / 56 tests), and production build
+validated in this continuation.
+
+## 13.208 Comprehensive Optimization: Cost Latency Model Density And Episode Agent Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.cost-latency-model-density.v1
+```
+
+### 13.208.1 Capability
+
+Project actor-scoped native/committed/rejected density into
+`cost_latency.json` `byModel` stats and tournament episode API agent summaries
+so model cost telemetry and redacted episode agent rows share the same commit
+authority as leaderboard, agents.csv, and match CLI surfaces.
+
+### 13.208.2 Behavior
+
+- `buildCostLatencyReport()` now accumulates model density from
+  `countSocialStepCommitsByActor()` mapped through episode agent player→model.
+- `cost_latency.byModel[*]` includes:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- `serializeTournamentEpisodeSummaryForApi()` episode `agents[]` now includes
+  density fields while remaining redaction-safe (still no role/team/profile/
+  model/policy/reward/won).
+- Focused writer and pack-download tests lock model density; API tests lock
+  episode agent density keys.
+
+### 13.208.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts tests/social.test.ts tests/tournament.test.ts --reporter=dot
+npm run build
+```
+
+Observed: typecheck, focused suites (4 files / 56 tests), and production build
+validated in this continuation.
+
+## 13.209 Comprehensive Optimization: Evaluation ModelRewards Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.evaluation-model-rewards-density.v1
+```
+
+### 13.209.1 Capability
+
+Project actor-scoped native/committed/rejected density into tournament
+evaluation `modelRewards` summaries on both CLI and server so model reward
+aggregates share the same commit authority as leaderboard, cost_latency.byModel,
+agents.csv, and match CLI agent surfaces.
+
+### 13.209.2 Behavior
+
+- Server and CLI `summarizeModelRewards()` now accept evaluated
+  `{ episode, evaluation }` pairs.
+- Density is accumulated from `countSocialStepCommitsByActor()` mapped through
+  episode agent player→model.
+- Each `modelRewards[model]` includes:
+  - existing `agentGames` / `wins` / `winRate` / `averageReward`
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Server tournament export summary tests lock per-model density fields.
+
+### 13.209.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/tournament.test.ts tests/tournamentArtifacts.test.ts tests/social.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (4 files / 56 tests), and production build
+validated in this continuation.
+
+## 13.210 Comprehensive Optimization: CLI ProfileRewards Density With Public Redaction
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.cli-profile-rewards-density.v1
+```
+
+### 13.210.1 Capability
+
+Add profile-level native/committed/rejected density to CLI research evaluation
+summaries while keeping public server tournament summaries free of raw profile
+ids, policy names, and profileRewards objects.
+
+### 13.210.2 Behavior
+
+- CLI `summarizeTournamentEvaluation()` now emits `profileRewards`.
+- CLI `summarizeProfileRewards()` accumulates:
+  - reward/win aggregates from evaluated agent rewards
+  - density from `countSocialStepCommitsByActor()` mapped through episode
+    player→profile
+- Each CLI `profileRewards[profileId]` includes:
+  - `profileId`
+  - `model`
+  - `agentGames` / `wins` / `winRate` / `averageReward`
+  - `nativeSteps` / `committedSteps` / `rejectedSteps`
+- Server public tournament evaluation summaries intentionally omit
+  `profileRewards` so raw profile ids cannot leak through
+  `summary.evaluation`.
+- Server tests lock:
+  - `modelRewards` density fields remain present
+  - `profileRewards` is absent from public summary
+  - explicit-profile public summary still does not contain profile ids/policy
+    names
+
+### 13.210.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/tournament.test.ts tests/tournamentArtifacts.test.ts tests/social.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (4 files / 56 tests), and production build
+validated in this continuation.
+
+## 13.211 Comprehensive Optimization: Assignment Agent Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.assignment-agent-density.v1
+```
+
+### 13.211.1 Capability
+
+Project actor-scoped native/committed/rejected density into
+`assignment.json` per-agent records so assignment ledgers share the same commit
+authority as agents.csv, episode agent summaries, cost_latency.byModel, and
+modelRewards.
+
+### 13.211.2 Behavior
+
+- `TournamentAssignmentAgentRecord` now includes:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- `assignmentAgentsForEpisode()` uses `countSocialStepCommitsByActor()` over
+  episode or artifact social steps.
+- Agents with no actor steps export `0/0/0`.
+- Role/team redaction for public packs remains unchanged.
+- Focused writer and pack-download tests lock agent density fields.
+
+### 13.211.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.212 Comprehensive Optimization: Failures JSONL Agent Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.failures-agent-density.v1
+```
+
+### 13.212.1 Capability
+
+Project actor-scoped native/committed/rejected density into
+`failures.jsonl` agent rows so failed-episode audit surfaces share the same
+commit authority as assignment agents, agents.csv, and episode agent summaries.
+
+### 13.212.2 Behavior
+
+- `aggregateFailureRecords()` now attaches density fields to each failure agent:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Density comes from `countSocialStepCommitsByActor()` over episode or artifact
+  social steps.
+- Public/redacted packs still strip role/team/won from failure agents while
+  preserving density scalars.
+- Focused writer and pack-download tests lock agent density fields on failure
+  records.
+
+### 13.212.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.213 Comprehensive Optimization: Episodes JSONL Agent Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.episodes-agent-density.v1
+```
+
+### 13.213.1 Capability
+
+Project actor-scoped native/committed/rejected density into
+`episodes.jsonl` agent rows so episode ledgers share the same commit authority
+as assignment agents, failures agents, agents.csv, and episode API summaries.
+
+### 13.213.2 Behavior
+
+- `episodeRecord()` now attaches density fields to each episode agent:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Density comes from `countSocialStepCommitsByActor()` over episode or artifact
+  social steps.
+- Public/redacted packs still strip role/team/won from episode agents while
+  preserving density scalars.
+- Focused writer, redacted-export, and pack-download tests lock agent density.
+
+### 13.213.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.214 Comprehensive Optimization: Benchmark Strata Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.benchmark-strata-density.v1
+```
+
+### 13.214.1 Capability
+
+Project actor-scoped native/committed/rejected density into
+`benchmark_statistics.json` agent-seat strata (`byModel`, `byProfile`, `byRole`,
+`byTeam`, `bySeat`) so stratified tournament analysis shares the same commit
+authority as leaderboard, cost_latency.byModel, modelRewards, and agents.csv.
+
+### 13.214.2 Behavior
+
+- `BenchmarkAgentSeatStratum` now includes:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- `buildBenchmarkStatistics()` accumulates density via
+  `countSocialStepCommitsByActor()` mapped through each episode agent.
+- Role/team strata still omit hidden truth when `redactTruth` is enabled.
+- Focused writer and pack-download tests lock strata density fields.
+
+### 13.214.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.215 Comprehensive Optimization: Benchmark Episode Strata Commit Density
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.benchmark-episode-strata-density.v1
+```
+
+### 13.215.1 Capability
+
+Project native/committed/rejected density into
+`benchmark_statistics.json` episode-status and harness-status strata so
+status-bucket analysis shares the same commit authority as agent-seat strata,
+leaderboard, and cost/latency surfaces.
+
+### 13.215.2 Behavior
+
+- `BenchmarkEpisodeStratum` now includes:
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- `recordEpisodeStratum()` accumulates density from the same
+  `countSocialStepCommits()` totals already used for status denominators.
+- Focused writer tests lock completed/truncated and failed/tournamentFailed
+  strata density fields.
+- Pack-download tests lock `byEpisodeStatus` density fields.
+
+### 13.215.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.216 Comprehensive Optimization: Shared Evaluation Reward Density Summarizers
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.shared-evaluation-reward-density.v1
+```
+
+### 13.216.1 Capability
+
+Centralize model/profile reward + commit-density summarization in a pure harness
+module so CLI research exports and server public evaluation summaries cannot
+drift, and profileRewards density is unit-tested without exposing profile ids on
+public server summaries.
+
+### 13.216.2 Behavior
+
+- New module: `src/harness/tournamentEvaluationSummary.ts`
+  - `summarizeModelRewardsWithDensity()`
+  - `summarizeProfileRewardsWithDensity()`
+  - `averageTeamRewards()`
+- CLI `runTournament.ts` uses the shared helpers and continues emitting
+  `profileRewards` for research exports.
+- Server public tournament evaluation summaries use
+  `summarizeModelRewardsWithDensity()` and still omit `profileRewards`.
+- Unit tests cover:
+  - model density including system-step exclusion
+  - profile density including multi-step commit/reject
+  - missing `profileId` ignored by profileRewards
+  - team reward averaging
+
+### 13.216.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentEvaluationSummary.test.ts tests/serverTournamentArtifactsApi.test.ts tests/tournament.test.ts tests/tournamentArtifacts.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (4 files / 31 tests), and production build
+validated in this continuation.
+
+## 13.217 Comprehensive Optimization: Cockpit Pack Export Evaluation Density Surface
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.pack-export-evaluation-density.v1
+```
+
+### 13.217.1 Capability
+
+Surface server tournament evaluation density in the React pack-export inspector
+so researchers can inspect evaluation-level and modelRewards commit density
+without inventing frontend truth or exposing profileRewards on public summaries.
+
+### 13.217.2 Behavior
+
+- `TournamentRunResponse.summary.evaluation` now types:
+  - aggregate `nativeSteps` / `committedSteps` / `rejectedSteps`
+  - `modelRewards[model].nativeSteps/committedSteps/rejectedSteps`
+- Pack export inspector fields:
+  - `evaluationDensity` via `formatPackCommitDensity(...)`
+  - `evaluationModelRewards` via `formatModelRewardDensity(...)`
+- React only projects server-owned evaluation summary fields; it does not
+  recompute density from local artifacts or invent model/profile truth.
+- Public server summaries still omit `profileRewards`.
+
+### 13.217.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npm run build
+```
+
+Observed: typecheck and production build validated in this continuation.
+Focused tournament API density suites remain green from the prior shared
+summarizer slice.
+
+## 13.218 Comprehensive Optimization: Metrics CSV And JSONL Promotion Projection
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.metrics-promotion-export.v1
+```
+
+### 13.218.1 Capability
+
+Project formal metric-promotion decisions into tournament tabular and JSONL
+exports so researchers can filter scorecard vs diagnostic metrics without
+recomputing catalog rules offline or promoting zero-weight social/temporal
+metrics into leaderboards.
+
+### 13.218.2 Behavior
+
+- `metrics.csv` now includes:
+  - `promotion_class`
+  - `scorecard_eligible`
+  - `promotion_reasons`
+  - `promotion_decision_id`
+- `metrics.jsonl` metric records now include:
+  - `promotionClass`
+  - `scorecardEligible`
+  - `promotionReasons`
+  - `promotionDecisionId`
+- Both surfaces call `decideMetricPromotion(metric)` from
+  `src/harness/evaluation.ts`.
+- Catalog/runtime rules remain authority:
+  - `agent.reward` stays scorecard-eligible when weight/evidence/value pass.
+  - social/temporal diagnostics remain non-scorecard.
+  - survival metrics remain diagnostic audit metrics.
+- Public packs inherit the same columns without inventing role/team truth.
+
+### 13.218.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.219 Comprehensive Optimization: Summary Markdown Metric Promotion Projection
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.summary-metric-promotion.v1
+```
+
+### 13.219.1 Capability
+
+Project formal metric-promotion aggregates into tournament `summary.md` so
+researchers can inspect scorecard vs diagnostic vs benchmark-only metric row
+counts without opening CSV/JSONL or inventing promotion rules in the UI.
+
+### 13.219.2 Behavior
+
+- `summarizeTournamentMetricPromotions()` aggregates recorded evaluation-report
+  metrics through `decideMetricPromotion()`.
+- `summary.md` run-set bullets now include:
+  - metric row count
+  - scorecard-eligible row count
+  - diagnostic / benchmark-only / scorecard-class row counts
+- A `## Metric Promotion` table lists per-class rows and scorecard-eligible rows.
+- The summary remains a pure projection over recorded metrics and does not
+  promote social/temporal diagnostics into rewards or leaderboards.
+
+### 13.219.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.220 Comprehensive Optimization: Pack Metrics JSONL Promotion Lock
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.pack-metrics-jsonl-promotion-lock.v1
+```
+
+### 13.220.1 Capability
+
+Lock the public tournament-pack download path so `metrics.jsonl` carries the
+same formal promotion projection as research writer exports, without leaking
+absolute artifact base directories.
+
+### 13.220.2 Behavior
+
+- Pack download tests now parse `/files/metrics.jsonl` records and assert:
+  - `type: "metric"`
+  - `promotionClass` string
+  - `scorecardEligible` boolean
+  - `promotionReasons` array
+  - `agent.reward` remains scorecard-eligible
+  - `agent.social.memory_count` remains diagnostic when present
+- Absolute tournament artifact base paths remain redacted from the downloaded
+  text.
+
+### 13.220.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/tournamentArtifacts.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.221 Comprehensive Optimization: Manifest Metric Promotion Aggregates
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.manifest-metric-promotion.v1
+```
+
+### 13.221.1 Capability
+
+Project formal metric-promotion aggregates into tournament `manifest.json` so
+pack list/detail consumers and offline research tooling can inspect scorecard
+vs diagnostic metric density without parsing every metrics row.
+
+### 13.221.2 Behavior
+
+- `buildManifest()` now includes:
+  - `metricCount`
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+  - `scorecardEligibleMetricClassCounts`
+- Aggregates reuse `summarizeTournamentMetricPromotions()` /
+  `decideMetricPromotion()` over recorded evaluation-report metrics.
+- Public pack and research writer tests lock the new fields.
+
+### 13.221.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.222 Comprehensive Optimization: Pack DTO Metric Promotion Projection
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.pack-dto-metric-promotion.v1
+```
+
+### 13.222.1 Capability
+
+Project tournament `manifest.json` metric-promotion aggregates into the
+server-owned tournament pack DTO so cockpit pack list/detail/export surfaces can
+inspect scorecard vs diagnostic metric density without downloading metrics files
+or inventing promotion rules in React.
+
+### 13.222.2 Behavior
+
+- `StoredTournamentArtifactSet` and `serializeTournamentArtifactSet()` now carry:
+  - `metricCount`
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+  - `scorecardEligibleMetricClassCounts`
+- Pack persist/rehydrate/index paths parse these fields from `manifest.json`
+  through `tournamentDensityFromUnknown()`.
+- React `TournamentArtifactSetSummary` and pack-export inspector surface
+  `metricCount`, scorecard-eligible counts, and a compact
+  `formatPackMetricPromotion()` projection.
+- Public pack API tests lock the new DTO fields without base-dir leakage.
+
+### 13.222.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/tournamentArtifacts.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.223 Comprehensive Optimization: Leaderboard And Packs Table Metric Promotion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.leaderboard-packs-metric-promotion.v1
+```
+
+### 13.223.1 Capability
+
+Project formal metric-promotion aggregates into tournament `leaderboard.json`
+and surface the same pack DTO promotion projection in the React packs table so
+researchers can scan scorecard vs diagnostic density without downloading metrics
+files or inventing promotion rules in the UI.
+
+### 13.223.2 Behavior
+
+- `buildLeaderboard()` now includes:
+  - `metricCount`
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+  - `scorecardEligibleMetricClassCounts`
+- Aggregates reuse `summarizeTournamentMetricPromotions()` /
+  `decideMetricPromotion()` over recorded evaluation-report metrics.
+- React packs table adds a `promotion` column via
+  `formatPackMetricPromotion(pack)`.
+- Writer and pack download tests lock the leaderboard promotion fields.
+
+### 13.223.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.224 Comprehensive Optimization: Registry And Benchmark Metric Promotion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.registry-benchmark-metric-promotion.v1
+```
+
+### 13.224.1 Capability
+
+Project formal metric-promotion policy/catalog metadata and run-set promotion
+aggregates into tournament `registry.json` and `benchmark_statistics.json` so
+offline analysis and pack downloads can inspect scorecard vs diagnostic density
+without recomputing catalog rules from metrics rows.
+
+### 13.224.2 Behavior
+
+- `buildRegistrySnapshot()` now includes:
+  - `metricPromotionPolicyId`
+  - `metricPromotionCatalogId`
+  - `metricPromotionCatalog` from `summarizeMetricPromotionCatalog()`
+  - `metricCount` / `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts` / `scorecardEligibleMetricClassCounts`
+- `buildBenchmarkStatistics()` includes the same promotion policy/catalog and
+  aggregate count fields.
+- Aggregates reuse `summarizeTournamentMetricPromotions()` over recorded
+  evaluation-report metrics.
+- Writer and pack download tests lock the new registry/benchmark promotion
+  fields without inventing scorecard promotions for social/temporal diagnostics.
+
+### 13.224.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.225 Comprehensive Optimization: Episode Metric Promotion Aggregates
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.episode-metric-promotion.v1
+```
+
+### 13.225.1 Capability
+
+Project formal metric-promotion aggregates onto per-episode tournament exports
+so researchers can filter scorecard vs diagnostic density at episode grain
+without recomputing catalog rules from metrics rows.
+
+### 13.225.2 Behavior
+
+- `summarizeTournamentMetricPromotionsFromMetrics()` is the shared pure helper
+  over `HarnessMetricRecord[]`; run-set
+  `summarizeTournamentMetricPromotions()` reuses it.
+- `episodeRecord()` / `episodes.jsonl` now include:
+  - `metricCount`
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+  - `scorecardEligibleMetricClassCounts`
+- `episodes.csv` now includes:
+  - `scorecard_eligible_metric_count`
+  - `scorecard_metric_count`
+  - `diagnostic_metric_count`
+  - `benchmark_only_metric_count`
+- Aggregates use `decideMetricPromotion()` over recorded evaluation-report
+  metrics only. Social/temporal diagnostics remain non-scorecard unless an
+  explicit later promotion decision changes them.
+
+### 13.225.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/tournamentArtifacts.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.226 Comprehensive Optimization: Tournament Episode API Metric Promotion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.tournament-episode-metric-promotion.v1
+```
+
+### 13.226.1 Capability
+
+Project formal per-episode metric-promotion aggregates into public tournament
+run episode summaries so cockpit and API consumers can inspect scorecard vs
+diagnostic density without downloading metrics files or inventing promotion
+rules in React.
+
+### 13.226.2 Behavior
+
+- Exported helpers:
+  - `summarizeTournamentMetricPromotionsFromMetrics()`
+  - `summarizeTournamentMetricPromotions()`
+- `serializeTournamentEpisodeSummaryForApi()` now includes:
+  - `metricCount`
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+  - `scorecardEligibleMetricClassCounts`
+- `evaluationReportSummary` also carries the same scorecard/promotion class
+  aggregates when an evaluation report exists.
+- Aggregates reuse `decideMetricPromotion()` over recorded evaluation-report
+  metrics only. Social/temporal diagnostics remain non-scorecard unless an
+  explicit later promotion decision changes them.
+- Public tournament episode API tests lock the new fields without exposing
+  private evaluation report payloads.
+
+### 13.226.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/tournamentArtifacts.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 25 tests), and production build
+validated in this continuation.
+
+## 13.227 Comprehensive Optimization: Tournament Evaluation Summary Metric Promotion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+tournament.evaluation-summary-metric-promotion.v1
+```
+
+### 13.227.1 Capability
+
+Project formal metric-promotion aggregates into tournament run evaluation and
+evaluation-report summaries for both the public server path and CLI research
+exports, so consumers can inspect scorecard vs diagnostic density without
+opening metrics files or inventing promotion rules.
+
+### 13.227.2 Behavior
+
+- Server and CLI `summarizeTournamentEvaluation()` now include:
+  - `metricCount`
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+  - `scorecardEligibleMetricClassCounts`
+  - per evaluated episode promotion aggregates
+- Server and CLI `summarizeTournamentEvaluationReports()` now include the same
+  run-set promotion aggregates.
+- Aggregates reuse `summarizeTournamentMetricPromotionsFromMetrics()` /
+  `decideMetricPromotion()` over recorded evaluation-report metrics only.
+- Public server summaries still omit `profileRewards`.
+
+### 13.227.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/tournamentArtifacts.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (server 1 file / 16 tests; artifacts 1 file
+/ 9 tests), and production build validated in this continuation.
+
+## 13.228 Comprehensive Optimization: Match Evaluation Report Metric Promotion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.match-evaluation-report-metric-promotion.v1
+```
+
+### 13.228.1 Capability
+
+Project formal metric-promotion aggregates into public match evaluation-report
+summaries, and surface tournament evaluation/evaluation-report promotion fields
+in the React pack-export inspector so cockpit consumers can inspect scorecard vs
+diagnostic density without inventing promotion rules or downloading metrics
+files.
+
+### 13.228.2 Behavior
+
+- `summarizeEvaluationReport()` now uses top-level
+  `import type { HarnessEvaluationReport }` and includes:
+  - `metricCount`
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+  - `scorecardEligibleMetricClassCounts`
+- Aggregates reuse `summarizeTournamentMetricPromotionsFromMetrics()` over
+  recorded evaluation-report metrics only.
+- React `TournamentRunResponse` types evaluation/evaluationReports/episode
+  promotion fields.
+- Pack export inspector now projects:
+  - `evaluationPromotion`
+  - `evaluationReportsPromotion`
+- Public match summary tests lock evaluation-report promotion fields without
+  exposing private report payloads.
+
+### 13.228.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/serverTournamentArtifactsApi.test.ts tests/tournamentArtifacts.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (3 files / 41 tests), and production build
+validated in this continuation.
+
+## 13.229 Comprehensive Optimization: Match CLI Evaluation Report Metric Promotion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+cli.match-evaluation-report-metric-promotion.v1
+```
+
+### 13.229.1 Capability
+
+Project formal metric-promotion aggregates into the match CLI research
+`evaluationReport` summary so offline/research consumers can inspect scorecard
+vs diagnostic density without inventing promotion rules.
+
+### 13.229.2 Behavior
+
+- `src/scripts/runMatch.ts` `summarizeEvaluationReport()` now includes:
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+  - `scorecardEligibleMetricClassCounts`
+- Aggregates reuse `summarizeTournamentMetricPromotionsFromMetrics()`.
+- Research `topMetrics` rows now include `promotionClass`,
+  `scorecardEligible`, and `promotionDecisionId` via `decideMetricPromotion()`.
+- Public server match summaries remain redacted and do not expose `topMetrics`
+  private subject/score payloads.
+
+### 13.229.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverPublicViewApi.test.ts tests/evaluation.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (3 files / 66 tests), and production build
+validated in this continuation.
+
+## 13.230 Comprehensive Optimization: Tournament CLI Research Evaluation Reports
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+cli.tournament-evaluation-reports-research-topmetrics.v1
+```
+
+### 13.230.1 Capability
+
+Extend the tournament CLI research evaluation-report summary with
+promotion-aware research fields while keeping the public server summary
+redacted.
+
+### 13.230.2 Behavior
+
+- CLI `summarizeTournamentEvaluationReports()` now includes:
+  - existing promotion aggregates
+  - research-only `topMetrics` with `promotionClass`, `scorecardEligible`, and
+    `promotionDecisionId` via `decideMetricPromotion()`
+  - research-only `episodeReports` with per-report promotion aggregates
+- Public server `summarizeTournamentEvaluationReports()` remains redacted and
+  continues to omit `topMetrics` / private subject payloads.
+- Public tournament API tests continue to assert summary does not expose
+  `topMetrics`.
+
+### 13.230.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/serverPublicViewApi.test.ts tests/evaluation.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (3 files / 66 tests), and production build
+validated in this continuation.
+
+## 13.231 Comprehensive Optimization: Shared Research Metric Promotion Rows
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+evaluation.research-metric-promotion-rows.v1
+```
+
+### 13.231.1 Capability
+
+Centralize research CLI `topMetrics` projection so match and tournament CLI
+summaries share one promotion-aware row builder instead of duplicating
+`decideMetricPromotion()` mapping logic.
+
+### 13.231.2 Behavior
+
+- `src/harness/evaluation.ts` exports:
+  - `ResearchMetricPromotionSummary`
+  - `summarizeResearchMetricPromotionRows(metrics, limit?)`
+- Each row includes `id`, `scope`, optional `subjectId`, `value`, `weight`,
+  `source`, `promotionClass`, `scorecardEligible`, and `promotionDecisionId`.
+- Match CLI and tournament CLI research summaries reuse the helper.
+- Public server evaluation summaries remain redacted and do not expose
+  research `topMetrics` subject/score payloads.
+- Unit coverage locks limit behavior plus scorecard vs diagnostic decisions.
+
+### 13.231.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/evaluation.test.ts tests/serverPublicViewApi.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (3 files / 67 tests), and production build
+validated in this continuation.
+
+## 13.232 Comprehensive Optimization: Pack Export Status Metric Promotion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.pack-export-status-metric-promotion.v1
+```
+
+### 13.232.1 Capability
+
+Surface formal metric-promotion aggregates in the React cockpit pack export and
+pack selection status messages so operators can see scorecard vs diagnostic
+density without opening the pack inspector.
+
+### 13.232.2 Behavior
+
+- Pack export status prefers evaluation-summary promotion aggregates from the
+  tournament run response, falling back to pack DTO promotion aggregates.
+- Pack selection status includes `promotion=` from the selected pack DTO.
+- Projection remains pure display of server-owned promotion fields; React does
+  not recompute catalog/scorecard rules.
+
+### 13.232.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts tests/evaluation.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck/build validated in this continuation; focused suites run
+alongside documentation.
+
+## 13.233 Comprehensive Optimization: Public Share Pack Metric Promotion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.public-share-pack-metric-promotion.v1
+```
+
+### 13.233.1 Capability
+
+Project pack commit density and formal metric-promotion aggregates into public
+tournament share detail, inventory, and analytics summary surfaces so operators
+and untrusted share consumers can inspect scorecard vs diagnostic density
+without opening private metrics files or inventing promotion rules.
+
+### 13.233.2 Behavior
+
+- `serializeTournamentPublicShareDetail()` now includes redaction-safe:
+  - `packDensity`
+  - `packMetricPromotion`
+- `/api/tournament-public-shares` inventory rows include the same pack density
+  and metric-promotion aggregates when the pack is found.
+- Share analytics summary rows include `packMetricPromotion`.
+- React `TournamentPublicShareSummary` types the new pack density/promotion
+  fields.
+- Absolute base directories and private metric subject payloads remain omitted.
+
+### 13.233.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suite (1 file / 16 tests), and production build
+validated in this continuation.
+
+## 13.234 Comprehensive Optimization: React Share Pack Promotion Surfaces
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.share-pack-metric-promotion-ui.v1
+```
+
+### 13.234.1 Capability
+
+Surface server-owned pack metric-promotion aggregates in the React cockpit share
+tables and share inspector so operators can scan scorecard vs diagnostic density
+without opening private metrics files.
+
+### 13.234.2 Behavior
+
+- Share-link table and cross-pack inventory table now include a `promotion`
+  column via `formatPackMetricPromotion()`.
+- Share inspector fields now include `packDensity` and `packMetricPromotion`.
+- React remains a pure projection over server-owned pack density/promotion
+  fields from public-share inventory/detail APIs.
+
+### 13.234.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suite (1 file / 16 tests), and production build
+validated in this continuation.
+
+## 13.235 Comprehensive Optimization: Share Analytics Markdown Metric Promotion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.share-analytics-markdown-metric-promotion.v1
+```
+
+### 13.235.1 Capability
+
+Project pack metric-promotion aggregates into the public-share analytics
+markdown export so offline share audits can inspect scorecard vs diagnostic
+density without inventing promotion rules or opening private metrics files.
+
+### 13.235.2 Behavior
+
+- `renderTournamentPublicShareAnalyticsSummaryMarkdown()` now includes a
+  `promotion` column.
+- Promotion cells use server-owned pack aggregates:
+  `rows=… eligible=… scorecard=… diagnostic=… benchmark=…`.
+- Absolute base directories and private metric subjects remain omitted.
+
+### 13.235.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suite (1 file / 16 tests), and production build
+validated in this continuation.
+
+## 13.236 Comprehensive Optimization: Share Analytics Totals Metric Promotion
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.share-analytics-totals-metric-promotion.v1
+```
+
+### 13.236.1 Capability
+
+Aggregate pack metric-promotion density into public-share analytics summary
+totals so operators can inspect scorecard vs diagnostic density across shared
+packs without double-counting multi-share packs or inventing promotion rules.
+
+### 13.236.2 Behavior
+
+- `buildTournamentPublicShareAnalyticsSummary().totals` now includes:
+  - `packsWithPromotionCount`
+  - `metricCount`
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+- Totals aggregate unique `artifactSetId` packs only, so multiple shares of the
+  same pack do not double-count metric rows.
+- Markdown totals table renders the same promotion aggregates.
+- Absolute base directories and private metric subjects remain omitted.
+
+### 13.236.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suite (1 file / 16 tests), and production build
+validated in this continuation.
+
+## 13.237 Comprehensive Optimization: Share Inventory Metric Promotion Totals
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.share-inventory-metric-promotion-totals.v1
+```
+
+### 13.237.1 Capability
+
+Project unique-pack metric-promotion totals into the public-share inventory API
+and React inventory status surfaces so operators can scan scorecard vs
+diagnostic density across all shares without double-counting multi-share packs.
+
+### 13.237.2 Behavior
+
+- `GET /api/tournament-public-shares` now includes:
+  - `packsWithPromotionCount`
+  - `metricCount`
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+- Totals aggregate unique `artifactSetId` packs only.
+- React inventory refresh status and tags display the same totals via
+  `formatPackMetricPromotion()`.
+- Absolute base directories and private metric subjects remain omitted.
+
+### 13.237.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suite (1 file / 16 tests), and production build
+validated in this continuation.
+
+## 13.238 Comprehensive Optimization: Unique Pack Metric Promotion Helper
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.unique-pack-metric-promotion-helper.v1
+```
+
+### 13.238.1 Capability
+
+Centralize unique-pack metric-promotion aggregation so public-share inventory
+and analytics totals share one double-count-safe implementation.
+
+### 13.238.2 Behavior
+
+- `aggregateUniquePackMetricPromotion()` aggregates by unique `artifactSetId`
+  and returns:
+  - `packsWithPromotionCount`
+  - `metricCount`
+  - `scorecardEligibleMetricCount`
+  - `metricPromotionClassCounts`
+- Inventory API and share analytics summary totals both reuse the helper.
+- Multi-share packs still count promotion density once.
+
+### 13.238.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suite (1 file / 16 tests), and production build
+validated in this continuation.
+
+## 13.239 Comprehensive Optimization: Pure Pack Metric Promotion Module
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.pack-metric-promotion-module.v1
+```
+
+### 13.239.1 Capability
+
+Extract unique-pack metric-promotion aggregation and formatting into a pure
+server module with unit tests, so inventory and analytics totals share one
+double-count-safe implementation that can be validated without Express.
+
+### 13.239.2 Behavior
+
+- New `src/server/packMetricPromotion.ts` exports:
+  - `aggregateUniquePackMetricPromotion()`
+  - `formatSharePackMetricPromotion()`
+- `src/server/index.ts` imports those helpers instead of keeping local copies.
+- Unit tests cover multi-share de-duplication, missing/packless shares, empty
+  input, and partial formatting.
+
+### 13.239.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/packMetricPromotion.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 19 tests), and production build
+validated in this continuation.
+
+## 13.240 Comprehensive Optimization: Unique Pack Commit Density Totals
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.unique-pack-commit-density-totals.v1
+```
+
+### 13.240.1 Capability
+
+Aggregate native/committed/rejected step density across unique packs in
+public-share inventory and analytics totals, mirroring the unique-pack
+metric-promotion aggregation and avoiding multi-share double-counting.
+
+### 13.240.2 Behavior
+
+- `src/server/packMetricPromotion.ts` now exports:
+  - `aggregateUniquePackCommitDensity()`
+  - `formatSharePackCommitDensity()`
+- Inventory API and analytics summary totals include:
+  - `packsWithDensityCount`
+  - `nativeSteps`
+  - `committedSteps`
+  - `rejectedSteps`
+- Analytics markdown totals render the density rows.
+- React inventory status/tags surface the same density totals.
+- Multi-share packs still count density once per `artifactSetId`.
+
+### 13.240.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/packMetricPromotion.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 20 tests), and production build
+validated in this continuation.
+
+## 13.241 Comprehensive Optimization: Share Analytics Markdown Density Column
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+server.share-analytics-markdown-density-column.v1
+```
+
+### 13.241.1 Capability
+
+Project unique-pack commit density into public-share analytics markdown share
+rows so offline share audits can inspect native/committed/rejected density
+alongside metric-promotion aggregates without inventing progress authority.
+
+### 13.241.2 Behavior
+
+- Analytics markdown share table now includes a `density` column.
+- Density cells use `formatSharePackCommitDensity()` over server-owned pack
+  density snapshots (`n=… c=… r=…`).
+- Unit tests cover complete/incomplete density formatting.
+- Absolute base directories remain omitted.
+
+### 13.241.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/packMetricPromotion.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck, focused suites (2 files / 21 tests), and production build
+validated in this continuation.
+
+## 13.242 Comprehensive Optimization: React Share Density Columns
+
+Timestamp:
+
+```text
+2026-07-15
+```
+
+Goal id:
+
+```text
+react.share-pack-commit-density-columns.v1
+```
+
+### 13.242.1 Capability
+
+Surface server-owned pack commit density in React share-link and cross-pack
+inventory tables so operators can scan native/committed/rejected density beside
+metric-promotion aggregates without inventing progress authority.
+
+### 13.242.2 Behavior
+
+- Share-link table and inventory table now include a `density` column via
+  `formatPackCommitDensity()` over `share.packDensity`.
+- Values remain pure projections of inventory/public-share API fields.
+- Absolute base directories and private metric subjects remain omitted.
+
+### 13.242.3 Validation
+
+```bash
+npx tsc --noEmit --pretty false --noErrorTruncation
+npx vitest run tests/packMetricPromotion.test.ts tests/serverTournamentArtifactsApi.test.ts --reporter=dot --testTimeout=30000
+npm run build
+```
+
+Observed: typecheck/build validated in this continuation; focused suites
+2 files / 21 tests.
+
+## 13.243 Latest Generic Harness Authority And Safe Projection Lock
+
+Timestamp:
+
+```text
+2026-07-20
+```
+
+Goal id:
+
+```text
+harness.generic-runner-authority-and-safe-projection.v1
+```
+
+### 13.243.1 Capability
+
+The reusable runner is now exposed as `runHarnessEpisode()` over the generic
+social contracts. Werewolf remains an adapter and compatibility surface, not a
+dependency of the generic runner. The runtime records deterministic native
+steps, including explicitly rejected proposals, and preserves the distinction
+between a policy/reasoner proposal and an environment-committed action.
+
+### 13.243.2 Authority And Agent Lifecycle
+
+- `SocialEnvironment.validateAction(command, pending)` is an optional pure
+  preflight. The runner applies it before message-envelope publication and
+  before `step()` or `stepBatch()`.
+- Before that preflight, the runner verifies that `SocialAction.actorId` and
+  every message-draft `senderId` belong to the scheduled actor. Generic command
+  payload identity remains an environment/domain concern.
+- A rejected preflight result records a rejected native step, leaves domain
+  state and committed messages unchanged, and sends a rejected actor receipt.
+- Environment `step()` and `stepBatch()` remain the authoritative second
+  legality boundary. A generic preflight must never replace domain validation.
+- `step()` and `stepBatch()` must be atomic: if they throw, `snapshot()` must
+  remain unchanged. Hash-visible violations are recorded as
+  `environment_non_atomic_failure`, rejected by artifact integrity/replay, and
+  never presented as an ordinary replayable rejection.
+- The message bus constructs and validates a whole batch before environment
+  commit, then appends the prepared records atomically. A post-commit actor
+  feedback or snapshot-hook failure leaves the domain step `committed` and adds
+  structured post-commit failure evidence.
+- Actors stage a plan, memo, and candidate decision during `decide()`. Durable
+  actor/social state changes only from a committed `onStepResult()` receipt.
+- The standard streaming reasoner performs one cognition request per ordinary
+  turn. For non-speech turns it may add an optional internal
+  `ACTION_CANDIDATE` envelope; policy/arbitration accepts only a compatible
+  legal candidate and the environment validates it again. The envelope is
+  advisory evidence, not an agent definition or action authority.
+
+### 13.243.3 Replay And Determinism
+
+- Native replay applies only `commitStatus: "committed"` steps, checks rejected
+  steps for zero state/event/message mutation, rejects non-atomic failure
+  records, and creates no actors, policies,
+  reasoners, or provider calls.
+- Domain event timestamps are sequence-derived rather than wall-clock values,
+  allowing equal seed plus equal commands to reproduce identical event arrays
+  and state hashes.
+- `tests/genericHarnessContract.test.ts` supplies a non-Werewolf ledger domain
+  proof for scoped observations, channel delivery, preflight rejection, and
+  deterministic replay.
+
+### 13.243.4 Public Artifact Projection
+
+- `GET /api/matches/:id/artifact` defaults to `postgame-redacted`.
+- `GET /api/checkpoints/:id/artifact` defaults to `truth-redacted`.
+- `view=full` is explicit local/debug access only. Full comparison generation
+  is request-local and is never newly persisted in the comparison registry.
+- Projection responses are non-cacheable; explicit full responses also carry a
+  no-index robots directive. Server-side fork authority continues to use
+  canonical validated checkpoints, never a public projection.
+- Default CLI diagnostics for `agent:probe`, `arena:match`, and
+  `arena:tournament` are also safe projections: they omit provider endpoints,
+  provider request ids, and raw provider errors while retaining protocol/config
+  state, bounded metrics, safe failure classification, and stream completion.
+  Explicit `--json=full` remains local/debug-only output and must not be
+  published without applying the artifact redaction policy.
+
+### 13.243.5 Required Validation
+
+Before reporting this slice complete, rerun the generic harness/reasoner,
+Werewolf adapter, engine determinism, public projection, typecheck, and
+production-build checks against the final worktree. A browser end-to-end check
+must use a stable API process so process-memory artifact state is not reset by
+hot reload during the test.
+
+## 13.244 Transaction Identity And Joint-Batch Integrity Lock
+
+Timestamp:
+
+```text
+2026-07-20
+```
+
+Goal id:
+
+```text
+harness.transaction-identity-and-joint-batch-integrity.v1
+```
+
+### 13.244.1 Lifecycle Identity
+
+- `SocialActorObservationContext.transactionId` is runner-owned lifecycle
+  identity. It is generated per scheduled pending action and is carried into
+  every committed or rejected `SocialActorStepReceipt`.
+- `SocialAction.traceId` remains evidence identity. A policy or domain adapter
+  may supply it, so it must not be used to find staged actor state.
+- `ScaffoldedSocialActor` and `WerewolfSocialActorAdapter` stage by
+  transaction id and discard the staged record for every rejected receipt,
+  including reasoner/decision failures.
+- Receipt delivery receives an isolated serializable copy. An actor callback
+  must never mutate the runner-owned action, command, metadata, or artifact.
+- Werewolf action metadata contains a staged preview of the expected committed
+  agent-state hash. The adapter verifies it after commit rather than writing
+  into receipt action metadata after the environment has transitioned.
+
+### 13.244.2 Batch Rules
+
+- Before concurrent `aec-batched-decision` or `parallel` collection, the
+  scheduler rejects duplicate pending actor ids before any actor observe or
+  decide call. The result is a replayable rejected `system` scheduler-validation
+  record, not a malformed joint batch.
+- A true `parallel` batch remains one complete atomic `stepBatch()` call. The
+  runner delivers all committed actor receipts before invoking any per-step
+  snapshot hook, so every snapshot attached to the batch represents the full
+  committed agent set.
+- When an AEC shared-decision batch is abandoned before a peer command is
+  applied, each peer receives both a rejected receipt and a rejected native
+  step with `failure.stage: "batch_aborted"`.
+- `batch_aborted` remains execution evidence but is derivative, not an
+  additional root provider/harness error for metric, leaderboard, or failure
+  summary counts.
+
+### 13.244.3 Validation Recorded
+
+The following focused checks passed after this lock was added:
+
+```bash
+npm run typecheck
+git diff --check
+npx vitest run tests/social.test.ts tests/genericHarnessContract.test.ts \
+  tests/werewolfAdapter.test.ts --testTimeout=30000 --maxWorkers=1 \
+  --no-file-parallelism
+npx vitest run tests/scaffold.test.ts tests/reasonerProposal.test.ts \
+  tests/replay.test.ts tests/artifacts.test.ts tests/werewolfExecutionEvidence.test.ts \
+  --testTimeout=30000 --maxWorkers=1 --no-file-parallelism
+```
+
+These cover action-owned trace ids, trace-prefix failure cleanup, receipt
+isolation, duplicate joint actors, AEC batch-abort evidence, parallel snapshot
+atomicity, native replay, and artifact integrity. Full build/API/E2E validation
+remains required before declaring the broader refactor complete.

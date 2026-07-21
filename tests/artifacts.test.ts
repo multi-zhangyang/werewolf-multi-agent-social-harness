@@ -13,6 +13,10 @@ import {
 } from "../src/harness/artifacts";
 import { hashStableState } from "../src/harness/hash";
 import {
+  DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
+  DECEPTION_BELIEF_SHIFT_METRIC_IDS,
+  DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID,
+  DECEPTION_REPUTATION_ASSOCIATION_METRIC_IDS,
   WEREWOLF_ADVERSARIAL_EVALUATOR_ID,
   WEREWOLF_ADVERSARIAL_METRIC_IDS,
   WEREWOLF_OUTCOME_EVALUATOR_ID,
@@ -22,21 +26,34 @@ import {
   WEREWOLF_SOCIAL_CALIBRATION_EVALUATOR_ID,
   WEREWOLF_SOCIAL_CALIBRATION_METRIC_IDS
 } from "../src/harness/evaluator";
+import { emptyEvaluationSummary } from "../src/harness/evaluation";
 import { describeResolvedAssignments, profilesFromModels, resolveAgentConfigs } from "../src/harness/profiles";
 import { runHarnessMatch } from "../src/harness/runtime";
 import {
+  BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
   COMMITMENT_COALITION_ASSOCIATION_EVALUATOR_ID,
   COMMITMENT_COALITION_ASSOCIATION_METRIC_IDS,
   COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
   COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+  GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+  NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
   SOCIAL_DYNAMICS_EVALUATOR_ID,
   SOCIAL_DYNAMICS_METRIC_IDS,
   SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_ID,
   SOCIAL_FACT_INGEST_EVIDENCE_METRIC_IDS,
   SOCIAL_STATE_EVALUATOR_ID,
-  SOCIAL_STATE_METRIC_IDS
+  SOCIAL_STATE_METRIC_IDS,
+  TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+  TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_METRIC_IDS,
+  TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS
 } from "../src/harness/socialEvaluator";
-import { deriveSocialExposureRecords } from "../src/harness/social";
+import { deriveSocialExposureRecords, isSocialStepCommitted } from "../src/harness/social";
 import {
   addSocialBetrayal,
   addSocialCoalition,
@@ -197,7 +214,7 @@ describe("match artifact JSONL export", () => {
     }, { traceId: "trace-betrayal-evidence-artifact", turnIndex: 13, phase: "day_vote", day: 1 });
 
     const artifact = {
-      artifactVersion: "harness.match.v1",
+      artifactVersion: "harness.match.v2",
       kind: "match",
       runId: "artifact-commitment-coalition",
       createdAt: new Date(0).toISOString(),
@@ -238,7 +255,7 @@ describe("match artifact JSONL export", () => {
         metricCount: 0,
         metrics: [],
         outputs: {},
-        summary: { teamScores: {}, agentScores: {}, profileScores: {}, modelScores: {} }
+        summary: emptyEvaluationSummary()
       },
       metrics: {
         days: 1,
@@ -445,7 +462,7 @@ describe("match artifact JSONL export", () => {
     expect(jsonl).not.toContain("actorSnapshotsAfterStep");
     expect(jsonl).not.toContain("\"agents\":[");
     expect(header).toMatchObject({
-      artifactVersion: "harness.match.v1",
+      artifactVersion: "harness.match.v2",
       kind: "match",
       runId: "artifact-jsonl-completed",
       seed: initialState.seed,
@@ -555,6 +572,54 @@ describe("match artifact JSONL export", () => {
           visibility: "postgame"
         }),
         expect.objectContaining({
+          id: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_norm_sanction_lifecycle_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_gossip_exposure_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_trust_repair_lifecycle_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_trust_repair_relationship_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_trust_repair_reputation_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_betrayal_lifecycle_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
+          metricIds: DECEPTION_BELIEF_SHIFT_METRIC_IDS,
+          aggregation: "zero_weight_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID,
+          metricIds: DECEPTION_REPUTATION_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_reputation_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
           id: SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_ID,
           inputSchema: "harness.social-fact-ingest-evidence.evaluation-context.v1",
           outputSchema: "harness.social-fact-ingest-evidence.summary.v1",
@@ -658,6 +723,7 @@ describe("match artifact JSONL export", () => {
     expect(JSON.stringify(socialMutationRecords[0])).not.toMatch(/privateMemo|authorization|api[_-]?key/i);
 
     const firstStep = artifact.trajectory[0];
+    const firstNativeStep = artifact.socialEpisode.steps.find((step) => step.traceId === firstStep.traceId);
     const firstSocialStep = artifact.socialEpisode.steps[0];
     expect(socialStepRecords[0]).toMatchObject({
       runId: artifact.runId,
@@ -703,7 +769,7 @@ describe("match artifact JSONL export", () => {
     });
     expect(traceRecords[0]).toMatchObject({
       traceId: firstStep.traceId,
-      turnIndex: firstStep.turnIndex,
+      turnIndex: firstNativeStep?.turnIndex,
       actorId: firstStep.actorId,
       model: firstStep.model,
       actionKind: firstStep.pendingAction.kind,
@@ -806,7 +872,7 @@ describe("match artifact JSONL export", () => {
       denominator: expect.any(Number),
       confidence: expect.any(Number),
       aggregation: expect.any(String),
-      evidenceRefs: expect.arrayContaining([expect.objectContaining({ artifact: "event" })])
+      evidenceRefs: expect.arrayContaining([expect.objectContaining({ artifact: "trace", traceId: expect.any(String) })])
     });
     expect(metricRecords.find((metric) => metric.id === "agent.survival_rate")).toMatchObject({
       evaluatorId: WEREWOLF_ROLE_SURVIVAL_EVALUATOR_ID,
@@ -904,7 +970,11 @@ describe("match artifact JSONL export", () => {
     expect(validateMatchArtifactIntegrity(artifact)).toEqual([]);
     expect(artifact.agentSnapshotFrames?.length).toBeGreaterThan(0);
     expect(artifact.trajectory.every((step) => !step.agentSnapshotsAfterStep && step.agentSnapshotFrameIdAfterStep)).toBe(true);
-    expect(artifact.socialEpisode.steps.every((step) => !step.actorSnapshotsAfterStep && step.actorSnapshotFrameIdAfterStep)).toBe(true);
+    expect(
+      artifact.socialEpisode.steps
+        .filter((step) => isSocialStepCommitted(step) && step.actorId !== "system")
+        .every((step) => !step.actorSnapshotsAfterStep && step.actorSnapshotFrameIdAfterStep)
+    ).toBe(true);
 
     const jsonl = toTrajectoryJsonl(artifact);
     const records = parseJsonl(jsonl);
@@ -937,12 +1007,67 @@ describe("match artifact JSONL export", () => {
       agentSnapshotFrameIdAfterStep: artifact.trajectory[0].agentSnapshotFrameIdAfterStep
     });
     expect(socialStepRecords[0]).toMatchObject({
-      actorSnapshotsHashAfterStep: artifact.socialEpisode.steps[0].actorSnapshotsHashAfterStep,
-      actorSnapshotFrameIdAfterStep: artifact.socialEpisode.steps[0].actorSnapshotFrameIdAfterStep
+      actorSnapshotsHashAfterStep: artifact.socialEpisode.steps[0].actorSnapshotsHashAfterStep ?? null,
+      actorSnapshotFrameIdAfterStep: artifact.socialEpisode.steps[0].actorSnapshotFrameIdAfterStep ?? null
     });
     expect(jsonl).not.toContain("agentSnapshotsAfterStep");
     expect(jsonl).not.toContain("actorSnapshotsAfterStep");
     expect(JSON.stringify(frameRecords)).not.toMatch(/privateMemos|journal|beliefs|social/i);
+  });
+
+  it("binds recorded metric-promotion decisions to report provenance and rejects tampering", async () => {
+    const initialState = createGame({ id: "artifact-promotion-integrity", seed: "artifact-promotion-integrity" });
+    const profiles = profilesFromModels(["alpha", "beta"], 0.3);
+    const agents = resolveAgentConfigs(initialState.players, profiles, 0, 0.3);
+    const result = await runHarnessMatch({
+      initialState,
+      agents,
+      reasoner: stubReasoner,
+      maxTransitions: 4
+    });
+    const artifact = buildMatchArtifact({
+      runId: "artifact-promotion-integrity",
+      seed: initialState.seed,
+      models: ["alpha", "beta"],
+      profiles,
+      resolvedAssignments: describeResolvedAssignments(initialState.players, agents),
+      result
+    });
+    const recordedMetricIndex = artifact.evaluationReport.metrics.findIndex((metric) => Boolean(metric.promotionDecision));
+    const eligibleMetricIndex = artifact.evaluationReport.metrics.findIndex(
+      (metric) => metric.promotionDecision?.eligibleForScorecard
+    );
+    if (recordedMetricIndex < 0 || eligibleMetricIndex < 0) {
+      throw new Error("Expected a generated artifact with recorded scorecard promotion decisions.");
+    }
+
+    expect(artifact.evaluationReport.metrics.every((metric) => metric.promotionDecision?.resolution === "recorded")).toBe(true);
+    expect(validateMatchArtifactIntegrity(artifact)).toEqual([]);
+    const metricRecord = parseJsonl(toTrajectoryJsonl(artifact)).find(
+      (record) => record.type === "metric" && record.id === artifact.evaluationReport.metrics[recordedMetricIndex]?.id
+    );
+    expect(metricRecord).toMatchObject({ promotionDecision: expect.objectContaining({ resolution: "recorded" }) });
+
+    const identityTamper = cloneJson(artifact);
+    identityTamper.evaluationReport.metrics[recordedMetricIndex]!.promotionDecision!.policyHash = "tampered-policy-hash";
+    expect(validateMatchArtifactIntegrity(identityTamper).join("\n")).toMatch(/promotionDecision\.policyHash mismatch/);
+
+    const missingDecision = cloneJson(artifact);
+    delete missingDecision.evaluationReport.metrics[recordedMetricIndex]!.promotionDecision;
+    expect(validateMatchArtifactIntegrity(missingDecision).join("\n")).toMatch(/missing promotionDecision/);
+
+    const eligibilityTamper = cloneJson(artifact);
+    eligibilityTamper.evaluationReport.metrics[eligibleMetricIndex]!.evidenceRefs = [];
+    expect(validateMatchArtifactIntegrity(eligibilityTamper).join("\n")).toMatch(/scorecard-eligible decision requires evidenceRefs/);
+
+    const aggregateTamper = cloneJson(artifact);
+    aggregateTamper.evaluationReport.summary.promotion.scorecardMetricCount += 1;
+    expect(validateMatchArtifactIntegrity(aggregateTamper).join("\n")).toMatch(/scorecardMetricCount mismatch/);
+
+    const legacyCompatible = cloneJson(artifact);
+    for (const metric of legacyCompatible.evaluationReport.metrics) delete metric.promotionDecision;
+    delete (legacyCompatible.evaluationReport.summary.promotion as { decisionStorage?: string }).decisionStorage;
+    expect(validateMatchArtifactIntegrity(legacyCompatible)).toEqual([]);
   });
 
   it("redacts snapshot frame payloads before committing frame hashes", async () => {
@@ -1030,10 +1155,10 @@ describe("match artifact JSONL export", () => {
     expect(rangeErrors).toMatch(/trajectory\[\d+\] messageSeqRange mismatch/);
 
     const exposureTamper = cloneJson(artifact);
-    const exposureStep = exposureTamper.socialEpisode.steps.find((step: any) => step.observation?.social?.messages?.length) as any;
+    const exposureStep = exposureTamper.socialEpisode.steps.find((step: any) => step.observation?.view?.social?.messages?.length) as any;
     if (!exposureStep) throw new Error("Expected a social step with scoped social-message exposure.");
-    exposureStep.observation.social.messages[0] = {
-      ...exposureStep.observation.social.messages[0],
+    exposureStep.observation.view.social.messages[0] = {
+      ...exposureStep.observation.view.social.messages[0],
       id: "msg-does-not-exist",
       seq: 999
     };
@@ -1077,7 +1202,11 @@ describe("match artifact JSONL export", () => {
     expect(validateMatchArtifactIntegrity(artifact)).toEqual([]);
     expect(artifact.agentSnapshotFrames?.length).toBeGreaterThan(0);
     expect(artifact.trajectory.every((step) => !step.agentSnapshotsAfterStep && step.agentSnapshotFrameIdAfterStep)).toBe(true);
-    expect(artifact.socialEpisode.steps.every((step) => !step.actorSnapshotsAfterStep && step.actorSnapshotFrameIdAfterStep)).toBe(true);
+    expect(
+      artifact.socialEpisode.steps
+        .filter((step) => isSocialStepCommitted(step) && step.actorId !== "system")
+        .every((step) => !step.actorSnapshotsAfterStep && step.actorSnapshotFrameIdAfterStep)
+    ).toBe(true);
     for (const step of artifact.trajectory) {
       const snapshots = resolveAgentSnapshotsAfterStep(artifact, step);
       expect(snapshots?.map((agent) => agent.playerId).sort()).toEqual(playerIds);
@@ -1132,9 +1261,14 @@ describe("match artifact JSONL export", () => {
     retargetSnapshotFrameRefs(unknownPlayerFrame, unknownPlayerOldFrameId, unknownPlayerFrame.agentSnapshotFrames[0]);
     expect(validateMatchArtifactIntegrity(unknownPlayerFrame).join("\n")).toMatch(/references unknown player unknown-player-in-frame/);
 
+    const firstNativeStepIndex = artifact.socialEpisode.steps.findIndex(
+      (step) => step.traceId === artifact.trajectory[0].traceId
+    );
+    if (firstNativeStepIndex < 0) throw new Error("Expected native social step for first trajectory entry.");
+
     const missingStepFrameRef = cloneJson(artifact);
     missingStepFrameRef.trajectory[0].agentSnapshotFrameIdAfterStep = "agent-snapshot:missing-step-ref";
-    missingStepFrameRef.socialEpisode.steps[0].actorSnapshotFrameIdAfterStep = "agent-snapshot:missing-step-ref";
+    missingStepFrameRef.socialEpisode.steps[firstNativeStepIndex].actorSnapshotFrameIdAfterStep = "agent-snapshot:missing-step-ref";
     expect(validateMatchArtifactIntegrity(missingStepFrameRef).join("\n")).toMatch(/references missing agent snapshot frame agent-snapshot:missing-step-ref/);
 
     const orphanFrame = cloneJson(artifact);
@@ -1148,11 +1282,11 @@ describe("match artifact JSONL export", () => {
 
     const wrongStepFrameHash = cloneJson(artifact);
     wrongStepFrameHash.trajectory[0].agentSnapshotsHashAfterStep = "wrong-step-snapshot-hash";
-    wrongStepFrameHash.socialEpisode.steps[0].actorSnapshotsHashAfterStep = "wrong-step-snapshot-hash";
+    wrongStepFrameHash.socialEpisode.steps[firstNativeStepIndex].actorSnapshotsHashAfterStep = "wrong-step-snapshot-hash";
     expect(validateMatchArtifactIntegrity(wrongStepFrameHash).join("\n")).toMatch(/agentSnapshotFrameIdAfterStep hash mismatch/);
 
     const socialFrameRefMismatch = cloneJson(artifact);
-    socialFrameRefMismatch.socialEpisode.steps[0].actorSnapshotFrameIdAfterStep = "agent-snapshot:missing-social-ref";
+    socialFrameRefMismatch.socialEpisode.steps[firstNativeStepIndex].actorSnapshotFrameIdAfterStep = "agent-snapshot:missing-social-ref";
     const socialFrameRefMismatchErrors = validateMatchArtifactIntegrity(socialFrameRefMismatch).join("\n");
     expect(socialFrameRefMismatchErrors).toMatch(/agentSnapshotFrameIdAfterStep mismatch with socialEpisode step/);
     expect(socialFrameRefMismatchErrors).toMatch(/actorSnapshotFrameIdAfterStep references missing agent snapshot frame/);
@@ -1205,11 +1339,15 @@ describe("match artifact JSONL export", () => {
       futureTraceSocialStep.actorSnapshotsHashAfterStep = futureTraceFrame.agentsHash;
       futureTraceSocialStep.actorSnapshotFrameIdAfterStep = futureTraceFrame.frameId;
     }
+    const nativeBoundaryIndex = futureTraceTamper.socialEpisode.steps.findIndex(
+      (step) => step.traceId === futureTraceTamper.trajectory[safeBoundaryIndex].traceId
+    );
+    if (nativeBoundaryIndex < 0) throw new Error("Expected native boundary step.");
     expect(validateMatchArtifactIntegrity(futureTraceTamper)).toEqual([]);
     expect(() =>
       buildHarnessCheckpointAtPrefix({
         artifact: futureTraceTamper,
-        selector: { trajectoryLength: safeBoundaryIndex + 1 },
+        selector: { nativeStepCount: nativeBoundaryIndex + 1 },
         checkpointId: "future-trace-tamper"
       })
     ).toThrow(/future trace/);
@@ -1243,7 +1381,7 @@ describe("match artifact JSONL export", () => {
       () =>
         buildHarnessCheckpointAtPrefix({
           artifact,
-          selector: { traceId: artifact.trajectory[0].traceId, turnIndex: artifact.trajectory[0].turnIndex },
+          selector: { traceId: artifact.trajectory[0].traceId, nativeTurnIndex: artifact.socialEpisode.steps.find((step) => step.traceId === artifact.trajectory[0].traceId)!.turnIndex },
           checkpointId: "prefix-ambiguous-selector"
         }),
       "ambiguous_selector",
@@ -1255,12 +1393,12 @@ describe("match artifact JSONL export", () => {
       /did not match/
     );
     expectCheckpointSelectionError(
-      () => buildHarnessCheckpointAtPrefix({ artifact, selector: { turnIndex: 999_999 }, checkpointId: "prefix-missing-turn" }),
+      () => buildHarnessCheckpointAtPrefix({ artifact, selector: { nativeTurnIndex: 999_999 }, checkpointId: "prefix-missing-turn" }),
       "selector_not_found",
       /did not match/
     );
     expectCheckpointSelectionError(
-      () => buildHarnessCheckpointAtPrefix({ artifact, selector: { trajectoryLength: 999_999 }, checkpointId: "prefix-out-of-range" }),
+      () => buildHarnessCheckpointAtPrefix({ artifact, selector: { nativeStepCount: 999_999 }, checkpointId: "prefix-out-of-range" }),
       "selector_not_found",
       /did not match/
     );
@@ -1287,61 +1425,27 @@ describe("match artifact JSONL export", () => {
       () =>
         buildHarnessCheckpointAtPrefix({
           artifact: noSnapshotArtifact,
-          selector: { trajectoryLength: 1 },
+          selector: { nativeStepCount: 1 },
           checkpointId: "prefix-missing-snapshots"
         }),
       "missing_agent_snapshots",
       /not recorded/
     );
 
-    const parallelBoundary = cloneJson(artifact);
-    const parallelSocialStep = parallelBoundary.socialEpisode.steps.find((step) => step.traceId === parallelBoundary.trajectory[0].traceId);
-    if (!parallelSocialStep) throw new Error("Expected matching social step for parallel boundary tamper.");
-    parallelSocialStep.schedulerMode = "parallel";
+    const wolfBatchSteps = artifact.socialEpisode.steps.filter((step) => step.action.kind === "werewolf.killVote");
+    if (wolfBatchSteps.length < 2 || wolfBatchSteps[0].batchId !== wolfBatchSteps[1].batchId) {
+      throw new Error("Expected a real native Werewolf decision batch.");
+    }
+    const firstBatchStepIndex = artifact.socialEpisode.steps.findIndex((step) => step.traceId === wolfBatchSteps[0].traceId);
     expectCheckpointSelectionError(
       () =>
         buildHarnessCheckpointAtPrefix({
-          artifact: parallelBoundary,
-          selector: { trajectoryLength: 1 },
-          checkpointId: "prefix-parallel-boundary"
-        }),
-      "unsafe_batch_boundary",
-      /parallel or atomic/
-    );
-
-    const atomicBoundary = cloneJson(artifact);
-    const atomicSocialStep = atomicBoundary.socialEpisode.steps.find((step) => step.traceId === atomicBoundary.trajectory[0].traceId);
-    if (!atomicSocialStep) throw new Error("Expected matching social step for atomic boundary tamper.");
-    atomicSocialStep.atomic = true;
-    expectCheckpointSelectionError(
-      () =>
-        buildHarnessCheckpointAtPrefix({
-          artifact: atomicBoundary,
-          selector: { trajectoryLength: 1 },
-          checkpointId: "prefix-atomic-boundary"
-        }),
-      "unsafe_batch_boundary",
-      /parallel or atomic/
-    );
-
-    if (artifact.trajectory.length < 2) throw new Error("Expected at least two trajectory steps for batch boundary tamper.");
-    const midBatchBoundary = cloneJson(artifact);
-    const firstBatchStep = midBatchBoundary.socialEpisode.steps.find((step) => step.traceId === midBatchBoundary.trajectory[0].traceId);
-    const secondBatchStep = midBatchBoundary.socialEpisode.steps.find((step) => step.traceId === midBatchBoundary.trajectory[1].traceId);
-    if (!firstBatchStep || !secondBatchStep) throw new Error("Expected matching social steps for batch boundary tamper.");
-    firstBatchStep.schedulerMode = "aec-batched-decision";
-    firstBatchStep.batchId = "tampered-batch";
-    secondBatchStep.schedulerMode = "aec-batched-decision";
-    secondBatchStep.batchId = "tampered-batch";
-    expectCheckpointSelectionError(
-      () =>
-        buildHarnessCheckpointAtPrefix({
-          artifact: midBatchBoundary,
-          selector: { trajectoryLength: 1 },
+          artifact,
+          selector: { nativeStepCount: firstBatchStepIndex + 1 },
           checkpointId: "prefix-mid-batch-boundary"
         }),
       "unsafe_batch_boundary",
-      /middle of an aec-batched-decision batch/
+      /middle of a native scheduler batch/
     );
   }, 30000);
 
@@ -1374,7 +1478,7 @@ describe("match artifact JSONL export", () => {
       () =>
         buildHarnessCheckpointAtPrefix({
           artifact: futureMessageRef,
-          selector: { trajectoryLength: boundary.trajectoryLength },
+          selector: { nativeStepCount: boundary.nativeStepCount },
           checkpointId: "prefix-future-message-ref"
         }),
       "missing_agent_snapshots",
@@ -1390,7 +1494,7 @@ describe("match artifact JSONL export", () => {
       () =>
         buildHarnessCheckpointAtPrefix({
           artifact: futureMessageRange,
-          selector: { trajectoryLength: boundary.trajectoryLength },
+          selector: { nativeStepCount: boundary.nativeStepCount },
           checkpointId: "prefix-future-message-range"
         }),
       "missing_agent_snapshots",
@@ -1406,7 +1510,7 @@ describe("match artifact JSONL export", () => {
       () =>
         buildHarnessCheckpointAtPrefix({
           artifact: futureEventRef,
-          selector: { trajectoryLength: boundary.trajectoryLength },
+          selector: { nativeStepCount: boundary.nativeStepCount },
           checkpointId: "prefix-future-event-ref"
         }),
       "missing_agent_snapshots",
@@ -1422,7 +1526,7 @@ describe("match artifact JSONL export", () => {
       () =>
         buildHarnessCheckpointAtPrefix({
           artifact: futureEventRange,
-          selector: { trajectoryLength: boundary.trajectoryLength },
+          selector: { nativeStepCount: boundary.nativeStepCount },
           checkpointId: "prefix-future-event-range"
         }),
       "missing_agent_snapshots",
@@ -1510,7 +1614,7 @@ describe("match artifact JSONL export", () => {
       schedulerMode: artifact.socialEpisode.steps[0].schedulerMode,
       action: artifact.socialEpisode.steps[0].action,
       eventSeqRange: artifact.socialEpisode.steps[0].eventSeqRange,
-      messageSeqRange: artifact.socialEpisode.steps[0].messageSeqRange
+      messageSeqRange: artifact.socialEpisode.steps[0].messageSeqRange ?? null
     });
     expect(header).toMatchObject({
       status: "failed",
@@ -1539,7 +1643,7 @@ describe("match artifact JSONL export", () => {
       turnTrace: expect.objectContaining({ traceId: artifact.trajectory[0].traceId }),
       commandType: "seer.inspect"
     });
-    expect(event).toBeDefined();
+    expect(event).toBeUndefined();
     expect(error).toMatchObject({
       actorId: expect.any(String),
       failureReason: expect.stringContaining("jsonl planned reasoner failure")
@@ -1749,6 +1853,7 @@ function firstSafePrefixLength(artifact: MatchArtifact): number {
 
 function firstSafePrefixBoundaryWithFutureEvidence(artifact: MatchArtifact): {
   trajectoryLength: number;
+  nativeStepCount: number;
   futureMessageSeq: number;
   futureEventSeq: number;
 } {
@@ -1773,8 +1878,11 @@ function firstSafePrefixBoundaryWithFutureEvidence(artifact: MatchArtifact): {
     const futureMessageSeq = artifact.socialEpisode.messages.find((message) => message.seq > maxMessageSeq)?.seq;
     const futureEventSeq = artifact.events.find((event) => event.seq > maxEventSeq)?.seq;
     if (futureMessageSeq !== undefined && futureEventSeq !== undefined) {
+      const nativeStepIndex = artifact.socialEpisode.steps.findIndex((candidate) => candidate.traceId === step.traceId);
+      if (nativeStepIndex < 0) continue;
       return {
         trajectoryLength: index + 1,
+        nativeStepCount: nativeStepIndex + 1,
         futureMessageSeq,
         futureEventSeq
       };

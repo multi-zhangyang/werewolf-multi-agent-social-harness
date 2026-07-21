@@ -1,4 +1,10 @@
-import type { SocialAction, SocialActor, SocialActorObservationContext, SocialAgentProfile } from "./social";
+import type {
+  SocialAction,
+  SocialActor,
+  SocialActorObservationContext,
+  SocialActorStepReceipt,
+  SocialAgentProfile
+} from "./social";
 import {
   extractVisibleSocialMessagesFromObservation,
   hydrateSeenSocialMessageIds,
@@ -239,6 +245,18 @@ export interface ScaffoldedActorOptions<TObservation = unknown, TPending = unkno
   maxMemoryEntries?: number;
 }
 
+/**
+ * A runner-owned turn is speculative until the environment accepts it. Keep
+ * its observation, social ingestion, memo, and action decision isolated from
+ * the durable agent state until a committed receipt arrives.
+ */
+interface StagedScaffoldTurn<TObservation = unknown, TPending = unknown, TCommand = unknown> {
+  traceId: string;
+  state: AgentScaffoldState<TObservation, TPending, TCommand>;
+  seenMessageIds: Set<string>;
+  observationContext?: SocialActorObservationContext<TPending>;
+}
+
 export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, TCommand = unknown>
   implements SocialActor<TObservation, TPending, TCommand>
 {
@@ -252,6 +270,9 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
   private mutableState: AgentScaffoldState<TObservation, TPending, TCommand>;
   private latestObservationContext?: SocialActorObservationContext<TPending>;
   private readonly seenMessageIds = new Set<string>();
+  private readonly stagedTurns = new Map<string, StagedScaffoldTurn<TObservation, TPending, TCommand>>();
+  private latestStagedTraceId?: string;
+  private activeStagedTurn?: StagedScaffoldTurn<TObservation, TPending, TCommand>;
 
   constructor(options: ScaffoldedActorOptions<TObservation, TPending, TCommand>) {
     this.id = options.id;
@@ -286,75 +307,96 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
   }
 
   observe(observation: TObservation, context?: SocialActorObservationContext<TPending>): void {
-    this.latestObservationContext = cloneJson(context);
-    this.mutableState.observations += 1;
-    this.mutableState.lastObservation = cloneJson(observation);
-    this.remember({
-      kind: "observation",
-      observation: cloneJson(observation),
-      source: "observation",
-      visibility: "private",
-      evidenceRefs: [{ artifact: "observation", seq: this.mutableState.observations }]
-    }, scaffoldMutationContext(context));
-    const visibleMessages = extractVisibleSocialMessagesFromObservation(observation);
-    if (visibleMessages.length) {
-      ingestVisibleSocialMessages({
-        social: this.mutableState.social,
-        observerId: this.id,
-        messages: visibleMessages,
-        seenMessageIds: this.seenMessageIds,
-        context: scaffoldMutationContext(context)
-      });
-      this.syncCompatibilityMemory();
-    }
+    const stagedTurn = context?.transactional === true && context.traceId ? this.createStagedTurn(context) : undefined;
+    if (!stagedTurn) this.latestObservationContext = cloneJson(context);
+    this.withActiveStagedTurn(stagedTurn, () => {
+      const state = this.workingState();
+      state.observations += 1;
+      state.lastObservation = cloneJson(observation);
+      this.remember({
+        kind: "observation",
+        observation: cloneJson(observation),
+        source: "observation",
+        visibility: "private",
+        evidenceRefs: [{ artifact: "observation", seq: state.observations }]
+      }, scaffoldMutationContext(this.workingObservationContext()));
+      const visibleMessages = extractVisibleSocialMessagesFromObservation(observation);
+      if (visibleMessages.length) {
+        ingestVisibleSocialMessages({
+          social: state.social,
+          observerId: this.id,
+          messages: visibleMessages,
+          seenMessageIds: this.workingSeenMessageIds(),
+          context: scaffoldMutationContext(this.workingObservationContext())
+        });
+        this.syncCompatibilityMemory();
+      }
+    });
   }
 
   async decide(pending: TPending): Promise<SocialAction<TCommand>> {
-    if (this.mutableState.lastObservation === undefined) {
-      throw new Error(`Scaffolded actor ${this.id} cannot decide before observe().`);
-    }
-    const observation = this.mutableState.lastObservation;
-    const memo = await this.reasoner?.reflect(this.decisionInput(observation, pending));
-    if (memo) {
+    const stagedTurn = this.latestStagedTraceId ? this.stagedTurns.get(this.latestStagedTraceId) : undefined;
+    return this.withActiveStagedTurnAsync(stagedTurn, async () => {
+      const state = this.workingState();
+      if (state.lastObservation === undefined) {
+        throw new Error(`Scaffolded actor ${this.id} cannot decide before observe().`);
+      }
+      const observation = state.lastObservation;
+      const memo = await this.reasoner?.reflect(this.decisionInput(observation, pending));
+      if (memo) {
+        this.remember({
+          kind: "memo",
+          pendingAction: cloneJson(pending),
+          content: memo,
+          source: "reasoner",
+          visibility: "private",
+          evidenceRefs: [{ artifact: "memory", description: `reasoner:${this.reasoner?.id}` }],
+          tags: ["reasoner-memo"],
+          metadata: {
+            reasonerId: this.reasoner?.id
+          }
+        }, scaffoldMutationContext(this.workingObservationContext()));
+      }
+      const input = this.decisionInput(observation, pending);
+      const { action, arbitration } = await this.selectAction(input, memo);
+      if (action.actorId !== this.id) {
+        throw new Error(`Policy ${this.policy.id} returned action for ${action.actorId}, expected ${this.id}.`);
+      }
+      const actionWithArbitration = arbitration ? withArbitrationMetadata(action, arbitration) : action;
+      state.decisions += 1;
+      state.lastAction = cloneJson(actionWithArbitration);
       this.remember({
-        kind: "memo",
+        kind: "decision",
         pendingAction: cloneJson(pending),
-        content: memo,
-        source: "reasoner",
+        action: cloneJson(actionWithArbitration),
+        source: "policy",
         visibility: "private",
-        evidenceRefs: [{ artifact: "memory", description: `reasoner:${this.reasoner?.id}` }],
-        tags: ["reasoner-memo"],
-        metadata: {
-          reasonerId: this.reasoner?.id
-        }
-      }, scaffoldMutationContext(this.latestObservationContext));
-    }
-    const input = this.decisionInput(observation, pending);
-    const { action, arbitration } = await this.selectAction(input, memo);
-    if (action.actorId !== this.id) {
-      throw new Error(`Policy ${this.policy.id} returned action for ${action.actorId}, expected ${this.id}.`);
-    }
-    const actionWithArbitration = arbitration ? withArbitrationMetadata(action, arbitration) : action;
-    this.mutableState.decisions += 1;
-    this.mutableState.lastAction = cloneJson(actionWithArbitration);
-    this.remember({
-      kind: "decision",
-      pendingAction: cloneJson(pending),
-      action: cloneJson(actionWithArbitration),
-      source: "policy",
-      visibility: "private",
-      evidenceRefs: [{ artifact: "action", description: `policy:${this.policy.id}` }],
-      tags: arbitration ? ["policy-decision", "action-arbitration"] : ["policy-decision"],
-      metadata: arbitration
-        ? {
-            policyId: this.policy.id,
-            arbitration
-          }
-        : {
-            policyId: this.policy.id
-          }
-    }, scaffoldMutationContext(this.latestObservationContext));
-    return cloneJson(actionWithArbitration);
+        evidenceRefs: [{ artifact: "action", description: `policy:${this.policy.id}` }],
+        tags: arbitration ? ["policy-decision", "action-arbitration"] : ["policy-decision"],
+        metadata: arbitration
+          ? {
+              policyId: this.policy.id,
+              arbitration
+            }
+          : {
+              policyId: this.policy.id
+            }
+      }, scaffoldMutationContext(this.workingObservationContext()));
+      return cloneJson(actionWithArbitration);
+    });
+  }
+
+  onStepResult(receipt: SocialActorStepReceipt<TObservation, TPending, TCommand>): void {
+    const transactionId = receipt.transactionId ?? receipt.traceId;
+    const stagedTurn = this.stagedTurns.get(transactionId);
+    if (!stagedTurn) return;
+    this.stagedTurns.delete(transactionId);
+    if (this.latestStagedTraceId === transactionId) this.latestStagedTraceId = undefined;
+    if (receipt.status !== "committed") return;
+
+    this.mutableState = cloneJson(stagedTurn.state);
+    this.seenMessageIds.clear();
+    for (const messageId of stagedTurn.seenMessageIds) this.seenMessageIds.add(messageId);
   }
 
   private async selectAction(
@@ -419,7 +461,7 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
 
   private decisionInput(observation: TObservation, pending: TPending): AgentDecisionInput<TObservation, TPending, TCommand> {
     return {
-      agent: this.state,
+      agent: cloneJson(this.workingState()),
       observation: cloneJson(observation),
       pendingAction: cloneJson(pending)
     };
@@ -429,7 +471,7 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
     entry: Omit<ScaffoldMemoryEntry<TObservation, TPending, TCommand>, "seq" | "createdAt">,
     context?: SocialStateMutationContext
   ): void {
-    appendSocialMemory(this.mutableState.social, {
+    appendSocialMemory(this.workingState().social, {
       kind: entry.kind,
       source: entry.source,
       visibility: entry.visibility,
@@ -447,7 +489,8 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
   }
 
   private syncCompatibilityMemory(): void {
-    this.mutableState.memory = this.mutableState.social.memory.entries.map((memoryEntry) => ({
+    const state = this.workingState();
+    state.memory = state.social.memory.entries.map((memoryEntry) => ({
       seq: memoryEntry.seq,
       kind: memoryEntry.kind === "observation" || memoryEntry.kind === "decision" || memoryEntry.kind === "memo" ? memoryEntry.kind : "memo",
       observation: cloneJson(memoryEntry.observation),
@@ -463,6 +506,61 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
       importance: memoryEntry.importance,
       metadata: cloneJson(memoryEntry.metadata)
     }));
+  }
+
+  private createStagedTurn(
+    context: SocialActorObservationContext<TPending>
+  ): StagedScaffoldTurn<TObservation, TPending, TCommand> {
+    const traceId = context.traceId;
+    if (!traceId) throw new Error(`Scaffolded actor ${this.id} requires traceId for a staged turn.`);
+    const transactionId = context.transactionId ?? traceId;
+    const stagedTurn: StagedScaffoldTurn<TObservation, TPending, TCommand> = {
+      traceId,
+      state: cloneJson(this.mutableState),
+      seenMessageIds: new Set(this.seenMessageIds),
+      observationContext: cloneJson(context)
+    };
+    this.stagedTurns.set(transactionId, stagedTurn);
+    this.latestStagedTraceId = transactionId;
+    return stagedTurn;
+  }
+
+  private workingState(): AgentScaffoldState<TObservation, TPending, TCommand> {
+    return this.activeStagedTurn?.state ?? this.mutableState;
+  }
+
+  private workingSeenMessageIds(): Set<string> {
+    return this.activeStagedTurn?.seenMessageIds ?? this.seenMessageIds;
+  }
+
+  private workingObservationContext(): SocialActorObservationContext<TPending> | undefined {
+    return this.activeStagedTurn?.observationContext ?? this.latestObservationContext;
+  }
+
+  private withActiveStagedTurn<TResult>(
+    stagedTurn: StagedScaffoldTurn<TObservation, TPending, TCommand> | undefined,
+    operation: () => TResult
+  ): TResult {
+    const previous = this.activeStagedTurn;
+    this.activeStagedTurn = stagedTurn;
+    try {
+      return operation();
+    } finally {
+      this.activeStagedTurn = previous;
+    }
+  }
+
+  private async withActiveStagedTurnAsync<TResult>(
+    stagedTurn: StagedScaffoldTurn<TObservation, TPending, TCommand> | undefined,
+    operation: () => Promise<TResult>
+  ): Promise<TResult> {
+    const previous = this.activeStagedTurn;
+    this.activeStagedTurn = stagedTurn;
+    try {
+      return await operation();
+    } finally {
+      this.activeStagedTurn = previous;
+    }
   }
 }
 

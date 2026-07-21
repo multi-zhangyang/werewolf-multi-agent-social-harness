@@ -24,6 +24,7 @@ import {
   updateSocialReputation,
   upsertSocialBelief
 } from "../src/harness/socialState";
+import { ingestVisibleSocialMessages } from "../src/harness/socialObservationIngestor";
 
 interface TestObservation {
   turn: number;
@@ -146,7 +147,7 @@ describe("scaffolded social actor", () => {
           kind: "coalition_signal",
           subjectId: "ally",
           targetId: "target-b",
-          value: "coordinate pressure",
+          value: "opaque-domain.coordination",
           confidence: 0.75,
           evidenceRefs: [],
           metadata: {
@@ -440,6 +441,208 @@ describe("scaffolded social actor", () => {
       )
     ).toHaveLength(1);
     expect(social.journal?.entries.some((entry) => entry.evidenceRefs.some((ref) => ref.id === hiddenMessage.id))).toBe(false);
+  });
+
+  it("persists exact visible-message ingestion identities across bounded-memory snapshot restore", () => {
+    const firstMessage = socialMessage({
+      id: "msg-durable-first",
+      seq: 10,
+      senderId: "speaker",
+      visibility: "public",
+      content: "first explicit social consequence",
+      metadata: {
+        socialFacts: [
+          {
+            kind: "relationship",
+            targetId: "target-a",
+            deltas: { trust: 0.25 }
+          },
+          {
+            kind: "reputation",
+            subjectId: "target-a",
+            deltas: { cooperation: 0.3 }
+          }
+        ]
+      }
+    });
+    const secondMessage = socialMessage({
+      id: "msg-durable-second",
+      seq: 20,
+      senderId: "speaker",
+      visibility: "public",
+      content: "ordinary visible message that advances bounded memory"
+    });
+    const actor = createScaffoldedActor<SocialObservation<{ turn: number }, TestPending>, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      policy: policyFor<SocialObservation<{ turn: number }, TestPending>>("a"),
+      maxMemoryEntries: 2
+    });
+
+    actor.observe(socialObservationFor("a", [firstMessage]), observationContext({ actorId: "a", kind: "observe" }, 31));
+    actor.observe(
+      socialObservationFor("a", [firstMessage, secondMessage], { visibleState: { turn: 2 } }),
+      observationContext({ actorId: "a", kind: "observe" }, 32)
+    );
+
+    const snapshot = actor.state.social;
+    expect(snapshot.memory.entries.some((entry) => entry.evidenceRefs.some((ref) => ref.id === firstMessage.id))).toBe(false);
+    expect(snapshot.relationships.edges["target-a"].trust).toBe(0.25);
+    expect(snapshot.reputation.records["target-a"].cooperation).toBe(0.3);
+    expect(snapshot.messageIngestion).toEqual({
+      schemaVersion: "harness.social-message-ingestion.v1",
+      seenMessageIds: [firstMessage.id, secondMessage.id]
+    });
+
+    const delayedOlderMessage = socialMessage({
+      id: "msg-durable-delayed-older",
+      seq: 5,
+      senderId: "late-speaker",
+      visibility: "public",
+      content: "newly visible older-sequence evidence",
+      metadata: {
+        socialFacts: [
+          {
+            kind: "relationship",
+            targetId: "target-a",
+            deltas: { trust: 0.1 }
+          }
+        ]
+      }
+    });
+    const hiddenMessage = socialMessage({
+      id: "msg-durable-hidden",
+      seq: 4,
+      senderId: "hidden-speaker",
+      visibility: "private",
+      content: "not present in this actor's scoped observation",
+      recipientIds: ["hidden-speaker"]
+    });
+    const restored = createScaffoldedActor<SocialObservation<{ turn: number }, TestPending>, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      policy: policyFor<SocialObservation<{ turn: number }, TestPending>>("a"),
+      initialSocialState: snapshot,
+      maxMemoryEntries: 2
+    });
+
+    restored.observe(
+      socialObservationFor("a", [firstMessage, secondMessage, delayedOlderMessage], { visibleState: { turn: 3 } }),
+      observationContext({ actorId: "a", kind: "observe" }, 33)
+    );
+
+    const social = restored.state.social;
+    expect(social.relationships.edges["target-a"].trust).toBe(0.35);
+    expect(social.reputation.records["target-a"].cooperation).toBe(0.3);
+    expect(social.messageIngestion?.seenMessageIds).toEqual([
+      firstMessage.id,
+      secondMessage.id,
+      delayedOlderMessage.id
+    ]);
+    expect(social.messageIngestion?.seenMessageIds).not.toContain(hiddenMessage.id);
+    expect(
+      social.journal?.entries.filter(
+        (entry) => entry.store === "relationships" && entry.metadata?.messageId === firstMessage.id
+      )
+    ).toHaveLength(1);
+    expect(
+      social.journal?.entries.filter(
+        (entry) => entry.store === "reputation" && entry.metadata?.messageId === firstMessage.id
+      )
+    ).toHaveLength(1);
+    expect(
+      social.journal?.entries.filter(
+        (entry) => entry.store === "relationships" && entry.metadata?.messageId === delayedOlderMessage.id
+      )
+    ).toHaveLength(1);
+  });
+
+  it("migrates retained visible-message evidence from legacy social snapshots", () => {
+    const visibleMessage = socialMessage({
+      id: "msg-legacy-retained",
+      seq: 7,
+      senderId: "speaker",
+      visibility: "public",
+      content: "retained legacy message"
+    });
+    const original = createScaffoldedActor<SocialObservation<{ turn: number }, TestPending>, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      policy: policyFor<SocialObservation<{ turn: number }, TestPending>>("a")
+    });
+    original.observe(socialObservationFor("a", [visibleMessage]), observationContext({ actorId: "a", kind: "observe" }, 34));
+    const legacySnapshot = original.state.social;
+    delete legacySnapshot.messageIngestion;
+
+    const restored = createScaffoldedActor<SocialObservation<{ turn: number }, TestPending>, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      policy: policyFor<SocialObservation<{ turn: number }, TestPending>>("a"),
+      initialSocialState: legacySnapshot
+    });
+    restored.observe(socialObservationFor("a", [visibleMessage]), observationContext({ actorId: "a", kind: "observe" }, 35));
+
+    expect(restored.state.social.messageIngestion).toEqual({
+      schemaVersion: "harness.social-message-ingestion.v1",
+      seenMessageIds: [visibleMessage.id]
+    });
+    expect(
+      restored.state.social.memory.entries.filter(
+        (entry) => entry.kind === "message" && entry.evidenceRefs.some((ref) => ref.id === visibleMessage.id)
+      )
+    ).toHaveLength(1);
+  });
+
+  it("commits each visible-message ingestion transaction only after all store updates succeed", () => {
+    const message = socialMessage({
+      id: "msg-transactional-ingestion",
+      seq: 41,
+      senderId: "speaker",
+      visibility: "public",
+      content: "transactional visible message",
+      metadata: {
+        socialFacts: [
+          {
+            kind: "relationship",
+            targetId: "target-a",
+            deltas: { trust: 0.2 }
+          }
+        ]
+      }
+    });
+    const social = createAgentSocialState<TestObservation, TestPending, TestCommand>({
+      agentId: "a",
+      profile
+    });
+    const seenMessageIds = new Set<string>();
+
+    expect(() =>
+      ingestVisibleSocialMessages({
+        social,
+        observerId: "a",
+        messages: [message],
+        seenMessageIds,
+        onMessageIngested() {
+          throw new Error("domain-specific ingestion failed");
+        }
+      })
+    ).toThrow(/domain-specific ingestion failed/);
+
+    expect(seenMessageIds).toEqual(new Set());
+    expect(social.messageIngestion?.seenMessageIds).toEqual([]);
+    expect(social.memory.entries).toEqual([]);
+    expect(social.relationships.edges).toEqual({});
+    expect(social.journal?.entries ?? []).toEqual([]);
+
+    const retried = ingestVisibleSocialMessages({
+      social,
+      observerId: "a",
+      messages: [message],
+      seenMessageIds
+    });
+    expect(retried).toMatchObject({ ingestedMessageCount: 1, skippedDuplicateMessageCount: 0 });
+    expect(social.messageIngestion?.seenMessageIds).toEqual([message.id]);
+    expect(social.relationships.edges["target-a"].trust).toBe(0.2);
   });
 
   it("acts without a reasoner and keeps trimmed memory sequence ids monotonic", async () => {

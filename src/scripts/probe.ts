@@ -1,13 +1,20 @@
-import { modelClientFromEnv, providerConfigSummaryFromEnv } from "../agents/providerRegistry";
+import { modelClientFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
 import { normalizeModelList } from "../agents/schema";
 import { applyCommand, createGame, getPendingActions } from "../core/engine";
 import { isAgentPendingAction } from "../core/pending";
+import { safeProviderFailureMessage } from "../harness/providerFailure";
 import { OpenAIHarnessReasoner } from "../harness/reasoner";
 import { probeHarnessTurn } from "../harness/runtime";
 
 interface ProbeOptions {
   models: string[];
   timeoutMs?: number;
+}
+
+interface ProbeStreamSummary {
+  enabled: boolean;
+  completed: boolean;
+  completedBy: string | null;
 }
 
 interface ProbeSummary {
@@ -28,7 +35,7 @@ interface ProbeSummary {
   modelLatencyMs: number | null;
   promptTokens?: number;
   completionTokens?: number;
-  providerRequestId?: string;
+  stream: ProbeStreamSummary | null;
   elapsedMs: number;
   failureReason: string | null;
 }
@@ -43,9 +50,8 @@ if (hasFlag("help")) {
           summary: {
             kind: "probe",
             ok: false,
-            provider: providerConfigSummaryFromEnv(),
-            endpoint: providerConfigSummaryFromEnv().endpoint,
-            failureReason: describeError(error)
+            provider: providerDiagnosticSummaryFromEnv(),
+            failureReason: summarizeProbeFailure(error)
           }
         },
         null,
@@ -77,7 +83,7 @@ async function main(): Promise<void> {
   const results: ProbeSummary[] = [];
 
   console.error(
-    `[probe] provider=${providerConfigSummaryFromEnv().protocol} endpoint=${providerConfigSummaryFromEnv().endpoint ?? "none"} models=${options.models.join(",")} timeoutMs=${options.timeoutMs ?? "none"}`
+    `[probe] protocol=${providerDiagnosticSummaryFromEnv().protocol ?? "invalid"} configured=${providerDiagnosticSummaryFromEnv().configured} models=${options.models.join(",")} timeoutMs=${options.timeoutMs ?? "none"}`
   );
 
   try {
@@ -88,8 +94,9 @@ async function main(): Promise<void> {
           ok: false,
           model,
           modelLatencyMs: null,
+          stream: null,
           elapsedMs: Math.round(performance.now() - startedAt),
-          failureReason: abortReason(timeoutController.signal.reason)
+          failureReason: "Probe timeout or abort signal was triggered."
         });
         process.exitCode = 1;
         continue;
@@ -137,7 +144,7 @@ async function main(): Promise<void> {
           modelLatencyMs: probe.trace.latencyMs,
           promptTokens: probe.trace.promptTokens,
           completionTokens: probe.trace.completionTokens,
-          providerRequestId: probe.trace.providerRequestId,
+          stream: summarizeStream(probe.trace.stream),
           elapsedMs: Math.round(performance.now() - modelStarted),
           failureReason: null
         });
@@ -148,8 +155,9 @@ async function main(): Promise<void> {
           ok: false,
           model,
           modelLatencyMs: null,
+          stream: null,
           elapsedMs: Math.round(performance.now() - modelStarted),
-          failureReason: describeError(error)
+          failureReason: summarizeProbeFailure(error, timeoutController.signal)
         });
       }
     }
@@ -165,8 +173,7 @@ async function main(): Promise<void> {
         summary: {
           kind: "probe",
           ok: failed.length === 0,
-          provider: providerConfigSummaryFromEnv(),
-          endpoint: providerConfigSummaryFromEnv().endpoint,
+          provider: providerDiagnosticSummaryFromEnv(),
           models: options.models,
           timeoutMs: options.timeoutMs ?? null,
           elapsedMs: Math.round(performance.now() - startedAt),
@@ -216,13 +223,18 @@ function parseDurationMs(value: string | undefined, name: string): number | unde
   return ms;
 }
 
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function summarizeStream(stream: { enabled: boolean; completed: boolean; completedBy?: string } | undefined): ProbeStreamSummary | null {
+  if (!stream) return null;
+  return {
+    enabled: stream.enabled,
+    completed: stream.completed,
+    completedBy: stream.completedBy ?? null
+  };
 }
 
-function abortReason(reason: unknown): string {
-  if (reason instanceof Error) return reason.message;
-  return reason ? String(reason) : "Probe timeout or abort signal was triggered.";
+function summarizeProbeFailure(error: unknown, signal?: AbortSignal): string {
+  if (signal?.aborted) return "Probe timeout or abort signal was triggered.";
+  return safeProviderFailureMessage(error, "Probe failed before the harness turn completed.");
 }
 
 function printUsage(): void {

@@ -1,10 +1,17 @@
 import { writeFile } from "node:fs/promises";
-import { modelClientFromEnv, providerConfigSummaryFromEnv } from "../agents/providerRegistry";
+import { modelClientFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
 import { normalizeModelList } from "../agents/schema";
 import { createGame } from "../core/engine";
-import type { GameEvent, MatchMetrics } from "../core/types";
+import type { MatchMetrics } from "../core/types";
 import { buildMatchArtifact, toTrajectoryJsonl } from "../harness/artifacts";
-import { summarizeEvaluationWarnings } from "../harness/evaluation";
+import { harnessFailureEvidenceFromEpisode } from "../harness/executionEvidence";
+import { werewolfHarnessTurnEvidenceFromEpisode } from "../harness/werewolfExecutionEvidence";
+import { safeProviderFailureMessage } from "../harness/providerFailure";
+import {
+  legacyMetricPromotionPolicyFromSummary,
+  summarizeEvaluationWarnings,
+  summarizeResearchMetricPromotionRows
+} from "../harness/evaluation";
 import {
   assignmentFromUnknown,
   describeResolvedAssignments,
@@ -14,7 +21,11 @@ import {
 } from "../harness/profiles";
 import { OpenAIHarnessReasoner } from "../harness/reasoner";
 import { runHarnessMatch } from "../harness/runtime";
-import type { AdversarialEvaluation, HarnessAgentProfile, HarnessEvaluationReport, HarnessTurnTrace } from "../harness/types";
+import { countSocialStepCommits, countSocialStepCommitsByActor } from "../harness/social";
+import {
+  summarizeTournamentMetricPromotionsFromMetrics
+} from "../harness/tournamentArtifacts";
+import type { AdversarialEvaluation, HarnessAgentProfile, HarnessEvaluationReport } from "../harness/types";
 
 interface MatchOptions {
   models: string[];
@@ -39,10 +50,9 @@ if (hasFlag("help")) {
           summary: {
             kind: "match",
             ok: false,
-            provider: providerConfigSummaryFromEnv(),
-            endpoint: providerConfigSummaryFromEnv().endpoint,
+            provider: providerDiagnosticSummaryFromEnv(),
             evaluation: null,
-            failureReason: describeError(error)
+            failureReason: safeProviderFailureMessage(error, "Match failed before the harness episode could start.")
           }
         },
         null,
@@ -71,7 +81,7 @@ async function main(): Promise<void> {
   timeout?.unref();
 
   console.error(
-    `[match] provider=${providerConfigSummaryFromEnv().protocol} endpoint=${providerConfigSummaryFromEnv().endpoint ?? "none"} models=${options.models.join(",")} seed=${options.seed} timeoutMs=${
+    `[match] protocol=${providerDiagnosticSummaryFromEnv().protocol ?? "invalid"} configured=${providerDiagnosticSummaryFromEnv().configured} models=${options.models.join(",")} seed=${options.seed} timeoutMs=${
       options.timeoutMs ?? "none"
     } maxTransitions=${options.maxTransitions ?? "none"}`
   );
@@ -91,14 +101,13 @@ async function main(): Promise<void> {
       ),
       maxTransitions: options.maxTransitions
     });
+    const harnessTurns = werewolfHarnessTurnEvidenceFromEpisode(result.socialEpisode);
+    const harnessErrors = harnessFailureEvidenceFromEpisode(result.socialEpisode);
 
-    const harnessTurns = result.state.events.filter((event) => event.type === "harness.turn");
-    const harnessErrors = result.state.events.filter((event) => event.type === "harness.error");
     const summary = {
       kind: "match",
-      ok: result.status !== "failed" && harnessErrors.length === 0,
-      provider: providerConfigSummaryFromEnv(),
-      endpoint: providerConfigSummaryFromEnv().endpoint,
+      ok: result.status !== "failed" && result.metrics.harnessErrorCount === 0,
+      provider: providerDiagnosticSummaryFromEnv(),
       seed: options.seed,
       models: options.models,
       profiles: options.profiles,
@@ -116,30 +125,49 @@ async function main(): Promise<void> {
       endReason: result.state.endReason ?? null,
       day: result.state.day,
       phase: result.state.phase,
-      harnessTurns: harnessTurns.length,
-      harnessErrors: harnessErrors.length,
+      harnessTurns: result.metrics.harnessTurnCount,
+      harnessErrors: result.metrics.harnessErrorCount,
+      ...countSocialStepCommits(result.socialEpisode.steps),
       trajectorySteps: result.trajectory.length,
       averageModelLatencyMs: result.metrics.averageLatencyMs,
       modelUsage: summarizeModelUsage(result.metrics),
-      evaluation: summarizeEvaluation(result.evaluation),
+      evaluation: summarizeEvaluation(result.evaluation, result.socialEpisode.steps),
       evaluationReport: summarizeEvaluationReport(result.evaluationReport),
       lastHarnessTurns: harnessTurns.slice(-12).map(summarizeHarnessTurn),
       harnessFailures: harnessErrors.map(summarizeHarnessFailure),
-      failureReason: result.failureReason ?? (harnessErrors.length ? harnessErrors.map((event) => summarizeHarnessFailure(event).failureReason).join(" | ") : null),
+      failureReason:
+        result.status === "failed"
+          ? "Harness match failed; inspect validated failure records."
+          : harnessErrors.length
+            ? "Harness recorded one or more failures; inspect validated failure records."
+            : null,
       metrics: result.metrics,
       exports: {
         artifact: options.export ?? null,
         jsonl: options.exportJsonl ?? null
       },
-      agents: result.agents.map((agent) => ({
-        playerId: agent.playerId,
-        profileId: agent.profileId,
-        model: agent.model,
-        temperature: agent.temperature,
-        policyName: agent.policyName,
-        turns: agent.turns,
-        observations: agent.observations
-      }))
+      agents: (() => {
+        const densityByActor = countSocialStepCommitsByActor(result.socialEpisode.steps);
+        return result.agents.map((agent) => {
+          const density = densityByActor.get(agent.playerId) ?? {
+            nativeSteps: 0,
+            committedSteps: 0,
+            rejectedSteps: 0
+          };
+          return {
+            playerId: agent.playerId,
+            profileId: agent.profileId,
+            model: agent.model,
+            temperature: agent.temperature,
+            policyName: agent.policyName,
+            turns: agent.turns,
+            observations: agent.observations,
+            nativeSteps: density.nativeSteps,
+            committedSteps: density.committedSteps,
+            rejectedSteps: density.rejectedSteps
+          };
+        });
+      })()
     };
     const artifact = buildMatchArtifact({
       runId: `cli-${options.seed}`,
@@ -181,8 +209,7 @@ async function main(): Promise<void> {
           summary: {
             kind: "match",
             ok: false,
-            provider: providerConfigSummaryFromEnv(),
-            endpoint: providerConfigSummaryFromEnv().endpoint,
+            provider: providerDiagnosticSummaryFromEnv(),
             seed: options.seed,
             models: options.models,
             profiles: options.profiles,
@@ -192,7 +219,7 @@ async function main(): Promise<void> {
             timeoutMs: options.timeoutMs ?? null,
             timedOut: timeoutController.signal.aborted,
             evaluation: null,
-            failureReason: describeError(error)
+            failureReason: summarizeMatchFailure(error, timeoutController.signal)
           }
         },
         null,
@@ -244,7 +271,10 @@ function summarizeModelUsage(metrics: MatchMetrics): Record<string, object> {
   );
 }
 
-function summarizeEvaluation(evaluation: AdversarialEvaluation | undefined): object | null {
+function summarizeEvaluation(
+  evaluation: AdversarialEvaluation | undefined,
+  socialSteps: Parameters<typeof countSocialStepCommits>[0] = []
+): object | null {
   if (!evaluation) return null;
   return {
     winner: evaluation.winner ?? null,
@@ -263,36 +293,33 @@ function summarizeEvaluation(evaluation: AdversarialEvaluation | undefined): obj
     influenceByAgent: evaluation.influenceByAgent,
     deceptionByAgent: evaluation.deceptionByAgent,
     trajectorySteps: evaluation.trajectory.length,
+    ...countSocialStepCommits(socialSteps),
     lastTrajectorySteps: evaluation.trajectory.slice(-12)
   };
 }
 
 function summarizeEvaluationReport(report: HarnessEvaluationReport | undefined): object | null {
   if (!report) return null;
+  const promotionPolicy = legacyMetricPromotionPolicyFromSummary(report.summary.promotion);
+  const promotionSummary = summarizeTournamentMetricPromotionsFromMetrics(report.metrics ?? [], promotionPolicy);
   return {
     id: report.id,
     evaluatorIds: report.evaluatorIds,
     metricCount: report.metricCount,
+    scorecardEligibleMetricCount: promotionSummary.scorecardEligibleCount,
+    metricPromotionClassCounts: promotionSummary.byClass,
+    scorecardEligibleMetricClassCounts: promotionSummary.scorecardEligibleByClass,
     ...summarizeEvaluationWarnings(report.warnings),
     summary: report.summary,
-    topMetrics: report.metrics.slice(0, 12).map((metric) => ({
-      id: metric.id,
-      scope: metric.scope,
-      subjectId: metric.subjectId,
-      value: metric.value,
-      weight: metric.weight,
-      source: metric.source
-    }))
+    topMetrics: summarizeResearchMetricPromotionRows(report.metrics, 12, promotionPolicy)
   };
 }
 
-function summarizeHarnessTurn(event: GameEvent): object {
-  const trace = event.payload as Partial<HarnessTurnTrace>;
+function summarizeHarnessTurn(event: ReturnType<typeof werewolfHarnessTurnEvidenceFromEpisode>[number]): object {
+  const trace = event.trace;
   return {
-    seq: event.seq,
-    harnessTurn: trace.traceId ?? String(event.seq),
-    day: event.day,
-    phase: event.phase,
+    seq: event.turnIndex,
+    harnessTurn: trace.traceId,
     actorId: trace.playerId ?? event.actorId ?? null,
     model: trace.model ?? null,
     actionKind: trace.actionKind ?? null,
@@ -304,20 +331,25 @@ function summarizeHarnessTurn(event: GameEvent): object {
     modelLatencyMs: trace.latencyMs ?? null,
     promptTokens: trace.promptTokens ?? null,
     completionTokens: trace.completionTokens ?? null,
-    providerRequestId: trace.providerRequestId ?? null
+    stream: trace.stream
+      ? {
+          enabled: trace.stream.enabled,
+          completed: trace.stream.completed,
+          completedBy: trace.stream.completedBy ?? null
+        }
+      : null
   };
 }
 
-function summarizeHarnessFailure(event: GameEvent): { failureReason: string } & Record<string, unknown> {
-  const payload = isRecord(event.payload) ? event.payload : {};
+function summarizeHarnessFailure(event: ReturnType<typeof harnessFailureEvidenceFromEpisode>[number]): { failureReason: string } & Record<string, unknown> {
+  const payload = event.payload ?? (isRecord(event.failure.metadata) ? event.failure.metadata : {});
   return {
-    seq: event.seq,
-    day: event.day,
-    phase: event.phase,
+    seq: event.turnIndex,
     actorId: event.actorId ?? null,
+    failureStage: event.failure.stage,
     model: typeof payload.model === "string" ? payload.model : null,
     actionKind: typeof payload.actionKind === "string" ? payload.actionKind : null,
-    failureReason: typeof payload.message === "string" ? payload.message : JSON.stringify(event.payload)
+    failureReason: `Harness step failed during ${event.failure.stage}.`
   };
 }
 
@@ -361,8 +393,9 @@ function parseTemperature(value: string): number {
   return parsed;
 }
 
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function summarizeMatchFailure(error: unknown, signal: AbortSignal): string {
+  if (signal.aborted) return "Match timeout or abort signal was triggered.";
+  return safeProviderFailureMessage(error, "Match failed before the harness episode completed.");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

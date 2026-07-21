@@ -1,5 +1,7 @@
 import type { AgentPendingAction } from "../core/pending";
 import type { GameCommand, GameState } from "../core/types";
+export { runHarnessEpisode } from "./runner";
+export type { SocialEpisodeArtifact, SocialEpisodeOptions } from "./social";
 import type {
   HarnessAgentConfig,
   HarnessRunOptions,

@@ -33,17 +33,22 @@ describe("role-balanced tournament harness", () => {
     expect(result.second).toEqual(["beta", "gamma", "alpha", "beta"]);
   });
 
-  it("aggregates completed episode exposure, roles, model usage, harness turns, and rewards", async () => {
+  it("preserves truncated episodes without promoting partial results into completed model stats", async () => {
     const result = await runTsxJson<{
       gamesRequested: number;
       gamesCompleted: number;
       gamesFailed: number;
+      gamesTruncated: number;
       episodeCount: number;
+      episodeStatuses: string[];
       episodeAgentCounts: number[];
       episodesHaveEvaluation: boolean;
       alpha: {
         seatGames: number;
         harnessTurns: number;
+        nativeSteps: number;
+        committedSteps: number;
+        rejectedSteps: number;
         promptTokens: number;
         completionTokens: number;
         roleGames: Record<string, number>;
@@ -53,6 +58,9 @@ describe("role-balanced tournament harness", () => {
       beta: {
         seatGames: number;
         harnessTurns: number;
+        nativeSteps: number;
+        committedSteps: number;
+        rejectedSteps: number;
         promptTokens: number;
         completionTokens: number;
         roleGames: Record<string, number>;
@@ -96,7 +104,9 @@ describe("role-balanced tournament harness", () => {
         gamesRequested: result.gamesRequested,
         gamesCompleted: result.gamesCompleted,
         gamesFailed: result.gamesFailed,
+        gamesTruncated: result.gamesTruncated,
         episodeCount: result.episodes.length,
+        episodeStatuses: result.episodes.map((episode) => episode.status),
         episodeAgentCounts: result.episodes.map((episode) => episode.agents.length),
         episodesHaveEvaluation: result.episodes.every((episode) => Boolean(episode.evaluation)),
         alpha: result.modelStats.alpha,
@@ -105,24 +115,34 @@ describe("role-balanced tournament harness", () => {
     `);
 
     expect(result.gamesRequested).toBe(2);
-    expect(result.gamesCompleted).toBe(2);
+    expect(result.gamesCompleted).toBe(0);
     expect(result.gamesFailed).toBe(0);
+    expect(result.gamesTruncated).toBe(2);
     expect(result.episodeCount).toBe(2);
+    expect(result.episodeStatuses).toEqual(["truncated", "truncated"]);
     expect(result.episodeAgentCounts.every((count) => count === 9)).toBe(true);
     expect(result.episodesHaveEvaluation).toBe(true);
 
     const alpha = result.alpha;
     const beta = result.beta;
-    expect(alpha.seatGames).toBe(9);
-    expect(beta.seatGames).toBe(9);
-    expect(alpha.harnessTurns + beta.harnessTurns).toBe(6);
-    expect(alpha.promptTokens + beta.promptTokens).toBe(30);
-    expect(alpha.completionTokens + beta.completionTokens).toBe(54);
+    expect(alpha.seatGames).toBe(0);
+    expect(beta.seatGames).toBe(0);
+    expect(alpha.harnessTurns + beta.harnessTurns).toBe(0);
+    expect(typeof alpha.nativeSteps).toBe("number");
+    expect(typeof alpha.committedSteps).toBe("number");
+    expect(typeof alpha.rejectedSteps).toBe("number");
+    expect(typeof beta.nativeSteps).toBe("number");
+    expect(typeof beta.committedSteps).toBe("number");
+    expect(typeof beta.rejectedSteps).toBe("number");
+    expect(alpha.nativeSteps).toBe(alpha.committedSteps + alpha.rejectedSteps);
+    expect(beta.nativeSteps).toBe(beta.committedSteps + beta.rejectedSteps);
+    expect(alpha.promptTokens + beta.promptTokens).toBe(0);
+    expect(alpha.completionTokens + beta.completionTokens).toBe(0);
     expect(Object.values(alpha.roleGames).reduce((sum, value) => sum + value, 0)).toBe(alpha.seatGames);
     expect(Object.values(beta.roleGames).reduce((sum, value) => sum + value, 0)).toBe(beta.seatGames);
-    expect(alpha.rewardTotal + beta.rewardTotal).toBeLessThan(0);
-    expect(alpha.averageReward).toBeCloseTo(alpha.rewardTotal / alpha.seatGames, 3);
-    expect(beta.averageReward).toBeCloseTo(beta.rewardTotal / beta.seatGames, 3);
+    expect(alpha.rewardTotal + beta.rewardTotal).toBe(0);
+    expect(alpha.averageReward).toBe(0);
+    expect(beta.averageReward).toBe(0);
   });
 
   it("counts returned failed harness results without aggregating them as completed exposure", async () => {

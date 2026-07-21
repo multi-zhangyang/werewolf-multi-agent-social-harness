@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { replayHarnessTrajectory } from "../harness/replay";
-import { hashStableState } from "../harness/hash";
+import { replayWerewolfSocialEpisode } from "../harness/replay";
 import type { MatchArtifact } from "../harness/artifacts";
+import { countSocialStepCommits } from "../harness/social";
 
 interface ReplayCliOptions {
   artifact: string;
@@ -33,13 +33,8 @@ if (hasFlag("help")) {
 async function main(): Promise<void> {
   const options = parseOptions();
   const artifact = JSON.parse(await readFile(options.artifact, "utf8")) as MatchArtifact;
-  const replay = replayHarnessTrajectory({
-    initialState: artifact.initialState,
-    trajectory: artifact.trajectory,
-    stopOnMismatch: options.stopOnMismatch
-  });
-  const expectedFinalHash = hashStableState(artifact.finalState);
-  const finalHashMatchesArtifact = replay.finalHash === expectedFinalHash;
+  const replay = replayWerewolfSocialEpisode(artifact.socialEpisode, { stopOnMismatch: options.stopOnMismatch });
+  const finalHashMatchesArtifact = replay.finalHash === replay.expectedFinalHash;
   const summary = {
     kind: "replay",
     ok: replay.ok && finalHashMatchesArtifact,
@@ -47,11 +42,15 @@ async function main(): Promise<void> {
     runId: artifact.runId,
     seed: artifact.seed,
     status: artifact.status,
-    replayedCommands: replay.replayedCommands,
-    trajectorySteps: artifact.trajectory.length,
+    authority: "native-social-episode",
+    ...countSocialStepCommits(artifact.socialEpisode.steps),
+    replayedSteps: replay.replayedSteps,
+    replayedBatches: replay.replayedBatches,
     finalHash: replay.finalHash,
-    expectedFinalHash,
+    expectedFinalHash: replay.expectedFinalHash,
     finalHashMatchesArtifact,
+    messagesHash: replay.messagesHash,
+    expectedMessagesHash: replay.expectedMessagesHash,
     mismatchCount: replay.mismatches.length,
     mismatches: replay.mismatches.slice(0, 12)
   };
@@ -90,7 +89,7 @@ function printUsage(): void {
     [
       "Usage: npm run arena:replay -- --artifact=artifacts/match.json [--json=summary|full]",
       "",
-      "Replays a harness artifact from initialState + recorded trajectory. It does not call any model API."
+      "Replays a harness artifact from its native social execution. It does not call actors, reasoners, or model APIs."
     ].join("\n")
   );
 }

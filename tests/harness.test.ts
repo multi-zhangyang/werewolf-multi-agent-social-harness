@@ -9,10 +9,13 @@ import { buildFinalHarnessCheckpoint, buildMatchArtifact, toTrajectoryJsonl } fr
 import { WerewolfEnvironment } from "../src/harness/environment";
 import { evaluateAdversarialMatch } from "../src/harness/evaluator";
 import { hashStableState } from "../src/harness/hash";
+import { harnessFailureEvidenceFromEpisode } from "../src/harness/executionEvidence";
+import { werewolfHarnessTurnEvidenceFromEpisode } from "../src/harness/werewolfExecutionEvidence";
 import { policyForRole } from "../src/harness/policy";
 import { describeResolvedAssignments, profilesFromModels, resolveAgentConfigs } from "../src/harness/profiles";
 import { replayHarnessTrajectory } from "../src/harness/replay";
 import { probeHarnessTurn, runHarnessMatch } from "../src/harness/runtime";
+import { isSocialStepCommitted } from "../src/harness/social";
 import type { AgentHarnessState, HarnessReasoner, HarnessTurnTrace } from "../src/harness/types";
 import type { GameCommand, GameState, PlayerState, Role } from "../src/core/types";
 
@@ -97,25 +100,6 @@ describe("harness agent-environment cycle", () => {
     expect(actor.state.social?.memory.entries[1]).toMatchObject({ source: "reasoner", visibility: "private", content: memo });
     expect(actor.state.social?.memory.entries[2].action?.command).toEqual(command);
 
-    const trace: HarnessTurnTrace = {
-      traceId: "harness-env-cycle:trace",
-      playerId: action.actorId,
-      model: actor.state.model,
-      actionKind: action.kind,
-      policyName: actor.state.policyName,
-      commandType: command.type,
-      intent: plan.intent,
-      confidence: plan.confidence,
-      strategyTags: plan.strategyTags,
-      beliefs: actor.state.beliefs,
-      privateMemo: memo,
-      latencyMs: 5,
-      promptTokens: 7,
-      completionTokens: 11,
-      providerRequestId: "stub-harness-env-cycle"
-    };
-    environment.recordTurn(trace);
-
     const before = environment.snapshot();
     const after = environment.step(command);
     const evaluation = evaluateAdversarialMatch(after, [actor.state]);
@@ -126,14 +110,160 @@ describe("harness agent-environment cycle", () => {
       targetId: command.targetId
     });
     expect(after.events.length).toBeGreaterThan(before.events.length);
-    expect(evaluation.trajectory).toHaveLength(1);
-    expect(evaluation.trajectory[0]).toMatchObject({
-      playerId: action.actorId,
-      model: "stub-model",
-      policyName: "seer-information",
-      commandType: "seer.inspect"
-    });
+    expect(evaluation.trajectory).toEqual([]);
     expect(evaluation.agentRewards).toHaveLength(after.players.length);
+  });
+
+  it("applies true parallel wolf kill votes through stepBatch without intermediate pending leakage", () => {
+    const environment = new WerewolfEnvironment(createGame({ id: "harness-step-batch-wolves", seed: "harness-step-batch-wolves" }));
+    environment.step({ type: "system.advance", actorId: "system" });
+
+    const seerAction = environment.pendingActions().find((pending) => pending.kind === "inspect");
+    if (!seerAction) throw new Error("Expected seer inspect pending action.");
+    const seerTarget = seerAction.legalTargetIds[0];
+    if (!seerTarget) throw new Error("Expected seer legal target.");
+    environment.step({ type: "seer.inspect", actorId: seerAction.actorId, targetId: seerTarget });
+
+    expect(environment.snapshot().phase).toBe("night_wolves");
+    const killPending = environment.pendingActions().filter((pending) => pending.kind === "kill");
+    expect(killPending.length).toBeGreaterThanOrEqual(2);
+    const preBatch = environment.snapshot();
+    const commandsByAgent = Object.fromEntries(
+      killPending.map((pending, index) => {
+        const targetId = pending.legalTargetIds[index % pending.legalTargetIds.length];
+        if (!targetId) throw new Error(`Missing legal kill target for ${pending.actorId}.`);
+        return [
+          pending.actorId,
+          {
+            type: "werewolf.killVote" as const,
+            actorId: pending.actorId,
+            targetId
+          }
+        ];
+      })
+    );
+
+    // All commands must validate against the shared pre-batch decision state.
+    for (const pending of killPending) {
+      expect(preBatch.night.wolfVotes[pending.actorId]).toBeUndefined();
+      expect(commandsByAgent[pending.actorId]).toBeDefined();
+    }
+
+    const afterBatch = environment.stepBatch(commandsByAgent);
+    expect(afterBatch.phase).toBe("night_witch");
+    for (const pending of killPending) {
+      expect(afterBatch.night.wolfVotes[pending.actorId]).toBe(commandsByAgent[pending.actorId]?.targetId);
+    }
+    // No intermediate open-wolf pending remains after joint apply.
+    expect(environment.pendingActions().some((pending) => pending.kind === "kill")).toBe(false);
+  });
+
+  it("rejects incomplete or mixed-phase stepBatch maps", () => {
+    const environment = new WerewolfEnvironment(createGame({ id: "harness-step-batch-reject", seed: "harness-step-batch-reject" }));
+    environment.step({ type: "system.advance", actorId: "system" });
+    const seerAction = environment.pendingActions().find((pending) => pending.kind === "inspect");
+    if (!seerAction) throw new Error("Expected seer inspect pending action.");
+    environment.step({
+      type: "seer.inspect",
+      actorId: seerAction.actorId,
+      targetId: seerAction.legalTargetIds[0] ?? livingExcept(environment.snapshot(), seerAction.actorId).id
+    });
+
+    const killPending = environment.pendingActions().filter((pending) => pending.kind === "kill");
+    expect(killPending.length).toBeGreaterThanOrEqual(2);
+    const [first, second] = killPending;
+    const targetId = first.legalTargetIds[0];
+    if (!targetId) throw new Error("Expected kill target.");
+
+    expect(() =>
+      environment.stepBatch({
+        [first.actorId]: { type: "werewolf.killVote", actorId: first.actorId, targetId }
+      })
+    ).toThrow(/complete pending agent set|missing=/);
+
+    expect(() =>
+      environment.stepBatch({
+        [first.actorId]: { type: "werewolf.killVote", actorId: first.actorId, targetId },
+        [second.actorId]: { type: "werewolf.killVote", actorId: second.actorId, targetId },
+        extra: { type: "werewolf.killVote", actorId: "extra", targetId }
+      } as Record<string, GameCommand>)
+    ).toThrow(/unexpected=/);
+
+    expect(() =>
+      environment.stepBatch({
+        [first.actorId]: { type: "system.advance", actorId: first.actorId },
+        [second.actorId]: { type: "werewolf.killVote", actorId: second.actorId, targetId }
+      } as Record<string, GameCommand>)
+    ).toThrow(/system\.advance|not accept|not legal/);
+  });
+
+  it("applies day_vote joint actions through stepBatch and advances to exile resolve path", () => {
+    const environment = new WerewolfEnvironment(createGame({ id: "harness-step-batch-votes", seed: "harness-step-batch-votes" }));
+    // Drive the engine to day_vote with a deterministic legal prefix.
+    for (let guard = 0; guard < 64; guard += 1) {
+      const phase = environment.snapshot().phase;
+      if (phase === "day_vote" || phase === "game_over") break;
+
+      const system = environment.pending().find((action) => action.kind === "advance");
+      if (system) {
+        environment.step({ type: "system.advance", actorId: "system" });
+        continue;
+      }
+
+      const agentPending = environment.pendingActions();
+      if (agentPending.length === 0) break;
+
+      if (agentPending.every((action) => action.kind === "kill")) {
+        const commands = Object.fromEntries(
+          agentPending.map((action) => {
+            if (action.kind !== "kill") throw new Error("Expected kill pending.");
+            const targetId = action.legalTargetIds[0];
+            if (!targetId) throw new Error("kill target missing");
+            return [action.actorId, { type: "werewolf.killVote" as const, actorId: action.actorId, targetId }];
+          })
+        );
+        environment.stepBatch(commands);
+        continue;
+      }
+
+      const action = agentPending[0];
+      if (action.kind === "inspect") {
+        environment.step({ type: "seer.inspect", actorId: action.actorId, targetId: action.legalTargetIds[0]! });
+        continue;
+      }
+      if (action.kind === "witch") {
+        environment.step({ type: "witch.act", actorId: action.actorId });
+        continue;
+      }
+      if (action.kind === "speech") {
+        environment.step({ type: "speech.submit", actorId: action.actorId, text: "joint-vote setup speech" });
+        continue;
+      }
+      if (action.kind === "kill") {
+        environment.step({ type: "werewolf.killVote", actorId: action.actorId, targetId: action.legalTargetIds[0]! });
+        continue;
+      }
+      break;
+    }
+
+    expect(environment.snapshot().phase).toBe("day_vote");
+    const votePending = environment.pendingActions().filter((pending) => pending.kind === "vote");
+    expect(votePending.length).toBeGreaterThanOrEqual(2);
+    const commandsByAgent = Object.fromEntries(
+      votePending.map((pending, index) => {
+        if (pending.kind !== "vote") throw new Error("Expected vote pending.");
+        const targetId = pending.legalTargetIds[index % pending.legalTargetIds.length];
+        return [
+          pending.actorId,
+          targetId
+            ? { type: "vote.cast" as const, actorId: pending.actorId, targetId }
+            : { type: "vote.cast" as const, actorId: pending.actorId, abstain: true }
+        ];
+      })
+    );
+    const after = environment.stepBatch(commandsByAgent);
+    expect(["exile_resolve", "hunter_shot", "night_seer", "night_wolves", "game_over"]).toContain(after.phase);
+    expect(environment.pendingActions().some((pending) => pending.kind === "vote")).toBe(false);
   });
 
   it("records harness turn trace with policyName, beliefs, and commandType", async () => {
@@ -189,8 +319,8 @@ describe("harness agent-environment cycle", () => {
         reasoner: stubReasoner,
         maxTransitions: 2
       });
-      const turnEvents = result.state.events.filter((event) => event.type === "harness.turn");
-      const trace = turnEvents[0]?.payload;
+      const turnEvents = result.trajectory;
+      const trace = turnEvents[0]?.turnTrace;
       const actedAgent = result.agents.find((agent) => agent.playerId === trace?.playerId);
       console.log(JSON.stringify({
         turnEventCount: turnEvents.length,
@@ -304,7 +434,7 @@ describe("harness agent-environment cycle", () => {
     expect(hashStableState(state)).toBe(beforeHash);
     expect(state.phase).toBe("night_seer");
     expect(state.night.seerInspection).toBeUndefined();
-    expect(state.events.some((event) => event.type === "harness.turn" || event.type === "seer.inspected")).toBe(false);
+    expect(state.events.some((event) => event.type === "seer.inspected")).toBe(false);
   });
 
   it("keeps reasoner scoped, preserves actor state, and emits replayable social trajectory", async () => {
@@ -377,8 +507,7 @@ describe("harness agent-environment cycle", () => {
         reasoner: scopedReasoner,
         maxTransitions: 4
       });
-      const turnEvents = result.state.events.filter((event) => event.type === "harness.turn");
-      const traceIds = turnEvents.map((event) => event.payload.traceId);
+      const traceIds = result.trajectory.map((step) => step.traceId);
       const actedAgent = result.agents.find((agent) => agent.turns > 0);
       console.log(JSON.stringify({
         status: result.status,
@@ -434,7 +563,7 @@ describe("harness agent-environment cycle", () => {
     expect(result.social).toMatchObject({
       status: "truncated",
       profileCount: 9,
-      stepCount: result.trajectory.length
+      stepCount: result.trajectory.length + 1
     });
     expect(result.social.channelKinds).toEqual(expect.arrayContaining(["public", "team", "private"]));
   });
@@ -479,7 +608,7 @@ describe("harness agent-environment cycle", () => {
     });
     const killSteps = result.trajectory.filter((step) => step.command.type === "werewolf.killVote");
     const wolfSocialSteps = result.socialEpisode.steps.filter((step) => step.action.command.type === "werewolf.killVote");
-    const turnEvents = result.state.events.filter((event) => event.type === "harness.turn");
+    const turnEvents = werewolfHarnessTurnEvidenceFromEpisode(result.socialEpisode);
 
     expect(result.status).toBe("truncated");
     expect(result.truncationReason).toContain("maxTransitions 3");
@@ -488,11 +617,13 @@ describe("harness agent-environment cycle", () => {
     expect(killSteps.map((step) => step.actorId).sort()).toEqual(wolves.map((wolf) => wolf.id).sort());
     expect(killSteps.map((step) => step.turnIndex)).toEqual([2, 3]);
     expect(new Set(killSteps.map((step) => step.decisionStateHash)).size).toBe(1);
-    expect(result.socialEpisode.steps.map((step) => step.traceId)).toEqual(result.trajectory.map((step) => step.traceId));
+    expect(result.socialEpisode.steps.filter((step) => isSocialStepCommitted(step) && step.actorId !== "system").map((step) => step.traceId)).toEqual(
+      result.trajectory.map((step) => step.traceId)
+    );
     expect(wolfSocialSteps).toHaveLength(2);
     expect(new Set(wolfSocialSteps.map((step) => step.batchId)).size).toBe(1);
     expect(wolfSocialSteps.map((step) => step.schedulerMode)).toEqual(["aec-batched-decision", "aec-batched-decision"]);
-    expect(wolfSocialSteps.map((step) => step.batchIndex)).toEqual([1, 2]);
+    expect(wolfSocialSteps.map((step) => step.batchIndex)).toEqual([3, 3]);
     expect(wolfSocialSteps.map((step) => step.batchSize)).toEqual([2, 2]);
     expect(result.metrics).toMatchObject({ harnessTurnCount: 3, harnessErrorCount: 0 });
     expect(turnEvents).toHaveLength(3);
@@ -575,12 +706,13 @@ describe("harness agent-environment cycle", () => {
     expect(witchStep?.observation.social.messages.some((message) => message.metadata?.kind === "werewolf-kill-vote")).toBe(false);
     expect(laterSpeechWithPublicContext).toBeDefined();
     expect(wolfSpeechWithTeamContext).toBeDefined();
-    expect(result.socialEpisode.steps.map((step) => step.traceId)).toEqual(result.trajectory.map((step) => step.traceId));
+    expect(result.socialEpisode.steps.filter((step) => isSocialStepCommitted(step) && step.actorId !== "system").map((step) => step.traceId)).toEqual(
+      result.trajectory.map((step) => step.traceId)
+    );
     for (const trajectoryStep of result.trajectory) {
       const socialStep = result.socialEpisode.steps.find((step) => step.traceId === trajectoryStep.traceId);
       expect(socialStep).toMatchObject({
         traceId: trajectoryStep.traceId,
-        turnIndex: trajectoryStep.turnIndex,
         actorId: trajectoryStep.actorId,
         profileId: trajectoryStep.profileId ?? trajectoryStep.actorId,
         pendingAction: trajectoryStep.pendingAction,
@@ -600,12 +732,12 @@ describe("harness agent-environment cycle", () => {
       schedulerMode: "aec-batched-decision",
       atomic: false,
       resolutionPolicy: "sequential-apply-from-shared-decision-state",
-      batchId: expect.stringContaining(":werewolf-batch:"),
+      batchId: expect.stringContaining(":batch:"),
       batchSize: 2
     });
     const wolfBatchSteps = result.socialEpisode.steps.filter((step) => step.action.command.type === "werewolf.killVote");
     expect(new Set(wolfBatchSteps.map((step) => step.batchId)).size).toBe(1);
-    expect(wolfBatchSteps.map((step) => step.batchIndex)).toEqual([1, 2]);
+    expect(wolfBatchSteps.map((step) => step.batchIndex)).toEqual([3, 3]);
 
     for (const step of result.socialEpisode.steps.filter((item) => item.messageSeqRange)) {
       const [start, end] = step.messageSeqRange!;
@@ -680,7 +812,7 @@ describe("harness agent-environment cycle", () => {
       trajectory: artifact.trajectory,
       expectedFinalHash: artifact.failureStateHash
     });
-    const harnessErrors = result.state.events.filter((event) => event.type === "harness.error");
+    const harnessErrors = harnessFailureEvidenceFromEpisode(result.socialEpisode);
     const firstError = harnessErrors[0]?.payload as { message?: string; actionKind?: string; traceId?: string };
 
     expect(result.status).toBe("failed");
@@ -693,8 +825,10 @@ describe("harness agent-environment cycle", () => {
       failureReason: result.failureReason,
       error: result.failureReason
     });
-    expect(result.socialEpisode.steps).toHaveLength(result.trajectory.length);
-    expect(result.socialEpisode.steps.map((step) => step.traceId)).toEqual(result.trajectory.map((step) => step.traceId));
+    expect(result.socialEpisode.steps.filter((step) => isSocialStepCommitted(step) && step.actorId !== "system").map((step) => step.traceId)).toEqual(
+      result.trajectory.map((step) => step.traceId)
+    );
+    expect(result.socialEpisode.steps.at(-1)).toMatchObject({ commitStatus: "rejected", failure: expect.any(Object) });
     expect(harnessErrors).toHaveLength(1);
     expect(firstError.message).toContain("planned reasoner failure");
     expect(firstError.actionKind).toBe("kill");
@@ -704,19 +838,19 @@ describe("harness agent-environment cycle", () => {
       failureReason: result.failureReason,
       failureStateHash: result.failureStateHash
     });
-    expect(artifact.events.some((event) => event.type === "harness.error")).toBe(true);
+    expect(harnessFailureEvidenceFromEpisode(artifact.socialEpisode)).toHaveLength(1);
     expect(artifact.socialEpisode.messages.length).toBeGreaterThan(0);
     expect(artifact.agents).toHaveLength(result.agents.length);
     expect(artifact.agents.some((agent) => agent.social?.memory.entries.length)).toBe(true);
     expect(replay.ok).toBe(true);
     expect(replay.replayedCommands).toBe(artifact.trajectory.length);
     expect(replay.finalHash).toBe(artifact.trajectory.at(-1)?.postStateHash);
-    expect(replay.finalHash).not.toBe(artifact.failureStateHash);
-    expect(fullFinalReplay.ok).toBe(false);
+    expect(replay.finalHash).toBe(artifact.failureStateHash);
+    expect(fullFinalReplay.ok).toBe(true);
     expect(fullFinalReplay.finalHash).toBe(replay.finalHash);
     expect(fullFinalReplay.expectedFinalHash).toBe(artifact.failureStateHash);
-    expect(fullFinalReplay.mismatches.join("\n")).toMatch(/finalHash mismatch/);
-    expect(() => buildFinalHarnessCheckpoint({ artifact })).toThrow(/final state is beyond the replayable trajectory prefix/);
+    expect(fullFinalReplay.mismatches).toEqual([]);
+    expect(() => buildFinalHarnessCheckpoint({ artifact })).not.toThrow();
   });
 
   it("records environment-step failures for illegal commands without adding failed trajectory steps", async () => {
@@ -773,14 +907,14 @@ describe("harness agent-environment cycle", () => {
       resolvedAssignments: describeResolvedAssignments(initialState.players, agents),
       result
     });
-    const harnessTurns = result.state.events.filter((event) => event.type === "harness.turn");
-    const harnessErrors = result.state.events.filter((event) => event.type === "harness.error");
+    const harnessTurns = werewolfHarnessTurnEvidenceFromEpisode(result.socialEpisode);
+    const harnessErrors = harnessFailureEvidenceFromEpisode(result.socialEpisode);
     const turnEvent = harnessTurns[0];
     const errorEvent = harnessErrors[0];
-    const turnPayload = turnEvent?.payload as HarnessTurnTrace;
+    const turnPayload = turnEvent?.trace as HarnessTurnTrace;
     const payload = errorEvent?.payload as Record<string, unknown>;
-    const artifactTurns = artifact.events.filter((event) => event.type === "harness.turn");
-    const artifactErrors = artifact.events.filter((event) => event.type === "harness.error");
+    const artifactTurns = werewolfHarnessTurnEvidenceFromEpisode(artifact.socialEpisode);
+    const artifactErrors = harnessFailureEvidenceFromEpisode(artifact.socialEpisode);
     const artifactPayload = artifactErrors[0]?.payload as Record<string, unknown>;
     const replay = replayHarnessTrajectory({
       initialState: artifact.initialState,
@@ -807,13 +941,14 @@ describe("harness agent-environment cycle", () => {
       failureReason: result.failureReason,
       error: result.failureReason
     });
-    expect(result.socialEpisode.steps).toHaveLength(0);
+    expect(result.socialEpisode.steps).toHaveLength(1);
+    expect(result.socialEpisode.steps[0]).toMatchObject({ commitStatus: "rejected", failure: { stage: "environment_step" } });
     expect(result.socialEpisode.messages).toHaveLength(0);
-    expect(result.socialEpisode.metrics).toMatchObject({ harnessTurnCount: 1, harnessErrorCount: 1 });
-    expect(result.metrics).toMatchObject({ harnessTurnCount: 1, harnessErrorCount: 1 });
+    expect(result.socialEpisode.metrics).toMatchObject({ harnessTurnCount: 0, harnessErrorCount: 1 });
+    expect(result.metrics).toMatchObject({ harnessTurnCount: 0, harnessErrorCount: 1 });
     expect(harnessTurns).toHaveLength(1);
     expect(harnessErrors).toHaveLength(1);
-    expect(turnEvent.seq).toBeLessThan(errorEvent.seq);
+    expect(turnEvent.turnIndex).toBeLessThanOrEqual(errorEvent.turnIndex);
     expect(turnPayload).toMatchObject({
       playerId: seer.id,
       actionKind: "inspect",
@@ -837,7 +972,7 @@ describe("harness agent-environment cycle", () => {
       failureStateHash: result.failureStateHash
     });
     expect(artifact.trajectory).toHaveLength(0);
-    expect(artifact.socialEpisode.steps).toHaveLength(0);
+    expect(artifact.socialEpisode.steps).toHaveLength(1);
     expect(artifact.socialEpisode.messages).toHaveLength(0);
     expect(artifactTurns).toHaveLength(1);
     expect(artifactErrors).toHaveLength(1);
@@ -846,12 +981,12 @@ describe("harness agent-environment cycle", () => {
     expect(replay.mismatches).toEqual([]);
     expect(replay.replayedCommands).toBe(0);
     expect(replay.finalHash).toBe(hashStableState(artifact.initialState));
-    expect(replay.finalHash).not.toBe(artifact.failureStateHash);
-    expect(fullFinalReplay.ok).toBe(false);
+    expect(replay.finalHash).toBe(artifact.failureStateHash);
+    expect(fullFinalReplay.ok).toBe(true);
     expect(fullFinalReplay.finalHash).toBe(replay.finalHash);
     expect(fullFinalReplay.expectedFinalHash).toBe(artifact.failureStateHash);
-    expect(fullFinalReplay.mismatches.join("\n")).toMatch(/finalHash mismatch/);
-    expect(() => buildFinalHarnessCheckpoint({ artifact })).toThrow(/final state is beyond the replayable trajectory prefix/);
+    expect(fullFinalReplay.mismatches).toEqual([]);
+    expect(() => buildFinalHarnessCheckpoint({ artifact })).not.toThrow();
   });
 
   it("rejects illegal Werewolf command families at the environment authority boundary", () => {
@@ -1057,9 +1192,9 @@ describe("harness agent-environment cycle", () => {
       resolvedAssignments: describeResolvedAssignments(initialState.players, agents),
       result
     });
-    const harnessErrors = result.state.events.filter((event) => event.type === "harness.error");
+    const harnessErrors = harnessFailureEvidenceFromEpisode(result.socialEpisode);
     const payload = harnessErrors[0]?.payload as Record<string, any>;
-    const artifactPayload = artifact.events.find((event) => event.type === "harness.error")?.payload as Record<string, any>;
+    const artifactPayload = harnessFailureEvidenceFromEpisode(artifact.socialEpisode)[0]?.payload as Record<string, any>;
     const replay = replayHarnessTrajectory({
       initialState: artifact.initialState,
       trajectory: artifact.trajectory
@@ -1133,6 +1268,6 @@ describe("harness agent-environment cycle", () => {
     expect(toTrajectoryJsonl(artifact)).not.toContain("retry-cause-token-should-not-appear");
     expect(replay.ok).toBe(true);
     expect(replay.finalHash).toBe(artifact.trajectory.at(-1)?.postStateHash);
-    expect(replay.finalHash).not.toBe(artifact.failureStateHash);
+    expect(replay.finalHash).toBe(artifact.failureStateHash);
   });
 });

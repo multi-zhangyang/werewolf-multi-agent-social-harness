@@ -3,6 +3,7 @@ import { createGame } from "../src/core/engine";
 import { MATCH_ARTIFACT_VERSION, type MatchArtifact } from "../src/harness/artifacts";
 import { buildSocialGraph } from "../src/App";
 import type { SocialExposureRecord, SocialMessage } from "../src/harness/social";
+import { emptyEvaluationSummary } from "../src/harness/evaluation";
 
 describe("artifact social graph", () => {
   it("derives message exposure edges from scoped observations, not recipient envelopes", () => {
@@ -171,7 +172,6 @@ function createExposureArtifact(options: {
     schedulerMode: "aec" as const,
     pendingAction: { kind: "speech", actorId: observerId },
     observation: {
-      gameId: state.id,
       phase: "day_speech",
       day: 1,
       you: { id: observerId },
@@ -191,7 +191,6 @@ function createExposureArtifact(options: {
       kind: "player",
       agentId: observerId,
       view: {
-        gameId: state.id,
         phase: "day_speech",
         day: 1,
         you: { id: observerId },
@@ -281,7 +280,7 @@ function createExposureArtifact(options: {
       metricCount: 0,
       metrics: [],
       outputs: {},
-      summary: { teamScores: {}, agentScores: {}, profileScores: {}, modelScores: {} }
+      summary: emptyEvaluationSummary()
     },
     metrics: {
       days: 1,

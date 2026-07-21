@@ -575,8 +575,6 @@ function werewolfViewFor(action: AgentPendingAction): PlayerView {
 
 function viewFor(action: AgentPendingAction): PlayerView {
   return {
-    gameId: "policy-arbitration",
-    seed: "policy-arbitration",
     phase: action.phase,
     day: 2,
     you: {

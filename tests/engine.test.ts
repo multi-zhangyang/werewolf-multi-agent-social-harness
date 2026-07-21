@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { applyCommand, createGame, getPendingActions, livingPlayers } from "../src/core/engine";
 import { isAgentPendingAction } from "../src/core/pending";
+import { createPlayerView, serializePublicState } from "../src/core/view";
+import { hashStableState } from "../src/harness/hash";
 import type { GameState, PendingAction, PlayerState, Role } from "../src/core/types";
 
 function advanceSystem(state: GameState): GameState {
@@ -131,5 +133,73 @@ describe("game-core state machine", () => {
     const pending = getPendingActions(state);
     expect(pending).toHaveLength(1);
     expect(isAgentPendingAction(pending[0])).toBe(false);
+  });
+
+  it("derives event timestamps from sequence so same seed and commands yield identical event and state hashes", () => {
+    const firstInitial = createGame({ id: "deterministic-event-clock", seed: "deterministic-event-clock" });
+    const secondInitial = createGame({ id: "deterministic-event-clock", seed: "deterministic-event-clock" });
+    expect(firstInitial.events).toEqual(secondInitial.events);
+    expect(firstInitial.events[0]?.createdAt).toBe(new Date(1000).toISOString());
+
+    const first = applyCommand(firstInitial, { type: "system.advance", actorId: "system" });
+    const second = applyCommand(secondInitial, { type: "system.advance", actorId: "system" });
+    expect(first.events).toEqual(second.events);
+    expect(hashStableState(first)).toBe(hashStableState(second));
+    expect(first.events.at(-1)?.createdAt).toBe(new Date(first.events.length * 1000).toISOString());
+  });
+
+  it("keeps the deterministic seed and hidden death sources out of every live view", () => {
+    const initial = createGame({ id: "opaque-live-game", seed: "hidden-role-seed" });
+    const observer = initial.players.find((player) => player.role === "villager") ?? initial.players[0];
+    const source = initial.players.find((player) => player.role === "witch") ?? initial.players[1];
+    const victim = initial.players.find((player) => player.id !== observer.id && player.id !== source.id) ?? initial.players[2];
+    const state: GameState = {
+      ...initial,
+      phase: "day_speech",
+      day: 1,
+      deaths: [{ day: 1, playerId: victim.id, reason: "poison", sourceId: source.id }],
+      events: [
+        ...initial.events,
+        {
+          id: `${initial.id}:public-death`,
+          seq: initial.events.length + 1,
+          day: 1,
+          phase: "day_speech",
+          type: "player.died",
+          actorId: "system",
+          visibility: "public",
+          payload: { playerId: victim.id, reason: "poison", sourceId: source.id },
+          createdAt: "2026-07-13T00:00:00.000Z"
+        },
+        {
+          id: `${initial.id}:postgame-private`,
+          seq: initial.events.length + 2,
+          day: 1,
+          phase: "day_speech",
+          type: "game.ended",
+          actorId: "system",
+          visibility: "postgame",
+          payload: { secret: "not-live" },
+          createdAt: "2026-07-13T00:00:01.000Z"
+        }
+      ]
+    };
+    const pending: Extract<PendingAction, { kind: "speech" }> = {
+      kind: "speech",
+      phase: "day_speech",
+      actorId: observer.id,
+      legalPressureTargetIds: state.players.filter((player) => player.id !== observer.id).map((player) => player.id)
+    };
+
+    const actorView = createPlayerView(state, observer.id, pending);
+    const publicView = serializePublicState(state);
+
+    expect(actorView).not.toHaveProperty("seed");
+    expect(actorView).not.toHaveProperty("gameId");
+    expect(publicView).not.toHaveProperty("seed");
+    expect(publicView).not.toHaveProperty("id");
+    expect(actorView.deaths[0]).not.toHaveProperty("sourceId");
+    expect(JSON.stringify(actorView.recentEvents)).not.toContain("sourceId");
+    expect(actorView.recentEvents.some((event) => event.id.endsWith("postgame-private"))).toBe(false);
   });
 });

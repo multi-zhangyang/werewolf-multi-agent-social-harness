@@ -18,6 +18,11 @@ test-results/
 
 # Local run artifacts and screenshots
 artifacts/
+# Historical root-level CLI example names. Keep the precise patterns rather
+# than ignoring every JSON/JSONL file, because experiment specs are source.
+/match-artifact.json
+/trajectory.jsonl
+/tournament-artifacts.json
 
 # Logs and process files
 *.log
@@ -32,4 +37,3 @@ pnpm-debug.log*
 Thumbs.db
 .idea/
 .vscode/
-

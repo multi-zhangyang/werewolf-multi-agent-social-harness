@@ -1,11 +1,10 @@
-import { appendHarnessError, appendHarnessTurn, applyCommand, getPendingActions } from "../core/engine";
+import { applyCommand, getPendingActions } from "../core/engine";
 import { isAgentPendingAction, type AgentPendingAction } from "../core/pending";
 import { createPlayerView } from "../core/view";
 import type { GameCommand, GameState, PendingAction, PlayerView } from "../core/types";
-import type { MultiAgentEnvironment } from "./contracts";
-import type { HarnessErrorPayload } from "./types";
+import type { SocialActionValidationResult } from "./social";
 
-export class WerewolfEnvironment implements MultiAgentEnvironment {
+export class WerewolfEnvironment {
   private state: GameState;
 
   constructor(initialState: GameState) {
@@ -38,18 +37,98 @@ export class WerewolfEnvironment implements MultiAgentEnvironment {
     return this.snapshot();
   }
 
+  /**
+   * Pure legality boundary used by the generic social runner. `step` keeps its
+   * defensive assertion as a second line of protection, while this method
+   * lets the harness reject a command before any message draft is committed.
+   */
+  validate(command: GameCommand): SocialActionValidationResult {
+    try {
+      this.assertCommandIsPending(command);
+      return { valid: true };
+    } catch (error) {
+      return {
+        valid: false,
+        code: "illegal-command",
+        message: error instanceof Error ? error.message : String(error),
+        metadata: {
+          phase: this.state.phase,
+          commandType: command.type,
+          actorId: command.actorId
+        }
+      };
+    }
+  }
+
+  /**
+   * True joint-action apply for simultaneous phases (night wolf kill votes and
+   * day votes). All commands are validated against the same pre-batch pending
+   * set, then applied in that pending order without intermediate observation
+   * leakage. Final maybeAutoAdvance still happens through applyCommand on the
+   * last legal member of the joint set.
+   */
+  stepBatch(commandsByAgent: Record<string, GameCommand>): GameState {
+    const pending = this.pendingActions();
+    if (pending.length === 0) {
+      throw new Error("stepBatch requires at least one pending agent action.");
+    }
+
+    const pendingActorIds = pending.map((action) => action.actorId);
+    const commandActorIds = Object.keys(commandsByAgent);
+    const pendingSet = new Set(pendingActorIds);
+    const commandSet = new Set(commandActorIds);
+
+    if (pendingSet.size !== pendingActorIds.length) {
+      throw new Error("stepBatch cannot resolve duplicate pending actor ids.");
+    }
+    if (commandSet.size !== commandActorIds.length) {
+      throw new Error("stepBatch rejects duplicate actor commands.");
+    }
+    if (pendingSet.size !== commandSet.size || pendingActorIds.some((actorId) => !commandSet.has(actorId))) {
+      const missing = pendingActorIds.filter((actorId) => !commandSet.has(actorId));
+      const unexpected = commandActorIds.filter((actorId) => !pendingSet.has(actorId));
+      throw new Error(
+        `stepBatch requires the complete pending agent set. missing=[${missing.join(",")}] unexpected=[${unexpected.join(",")}]`
+      );
+    }
+
+    // Validate every command against the shared pre-batch decision state before
+    // any command mutates environment truth.
+    for (const action of pending) {
+      const command = commandsByAgent[action.actorId];
+      if (!command) {
+        throw new Error(`stepBatch missing command for pending actor ${action.actorId}.`);
+      }
+      if (command.actorId !== action.actorId) {
+        throw new Error(`stepBatch command actor ${command.actorId} does not match map key ${action.actorId}.`);
+      }
+      if (command.type === "system.advance") {
+        throw new Error("stepBatch does not accept system.advance; use step() for system transitions.");
+      }
+      this.assertCommandIsPending(command);
+      assertCommandMatchesAction(command, action);
+    }
+
+    const expectedKind = pending[0]?.kind;
+    if (!pending.every((action) => action.kind === expectedKind)) {
+      throw new Error("stepBatch requires a homogeneous pending action kind for joint resolution.");
+    }
+
+    // Apply against an isolated working state, then publish it only after every
+    // command succeeds. This fulfills the generic SocialParallelEnvironment
+    // contract: a thrown batch leaves observable environment state unchanged.
+    let nextBatchState = cloneGameState(this.state);
+    for (const action of pending) {
+      const command = commandsByAgent[action.actorId];
+      const nextState = applyCommand(nextBatchState, command);
+      nextBatchState = nextState;
+    }
+    this.state = nextBatchState;
+    return this.snapshot();
+  }
+
   done(): boolean {
     return this.state.phase === "game_over" || this.pending().length === 0;
-  }
-
-  recordTurn(payload: unknown): GameState {
-    this.state = appendHarnessTurn(this.state, payload);
-    return this.snapshot();
-  }
-
-  recordError(actorId: string, payload: HarnessErrorPayload): GameState {
-    this.state = appendHarnessError(this.state, actorId, payload);
-    return this.snapshot();
   }
 
   private requirePendingAction(action: AgentPendingAction): AgentPendingAction {

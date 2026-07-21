@@ -14,7 +14,9 @@ import {
   type ProviderFailureKind,
   type ProviderFailureStage,
   type ProviderRetryHistoryEntry,
-  type ProviderStreamCompletionMode
+  type ProviderStreamCompletionMode,
+  isProviderFailureKind as schemaIsProviderFailureKind,
+  looksLikeHtmlGatewayPayload
 } from "./schema";
 import {
   baseUrlFromEndpointUrl,
@@ -323,8 +325,13 @@ function openAISdkModelCallError(error: unknown, stage: ProviderFailureStage, ti
   if (error instanceof APIError) {
     const status = typeof error.status === "number" ? error.status : undefined;
     const providerStage: ProviderFailureStage = status === undefined ? stage : "http_response";
-    return new ModelCallError(`LLM API HTTP ${status ?? "error"}: ${error.message.slice(0, 600)}`, {
-      failureKind: status === undefined ? "unknown" : "http",
+    const htmlGateway = looksLikeHtmlGatewayPayload(error.message) || looksLikeHtmlGatewayPayload(error.error);
+    const failureKind: ProviderFailureKind = status === undefined ? "unknown" : htmlGateway ? "gateway_html" : "http";
+    const message = htmlGateway
+      ? `LLM API HTTP ${status ?? "error"}: gateway returned HTML (likely wrong endpoint path or gateway auth failure).`
+      : `LLM API HTTP ${status ?? "error"}: ${error.message.slice(0, 600)}`;
+    return new ModelCallError(message, {
+      failureKind,
       providerStage,
       status,
       retryable: status === undefined ? true : isRetryableHttpStatus(status),
@@ -464,18 +471,7 @@ function providerStageLabel(stage: ProviderFailureStage): string {
 }
 
 function isProviderFailureKind(value: string | undefined): value is ProviderFailureKind {
-  return (
-    value === "http" ||
-    value === "timeout" ||
-    value === "abort" ||
-    value === "stream_invalid_json" ||
-    value === "stream_empty" ||
-    value === "stream_missing_body" ||
-    value === "non_json" ||
-    value === "empty_content" ||
-    value === "network" ||
-    value === "unknown"
-  );
+  return schemaIsProviderFailureKind(value);
 }
 
 function isProviderFailureStage(value: string | undefined): value is ProviderFailureStage {

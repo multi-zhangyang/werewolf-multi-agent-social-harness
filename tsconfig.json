@@ -22,5 +22,5 @@
     "jsx": "react-jsx",
     "types": ["node", "vite/client", "vitest/globals"]
   },
-  "include": ["src", "tests", "vite.config.ts"]
+  "include": ["src", "tests", "e2e", "vite.config.ts", "playwright.config.ts", "playwright.live.config.ts"]
 }

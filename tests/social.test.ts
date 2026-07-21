@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
+import { replaySocialEpisode } from "../src/harness/replay";
 import {
+  countSocialStepCommits,
+  countSocialStepCommitsByActor,
   deriveSocialExposureRecords,
+  isSocialStepCommitted,
   runSocialEpisode,
+  SocialCommunicationBus,
   validateSocialEpisodeArtifact,
   type SocialAction,
   type SocialActor,
+  type SocialActorStepReceipt,
   type SocialAgentProfile,
   type SocialChannel,
+  type SocialDecisionFailureStage,
   type SocialEnvironment,
   type SocialMessage,
   type SocialParallelEnvironment,
@@ -46,6 +53,68 @@ const tableChannel: SocialChannel = {
   participantIds: ["a", "b", "system"],
   readableBy: "all"
 };
+
+
+describe("isSocialStepCommitted", () => {
+  it("treats committed and legacy no-error steps as committed", () => {
+    expect(isSocialStepCommitted({ commitStatus: "committed" })).toBe(true);
+    expect(isSocialStepCommitted({})).toBe(true);
+    expect(isSocialStepCommitted({ commitStatus: "rejected" })).toBe(false);
+    expect(isSocialStepCommitted({ error: "failed" })).toBe(false);
+  });
+});
+
+describe("countSocialStepCommits", () => {
+  it("counts committed and rejected native steps without inventing progress", () => {
+    expect(
+      countSocialStepCommits([
+        { commitStatus: "committed" },
+        { commitStatus: "rejected", error: "illegal" },
+        {},
+        { error: "failed" }
+      ])
+    ).toEqual({
+      nativeSteps: 4,
+      committedSteps: 2,
+      rejectedSteps: 2
+    });
+  });
+
+  it("returns zeros for an empty step list", () => {
+    expect(countSocialStepCommits([])).toEqual({
+      nativeSteps: 0,
+      committedSteps: 0,
+      rejectedSteps: 0
+    });
+  });
+});
+
+describe("countSocialStepCommitsByActor", () => {
+  it("counts non-system actor steps by commit status", () => {
+    expect(
+      Object.fromEntries(
+        countSocialStepCommitsByActor([
+          { actorId: "system", commitStatus: "committed" },
+          { actorId: "p1", commitStatus: "committed" },
+          { actorId: "p1", commitStatus: "rejected", error: "illegal" },
+          { actorId: "p2", error: "failed" },
+          { actorId: "p2" }
+        ])
+      )
+    ).toEqual({
+      p1: { nativeSteps: 2, committedSteps: 1, rejectedSteps: 1 },
+      p2: { nativeSteps: 2, committedSteps: 1, rejectedSteps: 1 }
+    });
+  });
+
+  it("returns an empty map for only system or empty steps", () => {
+    expect(countSocialStepCommitsByActor([])).toEqual(new Map());
+    expect(
+      countSocialStepCommitsByActor([{ actorId: "system", commitStatus: "committed" }])
+    ).toEqual(new Map());
+  });
+});
+
 
 describe("generic social harness scheduler contract", () => {
   it("runs AEC as a single selected actor per environment transition", async () => {
@@ -350,6 +419,238 @@ describe("generic social harness scheduler contract", () => {
     expect(artifact.steps[0].terminationReason).toBe("parallel terminal test");
   });
 
+  it("records a decision-collection failure as one complete rejected parallel batch", async () => {
+    const environment = new TestParallelEnvironment();
+    const actorA = new TestActor("a");
+    const actorB = new TestActor("b", { decideFailure: "parallel b exploded" });
+
+    const artifact = await runSocialEpisode({
+      id: "social-parallel-decision-failure",
+      environment,
+      actors: [actorA, actorB],
+      schedulerMode: "parallel",
+      maxTransitions: 2,
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(artifact.failureReason).toContain("parallel b exploded");
+    expect(environment.stepCalls).toBe(0);
+    expect(environment.batchCalls).toBe(0);
+    expect(artifact.messages).toEqual([]);
+    expect(artifact.steps).toHaveLength(2);
+    expect(artifact.steps.map((step) => step.actorId)).toEqual(["a", "b"]);
+    expect(artifact.steps.every((step) => step.commitStatus === "rejected")).toBe(true);
+    expect(artifact.steps.every((step) => step.atomic === true)).toBe(true);
+    expect(artifact.steps.every((step) => step.resolutionPolicy === "parallel-stepBatch")).toBe(true);
+    expect(artifact.steps.map((step) => step.batchSize)).toEqual([2, 2]);
+    expect(artifact.steps.map((step) => step.preStateHash)).toEqual([
+      hashState({ tick: 0, done: false, log: [] }),
+      hashState({ tick: 0, done: false, log: [] })
+    ]);
+    expect(artifact.steps.map((step) => step.failure?.stage).sort()).toEqual(["actor_decide", "batch_aborted"]);
+    expect(actorA.receipts).toMatchObject([{ status: "rejected", actorId: "a" }]);
+    expect(actorB.receipts).toMatchObject([{ status: "rejected", actorId: "b" }]);
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+
+    const replayEnvironment = new TestParallelEnvironment();
+    const replay = replaySocialEpisode({
+      episode: artifact,
+      environment: replayEnvironment,
+      hashState,
+      eventSeq,
+      stopOnMismatch: false
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.replayedSteps).toBe(0);
+    expect(replay.rejectedSteps).toBe(2);
+    expect(replayEnvironment.stepCalls).toBe(0);
+    expect(replayEnvironment.batchCalls).toBe(0);
+
+    const tampered = clone(artifact);
+    tampered.steps[0].atomic = false;
+    expect(validateSocialEpisodeArtifact(tampered).join("\n")).toMatch(/parallel step must be atomic/);
+  });
+
+  it("rejects duplicate pending actor ids before concurrent decision collection", async () => {
+    const actorA = new TestActor("a");
+    const batchedEnvironment = new TestEnvironment({
+      pending: [
+        { actorId: "a", kind: "act" },
+        { actorId: "a", kind: "act" }
+      ]
+    });
+    const batched = await runSocialEpisode({
+      id: "social-batched-duplicate-pending-actor",
+      environment: batchedEnvironment,
+      actors: [actorA, new TestActor("b")],
+      schedulerMode: "aec-batched-decision",
+      hashState,
+      eventSeq
+    });
+
+    expect(batched.status).toBe("failed");
+    expect(batched.failureReason).toContain("multiple pending actions for actor a");
+    expect(actorA.observations).toEqual([]);
+    expect(actorA.decisions).toEqual([]);
+    expect(batchedEnvironment.stepCalls).toBe(0);
+    expect(batched.steps).toMatchObject([
+      {
+        actorId: "system",
+        schedulerMode: "aec-batched-decision",
+        resolutionPolicy: "scheduler-validation",
+        commitStatus: "rejected",
+        failure: { stage: "scheduler_validation" }
+      }
+    ]);
+    expect(validateSocialEpisodeArtifact(batched)).toEqual([]);
+
+    const parallelActor = new TestActor("a");
+    const parallelEnvironment = new DuplicatePendingParallelEnvironment();
+    const parallel = await runSocialEpisode({
+      id: "social-parallel-duplicate-pending-actor",
+      environment: parallelEnvironment,
+      actors: [parallelActor, new TestActor("b")],
+      schedulerMode: "parallel",
+      hashState,
+      eventSeq
+    });
+
+    expect(parallel.status).toBe("failed");
+    expect(parallelActor.observations).toEqual([]);
+    expect(parallelActor.decisions).toEqual([]);
+    expect(parallelEnvironment.stepCalls).toBe(0);
+    expect(parallelEnvironment.batchCalls).toBe(0);
+    expect(parallel.steps).toMatchObject([
+      {
+        actorId: "system",
+        schedulerMode: "parallel",
+        atomic: false,
+        resolutionPolicy: "scheduler-validation",
+        commitStatus: "rejected"
+      }
+    ]);
+    expect(validateSocialEpisodeArtifact(parallel)).toEqual([]);
+
+    const replay = replaySocialEpisode({
+      episode: parallel,
+      environment: new DuplicatePendingParallelEnvironment(),
+      hashState,
+      eventSeq
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.replayedSteps).toBe(0);
+    expect(replay.rejectedSteps).toBe(1);
+  });
+
+  it("records every aec-batched proposal when decision collection fails", async () => {
+    const environment = new TestEnvironment();
+    const actorA = new TestActor("a");
+    const actorB = new TestActor("b", { decideFailure: "batched b exploded" });
+
+    const artifact = await runSocialEpisode({
+      id: "social-batched-decision-failure",
+      environment,
+      actors: [actorA, actorB],
+      schedulerMode: "aec-batched-decision",
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(environment.stepCalls).toBe(0);
+    expect(artifact.steps).toHaveLength(2);
+    expect(artifact.steps.map((step) => step.actorId)).toEqual(["a", "b"]);
+    expect(artifact.steps.every((step) => step.commitStatus === "rejected")).toBe(true);
+    expect(artifact.steps.map((step) => step.failure?.stage)).toEqual(["batch_aborted", "actor_decide"]);
+    expect(actorA.receipts[0]).toMatchObject({ status: "rejected", failure: { stage: "batch_aborted" } });
+    expect(actorB.receipts[0]).toMatchObject({ status: "rejected", failure: { stage: "actor_decide" } });
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+
+    const replay = replaySocialEpisode({
+      episode: artifact,
+      environment: new TestEnvironment(),
+      hashState,
+      eventSeq
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.replayedSteps).toBe(0);
+    expect(replay.rejectedSteps).toBe(2);
+  });
+
+  it("records abandoned aec-batched proposals after an earlier transition terminates the episode", async () => {
+    const environment = new TestEnvironment();
+    const actorA = new TestActor("a", { terminate: true });
+    const actorB = new TestActor("b");
+
+    const artifact = await runSocialEpisode({
+      id: "social-batched-termination-aborts-peer",
+      environment,
+      actors: [actorA, actorB],
+      schedulerMode: "aec-batched-decision",
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("completed");
+    expect(environment.stepCalls).toBe(1);
+    expect(artifact.steps).toHaveLength(2);
+    expect(artifact.steps.map((step) => step.commitStatus)).toEqual(["committed", "rejected"]);
+    expect(artifact.steps[1]).toMatchObject({
+      actorId: "b",
+      preStateHash: hashState({ tick: 1, done: true, log: ["a"] }),
+      postStateHash: hashState({ tick: 1, done: true, log: ["a"] }),
+      failure: { stage: "batch_aborted" }
+    });
+    expect(actorB.receipts[0]).toMatchObject({ status: "rejected", failure: { stage: "batch_aborted" } });
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+
+    const replay = replaySocialEpisode({
+      episode: artifact,
+      environment: new TestEnvironment(),
+      hashState,
+      eventSeq
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.replayedSteps).toBe(1);
+    expect(replay.rejectedSteps).toBe(1);
+  });
+
+  it("isolates actor receipts from runner-owned action artifacts", async () => {
+    const environment = new RecordingEnvironment({
+      pending: [{ actorId: "a", kind: "act" }],
+      doneAfterSteps: 1
+    });
+    const actor = new ReceiptMutatingActor("a");
+
+    const artifact = await runSocialEpisode({
+      id: "social-receipt-isolation",
+      environment,
+      actors: [actor],
+      schedulerMode: "aec",
+      hashState,
+      eventSeq
+    });
+
+    expect(environment.commands).toEqual([{ actorId: "a", value: "a:act" }]);
+    expect(artifact.steps[0]?.action.command).toEqual({ actorId: "a", value: "a:act" });
+    expect(artifact.steps[0]?.action.metadata).toBeUndefined();
+    expect(actor.receipts[0]?.action?.command).toMatchObject({ value: "receipt-mutated" });
+
+    const replay = replaySocialEpisode({
+      episode: artifact,
+      environment: new RecordingEnvironment({
+        pending: [{ actorId: "a", kind: "act" }],
+        doneAfterSteps: 1
+      }),
+      hashState,
+      eventSeq
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.replayedSteps).toBe(1);
+  });
+
   it("runs system transitions when no agent action is pending", async () => {
     const environment = new SystemThenAgentEnvironment();
     const actorA = new TestActor("a");
@@ -425,6 +726,27 @@ describe("generic social harness feedback and failure contract", () => {
           recipientIds: ["b", "c"],
           visibility: "public",
           content: "public claim from a",
+          speechActs: [
+            {
+              id: "",
+              kind: "role_claim",
+              subjectId: "a",
+              value: "seer",
+              confidence: 1,
+              evidenceRefs: [],
+              metadata: { source: "metadata.claimedRole", messageKind: "public-speech" }
+            },
+            {
+              id: "",
+              kind: "accusation",
+              subjectId: "a",
+              targetId: "c",
+              value: "pressure_target",
+              confidence: 0.8,
+              evidenceRefs: [],
+              metadata: { source: "metadata.pressureTargetId", messageKind: "public-speech" }
+            }
+          ],
           metadata: { kind: "public-speech", claimedRole: "seer", pressureTargetId: "c" }
         },
         {
@@ -524,6 +846,60 @@ describe("generic social harness feedback and failure contract", () => {
     expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
   });
 
+  it("does not infer domain speech acts from opaque message metadata", () => {
+    const bus = new SocialCommunicationBus([tableChannel]);
+
+    const message = bus.publish({
+      channelId: "table",
+      senderId: "a",
+      recipientIds: ["b"],
+      visibility: "public",
+      content: "opaque domain action",
+      metadata: {
+        kind: "unrelated-domain-action",
+        targetId: "b",
+        claimedRole: "specialist"
+      }
+    });
+
+    expect(message.speechActs).toBeUndefined();
+  });
+
+  it("normalizes generic structured social facts without recognizing a domain command", () => {
+    const bus = new SocialCommunicationBus([tableChannel]);
+
+    const message = bus.publish({
+      channelId: "table",
+      senderId: "a",
+      recipientIds: ["b"],
+      visibility: "public",
+      content: "a makes a generic commitment",
+      metadata: {
+        socialFacts: [
+          {
+            id: "generic-commitment",
+            kind: "commitment",
+            actorId: "a",
+            targetId: "b",
+            stance: "support"
+          }
+        ]
+      }
+    });
+
+    expect(message.speechActs).toEqual([
+      expect.objectContaining({
+        id: "msg-1:speech-act:1",
+        kind: "commitment",
+        subjectId: "a",
+        targetId: "b",
+        value: "support",
+        metadata: { source: "metadata.socialFacts", factKind: "commitment", factId: "generic-commitment" },
+        evidenceRefs: [expect.objectContaining({ artifact: "message", id: "msg-1", seq: 1 })]
+      })
+    ]);
+  });
+
   it("restores an initial message prefix and continues message sequence numbers", async () => {
     const direct: SocialChannel = {
       id: "direct-a-b",
@@ -621,33 +997,31 @@ describe("generic social harness feedback and failure contract", () => {
     });
   });
 
-  it("runs beforeEnvironmentStep after message validation and includes hook events in event ranges", async () => {
+  it("delivers actor feedback only after the environment commits", async () => {
     const environment = new TestEnvironment({ doneAfterSteps: 1 });
-    const calls: string[] = [];
+    const actor = new TestActor("a");
 
     const artifact = await runSocialEpisode({
       id: "social-before-step-hook",
       environment,
-      actors: [new TestActor("a")],
+      actors: [actor],
       channels: [tableChannel],
       schedulerMode: "aec",
       maxTransitions: 1,
       hashState,
-      eventSeq,
-      beforeEnvironmentStep(context) {
-        calls.push(`${context.actorId}:${context.action.kind}:${context.preState.log.length}`);
-        environment.recordTrace(context.actorId);
-      }
+      eventSeq
     });
 
     expect(artifact.status).toBe("completed");
-    expect(calls).toEqual(["a:act:0"]);
-    expect(environment.snapshot().log).toEqual(["trace:a", "a"]);
+    expect(actor.receipts).toHaveLength(1);
+    expect(actor.receipts[0]).toMatchObject({ status: "committed", actorId: "a", postStateHash: hashState(environment.snapshot()) });
+    expect(environment.snapshot().log).toEqual(["a"]);
     expect(artifact.steps[0]).toMatchObject({
       actorId: "a",
+      commitStatus: "committed",
       preStateHash: hashState({ tick: 0, done: false, log: [] }),
-      postStateHash: hashState({ tick: 1, done: true, log: ["trace:a", "a"] }),
-      eventSeqRange: [1, 2]
+      postStateHash: hashState({ tick: 1, done: true, log: ["a"] }),
+      eventSeqRange: [1, 1]
     });
   });
 
@@ -699,6 +1073,7 @@ describe("generic social harness feedback and failure contract", () => {
       decisionState: TestState;
       decisionStateHash?: string;
       preStateHash?: string;
+      failureStage: SocialDecisionFailureStage;
       error: string;
     }> = [];
 
@@ -727,6 +1102,7 @@ describe("generic social harness feedback and failure contract", () => {
           decisionState: context.decisionState,
           decisionStateHash: context.decisionStateHash,
           preStateHash: context.preStateHash,
+          failureStage: context.failureStage,
           error: context.error instanceof Error ? context.error.message : String(context.error)
         });
         environment.recordTrace(`failure:${context.traceId ?? "missing-trace"}`);
@@ -746,6 +1122,7 @@ describe("generic social harness feedback and failure contract", () => {
         decisionState: { tick: 0, done: false, log: [] },
         decisionStateHash: hashState({ tick: 0, done: false, log: [] }),
         preStateHash: hashState({ tick: 0, done: false, log: [] }),
+        failureStage: "actor_decide",
         error: "decide exploded"
       }
     ]);
@@ -754,6 +1131,7 @@ describe("generic social harness feedback and failure contract", () => {
       traceId: "social-decision-failure-hook:trace:7:a:act:0",
       actorId: "a",
       error: "decide exploded",
+      failure: { stage: "actor_decide", message: "decide exploded" },
       observation: { agentId: "a", tick: 0, pendingKind: "act" },
       preStateHash: hashState({ tick: 0, done: false, log: [] })
     });
@@ -780,6 +1158,7 @@ describe("generic social harness feedback and failure contract", () => {
       traceId?: string;
       actorTurnIndex?: number;
       observation?: TestObservation;
+      failureStage: SocialDecisionFailureStage;
       error: string;
     }> = [];
 
@@ -802,6 +1181,7 @@ describe("generic social harness feedback and failure contract", () => {
           traceId: context.traceId,
           actorTurnIndex: context.actorTurnIndex,
           observation: context.observation,
+          failureStage: context.failureStage,
           error: context.error instanceof Error ? context.error.message : String(context.error)
         });
         environment.recordTrace(`observe-failure:${context.traceId ?? "missing-trace"}`);
@@ -816,6 +1196,7 @@ describe("generic social harness feedback and failure contract", () => {
         traceId: "social-observe-failure-hook:trace:11:a:act:0",
         actorTurnIndex: 11,
         observation: undefined,
+        failureStage: "environment_observe",
         error: "observe exploded"
       }
     ]);
@@ -905,8 +1286,19 @@ describe("generic social harness feedback and failure contract", () => {
     ]);
     expect(environment.stepCalls).toBe(0);
     expect(artifact.messages).toEqual([]);
-    expect(artifact.steps).toHaveLength(1);
+    expect(artifact.steps).toHaveLength(2);
     expect(artifact.steps[0]).toMatchObject({
+      actorId: "a",
+      schedulerMode: "aec-batched-decision",
+      resolutionPolicy: "sequential-apply-from-shared-decision-state",
+      batchIndex: 1,
+      batchSize: 2,
+      commitStatus: "rejected",
+      failure: { stage: "batch_aborted" },
+      preStateHash: hashState({ tick: 0, done: false, log: [] }),
+      postStateHash: hashState({ tick: 0, done: false, log: [] })
+    });
+    expect(artifact.steps[1]).toMatchObject({
       traceId: "social-batched-decision-failure-hook:trace:22:b:2:act",
       turnIndex: 2,
       actorId: "b",
@@ -930,6 +1322,7 @@ describe("generic social harness feedback and failure contract", () => {
       traceId?: string;
       actorTurnIndex?: number;
       observation?: TestObservation;
+      failureStage: SocialDecisionFailureStage;
       error: string;
     }> = [];
 
@@ -954,6 +1347,7 @@ describe("generic social harness feedback and failure contract", () => {
           traceId: context.traceId,
           actorTurnIndex: context.actorTurnIndex,
           observation: context.observation,
+          failureStage: context.failureStage,
           error: context.error instanceof Error ? context.error.message : String(context.error)
         });
       }
@@ -970,6 +1364,7 @@ describe("generic social harness feedback and failure contract", () => {
         traceId: "social-assemble-failure-hook:trace:13:a:act:0",
         actorTurnIndex: 13,
         observation: undefined,
+        failureStage: "observation_assembly",
         error: "assemble exploded"
       }
     ]);
@@ -977,6 +1372,7 @@ describe("generic social harness feedback and failure contract", () => {
       traceId: "social-assemble-failure-hook:trace:13:a:act:0",
       actorId: "a",
       error: "assemble exploded",
+      failure: { stage: "observation_assembly", message: "assemble exploded" },
       decisionStateHash: hashState({ tick: 0, done: false, log: [] }),
       preStateHash: hashState({ tick: 0, done: false, log: [] }),
       postStateHash: hashState({ tick: 0, done: false, log: [] })
@@ -1131,9 +1527,6 @@ describe("generic social harness feedback and failure contract", () => {
       schedulerMode: "aec",
       hashState,
       eventSeq,
-      beforeEnvironmentStep(context) {
-        environment.recordTrace(`before:${context.actorId}`);
-      },
       onEnvironmentStepFailure(context) {
         hookCalls.push({
           actorId: context.actorId,
@@ -1142,7 +1535,7 @@ describe("generic social harness feedback and failure contract", () => {
           failureState: context.failureState,
           error: context.error instanceof Error ? context.error.message : String(context.error)
         });
-        environment.recordTrace(`step-failure:${context.actorId}`);
+        return { stage: "environment_step", message: String(context.error instanceof Error ? context.error.message : context.error) };
       }
     });
 
@@ -1153,7 +1546,7 @@ describe("generic social harness feedback and failure contract", () => {
         actorId: "a",
         profileId: "a",
         turnIndex: 1,
-        failureState: { tick: 0, done: false, log: ["trace:before:a"] },
+        failureState: { tick: 0, done: false, log: [] },
         error: "step exploded"
       }
     ]);
@@ -1162,15 +1555,17 @@ describe("generic social harness feedback and failure contract", () => {
     expect(artifact.finalState).toEqual({
       tick: 0,
       done: false,
-      log: ["trace:before:a", "trace:step-failure:a"]
+      log: []
     });
     expect(artifact.steps[0]).toMatchObject({
       actorId: "a",
+      commitStatus: "rejected",
       error: "step exploded",
       preStateHash: hashState({ tick: 0, done: false, log: [] }),
-      postStateHash: hashState({ tick: 0, done: false, log: ["trace:before:a", "trace:step-failure:a"] }),
-      eventSeqRange: [1, 2]
+      postStateHash: hashState({ tick: 0, done: false, log: [] }),
+      failure: { stage: "environment_step", message: "step exploded" }
     });
+    expect(artifact.steps[0].eventSeqRange).toBeUndefined();
     expect(artifact.steps[0].messageSeqRange).toBeUndefined();
   });
 
@@ -1208,6 +1603,167 @@ describe("generic social harness feedback and failure contract", () => {
       error: expect.stringContaining("Unknown social channel missing-channel")
     });
     expect(artifact.steps[0].messageSeqRange).toBeUndefined();
+  });
+
+  it("rejects action and message drafts that impersonate a different scheduled actor", async () => {
+    const impersonatingActionEnvironment = new TestEnvironment({ doneAfterSteps: 1 });
+    const impersonatingAction = await runSocialEpisode({
+      id: "social-action-ownership",
+      environment: impersonatingActionEnvironment,
+      actors: [new TestActor("a", { actionActorId: "b" }), new TestActor("b")],
+      channels: [tableChannel],
+      schedulerMode: "aec",
+      hashState
+    });
+
+    expect(impersonatingAction.status).toBe("failed");
+    expect(impersonatingActionEnvironment.stepCalls).toBe(0);
+    expect(impersonatingAction.messages).toEqual([]);
+    expect(impersonatingAction.steps[0]).toMatchObject({
+      actorId: "a",
+      commitStatus: "rejected",
+      failure: { stage: "action_ownership" }
+    });
+
+    const impersonatingMessageEnvironment = new TestEnvironment({ doneAfterSteps: 1 });
+    const actor = new TestActor("a", {
+      messages: [
+        {
+          channelId: "table",
+          senderId: "b",
+          recipientIds: ["a"],
+          visibility: "public",
+          content: "a must not be able to publish as b"
+        }
+      ]
+    });
+    const impersonatingMessage = await runSocialEpisode({
+      id: "social-message-ownership",
+      environment: impersonatingMessageEnvironment,
+      actors: [actor, new TestActor("b")],
+      channels: [tableChannel],
+      schedulerMode: "aec",
+      hashState
+    });
+
+    expect(impersonatingMessage.status).toBe("failed");
+    expect(impersonatingMessageEnvironment.stepCalls).toBe(0);
+    expect(impersonatingMessage.messages).toEqual([]);
+    expect(actor.receipts).toMatchObject([{ status: "rejected", actorId: "a" }]);
+    expect(impersonatingMessage.steps[0]).toMatchObject({
+      actorId: "a",
+      commitStatus: "rejected",
+      failure: { stage: "action_ownership" }
+    });
+  });
+
+  it("records a non-atomic environment failure instead of treating it as replayable rejection", async () => {
+    const environment = new NonAtomicFailureEnvironment();
+    const actor = new TestActor("a", {
+      messages: [
+        {
+          channelId: "table",
+          senderId: "a",
+          recipientIds: ["b"],
+          visibility: "public",
+          content: "this draft must remain uncommitted"
+        }
+      ]
+    });
+    const artifact = await runSocialEpisode({
+      id: "social-non-atomic-environment",
+      environment,
+      actors: [actor, new TestActor("b")],
+      channels: [tableChannel],
+      schedulerMode: "aec",
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(environment.snapshot()).toEqual({ tick: 1, done: false, log: ["a"] });
+    expect(artifact.messages).toEqual([]);
+    expect(actor.receipts).toMatchObject([{ status: "rejected", actorId: "a" }]);
+    expect(artifact.steps[0]).toMatchObject({
+      commitStatus: "rejected",
+      preStateHash: hashState({ tick: 0, done: false, log: [] }),
+      postStateHash: hashState({ tick: 1, done: false, log: ["a"] }),
+      eventSeqRange: [1, 1],
+      failure: { stage: "environment_non_atomic_failure" }
+    });
+    expect(validateSocialEpisodeArtifact(artifact).join("\n")).toMatch(/environment_non_atomic_failure/);
+
+    const replay = replaySocialEpisode({
+      episode: artifact,
+      environment: new NonAtomicFailureEnvironment(),
+      hashState,
+      eventSeq,
+      stopOnMismatch: false
+    });
+    expect(replay.ok).toBe(false);
+    expect(replay.mismatches.join("\n")).toMatch(/non-atomic failure|rejected step changed domain state|rejected step changed event range/);
+  });
+
+  it("treats a state-mutating validateAction preflight as a non-replayable environment failure", async () => {
+    const environment = new PreflightMutationEnvironment();
+    const actor = new TestActor("a");
+    const artifact = await runSocialEpisode({
+      id: "social-mutating-preflight",
+      environment,
+      actors: [actor, new TestActor("b")],
+      schedulerMode: "aec",
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(environment.stepCalls).toBe(0);
+    expect(environment.snapshot()).toEqual({ tick: 1, done: false, log: ["preflight:a"] });
+    expect(artifact.steps[0]).toMatchObject({
+      commitStatus: "rejected",
+      preStateHash: hashState({ tick: 0, done: false, log: [] }),
+      postStateHash: hashState({ tick: 1, done: false, log: ["preflight:a"] }),
+      failure: {
+        stage: "environment_non_atomic_failure",
+        message: expect.stringContaining("validateAction() mutated domain state")
+      }
+    });
+    expect(actor.receipts).toMatchObject([{ status: "rejected", actorId: "a" }]);
+    expect(validateSocialEpisodeArtifact(artifact).join("\n")).toMatch(/environment_non_atomic_failure/);
+
+    const replay = replaySocialEpisode({
+      episode: artifact,
+      environment: new PreflightMutationEnvironment(),
+      hashState,
+      eventSeq,
+      stopOnMismatch: false
+    });
+    expect(replay.ok).toBe(false);
+    expect(replay.mismatches.join("\n")).toMatch(/non-atomic failure|rejected step changed domain state/);
+  });
+
+  it("keeps a committed transition committed when a post-step observer fails", async () => {
+    const environment = new TestEnvironment({ doneAfterSteps: 1 });
+    const actor = new TestActor("a");
+    const artifact = await runSocialEpisode({
+      id: "social-post-commit-hook-failure",
+      environment,
+      actors: [actor, new TestActor("b")],
+      schedulerMode: "aec",
+      hashState,
+      afterEnvironmentStep() {
+        throw new Error("snapshot sink exploded");
+      }
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(environment.stepCalls).toBe(1);
+    expect(environment.snapshot()).toEqual({ tick: 1, done: true, log: ["a"] });
+    expect(actor.receipts).toMatchObject([{ status: "committed", actorId: "a" }]);
+    expect(artifact.steps[0]).toMatchObject({
+      commitStatus: "committed",
+      failure: { stage: "after_environment_step", message: "snapshot sink exploded" }
+    });
   });
 
   it("returns failed artifact for system transition failure without committing messages", async () => {
@@ -1266,6 +1822,7 @@ class TestActor implements SocialActor<TestObservation, TestPending, TestCommand
   readonly profile: SocialAgentProfile;
   readonly observations: TestObservation[] = [];
   readonly decisions: TestPending[] = [];
+  readonly receipts: Array<SocialActorStepReceipt<TestObservation, TestPending, TestCommand>> = [];
 
   constructor(
     readonly id: string,
@@ -1274,6 +1831,7 @@ class TestActor implements SocialActor<TestObservation, TestPending, TestCommand
       observeFailure?: string;
       messages?: SocialAction<TestCommand>["messages"];
       terminate?: boolean;
+      actionActorId?: string;
     } = {}
   ) {
     this.profile = { id, model: `${id}-model` };
@@ -1287,16 +1845,30 @@ class TestActor implements SocialActor<TestObservation, TestPending, TestCommand
   decide(pending: TestPending): SocialAction<TestCommand> {
     this.decisions.push(pending);
     if (this.options.decideFailure) throw new Error(this.options.decideFailure);
+    const actionActorId = this.options.actionActorId ?? this.id;
     return {
-      actorId: this.id,
+      actorId: actionActorId,
       kind: pending.kind,
       command: {
-        actorId: this.id,
-        value: `${this.id}:${pending.kind}`,
+        actorId: actionActorId,
+        value: `${actionActorId}:${pending.kind}`,
         terminate: this.options.terminate
       },
       messages: this.options.messages
     };
+  }
+
+  onStepResult(receipt: SocialActorStepReceipt<TestObservation, TestPending, TestCommand>): void {
+    this.receipts.push(receipt);
+  }
+}
+
+class ReceiptMutatingActor extends TestActor {
+  override onStepResult(receipt: SocialActorStepReceipt<TestObservation, TestPending, TestCommand>): void {
+    super.onStepResult(receipt);
+    if (!receipt.action) return;
+    receipt.action.command.value = "receipt-mutated";
+    receipt.action.metadata = { receiptMutated: true };
   }
 }
 
@@ -1382,6 +1954,23 @@ class RecordingEnvironment extends TestEnvironment {
   }
 }
 
+class NonAtomicFailureEnvironment extends TestEnvironment {
+  override step(command: TestCommand): TestState {
+    this.stepCalls += 1;
+    this.state.tick += 1;
+    this.state.log.push(command.actorId);
+    throw new Error("mutated before throwing");
+  }
+}
+
+class PreflightMutationEnvironment extends TestEnvironment {
+  validateAction(command: TestCommand) {
+    this.state.tick += 1;
+    this.state.log.push(`preflight:${command.actorId}`);
+    return { valid: false, code: "preflight-mutated", message: "preflight mutated state" };
+  }
+}
+
 class TestParallelEnvironment extends TestEnvironment implements SocialParallelEnvironment<TestState, TestObservation, TestPending, TestCommand> {
   batchCalls = 0;
 
@@ -1411,6 +2000,16 @@ class TestParallelEnvironment extends TestEnvironment implements SocialParallelE
       episodeTruncated: false,
       terminationReason: "parallel terminal test"
     };
+  }
+}
+
+class DuplicatePendingParallelEnvironment extends TestParallelEnvironment {
+  override pendingActions(): TestPending[] {
+    if (this.state.done) return [];
+    return [
+      { actorId: "a", kind: "act" },
+      { actorId: "a", kind: "act" }
+    ];
   }
 }
 

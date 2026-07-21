@@ -1,7 +1,6 @@
 import { metric, type HarnessEvaluator, type HarnessEvaluationContext } from "./evaluation";
 import { deriveSocialExposureRecords, type SocialEpisodeArtifact, type SocialExposureRecord, type SocialMessage, type SocialSpeechAct } from "./social";
 import type {
-  AgentHarnessState,
   HarnessEvaluatorManifestConfig,
   HarnessEvaluationModuleResult,
   HarnessMetricEvidenceRef,
@@ -9,6 +8,7 @@ import type {
 } from "./types";
 import type {
   BetrayalRecord,
+  AgentSocialState,
   CoalitionRecord,
   CommitmentRecord,
   EvidenceRef,
@@ -21,6 +21,42 @@ import type {
   SocialStateMutationJournalEntry,
   TrustRepairRecord
 } from "./socialState";
+
+/**
+ * Minimal durable actor projection required by the generic social evaluators.
+ * New domain adapters should provide `id`; legacy artifacts can derive their
+ * identity from `social.agentId` until their snapshot schema is migrated.
+ */
+export interface SocialAgentSnapshot {
+  id?: string;
+  profileId?: string;
+  model?: string;
+  policyId?: string;
+  social?: AgentSocialState;
+  socialStateHash?: string;
+}
+
+interface LegacySocialAgentProjection {
+  playerId?: string;
+  policyName?: string;
+}
+
+type SocialEvaluationContext<TState = unknown, TMetrics = unknown, TSocialEpisode = unknown> = HarnessEvaluationContext<
+  TState,
+  TMetrics,
+  TSocialEpisode,
+  SocialAgentSnapshot,
+  unknown
+>;
+
+type SocialEvaluator<TState = unknown, TMetrics = unknown, TSocialEpisode = unknown, TOutput = unknown> = HarnessEvaluator<
+  TState,
+  TMetrics,
+  TSocialEpisode,
+  TOutput,
+  SocialAgentSnapshot,
+  unknown
+>;
 
 export const SOCIAL_STATE_EVALUATOR_ID = "social.state.v1";
 export const SOCIAL_STATE_METRIC_IDS = [
@@ -471,7 +507,7 @@ export interface BetrayalLifecycleTemporalAssociationEvaluation {
   betrayalNoLaterLifecycleEvidenceRecords: number;
 }
 
-export function createSocialStateEvaluator<TState = unknown, TMetrics = unknown, TSocialEpisode = unknown>(): HarnessEvaluator<
+export function createSocialStateEvaluator<TState = unknown, TMetrics = unknown, TSocialEpisode = unknown>(): SocialEvaluator<
   TState,
   TMetrics,
   TSocialEpisode,
@@ -482,7 +518,7 @@ export function createSocialStateEvaluator<TState = unknown, TMetrics = unknown,
     label: "Social state evaluator",
     version: "1.0.0",
     manifest: SOCIAL_STATE_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>): HarnessEvaluationModuleResult<SocialStateEvaluation> {
+    evaluate(context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>): HarnessEvaluationModuleResult<SocialStateEvaluation> {
       const metrics = metricsFromSocialState(context.agents);
       return {
         evaluatorId: SOCIAL_STATE_EVALUATOR_ID,
@@ -499,13 +535,13 @@ export function createCommitmentCoalitionAssociationEvaluator<
   TState = unknown,
   TMetrics = unknown,
   TSocialEpisode = unknown
->(): HarnessEvaluator<TState, TMetrics, TSocialEpisode, CommitmentCoalitionAssociationEvaluation> {
+>(): SocialEvaluator<TState, TMetrics, TSocialEpisode, CommitmentCoalitionAssociationEvaluation> {
   return {
     id: COMMITMENT_COALITION_ASSOCIATION_EVALUATOR_ID,
     label: "Commitment-coalition association evaluator",
     version: "1.0.0",
     manifest: COMMITMENT_COALITION_ASSOCIATION_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>): HarnessEvaluationModuleResult<CommitmentCoalitionAssociationEvaluation> {
+    evaluate(context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>): HarnessEvaluationModuleResult<CommitmentCoalitionAssociationEvaluation> {
       return {
         evaluatorId: COMMITMENT_COALITION_ASSOCIATION_EVALUATOR_ID,
         label: "Commitment-coalition association evaluator",
@@ -521,14 +557,14 @@ export function createCommitmentCoalitionLifecycleTemporalAssociationEvaluator<
   TState = unknown,
   TMetrics = unknown,
   TSocialEpisode = unknown
->(): HarnessEvaluator<TState, TMetrics, TSocialEpisode, CommitmentCoalitionLifecycleTemporalAssociationEvaluation> {
+>(): SocialEvaluator<TState, TMetrics, TSocialEpisode, CommitmentCoalitionLifecycleTemporalAssociationEvaluation> {
   return {
     id: COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
     label: "Commitment-coalition lifecycle temporal association evaluator",
     version: "1.0.0",
     manifest: COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_MANIFEST,
     evaluate(
-      context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>
+      context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>
     ): HarnessEvaluationModuleResult<CommitmentCoalitionLifecycleTemporalAssociationEvaluation> {
       return {
         evaluatorId: COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
@@ -545,14 +581,14 @@ export function createNormSanctionLifecycleTemporalAssociationEvaluator<
   TState = unknown,
   TMetrics = unknown,
   TSocialEpisode = unknown
->(): HarnessEvaluator<TState, TMetrics, TSocialEpisode, NormSanctionLifecycleTemporalAssociationEvaluation> {
+>(): SocialEvaluator<TState, TMetrics, TSocialEpisode, NormSanctionLifecycleTemporalAssociationEvaluation> {
   return {
     id: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
     label: "Norm-sanction lifecycle temporal association evaluator",
     version: "1.0.0",
     manifest: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_MANIFEST,
     evaluate(
-      context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>
+      context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>
     ): HarnessEvaluationModuleResult<NormSanctionLifecycleTemporalAssociationEvaluation> {
       return {
         evaluatorId: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
@@ -569,14 +605,14 @@ export function createGossipExposureTemporalAssociationEvaluator<
   TState = unknown,
   TMetrics = unknown,
   TSocialEpisode = unknown
->(): HarnessEvaluator<TState, TMetrics, TSocialEpisode, GossipExposureTemporalAssociationEvaluation> {
+>(): SocialEvaluator<TState, TMetrics, TSocialEpisode, GossipExposureTemporalAssociationEvaluation> {
   return {
     id: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
     label: "Gossip-exposure temporal association evaluator",
     version: "1.0.0",
     manifest: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_MANIFEST,
     evaluate(
-      context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>
+      context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>
     ): HarnessEvaluationModuleResult<GossipExposureTemporalAssociationEvaluation> {
       return {
         evaluatorId: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
@@ -593,14 +629,14 @@ export function createTrustRepairLifecycleTemporalAssociationEvaluator<
   TState = unknown,
   TMetrics = unknown,
   TSocialEpisode = unknown
->(): HarnessEvaluator<TState, TMetrics, TSocialEpisode, TrustRepairLifecycleTemporalAssociationEvaluation> {
+>(): SocialEvaluator<TState, TMetrics, TSocialEpisode, TrustRepairLifecycleTemporalAssociationEvaluation> {
   return {
     id: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
     label: "Trust-repair lifecycle temporal association evaluator",
     version: "1.0.0",
     manifest: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_MANIFEST,
     evaluate(
-      context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>
+      context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>
     ): HarnessEvaluationModuleResult<TrustRepairLifecycleTemporalAssociationEvaluation> {
       return {
         evaluatorId: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
@@ -617,14 +653,14 @@ export function createTrustRepairRelationshipTemporalAssociationEvaluator<
   TState = unknown,
   TMetrics = unknown,
   TSocialEpisode = unknown
->(): HarnessEvaluator<TState, TMetrics, TSocialEpisode, TrustRepairRelationshipTemporalAssociationEvaluation> {
+>(): SocialEvaluator<TState, TMetrics, TSocialEpisode, TrustRepairRelationshipTemporalAssociationEvaluation> {
   return {
     id: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
     label: "Trust-repair relationship temporal association evaluator",
     version: "1.0.0",
     manifest: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_MANIFEST,
     evaluate(
-      context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>
+      context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>
     ): HarnessEvaluationModuleResult<TrustRepairRelationshipTemporalAssociationEvaluation> {
       return {
         evaluatorId: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
@@ -641,14 +677,14 @@ export function createTrustRepairReputationTemporalAssociationEvaluator<
   TState = unknown,
   TMetrics = unknown,
   TSocialEpisode = unknown
->(): HarnessEvaluator<TState, TMetrics, TSocialEpisode, TrustRepairReputationTemporalAssociationEvaluation> {
+>(): SocialEvaluator<TState, TMetrics, TSocialEpisode, TrustRepairReputationTemporalAssociationEvaluation> {
   return {
     id: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
     label: "Trust-repair reputation temporal association evaluator",
     version: "1.0.0",
     manifest: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_MANIFEST,
     evaluate(
-      context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>
+      context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>
     ): HarnessEvaluationModuleResult<TrustRepairReputationTemporalAssociationEvaluation> {
       return {
         evaluatorId: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
@@ -665,14 +701,14 @@ export function createBetrayalLifecycleTemporalAssociationEvaluator<
   TState = unknown,
   TMetrics = unknown,
   TSocialEpisode = unknown
->(): HarnessEvaluator<TState, TMetrics, TSocialEpisode, BetrayalLifecycleTemporalAssociationEvaluation> {
+>(): SocialEvaluator<TState, TMetrics, TSocialEpisode, BetrayalLifecycleTemporalAssociationEvaluation> {
   return {
     id: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
     label: "Betrayal lifecycle temporal association evaluator",
     version: "1.0.0",
     manifest: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_MANIFEST,
     evaluate(
-      context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>
+      context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>
     ): HarnessEvaluationModuleResult<BetrayalLifecycleTemporalAssociationEvaluation> {
       return {
         evaluatorId: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
@@ -685,7 +721,7 @@ export function createBetrayalLifecycleTemporalAssociationEvaluator<
   };
 }
 
-export function createSocialDynamicsEvaluator<TState = unknown, TMetrics = unknown, TSocialEpisode = unknown>(): HarnessEvaluator<
+export function createSocialDynamicsEvaluator<TState = unknown, TMetrics = unknown, TSocialEpisode = unknown>(): SocialEvaluator<
   TState,
   TMetrics,
   TSocialEpisode,
@@ -696,7 +732,7 @@ export function createSocialDynamicsEvaluator<TState = unknown, TMetrics = unkno
     label: "Social dynamics evaluator",
     version: "1.0.0",
     manifest: SOCIAL_DYNAMICS_EVALUATOR_MANIFEST,
-    evaluate(context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>): HarnessEvaluationModuleResult<SocialDynamicsEvaluation> {
+    evaluate(context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>): HarnessEvaluationModuleResult<SocialDynamicsEvaluation> {
       return {
         evaluatorId: SOCIAL_DYNAMICS_EVALUATOR_ID,
         label: "Social dynamics evaluator",
@@ -712,14 +748,14 @@ export function createSocialFactIngestEvidenceEvaluator<
   TState = unknown,
   TMetrics = unknown,
   TSocialEpisode = unknown
->(): HarnessEvaluator<TState, TMetrics, TSocialEpisode, SocialFactIngestEvidenceEvaluation> {
+>(): SocialEvaluator<TState, TMetrics, TSocialEpisode, SocialFactIngestEvidenceEvaluation> {
   return {
     id: SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_ID,
     label: "Social fact ingest evidence evaluator",
     version: "1.0.0",
     manifest: SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_MANIFEST,
     evaluate(
-      context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode>
+      context: SocialEvaluationContext<TState, TMetrics, TSocialEpisode>
     ): HarnessEvaluationModuleResult<SocialFactIngestEvidenceEvaluation> {
       return {
         evaluatorId: SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_ID,
@@ -732,57 +768,57 @@ export function createSocialFactIngestEvidenceEvaluator<
   };
 }
 
-export function metricsFromSocialState(agents: AgentHarnessState[]): HarnessMetricRecord[] {
+export function metricsFromSocialState(agents: SocialAgentSnapshot[]): HarnessMetricRecord[] {
   return agents.flatMap((agent) => metricsForAgent(agent));
 }
 
-export function metricsFromSocialDynamics(agents: AgentHarnessState[]): HarnessMetricRecord[] {
+export function metricsFromSocialDynamics(agents: SocialAgentSnapshot[]): HarnessMetricRecord[] {
   return agents.flatMap((agent) => dynamicsMetricsForAgent(agent));
 }
 
-export function metricsFromSocialFactIngestEvidence(agents: AgentHarnessState[], socialEpisode?: unknown): HarnessMetricRecord[] {
+export function metricsFromSocialFactIngestEvidence(agents: SocialAgentSnapshot[], socialEpisode?: unknown): HarnessMetricRecord[] {
   const exposureRecords = exposureRecordsFromSocialEpisode(socialEpisode);
   const recordsByObserver = groupExposureRecordsByObserver(exposureRecords);
   const messages = messagesFromSocialEpisode(socialEpisode);
   const messageIndex = socialMessageIndex(messages);
-  return agents.flatMap((agent) => socialFactIngestEvidenceMetricsForAgent(agent, recordsByObserver.get(agent.playerId) ?? [], messageIndex));
+  return agents.flatMap((agent) => socialFactIngestEvidenceMetricsForAgent(agent, recordsByObserver.get(socialAgentId(agent)) ?? [], messageIndex));
 }
 
-export function metricsFromCommitmentCoalitionAssociations(agents: AgentHarnessState[]): HarnessMetricRecord[] {
+export function metricsFromCommitmentCoalitionAssociations(agents: SocialAgentSnapshot[]): HarnessMetricRecord[] {
   return agents.flatMap((agent) => commitmentCoalitionAssociationMetricsForAgent(agent));
 }
 
-export function metricsFromCommitmentCoalitionLifecycleTemporalAssociations(agents: AgentHarnessState[]): HarnessMetricRecord[] {
+export function metricsFromCommitmentCoalitionLifecycleTemporalAssociations(agents: SocialAgentSnapshot[]): HarnessMetricRecord[] {
   return agents.flatMap((agent) => commitmentCoalitionLifecycleTemporalMetricsForAgent(agent));
 }
 
-export function metricsFromNormSanctionLifecycleTemporalAssociations(agents: AgentHarnessState[]): HarnessMetricRecord[] {
+export function metricsFromNormSanctionLifecycleTemporalAssociations(agents: SocialAgentSnapshot[]): HarnessMetricRecord[] {
   return agents.flatMap((agent) => normSanctionLifecycleTemporalMetricsForAgent(agent));
 }
 
-export function metricsFromGossipExposureTemporalAssociations(agents: AgentHarnessState[], socialEpisode?: unknown): HarnessMetricRecord[] {
+export function metricsFromGossipExposureTemporalAssociations(agents: SocialAgentSnapshot[], socialEpisode?: unknown): HarnessMetricRecord[] {
   const exposureRecords = exposureRecordsFromSocialEpisode(socialEpisode);
   const recordsByObserver = groupExposureRecordsByObserver(exposureRecords);
-  return agents.flatMap((agent) => gossipExposureTemporalMetricsForAgent(agent, recordsByObserver.get(agent.playerId) ?? [], exposureRecords.length));
+  return agents.flatMap((agent) => gossipExposureTemporalMetricsForAgent(agent, recordsByObserver.get(socialAgentId(agent)) ?? [], exposureRecords.length));
 }
 
-export function metricsFromTrustRepairLifecycleTemporalAssociations(agents: AgentHarnessState[]): HarnessMetricRecord[] {
+export function metricsFromTrustRepairLifecycleTemporalAssociations(agents: SocialAgentSnapshot[]): HarnessMetricRecord[] {
   return agents.flatMap((agent) => trustRepairLifecycleTemporalMetricsForAgent(agent));
 }
 
-export function metricsFromTrustRepairRelationshipTemporalAssociations(agents: AgentHarnessState[]): HarnessMetricRecord[] {
+export function metricsFromTrustRepairRelationshipTemporalAssociations(agents: SocialAgentSnapshot[]): HarnessMetricRecord[] {
   return agents.flatMap((agent) => trustRepairRelationshipTemporalMetricsForAgent(agent));
 }
 
-export function metricsFromTrustRepairReputationTemporalAssociations(agents: AgentHarnessState[]): HarnessMetricRecord[] {
+export function metricsFromTrustRepairReputationTemporalAssociations(agents: SocialAgentSnapshot[]): HarnessMetricRecord[] {
   return agents.flatMap((agent) => trustRepairReputationTemporalMetricsForAgent(agent));
 }
 
-export function metricsFromBetrayalLifecycleTemporalAssociations(agents: AgentHarnessState[]): HarnessMetricRecord[] {
+export function metricsFromBetrayalLifecycleTemporalAssociations(agents: SocialAgentSnapshot[]): HarnessMetricRecord[] {
   return agents.flatMap((agent) => betrayalLifecycleTemporalMetricsForAgent(agent));
 }
 
-export function metricsFromSocialExposure(agents: AgentHarnessState[], socialEpisode?: unknown): HarnessMetricRecord[] {
+export function metricsFromSocialExposure(agents: SocialAgentSnapshot[], socialEpisode?: unknown): HarnessMetricRecord[] {
   const exposureRecords = exposureRecordsFromSocialEpisode(socialEpisode);
   if (!exposureRecords.length) return [];
 
@@ -790,7 +826,7 @@ export function metricsFromSocialExposure(agents: AgentHarnessState[], socialEpi
   const uniqueSourcesAcrossEpisode = new Set(exposureRecords.map((record) => record.sourceId)).size;
   const publicExposureRecords = exposureRecords.filter((record) => record.visibility === "public");
   return agents.flatMap((agent) =>
-    exposureMetricsForAgent(agent, recordsByObserver.get(agent.playerId) ?? [], {
+    exposureMetricsForAgent(agent, recordsByObserver.get(socialAgentId(agent)) ?? [], {
       totalExposureRecords: exposureRecords.length,
       publicExposureRecords: publicExposureRecords.length,
       uniqueSourcesAcrossEpisode
@@ -827,7 +863,7 @@ type SocialMessageIndex = {
 };
 
 function socialFactIngestEvidenceMetricsForAgent(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   exposureRecords: SocialExposureRecord[],
   messages: SocialMessageIndex
 ): HarnessMetricRecord[] {
@@ -866,7 +902,7 @@ function socialFactIngestEvidenceMetricsForAgent(
 }
 
 function socialFactIngestEvidenceMetricPair(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evaluations: SocialFactIngestRecordEvaluation[],
   kind: SocialFactIngestCandidateKind,
@@ -916,7 +952,7 @@ function socialFactIngestEvidenceMetricPair(
 }
 
 function socialFactIngestMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -934,7 +970,7 @@ function socialFactIngestMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: options.unit,
@@ -952,7 +988,7 @@ function socialFactIngestMetric(
 }
 
 function evaluateSocialFactIngestEvidenceForAgent(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   exposureRecords: SocialExposureRecord[],
   messages: SocialMessageIndex
 ): SocialFactIngestRecordEvaluation[] {
@@ -1012,7 +1048,6 @@ function socialFactIngestCandidateFromSpeechAct(
     };
   }
   if (act.kind === "coalition_signal") {
-    if (act.value === "werewolf.killVote") return undefined;
     const memberIds = stringArrayMetadataValue(act.metadata?.memberIds);
     if (!memberIds.length) return undefined;
     const speechActId = speechActIdForEvaluation(act, speechActIndex);
@@ -1102,7 +1137,7 @@ function entryMatchesMessage(candidate: SocialFactIngestCandidate, entry: Social
 }
 
 function evidenceFromSocialFactIngestRecords(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   records: SocialFactIngestRecordEvaluation[]
 ): HarnessMetricEvidenceRef[] {
   const exposureEvidence = records.flatMap((record) => evidenceFromExposureRecords(agent, [record.candidate.exposureRecord]));
@@ -1135,7 +1170,7 @@ function sampleSocialFactIngestCandidates(records: SocialFactIngestRecordEvaluat
   }));
 }
 
-function metricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[] {
+function metricsForAgent(agent: SocialAgentSnapshot): HarnessMetricRecord[] {
   const social = agent.social;
   if (!social) return [];
 
@@ -1529,7 +1564,7 @@ function metricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[] {
   ];
 }
 
-function dynamicsMetricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[] {
+function dynamicsMetricsForAgent(agent: SocialAgentSnapshot): HarnessMetricRecord[] {
   const social = agent.social;
   if (!social) return [];
 
@@ -1612,7 +1647,7 @@ function dynamicsMetricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[
   ];
 }
 
-function commitmentCoalitionAssociationMetricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[] {
+function commitmentCoalitionAssociationMetricsForAgent(agent: SocialAgentSnapshot): HarnessMetricRecord[] {
   const social = agent.social;
   if (!social) return [];
 
@@ -1660,7 +1695,7 @@ function commitmentCoalitionAssociationMetricsForAgent(agent: AgentHarnessState)
   ];
 }
 
-function commitmentCoalitionLifecycleTemporalMetricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[] {
+function commitmentCoalitionLifecycleTemporalMetricsForAgent(agent: SocialAgentSnapshot): HarnessMetricRecord[] {
   const social = agent.social;
   if (!social) return [];
 
@@ -1748,7 +1783,7 @@ function commitmentCoalitionLifecycleTemporalMetricsForAgent(agent: AgentHarness
   ];
 }
 
-function normSanctionLifecycleTemporalMetricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[] {
+function normSanctionLifecycleTemporalMetricsForAgent(agent: SocialAgentSnapshot): HarnessMetricRecord[] {
   const social = agent.social;
   if (!social) return [];
 
@@ -1836,7 +1871,7 @@ function normSanctionLifecycleTemporalMetricsForAgent(agent: AgentHarnessState):
 }
 
 function gossipExposureTemporalMetricsForAgent(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   exposureRecords: SocialExposureRecord[],
   totalExposureRecords: number
 ): HarnessMetricRecord[] {
@@ -1893,7 +1928,7 @@ function gossipExposureTemporalMetricsForAgent(
   ];
 }
 
-function trustRepairLifecycleTemporalMetricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[] {
+function trustRepairLifecycleTemporalMetricsForAgent(agent: SocialAgentSnapshot): HarnessMetricRecord[] {
   const social = agent.social;
   if (!social) return [];
 
@@ -1942,7 +1977,7 @@ function trustRepairLifecycleTemporalMetricsForAgent(agent: AgentHarnessState): 
   ];
 }
 
-function trustRepairRelationshipTemporalMetricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[] {
+function trustRepairRelationshipTemporalMetricsForAgent(agent: SocialAgentSnapshot): HarnessMetricRecord[] {
   const social = agent.social;
   if (!social) return [];
 
@@ -1995,7 +2030,7 @@ function trustRepairRelationshipTemporalMetricsForAgent(agent: AgentHarnessState
   ];
 }
 
-function trustRepairReputationTemporalMetricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[] {
+function trustRepairReputationTemporalMetricsForAgent(agent: SocialAgentSnapshot): HarnessMetricRecord[] {
   const social = agent.social;
   if (!social) return [];
 
@@ -2048,7 +2083,7 @@ function trustRepairReputationTemporalMetricsForAgent(agent: AgentHarnessState):
   ];
 }
 
-function betrayalLifecycleTemporalMetricsForAgent(agent: AgentHarnessState): HarnessMetricRecord[] {
+function betrayalLifecycleTemporalMetricsForAgent(agent: SocialAgentSnapshot): HarnessMetricRecord[] {
   const social = agent.social;
   if (!social) return [];
 
@@ -2101,7 +2136,7 @@ function betrayalLifecycleTemporalMetricsForAgent(agent: AgentHarnessState): Har
 }
 
 function exposureMetricsForAgent(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   exposureRecords: SocialExposureRecord[],
   episodeTotals: { totalExposureRecords: number; publicExposureRecords: number; uniqueSourcesAcrossEpisode: number }
 ): HarnessMetricRecord[] {
@@ -2148,7 +2183,7 @@ function exposureMetricsForAgent(
   ];
 }
 
-function summarizeSocialState(agents: AgentHarnessState[]): SocialStateEvaluation {
+function summarizeSocialState(agents: SocialAgentSnapshot[]): SocialStateEvaluation {
   const states = agents.flatMap((agent) => (agent.social ? [agent.social] : []));
   return {
     agentCount: agents.length,
@@ -2170,7 +2205,7 @@ function summarizeSocialState(agents: AgentHarnessState[]): SocialStateEvaluatio
   };
 }
 
-function summarizeSocialDynamics(agents: AgentHarnessState[], socialEpisode?: unknown): SocialDynamicsEvaluation {
+function summarizeSocialDynamics(agents: SocialAgentSnapshot[], socialEpisode?: unknown): SocialDynamicsEvaluation {
   const states = agents.flatMap((agent) => (agent.social ? [{ agent, social: agent.social }] : []));
   const exposureRecords = exposureRecordsFromSocialEpisode(socialEpisode);
   return {
@@ -2192,12 +2227,12 @@ function summarizeSocialDynamics(agents: AgentHarnessState[], socialEpisode?: un
   };
 }
 
-function summarizeSocialFactIngestEvidence(agents: AgentHarnessState[], socialEpisode?: unknown): SocialFactIngestEvidenceEvaluation {
+function summarizeSocialFactIngestEvidence(agents: SocialAgentSnapshot[], socialEpisode?: unknown): SocialFactIngestEvidenceEvaluation {
   const exposureRecords = exposureRecordsFromSocialEpisode(socialEpisode);
   const recordsByObserver = groupExposureRecordsByObserver(exposureRecords);
   const messageIndex = socialMessageIndex(messagesFromSocialEpisode(socialEpisode));
   const aggregate = agents.map((agent) => {
-    const evaluations = evaluateSocialFactIngestEvidenceForAgent(agent, recordsByObserver.get(agent.playerId) ?? [], messageIndex);
+    const evaluations = evaluateSocialFactIngestEvidenceForAgent(agent, recordsByObserver.get(socialAgentId(agent)) ?? [], messageIndex);
     const byKind = (kind: SocialFactIngestCandidateKind) => evaluations.filter((item) => item.candidate.kind === kind);
     const commitment = byKind("commitment");
     const coalition = byKind("coalition");
@@ -2206,7 +2241,7 @@ function summarizeSocialFactIngestEvidence(agents: AgentHarnessState[], socialEp
     return {
       hasSocial: Boolean(agent.social),
       hasJournal: (agent.social?.journal?.entries.length ?? 0) > 0,
-      hasExposure: (recordsByObserver.get(agent.playerId)?.length ?? 0) > 0,
+      hasExposure: (recordsByObserver.get(socialAgentId(agent))?.length ?? 0) > 0,
       commitmentSpeechActCandidates: commitment.length,
       commitmentSpeechActLinkedCandidates: commitment.filter((item) => item.linked).length,
       commitmentSpeechActMissingMutationCandidates: commitment.filter((item) => item.missingMutation).length,
@@ -2242,7 +2277,7 @@ function summarizeSocialFactIngestEvidence(agents: AgentHarnessState[], socialEp
   };
 }
 
-function summarizeCommitmentCoalitionAssociations(agents: AgentHarnessState[]): CommitmentCoalitionAssociationEvaluation {
+function summarizeCommitmentCoalitionAssociations(agents: SocialAgentSnapshot[]): CommitmentCoalitionAssociationEvaluation {
   const states = agents.flatMap((agent) => (agent.social ? [{ social: agent.social }] : []));
   const aggregate = states.map(({ social }) => {
     const commitments = Object.values(social.commitments?.records ?? {});
@@ -2270,7 +2305,7 @@ function summarizeCommitmentCoalitionAssociations(agents: AgentHarnessState[]): 
 }
 
 function summarizeCommitmentCoalitionLifecycleTemporalAssociations(
-  agents: AgentHarnessState[]
+  agents: SocialAgentSnapshot[]
 ): CommitmentCoalitionLifecycleTemporalAssociationEvaluation {
   const states = agents.flatMap((agent) => (agent.social ? [{ social: agent.social }] : []));
   const aggregate = states.map(({ social }) => {
@@ -2316,7 +2351,7 @@ function summarizeCommitmentCoalitionLifecycleTemporalAssociations(
   };
 }
 
-function summarizeNormSanctionLifecycleTemporalAssociations(agents: AgentHarnessState[]): NormSanctionLifecycleTemporalAssociationEvaluation {
+function summarizeNormSanctionLifecycleTemporalAssociations(agents: SocialAgentSnapshot[]): NormSanctionLifecycleTemporalAssociationEvaluation {
   const states = agents.flatMap((agent) => (agent.social ? [{ social: agent.social }] : []));
   const aggregate = states.map(({ social }) => {
     const journalEntries = orderedJournalEntries(social.journal?.entries ?? []);
@@ -2362,14 +2397,14 @@ function summarizeNormSanctionLifecycleTemporalAssociations(agents: AgentHarness
 }
 
 function summarizeGossipExposureTemporalAssociations(
-  agents: AgentHarnessState[],
+  agents: SocialAgentSnapshot[],
   socialEpisode?: unknown
 ): GossipExposureTemporalAssociationEvaluation {
   const exposureRecords = exposureRecordsFromSocialEpisode(socialEpisode);
   const recordsByObserver = groupExposureRecordsByObserver(exposureRecords);
   const states = agents.flatMap((agent) => (agent.social ? [{ agent, social: agent.social }] : []));
   const aggregate = states.map(({ agent, social }) => {
-    const observerExposureRecords = recordsByObserver.get(agent.playerId) ?? [];
+    const observerExposureRecords = recordsByObserver.get(socialAgentId(agent)) ?? [];
     const journalEntries = orderedJournalEntries(social.journal?.entries ?? []);
     const gossipRecords = Object.values(social.gossip?.records ?? {});
     const evaluatedRecords = gossipRecords.map((record) =>
@@ -2408,7 +2443,7 @@ function summarizeGossipExposureTemporalAssociations(
   };
 }
 
-function summarizeTrustRepairLifecycleTemporalAssociations(agents: AgentHarnessState[]): TrustRepairLifecycleTemporalAssociationEvaluation {
+function summarizeTrustRepairLifecycleTemporalAssociations(agents: SocialAgentSnapshot[]): TrustRepairLifecycleTemporalAssociationEvaluation {
   const states = agents.flatMap((agent) => (agent.social ? [{ social: agent.social }] : []));
   const aggregate = states.map(({ social }) => {
     const journalEntries = orderedJournalEntries(social.journal?.entries ?? []);
@@ -2438,7 +2473,7 @@ function summarizeTrustRepairLifecycleTemporalAssociations(agents: AgentHarnessS
   };
 }
 
-function summarizeTrustRepairRelationshipTemporalAssociations(agents: AgentHarnessState[]): TrustRepairRelationshipTemporalAssociationEvaluation {
+function summarizeTrustRepairRelationshipTemporalAssociations(agents: SocialAgentSnapshot[]): TrustRepairRelationshipTemporalAssociationEvaluation {
   const states = agents.flatMap((agent) => (agent.social ? [{ social: agent.social }] : []));
   const aggregate = states.map(({ social }) => {
     const journalEntries = orderedJournalEntries(social.journal?.entries ?? []);
@@ -2475,7 +2510,7 @@ function summarizeTrustRepairRelationshipTemporalAssociations(agents: AgentHarne
   };
 }
 
-function summarizeTrustRepairReputationTemporalAssociations(agents: AgentHarnessState[]): TrustRepairReputationTemporalAssociationEvaluation {
+function summarizeTrustRepairReputationTemporalAssociations(agents: SocialAgentSnapshot[]): TrustRepairReputationTemporalAssociationEvaluation {
   const states = agents.flatMap((agent) => (agent.social ? [{ social: agent.social }] : []));
   const aggregate = states.map(({ social }) => {
     const journalEntries = orderedJournalEntries(social.journal?.entries ?? []);
@@ -2509,7 +2544,7 @@ function summarizeTrustRepairReputationTemporalAssociations(agents: AgentHarness
   };
 }
 
-function summarizeBetrayalLifecycleTemporalAssociations(agents: AgentHarnessState[]): BetrayalLifecycleTemporalAssociationEvaluation {
+function summarizeBetrayalLifecycleTemporalAssociations(agents: SocialAgentSnapshot[]): BetrayalLifecycleTemporalAssociationEvaluation {
   const states = agents.flatMap((agent) => (agent.social ? [{ social: agent.social }] : []));
   const aggregate = states.map(({ social }) => {
     const journalEntries = orderedJournalEntries(social.journal?.entries ?? []);
@@ -2540,7 +2575,7 @@ function summarizeBetrayalLifecycleTemporalAssociations(agents: AgentHarnessStat
 }
 
 function countMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2555,7 +2590,7 @@ function countMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "count",
@@ -2571,7 +2606,7 @@ function countMetric(
 }
 
 function ratioMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2587,7 +2622,7 @@ function ratioMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "ratio",
@@ -2603,7 +2638,7 @@ function ratioMetric(
 }
 
 function averageMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2618,7 +2653,7 @@ function averageMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "score",
@@ -2634,7 +2669,7 @@ function averageMetric(
 }
 
 function associationCountMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2649,7 +2684,7 @@ function associationCountMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "count",
@@ -2665,7 +2700,7 @@ function associationCountMetric(
 }
 
 function associationRatioMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2681,7 +2716,7 @@ function associationRatioMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "ratio",
@@ -2705,7 +2740,7 @@ function associationMetadata(metadata: Record<string, unknown> = {}): Record<str
 }
 
 function lifecycleCountMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2720,7 +2755,7 @@ function lifecycleCountMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "count",
@@ -2736,7 +2771,7 @@ function lifecycleCountMetric(
 }
 
 function lifecycleRatioMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2753,7 +2788,7 @@ function lifecycleRatioMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "ratio",
@@ -2769,7 +2804,7 @@ function lifecycleRatioMetric(
 }
 
 function normSanctionLifecycleCountMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2784,7 +2819,7 @@ function normSanctionLifecycleCountMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "count",
@@ -2800,7 +2835,7 @@ function normSanctionLifecycleCountMetric(
 }
 
 function normSanctionLifecycleRatioMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2817,7 +2852,7 @@ function normSanctionLifecycleRatioMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "ratio",
@@ -2833,7 +2868,7 @@ function normSanctionLifecycleRatioMetric(
 }
 
 function gossipExposureTemporalCountMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2848,7 +2883,7 @@ function gossipExposureTemporalCountMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "count",
@@ -2864,7 +2899,7 @@ function gossipExposureTemporalCountMetric(
 }
 
 function gossipExposureTemporalRatioMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2881,7 +2916,7 @@ function gossipExposureTemporalRatioMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "ratio",
@@ -2897,7 +2932,7 @@ function gossipExposureTemporalRatioMetric(
 }
 
 function trustRepairLifecycleCountMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2912,7 +2947,7 @@ function trustRepairLifecycleCountMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "count",
@@ -2928,7 +2963,7 @@ function trustRepairLifecycleCountMetric(
 }
 
 function trustRepairLifecycleRatioMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2945,7 +2980,7 @@ function trustRepairLifecycleRatioMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "ratio",
@@ -2961,7 +2996,7 @@ function trustRepairLifecycleRatioMetric(
 }
 
 function trustRepairRelationshipTemporalCountMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -2976,7 +3011,7 @@ function trustRepairRelationshipTemporalCountMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "count",
@@ -2992,7 +3027,7 @@ function trustRepairRelationshipTemporalCountMetric(
 }
 
 function trustRepairRelationshipTemporalRatioMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -3009,7 +3044,7 @@ function trustRepairRelationshipTemporalRatioMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "ratio",
@@ -3025,7 +3060,7 @@ function trustRepairRelationshipTemporalRatioMetric(
 }
 
 function trustRepairReputationTemporalCountMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -3040,7 +3075,7 @@ function trustRepairReputationTemporalCountMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "count",
@@ -3056,7 +3091,7 @@ function trustRepairReputationTemporalCountMetric(
 }
 
 function trustRepairReputationTemporalRatioMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -3073,7 +3108,7 @@ function trustRepairReputationTemporalRatioMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "ratio",
@@ -3089,7 +3124,7 @@ function trustRepairReputationTemporalRatioMetric(
 }
 
 function betrayalLifecycleCountMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -3104,7 +3139,7 @@ function betrayalLifecycleCountMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "count",
@@ -3120,7 +3155,7 @@ function betrayalLifecycleCountMetric(
 }
 
 function betrayalLifecycleRatioMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -3137,7 +3172,7 @@ function betrayalLifecycleRatioMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "ratio",
@@ -3189,7 +3224,7 @@ function gossipExposureMetadata(metadata: Record<string, unknown> = {}): Record<
 }
 
 function dynamicsCountMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -3204,7 +3239,7 @@ function dynamicsCountMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "count",
@@ -3220,7 +3255,7 @@ function dynamicsCountMetric(
 }
 
 function dynamicsRatioMetric(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   subject: Record<string, unknown>,
   evidenceRefs: HarnessMetricEvidenceRef[],
   options: {
@@ -3236,7 +3271,7 @@ function dynamicsRatioMetric(
     id: options.id,
     label: options.label,
     scope: "agent",
-    subjectId: agent.playerId,
+    subjectId: socialAgentId(agent),
     subject,
     value: options.value,
     unit: "ratio",
@@ -3251,28 +3286,48 @@ function dynamicsRatioMetric(
   });
 }
 
-function socialSubject(agent: AgentHarnessState): Record<string, unknown> {
+function socialSubject(agent: SocialAgentSnapshot): Record<string, unknown> {
+  const actorId = socialAgentId(agent);
+  const profileId = agent.profileId ?? agent.social?.profile.id;
+  const model = agent.model ?? agent.social?.profile.model;
+  const policyId = agent.policyId ?? agent.social?.profile.policyId ?? legacySocialProjection(agent).policyName;
   return {
-    playerId: agent.playerId,
-    profileId: agent.profileId,
-    model: agent.model,
-    policyName: agent.policyName
+    actorId,
+    profileId,
+    model,
+    policyId,
+    // Kept for existing Werewolf artifact readers while new domains consume
+    // the domain-neutral actorId/policyId fields above.
+    playerId: actorId,
+    policyName: policyId
   };
 }
 
-function agentStateEvidence(agent: AgentHarnessState): HarnessMetricEvidenceRef[] {
+function socialAgentId(agent: SocialAgentSnapshot): string {
+  const actorId = agent.id ?? agent.social?.agentId ?? legacySocialProjection(agent).playerId;
+  if (!actorId) {
+    throw new Error("Social evaluator requires snapshot.id, snapshot.social.agentId, or a legacy playerId.");
+  }
+  return actorId;
+}
+
+function legacySocialProjection(agent: SocialAgentSnapshot): LegacySocialAgentProjection {
+  return agent as SocialAgentSnapshot & LegacySocialAgentProjection;
+}
+
+function agentStateEvidence(agent: SocialAgentSnapshot): HarnessMetricEvidenceRef[] {
   return [
     {
       artifact: "agent_state",
-      id: agent.playerId,
+      id: socialAgentId(agent),
       description: `socialStateHash:${agent.socialStateHash ?? "unknown"}`
     }
   ];
 }
 
-function isCoordinationMessage(agent: AgentHarnessState, entry: SocialMemoryEntry): boolean {
+function isCoordinationMessage(agent: SocialAgentSnapshot, entry: SocialMemoryEntry): boolean {
   if (entry.visibility === "team") return true;
-  if (entry.visibility === "private" && entry.source !== agent.playerId && entry.source !== "environment" && entry.source !== "reasoner") return true;
+  if (entry.visibility === "private" && entry.source !== socialAgentId(agent) && entry.source !== "environment" && entry.source !== "reasoner") return true;
   return false;
 }
 
@@ -3294,47 +3349,47 @@ function coalitionSignalRecords(
   ];
 }
 
-function evidenceFromRelationships(agent: AgentHarnessState, records: RelationshipEdge[]): HarnessMetricEvidenceRef[] {
+function evidenceFromRelationships(agent: SocialAgentSnapshot, records: RelationshipEdge[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
 }
 
-function evidenceFromReputation(agent: AgentHarnessState, records: ReputationRecord[]): HarnessMetricEvidenceRef[] {
+function evidenceFromReputation(agent: SocialAgentSnapshot, records: ReputationRecord[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
 }
 
-function evidenceFromNorms(agent: AgentHarnessState, records: NormRecord[]): HarnessMetricEvidenceRef[] {
+function evidenceFromNorms(agent: SocialAgentSnapshot, records: NormRecord[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
 }
 
-function evidenceFromMemories(agent: AgentHarnessState, records: SocialMemoryEntry[]): HarnessMetricEvidenceRef[] {
+function evidenceFromMemories(agent: SocialAgentSnapshot, records: SocialMemoryEntry[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
 }
 
-function evidenceFromCommitments(agent: AgentHarnessState, records: CommitmentRecord[]): HarnessMetricEvidenceRef[] {
+function evidenceFromCommitments(agent: SocialAgentSnapshot, records: CommitmentRecord[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
 }
 
-function evidenceFromCoalitions(agent: AgentHarnessState, records: CoalitionRecord[]): HarnessMetricEvidenceRef[] {
+function evidenceFromCoalitions(agent: SocialAgentSnapshot, records: CoalitionRecord[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
 }
 
-function evidenceFromGossip(agent: AgentHarnessState, records: GossipRecord[]): HarnessMetricEvidenceRef[] {
+function evidenceFromGossip(agent: SocialAgentSnapshot, records: GossipRecord[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
 }
 
-function evidenceFromNormSanctions(agent: AgentHarnessState, records: NormSanctionRecord[]): HarnessMetricEvidenceRef[] {
+function evidenceFromNormSanctions(agent: SocialAgentSnapshot, records: NormSanctionRecord[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
 }
 
-function evidenceFromTrustRepairs(agent: AgentHarnessState, records: TrustRepairRecord[]): HarnessMetricEvidenceRef[] {
+function evidenceFromTrustRepairs(agent: SocialAgentSnapshot, records: TrustRepairRecord[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
 }
 
-function evidenceFromBetrayals(agent: AgentHarnessState, records: BetrayalRecord[]): HarnessMetricEvidenceRef[] {
+function evidenceFromBetrayals(agent: SocialAgentSnapshot, records: BetrayalRecord[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
 }
 
-function evidenceFromGossipExposureRecords(agent: AgentHarnessState, records: GossipExposureRecordEvaluation[]): HarnessMetricEvidenceRef[] {
+function evidenceFromGossipExposureRecords(agent: SocialAgentSnapshot, records: GossipExposureRecordEvaluation[]): HarnessMetricEvidenceRef[] {
   const socialEvidenceRefs = records.flatMap((record) => [...record.messageEvidenceRefs, ...(record.creationEntry?.evidenceRefs ?? [])]);
   const exposureEvidenceRefs = records.flatMap((record) => evidenceFromExposureRecords(agent, record.associatedExposureRecords));
   const mapped = evidenceFromSocialRefs(agent, socialEvidenceRefs);
@@ -3342,7 +3397,7 @@ function evidenceFromGossipExposureRecords(agent: AgentHarnessState, records: Go
 }
 
 function evidenceFromCoalitionSignals(
-  agent: AgentHarnessState,
+  agent: SocialAgentSnapshot,
   records: Array<{ evidenceRefs: EvidenceRef[] }>
 ): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, records.flatMap((record) => record.evidenceRefs));
@@ -3409,7 +3464,7 @@ function evidenceKeys(ref: EvidenceRef): string[] {
   return keys;
 }
 
-function evidenceFromCommitmentCoalitionPairs(agent: AgentHarnessState, pairs: CommitmentCoalitionPair[]): HarnessMetricEvidenceRef[] {
+function evidenceFromCommitmentCoalitionPairs(agent: SocialAgentSnapshot, pairs: CommitmentCoalitionPair[]): HarnessMetricEvidenceRef[] {
   return evidenceFromSocialRefs(agent, pairs.flatMap((pair) => pair.evidenceRefs));
 }
 
@@ -3899,7 +3954,7 @@ function orderedExposureRecords(records: SocialExposureRecord[]): SocialExposure
   });
 }
 
-function evidenceFromLifecycleRecords(agent: AgentHarnessState, records: LifecycleRecordEvaluation[]): HarnessMetricEvidenceRef[] {
+function evidenceFromLifecycleRecords(agent: SocialAgentSnapshot, records: LifecycleRecordEvaluation[]): HarnessMetricEvidenceRef[] {
   const socialEvidenceRefs = records.flatMap((record) => [
     ...(record.creationEntry?.evidenceRefs ?? []),
     ...record.lifecycleEntries.flatMap((entry) => entry.evidenceRefs)
@@ -3908,7 +3963,7 @@ function evidenceFromLifecycleRecords(agent: AgentHarnessState, records: Lifecyc
   return uniqueEvidenceRefs([...mapped, ...agentStateEvidence(agent)]);
 }
 
-function evidenceFromJournalMutationRecords(agent: AgentHarnessState, records: TrustRepairJournalMutationRecordEvaluation[]): HarnessMetricEvidenceRef[] {
+function evidenceFromJournalMutationRecords(agent: SocialAgentSnapshot, records: TrustRepairJournalMutationRecordEvaluation[]): HarnessMetricEvidenceRef[] {
   const socialEvidenceRefs = records.flatMap((record) => [
     ...(record.creationEntry?.evidenceRefs ?? []),
     ...record.mutationEntries.flatMap((entry) => entry.evidenceRefs)
@@ -3967,7 +4022,7 @@ function sampleGossipExposureRecords(records: GossipExposureRecordEvaluation[]):
   }));
 }
 
-function evidenceFromExposureRecords(agent: AgentHarnessState, records: SocialExposureRecord[]): HarnessMetricEvidenceRef[] {
+function evidenceFromExposureRecords(agent: SocialAgentSnapshot, records: SocialExposureRecord[]): HarnessMetricEvidenceRef[] {
   const refs: HarnessMetricEvidenceRef[] = [];
   for (const record of records) {
     for (const ref of record.evidenceRefs) {
@@ -3979,12 +4034,22 @@ function evidenceFromExposureRecords(agent: AgentHarnessState, records: SocialEx
         refs.push({ artifact: "trace", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
         continue;
       }
+      if (ref.artifact === "observation") {
+        refs.push({
+          artifact: "observation",
+          id: ref.id,
+          seq: ref.seq,
+          traceId: ref.traceId,
+          description: ref.description ?? `scoped exposure of ${record.messageId}`
+        });
+        continue;
+      }
       refs.push({
-        artifact: "trace",
+        artifact: "observation",
         id: ref.id,
         seq: ref.seq,
         traceId: ref.traceId,
-        description: `observation:${ref.description ?? `scoped exposure of ${record.messageId}`}`
+        description: ref.description ?? `scoped exposure of ${record.messageId}`
       });
     }
   }
@@ -3992,7 +4057,7 @@ function evidenceFromExposureRecords(agent: AgentHarnessState, records: SocialEx
   return unique.length ? unique : agentStateEvidence(agent);
 }
 
-function evidenceFromSocialRefs(agent: AgentHarnessState, refs: EvidenceRef[]): HarnessMetricEvidenceRef[] {
+function evidenceFromSocialRefs(agent: SocialAgentSnapshot, refs: EvidenceRef[]): HarnessMetricEvidenceRef[] {
   const mapped: HarnessMetricEvidenceRef[] = [];
   for (const ref of refs) {
     if (ref.artifact === "message") {
@@ -4007,6 +4072,10 @@ function evidenceFromSocialRefs(agent: AgentHarnessState, refs: EvidenceRef[]): 
       mapped.push({ artifact: "trace", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
       continue;
     }
+    if (ref.artifact === "observation") {
+      mapped.push({ artifact: "observation", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
+      continue;
+    }
     if (ref.artifact === "state" || ref.artifact === "outcome") {
       mapped.push({ artifact: "state", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
       continue;
@@ -4015,7 +4084,7 @@ function evidenceFromSocialRefs(agent: AgentHarnessState, refs: EvidenceRef[]): 
       mapped.push({ artifact: "trace", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: `${ref.artifact}:${ref.description ?? ""}` });
       continue;
     }
-    mapped.push({ artifact: "agent_state", id: agent.playerId, seq: ref.seq, description: `${ref.artifact}:${ref.description ?? "social evidence"}` });
+    mapped.push({ artifact: "agent_state", id: socialAgentId(agent), seq: ref.seq, description: `${ref.artifact}:${ref.description ?? "social evidence"}` });
   }
   const unique = uniqueEvidenceRefs(mapped);
   return unique.length ? unique : agentStateEvidence(agent);
@@ -4033,7 +4102,7 @@ function uniqueEvidenceRefs(refs: HarnessMetricEvidenceRef[]): HarnessMetricEvid
   return unique;
 }
 
-function withSocialHash(agent: AgentHarnessState, metadata: Record<string, unknown> = {}): Record<string, unknown> {
+function withSocialHash(agent: SocialAgentSnapshot, metadata: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     ...metadata,
     socialStateHash: agent.socialStateHash ?? null

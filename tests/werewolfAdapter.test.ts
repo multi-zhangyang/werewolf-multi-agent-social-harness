@@ -1,32 +1,52 @@
 import { describe, expect, it, vi } from "vitest";
 import { ModelCallError } from "../src/agents/schema";
 import { applyCommand, createGame, getPendingActions } from "../src/core/engine";
+import { createPlayerView } from "../src/core/view";
 import type { GameCommand, GameState } from "../src/core/types";
 import { WerewolfAgentActor } from "../src/harness/actor";
 import { buildFinalHarnessCheckpoint, buildMatchArtifact, forkHarnessRunOptions, toTrajectoryJsonl, type MatchArtifact } from "../src/harness/artifacts";
 import { hashStableState } from "../src/harness/hash";
+import { harnessFailureEvidenceFromEpisode } from "../src/harness/executionEvidence";
+import { werewolfHarnessTurnEvidenceFromEpisode } from "../src/harness/werewolfExecutionEvidence";
 import { policyForRole } from "../src/harness/policy";
 import { describeResolvedAssignments, profilesFromModels, resolveAgentConfigs } from "../src/harness/profiles";
 import { runHarnessMatch } from "../src/harness/runtime";
-import { deriveSocialExposureRecords, runSocialEpisode, type SocialActor, type SocialActorObservationContext, type SocialAgentProfile } from "../src/harness/social";
+import { emptyEvaluationSummary } from "../src/harness/evaluation";
 import {
+  deriveSocialExposureRecords,
+  isSocialStepCommitted,
+  runSocialEpisode,
+  SocialCommunicationBus,
+  type SocialActor,
+  type SocialActorObservationContext,
+  type SocialAgentProfile
+} from "../src/harness/social";
+import {
+  assembleHarnessPlayerView,
   assembleWerewolfSocialObservation,
+  createWerewolfMessageDrafts,
+  createWerewolfJointPhaseSchedulerResolver,
   createWerewolfSocialChannels,
   projectWerewolfSocialStepsToHarnessTrajectory,
   recordWerewolfEnvironmentStepFailure,
-  recordWerewolfHarnessTurn,
   runWerewolfSocialHarnessPrefix,
   runWerewolfSocialHarnessPrefixAsHarnessResult,
   werewolfEventSeq,
+  werewolfLegacySchedulerModeForBatch,
   werewolfLegacyTraceId,
   werewolfSystemTransition,
   WerewolfSocialActorAdapter,
   WerewolfSocialEnvironment,
   type WerewolfSocialObservation,
-  type WerewolfSocialPendingAction,
+  type WerewolfSocialPendingAction
 } from "../src/harness/werewolfAdapter";
 import { replayHarnessTrajectory } from "../src/harness/replay";
-import type { AgentHarnessState, HarnessAgentConfig, HarnessReasoner } from "../src/harness/types";
+import {
+  DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER,
+  type AgentHarnessState,
+  type HarnessAgentConfig,
+  type HarnessReasoner
+} from "../src/harness/types";
 
 describe("Werewolf generic social adapter", () => {
   it("drives system.advance and the next agent action through runSocialEpisode", async () => {
@@ -78,7 +98,6 @@ describe("Werewolf generic social adapter", () => {
       maxTransitions: 2,
       hashState: hashStableState,
       eventSeq: werewolfEventSeq,
-      beforeEnvironmentStep: recordWerewolfHarnessTurn,
       assembleObservation: assembleWerewolfSocialObservation,
       systemTransition: werewolfSystemTransition
     });
@@ -112,7 +131,7 @@ describe("Werewolf generic social adapter", () => {
         command: { type: "seer.inspect", actorId: seer.id, targetId: expect.any(String) }
       }
     });
-    expect(artifact.steps[1].eventSeqRange).toEqual([3, 5]);
+    expect(artifact.steps[1].eventSeqRange).toEqual([3, 4]);
     expect(actor.state.observations).toBe(1);
     expect(actor.state.turns).toBe(1);
     expect(actor.state.privateMemos).toEqual([expect.stringContaining("adapter memo:deterministic-inspect:inspect")]);
@@ -123,6 +142,21 @@ describe("Werewolf generic social adapter", () => {
     const seerMessage = artifact.messages.find((message) => message.metadata?.kind === "private-seer-inspect");
     const memoMessage = artifact.messages.find((message) => message.metadata?.kind === "private-reasoner-memo");
     expect(artifact.messages).toHaveLength(2);
+    const inspectDraft = artifact.steps[1].action.messages?.find((message) => message.metadata?.kind === "private-seer-inspect");
+    expect(inspectDraft).toMatchObject({
+      speechActs: [
+        {
+          id: "",
+          kind: "role_action",
+          subjectId: seer.id,
+          targetId: expect.any(String),
+          value: "seer.inspect",
+          confidence: 1,
+          evidenceRefs: [],
+          metadata: { source: "metadata.targetId", messageKind: "private-seer-inspect" }
+        }
+      ]
+    });
     expect(seerMessage).toMatchObject({
       channelId: `private-${seer.id}`,
       senderId: seer.id,
@@ -135,7 +169,26 @@ describe("Werewolf generic social adapter", () => {
         commandType: "seer.inspect",
         kind: "private-seer-inspect",
         targetId: expect.any(String)
-      }
+      },
+      speechActs: [
+        {
+          id: "msg-1:speech-act:1",
+          kind: "role_action",
+          subjectId: seer.id,
+          targetId: expect.any(String),
+          value: "seer.inspect",
+          confidence: 1,
+          evidenceRefs: [
+            {
+              artifact: "message",
+              id: "msg-1",
+              seq: 1,
+              description: `private-${seer.id}`
+            }
+          ],
+          metadata: { source: "metadata.targetId", messageKind: "private-seer-inspect" }
+        }
+      ]
     });
     expect(memoMessage).toMatchObject({
       channelId: `private-${seer.id}`,
@@ -176,12 +229,12 @@ describe("Werewolf generic social adapter", () => {
       }
     });
     expect(artifact.finalState.phase).toBe("night_wolves");
-    const harnessTurnEvents = artifact.finalState.events.filter((event) => event.type === "harness.turn");
+    const harnessTurnEvents = werewolfHarnessTurnEvidenceFromEpisode(artifact);
     expect(harnessTurnEvents).toHaveLength(1);
     expect(harnessTurnEvents[0]).toMatchObject({
-      seq: 3,
+      turnIndex: 2,
       actorId: seer.id,
-      payload: {
+      trace: {
         traceId: artifact.steps[1].traceId,
         playerId: seer.id,
         actionKind: "inspect",
@@ -190,6 +243,7 @@ describe("Werewolf generic social adapter", () => {
         agentStateHash: actor.state.socialStateHash
       }
     });
+    expect(harnessTurnEvents[0]?.trace.beliefs).toEqual(actor.state.beliefs);
     const inspectCommand = artifact.steps[1].action.command;
     if (inspectCommand.type !== "seer.inspect") throw new Error("Expected seer inspect command.");
     expect(artifact.finalState.night.seerInspection).toMatchObject({
@@ -241,6 +295,166 @@ describe("Werewolf generic social adapter", () => {
     expect(replay.finalHash).toBe(hashStableState(artifact.finalState));
   });
 
+  it("cleans staged adapter state by transaction id when a tracePrefix reasoner turn fails", async () => {
+    const initialState = createGame({ id: "werewolf-trace-prefix-stage-cleanup", seed: "werewolf-trace-prefix-stage-cleanup" });
+    const seer = initialState.players.find((player) => player.role === "seer");
+    if (!seer) throw new Error("Expected a seer in the default Werewolf config.");
+    const nightSeerState = applyCommand(initialState, { type: "system.advance", actorId: "system" });
+    const actor = new WerewolfAgentActor({
+      playerId: seer.id,
+      profileId: "trace-prefix-failure-profile",
+      model: "trace-prefix-failure-model",
+      temperature: 0,
+      policyName: policyForRole(seer.role),
+      turns: 0,
+      observations: 0,
+      beliefs: {},
+      privateMemos: []
+    });
+    const adapter = new WerewolfSocialActorAdapter({
+      actor,
+      reasoner: {
+        async think() {
+          throw new Error("trace-prefix reasoner exploded");
+        }
+      },
+      players: nightSeerState.players,
+      tracePrefix: "adapter-owned-evidence-trace"
+    });
+
+    const artifact = await runSocialEpisode({
+      id: "werewolf-trace-prefix-stage-cleanup",
+      environment: WerewolfSocialEnvironment.fromState(nightSeerState),
+      actors: [adapter],
+      channels: createWerewolfSocialChannels(nightSeerState.players),
+      schedulerMode: "aec",
+      maxTransitions: 1,
+      hashState: hashStableState,
+      eventSeq: werewolfEventSeq,
+      assembleObservation: assembleWerewolfSocialObservation
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(artifact.steps).toMatchObject([
+      {
+        actorId: seer.id,
+        commitStatus: "rejected",
+        failure: { stage: "actor_decide", message: expect.stringContaining("trace-prefix reasoner exploded") }
+      }
+    ]);
+    expect(actor.state).toMatchObject({ turns: 0, observations: 0, beliefs: {}, privateMemos: [] });
+    expect(actor.state.social?.memory.entries).toEqual([]);
+    expect(actor.state.social?.journal?.entries ?? []).toEqual([]);
+    const internal = adapter as unknown as {
+      stagedActors: Map<string, unknown>;
+      pendingProposals: Map<string, unknown>;
+    };
+    expect(internal.stagedActors.size).toBe(0);
+    expect(internal.pendingProposals.size).toBe(0);
+  });
+
+  it("maps every Werewolf command to adapter-owned typed speech acts", () => {
+    const initialState = createGame({ id: "werewolf-speech-act-mapping", seed: "werewolf-speech-act-mapping" });
+    const state = applyCommand(initialState, { type: "system.advance", actorId: "system" });
+    const pendingAction = getPendingActions(state).find((action) => action.kind === "inspect");
+    if (!pendingAction || pendingAction.kind !== "inspect") throw new Error("Expected a seer inspect pending action.");
+    const actor = state.players.find((player) => player.id === pendingAction.actorId);
+    if (!actor) throw new Error("Expected the inspect actor.");
+    const targetIds = state.players.filter((player) => player.id !== actor.id).map((player) => player.id);
+    const [firstTargetId, secondTargetId] = targetIds;
+    if (!firstTargetId || !secondTargetId) throw new Error("Expected multiple Werewolf message targets.");
+    const observation = assembleHarnessPlayerView(
+      createPlayerView(state, actor.id, pendingAction),
+      new SocialCommunicationBus(createWerewolfSocialChannels(state.players))
+    );
+    const draftSpeechActs = (command: GameCommand) => {
+      const [message] = createWerewolfMessageDrafts({
+        players: state.players,
+        traceId: "werewolf-speech-act-mapping:trace",
+        turnIndex: 1,
+        actorId: actor.id,
+        pendingAction,
+        command,
+        policyPlan: {
+          policyName: policyForRole(actor.role),
+          command,
+          intent: "mapping contract",
+          confidence: 1,
+          strategyTags: []
+        },
+        observation,
+        reasonerOutput: { content: "", latencyMs: 0 }
+      });
+      if (!message) throw new Error(`Expected a message draft for ${command.type}.`);
+      return message.speechActs;
+    };
+
+    expect(
+      draftSpeechActs({
+        type: "speech.submit",
+        actorId: actor.id,
+        text: "I claim seer and pressure the target.",
+        claimedRole: "seer",
+        pressureTargetId: firstTargetId
+      })
+    ).toMatchObject([
+      { id: "", kind: "role_claim", subjectId: actor.id, value: "seer", metadata: { source: "metadata.claimedRole" } },
+      {
+        id: "",
+        kind: "accusation",
+        subjectId: actor.id,
+        targetId: firstTargetId,
+        value: "pressure_target",
+        metadata: { source: "metadata.pressureTargetId" }
+      }
+    ]);
+    expect(draftSpeechActs({ type: "speech.submit", actorId: actor.id, text: "No typed claim." })).toBeUndefined();
+    expect(draftSpeechActs({ type: "vote.cast", actorId: actor.id, abstain: true })).toMatchObject([
+      {
+        id: "",
+        kind: "vote_intent",
+        subjectId: actor.id,
+        value: "vote.abstain",
+        metadata: { source: "metadata.targetId", abstain: true, messageKind: "public-vote" }
+      }
+    ]);
+    expect(draftSpeechActs({ type: "hunter.shoot", actorId: actor.id })).toMatchObject([
+      { id: "", kind: "role_action", subjectId: actor.id, value: "hunter.shoot", metadata: { source: "metadata.targetId" } }
+    ]);
+    expect(draftSpeechActs({ type: "werewolf.killVote", actorId: actor.id, targetId: firstTargetId })).toMatchObject([
+      {
+        id: "",
+        kind: "coalition_signal",
+        subjectId: actor.id,
+        targetId: firstTargetId,
+        value: "werewolf.killVote",
+        metadata: { source: "metadata.targetId", messageKind: "werewolf-kill-vote" }
+      }
+    ]);
+    expect(draftSpeechActs({ type: "seer.inspect", actorId: actor.id, targetId: firstTargetId })).toMatchObject([
+      {
+        id: "",
+        kind: "role_action",
+        subjectId: actor.id,
+        targetId: firstTargetId,
+        value: "seer.inspect",
+        metadata: { source: "metadata.targetId", messageKind: "private-seer-inspect" }
+      }
+    ]);
+    expect(
+      draftSpeechActs({ type: "witch.act", actorId: actor.id, saveTargetId: firstTargetId, poisonTargetId: secondTargetId })
+    ).toMatchObject([
+      {
+        id: "",
+        kind: "role_action",
+        subjectId: actor.id,
+        targetId: secondTargetId,
+        value: "witch.act",
+        metadata: { source: "metadata.kind", hasSave: true, hasPoison: true, messageKind: "private-witch-action" }
+      }
+    ]);
+  });
+
   it("can project generic Werewolf steps with legacy harness trace ids", async () => {
     const initialState = createGame({ id: "werewolf-social-legacy-trace", seed: "werewolf-social-legacy-trace" });
     const seer = initialState.players.find((player) => player.role === "seer");
@@ -283,7 +497,6 @@ describe("Werewolf generic social adapter", () => {
       maxTransitions: 2,
       hashState: hashStableState,
       eventSeq: werewolfEventSeq,
-      beforeEnvironmentStep: recordWerewolfHarnessTurn,
       assembleObservation: assembleWerewolfSocialObservation,
       systemTransition: werewolfSystemTransition,
       traceIdForDecision: werewolfLegacyTraceId
@@ -294,8 +507,8 @@ describe("Werewolf generic social adapter", () => {
     expect(artifact.steps[1].traceId).toBe(expectedTraceId);
     expect(reasonerCalls).toEqual([expectedTraceId]);
     expect(artifact.messages.every((message) => message.metadata?.traceId === expectedTraceId)).toBe(true);
-    expect(artifact.finalState.events.find((event) => event.type === "harness.turn")).toMatchObject({
-      payload: {
+    expect(werewolfHarnessTurnEvidenceFromEpisode(artifact)[0]).toMatchObject({
+      trace: {
         traceId: expectedTraceId,
         privateMemo: expect.stringContaining("legacy trace memo")
       }
@@ -448,6 +661,206 @@ describe("Werewolf generic social adapter", () => {
     }
   });
 
+  it("drives Werewolf kill votes through true parallel stepBatch joint resolution", async () => {
+    const initialState = createGame({ id: "werewolf-social-parallel", seed: "werewolf-social-parallel" });
+    const seer = initialState.players.find((player) => player.role === "seer");
+    if (!seer) throw new Error("Expected a seer in the default Werewolf config.");
+    const afterAdvance = applyCommand(initialState, { type: "system.advance", actorId: "system" });
+    const inspectTarget = afterAdvance.players.find((player) => player.alive && player.id !== seer.id);
+    if (!inspectTarget) throw new Error("Expected a seer inspect target.");
+    const nightWolves = applyCommand(afterAdvance, { type: "seer.inspect", actorId: seer.id, targetId: inspectTarget.id });
+    const wolves = nightWolves.players.filter((player) => player.role === "werewolf");
+    expect(nightWolves.phase).toBe("night_wolves");
+    expect(wolves).toHaveLength(2);
+
+    const environment = WerewolfSocialEnvironment.fromState(nightWolves);
+    const reasoner: HarnessReasoner = {
+      async think(input) {
+        const content = `parallel adapter memo:${input.agent.playerId}:${input.action.kind}`;
+        return {
+          content,
+          completion: {
+            content,
+            latencyMs: 1,
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+            providerRequestId: `parallel-adapter-${input.traceId}`,
+            attempts: 1
+          }
+        };
+      }
+    };
+    const actors = wolves.map((wolf) => {
+      const actorState: AgentHarnessState = {
+        playerId: wolf.id,
+        profileId: `${wolf.id}-wolf-parallel-profile`,
+        model: "deterministic-wolf-parallel",
+        temperature: 0,
+        policyName: policyForRole(wolf.role),
+        turns: 0,
+        observations: 0,
+        beliefs: {},
+        privateMemos: []
+      };
+      return new WerewolfSocialActorAdapter({
+        actor: new WerewolfAgentActor(actorState),
+        reasoner,
+        players: nightWolves.players,
+        tracePrefix: "werewolf-social-parallel"
+      });
+    });
+
+    const artifact = await runSocialEpisode({
+      id: "werewolf-social-parallel",
+      environment,
+      actors,
+      channels: createWerewolfSocialChannels(nightWolves.players),
+      schedulerMode: "parallel",
+      maxTransitions: 2,
+      hashState: hashStableState,
+      eventSeq: werewolfEventSeq,
+      assembleObservation: assembleWerewolfSocialObservation,
+      systemTransition: werewolfSystemTransition
+    });
+
+    expect(artifact.status).toBe("truncated");
+    expect(artifact.steps).toHaveLength(2);
+    expect(artifact.steps.every((step) => step.schedulerMode === "parallel")).toBe(true);
+    expect(artifact.steps.every((step) => step.resolutionPolicy === "parallel-stepBatch")).toBe(true);
+    expect(artifact.steps.every((step) => step.atomic === true)).toBe(true);
+    expect(new Set(artifact.steps.map((step) => step.preStateHash)).size).toBe(1);
+    expect(new Set(artifact.steps.map((step) => step.postStateHash)).size).toBe(1);
+    expect(artifact.steps[0].preStateHash).toBe(hashStableState(nightWolves));
+    expect(artifact.steps[0].postStateHash).toBe(hashStableState(artifact.finalState));
+    expect(artifact.finalState.phase).toBe("night_witch");
+    for (const wolf of wolves) {
+      expect(artifact.finalState.night.wolfVotes[wolf.id]).toEqual(expect.any(String));
+    }
+  });
+
+  it("lets runHarnessMatch use jointPhaseScheduler parallel for wolf kill votes", async () => {
+    const initialState = createGame({ id: "werewolf-joint-parallel-match", seed: "werewolf-joint-parallel-match" });
+    const agents = initialState.players.map((player, index) => ({
+      playerId: player.id,
+      profileId: `profile-${index + 1}`,
+      model: "deterministic-joint-parallel",
+      temperature: 0,
+      policyName: policyForRole(player.role)
+    }));
+    const reasoner: HarnessReasoner = {
+      async think(input) {
+        const content = `joint-parallel:${input.agent.playerId}:${input.action.kind}`;
+        return {
+          content,
+          completion: {
+            content,
+            latencyMs: 1,
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+            providerRequestId: `joint-parallel-${input.traceId}`,
+            attempts: 1
+          }
+        };
+      }
+    };
+
+    // seer.inspect + 2 wolf kill votes. Parallel joint apply should still reach night_witch.
+    // system.advance + seer.inspect + joint 2-wolf parallel batch.
+    // Parallel refuses partial batch application when maxTransitions is too low.
+    const result = await runHarnessMatch({
+      initialState,
+      agents,
+      reasoner,
+      maxTransitions: 4,
+      jointPhaseScheduler: "parallel"
+    });
+
+    expect(result.status).toBe("truncated");
+    expect(result.state.phase).toBe("night_witch");
+    const killSteps = result.socialEpisode.steps.filter((step) => {
+      const command = step.action?.command as { type?: string } | undefined;
+      return command?.type === "werewolf.killVote";
+    });
+    expect(killSteps.length).toBe(2);
+    expect(killSteps.every((step) => step.schedulerMode === "parallel")).toBe(true);
+    expect(killSteps.every((step) => step.resolutionPolicy === "parallel-stepBatch")).toBe(true);
+    expect(killSteps.every((step) => step.atomic === true)).toBe(true);
+    expect(new Set(killSteps.map((step) => step.preStateHash)).size).toBe(1);
+    expect(new Set(killSteps.map((step) => step.postStateHash)).size).toBe(1);
+    expect(new Set(killSteps.map((step) => step.actorSnapshotsHashAfterStep)).size).toBe(1);
+    for (const step of killSteps) {
+      const snapshots = step.actorSnapshotsAfterStep as AgentHarnessState[] | undefined;
+      expect(snapshots).toBeDefined();
+      for (const wolf of result.state.players.filter((player) => player.role === "werewolf")) {
+        expect(snapshots?.find((agent) => agent.playerId === wolf.id)).toMatchObject({
+          observations: 1,
+          turns: 1
+        });
+      }
+    }
+    for (const wolf of result.state.players.filter((player) => player.role === "werewolf")) {
+      expect(result.state.night.wolfVotes[wolf.id]).toEqual(expect.any(String));
+    }
+  });
+
+  it("keeps jointPhaseScheduler parallel as opt-in and defaults to aec-batched-decision", async () => {
+    const initialState = createGame({ id: "werewolf-joint-default-match", seed: "werewolf-joint-default-match" });
+    const agents = initialState.players.map((player, index) => ({
+      playerId: player.id,
+      profileId: `profile-${index + 1}`,
+      model: "deterministic-joint-default",
+      temperature: 0,
+      policyName: policyForRole(player.role)
+    }));
+    const reasoner: HarnessReasoner = {
+      async think(input) {
+        const content = `joint-default:${input.agent.playerId}:${input.action.kind}`;
+        return {
+          content,
+          completion: {
+            content,
+            latencyMs: 1,
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+            providerRequestId: `joint-default-${input.traceId}`,
+            attempts: 1
+          }
+        };
+      }
+    };
+    expect(DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER).toBe("aec-batched-decision");
+    const defaultResolver = createWerewolfJointPhaseSchedulerResolver();
+    const parallelResolver = createWerewolfJointPhaseSchedulerResolver("parallel");
+    const jointContext = {
+      id: "joint-default-check",
+      state: initialState,
+      pendingActions: [
+        { type: "agent" as const, actorId: "p1", kind: "kill" as const, legalTargetIds: ["p2"] },
+        { type: "agent" as const, actorId: "p2", kind: "kill" as const, legalTargetIds: ["p1"] }
+      ],
+      turnIndex: 1,
+      batchIndex: 0,
+      defaultSchedulerMode: "aec" as const
+    };
+    expect(defaultResolver(jointContext as never)).toBe("aec-batched-decision");
+    expect(parallelResolver(jointContext as never)).toBe("parallel");
+    expect(werewolfLegacySchedulerModeForBatch(jointContext as never)).toBe("aec-batched-decision");
+    expect(defaultResolver({ ...jointContext, pendingActions: [] } as never)).toBe("aec");
+
+    const result = await runHarnessMatch({
+      initialState,
+      agents,
+      reasoner,
+      maxTransitions: 4
+    });
+
+    expect(result.status).toBe("truncated");
+    const killSteps = result.socialEpisode.steps.filter((step) => {
+      const command = step.action?.command as { type?: string } | undefined;
+      return command?.type === "werewolf.killVote";
+    });
+    expect(killSteps.length).toBe(2);
+    expect(killSteps.every((step) => step.schedulerMode === "aec-batched-decision")).toBe(true);
+    expect(killSteps.some((step) => step.schedulerMode === "parallel")).toBe(false);
+  });
+
   it("projects batched Werewolf kill votes with legacy trace ids into replayable trajectory", async () => {
     const initialState = createGame({ id: "werewolf-social-batched-legacy-trace", seed: "werewolf-social-batched-legacy-trace" });
     const seer = initialState.players.find((player) => player.role === "seer");
@@ -503,7 +916,6 @@ describe("Werewolf generic social adapter", () => {
       maxTransitions: 2,
       hashState: hashStableState,
       eventSeq: werewolfEventSeq,
-      beforeEnvironmentStep: recordWerewolfHarnessTurn,
       assembleObservation: assembleWerewolfSocialObservation,
       systemTransition: werewolfSystemTransition,
       traceIdForDecision: werewolfLegacyTraceId
@@ -518,7 +930,7 @@ describe("Werewolf generic social adapter", () => {
     expect(new Set(artifact.steps.map((step) => step.decisionStateHash))).toEqual(new Set([hashStableState(nightWolves)]));
     expect(reasonerCalls).toEqual(wolves.map((wolf, index) => ({ actorId: wolf.id, traceId: expectedTraceIds[index] })));
     expect(artifact.messages.every((message) => expectedTraceIds.includes(String(message.metadata?.traceId)))).toBe(true);
-    expect(artifact.finalState.events.filter((event) => event.type === "harness.turn").map((event) => (event.payload as { traceId?: string }).traceId)).toEqual(expectedTraceIds);
+    expect(werewolfHarnessTurnEvidenceFromEpisode(artifact).map((event) => event.trace.traceId)).toEqual(expectedTraceIds);
 
     const projectedTrajectory = projectWerewolfSocialStepsToHarnessTrajectory(artifact.steps);
     expect(projectedTrajectory).toHaveLength(2);
@@ -839,6 +1251,7 @@ describe("Werewolf generic social adapter", () => {
     });
 
     const expectedTraceId = `${initialState.id}:harness:1:${seer.id}:night_seer`;
+    expect(result.artifact.domainId).toBe("werewolf");
     expect(result.artifact.status).toBe("truncated");
     expect(result.artifact.steps).toHaveLength(2);
     expect(result.artifact.steps[0]).toMatchObject({
@@ -933,12 +1346,15 @@ describe("Werewolf generic social adapter", () => {
     });
     expect(result.trajectory).toEqual([]);
     expect(projectWerewolfSocialStepsToHarnessTrajectory(result.artifact.steps)).toEqual([]);
-    expect(result.agentStates.find((agent) => agent.playerId === seer.id)).toMatchObject({
+    const failedSeerState = result.agentStates.find((agent) => agent.playerId === seer.id);
+    expect(failedSeerState).toMatchObject({
       playerId: seer.id,
       turns: 0,
-      observations: 1,
+      observations: 0,
       privateMemos: []
     });
+    expect(failedSeerState?.social?.memory.entries).toEqual([]);
+    expect(failedSeerState?.social?.journal?.entries ?? []).toEqual([]);
   });
 
   it("records legacy harness errors for generic provider decision failures without projecting failed steps", async () => {
@@ -986,7 +1402,7 @@ describe("Werewolf generic social adapter", () => {
       reasoner,
       maxTransitions: 8
     });
-    const harnessErrors = result.artifact.finalState.events.filter((event) => event.type === "harness.error");
+    const harnessErrors = harnessFailureEvidenceFromEpisode(result.artifact);
     const payload = harnessErrors[0]?.payload as Record<string, any>;
     const projectedTrajectory = projectWerewolfSocialStepsToHarnessTrajectory(result.artifact.steps);
 
@@ -1017,8 +1433,12 @@ describe("Werewolf generic social adapter", () => {
     expect(JSON.stringify(payload)).not.toContain("raw-provider-token-should-not-appear");
     expect(JSON.stringify(result.artifact)).not.toContain("raw-provider-token-should-not-appear");
     expect(result.artifact.messages.map((message) => message.metadata?.kind)).toEqual(["private-seer-inspect", "private-reasoner-memo"]);
-    expect(result.artifact.steps.filter((step) => step.error)).toHaveLength(1);
+    expect(result.artifact.steps.filter((step) => step.error && step.failure?.stage !== "batch_aborted")).toHaveLength(1);
+    expect(result.artifact.steps.some((step) => step.failure?.stage === "batch_aborted")).toBe(true);
     expect(result.artifact.steps.some((step) => step.error && step.traceId === payload.traceId)).toBe(true);
+    expect(result.artifact.steps.find((step) => step.error)?.failure).toMatchObject({
+      stage: "actor_decide"
+    });
   });
 
   it("records legacy harness errors for generic environment step failures without projecting failed steps", async () => {
@@ -1042,7 +1462,7 @@ describe("Werewolf generic social adapter", () => {
       actorTurnIndexForDecision: () => 1,
       onEnvironmentStepFailure: recordWerewolfEnvironmentStepFailure
     });
-    const harnessErrors = artifact.finalState.events.filter((event) => event.type === "harness.error");
+    const harnessErrors = harnessFailureEvidenceFromEpisode(artifact);
     const payload = harnessErrors[0]?.payload as Record<string, any>;
     const projectedTrajectory = projectWerewolfSocialStepsToHarnessTrajectory(artifact.steps);
 
@@ -1065,7 +1485,8 @@ describe("Werewolf generic social adapter", () => {
       },
       error: expect.any(String),
       postStateHash: hashStableState(artifact.finalState),
-      eventSeqRange: [3, 3]
+      commitStatus: "rejected",
+      failure: expect.objectContaining({ stage: "environment_step" })
     });
     expect(artifact.steps[1].error).toContain("not legal for this pending action");
     expect(projectedTrajectory).toEqual([]);
@@ -1097,15 +1518,14 @@ describe("Werewolf generic social adapter", () => {
       maxTransitions: 2,
       hashState: hashStableState,
       eventSeq: werewolfEventSeq,
-      beforeEnvironmentStep: recordWerewolfHarnessTurn,
       assembleObservation: assembleWerewolfSocialObservation,
       systemTransition: werewolfSystemTransition,
       traceIdForDecision: werewolfLegacyTraceId,
       actorTurnIndexForDecision: () => 1,
       onEnvironmentStepFailure: recordWerewolfEnvironmentStepFailure
     });
-    const harnessTurns = artifact.finalState.events.filter((event) => event.type === "harness.turn");
-    const harnessErrors = artifact.finalState.events.filter((event) => event.type === "harness.error");
+    const harnessTurns = werewolfHarnessTurnEvidenceFromEpisode(artifact);
+    const harnessErrors = harnessFailureEvidenceFromEpisode(artifact);
     const payload = harnessErrors[0]?.payload as Record<string, any>;
     const projectedTrajectory = projectWerewolfSocialStepsToHarnessTrajectory(artifact.steps);
 
@@ -1140,7 +1560,8 @@ describe("Werewolf generic social adapter", () => {
       },
       error: expect.stringContaining("Unknown social channel missing-channel"),
       postStateHash: hashStableState(artifact.finalState),
-      eventSeqRange: [3, 3]
+      commitStatus: "rejected",
+      failure: expect.objectContaining({ stage: "environment_step" })
     });
     expect(artifact.steps[1].messageSeqRange).toBeUndefined();
     expect(projectedTrajectory).toEqual([]);
@@ -1149,7 +1570,7 @@ describe("Werewolf generic social adapter", () => {
     expect(JSON.stringify(artifact.steps[1].action.messages)).toContain("draft should never commit");
 
     const matchArtifact = {
-      artifactVersion: "harness.match.v1",
+      artifactVersion: "harness.match.v2",
       kind: "match",
       runId: initialState.id,
       createdAt: "2026-07-05T00:00:00.000Z",
@@ -1182,7 +1603,7 @@ describe("Werewolf generic social adapter", () => {
         metricCount: 0,
         metrics: [],
         outputs: {},
-        summary: { teamScores: {}, agentScores: {}, profileScores: {}, modelScores: {} }
+        summary: emptyEvaluationSummary()
       },
       metrics: {
         days: 1,
@@ -1272,11 +1693,6 @@ describe("Werewolf generic social adapter", () => {
       maxTransitions: 2,
       hashState: hashStableState,
       eventSeq: werewolfEventSeq,
-      beforeEnvironmentStep(context) {
-        if (context.actor instanceof WerewolfSocialActorAdapter) {
-          recordWerewolfHarnessTurn(context);
-        }
-      },
       assembleObservation: assembleWerewolfSocialObservation,
       traceIdForDecision: werewolfLegacyTraceId,
       actorTurnIndexForDecision: () => {
@@ -1289,7 +1705,7 @@ describe("Werewolf generic social adapter", () => {
       `${nightWolves.id}:harness:1:${validWolf.id}:night_wolves`,
       `${nightWolves.id}:harness:2:${invalidWolf.id}:night_wolves`
     ];
-    const harnessErrors = artifact.finalState.events.filter((event) => event.type === "harness.error");
+    const harnessErrors = harnessFailureEvidenceFromEpisode(artifact);
     const payload = harnessErrors[0]?.payload as Record<string, any>;
     const projectedTrajectory = projectWerewolfSocialStepsToHarnessTrajectory(artifact.steps);
 
@@ -1303,7 +1719,7 @@ describe("Werewolf generic social adapter", () => {
       schedulerMode: "aec-batched-decision",
       resolutionPolicy: "sequential-apply-from-shared-decision-state",
       postStateHash: expect.any(String),
-      eventSeqRange: [nightWolves.events.at(-1)!.seq + 1, nightWolves.events.at(-1)!.seq + 2],
+      eventSeqRange: [nightWolves.events.at(-1)!.seq + 1, nightWolves.events.at(-1)!.seq + 1],
       messageSeqRange: [1, 2]
     });
     expect(artifact.steps[1]).toMatchObject({
@@ -1322,7 +1738,8 @@ describe("Werewolf generic social adapter", () => {
       error: expect.stringContaining("not legal for this pending action"),
       preStateHash: artifact.steps[0].postStateHash,
       postStateHash: hashStableState(artifact.finalState),
-      eventSeqRange: [nightWolves.events.at(-1)!.seq + 3, nightWolves.events.at(-1)!.seq + 3]
+      commitStatus: "rejected",
+      failure: expect.objectContaining({ stage: "environment_step" })
     });
     expect(artifact.steps[1].messageSeqRange).toBeUndefined();
     expect(artifact.messages.map((message) => message.metadata?.kind)).toEqual(["werewolf-kill-vote", "private-reasoner-memo"]);
@@ -1347,7 +1764,7 @@ describe("Werewolf generic social adapter", () => {
     expect(replay.mismatches).toEqual([]);
     expect(replay.ok).toBe(true);
     expect(replay.finalHash).toBe(projectedTrajectory[0].postStateHash);
-    expect(replay.finalHash).not.toBe(hashStableState(artifact.finalState));
+    expect(replay.finalHash).toBe(hashStableState(artifact.finalState));
       expect(JSON.stringify(artifact)).not.toContain("raw-provider-token-should-not-appear");
     } finally {
       vi.useRealTimers();
@@ -1410,7 +1827,7 @@ describe("Werewolf generic social adapter", () => {
         actorId: seer.id,
         command: { type: "seer.inspect", actorId: seer.id, targetId: expect.any(String) },
         pendingAction: { kind: "inspect", actorId: seer.id, phase: "night_seer" },
-        eventSeqRange: [3, 5],
+        eventSeqRange: [3, 4],
         messageSeqRange: [1, 2],
         turnTrace: {
           traceId: expectedTraceId,
@@ -1498,8 +1915,8 @@ describe("Werewolf generic social adapter", () => {
       expect(socialKillSteps).toHaveLength(2);
       expect(new Set(socialKillSteps.map((step) => step.batchId)).size).toBe(1);
       expect(socialKillSteps.every((step) => step.schedulerMode === "aec-batched-decision")).toBe(true);
-      expect(socialKillSteps.every((step) => step.batchId?.includes(":werewolf-batch:"))).toBe(true);
-      expect(socialKillSteps.map((step) => step.batchIndex)).toEqual([1, 2]);
+      expect(socialKillSteps.every((step) => step.batchId?.includes(":batch:"))).toBe(true);
+      expect(socialKillSteps.map((step) => step.batchIndex)).toEqual([3, 3]);
       expect(socialKillSteps.map((step) => step.batchSize)).toEqual([2, 2]);
       expect(killMessages).toHaveLength(2);
       expect(killMessages.map((message) => message.metadata?.traceId)).toEqual(killSteps.map((step) => step.traceId));
@@ -1660,8 +2077,8 @@ describe("Werewolf generic social adapter", () => {
         initialState: result.initialState,
         trajectory: result.trajectory
       });
-      const harnessTurns = result.state.events.filter((event) => event.type === "harness.turn");
-      const harnessErrors = result.state.events.filter((event) => event.type === "harness.error");
+      const harnessTurns = werewolfHarnessTurnEvidenceFromEpisode(result.socialEpisode);
+      const harnessErrors = harnessFailureEvidenceFromEpisode(result.socialEpisode);
       const successfulSocialSteps = result.socialEpisode.steps.filter((step) => !step.error && step.actorId !== "system");
 
       expect(result.status).toBe("truncated");
@@ -1776,8 +2193,8 @@ describe("Werewolf generic social adapter", () => {
         initialState: result.initialState,
         trajectory: result.trajectory
       });
-      const harnessTurns = result.state.events.filter((event) => event.type === "harness.turn");
-      const harnessErrors = result.state.events.filter((event) => event.type === "harness.error");
+      const harnessTurns = werewolfHarnessTurnEvidenceFromEpisode(result.socialEpisode);
+      const harnessErrors = harnessFailureEvidenceFromEpisode(result.socialEpisode);
       const payload = harnessErrors[0]?.payload as Record<string, any>;
 
       expect(result.status).toBe("failed");
@@ -1801,9 +2218,14 @@ describe("Werewolf generic social adapter", () => {
         failureReason: result.failureReason,
         error: result.failureReason
       });
-      expect(result.socialEpisode.steps.map((step) => step.traceId)).toEqual(result.trajectory.map((step) => step.traceId));
+      expect(result.socialEpisode.steps.filter((step) => isSocialStepCommitted(step) && step.actorId !== "system").map((step) => step.traceId)).toEqual(
+        result.trajectory.map((step) => step.traceId)
+      );
+      expect(result.socialEpisode.steps.at(-1)).toMatchObject({ commitStatus: "rejected", failure: expect.any(Object) });
       expect(result.socialEpisode.messages).toHaveLength(2);
-      expect(harnessTurns).toHaveLength(1);
+      expect(harnessTurns).toHaveLength(2);
+      expect(harnessTurns.filter(({ step }) => isSocialStepCommitted(step))).toHaveLength(1);
+      expect(harnessTurns.some(({ step }) => step.failure?.stage === "batch_aborted")).toBe(true);
       expect(harnessErrors).toHaveLength(1);
       expect(payload).toMatchObject({
         model: "failed-result-parity-profile",
@@ -1830,7 +2252,7 @@ describe("Werewolf generic social adapter", () => {
       expect(replay.mismatches).toEqual([]);
       expect(replay.replayedCommands).toBe(result.trajectory.length);
       expect(replay.finalHash).toBe(result.trajectory.at(-1)?.postStateHash);
-      expect(replay.finalHash).not.toBe(result.failureStateHash);
+      expect(replay.finalHash).toBe(result.failureStateHash);
     } finally {
       vi.useRealTimers();
     }
@@ -1888,9 +2310,9 @@ describe("Werewolf generic social adapter", () => {
         initialState: result.initialState,
         trajectory: result.trajectory
       });
-      const harnessTurns = result.state.events.filter((event) => event.type === "harness.turn");
-      const harnessErrors = result.state.events.filter((event) => event.type === "harness.error");
-      const turnPayload = harnessTurns[0]?.payload as Record<string, any>;
+      const harnessTurns = werewolfHarnessTurnEvidenceFromEpisode(result.socialEpisode);
+      const harnessErrors = harnessFailureEvidenceFromEpisode(result.socialEpisode);
+      const turnPayload = harnessTurns[0]?.trace as Record<string, any>;
       const errorPayload = harnessErrors[0]?.payload as Record<string, any>;
 
       expect(result.status).toBe("failed");
@@ -1898,9 +2320,10 @@ describe("Werewolf generic social adapter", () => {
       expect(result.failureReason).toContain("not legal for this pending action");
       expect(result.failureReason).not.toContain("Harness turn failed");
       expect(result.failureStateHash).toBe(hashStableState(result.state));
-      expect(result.metrics).toMatchObject({ harnessTurnCount: 1, harnessErrorCount: 1 });
+      expect(result.metrics).toMatchObject({ harnessTurnCount: 0, harnessErrorCount: 1 });
       expect(result.trajectory).toHaveLength(0);
-      expect(result.socialEpisode.steps).toEqual([]);
+      expect(result.socialEpisode.steps).toHaveLength(1);
+      expect(result.socialEpisode.steps[0]).toMatchObject({ commitStatus: "rejected", failure: { stage: "environment_step" } });
       expect(result.socialEpisode.messages).toEqual([]);
       expect(result.socialEpisode).toMatchObject({
         status: "failed",
@@ -1912,7 +2335,7 @@ describe("Werewolf generic social adapter", () => {
       expect(result.state.events.some((event) => event.type === "seer.inspected")).toBe(false);
       expect(harnessTurns).toHaveLength(1);
       expect(harnessErrors).toHaveLength(1);
-      expect(harnessTurns[0].seq).toBeLessThan(harnessErrors[0].seq);
+      expect(harnessTurns[0].turnIndex).toBeLessThanOrEqual(harnessErrors[0].turnIndex);
       expect(turnPayload).toMatchObject({
         playerId: seer.id,
         actionKind: "inspect",
@@ -1935,7 +2358,7 @@ describe("Werewolf generic social adapter", () => {
       expect(replay.mismatches).toEqual([]);
       expect(replay.replayedCommands).toBe(0);
       expect(replay.finalHash).toBe(hashStableState(result.initialState));
-      expect(replay.finalHash).not.toBe(result.failureStateHash);
+      expect(replay.finalHash).toBe(result.failureStateHash);
     } finally {
       vi.useRealTimers();
     }
@@ -1962,14 +2385,14 @@ describe("Werewolf generic social adapter", () => {
         reasoner,
         maxTransitions: 2
       });
-      const harnessErrors = result.state.events.filter((event) => event.type === "harness.error");
+      const harnessErrors = harnessFailureEvidenceFromEpisode(result.socialEpisode);
       const payload = harnessErrors[0]?.payload as Record<string, any>;
 
       expect(reasonerCalls).toEqual([]);
       expect(result.status).toBe("failed");
       expect(result.failureReason).toContain(`No harness agent config for ${initialState.players[0].id}`);
       expect(result.failureStateHash).toBe(hashStableState(result.state));
-      expect(result.metrics).toMatchObject({ harnessTurnCount: 0, harnessErrorCount: 1 });
+      expect(result.metrics).toMatchObject({ harnessTurnCount: 0, harnessErrorCount: 0 });
       expect(result.trajectory).toEqual([]);
       expect(result.socialEpisode.steps).toEqual([]);
       expect(result.socialEpisode.messages).toEqual([]);
@@ -1981,13 +2404,8 @@ describe("Werewolf generic social adapter", () => {
       expect(result.agents).toEqual([]);
       expect(result.evaluation.agentRewards).toHaveLength(initialState.players.length);
       expect(result.evaluationReport.metricCount).toBe(result.evaluationReport.metrics.length);
-      expect(harnessErrors).toHaveLength(1);
-      expect(payload).toMatchObject({
-        model: "unknown",
-        actionKind: "initialize",
-        message: result.failureReason,
-        traceId: `${initialState.id}:harness:init`
-      });
+      expect(harnessErrors).toEqual([]);
+      expect(payload).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }
@@ -2057,9 +2475,10 @@ describe("Werewolf generic social adapter", () => {
       expect(result.state.events.some((event) => event.type === "game.ended")).toBe(true);
       expect(result.trajectory.length).toBeGreaterThan(0);
       expect(result.socialEpisode.status).toBe("completed");
-      expect(result.socialEpisode.steps).toHaveLength(result.trajectory.length);
-      expect(result.socialEpisode.steps.map((step) => step.traceId)).toEqual(result.trajectory.map((step) => step.traceId));
-      expect(result.socialEpisode.steps.every((step) => step.actorId !== "system" && !step.error)).toBe(true);
+      expect(result.socialEpisode.steps.length).toBeGreaterThan(result.trajectory.length);
+      expect(result.socialEpisode.steps.filter((step) => isSocialStepCommitted(step) && step.actorId !== "system").map((step) => step.traceId)).toEqual(
+        result.trajectory.map((step) => step.traceId)
+      );
       expect(result.agents).toHaveLength(initialState.players.length);
       expect(result.evaluation.agentRewards).toHaveLength(initialState.players.length);
       expect(result.evaluationReport.metricCount).toBe(result.evaluationReport.metrics.length);
@@ -2072,7 +2491,7 @@ describe("Werewolf generic social adapter", () => {
       expect(genericArtifact.failureStateHash).toBeUndefined();
       expect(hashStableState(genericArtifact.finalState)).toBe(hashStableState(result.state));
       expect(genericArtifact.trajectory).toHaveLength(result.trajectory.length);
-      expect(genericArtifact.socialEpisode.steps).toHaveLength(genericArtifact.trajectory.length);
+      expect(genericArtifact.socialEpisode.steps.length).toBeGreaterThan(genericArtifact.trajectory.length);
       expect(genericArtifact.evaluation.agentRewards).toHaveLength(initialState.players.length);
       expect(genericArtifact.evaluationReport.metricCount).toBe(genericArtifact.evaluationReport.metrics.length);
       expect(jsonlRecords.filter((record) => record.type === "header")).toHaveLength(1);
@@ -2140,8 +2559,7 @@ describe("Werewolf generic social adapter", () => {
       if (!nextActorId) throw new Error("Expected the fork checkpoint to resume on an agent action.");
       const restoredAgent = parentArtifact.agents.find((agent) => agent.playerId === nextActorId);
       if (!restoredAgent) throw new Error(`Expected restored state for ${nextActorId}.`);
-      restoredAgent.turns = 11;
-      restoredAgent.privateMemos.push("checkpoint fork restoration marker");
+      const restoredTurns = restoredAgent.turns;
       const checkpoint = buildFinalHarnessCheckpoint({
         artifact: parentArtifact,
         checkpointId: "werewolf-social-fork-checkpoint",
@@ -2149,7 +2567,7 @@ describe("Werewolf generic social adapter", () => {
         reason: "generic social fork parity"
       });
 
-      const expectedVisibleParentMessageIds = visibleParentMessageIds(checkpoint.socialMessages, nextActorId);
+      const expectedVisibleParentMessageIds = visibleParentMessageIds(checkpoint.executionPrefix.messages, nextActorId);
       expect(expectedVisibleParentMessageIds.length).toBeGreaterThan(0);
       const forkReasonerCalls: Array<{ traceId: string; actorId: string; priorTurns: number; visibleParentMessageIds: string[] }> = [];
       const makeForkReasoner = (
@@ -2161,7 +2579,7 @@ describe("Werewolf generic social adapter", () => {
             actorId: input.action.actorId,
             priorTurns: input.agent.turns,
             visibleParentMessageIds: input.view.social.messages
-              .filter((message) => checkpoint.socialMessages.some((parentMessage) => parentMessage.id === message.id))
+              .filter((message) => checkpoint.executionPrefix.messages.some((parentMessage) => parentMessage.id === message.id))
               .map((message) => message.id)
           });
           const content =
@@ -2208,18 +2626,18 @@ describe("Werewolf generic social adapter", () => {
       expect(fork.socialEpisode.steps).toHaveLength(1);
       expect(fork.socialEpisode.steps[0].traceId).toBe(fork.trajectory[0].traceId);
       expect(fork.trajectory[0].preStateHash).toBe(checkpoint.source.stateHash);
-      expect(fork.trajectory[0].messageSeqRange?.[0]).toBe((checkpoint.source.messageSeq ?? 0) + 1);
-      expect(fork.socialEpisode.messages.slice(0, checkpoint.socialMessages.length)).toEqual(checkpoint.socialMessages);
+      expect(fork.trajectory[0].messageSeqRange?.[0]).toBe((checkpoint.source.lastMessageSeq ?? 0) + 1);
+      expect(fork.socialEpisode.messages.slice(0, checkpoint.executionPrefix.messages.length)).toEqual(checkpoint.executionPrefix.messages);
       expect(fork.socialEpisode.messages.at(-1)?.seq).toBe(fork.trajectory[0].messageSeqRange?.[1]);
-      expect(fork.agents.find((agent) => agent.playerId === nextActorId)?.turns).toBeGreaterThan(11);
-      expect(fork.metrics.harnessTurnCount).toBe(fork.state.events.filter((event) => event.type === "harness.turn").length);
+      expect(fork.agents.find((agent) => agent.playerId === nextActorId)?.turns).toBe(restoredTurns + 1);
+      expect(fork.metrics.harnessTurnCount).toBe(werewolfHarnessTurnEvidenceFromEpisode(fork.socialEpisode).length);
       expect(fork.evaluation.agentRewards).toHaveLength(initialState.players.length);
       expect(fork.evaluationReport.metricCount).toBe(fork.evaluationReport.metrics.length);
       expect(forkReasonerCalls).toEqual([
         {
           traceId: fork.trajectory[0].traceId,
           actorId: nextActorId,
-          priorTurns: 11,
+          priorTurns: restoredTurns,
           visibleParentMessageIds: expectedVisibleParentMessageIds
         }
       ]);

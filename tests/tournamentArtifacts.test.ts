@@ -6,6 +6,10 @@ import { createGame } from "../src/core/engine";
 import { ModelCallError } from "../src/agents/schema";
 import { buildFinalHarnessCheckpoint, buildMatchArtifact, forkHarnessRunOptions } from "../src/harness/artifacts";
 import {
+  DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
+  DECEPTION_BELIEF_SHIFT_METRIC_IDS,
+  DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID,
+  DECEPTION_REPUTATION_ASSOCIATION_METRIC_IDS,
   WEREWOLF_ADVERSARIAL_EVALUATOR_ID,
   WEREWOLF_ADVERSARIAL_METRIC_IDS,
   WEREWOLF_DECEPTION_EVALUATOR_ID,
@@ -28,12 +32,22 @@ import {
   COMMITMENT_COALITION_ASSOCIATION_METRIC_IDS,
   COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
   COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+  GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+  NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
   SOCIAL_DYNAMICS_EVALUATOR_ID,
   SOCIAL_DYNAMICS_METRIC_IDS,
   SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_ID,
   SOCIAL_FACT_INGEST_EVIDENCE_METRIC_IDS,
   SOCIAL_STATE_EVALUATOR_ID,
-  SOCIAL_STATE_METRIC_IDS
+  SOCIAL_STATE_METRIC_IDS,
+  TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+  TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_METRIC_IDS,
+  TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+  TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS
 } from "../src/harness/socialEvaluator";
 import { runTournament, type TournamentResult } from "../src/harness/tournament";
 import {
@@ -42,7 +56,7 @@ import {
   BENCHMARK_STATISTICS_VERSION,
   writeTournamentArtifactDirectory
 } from "../src/harness/tournamentArtifacts";
-import type { HarnessEvaluationWarning, HarnessReasoner } from "../src/harness/types";
+import type { HarnessEvaluationReport, HarnessEvaluationWarning, HarnessReasoner } from "../src/harness/types";
 
 const tempDirs: string[] = [];
 
@@ -87,6 +101,8 @@ describe("tournament artifact directory writer", () => {
     expect(written.files.assignment).toBe(path.join(outputDir, "assignment.json"));
     expect(written.files.costLatency).toBe(path.join(outputDir, "cost_latency.json"));
     expect(written.files.benchmarkStatistics).toBe(path.join(outputDir, "benchmark_statistics.json"));
+    expect(written.files.tournamentComparison).toBe(path.join(outputDir, "tournament_comparison.json"));
+    expect(written.files.tournamentComparisonMarkdown).toBe(path.join(outputDir, "tournament_comparison.md"));
     expect(written.files.integrity).toBe(path.join(outputDir, "integrity.jsonl"));
     expect(written.files.summaryMarkdown).toBe(path.join(outputDir, "summary.md"));
     expect(written.files.episodesCsv).toBe(path.join(outputDir, "episodes.csv"));
@@ -108,7 +124,7 @@ describe("tournament artifact directory writer", () => {
       experimentId: "writer-layout",
       seed: "writer-truncated",
       gamesRequested: 1,
-      gamesCompleted: 1,
+      gamesCompleted: 0,
       gamesFailed: 0,
       gamesHarnessCompleted: 0,
       gamesTruncated: 1,
@@ -132,13 +148,40 @@ describe("tournament artifact directory writer", () => {
       artifactIntegrityOkCount: 1,
       artifactIntegrityErrorCount: 0,
       artifactIntegrityErroredMatchCount: 0,
-      matchCount: 1
+      matchCount: 1,
+      nativeSteps: 0,
+      committedSteps: 0,
+      rejectedSteps: 0,
+      metricCount: expect.any(Number),
+      scorecardEligibleMetricCount: expect.any(Number),
+      metricPromotionClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      }),
+      scorecardEligibleMetricClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      })
     });
     expect(manifest.statusCounts.truncated).toBe(1);
     expect(manifest.files.specNormalized).toBe("spec.normalized.json");
     expect(manifest.files.assignment).toBe("assignment.json");
     expect(manifest.files.costLatency).toBe("cost_latency.json");
     expect(manifest.files.benchmarkStatistics).toBe("benchmark_statistics.json");
+    expect(manifest.files.tournamentComparison).toBe("tournament_comparison.json");
+    expect(manifest.files.tournamentComparisonMarkdown).toBe("tournament_comparison.md");
+    const tournamentComparison = await readJson<Record<string, any>>(path.join(outputDir, "tournament_comparison.json"));
+    expect(tournamentComparison).toMatchObject({
+      artifactVersion: "harness.tournament-comparison.v1",
+      kind: "tournament-comparison",
+      tournamentSeed: "writer-truncated",
+      gamesRequested: 1,
+      artifactMatchCount: 1,
+      pairCount: 0
+    });
+    expect(tournamentComparison.comparisonSetId).toMatch(/^tournament-comparison:[a-f0-9]{24}$/);
     expect(manifest.files.integrity).toBe("integrity.jsonl");
     expect(manifest.files.summaryMarkdown).toBe("summary.md");
     expect(manifest.files.episodesCsv).toBe("episodes.csv");
@@ -153,6 +196,9 @@ describe("tournament artifact directory writer", () => {
       evaluationWarningCodes: ["test.warning"],
       integrityOk: true,
       integrityErrorCount: 0,
+      nativeSteps: 0,
+      committedSteps: 0,
+      rejectedSteps: 0,
       path: expect.stringMatching(/^matches\/.+\.json$/),
       jsonlPath: expect.stringMatching(/^matches\/.+\.jsonl$/)
     });
@@ -161,27 +207,45 @@ describe("tournament artifact directory writer", () => {
     const summaryMarkdown = await readFile(path.join(outputDir, "summary.md"), "utf8");
     expect(summaryMarkdown).toContain("# Tournament Summary: writer-layout");
     expect(summaryMarkdown).toContain("- Seed: writer-truncated");
+    expect(summaryMarkdown).toContain("- Native steps: 0");
+    expect(summaryMarkdown).toContain("- Committed steps: 0");
+    expect(summaryMarkdown).toContain("- Rejected steps: 0");
+    expect(summaryMarkdown).toContain("- Metric rows:");
+    expect(summaryMarkdown).toContain("- Scorecard-eligible metric rows:");
+    expect(summaryMarkdown).toContain("## Metric Promotion");
+    expect(summaryMarkdown).toContain("| promotion_class | rows | scorecard_eligible_rows |");
+    expect(summaryMarkdown).toContain("| model | seat_games | seat_wins | win_rate | avg_reward | turns | errors | native | committed | rejected |");
+    expect(summaryMarkdown).toContain("| profile | model | policy | seat_games | seat_wins | win_rate | avg_reward | native | committed | rejected |");
     expect(summaryMarkdown).toContain("## Interpretation Policy");
     expect(summaryMarkdown).toContain("does not make model superiority");
 
     const episodesCsv = await readFile(path.join(outputDir, "episodes.csv"), "utf8");
-    expect(episodesCsv).toMatch(/^tournament_seed,episode_index,episode_seed,run_id,match_id,status,harness_status,winner,phase,day,/);
+    expect(episodesCsv).toMatch(
+      /^tournament_seed,episode_index,episode_seed,run_id,match_id,status,harness_status,winner,phase,day,native_steps,committed_steps,rejected_steps,trajectory_steps,message_count,metric_count,scorecard_eligible_metric_count,scorecard_metric_count,diagnostic_metric_count,benchmark_only_metric_count,/
+    );
     expect(episodesCsv).toContain("writer-truncated,0,writer-truncated:g1");
-    expect(episodesCsv).toContain(",completed,truncated,");
+    expect(episodesCsv).toContain(",truncated,truncated,");
     expect(episodesCsv).toContain("matches/");
 
     const agentsCsv = await readFile(path.join(outputDir, "agents.csv"), "utf8");
     expect(agentsCsv).toMatch(/^tournament_seed,episode_index,episode_seed,run_id,match_id,status,harness_status,player_id,seat,/);
+    expect(agentsCsv).toContain("reward,native_steps,committed_steps,rejected_steps");
     expect(agentsCsv.trim().split("\n")).toHaveLength(result.episodes[0].agents.length + 1);
     expect(agentsCsv).toContain(",alpha,");
 
     const metricsCsv = await readFile(path.join(outputDir, "metrics.csv"), "utf8");
     expect(metricsCsv).toMatch(/^tournament_seed,episode_index,episode_seed,run_id,match_id,status,harness_status,metric_id,label,/);
+    expect(metricsCsv).toContain(
+      "evidence_ref_count,promotion_class,scorecard_eligible,promotion_reasons,promotion_decision_id,metadata,promotion_policy_id,promotion_policy_version,promotion_policy_hash,promotion_catalog_id,promotion_catalog_version,promotion_catalog_hash,promotion_resolution"
+    );
     expect(metricsCsv).toContain("agent.reward");
     expect(metricsCsv).toContain(WEREWOLF_OUTCOME_EVALUATOR_ID);
+    expect(metricsCsv).toMatch(/agent\.reward,.*,scorecard,/);
 
     const leaderboardCsv = await readFile(path.join(outputDir, "leaderboard.csv"), "utf8");
-    expect(leaderboardCsv).toMatch(/^subject_type,subject_id,model,profile_id,policy_name,seat_games,seat_wins,win_rate,/);
+    expect(leaderboardCsv).toMatch(
+      /^subject_type,subject_id,model,profile_id,policy_name,seat_games,seat_wins,win_rate,village_seat_games,village_seat_wins,werewolf_seat_games,werewolf_seat_wins,harness_turns,harness_errors,native_steps,committed_steps,rejected_steps,/
+    );
     expect(leaderboardCsv).toContain("model,alpha,alpha,");
 
     const episodes = await readJsonl<Record<string, any>>(path.join(outputDir, "episodes.jsonl"));
@@ -190,7 +254,7 @@ describe("tournament artifact directory writer", () => {
       type: "episode",
       episodeIndex: 0,
       tournamentEpisodeIndex: 0,
-      status: "completed",
+      status: "truncated",
       harnessStatus: "truncated",
       seed: "writer-truncated:g1",
       evaluationWarningCount: 1,
@@ -199,10 +263,35 @@ describe("tournament artifact directory writer", () => {
         warningCount: 1,
         warningCodes: [expect.objectContaining({ code: "test.warning", count: 1 })]
       }),
-      trajectorySteps: 0
+      nativeSteps: 0,
+      committedSteps: 0,
+      rejectedSteps: 0,
+      trajectorySteps: 0,
+      metricCount: expect.any(Number),
+      scorecardEligibleMetricCount: expect.any(Number),
+      metricPromotionClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      }),
+      scorecardEligibleMetricClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      })
     });
     expect(episodes[0].matchArtifact).toMatch(/^matches\/.+\.json$/);
     expect(episodes[0].matchJsonl).toMatch(/^matches\/.+\.jsonl$/);
+    expect(Array.isArray(episodes[0].agents)).toBe(true);
+    expect(episodes[0].agents.length).toBeGreaterThan(0);
+    for (const agent of episodes[0].agents) {
+      expect(agent).toMatchObject({
+        playerId: expect.any(String),
+        nativeSteps: expect.any(Number),
+        committedSteps: expect.any(Number),
+        rejectedSteps: expect.any(Number)
+      });
+    }
 
     const matchArtifact = await readJson<Record<string, any>>(path.join(outputDir, episodes[0].matchArtifact));
     expect(matchArtifact.status).toBe("truncated");
@@ -212,7 +301,7 @@ describe("tournament artifact directory writer", () => {
     const matchJsonl = await readJsonl<Record<string, any>>(path.join(outputDir, episodes[0].matchJsonl));
     const matchHeader = matchJsonl.find((record) => record.type === "header");
     expect(matchHeader).toMatchObject({
-      artifactVersion: "harness.match.v1",
+      artifactVersion: "harness.match.v2",
       kind: "match",
       runId: matchArtifact.runId,
       matchId: matchArtifact.matchId,
@@ -248,9 +337,9 @@ describe("tournament artifact directory writer", () => {
         "agent.social.coordination_message_count"
       ])
     );
-    for (const metricId of BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS) {
-      expect(metrics.map((metric) => metric.id)).not.toContain(metricId);
-    }
+    const betrayalMetricIds = new Set<string>(BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS);
+    const betrayalMetrics = metrics.filter((metric) => betrayalMetricIds.has(String(metric.id)));
+    expect(betrayalMetrics.every((metric) => (metric.weight ?? 0) === 0)).toBe(true);
     expect(metrics.every((metric) => metric.episodeIndex === 0 && metric.tournamentEpisodeIndex === 0 && metric.tournamentSeed === "writer-truncated")).toBe(true);
     expect(metrics.find((metric) => metric.id === "agent.reward")).toMatchObject({
       type: "metric",
@@ -263,7 +352,14 @@ describe("tournament artifact directory writer", () => {
       denominator: expect.any(Number),
       confidence: expect.any(Number),
       aggregation: expect.any(String),
-      evidenceRefs: expect.arrayContaining([expect.objectContaining({ artifact: "event" })])
+      evidenceRefs: expect.arrayContaining([expect.objectContaining({ artifact: "event" })]),
+      promotionClass: "scorecard",
+      scorecardEligible: true,
+      promotionReasons: expect.arrayContaining([expect.any(String)]),
+      promotionDecisionId: expect.any(String),
+      promotionPolicyId: "evaluation.metric-promotion.v1",
+      promotionCatalogId: "werewolf.metric-promotion.catalog.v1",
+      promotionResolution: "recorded"
     });
     expect(metrics.find((metric) => metric.id === "agent.survival_rate")).toMatchObject({
       type: "metric",
@@ -276,7 +372,10 @@ describe("tournament artifact directory writer", () => {
       denominator: expect.any(Number),
       confidence: expect.any(Number),
       aggregation: "ratio",
-      evidenceRefs: expect.arrayContaining([expect.objectContaining({ artifact: "event" })])
+      evidenceRefs: expect.arrayContaining([expect.objectContaining({ artifact: "event" })]),
+      promotionClass: "diagnostic",
+      scorecardEligible: false,
+      promotionReasons: expect.arrayContaining([expect.any(String)])
     });
     expect(metrics.find((metric) => metric.id === "agent.social.memory_count")).toMatchObject({
       type: "metric",
@@ -289,7 +388,10 @@ describe("tournament artifact directory writer", () => {
       denominator: expect.any(Number),
       confidence: expect.any(Number),
       aggregation: "sum",
-      evidenceRefs: [expect.objectContaining({ artifact: "agent_state", id: expect.any(String) })]
+      evidenceRefs: [expect.objectContaining({ artifact: "agent_state", id: expect.any(String) })],
+      promotionClass: "diagnostic",
+      scorecardEligible: false,
+      promotionReasons: expect.arrayContaining([expect.any(String)])
     });
     expect(metrics.find((metric) => metric.id === "agent.social.commitment_status_temporal_association_count")).toMatchObject({
       type: "metric",
@@ -378,12 +480,48 @@ describe("tournament artifact directory writer", () => {
         ok: true,
         errorCount: 0,
         errors: [],
+        nativeSteps: 0,
+        committedSteps: 0,
+        rejectedSteps: 0,
         matchArtifact: expect.stringMatching(/^matches\/.+\.json$/),
         matchJsonl: expect.stringMatching(/^matches\/.+\.jsonl$/)
       })
     ]);
 
     const registry = await readJson<Record<string, any>>(path.join(outputDir, "registry.json"));
+    expect(registry).toMatchObject({
+      kind: "evaluator-registry-snapshot",
+      metricPromotionPolicyId: "evaluation.metric-promotion.v1",
+      metricPromotionCatalogId: "werewolf.metric-promotion.catalog.v1",
+      metricPromotionPolicyVersion: expect.any(String),
+      metricPromotionPolicyHash: expect.any(String),
+      metricPromotionCatalogVersion: expect.any(String),
+      metricPromotionCatalogHash: expect.any(String),
+      mixedMetricPromotionPolicies: false,
+      metricPromotionPolicies: [
+        expect.objectContaining({
+          policyId: "evaluation.metric-promotion.v1",
+          catalogId: "werewolf.metric-promotion.catalog.v1"
+        })
+      ],
+      metricCount: expect.any(Number),
+      scorecardEligibleMetricCount: expect.any(Number),
+      metricPromotionClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      }),
+      scorecardEligibleMetricClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      }),
+      metricPromotionCatalog: expect.objectContaining({
+        catalogId: "werewolf.metric-promotion.catalog.v1",
+        entryCount: expect.any(Number),
+        ruleCount: expect.any(Number)
+      })
+    });
     expect(registry.reports[0]).toMatchObject({
       warnings: [expect.objectContaining({ code: "test.warning", severity: "warning", evaluatorId: WEREWOLF_OUTCOME_EVALUATOR_ID })],
       warningSummary: expect.objectContaining({
@@ -404,12 +542,18 @@ describe("tournament artifact directory writer", () => {
         SOCIAL_STATE_EVALUATOR_ID,
         COMMITMENT_COALITION_ASSOCIATION_EVALUATOR_ID,
         COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+        DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
+        DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID,
         SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_ID,
         SOCIAL_DYNAMICS_EVALUATOR_ID
       ])
     );
-    expect(registry.evaluatorIds).not.toContain(BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(registry.evaluators.map((entry: any) => entry.id)).not.toContain(BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
     expect(registry.evaluators).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -520,6 +664,54 @@ describe("tournament artifact directory writer", () => {
           visibility: "postgame"
         }),
         expect.objectContaining({
+          id: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_norm_sanction_lifecycle_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_gossip_exposure_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_trust_repair_lifecycle_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_trust_repair_relationship_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_trust_repair_reputation_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_betrayal_lifecycle_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: DECEPTION_BELIEF_SHIFT_EVALUATOR_ID,
+          metricIds: DECEPTION_BELIEF_SHIFT_METRIC_IDS,
+          aggregation: "zero_weight_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
+          id: DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID,
+          metricIds: DECEPTION_REPUTATION_ASSOCIATION_METRIC_IDS,
+          aggregation: "zero_weight_reputation_temporal_association_by_agent",
+          visibility: "postgame"
+        }),
+        expect.objectContaining({
           id: SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_ID,
           label: "Social fact ingest evidence evaluator",
           version: "1.0.0",
@@ -564,13 +756,44 @@ describe("tournament artifact directory writer", () => {
           id: COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
           metricIds: COMMITMENT_COALITION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS
         }),
+        expect.objectContaining({
+          id: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: NORM_SANCTION_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS
+        }),
+        expect.objectContaining({
+          id: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: GOSSIP_EXPOSURE_TEMPORAL_ASSOCIATION_METRIC_IDS
+        }),
+        expect.objectContaining({
+          id: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: TRUST_REPAIR_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS
+        }),
+        expect.objectContaining({
+          id: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: TRUST_REPAIR_RELATIONSHIP_TEMPORAL_ASSOCIATION_METRIC_IDS
+        }),
+        expect.objectContaining({
+          id: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS
+        }),
+        expect.objectContaining({
+          id: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
+          metricIds: BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS
+        }),
+        expect.objectContaining({ id: DECEPTION_BELIEF_SHIFT_EVALUATOR_ID, metricIds: DECEPTION_BELIEF_SHIFT_METRIC_IDS }),
+        expect.objectContaining({
+          id: DECEPTION_REPUTATION_ASSOCIATION_EVALUATOR_ID,
+          metricIds: DECEPTION_REPUTATION_ASSOCIATION_METRIC_IDS
+        }),
         expect.objectContaining({ id: SOCIAL_FACT_INGEST_EVIDENCE_EVALUATOR_ID, metricIds: SOCIAL_FACT_INGEST_EVIDENCE_METRIC_IDS }),
         expect.objectContaining({ id: SOCIAL_DYNAMICS_EVALUATOR_ID, metricIds: SOCIAL_DYNAMICS_METRIC_IDS })
       ])
     );
-    expect(registry.reports[0].evaluatorIds).not.toContain(BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID);
-    expect(registry.reports[0].evaluatorRegistry.map((entry: any) => entry.id)).not.toContain(
-      BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID
+    expect(registry.reports[0].evaluatorIds).toEqual(
+      expect.arrayContaining([BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID])
+    );
+    expect(registry.reports[0].evaluatorRegistry.map((entry: { id: string }) => entry.id)).toEqual(
+      expect.arrayContaining([BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_EVALUATOR_ID])
     );
 
     const specNormalized = await readJson<Record<string, any>>(path.join(outputDir, "spec.normalized.json"));
@@ -593,16 +816,20 @@ describe("tournament artifact directory writer", () => {
       profiles: result.profiles,
       assignment: result.assignment,
       gamesRequested: 1,
-      gamesCompleted: 1,
-      gamesFailed: 0
+      gamesCompleted: 0,
+      gamesFailed: 0,
+      gamesTruncated: 1
     });
     expect(assignment.episodes).toHaveLength(1);
     expect(assignment.episodes[0]).toMatchObject({
       episodeIndex: 0,
       tournamentEpisodeIndex: 0,
       seed: "writer-truncated:g1",
-      status: "completed",
+      status: "truncated",
       harnessStatus: "truncated",
+      nativeSteps: 0,
+      committedSteps: 0,
+      rejectedSteps: 0,
       matchArtifact: expect.stringMatching(/^matches\/.+\.json$/),
       matchJsonl: expect.stringMatching(/^matches\/.+\.jsonl$/),
       resolvedAssignments: expect.any(Array),
@@ -617,13 +844,47 @@ describe("tournament artifact directory writer", () => {
       model: firstAssignment.model,
       temperature: firstAssignment.temperature,
       role: firstAssignment.role,
-      team: firstAssignment.team
+      team: firstAssignment.team,
+      nativeSteps: expect.any(Number),
+      committedSteps: expect.any(Number),
+      rejectedSteps: expect.any(Number)
     });
 
     const leaderboard = await readJson<Record<string, any>>(path.join(outputDir, "leaderboard.json"));
     const benchmarkStatistics = await readJson<Record<string, any>>(path.join(outputDir, "benchmark_statistics.json"));
+    expect(leaderboard).toMatchObject({
+      kind: "tournament-leaderboard",
+      metricCount: expect.any(Number),
+      scorecardEligibleMetricCount: expect.any(Number),
+      metricPromotionClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      }),
+      scorecardEligibleMetricClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      })
+    });
     expect(leaderboard.modelStats).toEqual(result.modelStats);
     expect(leaderboard.profileStats).toEqual(result.profileStats);
+    for (const stats of Object.values(leaderboard.modelStats) as Array<Record<string, unknown>>) {
+      expect(stats).toMatchObject({
+        nativeSteps: expect.any(Number),
+        committedSteps: expect.any(Number),
+        rejectedSteps: expect.any(Number)
+      });
+      expect(stats.nativeSteps).toBe((stats.committedSteps as number) + (stats.rejectedSteps as number));
+    }
+    for (const stats of Object.values(leaderboard.profileStats) as Array<Record<string, unknown>>) {
+      expect(stats).toMatchObject({
+        nativeSteps: expect.any(Number),
+        committedSteps: expect.any(Number),
+        rejectedSteps: expect.any(Number)
+      });
+      expect(stats.nativeSteps).toBe((stats.committedSteps as number) + (stats.rejectedSteps as number));
+    }
     expect(leaderboard.benchmarkStatistics).toEqual(benchmarkStatistics);
     expect(benchmarkStatistics).toMatchObject({
       artifactVersion: "harness.tournament.v1",
@@ -633,6 +894,23 @@ describe("tournament artifact directory writer", () => {
       evaluatorVersion: BENCHMARK_STATISTICS_EVALUATOR_VERSION,
       experimentSpecHash: expect.any(String),
       visibility: "postgame",
+      metricPromotionPolicyId: "evaluation.metric-promotion.v1",
+      metricPromotionCatalogId: "werewolf.metric-promotion.catalog.v1",
+      metricPromotionPolicyHash: expect.any(String),
+      metricPromotionCatalogHash: expect.any(String),
+      mixedMetricPromotionPolicies: false,
+      metricCount: expect.any(Number),
+      scorecardEligibleMetricCount: expect.any(Number),
+      metricPromotionClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      }),
+      scorecardEligibleMetricClassCounts: expect.objectContaining({
+        scorecard: expect.any(Number),
+        diagnostic: expect.any(Number),
+        benchmark_only: expect.any(Number)
+      }),
       inputArtifacts: expect.arrayContaining(["spec.normalized.json", "assignment.json", "episodes.jsonl", "integrity.jsonl", "matches/*.json"])
     });
     expect(benchmarkStatistics.inputArtifacts).not.toContain("leaderboard.json");
@@ -651,12 +929,16 @@ describe("tournament artifact directory writer", () => {
         gamesRequested: 1,
         episodesScheduled: 1,
         episodesUnscheduled: 0,
-        gamesCompleted: 1,
+        gamesCompleted: 0,
+        gamesTruncated: 1,
         gamesFailed: 0,
         artifactCount: 1,
         matchArtifactCount: 1,
-        completedWithEvaluation: 1,
-        completedWithEvaluationReport: 1,
+        completedWithEvaluation: 0,
+        completedWithEvaluationReport: 0,
+        truncatedWithArtifact: 1,
+        truncatedWithEvaluation: 1,
+        truncatedWithEvaluationReport: 1,
         failedWithArtifact: 0,
         preHarnessFailures: 0,
         harnessStatusCounts: expect.objectContaining({
@@ -664,7 +946,10 @@ describe("tournament artifact directory writer", () => {
           truncated: 1,
           failed: 0,
           tournamentFailed: 0
-        })
+        }),
+        nativeSteps: 0,
+        committedSteps: 0,
+        rejectedSteps: 0
       }
     });
     expect(leaderboard.benchmarkStatistics.stratificationDimensions).toEqual([
@@ -680,36 +965,303 @@ describe("tournament artifact directory writer", () => {
       expect.objectContaining({
         episodeIndex: 0,
         seed: "writer-truncated:g1",
-        status: "completed",
-        harnessStatus: "truncated"
+        status: "truncated",
+        harnessStatus: "truncated",
+        nativeSteps: 0,
+        committedSteps: 0,
+        rejectedSteps: 0
       })
     ]);
     expect(Object.values(leaderboard.benchmarkStatistics.strata.byModel).reduce((sum: number, stats: any) => sum + stats.scheduledSeatCount, 0)).toBe(9);
     expect(Object.values(leaderboard.benchmarkStatistics.strata.byRole).reduce((sum: number, stats: any) => sum + stats.scheduledSeatCount, 0)).toBe(9);
+    for (const stats of Object.values(leaderboard.benchmarkStatistics.strata.byModel) as Array<Record<string, unknown>>) {
+      expect(stats).toMatchObject({
+        nativeSteps: expect.any(Number),
+        committedSteps: expect.any(Number),
+        rejectedSteps: expect.any(Number)
+      });
+    }
+    for (const stats of Object.values(leaderboard.benchmarkStatistics.strata.byProfile ?? {}) as Array<Record<string, unknown>>) {
+      expect(stats).toMatchObject({
+        nativeSteps: expect.any(Number),
+        committedSteps: expect.any(Number),
+        rejectedSteps: expect.any(Number)
+      });
+    }
     expect(leaderboard.benchmarkStatistics.strata.byTeam.village.scheduledSeatCount).toBeGreaterThan(0);
     expect(leaderboard.benchmarkStatistics.strata.byTeam.werewolves.scheduledSeatCount).toBeGreaterThan(0);
     expect(leaderboard.benchmarkStatistics.strata.bySeat["1"]).toMatchObject({
       dimension: "seat",
       key: "1",
       scheduledSeatCount: 1,
-      completedSeatCount: 1,
+      completedSeatCount: 0,
+      truncatedSeatCount: 1,
       failedSeatCount: 0,
+      nativeSteps: expect.any(Number),
+      committedSteps: expect.any(Number),
+      rejectedSteps: expect.any(Number),
       episodeIndexes: [0]
     });
-    expect(leaderboard.benchmarkStatistics.strata.byEpisodeStatus.completed).toMatchObject({
+    expect(leaderboard.benchmarkStatistics.strata.byEpisodeStatus.truncated).toMatchObject({
       dimension: "episodeStatus",
-      key: "completed",
+      key: "truncated",
       episodeCount: 1,
+      completedCount: 0,
+      truncatedCount: 1,
+      failedCount: 0,
       artifactCount: 1,
-      evaluationReportCount: 1
+      evaluationReportCount: 1,
+      nativeSteps: expect.any(Number),
+      committedSteps: expect.any(Number),
+      rejectedSteps: expect.any(Number)
     });
     expect(leaderboard.benchmarkStatistics.strata.byHarnessStatus.truncated).toMatchObject({
       dimension: "harnessStatus",
       key: "truncated",
       episodeCount: 1,
+      completedCount: 0,
+      truncatedCount: 1,
+      failedCount: 0,
       artifactCount: 1,
-      evaluationReportCount: 1
+      evaluationReportCount: 1,
+      nativeSteps: expect.any(Number),
+      committedSteps: expect.any(Number),
+      rejectedSteps: expect.any(Number)
     });
+  });
+
+  it("writes multi-episode tournament comparison pairs from recorded match artifacts", async () => {
+    const outputDir = await makeTempDir();
+    const result = await runTournament({
+      models: ["alpha", "beta"],
+      games: 2,
+      seed: "writer-multi-compare",
+      reasoner: deterministicReasoner,
+      maxTransitions: 0,
+      includeArtifacts: true
+    });
+    const written = await writeTournamentArtifactDirectory(result, {
+      outputDir,
+      experimentId: "writer-multi-compare",
+      createdAt: "2026-01-02T03:04:05.000Z"
+    });
+    expect(written.files.tournamentComparison).toBe(path.join(outputDir, "tournament_comparison.json"));
+    expect(written.files.tournamentComparisonMarkdown).toBe(path.join(outputDir, "tournament_comparison.md"));
+    const tournamentComparison = await readJson<Record<string, any>>(path.join(outputDir, "tournament_comparison.json"));
+    expect(tournamentComparison).toMatchObject({
+      artifactVersion: "harness.tournament-comparison.v1",
+      kind: "tournament-comparison",
+      tournamentSeed: "writer-multi-compare",
+      gamesRequested: 2,
+      artifactMatchCount: 2,
+      pairCount: 1
+    });
+    expect(tournamentComparison.pairs).toEqual([
+      expect.objectContaining({
+        baseline: expect.objectContaining({ episodeIndex: 0 }),
+        candidate: expect.objectContaining({ episodeIndex: 1 }),
+        comparisonId: expect.stringMatching(/^match-comparison:[a-f0-9]{24}$/i)
+      })
+    ]);
+    expect(tournamentComparison.summary.pairIdentityHash).toEqual(expect.any(String));
+    expect(JSON.stringify(tournamentComparison)).not.toContain(outputDir);
+    const tournamentComparisonMarkdown = await readFile(path.join(outputDir, "tournament_comparison.md"), "utf8");
+    expect(tournamentComparisonMarkdown).toContain("# Tournament Comparison");
+    expect(tournamentComparisonMarkdown).toContain(tournamentComparison.comparisonSetId);
+    expect(tournamentComparisonMarkdown).toContain("pairs=1");
+    expect(tournamentComparisonMarkdown).not.toContain(outputDir);
+  });
+
+  it("does not misrepresent the first report policy as tournament-wide when reports use mixed promotion policies", async () => {
+    const outputDir = await makeTempDir();
+    const result = await runTournament({
+      models: ["alpha", "beta"],
+      games: 2,
+      seed: "writer-mixed-promotion",
+      reasoner: deterministicReasoner,
+      maxTransitions: 0,
+      includeArtifacts: true
+    });
+    const secondEpisode = result.episodes[1];
+    if (!secondEpisode?.evaluationReport) throw new Error("Expected a second evaluation report.");
+    replacePromotionIdentityForEpisode(result, secondEpisode.index, {
+      policyId: "alternate.metric-promotion.v1",
+      policyVersion: "2.0.0",
+      policyHash: "alternate-policy-hash",
+      catalogId: "alternate.metric-promotion.catalog.v1",
+      catalogVersion: "2.0.0",
+      catalogHash: "alternate-catalog-hash",
+      catalogDomainId: "alternate-domain"
+    });
+
+    await writeTournamentArtifactDirectory(result, {
+      outputDir,
+      experimentId: "writer-mixed-promotion",
+      createdAt: "2026-01-02T03:04:05.000Z"
+    });
+
+    const registry = await readJson<Record<string, unknown>>(path.join(outputDir, "registry.json"));
+    const benchmark = await readJson<Record<string, unknown>>(path.join(outputDir, "benchmark_statistics.json"));
+    for (const output of [registry, benchmark]) {
+      expect(output).toMatchObject({
+        mixedMetricPromotionPolicies: true,
+        metricPromotionPolicyId: null,
+        metricPromotionPolicyVersion: null,
+        metricPromotionPolicyHash: null,
+        metricPromotionCatalogId: null,
+        metricPromotionCatalogVersion: null,
+        metricPromotionCatalogHash: null,
+        metricPromotionCatalogDomainId: null,
+        metricPromotionCatalog: null
+      });
+      expect(output.metricPromotionPolicies).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ catalogId: "werewolf.metric-promotion.catalog.v1" }),
+          expect.objectContaining({ catalogId: "alternate.metric-promotion.catalog.v1" })
+        ])
+      );
+    }
+
+    const metricCatalogIds = new Set(
+      (await readFile(path.join(outputDir, "metrics.jsonl"), "utf8"))
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { promotionCatalogId?: string | null })
+        .map((row) => row.promotionCatalogId)
+        .filter((id): id is string => typeof id === "string")
+    );
+    expect([...metricCatalogIds]).toEqual(
+      expect.arrayContaining(["werewolf.metric-promotion.catalog.v1", "alternate.metric-promotion.catalog.v1"])
+    );
+  });
+
+  it("writes a minimal allowlisted public pack from a domain-owned observation projector", async () => {
+    const outputDir = await makeTempDir();
+    const result = await runTournament({
+      models: ["alpha", "beta"],
+      games: 1,
+      seed: "writer-public-pack",
+      reasoner: deterministicReasoner,
+      maxTransitions: 1,
+      includeArtifacts: true
+    });
+    expect(result.artifacts?.length).toBe(1);
+    const fullArtifact = result.artifacts![0].artifact;
+    expect(fullArtifact.finalState.players.some((player) => Boolean(player.role))).toBe(true);
+
+    const written = await writeTournamentArtifactDirectory(result, {
+      outputDir,
+      createdAt: "2026-01-02T03:04:05.000Z",
+      visibility: "public",
+      projectPublicMatchArtifact: (artifact, episodeIndex) => {
+        const publicEvents = artifact.events
+          .filter((event) => event.visibility === "public")
+          .map((event) => ({ seq: event.seq, day: event.day, type: event.type }));
+        return {
+          artifactVersion: "harness.match.public.v1",
+          kind: "public-match",
+          episodeIndex,
+          status: artifact.status,
+          state: {
+            phase: artifact.finalState.phase,
+            day: artifact.finalState.day,
+            players: artifact.finalState.players.map((player) => ({
+              seat: player.seat,
+              name: player.name,
+              alive: player.alive,
+              isSheriff: player.isSheriff,
+              ...(player.eliminatedAt
+                ? {
+                    eliminatedAt: {
+                      day: player.eliminatedAt.day,
+                      reason: player.eliminatedAt.reason
+                    }
+                  }
+                : {})
+            })),
+            pendingActionCount: 0,
+            publicEventCount: publicEvents.length
+          },
+          events: publicEvents,
+          messages: []
+        };
+      }
+    });
+
+    const manifest = await readJson<Record<string, any>>(path.join(outputDir, "manifest.json"));
+    expect(written.files).toEqual({
+      manifest: path.join(outputDir, "manifest.json"),
+      episodes: path.join(outputDir, "episodes.jsonl"),
+      matchesDir: path.join(outputDir, "matches"),
+      matches: [path.join(outputDir, "matches", "episode-1.json")]
+    });
+    expect((await readdir(outputDir)).sort()).toEqual(["episodes.jsonl", "manifest.json", "matches"]);
+    expect(await readdir(path.join(outputDir, "matches"))).toEqual(["episode-1.json"]);
+    expect(manifest).toEqual({
+      artifactVersion: "harness.tournament.public.v1",
+      kind: "public-tournament",
+      visibility: "public",
+      createdAt: "2026-01-02T03:04:05.000Z",
+      games: { requested: 1, completed: 0, truncated: 1, failed: 0 },
+      files: {
+        manifest: "manifest.json",
+        episodes: "episodes.jsonl",
+        matches: ["matches/episode-1.json"]
+      }
+    });
+
+    const episodes = await readJsonl<Record<string, any>>(path.join(outputDir, "episodes.jsonl"));
+    expect(episodes).toEqual([
+      {
+        kind: "public-episode",
+        episodeIndex: 0,
+        status: fullArtifact.status,
+        match: "matches/episode-1.json",
+        publicMessageCount: 0
+      }
+    ]);
+
+    const matchPath = path.join(outputDir, manifest.files.matches[0]);
+    const matchArtifact = await readJson<Record<string, any>>(matchPath);
+    expect(Object.keys(matchArtifact).sort()).toEqual(["artifactVersion", "episodeIndex", "events", "kind", "messages", "state", "status"]);
+    expect(matchArtifact).toMatchObject({
+      artifactVersion: "harness.match.public.v1",
+      kind: "public-match",
+      episodeIndex: 0,
+      state: {
+        phase: expect.any(String),
+        day: expect.any(Number),
+        pendingActionCount: 0,
+        publicEventCount: expect.any(Number),
+        players: expect.any(Array)
+      },
+      events: expect.any(Array),
+      messages: []
+    });
+    for (const player of matchArtifact.state.players) {
+      expect(Object.keys(player).sort()).toEqual(expect.arrayContaining(["alive", "isSheriff", "name", "seat"]));
+      expect(player).not.toHaveProperty("id");
+      expect(player).not.toHaveProperty("role");
+      expect(player).not.toHaveProperty("team");
+      expect(player).not.toHaveProperty("ability");
+    }
+    for (const event of matchArtifact.events) {
+      expect(Object.keys(event).sort()).toEqual(["day", "seq", "type"]);
+    }
+    const publicContents = await Promise.all(
+      ["manifest.json", "episodes.jsonl", "matches/episode-1.json"].map((relativePath) =>
+        readFile(path.join(outputDir, relativePath), "utf8")
+      )
+    );
+    for (const forbidden of [
+      result.seed,
+      fullArtifact.seed,
+      fullArtifact.runId,
+      fullArtifact.matchId,
+      ...result.profiles.flatMap((profile) => [profile.id, profile.policyName])
+    ]) {
+      expect(publicContents.join("\n")).not.toContain(forbidden);
+    }
   });
 
   it("records corrupted match artifact integrity without inventing runtime failures", async () => {
@@ -747,6 +1299,9 @@ describe("tournament artifact directory writer", () => {
         ok: false,
         errorCount: 1,
         errors: [expectedIntegrityError],
+        nativeSteps: expect.any(Number),
+        committedSteps: expect.any(Number),
+        rejectedSteps: expect.any(Number),
         matchArtifact: expect.stringMatching(/^matches\/.+\.json$/),
         matchJsonl: expect.stringMatching(/^matches\/.+\.jsonl$/)
       })
@@ -755,7 +1310,7 @@ describe("tournament artifact directory writer", () => {
     const manifest = await readJson<Record<string, any>>(path.join(outputDir, "manifest.json"));
     expect(manifest).toMatchObject({
       matchCount: 1,
-      gamesCompleted: 1,
+      gamesCompleted: 0,
       gamesFailed: 0,
       gamesTruncated: 1,
       artifactIntegrityOkCount: 0,
@@ -935,7 +1490,10 @@ describe("tournament artifact directory writer", () => {
         episodeSeed: "writer-failed:g1",
         status: "failed",
         harnessStatus: "failed",
-        harnessErrorCount: 1
+        harnessErrorCount: 1,
+        nativeSteps: expect.any(Number),
+        committedSteps: expect.any(Number),
+        rejectedSteps: expect.any(Number)
       });
       expect(failures[0].failureReason).toContain("planned tournament writer failure");
       expect(failures[0].failureStateHash).toEqual(expect.any(String));
@@ -950,21 +1508,32 @@ describe("tournament artifact directory writer", () => {
         team: expect.any(String),
         actionKind: expect.any(String),
         traceId: expect.stringContaining(":harness:"),
-        eventId: expect.any(String),
-        eventSeq: expect.any(Number),
+        eventId: null,
+        eventSeq: null,
         failureKind: null,
         providerStage: null,
         providerFailure: null,
-        source: "harness.error"
+        source: "social_step_failure"
       });
       expect(failures[0].failureAttributions).toEqual([failures[0].primaryFailure]);
+      expect(Array.isArray(failures[0].agents)).toBe(true);
+      expect(failures[0].agents.length).toBeGreaterThan(0);
+      for (const agent of failures[0].agents) {
+        expect(agent).toMatchObject({
+          playerId: expect.any(String),
+          nativeSteps: expect.any(Number),
+          committedSteps: expect.any(Number),
+          rejectedSteps: expect.any(Number)
+        });
+      }
 
       const matchArtifact = await readJson<Record<string, any>>(path.join(outputDir, failures[0].partialArtifact));
       expect(matchArtifact.status).toBe("failed");
       expect(matchArtifact.failureReason).toContain("planned tournament writer failure");
       expect(matchArtifact.failureStateHash).toEqual(expect.any(String));
       expect(matchArtifact.trajectory.length).toBeGreaterThan(0);
-      expect(matchArtifact.events.some((event: { type: string }) => event.type === "harness.error")).toBe(true);
+      expect(matchArtifact.events.some((event: { type: string }) => event.type === "harness.error")).toBe(false);
+      expect(matchArtifact.socialEpisode.steps.some((step: any) => step.commitStatus === "rejected" && step.failure)).toBe(true);
       expect(matchArtifact.metrics.harnessErrorCount).toBe(1);
       expect(matchArtifact.socialEpisode.status).toBe("failed");
 
@@ -987,17 +1556,20 @@ describe("tournament artifact directory writer", () => {
           currency: null
         },
         totals: {
-          calls: 1,
-          promptTokens: 7,
-          completionTokens: 9,
-          totalTokens: 16,
-          latencyMs: 5,
+          calls: 2,
+          promptTokens: 14,
+          completionTokens: 18,
+          totalTokens: 32,
+          latencyMs: 10,
           averageLatencyMs: 5,
           harnessTurns: 1,
           harnessErrors: 1,
+          nativeSteps: expect.any(Number),
+          committedSteps: expect.any(Number),
+          rejectedSteps: expect.any(Number),
           attempts: expect.objectContaining({
-            count: 1,
-            sum: 1,
+            count: 2,
+            sum: 2,
             max: 1,
             missing: 0,
             average: 1
@@ -1008,8 +1580,11 @@ describe("tournament artifact directory writer", () => {
             episodeIndex: 0,
             status: "failed",
             harnessStatus: "failed",
-            calls: 1,
-            harnessErrors: 1
+            calls: 2,
+            harnessErrors: 1,
+            nativeSteps: expect.any(Number),
+            committedSteps: expect.any(Number),
+            rejectedSteps: expect.any(Number)
           })
         ]
       });
@@ -1028,9 +1603,12 @@ describe("tournament artifact directory writer", () => {
       expect(Object.values(costLatency.byModel)).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            calls: 1,
-            promptTokens: 7,
-            completionTokens: 9,
+            calls: 2,
+            promptTokens: 14,
+            completionTokens: 18,
+            nativeSteps: expect.any(Number),
+            committedSteps: expect.any(Number),
+            rejectedSteps: expect.any(Number),
             providerRequestIds: ["Bearer [REDACTED]"],
             providerFailures: expect.objectContaining({ count: 0 })
           })
@@ -1079,8 +1657,8 @@ describe("tournament artifact directory writer", () => {
       team: expect.any(String),
       actionKind: expect.any(String),
       traceId: expect.stringContaining(":harness:"),
-      eventId: expect.any(String),
-      eventSeq: expect.any(Number),
+      eventId: null,
+      eventSeq: null,
       failureKind: "timeout",
       providerStage: "during_request",
       status: null,
@@ -1101,13 +1679,13 @@ describe("tournament artifact directory writer", () => {
         providerRequestId: "Bearer [REDACTED]",
         retryCause: "LLM API request exceeded 42ms."
       },
-      source: "harness.error"
+      source: "social_step_failure"
     });
     expect(failures[0].failureAttributions).toEqual([failures[0].primaryFailure]);
 
     const matchArtifact = await readJson<Record<string, any>>(path.join(outputDir, failures[0].partialArtifact));
-    const harnessError = matchArtifact.events.find((event: { type: string }) => event.type === "harness.error");
-    expect(harnessError.payload.providerFailure).toMatchObject({
+    const nativeFailure = matchArtifact.socialEpisode.steps.find((step: any) => step.failure?.metadata?.providerFailure);
+    expect(nativeFailure.failure.metadata.providerFailure).toMatchObject({
       failureKind: "timeout",
       providerStage: "during_request",
       timeoutMs: 42,
@@ -1115,8 +1693,8 @@ describe("tournament artifact directory writer", () => {
       maxAttempts: 3,
       providerRequestId: "Bearer [REDACTED]"
     });
-    expect(JSON.stringify(harnessError.payload)).not.toContain("raw-provider-token-should-not-appear");
-    expect(JSON.stringify(harnessError.payload)).not.toContain("provider raw body should not appear");
+    expect(JSON.stringify(nativeFailure.failure.metadata)).not.toContain("raw-provider-token-should-not-appear");
+    expect(JSON.stringify(nativeFailure.failure.metadata)).not.toContain("provider raw body should not appear");
 
     const costLatency = await readJson<Record<string, any>>(path.join(outputDir, "cost_latency.json"));
     expect(costLatency.totals.providerFailures).toMatchObject({
@@ -1249,6 +1827,9 @@ describe("tournament artifact directory writer", () => {
           matchId: null,
           status: "failed",
           harnessStatus: null,
+          nativeSteps: 0,
+          committedSteps: 0,
+          rejectedSteps: 0,
           matchArtifact: null,
           matchJsonl: null,
           resolvedAssignments: [],
@@ -1278,7 +1859,10 @@ describe("tournament artifact directory writer", () => {
           truncated: 0,
           failed: 0,
           tournamentFailed: 1
-        })
+        }),
+        nativeSteps: 0,
+        committedSteps: 0,
+        rejectedSteps: 0
       },
       strata: {
         byEpisodeStatus: {
@@ -1286,7 +1870,10 @@ describe("tournament artifact directory writer", () => {
             dimension: "episodeStatus",
             key: "failed",
             episodeCount: 1,
-            artifactCount: 0
+            artifactCount: 0,
+            nativeSteps: 0,
+            committedSteps: 0,
+            rejectedSteps: 0
           })
         },
         byHarnessStatus: {
@@ -1294,7 +1881,10 @@ describe("tournament artifact directory writer", () => {
             dimension: "harnessStatus",
             key: "tournamentFailed",
             episodeCount: 1,
-            artifactCount: 0
+            artifactCount: 0,
+            nativeSteps: 0,
+            committedSteps: 0,
+            rejectedSteps: 0
           })
         }
       }
@@ -1312,13 +1902,15 @@ describe("tournament artifact directory writer", () => {
       checkpointId: forkOf.checkpointId,
       parentRunId: forkOf.parentRunId ?? null,
       parentMatchId: forkOf.parentMatchId ?? null,
-      parentTraceId: forkOf.parentTraceId ?? null,
-      parentTurnIndex: forkOf.parentTurnIndex ?? null,
+      parentBoundaryTraceId: forkOf.parentBoundaryTraceId ?? null,
+      parentBoundaryTurnIndex: forkOf.parentBoundaryTurnIndex ?? null,
       parentStateHash: forkOf.parentStateHash,
-      parentTrajectoryHash: forkOf.parentTrajectoryHash ?? null,
-      parentAgentsHash: forkOf.parentAgentsHash ?? null,
-      parentSocialMessagesHash: forkOf.parentSocialMessagesHash ?? null,
-      parentTrajectoryLength: forkOf.parentTrajectoryLength,
+      parentExecutionPrefixHash: forkOf.parentExecutionPrefixHash,
+      parentAgentsHash: forkOf.parentAgentsHash,
+      parentChannelsHash: forkOf.parentChannelsHash,
+      parentMessagesHash: forkOf.parentMessagesHash,
+      parentNativeStepCount: forkOf.parentNativeStepCount,
+      parentMessageCount: forkOf.parentMessageCount,
       createdAt: forkOf.createdAt,
       reason: forkOf.reason ?? null
     };
@@ -1362,7 +1954,10 @@ describe("tournament artifact directory writer", () => {
     const leaderboard = await readJson<Record<string, any>>(path.join(outputDir, "leaderboard.json"));
     expect(leaderboard.episodes[0]).toMatchObject({
       index: 0,
-      forkOf: forkSummary
+      forkOf: forkSummary,
+      nativeSteps: expect.any(Number),
+      committedSteps: expect.any(Number),
+      rejectedSteps: expect.any(Number)
     });
     expect(JSON.stringify(leaderboard)).not.toContain("parentEvidenceTraceIds");
 
@@ -1541,7 +2136,7 @@ async function buildForkedTournamentResult(): Promise<TournamentResult> {
             playerId: player.id,
             seat: player.seat,
             profileId: agent?.profileId,
-            model: agent?.model ?? "unknown",
+            model: agent?.model ?? "alpha",
             role: player.role,
             team: player.team,
             policyName: agent?.policyName,
@@ -1563,6 +2158,37 @@ async function buildForkedTournamentResult(): Promise<TournamentResult> {
       }
     ]
   };
+}
+
+function replacePromotionIdentityForEpisode(
+  result: TournamentResult,
+  episodeIndex: number,
+  identity: {
+    policyId: string;
+    policyVersion: string;
+    policyHash: string;
+    catalogId: string;
+    catalogVersion: string;
+    catalogHash: string;
+    catalogDomainId: string;
+  }
+): void {
+  const reports = new Set<HarnessEvaluationReport>();
+  const episode = result.episodes.find((item) => item.index === episodeIndex);
+  if (episode?.evaluationReport) reports.add(episode.evaluationReport);
+  if (episode?.artifact?.evaluationReport) reports.add(episode.artifact.evaluationReport);
+  for (const record of result.artifacts ?? []) {
+    if (record.index === episodeIndex) reports.add(record.artifact.evaluationReport);
+  }
+  if (!reports.size) throw new Error(`Expected evaluation report for episode ${episodeIndex}.`);
+
+  for (const report of reports) {
+    Object.assign(report.summary.promotion, identity);
+    for (const metric of report.metrics) {
+      if (!metric.promotionDecision) throw new Error(`Expected recorded promotion decision for ${metric.id}.`);
+      Object.assign(metric.promotionDecision, identity);
+    }
+  }
 }
 
 async function makeTempDir(): Promise<string> {
@@ -1587,6 +2213,8 @@ async function expectRequiredFiles(outputDir: string): Promise<void> {
       "cost_latency.json",
       "leaderboard.json",
       "benchmark_statistics.json",
+      "tournament_comparison.json",
+      "tournament_comparison.md",
       "summary.md",
       "episodes.csv",
       "agents.csv",

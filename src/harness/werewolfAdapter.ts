@@ -7,40 +7,52 @@ import { hashStableState } from "./hash";
 import { attachSpeech, policyForRole } from "./policy";
 import type {
   SocialAction,
+  SocialActionValidationResult,
   SocialActor,
   SocialActorObservationContext,
+  SocialActorStepReceipt,
   SocialAgentProfile,
   SocialActorTurnIndexProvider,
-  SocialBeforeEnvironmentStepContext,
   SocialChannel,
   SocialDecisionFailureHook,
   SocialEnvironment,
   SocialEnvironmentStepFailureHook,
+  SocialParallelEnvironment,
   SocialEpisodeArtifact,
   SocialHarnessStep,
   SocialMessage,
   SocialObservationAssembler,
   SocialSchedulerResolver,
+  SocialSpeechAct,
   SocialSystemTransition,
   SocialSystemTransitionProvider,
   SocialTraceIdProvider
 } from "./social";
-import { SocialCommunicationBus, runSocialEpisode } from "./social";
+import { SocialCommunicationBus } from "./social";
+import { runHarnessEpisode } from "./runner";
 import { createAgentSocialState } from "./socialState";
 import { describeError, providerFailureFromError } from "./providerFailure";
-import type {
-  AgentHarnessState,
-  HarnessAgentConfig,
-  HarnessErrorPayload,
-  HarnessPlayerView,
-  HarnessReasoner,
-  HarnessRunOptions,
-  HarnessRunResult,
-  HarnessStepRecord,
-  HarnessTurnTrace,
-  PolicyPlan,
-  ReasonerAgentContext,
-  ReasonerOutputSummary
+import {
+  WEREWOLF_HARNESS_TURN_METADATA_KIND,
+  parseWerewolfHarnessTurnActionMetadata,
+  tryParseWerewolfHarnessTurnActionMetadata,
+  type WerewolfHarnessTurnActionMetadata
+} from "./werewolfExecutionEvidence";
+import {
+  DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER,
+  type AgentHarnessState,
+  type HarnessAgentConfig,
+  type HarnessErrorPayload,
+  type HarnessPlayerView,
+  type HarnessReasoner,
+  type HarnessRunOptions,
+  type HarnessRunResult,
+  type HarnessStepRecord,
+  type HarnessTurnTrace,
+  type PolicyPlan,
+  type ReasonerAgentContext,
+  type ReasonerOutputSummary,
+  type WerewolfHarnessObservation
 } from "./types";
 import { WerewolfEnvironment } from "./environment";
 import { buildWerewolfHarnessRunResultFromParts } from "./werewolfResult";
@@ -56,24 +68,7 @@ export const WEREWOLF_SYSTEM_PROFILE: SocialAgentProfile = {
 
 export type WerewolfSocialPendingAction = PendingAction;
 
-export type WerewolfSocialObservation =
-  | {
-      kind: "player";
-      agentId: string;
-      view: HarnessPlayerView;
-    }
-  | {
-      kind: "system";
-      agentId: typeof WEREWOLF_SYSTEM_ACTOR_ID;
-      gameId: string;
-      phase: Phase;
-      day: number;
-      pendingAction: Extract<PendingAction, { kind: "advance" }>;
-      social: {
-        channels: SocialChannel[];
-        messages: SocialMessage[];
-      };
-    };
+export type WerewolfSocialObservation = WerewolfHarnessObservation;
 
 export interface WerewolfSocialActorAdapterOptions {
   actor: WerewolfAgentActor;
@@ -97,29 +92,30 @@ export interface WerewolfMessageDraftInput {
 export type WerewolfSocialStep = SocialHarnessStep<HarnessPlayerView, AgentPendingAction, GameCommand>;
 export type WerewolfGenericSocialStep = SocialHarnessStep<WerewolfSocialObservation, WerewolfSocialPendingAction, GameCommand>;
 
-export interface WerewolfSocialActionMetadata {
-  kind: "werewolf-harness-turn";
-  turnIndex?: number;
-  policyPlan: PolicyPlan;
-  reasonerOutput: ReasonerOutputSummary;
-  turnTrace: HarnessTurnTrace;
-  agentStateHash?: string;
-}
+export type WerewolfSocialActionMetadata = WerewolfHarnessTurnActionMetadata;
 
 export interface WerewolfSocialStepMetadata {
-  schedulerMode: "aec" | "aec-batched-decision";
+  schedulerMode: "aec" | "aec-batched-decision" | "parallel";
   resolutionPolicy: string;
   batchId?: string;
   batchIndex?: number;
   batchSize?: number;
 }
 
-export type WerewolfSocialHarnessPrefixSchedulerMode = "aec" | "aec-batched-decision" | "simultaneous-batch";
+export type WerewolfSocialHarnessPrefixSchedulerMode = "aec" | "aec-batched-decision" | "simultaneous-batch" | "parallel";
 
 export interface WerewolfSocialHarnessPrefixOptions
   extends Pick<
     HarnessRunOptions,
-    "initialState" | "agents" | "initialAgentStates" | "initialSocialMessages" | "reasoner" | "maxTransitions" | "recordAgentSnapshots"
+    | "initialState"
+    | "agents"
+    | "initialAgentStates"
+    | "initialSocialChannels"
+    | "initialSocialMessages"
+    | "reasoner"
+    | "maxTransitions"
+    | "jointPhaseScheduler"
+    | "recordAgentSnapshots"
   > {
   id?: string;
   schedulerMode?: WerewolfSocialHarnessPrefixSchedulerMode;
@@ -165,10 +161,24 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
   readonly id: string;
   readonly profile: SocialAgentProfile;
   private readonly turnTraces = new Map<string, HarnessTurnTrace>();
+  private readonly pendingProposals = new Map<
+    string,
+    {
+      plan: PolicyPlan;
+      privateMemo: string;
+      pendingAction: AgentPendingAction;
+      providerRequestId?: string;
+      expectedAgentStateHash: string;
+    }
+  >();
+  private readonly stagedActors = new Map<string, WerewolfAgentActor>();
   private latest?: {
     observation: Extract<WerewolfSocialObservation, { kind: "player" }>;
     traceId: string;
+    transactionId: string;
     turnIndex: number;
+    receiptTurnIndex: number;
+    actor: WerewolfAgentActor;
   };
   private localTurnIndex = 0;
 
@@ -193,11 +203,25 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
     if (observation.agentId !== this.id) {
       throw new Error(`Werewolf social actor ${this.id} received observation for ${observation.agentId}.`);
     }
-    const turnIndex = context?.actorTurnIndex ?? (context?.traceId ? context.turnIndex : this.localTurnIndex + 1);
-    const traceId = context?.traceId ?? `${this.options.tracePrefix ?? observation.view.gameId}:social-adapter:${turnIndex}:${this.id}:${observation.view.phase}`;
+    const turnIndex = this.options.tracePrefix
+      ? this.localTurnIndex + 1
+      : context?.actorTurnIndex ?? (context?.traceId ? context.turnIndex : this.localTurnIndex + 1);
+    const traceId = this.options.tracePrefix
+      ? `${this.options.tracePrefix}:social-adapter:${turnIndex}:${this.id}:${observation.view.phase}`
+      : context?.traceId ?? `werewolf:social-adapter:${turnIndex}:${this.id}:${observation.view.phase}`;
+    const transactionId = context?.transactionId ?? context?.traceId ?? traceId;
     this.localTurnIndex = Math.max(this.localTurnIndex, turnIndex);
-    this.latest = { observation, traceId, turnIndex };
-    this.options.actor.observe(observation.view, { traceId, turnIndex });
+    const stagedActor = context?.transactional === true ? new WerewolfAgentActor(cloneJson(this.options.actor.state)) : this.options.actor;
+    stagedActor.observe(observation.view, { traceId, turnIndex });
+    if (context?.transactional === true) this.stagedActors.set(transactionId, stagedActor);
+    this.latest = {
+      observation,
+      traceId,
+      transactionId,
+      turnIndex,
+      receiptTurnIndex: context?.turnIndex ?? turnIndex,
+      actor: stagedActor
+    };
   }
 
   async decide(pending: WerewolfSocialPendingAction): Promise<SocialAction<GameCommand>> {
@@ -211,41 +235,45 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       throw new Error(`Werewolf social actor ${this.id} cannot decide before observing.`);
     }
 
-    let plan = this.options.actor.plan(pending);
+    const stagedActor = this.latest.actor;
+    let plan = stagedActor.plan(pending);
     try {
-      const reasonerOutput = await this.options.reasoner.think({
+      const reasonerInput = {
         traceId: this.latest.traceId,
         view: cloneJson(this.latest.observation.view),
         action: cloneJson(pending),
-        agent: toReasonerAgentContext(this.options.actor.state),
+        agent: toReasonerAgentContext(stagedActor.state),
         policyPlan: cloneJson(plan)
-      });
+      };
+      const reasonerOutput = await this.options.reasoner.think(reasonerInput);
+      const actionProposal = reasonerOutput.actionProposal;
+      plan = stagedActor.applyReasonerProposal(plan, pending, actionProposal);
       if (pending.kind === "speech") {
         plan = attachSpeech(plan, normalizeSpeech(reasonerOutput.content));
       }
-      this.options.actor.commitTurn(plan, reasonerOutput.content, {
-        traceId: this.latest.traceId,
-        turnIndex: this.latest.turnIndex,
-        pendingAction: pending,
-        providerRequestId: reasonerOutput.completion.providerRequestId
-      });
-      const command = this.options.actor.act(plan);
-      const agentStateHash = this.options.actor.state.socialStateHash;
+      const command = stagedActor.act(plan);
       const publicSpeech = command.type === "speech.submit" ? command.text : undefined;
+      const commitContext = {
+        traceId: this.latest.traceId,
+        turnIndex: this.latest.receiptTurnIndex,
+        pendingAction: cloneJson(pending),
+        providerRequestId: reasonerOutput.completion.providerRequestId
+      };
+      const expectedAgentStateHash = stagedActor.previewCommittedStateHash(plan, reasonerOutput.content, commitContext);
       const trace: HarnessTurnTrace = {
         traceId: this.latest.traceId,
         playerId: this.id,
-        profileId: this.options.actor.state.profileId,
-        model: this.options.actor.state.model,
+        profileId: stagedActor.state.profileId,
+        model: stagedActor.state.model,
         actionKind: pending.kind,
-        policyName: this.options.actor.state.policyName,
+        policyName: stagedActor.state.policyName,
         commandType: command.type,
         intent: plan.intent,
         targetId: plan.targetId,
         confidence: plan.confidence,
         strategyTags: plan.strategyTags,
         arbitration: cloneJson(plan.arbitration),
-        beliefs: cloneJson(this.options.actor.state.beliefs),
+        beliefs: cloneJson(stagedActor.state.beliefs),
         privateMemo: reasonerOutput.content,
         publicSpeech,
         latencyMs: reasonerOutput.completion.latencyMs,
@@ -255,18 +283,29 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         attempts: reasonerOutput.completion.attempts,
         retryHistory: cloneJson(reasonerOutput.completion.retryHistory),
         stream: cloneJson(reasonerOutput.completion.stream),
-        agentStateHash
+        agentStateHash: expectedAgentStateHash
       };
-      const reasonerSummary = summarizeReasonerOutput(reasonerOutput.content, reasonerOutput.completion);
+      const reasonerSummary = summarizeReasonerOutput(
+        reasonerOutput.content,
+        reasonerOutput.completion,
+        actionProposal
+      );
       const metadata: WerewolfSocialActionMetadata = {
-        kind: "werewolf-harness-turn",
+        kind: WEREWOLF_HARNESS_TURN_METADATA_KIND,
         turnIndex: this.latest.turnIndex,
         policyPlan: cloneJson(plan),
         reasonerOutput: cloneJson(reasonerSummary),
         turnTrace: cloneJson(trace),
-        agentStateHash
+        agentStateHash: expectedAgentStateHash
       };
       this.turnTraces.set(this.latest.traceId, trace);
+      this.pendingProposals.set(this.latest.traceId, {
+        plan: cloneJson(plan),
+        privateMemo: reasonerOutput.content,
+        pendingAction: cloneJson(pending),
+        providerRequestId: reasonerOutput.completion.providerRequestId,
+        expectedAgentStateHash
+      });
       return {
         actorId: this.id,
         kind: command.type,
@@ -293,6 +332,29 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
     }
   }
 
+  onStepResult(receipt: SocialActorStepReceipt<WerewolfSocialObservation, WerewolfSocialPendingAction, GameCommand>): void {
+    const transactionId = receipt.transactionId ?? receipt.traceId;
+    const stagedActor = this.stagedActors.get(transactionId);
+    this.stagedActors.delete(transactionId);
+    const proposal = this.pendingProposals.get(receipt.traceId);
+    this.pendingProposals.delete(receipt.traceId);
+    if (!proposal || !stagedActor || receipt.status !== "committed") return;
+
+    stagedActor.commitTurn(proposal.plan, proposal.privateMemo, {
+      traceId: receipt.traceId,
+      turnIndex: receipt.turnIndex,
+      pendingAction: proposal.pendingAction,
+      providerRequestId: proposal.providerRequestId
+    });
+    const agentStateHash = stagedActor.state.socialStateHash;
+    if (agentStateHash !== proposal.expectedAgentStateHash) {
+      throw new Error(
+        `Committed agent state hash mismatch for ${this.id}: expected ${proposal.expectedAgentStateHash}, received ${agentStateHash}.`
+      );
+    }
+    replaceAgentHarnessState(this.options.actor.state, stagedActor.state);
+  }
+
   turnTraceFor(traceId: string | undefined): HarnessTurnTrace | undefined {
     if (!traceId) return undefined;
     return cloneJson(this.turnTraces.get(traceId));
@@ -300,7 +362,9 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
 }
 
 export class WerewolfSocialEnvironment
-  implements SocialEnvironment<GameState, WerewolfSocialObservation, WerewolfSocialPendingAction, GameCommand>
+  implements
+    SocialEnvironment<GameState, WerewolfSocialObservation, WerewolfSocialPendingAction, GameCommand>,
+    SocialParallelEnvironment<GameState, WerewolfSocialObservation, WerewolfSocialPendingAction, GameCommand>
 {
   constructor(readonly environment: WerewolfEnvironment) {}
 
@@ -338,12 +402,33 @@ export class WerewolfSocialEnvironment
     return this.environment.step(command);
   }
 
-  recordTurn(trace: HarnessTurnTrace): GameState {
-    return this.environment.recordTurn(trace);
+  validateAction(command: GameCommand, pending: WerewolfSocialPendingAction): SocialActionValidationResult {
+    if (pending.kind === "advance" && command.type !== "system.advance") {
+      return {
+        valid: false,
+        code: "pending-kind-mismatch",
+        message: `Command ${command.type} cannot resolve system pending action ${pending.kind}.`
+      };
+    }
+    if (pending.kind !== "advance" && command.type === "system.advance") {
+      return {
+        valid: false,
+        code: "pending-kind-mismatch",
+        message: `System advance cannot resolve agent pending action ${pending.kind}.`
+      };
+    }
+    if (pending.actorId && command.actorId !== pending.actorId) {
+      return {
+        valid: false,
+        code: "actor-mismatch",
+        message: `Command actor ${command.actorId} does not match pending actor ${pending.actorId}.`
+      };
+    }
+    return this.environment.validate(command);
   }
 
-  recordError(actorId: string, payload: HarnessErrorPayload): GameState {
-    return this.environment.recordError(actorId, payload);
+  stepBatch(commandsByAgent: Record<string, GameCommand>): GameState {
+    return this.environment.stepBatch(commandsByAgent);
   }
 
   done(): boolean {
@@ -356,7 +441,6 @@ export class WerewolfSocialEnvironment
 }
 
 export const assembleWerewolfSocialObservation: SocialObservationAssembler<
-  GameState,
   WerewolfSocialObservation,
   WerewolfSocialPendingAction
 > = (context) => {
@@ -507,9 +591,10 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
         players: initialState.players
       })
   );
-  const channels = createWerewolfSocialChannels(initialState.players);
-  const artifact = await runSocialEpisode({
+  const channels = cloneJson(options.initialSocialChannels ?? createWerewolfSocialChannels(initialState.players));
+  const artifact = await runHarnessEpisode({
     id: options.id ?? initialState.id,
+    domainId: "werewolf",
     environment: WerewolfSocialEnvironment.fromState(initialState),
     actors,
     channels,
@@ -517,9 +602,9 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
     schedulerMode: options.schedulerMode ?? "aec",
     maxTransitions: options.maxTransitions,
     hashState: hashStableState,
+    hashMessages: hashStableState,
     eventSeq: werewolfEventSeq,
-    beforeEnvironmentStep: (context) => {
-      recordWerewolfHarnessTurn(context);
+    afterEnvironmentStep: (context) => {
       if (!recordAgentSnapshots) return;
       if (context.actorId === WEREWOLF_SYSTEM_ACTOR_ID) return;
       const traceId = context.action.traceId;
@@ -534,7 +619,8 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
     systemTransition: werewolfSystemTransition,
     traceIdForDecision: options.traceIdForDecision ?? werewolfLegacyTraceId,
     actorTurnIndexForDecision: options.actorTurnIndexForDecision ?? createSequentialActorTurnIndexProvider(),
-    schedulerModeForBatch: options.schedulerModeForBatch ?? werewolfLegacySchedulerModeForBatch,
+    schedulerModeForBatch:
+      options.schedulerModeForBatch ?? createWerewolfJointPhaseSchedulerResolver(options.jointPhaseScheduler),
     onDecisionFailure: options.onDecisionFailure ?? recordWerewolfDecisionFailure,
     onEnvironmentStepFailure: options.onEnvironmentStepFailure ?? recordWerewolfEnvironmentStepFailure
   });
@@ -565,9 +651,7 @@ export async function runWerewolfSocialHarnessPrefixAsHarnessResult(
     finalState: prefix.artifact.finalState,
     agentStates: prefix.agentStates,
     trajectory: prefix.trajectory,
-    socialSteps: prefix.socialSteps,
-    messages: prefix.artifact.messages,
-    channels: prefix.channels,
+    socialEpisode: prefix.artifact,
     forkOf: options.forkOf
   });
 }
@@ -593,8 +677,7 @@ export async function probeWerewolfSocialHarnessTurn(options: WerewolfHarnessTur
     agentId: options.action.actorId,
     pendingAction: cloneJson(options.action),
     environmentObservation,
-    visibleSocial: socialBus.observe(options.action.actorId),
-    state: cloneJson(environment.snapshot())
+    visibleSocial: socialBus.observe(options.action.actorId)
   });
   const socialActor = new WerewolfSocialActorAdapter({
     actor,
@@ -628,26 +711,36 @@ function tryBuildWerewolfInitializationFailureResult(
     initializeWerewolfAgentActors(initialState, options.agents, options.initialAgentStates);
     return undefined;
   } catch (error) {
-    const environment = new WerewolfEnvironment(initialState);
-    const channels = createWerewolfSocialChannels(initialState.players);
+    const channels = cloneJson(options.initialSocialChannels ?? createWerewolfSocialChannels(initialState.players));
     const socialBus = new SocialCommunicationBus(channels, cloneJson(options.initialSocialMessages ?? []));
     const failureReason = describeError(error);
-    environment.recordError(WEREWOLF_SYSTEM_ACTOR_ID, {
-      model: "unknown",
-      actionKind: "initialize",
-      message: failureReason,
-      traceId: `${initialState.id}:harness:init`
-    });
     return buildWerewolfHarnessRunResultFromParts({
       status: "failed",
       failureReason,
       initialState,
-      finalState: environment.snapshot(),
+      finalState: initialState,
       agentStates: [],
       trajectory: [],
-      socialSteps: [],
-      messages: socialBus.listMessages(),
-      channels: socialBus.listChannels(),
+      socialEpisode: {
+        id: `${initialState.id}:social-execution:init-failure`,
+        status: "failed",
+        execution: {
+          schemaVersion: "harness.social-execution.v1",
+          started: false,
+          notStartedStage: "agent-initialization",
+          initialMessageCount: socialBus.listMessages().length,
+          initialMessagesHash: hashStableState(socialBus.listMessages())
+        },
+        schedulerMode: "aec",
+        profiles: [],
+        channels: socialBus.listChannels(),
+        initialState,
+        finalState: initialState,
+        steps: [],
+        messages: socialBus.listMessages(),
+        failureReason,
+        error: failureReason
+      },
       forkOf: options.forkOf
     });
   }
@@ -671,6 +764,7 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
       recipientIds: publicRecipientIds,
       visibility: "public",
       content: input.command.text,
+      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
       metadata: {
         ...baseMetadata,
         kind: "public-speech",
@@ -689,6 +783,7 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
       recipientIds: publicRecipientIds,
       visibility: "public",
       content: input.command.abstain ? `${input.actorId} abstained from the day vote.` : `${input.actorId} voted for ${input.command.targetId}.`,
+      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
       metadata: {
         ...baseMetadata,
         kind: "public-vote",
@@ -706,6 +801,7 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
       recipientIds: publicRecipientIds,
       visibility: "public",
       content: input.command.targetId ? `${input.actorId} shot ${input.command.targetId}.` : `${input.actorId} declined to shoot.`,
+      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
       metadata: {
         ...baseMetadata,
         kind: "public-hunter-shot",
@@ -721,6 +817,7 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
       recipientIds: wolfIds.filter((wolfId) => wolfId !== input.actorId),
       visibility: "team",
       content: `${input.actorId} selected ${input.command.targetId} as the night kill target.`,
+      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
       metadata: {
         ...baseMetadata,
         kind: "werewolf-kill-vote",
@@ -736,6 +833,7 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
       recipientIds: [input.actorId],
       visibility: "private",
       content: `${input.actorId} inspected ${input.command.targetId}.`,
+      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
       metadata: {
         ...baseMetadata,
         kind: "private-seer-inspect",
@@ -751,6 +849,7 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
       recipientIds: [input.actorId],
       visibility: "private",
       content: `${input.actorId} submitted witch action.`,
+      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
       metadata: {
         ...baseMetadata,
         kind: "private-witch-action",
@@ -780,6 +879,120 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
   }
 
   return messages;
+}
+
+function werewolfSpeechActsForCommand(command: GameCommand, actorId: string): SocialSpeechAct[] | undefined {
+  const evidenceRefs: SocialSpeechAct["evidenceRefs"] = [];
+
+  if (command.type === "speech.submit") {
+    const acts: SocialSpeechAct[] = [];
+    if (command.claimedRole) {
+      acts.push({
+        id: "",
+        kind: "role_claim",
+        subjectId: actorId,
+        value: command.claimedRole,
+        confidence: 1,
+        evidenceRefs,
+        metadata: { source: "metadata.claimedRole", messageKind: "public-speech" }
+      });
+    }
+    if (command.pressureTargetId) {
+      acts.push({
+        id: "",
+        kind: "accusation",
+        subjectId: actorId,
+        targetId: command.pressureTargetId,
+        value: "pressure_target",
+        confidence: 0.8,
+        evidenceRefs,
+        metadata: { source: "metadata.pressureTargetId", messageKind: "public-speech" }
+      });
+    }
+    return acts.length ? acts : undefined;
+  }
+
+  if (command.type === "vote.cast") {
+    return [
+      {
+        id: "",
+        kind: "vote_intent",
+        subjectId: actorId,
+        targetId: command.targetId,
+        value: command.abstain ? "vote.abstain" : "vote.cast",
+        confidence: 1,
+        evidenceRefs,
+        metadata: { source: "metadata.targetId", abstain: Boolean(command.abstain), messageKind: "public-vote" }
+      }
+    ];
+  }
+
+  if (command.type === "hunter.shoot") {
+    return [
+      {
+        id: "",
+        kind: "role_action",
+        subjectId: actorId,
+        targetId: command.targetId,
+        value: "hunter.shoot",
+        confidence: 1,
+        evidenceRefs,
+        metadata: { source: "metadata.targetId", messageKind: "public-hunter-shot" }
+      }
+    ];
+  }
+
+  if (command.type === "werewolf.killVote") {
+    return [
+      {
+        id: "",
+        kind: "coalition_signal",
+        subjectId: actorId,
+        targetId: command.targetId,
+        value: "werewolf.killVote",
+        confidence: 1,
+        evidenceRefs,
+        metadata: { source: "metadata.targetId", messageKind: "werewolf-kill-vote" }
+      }
+    ];
+  }
+
+  if (command.type === "seer.inspect") {
+    return [
+      {
+        id: "",
+        kind: "role_action",
+        subjectId: actorId,
+        targetId: command.targetId,
+        value: "seer.inspect",
+        confidence: 1,
+        evidenceRefs,
+        metadata: { source: "metadata.targetId", messageKind: "private-seer-inspect" }
+      }
+    ];
+  }
+
+  if (command.type === "witch.act") {
+    return [
+      {
+        id: "",
+        kind: "role_action",
+        subjectId: actorId,
+        targetId: command.poisonTargetId ?? command.saveTargetId,
+        value: "witch.act",
+        confidence: 1,
+        evidenceRefs,
+        metadata: {
+          source: "metadata.kind",
+          messageKind: "private-witch-action",
+          hasSave: Boolean(command.saveTargetId),
+          hasPoison: Boolean(command.poisonTargetId)
+        }
+      }
+    ];
+  }
+
+  return undefined;
 }
 
 export function toWerewolfSocialStep(step: HarnessStepRecord, metadata: WerewolfSocialStepMetadata): WerewolfSocialStep {
@@ -832,7 +1045,7 @@ export function projectWerewolfSocialStepToHarnessStep(
   if (!step.eventSeqRange) {
     throw new Error(`Cannot project Werewolf social step ${step.traceId}: missing eventSeqRange.`);
   }
-  const metadata = parseWerewolfSocialActionMetadata(step.action.metadata, step.traceId);
+  const metadata = parseWerewolfHarnessTurnActionMetadata(step.action.metadata, step.traceId);
   const stepAgentSnapshot = agentSnapshot ?? agentSnapshotFromSocialStep(step);
   if (metadata.turnTrace.traceId !== step.traceId) {
     throw new Error(`Cannot project Werewolf social step ${step.traceId}: turnTrace traceId mismatch.`);
@@ -890,12 +1103,7 @@ export const werewolfLegacyTraceId: SocialTraceIdProvider<GameState, WerewolfSoc
   return `${context.state.id}:harness:${context.actorTurnIndex ?? context.turnIndex}:${context.actorId}:${context.state.phase}`;
 };
 
-export const werewolfLegacySchedulerModeForBatch: SocialSchedulerResolver<GameState, WerewolfSocialPendingAction> = (context) => {
-  if (context.pendingActions.length > 0 && context.pendingActions.every((action) => action.kind === "vote" || action.kind === "kill")) {
-    return "aec-batched-decision";
-  }
-  return "aec";
-};
+// werewolfLegacySchedulerModeForBatch is defined below createWerewolfJointPhaseSchedulerResolver.
 
 export const recordWerewolfDecisionFailure: SocialDecisionFailureHook<
   GameState,
@@ -903,24 +1111,27 @@ export const recordWerewolfDecisionFailure: SocialDecisionFailureHook<
   WerewolfSocialPendingAction,
   GameCommand
 > = (context) => {
-  if (!(context.environment instanceof WerewolfSocialEnvironment)) {
-    throw new Error("Werewolf decision failure recorder requires WerewolfSocialEnvironment.");
-  }
   if (!isAgentPendingAction(context.pendingAction)) return;
-  const state = context.environment.snapshot();
+  const state = context.decisionState;
   const actor = context.actor instanceof WerewolfSocialActorAdapter ? context.actor : undefined;
   const model = actor?.state.model ?? context.actor?.profile.model ?? "unknown";
   const traceId =
     context.traceId ??
     `${state.id}:harness:${context.actorTurnIndex ?? context.turnIndex}:${context.pendingAction.actorId}:${state.phase}`;
   const providerFailure = providerFailureFromError(context.error);
-  context.environment.recordError(context.pendingAction.actorId, {
+  const payload: HarnessErrorPayload = {
     model,
     actionKind: context.pendingAction.kind,
     message: describeError(context.error),
     traceId,
     ...(providerFailure ? { providerFailure } : {})
-  });
+  };
+  return {
+    stage: context.failureStage,
+    message: payload.message,
+    causeName: context.error instanceof Error ? context.error.name : undefined,
+    metadata: payload
+  };
 };
 
 export const recordWerewolfEnvironmentStepFailure: SocialEnvironmentStepFailureHook<
@@ -929,13 +1140,10 @@ export const recordWerewolfEnvironmentStepFailure: SocialEnvironmentStepFailureH
   WerewolfSocialPendingAction,
   GameCommand
 > = (context) => {
-  if (!(context.environment instanceof WerewolfSocialEnvironment)) {
-    throw new Error("Werewolf environment step failure recorder requires WerewolfSocialEnvironment.");
-  }
   if (!isAgentPendingAction(context.pendingAction)) return;
-  const state = context.environment.snapshot();
+  const state = context.failureState;
   const actor = context.actor instanceof WerewolfSocialActorAdapter ? context.actor : undefined;
-  const metadata = parseWerewolfSocialActionMetadataSafe(context.action.metadata, context.action.traceId);
+  const metadata = tryParseWerewolfHarnessTurnActionMetadata(context.action.metadata, context.action.traceId);
   const model = metadata?.turnTrace.model ?? actor?.state.model ?? context.actor?.profile.model ?? "unknown";
   const actionKind = metadata?.turnTrace.actionKind ?? context.pendingAction.kind;
   const traceId =
@@ -954,25 +1162,13 @@ export const recordWerewolfEnvironmentStepFailure: SocialEnvironmentStepFailureH
   const attempts = metadata?.reasonerOutput.attempts;
   if (attempts !== undefined) payload.attempts = attempts;
   if (providerFailure) payload.providerFailure = providerFailure;
-  context.environment.recordError(context.pendingAction.actorId, payload);
+  return {
+    stage: "environment_step",
+    message: payload.message,
+    causeName: context.error instanceof Error ? context.error.name : undefined,
+    metadata: payload
+  };
 };
-
-export function recordWerewolfHarnessTurn(
-  context: SocialBeforeEnvironmentStepContext<GameState, WerewolfSocialObservation, WerewolfSocialPendingAction, GameCommand>
-): void {
-  if (context.actorId === WEREWOLF_SYSTEM_ACTOR_ID) return;
-  if (!(context.environment instanceof WerewolfSocialEnvironment)) {
-    throw new Error("Werewolf harness turn recorder requires WerewolfSocialEnvironment.");
-  }
-  if (!(context.actor instanceof WerewolfSocialActorAdapter)) {
-    throw new Error(`Werewolf harness turn recorder requires WerewolfSocialActorAdapter for ${context.actorId}.`);
-  }
-  const trace = context.actor.turnTraceFor(context.action.traceId);
-  if (!trace) {
-    throw new Error(`Missing Werewolf harness turn trace for ${context.actorId}/${context.action.traceId ?? "unknown-trace"}.`);
-  }
-  context.environment.recordTurn(trace);
-}
 
 function systemAdvanceAction(): SocialAction<GameCommand> {
   return {
@@ -983,37 +1179,6 @@ function systemAdvanceAction(): SocialAction<GameCommand> {
       actorId: WEREWOLF_SYSTEM_ACTOR_ID
     }
   };
-}
-
-function parseWerewolfSocialActionMetadata(metadata: unknown, traceId: string): WerewolfSocialActionMetadata {
-  if (!isRecord(metadata) || metadata.kind !== "werewolf-harness-turn") {
-    throw new Error(`Cannot project Werewolf social step ${traceId}: missing werewolf harness metadata.`);
-  }
-  if (!isRecord(metadata.policyPlan)) {
-    throw new Error(`Cannot project Werewolf social step ${traceId}: missing policyPlan metadata.`);
-  }
-  if (!isRecord(metadata.reasonerOutput)) {
-    throw new Error(`Cannot project Werewolf social step ${traceId}: missing reasonerOutput metadata.`);
-  }
-  if (!isRecord(metadata.turnTrace)) {
-    throw new Error(`Cannot project Werewolf social step ${traceId}: missing turnTrace metadata.`);
-  }
-  return {
-    kind: "werewolf-harness-turn",
-    turnIndex: typeof metadata.turnIndex === "number" ? metadata.turnIndex : undefined,
-    policyPlan: metadata.policyPlan as unknown as PolicyPlan,
-    reasonerOutput: metadata.reasonerOutput as unknown as ReasonerOutputSummary,
-    turnTrace: metadata.turnTrace as unknown as HarnessTurnTrace,
-    agentStateHash: typeof metadata.agentStateHash === "string" ? metadata.agentStateHash : undefined
-  };
-}
-
-function parseWerewolfSocialActionMetadataSafe(metadata: unknown, traceId: string | undefined): WerewolfSocialActionMetadata | undefined {
-  try {
-    return parseWerewolfSocialActionMetadata(metadata, traceId ?? "unknown-trace");
-  } catch {
-    return undefined;
-  }
 }
 
 function projectWerewolfSuccessfulSocialSteps(
@@ -1045,11 +1210,7 @@ function agentSnapshotFromSocialStep(step: WerewolfGenericSocialStep): AgentSnap
     hash: step.actorSnapshotsHashAfterStep
   };
 }
-
 function werewolfSocialStepSchedulerMode(mode: WerewolfGenericSocialStep["schedulerMode"]): WerewolfSocialStepMetadata["schedulerMode"] {
-  if (mode === "parallel") {
-    throw new Error("Parallel generic social steps cannot be converted to legacy Werewolf social steps.");
-  }
   return mode;
 }
 
@@ -1066,7 +1227,7 @@ function createWerewolfLegacySocialStepMetadataProvider(gameId: string): (step: 
   const batchByGenericId = new Map<string, { batchId: string; nextBatchPosition: number }>();
   return (step) => {
     const metadata = socialStepMetadataFor(step);
-    if (metadata.schedulerMode !== "aec-batched-decision") return metadata;
+    if (metadata.schedulerMode !== "aec-batched-decision" && metadata.schedulerMode !== "parallel") return metadata;
     const genericBatchId = step.batchId ?? `${step.traceId}:batch`;
     let batch = batchByGenericId.get(genericBatchId);
     if (!batch) {
@@ -1090,9 +1251,33 @@ function socialStepMetadataFor(step: WerewolfGenericSocialStep): WerewolfSocialS
   const schedulerMode = werewolfSocialStepSchedulerMode(step.schedulerMode);
   return {
     schedulerMode,
-    resolutionPolicy: step.resolutionPolicy ?? (schedulerMode === "aec-batched-decision" ? "sequential-apply-from-shared-decision-state" : "sequential-apply")
+    resolutionPolicy:
+      step.resolutionPolicy ??
+      (schedulerMode === "parallel"
+        ? "parallel-stepBatch"
+        : schedulerMode === "aec-batched-decision"
+          ? "sequential-apply-from-shared-decision-state"
+          : "sequential-apply")
   };
 }
+
+export function createWerewolfJointPhaseSchedulerResolver(
+  jointPhaseScheduler: HarnessRunOptions["jointPhaseScheduler"] = DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER
+): SocialSchedulerResolver<GameState, WerewolfSocialPendingAction> {
+  return (context) => {
+    if (
+      context.pendingActions.length > 0 &&
+      context.pendingActions.every((action) => isAgentPendingAction(action) && (action.kind === "vote" || action.kind === "kill"))
+    ) {
+      return jointPhaseScheduler ?? DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER;
+    }
+    return "aec";
+  };
+}
+
+export const werewolfLegacySchedulerModeForBatch = createWerewolfJointPhaseSchedulerResolver(
+  DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER
+);
 
 function createSequentialActorTurnIndexProvider(): SocialActorTurnIndexProvider<GameState, WerewolfSocialPendingAction> {
   let nextTurnIndex = 1;
@@ -1147,7 +1332,8 @@ function summarizeReasonerOutput(
     attempts?: number;
     retryHistory?: ReasonerOutputSummary["retryHistory"];
     stream?: ReasonerOutputSummary["stream"];
-  }
+  },
+  actionProposal?: ReasonerOutputSummary["actionProposal"]
 ): ReasonerOutputSummary {
   return {
     content,
@@ -1157,11 +1343,19 @@ function summarizeReasonerOutput(
     providerRequestId: completion.providerRequestId,
     attempts: completion.attempts,
     retryHistory: cloneJson(completion.retryHistory),
-    stream: cloneJson(completion.stream)
+    stream: cloneJson(completion.stream),
+    actionProposal: cloneJson(actionProposal)
   };
 }
 
 function cloneJson<T>(value: T): T {
   if (value === undefined) return value;
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/** Replace the canonical actor snapshot only after an environment commit. */
+function replaceAgentHarnessState(target: AgentHarnessState, source: AgentHarnessState): void {
+  const targetRecord = target as unknown as Record<string, unknown>;
+  for (const key of Object.keys(targetRecord)) delete targetRecord[key];
+  Object.assign(targetRecord, cloneJson(source) as unknown as Record<string, unknown>);
 }

@@ -10,6 +10,7 @@ import { buildMatchArtifact, resolveAgentSnapshotsAfterStep, type MatchArtifact 
 import { describeResolvedAssignments, profilesFromModels, resolveAgentConfigs } from "../src/harness/profiles";
 import { runHarnessMatch } from "../src/harness/runtime";
 import type { HarnessReasoner } from "../src/harness/types";
+import { countSocialStepCommits } from "../src/harness/social";
 
 const fakeReasoner: HarnessReasoner = {
   async think(input) {
@@ -53,7 +54,7 @@ describe("checkpoint and fork API", () => {
     clearServerStoreForTests();
   });
 
-  it("creates, lists, and retrieves final checkpoint summaries without exposing full checkpoint data by default", async () => {
+  it("creates checkpoint summaries and defaults checkpoint artifact reads to a truth-redacted projection", async () => {
     const { record } = await createStoredArtifactMatch("server-checkpoint-create");
 
     const created = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/checkpoints`, {
@@ -67,28 +68,66 @@ describe("checkpoint and fork API", () => {
 	      source: {
 	        runId: record.id,
 	        matchId: record.id,
-	        traceRef: expect.any(String),
+	        boundaryTraceRef: expect.any(String),
 	        stateHash: record.artifact?.finalState ? expect.any(String) : undefined
 	      }
 	    });
 	    expect(created.body.summary.source).not.toHaveProperty("traceId");
 	    assertPublicCheckpointResponse(created.body);
 
-    const artifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${created.body.summary.checkpointId}/artifact`);
-    expect(artifact.status).toBe(200);
-	    expect(artifact.body).toMatchObject({
-	      artifactVersion: "harness.checkpoint.v1",
-	      kind: "checkpoint",
-	      checkpointId: created.body.summary.checkpointId,
+    const defaultArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${created.body.summary.checkpointId}/artifact`);
+    expect(defaultArtifact.status).toBe(200);
+    expect(defaultArtifact.headers.get("cache-control")).toContain("no-store");
+    expect(defaultArtifact.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(defaultArtifact.body).toMatchObject({
+      artifactVersion: "harness.checkpoint.v2",
+      kind: "checkpoint",
+      checkpointId: created.body.summary.checkpointId,
 	      source: expect.objectContaining({
 	        runId: record.id,
 	        matchId: record.id
-	      })
-	    });
-	    expect(artifact.body.source).toHaveProperty("traceId");
-	    expect(artifact.body.source).not.toHaveProperty("traceRef");
-	    expect(JSON.stringify(artifact.body)).toContain("agents");
-    expect(JSON.stringify(artifact.body)).toContain("socialMessages");
+	      }),
+      projection: {
+        view: "truth-redacted",
+        privateEvidenceRedacted: true,
+        postgameTruthRedacted: true
+      }
+    });
+    expect(Object.keys(defaultArtifact.body.source).sort()).toEqual(["matchId", "runId", "sourceArtifactVersion", "status"]);
+    expect(defaultArtifact.body.source).not.toHaveProperty("boundaryTraceId");
+    expect(defaultArtifact.body.source).not.toHaveProperty("seed");
+    expect(defaultArtifact.body.source).not.toHaveProperty("stateHash");
+    expect(defaultArtifact.body.agents).toEqual([]);
+    expect(JSON.stringify(defaultArtifact.body)).toContain("executionPrefix");
+    for (const player of defaultArtifact.body.state.players) {
+      expect(player).not.toHaveProperty("role");
+      expect(player).not.toHaveProperty("team");
+      expect(player).not.toHaveProperty("ability");
+    }
+    expect(JSON.stringify(defaultArtifact.body)).not.toContain("seerInspection");
+    expect(defaultArtifact.body.state).not.toHaveProperty("night");
+    expect(defaultArtifact.body.state).not.toHaveProperty("seed");
+    const truthPrefix = defaultArtifact.body.executionPrefix;
+    expect(truthPrefix.channels.length).toBeGreaterThan(0);
+    expect(truthPrefix.channels.every((channel: any) => channel.kind === "public" && channel.readableBy === "all")).toBe(true);
+    expect(truthPrefix.messages.every((message: any) => message.visibility === "public")).toBe(true);
+    expect(truthPrefix.profiles).toEqual([]);
+    expect(truthPrefix.steps).toEqual([]);
+    expect(truthPrefix.exposureRecords).toEqual([]);
+    expect(JSON.stringify(truthPrefix)).not.toContain("werewolf-team");
+    for (const agent of record.artifact?.agents ?? []) {
+      for (const memo of agent.privateMemos) expect(JSON.stringify(defaultArtifact.body)).not.toContain(memo);
+    }
+
+    const artifact = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/checkpoints/${created.body.summary.checkpointId}/artifact?view=full`
+    );
+    expect(artifact.status).toBe(200);
+    expect(artifact.headers.get("x-robots-tag")).toContain("noindex");
+    expect(artifact.body.projection).toBeUndefined();
+    expect(artifact.body.state.players.some((player: { role?: string }) => Boolean(player.role))).toBe(true);
 
     const listed = await requestJson(baseUrl, "GET", `/api/checkpoints?matchId=${record.id}`);
     expect(listed.status).toBe(200);
@@ -97,13 +136,16 @@ describe("checkpoint and fork API", () => {
       checkpointId: created.body.summary.checkpointId,
       counts: {
         agents: artifact.body.agents.length,
-        trajectorySteps: artifact.body.trajectory.length,
-        socialMessages: artifact.body.socialMessages.length
+        nativeSteps: countSocialStepCommits(artifact.body.executionPrefix.steps).nativeSteps,
+        committedSteps: countSocialStepCommits(artifact.body.executionPrefix.steps).committedSteps,
+        rejectedSteps: countSocialStepCommits(artifact.body.executionPrefix.steps).rejectedSteps,
+        socialMessages: artifact.body.executionPrefix.messages.length,
+        channels: artifact.body.executionPrefix.channels.length
       }
     });
     expect(listed.body.checkpoints[0]).not.toHaveProperty("state");
     expect(listed.body.checkpoints[0]).not.toHaveProperty("agents");
-    expect(listed.body.checkpoints[0]).not.toHaveProperty("socialMessages");
+    expect(listed.body.checkpoints[0]).not.toHaveProperty("executionPrefix");
 
     const detail = await requestJson(baseUrl, "GET", `/api/checkpoints/${created.body.summary.checkpointId}`);
     expect(detail.status).toBe(200);
@@ -181,14 +223,16 @@ describe("checkpoint and fork API", () => {
   it("creates a prefix checkpoint by server-owned selector and forks from that boundary", async () => {
     const { record } = await createStoredArtifactMatch("server-checkpoint-prefix");
     if (!record.artifact) throw new Error("Expected stored match artifact.");
-    const trajectoryLength = firstSafePrefixLength(record.artifact);
-    const selectedStep = record.artifact.trajectory[trajectoryLength - 1];
+    const nativeStepCount = firstSafeNativePrefixLength(record.artifact);
+    const selectedNativeStep = record.artifact.socialEpisode.steps[nativeStepCount - 1];
+    const selectedStep = record.artifact.trajectory.find((step) => step.traceId === selectedNativeStep.traceId);
+    if (!selectedStep) throw new Error("Expected legacy projection for selected native player step.");
     const selectedSnapshots = resolveAgentSnapshotsAfterStep(record.artifact, selectedStep);
     if (!selectedSnapshots) throw new Error("Expected selected prefix snapshot frame.");
 
     const created = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/checkpoints`, {
       reason: "api prefix checkpoint",
-      trajectoryLength
+      nativeStepCount
     });
 
     expect(created.status).toBe(201);
@@ -199,34 +243,34 @@ describe("checkpoint and fork API", () => {
       source: {
         runId: record.id,
         matchId: record.id,
-        traceRef: expect.any(String),
-        turnIndex: selectedStep.turnIndex,
-        trajectoryLength,
+        boundaryTraceRef: expect.any(String),
+        boundaryTurnIndex: selectedNativeStep.turnIndex,
+        nativeStepCount,
         stateHash: selectedStep.postStateHash
       },
       counts: {
-        trajectorySteps: trajectoryLength
+        nativeSteps: nativeStepCount
       }
     });
     expect(created.body.summary.source).not.toHaveProperty("traceId");
     assertPublicCheckpointResponse(created.body);
 
-    const checkpointArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${created.body.summary.checkpointId}/artifact`);
+    const checkpointArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${created.body.summary.checkpointId}/artifact?view=full`);
     expect(checkpointArtifact.status).toBe(200);
     const checkpoint = checkpointArtifact.body;
     expect(checkpoint.source).toMatchObject({
       runId: record.id,
       matchId: record.id,
-      traceId: selectedStep.traceId,
-      turnIndex: selectedStep.turnIndex,
-      trajectoryLength,
+      boundaryTraceId: selectedNativeStep.traceId,
+      boundaryTurnIndex: selectedNativeStep.turnIndex,
+      nativeStepCount,
       stateHash: selectedStep.postStateHash
     });
-    expect(checkpoint.trajectory).toHaveLength(trajectoryLength);
+    expect(checkpoint.executionPrefix.steps).toHaveLength(nativeStepCount);
     expect(checkpoint.state).not.toEqual(record.artifact.finalState);
     expect(checkpoint.agents).toEqual(selectedSnapshots);
     expect(checkpoint.agents).not.toEqual(record.artifact.agents);
-    expect(checkpoint.socialMessages).toEqual(record.artifact.socialEpisode.messages.slice(0, checkpoint.source.messageSeq ?? 0));
+    expect(checkpoint.executionPrefix.messages).toEqual(record.artifact.socialEpisode.messages.slice(0, checkpoint.source.messageCount));
 
     const forked = await requestJson(baseUrl, "POST", `/api/checkpoints/${checkpoint.checkpointId}/fork`, {
       reason: "api prefix fork",
@@ -241,33 +285,33 @@ describe("checkpoint and fork API", () => {
         checkpointId: checkpoint.checkpointId,
         parentRunId: record.id,
         parentMatchId: record.id,
-        parentTraceRef: expect.any(String),
+        parentBoundaryTraceRef: expect.any(String),
         parentStateHash: checkpoint.source.stateHash,
-        parentTrajectoryLength: trajectoryLength,
+        parentNativeStepCount: nativeStepCount,
         reason: "api prefix fork"
       }
     });
-    expect(forked.body.summary.forkOf).not.toHaveProperty("parentTraceId");
+    expect(forked.body.summary.forkOf).not.toHaveProperty("parentBoundaryTraceId");
 
-    const forkArtifact = await requestJson(baseUrl, "GET", `/api/matches/${forked.body.id}/artifact`);
+    const forkArtifact = await requestJson(baseUrl, "GET", `/api/matches/${forked.body.id}/artifact?view=full`);
     expect(forkArtifact.status).toBe(200);
     expect(forkArtifact.body.forkOf).toMatchObject({
       checkpointId: checkpoint.checkpointId,
-      parentTraceId: selectedStep.traceId,
+      parentBoundaryTraceId: selectedNativeStep.traceId,
       parentStateHash: checkpoint.source.stateHash,
-      parentTrajectoryLength: trajectoryLength
+      parentNativeStepCount: nativeStepCount
     });
     expect(forkArtifact.body.trajectory[0].preStateHash).toBe(checkpoint.source.stateHash);
-    expect(forkArtifact.body.socialEpisode.messages.slice(0, checkpoint.socialMessages.length)).toEqual(checkpoint.socialMessages);
-    expect(forkArtifact.body.trajectory[0].messageSeqRange?.[0]).toBe((checkpoint.source.messageSeq ?? 0) + 1);
+    expect(forkArtifact.body.socialEpisode.messages.slice(0, checkpoint.executionPrefix.messages.length)).toEqual(checkpoint.executionPrefix.messages);
+    expect(forkArtifact.body.trajectory[0].messageSeqRange?.[0]).toBe((checkpoint.source.lastMessageSeq ?? 0) + 1);
   });
 
   it("rejects ambiguous, unknown, and raw-state prefix checkpoint requests", async () => {
     const { record } = await createStoredArtifactMatch("server-checkpoint-prefix-reject");
 
     const ambiguous = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/checkpoints`, {
-      trajectoryLength: 1,
-      turnIndex: 1
+      nativeStepCount: 1,
+      nativeTurnIndex: 1
     });
     expect(ambiguous.status).toBe(400);
     expect(ambiguous.body.error).toMatch(/at most one prefix selector/);
@@ -281,7 +325,7 @@ describe("checkpoint and fork API", () => {
     expect(unknownTrace.body.error).not.toContain("privateMemos");
 
     const outOfRange = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/checkpoints`, {
-      trajectoryLength: 999
+      nativeStepCount: 999
     });
     expect(outOfRange.status).toBe(400);
     expect(outOfRange.body.code).toBe("selector_not_found");
@@ -291,7 +335,7 @@ describe("checkpoint and fork API", () => {
       recordAgentSnapshots: false
     });
     const missingSnapshots = await requestJson(baseUrl, "POST", `/api/matches/${noSnapshotRecord.id}/checkpoints`, {
-      trajectoryLength: 1
+      nativeStepCount: 1
     });
     expect(missingSnapshots.status).toBe(409);
     expect(missingSnapshots.body.code).toBe("missing_agent_snapshots");
@@ -299,7 +343,7 @@ describe("checkpoint and fork API", () => {
     expect(JSON.stringify(missingSnapshots.body)).not.toContain("privateMemos");
 
     const rawState = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/checkpoints`, {
-      trajectoryLength: 1,
+      nativeStepCount: 1,
       state: record.state
     });
     expect(rawState.status).toBe(400);
@@ -311,7 +355,7 @@ describe("checkpoint and fork API", () => {
     const created = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/checkpoints`, {
       reason: "fork source"
     });
-    const checkpointArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${created.body.summary.checkpointId}/artifact`);
+    const checkpointArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${created.body.summary.checkpointId}/artifact?view=full`);
     expect(checkpointArtifact.status).toBe(200);
     const checkpoint = checkpointArtifact.body;
 
@@ -328,13 +372,13 @@ describe("checkpoint and fork API", () => {
 	        checkpointId: checkpoint.checkpointId,
 	        parentRunId: record.id,
 	        parentMatchId: record.id,
-	        parentTraceRef: expect.any(String),
+	        parentBoundaryTraceRef: expect.any(String),
 	        parentStateHash: checkpoint.source.stateHash,
-	        parentTrajectoryLength: checkpoint.source.trajectoryLength,
+	        parentNativeStepCount: checkpoint.source.nativeStepCount,
 	        reason: "api fork"
 	      }
 	    });
-	    expect(forked.body.summary.forkOf).not.toHaveProperty("parentTraceId");
+	    expect(forked.body.summary.forkOf).not.toHaveProperty("parentBoundaryTraceId");
     expect(forked.body.summary.resolvedAssignments).toHaveLength(forked.body.state.players.length);
     for (const assignment of forked.body.summary.resolvedAssignments) {
       expect(Object.keys(assignment).sort()).toEqual(["playerId", "seat"]);
@@ -358,21 +402,21 @@ describe("checkpoint and fork API", () => {
 	      checkpointId: checkpoint.checkpointId,
 	      parentRunId: record.id,
 	      parentMatchId: record.id,
-	      parentTraceId: checkpoint.source.traceId,
+	      parentBoundaryTraceId: checkpoint.source.boundaryTraceId,
 	      parentStateHash: checkpoint.source.stateHash,
-	      parentTrajectoryLength: checkpoint.source.trajectoryLength,
+	      parentNativeStepCount: checkpoint.source.nativeStepCount,
 	      reason: "api fork"
 	    });
-    expect(artifactResponse.body.forkOf).not.toHaveProperty("parentTraceRef");
-    if (artifactResponse.body.trajectory.length > 0) {
-      expect(artifactResponse.body.trajectory[0].preStateHash).toBe(checkpoint.source.stateHash);
+    expect(artifactResponse.body.forkOf).not.toHaveProperty("parentBoundaryTraceRef");
+    if (artifactResponse.body.socialEpisode.steps.length > 0) {
+      expect(artifactResponse.body.socialEpisode.steps[0].preStateHash).toBe(checkpoint.source.stateHash);
     }
 
     const lineage = await requestJson(baseUrl, "GET", `/api/matches/${forked.body.id}/fork-lineage`);
     expect(lineage.status).toBe(200);
     expect(lineage.body.summary).toMatchObject({
       kind: "fork-lineage",
-      schemaVersion: "server.fork-lineage-summary.v1",
+      schemaVersion: "server.fork-lineage-summary.v2",
       ok: true,
       isFork: true,
       runId: forked.body.id,
@@ -380,43 +424,49 @@ describe("checkpoint and fork API", () => {
         checkpointId: checkpoint.checkpointId,
         parentRunId: record.id,
         parentMatchId: record.id,
-        parentTraceRef: expect.any(String),
+        parentBoundaryTraceRef: expect.any(String),
         parentStateHash: checkpoint.source.stateHash,
-        parentTrajectoryLength: checkpoint.source.trajectoryLength,
+        parentNativeStepCount: checkpoint.source.nativeStepCount,
         reason: "api fork"
       },
       parent: {
         checkpointId: checkpoint.checkpointId,
         runId: record.id,
         matchId: record.id,
-        traceRef: expect.any(String),
-        trajectoryLength: checkpoint.source.trajectoryLength,
-        messageSeq: checkpoint.source.messageSeq ?? null,
+        boundaryTraceRef: expect.any(String),
+        nativeStepCount: checkpoint.source.nativeStepCount,
+        messageCount: checkpoint.source.messageCount,
+        lastMessageSeq: checkpoint.source.lastMessageSeq ?? null,
         stateHash: checkpoint.source.stateHash,
-        trajectoryHash: checkpoint.source.trajectoryHash,
+        executionPrefixHash: checkpoint.source.executionPrefixHash,
         agentsHash: checkpoint.source.agentsHash,
-        socialMessagesHash: checkpoint.source.socialMessagesHash,
+        channelsHash: checkpoint.source.channelsHash,
+        messagesHash: checkpoint.source.messagesHash,
         checkpointFound: true
       },
       child: {
         runId: forked.body.id,
-        trajectoryLength: artifactResponse.body.trajectory.length,
+        nativeStepCount: countSocialStepCommits(artifactResponse.body.socialEpisode.steps).nativeSteps,
+        committedSteps: countSocialStepCommits(artifactResponse.body.socialEpisode.steps).committedSteps,
+        rejectedSteps: countSocialStepCommits(artifactResponse.body.socialEpisode.steps).rejectedSteps,
         socialMessages: artifactResponse.body.socialEpisode.messages.length,
-        firstStepPreStateHash: artifactResponse.body.trajectory[0]?.preStateHash ?? null
+        firstStepPreStateHash: artifactResponse.body.socialEpisode.steps[0]?.preStateHash ?? null
       },
       boundary: {
-        status: artifactResponse.body.trajectory.length > 0 ? "verified" : "no_child_steps",
+        status: artifactResponse.body.socialEpisode.steps.length > 0 ? "verified" : "no_child_steps",
         checkpointFound: true,
-        stateHashMatches: artifactResponse.body.trajectory.length > 0 ? true : null,
+        stateHashMatches: artifactResponse.body.socialEpisode.steps.length > 0 ? true : null,
         checkpointSourceMatchesForkOf: true,
         messagePrefixMatchesCheckpoint: true,
-        newTrajectorySteps: artifactResponse.body.trajectory.length,
-        newSocialMessages: artifactResponse.body.socialEpisode.messages.length - checkpoint.socialMessages.length
+        newNativeSteps: countSocialStepCommits(artifactResponse.body.socialEpisode.steps).nativeSteps,
+        newCommittedSteps: countSocialStepCommits(artifactResponse.body.socialEpisode.steps).committedSteps,
+        newRejectedSteps: countSocialStepCommits(artifactResponse.body.socialEpisode.steps).rejectedSteps,
+        newSocialMessages: artifactResponse.body.socialEpisode.messages.length - checkpoint.executionPrefix.messages.length
       }
     });
-    expect(lineage.body.summary.forkOf).not.toHaveProperty("parentTraceId");
-    expect(lineage.body.summary.parent).not.toHaveProperty("traceId");
-    expect(JSON.stringify(lineage.body)).not.toContain("parentTraceId");
+    expect(lineage.body.summary.forkOf).not.toHaveProperty("parentBoundaryTraceId");
+    expect(lineage.body.summary.parent).not.toHaveProperty("boundaryTraceId");
+    expect(JSON.stringify(lineage.body)).not.toContain("parentBoundaryTraceId");
     expect(JSON.stringify(lineage.body)).not.toContain("\"players\"");
     expect(JSON.stringify(lineage.body)).not.toContain("\"privateMemo\"");
     expect(JSON.stringify(lineage.body)).not.toContain("\"socialMessages\":[");
@@ -425,7 +475,7 @@ describe("checkpoint and fork API", () => {
     expect(checkpointForks.status).toBe(200);
     expect(checkpointForks.body.summary).toMatchObject({
       kind: "checkpoint-forks",
-      schemaVersion: "server.checkpoint-forks-summary.v1",
+      schemaVersion: "server.checkpoint-forks-summary.v2",
       ok: true,
       checkpoint: {
         kind: "checkpoint",
@@ -433,7 +483,7 @@ describe("checkpoint and fork API", () => {
         source: {
           runId: record.id,
           matchId: record.id,
-          traceRef: expect.any(String),
+          boundaryTraceRef: expect.any(String),
           stateHash: checkpoint.source.stateHash
         }
       },
@@ -442,13 +492,13 @@ describe("checkpoint and fork API", () => {
         {
           runId: forked.body.id,
           matchId: forked.body.id,
-          trajectoryLength: artifactResponse.body.trajectory.length,
+          nativeStepCount: countSocialStepCommits(artifactResponse.body.socialEpisode.steps).nativeSteps,
           socialMessages: artifactResponse.body.socialEpisode.messages.length,
           forkOf: {
             checkpointId: checkpoint.checkpointId,
             parentRunId: record.id,
             parentMatchId: record.id,
-            parentTraceRef: expect.any(String)
+            parentBoundaryTraceRef: expect.any(String)
           },
           lineage: {
             kind: "fork-lineage",
@@ -463,8 +513,8 @@ describe("checkpoint and fork API", () => {
       ]
     });
     expect(checkpointForks.body.summary.checkpoint.source).not.toHaveProperty("traceId");
-    expect(checkpointForks.body.summary.forks[0].forkOf).not.toHaveProperty("parentTraceId");
-    expect(JSON.stringify(checkpointForks.body)).not.toContain("parentTraceId");
+    expect(checkpointForks.body.summary.forks[0].forkOf).not.toHaveProperty("parentBoundaryTraceId");
+    expect(JSON.stringify(checkpointForks.body)).not.toContain("parentBoundaryTraceId");
     expect(JSON.stringify(checkpointForks.body)).not.toContain("\"players\"");
     expect(JSON.stringify(checkpointForks.body)).not.toContain("\"privateMemo\"");
     expect(JSON.stringify(checkpointForks.body)).not.toContain("\"socialMessages\":[");
@@ -504,7 +554,7 @@ describe("checkpoint and fork API", () => {
     expect(empty.status).toBe(200);
     expect(empty.body.summary).toMatchObject({
       kind: "checkpoint-forks",
-      schemaVersion: "server.checkpoint-forks-summary.v1",
+      schemaVersion: "server.checkpoint-forks-summary.v2",
       ok: true,
       childCount: 0,
       forks: []
@@ -519,7 +569,7 @@ describe("checkpoint and fork API", () => {
     expect(emptyTree.status).toBe(200);
     expect(emptyTree.body.summary).toMatchObject({
       kind: "checkpoint-branch-tree",
-      schemaVersion: "server.checkpoint-branch-tree-summary.v1",
+      schemaVersion: "server.checkpoint-branch-tree-summary.v2",
       ok: true,
       okScope: "returned",
       rootCheckpointId: checkpointId,
@@ -584,7 +634,7 @@ describe("checkpoint and fork API", () => {
             checkpointId,
             parentRunId: record.id,
             parentMatchId: record.id,
-            parentTraceRef: expect.any(String),
+            parentBoundaryTraceRef: expect.any(String),
             reason: "second child"
           },
           lineage: {
@@ -645,7 +695,7 @@ describe("checkpoint and fork API", () => {
     expect(tree.status).toBe(200);
     expect(tree.body.summary).toMatchObject({
       kind: "checkpoint-branch-tree",
-      schemaVersion: "server.checkpoint-branch-tree-summary.v1",
+      schemaVersion: "server.checkpoint-branch-tree-summary.v2",
       ok: true,
       okScope: "returned",
       rootCheckpointId,
@@ -655,7 +705,7 @@ describe("checkpoint and fork API", () => {
         source: {
           runId: record.id,
           matchId: record.id,
-          traceRef: expect.any(String)
+          boundaryTraceRef: expect.any(String)
         }
       },
       counts: {
@@ -697,7 +747,7 @@ describe("checkpoint and fork API", () => {
         source: {
           runId: childRunId,
           matchId: childRunId,
-          traceRef: expect.any(String)
+          boundaryTraceRef: expect.any(String)
         }
       }
     });
@@ -709,7 +759,7 @@ describe("checkpoint and fork API", () => {
       runId: childRunId,
       forkOf: {
         checkpointId: rootCheckpointId,
-        parentTraceRef: expect.any(String)
+        parentBoundaryTraceRef: expect.any(String)
       },
       lineage: {
         kind: "fork-lineage",
@@ -727,7 +777,7 @@ describe("checkpoint and fork API", () => {
       runId: grandchildRunId,
       forkOf: {
         checkpointId: childCheckpointId,
-        parentTraceRef: expect.any(String)
+        parentBoundaryTraceRef: expect.any(String)
       }
     });
 
@@ -870,7 +920,7 @@ describe("checkpoint and fork API", () => {
 
     const index = JSON.parse(await readFile(path.join(checkpointBaseDir, CHECKPOINT_INDEX_FILE), "utf8"));
     expect(index).toMatchObject({
-      artifactVersion: "harness.checkpoint-artifact-index.v1",
+      artifactVersion: "harness.checkpoint-artifact-index.v2",
       kind: "checkpoint-artifact-index",
       checkpoints: [
         expect.objectContaining({
@@ -895,22 +945,23 @@ describe("checkpoint and fork API", () => {
     assertPublicCheckpointResponse(detail.body);
     expectNoCheckpointPathLeak(detail.body, checkpointBaseDir);
 
-    const artifact = await requestJson(restartedBaseUrl, "GET", `/api/checkpoints/${checkpointId}/artifact`);
+    const artifact = await requestJson(restartedBaseUrl, "GET", `/api/checkpoints/${checkpointId}/artifact?view=full`);
     expect(artifact.status).toBe(200);
     expect(artifact.body).toMatchObject({
-      artifactVersion: "harness.checkpoint.v1",
+      artifactVersion: "harness.checkpoint.v2",
       kind: "checkpoint",
       checkpointId,
       source: {
         runId: record.id,
         matchId: record.id,
         stateHash: checkpoint.source.stateHash,
-        trajectoryHash: checkpoint.source.trajectoryHash,
+        executionPrefixHash: checkpoint.source.executionPrefixHash,
         agentsHash: checkpoint.source.agentsHash,
-        socialMessagesHash: checkpoint.source.socialMessagesHash
+        channelsHash: checkpoint.source.channelsHash,
+        messagesHash: checkpoint.source.messagesHash
       }
     });
-    expect(artifact.body.source).toHaveProperty("traceId");
+    expect(artifact.body.source).toHaveProperty("boundaryTraceId");
     expectNoCheckpointPathLeak(artifact.body, checkpointBaseDir);
 
     const forked = await requestJson(restartedBaseUrl, "POST", `/api/checkpoints/${checkpointId}/fork`, {
@@ -925,34 +976,35 @@ describe("checkpoint and fork API", () => {
         checkpointId,
         parentRunId: record.id,
         parentMatchId: record.id,
-        parentTraceRef: expect.any(String),
+        parentBoundaryTraceRef: expect.any(String),
         parentStateHash: checkpoint.source.stateHash,
-        parentTrajectoryLength: checkpoint.source.trajectoryLength,
+        parentNativeStepCount: checkpoint.source.nativeStepCount,
         reason: "restored checkpoint fork"
       }
     });
-    expect(forked.body.summary.forkOf).not.toHaveProperty("parentTraceId");
+    expect(forked.body.summary.forkOf).not.toHaveProperty("parentBoundaryTraceId");
     expectNoCheckpointPathLeak(forked.body, checkpointBaseDir);
 
-    const forkArtifact = await requestJson(restartedBaseUrl, "GET", `/api/matches/${forked.body.id}/artifact`);
+    const forkArtifact = await requestJson(restartedBaseUrl, "GET", `/api/matches/${forked.body.id}/artifact?view=full`);
     expect(forkArtifact.status).toBe(200);
     expect(forkArtifact.body.forkOf).toMatchObject({
       checkpointId,
       parentRunId: record.id,
       parentMatchId: record.id,
-      parentTraceId: checkpoint.source.traceId,
+      parentBoundaryTraceId: checkpoint.source.boundaryTraceId,
       parentStateHash: checkpoint.source.stateHash,
-      parentTrajectoryHash: checkpoint.source.trajectoryHash,
+      parentExecutionPrefixHash: checkpoint.source.executionPrefixHash,
       parentAgentsHash: checkpoint.source.agentsHash,
-      parentSocialMessagesHash: checkpoint.source.socialMessagesHash,
-      parentTrajectoryLength: checkpoint.source.trajectoryLength,
+      parentChannelsHash: checkpoint.source.channelsHash,
+      parentMessagesHash: checkpoint.source.messagesHash,
+      parentNativeStepCount: checkpoint.source.nativeStepCount,
       reason: "restored checkpoint fork"
     });
-    expect(forkArtifact.body.socialEpisode.messages.slice(0, checkpoint.socialMessages.length)).toEqual(checkpoint.socialMessages);
+    expect(forkArtifact.body.socialEpisode.messages.slice(0, checkpoint.executionPrefix.messages.length)).toEqual(checkpoint.executionPrefix.messages);
     if (forkArtifact.body.trajectory.length > 0) {
       expect(forkArtifact.body.trajectory[0].preStateHash).toBe(checkpoint.source.stateHash);
       if (forkArtifact.body.trajectory[0].messageSeqRange) {
-        expect(forkArtifact.body.trajectory[0].messageSeqRange[0]).toBe((checkpoint.source.messageSeq ?? 0) + 1);
+        expect(forkArtifact.body.trajectory[0].messageSeqRange[0]).toBe((checkpoint.source.lastMessageSeq ?? 0) + 1);
       }
     }
     expectNoCheckpointPathLeak(forkArtifact.body, checkpointBaseDir);
@@ -965,7 +1017,7 @@ describe("checkpoint and fork API", () => {
     const badJsonId = "00000000-0000-4000-8000-000000000101";
     const badShapeId = "00000000-0000-4000-8000-000000000102";
     const badHashId = "00000000-0000-4000-8000-000000000103";
-    const validArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${checkpointId}/artifact`);
+    const validArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${checkpointId}/artifact?view=full`);
     expect(validArtifact.status).toBe(200);
 
     await rm(path.join(checkpointBaseDir, CHECKPOINT_INDEX_FILE), { force: true });
@@ -1050,9 +1102,10 @@ describe("checkpoint and fork API", () => {
         sourceMatchId: checkpointResponse.summary.source.matchId,
         seed: checkpointResponse.summary.source.seed,
         stateHash: checkpointResponse.summary.source.stateHash,
-        trajectoryHash: checkpointResponse.summary.source.trajectoryHash,
+        executionPrefixHash: checkpointResponse.summary.source.executionPrefixHash,
         agentsHash: checkpointResponse.summary.source.agentsHash,
-        socialMessagesHash: checkpointResponse.summary.source.socialMessagesHash,
+        channelsHash: checkpointResponse.summary.source.channelsHash,
+        messagesHash: checkpointResponse.summary.source.messagesHash,
         relativeFile: checkpointRelativeFile(checkpointId)
       },
       {
@@ -1119,7 +1172,7 @@ describe("checkpoint and fork API", () => {
       {
         code: "index_invalid_shape",
         indexContent: `${JSON.stringify({
-          artifactVersion: "harness.checkpoint-artifact-index.v1",
+          artifactVersion: "harness.checkpoint-artifact-index.v2",
           kind: "checkpoint-artifact-index",
           updatedAt: "2026-07-05T00:00:00.000Z",
           checkpoints: "not-an-array"
@@ -1212,46 +1265,34 @@ describe("checkpoint and fork API", () => {
   it("replays a stored match through the server-owned artifact endpoint", async () => {
     const { record, artifact } = await createStoredArtifactMatch("server-owned-replay");
 
-    const replayed = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/replay`, {
-      artifact: { initialState: null, trajectory: [] },
-      initialState: null,
-      trajectory: []
-    });
+    const replayed = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/replay`, {});
 
     expect(replayed.status).toBe(200);
     expect(replayed.body.summary).toMatchObject({
       kind: "replay",
+      authority: "native-social-episode",
       ok: true,
       source: "server-owned-match-artifact",
       matchId: record.id,
       runId: artifact.runId,
-      replayedCommands: artifact.trajectory.length,
-      trajectorySteps: artifact.trajectory.length,
+      nativeSteps: countSocialStepCommits(artifact.socialEpisode.steps).nativeSteps,
+      committedSteps: countSocialStepCommits(artifact.socialEpisode.steps).committedSteps,
+      rejectedSteps: countSocialStepCommits(artifact.socialEpisode.steps).rejectedSteps,
       finalHashMatchesArtifact: true,
       mismatchCount: 0
     });
     expect(replayed.body.replay.ok).toBe(true);
-    expect(replayed.body.replay.replayedCommands).toBe(artifact.trajectory.length);
+    expect(replayed.body.replay.replayedSteps).toBe(
+      countSocialStepCommits(artifact.socialEpisode.steps).committedSteps
+    );
     expect(replayed.body.summary.finalHash).toBe(replayed.body.replay.finalHash);
     expect(replayed.body.summary.finalHash).toBe(replayed.body.summary.expectedFinalHash);
     expect(replayed.body.replay).not.toHaveProperty("finalState");
     expect(JSON.stringify(replayed.body)).not.toContain("privateMemos");
 
-    const diagnostic = await requestJson(baseUrl, "POST", "/api/replay", {
-      artifact
-    });
-    expect(diagnostic.status).toBe(200);
-    expect(diagnostic.body.summary).toMatchObject({
-      kind: "replay",
-      ok: true,
-      source: "client-submitted-diagnostic",
-      replayedCommands: artifact.trajectory.length
-    });
-    expect(diagnostic.body.replay).not.toHaveProperty("finalState");
-    expect(JSON.stringify(diagnostic.body)).not.toContain("privateMemos");
   });
 
-  it("rejects unavailable or mismatched server-owned replay inputs without exposing final state", async () => {
+  it("rejects unavailable matches and client-submitted replay authority", async () => {
     const missing = await requestJson(baseUrl, "POST", "/api/matches/missing/replay", {});
     expect(missing.status).toBe(404);
     expect(missing.body.error).toBe("match not found");
@@ -1261,43 +1302,15 @@ describe("checkpoint and fork API", () => {
     expect(withoutArtifact.status).toBe(404);
     expect(withoutArtifact.body.error).toBe("match artifact not available");
 
-    const { record } = await createStoredArtifactMatch("server-owned-replay-mismatch");
-    if (!record.artifact?.trajectory.length) throw new Error("Expected replay fixture to create at least one trajectory step.");
-    record.artifact.trajectory[0] = {
-      ...record.artifact.trajectory[0],
-      postStateHash: "tampered-post-state-hash"
-    };
-    saveMatch(record);
-
-    const mismatched = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/replay`, {});
-    const firstStep = record.artifact.trajectory[0];
-    const mismatchJson = JSON.stringify(mismatched.body);
-    expect(mismatched.status).toBe(409);
-    expect(mismatched.body.summary).toMatchObject({
-      kind: "replay",
-      ok: false,
-      source: "server-owned-match-artifact",
-      matchId: record.id,
-      mismatchCodes: expect.arrayContaining([expect.objectContaining({ code: "post_state_hash" })])
+    const { record } = await createStoredArtifactMatch("server-owned-replay-client-authority");
+    const rejected = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/replay`, {
+      artifact: { initialState: null, socialEpisode: { steps: [] } },
+      initialState: null,
+      trajectory: []
     });
-    expect(mismatched.body.summary.mismatchCount).toBeGreaterThan(0);
-    expect(mismatched.body.replay.redaction).toMatchObject({
-      finalStateRedacted: true,
-      mismatchDetailsRedacted: true,
-      traceIdsRedacted: true,
-      actorIdsRedacted: true,
-      commandPayloadsRedacted: true,
-      rawHashesRedacted: true
-    });
-    expect(mismatched.body.replay.mismatches.join("\n")).toContain("Mismatch 1:");
-    expect(mismatched.body.replay.mismatches.join("\n")).not.toContain(firstStep.traceId);
-    expect(mismatched.body.replay.mismatches.join("\n")).not.toContain(firstStep.actorId);
-    expect(mismatched.body.replay.mismatches.join("\n")).not.toContain(firstStep.command.type);
-    expect(mismatched.body.replay.mismatches.join("\n")).not.toContain(firstStep.pendingAction.kind);
-    expect(mismatchJson).not.toContain(firstStep.traceId);
-    expect(mismatchJson).not.toContain(firstStep.command.type);
-    expect(mismatched.body.replay).not.toHaveProperty("finalState");
-    expect(JSON.stringify(mismatched.body)).not.toContain("privateMemos");
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.error).toContain("unsupported field");
+    expect(JSON.stringify(rejected.body)).not.toContain("privateMemos");
   });
 });
 
@@ -1345,7 +1358,7 @@ async function createPersistedCheckpoint(baseUrl: string, seed: string) {
   });
   expect(checkpointResponse.status).toBe(201);
   const checkpointId = checkpointResponse.body.summary.checkpointId as string;
-  const checkpointArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${checkpointId}/artifact`);
+  const checkpointArtifact = await requestJson(baseUrl, "GET", `/api/checkpoints/${checkpointId}/artifact?view=full`);
   expect(checkpointArtifact.status).toBe(200);
   return {
     record,
@@ -1361,7 +1374,7 @@ async function writeCheckpointIndex(checkpointBaseDir: string, checkpoints: unkn
     path.join(checkpointBaseDir, CHECKPOINT_INDEX_FILE),
     `${JSON.stringify(
       {
-        artifactVersion: "harness.checkpoint-artifact-index.v1",
+        artifactVersion: "harness.checkpoint-artifact-index.v2",
         kind: "checkpoint-artifact-index",
         updatedAt: "2026-07-05T00:00:00.000Z",
         checkpoints
@@ -1441,20 +1454,11 @@ function assertPublicCheckpointResponse(body: any): void {
   expect(json).not.toContain("\"state\":");
 }
 
-function firstSafePrefixLength(artifact: MatchArtifact): number {
-  for (const [index, step] of artifact.trajectory.entries()) {
-    const socialStep = artifact.socialEpisode.steps.find((candidate: any) => candidate.traceId === step.traceId);
-    const nextStep = artifact.trajectory[index + 1];
-    const nextSocialStep = nextStep ? artifact.socialEpisode.steps.find((candidate: any) => candidate.traceId === nextStep.traceId) : undefined;
-    if (!resolveAgentSnapshotsAfterStep(artifact, step) || !step.agentSnapshotsHashAfterStep) continue;
-    if (socialStep?.schedulerMode === "parallel" || socialStep?.atomic) continue;
-    if (
-      socialStep?.schedulerMode === "aec-batched-decision" &&
-      socialStep.batchId &&
-      nextSocialStep?.batchId === socialStep.batchId
-    ) {
-      continue;
-    }
+function firstSafeNativePrefixLength(artifact: MatchArtifact): number {
+  for (const [index, step] of artifact.socialEpisode.steps.entries()) {
+    const nextStep = artifact.socialEpisode.steps[index + 1];
+    if (!step.actorSnapshotFrameIdAfterStep || !step.actorSnapshotsHashAfterStep) continue;
+    if (step.batchId && nextStep?.batchId === step.batchId && (step.schedulerMode !== "aec" || step.atomic)) continue;
     return index + 1;
   }
   throw new Error("Expected a safe prefix checkpoint boundary in server fixture.");
@@ -1514,7 +1518,12 @@ async function close(server: Server): Promise<void> {
   });
 }
 
-async function requestJson(baseUrl: string, method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+async function requestJson(
+  baseUrl: string,
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<{ status: number; body: any; headers: Headers }> {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: body === undefined ? undefined : { "content-type": "application/json" },
@@ -1523,7 +1532,8 @@ async function requestJson(baseUrl: string, method: string, path: string, body?:
   const text = await response.text();
   return {
     status: response.status,
-    body: text ? JSON.parse(text) : null
+    body: text ? JSON.parse(text) : null,
+    headers: response.headers
   };
 }
 
