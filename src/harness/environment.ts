@@ -1,4 +1,5 @@
 import { applyCommand, getPendingActions } from "../core/engine";
+import { assertSupportedWerewolfRulesetId } from "../core/roles";
 import { isAgentPendingAction, type AgentPendingAction } from "../core/pending";
 import { createPlayerView } from "../core/view";
 import type { GameCommand, GameState, PendingAction, PlayerView } from "../core/types";
@@ -8,6 +9,7 @@ export class WerewolfEnvironment {
   private state: GameState;
 
   constructor(initialState: GameState) {
+    assertSupportedWerewolfRulesetId(initialState.config.rulesetId);
     this.state = cloneGameState(initialState);
   }
 

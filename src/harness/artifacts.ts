@@ -1,4 +1,5 @@
-import type { GameCommand, GameConfig, GameEvent, GameState, MatchMetrics } from "../core/types";
+import type { GameCommand, GameConfig, GameEvent, GameState, MatchMetrics, WerewolfRulesetId } from "../core/types";
+import { isSupportedWerewolfRulesetId } from "../core/roles";
 import type { HarnessAssignmentConfig, ResolvedAgentAssignment } from "./profiles";
 import { summarizeEvaluationWarnings } from "./evaluation";
 import { deriveSocialExposureRecords, isSocialStepCommitted, type SocialEpisodeArtifact, type SocialMessage } from "./social";
@@ -57,6 +58,8 @@ export interface MatchArtifact
   matchId?: string;
   createdAt: string;
   seed: string;
+  /** Domain-owned replay semantic identity, derived only from initial state. */
+  rulesetId: WerewolfRulesetId;
   config: GameConfig;
   models: string[];
   profiles: HarnessAgentProfile[];
@@ -117,6 +120,7 @@ export interface TrajectoryJsonlSource {
   matchId?: string;
   createdAt?: string;
   seed?: string;
+  rulesetId?: WerewolfRulesetId;
   models?: unknown;
   profiles?: unknown;
   assignment?: unknown;
@@ -139,6 +143,8 @@ export interface WerewolfHarnessCheckpointSource extends HarnessCheckpointSource
   sourceArtifactVersion: typeof MATCH_ARTIFACT_VERSION;
   matchId?: string;
   seed: string;
+  /** Explicit domain semantic binding; never inferred from an artifact version. */
+  rulesetId: WerewolfRulesetId;
   status: HarnessRunResult["status"];
 }
 
@@ -204,6 +210,7 @@ export function buildMatchArtifact(options: {
     matchId: options.matchId,
     createdAt: options.createdAt ?? new Date().toISOString(),
     seed: options.seed,
+    rulesetId: options.result.initialState.config.rulesetId,
     config: cloneJson(options.result.initialState.config),
     models: [...options.models],
     profiles: cloneJson(options.profiles),
@@ -352,6 +359,7 @@ export function toTrajectoryJsonl(artifact: TrajectoryJsonlSource): string {
       matchId: artifact.matchId,
       createdAt: artifact.createdAt,
       seed: artifact.seed,
+      rulesetId: artifact.rulesetId,
       models: artifact.models,
       profiles: artifact.profiles,
       assignment: artifact.assignment,
@@ -600,6 +608,9 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
       errors.push(`forkOf.checkpointArtifactVersion must be ${HARNESS_CHECKPOINT_VERSION}.`);
     }
   }
+  const errorsBeforeRulesetBinding = errors.length;
+  validateMatchArtifactRulesetBinding(artifact, errors);
+  const rulesetBindingInvalid = errors.length > errorsBeforeRulesetBinding;
 
   const finalEvents = artifact.finalState.events ?? [];
   if (artifact.events.length !== finalEvents.length) {
@@ -615,7 +626,7 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
     }
   }
 
-  validateNativeSocialExecution(artifact, errors);
+  validateNativeSocialExecution(artifact, errors, { replay: !rulesetBindingInvalid });
 
   const socialStepByTrace = new Map(artifact.socialEpisode.steps.map((step) => [step.traceId, step]));
   const messageSeqs = new Set(artifact.socialEpisode.messages.map((message) => message.seq));
@@ -876,7 +887,7 @@ function validateEvaluationPromotionIntegrity(report: HarnessEvaluationReport, e
   }
 }
 
-function validateNativeSocialExecution(artifact: MatchArtifact, errors: string[]): void {
+function validateNativeSocialExecution(artifact: MatchArtifact, errors: string[], options: { replay?: boolean } = {}): void {
   const execution = artifact.socialEpisode;
   if (!execution.execution) {
     errors.push("socialEpisode.execution metadata is required for harness.match.v2.");
@@ -939,11 +950,13 @@ function validateNativeSocialExecution(artifact: MatchArtifact, errors: string[]
     });
   }
 
-  const replay = replayWerewolfSocialEpisode(execution as SocialEpisodeArtifact<GameState, unknown, unknown, GameCommand>, {
-    stopOnMismatch: false,
-    agentSnapshotFrames: artifact.agentSnapshotFrames
-  });
-  for (const mismatch of replay.mismatches) errors.push(`socialEpisode replay: ${mismatch}`);
+  if (options.replay !== false) {
+    const replay = replayWerewolfSocialEpisode(execution as SocialEpisodeArtifact<GameState, unknown, unknown, GameCommand>, {
+      stopOnMismatch: false,
+      agentSnapshotFrames: artifact.agentSnapshotFrames
+    });
+    for (const mismatch of replay.mismatches) errors.push(`socialEpisode replay: ${mismatch}`);
+  }
 }
 
 export function assertValidMatchArtifactIntegrity(artifact: MatchArtifact): void {
@@ -984,6 +997,7 @@ export function buildHarnessCheckpointAtPrefix(options: {
   createdAt?: string;
   reason?: string;
 }): HarnessCheckpoint {
+  assertValidMatchArtifactIntegrity(options.artifact);
   const selected = resolveCheckpointPrefixSelection(options.artifact, options.selector);
   assertSafeCheckpointBoundary(options.artifact, selected.index);
   const agents = resolveAgentSnapshotsAfterNativeStep(options.artifact, selected.step);
@@ -1089,6 +1103,7 @@ export function forkHarnessRunOptions(options: {
     forkOf: {
       ...genericFork,
       parentMatchId: options.checkpoint.source.matchId,
+      parentRulesetId: options.checkpoint.source.rulesetId,
     }
   };
 }
@@ -1107,6 +1122,7 @@ export function validateHarnessCheckpoint(checkpoint: HarnessCheckpoint): string
   if (checkpoint.source.seed !== checkpoint.state.seed) {
     errors.push(`source.seed mismatch: expected ${checkpoint.state.seed}, received ${checkpoint.source.seed}.`);
   }
+  validateHarnessCheckpointRulesetBinding(checkpoint, errors);
 
   const playerIds = new Set(checkpoint.state.players.map((player) => player.id));
   const seenAgentIds = new Set<string>();
@@ -1193,6 +1209,7 @@ function buildNativeCheckpointRecord(options: {
       runId: options.artifact.runId,
       matchId: options.artifact.matchId,
       seed: options.artifact.seed,
+      rulesetId: options.artifact.rulesetId,
       status: options.artifact.status,
       boundaryTraceId: boundary?.traceId,
       boundaryTurnIndex: boundary?.turnIndex,
@@ -1215,6 +1232,71 @@ function buildNativeCheckpointRecord(options: {
     agents: cloneJson(options.agents),
     executionPrefix: cloneJson(options.executionPrefix)
   };
+}
+
+/**
+ * The harness envelope remains domain-neutral; this validator is deliberately
+ * kept in the Werewolf artifact specialization.  A single replay recipe must
+ * not combine config/state/episode/fork records from different semantics.
+ */
+function validateMatchArtifactRulesetBinding(artifact: MatchArtifact, errors: string[]): void {
+  validateWerewolfRulesetId(artifact.rulesetId, "rulesetId", errors);
+  const configs: Array<[string, GameConfig | undefined]> = [
+    ["config", artifact.config],
+    ["initialState.config", artifact.initialState?.config],
+    ["finalState.config", artifact.finalState?.config],
+    ["socialEpisode.initialState.config", (artifact.socialEpisode?.initialState as GameState | undefined)?.config],
+    ["socialEpisode.finalState.config", (artifact.socialEpisode?.finalState as GameState | undefined)?.config]
+  ];
+  for (const [label, config] of configs) {
+    validateWerewolfRulesetId(config?.rulesetId, `${label}.rulesetId`, errors);
+    if (config?.rulesetId !== artifact.rulesetId) {
+      errors.push(`${label}.rulesetId does not match artifact.rulesetId.`);
+    }
+  }
+
+  const canonicalConfig = artifact.config;
+  const canonicalConfigHash = hashStableState(canonicalConfig);
+  for (const [label, config] of configs.slice(1)) {
+    if (hashStableState(config) !== canonicalConfigHash) {
+      errors.push(`${label} does not match artifact.config.`);
+    }
+  }
+
+  if (artifact.forkOf) {
+    validateWerewolfRulesetId(artifact.forkOf.parentRulesetId, "forkOf.parentRulesetId", errors);
+    if (artifact.forkOf.parentRulesetId !== artifact.config?.rulesetId) {
+      errors.push("forkOf.parentRulesetId does not match artifact.config.rulesetId.");
+    }
+  }
+}
+
+function validateHarnessCheckpointRulesetBinding(checkpoint: HarnessCheckpoint, errors: string[]): void {
+  validateWerewolfRulesetId(checkpoint.source.rulesetId, "source.rulesetId", errors);
+  const configs: Array<[string, GameConfig | undefined]> = [
+    ["state.config", checkpoint.state?.config],
+    ["executionPrefix.initialState.config", (checkpoint.executionPrefix?.initialState as GameState | undefined)?.config],
+    ["executionPrefix.finalState.config", (checkpoint.executionPrefix?.finalState as GameState | undefined)?.config]
+  ];
+  for (const [label, config] of configs) {
+    validateWerewolfRulesetId(config?.rulesetId, `${label}.rulesetId`, errors);
+    if (config?.rulesetId !== checkpoint.source.rulesetId) {
+      errors.push(`${label}.rulesetId does not match source.rulesetId.`);
+    }
+  }
+
+  const stateConfigHash = hashStableState(checkpoint.state?.config);
+  for (const [label, config] of configs.slice(1)) {
+    if (hashStableState(config) !== stateConfigHash) {
+      errors.push(`${label} does not match state.config.`);
+    }
+  }
+}
+
+function validateWerewolfRulesetId(value: unknown, label: string, errors: string[]): void {
+  if (!isSupportedWerewolfRulesetId(value)) {
+    errors.push(`${label} must be a supported Werewolf ruleset id; received ${typeof value === "string" && value ? value : "<missing>"}.`);
+  }
 }
 
 function resolveAgentSnapshotsAfterNativeStep(

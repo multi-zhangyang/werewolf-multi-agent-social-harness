@@ -68,6 +68,7 @@ describe("checkpoint and fork API", () => {
 	      source: {
 	        runId: record.id,
 	        matchId: record.id,
+	        rulesetId: "werewolf.classic-9-seat.v1",
 	        boundaryTraceRef: expect.any(String),
 	        stateHash: record.artifact?.finalState ? expect.any(String) : undefined
 	      }
@@ -93,7 +94,7 @@ describe("checkpoint and fork API", () => {
         postgameTruthRedacted: true
       }
     });
-    expect(Object.keys(defaultArtifact.body.source).sort()).toEqual(["matchId", "runId", "sourceArtifactVersion", "status"]);
+    expect(Object.keys(defaultArtifact.body.source).sort()).toEqual(["matchId", "rulesetId", "runId", "sourceArtifactVersion", "status"]);
     expect(defaultArtifact.body.source).not.toHaveProperty("boundaryTraceId");
     expect(defaultArtifact.body.source).not.toHaveProperty("seed");
     expect(defaultArtifact.body.source).not.toHaveProperty("stateHash");

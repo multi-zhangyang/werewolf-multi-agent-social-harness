@@ -1793,6 +1793,7 @@ function matchArtifactFixture(options: {
     matchId: options.matchId,
     createdAt: options.createdAt,
     seed: options.seed,
+    rulesetId: state.config.rulesetId,
     config: state.config,
     models: ["comparison-model"],
     profiles: [{ id: "profile-comparison", model: "comparison-model", temperature: 0, policyName: "balanced" }],

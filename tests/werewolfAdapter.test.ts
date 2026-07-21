@@ -1638,6 +1638,7 @@ describe("Werewolf generic social adapter", () => {
       runId: initialState.id,
       createdAt: "2026-07-05T00:00:00.000Z",
       seed: initialState.seed,
+      rulesetId: initialState.config.rulesetId,
       config: initialState.config,
       models: ["invalid-message-model"],
       profiles: [{ id: "invalid-message-profile", model: "invalid-message-model" }],

@@ -25,7 +25,7 @@ import {
   type HarnessCheckpointPrefixSelector,
   type MatchArtifact
 } from "../harness/artifacts";
-import { buildReplayableSocialPrefix } from "../harness/episodeArtifacts";
+import { buildReplayableSocialPrefix, HarnessCheckpointSelectionError as GenericHarnessCheckpointSelectionError } from "../harness/episodeArtifacts";
 import {
   mergeExperimentOverrides,
   normalizeTournamentExperimentSpec,
@@ -649,6 +649,7 @@ app.post("/api/matches/:id/replay", async (req, res, next) => {
     }
     const body = requestBodyObject(req.body);
     assertAllowedBodyFields(body, ["stopOnMismatch"], "server-owned replay");
+    assertStoredMatchArtifactIntegrity(match.artifact);
     const replay = replayWerewolfSocialEpisode(match.artifact.socialEpisode, {
       stopOnMismatch: body.stopOnMismatch !== false,
       agentSnapshotFrames: match.artifact.agentSnapshotFrames
@@ -1701,6 +1702,7 @@ function buildMatchSummary(
     ok: result.status !== "failed" && harnessFailures.length === 0,
     provider: providerDiagnosticSummaryFromEnv(),
     seed: options.seed,
+    rulesetId: result.initialState.config.rulesetId,
     models: options.models,
     profileCount: options.profiles.length,
     modelCount: options.models.length,
@@ -1906,7 +1908,11 @@ function assertStoredMatchArtifactIntegrity(artifact: MatchArtifact): void {
 }
 
 function httpErrorFromReplayFrameError(error: unknown): unknown {
-  if (!(error instanceof HarnessCheckpointSelectionError)) return error;
+  // Replay frames use the generic prefix selector.  The older Werewolf
+  // checkpoint compatibility layer has a similarly named error class, but it
+  // is a distinct runtime constructor and must not be used to classify a
+  // generic replay-frame selection failure.
+  if (!(error instanceof GenericHarnessCheckpointSelectionError)) return error;
   switch (error.code) {
     case "ambiguous_selector":
     case "selector_not_found":
@@ -1949,6 +1955,7 @@ function serializeCheckpointSummary(checkpoint: HarnessCheckpoint): object {
       runId: checkpoint.source.runId,
       matchId: checkpoint.source.matchId ?? null,
       seed: checkpoint.source.seed,
+      rulesetId: checkpoint.source.rulesetId,
       status: checkpoint.source.status,
       boundaryTraceRef: checkpoint.source.boundaryTraceId
         ? hashStableState({ traceId: checkpoint.source.boundaryTraceId }).slice(0, 16)
@@ -2321,6 +2328,7 @@ function checkpointSourceMatchesForkProvenance(checkpoint: HarnessCheckpoint, fo
     checkpoint.checkpointId === forkOf.checkpointId &&
     checkpoint.source.runId === forkOf.parentRunId &&
     (checkpoint.source.matchId ?? null) === (forkOf.parentMatchId ?? null) &&
+    checkpoint.source.rulesetId === forkOf.parentRulesetId &&
     (checkpoint.source.boundaryTraceId ?? null) === (forkOf.parentBoundaryTraceId ?? null) &&
     (checkpoint.source.boundaryTurnIndex ?? null) === (forkOf.parentBoundaryTurnIndex ?? null) &&
     checkpoint.source.stateHash === forkOf.parentStateHash &&
@@ -2743,6 +2751,7 @@ async function writeCheckpointArtifactIndex(baseDir: string | undefined): Promis
       sourceRunId: persisted.source.runId,
       sourceMatchId: persisted.source.matchId ?? null,
       seed: persisted.source.seed,
+      rulesetId: persisted.source.rulesetId,
       stateHash: persisted.source.stateHash,
       executionPrefixHash: persisted.source.executionPrefixHash,
       agentsHash: persisted.source.agentsHash,
@@ -3710,6 +3719,7 @@ function redactHarnessCheckpointSourceForTruthView(source: HarnessCheckpoint["so
     sourceArtifactVersion: source.sourceArtifactVersion,
     runId: source.runId,
     matchId: source.matchId,
+    rulesetId: source.rulesetId,
     status: source.status
   };
 }
@@ -7126,6 +7136,7 @@ function summarizeForkProvenance(forkOf: HarnessForkProvenance): object {
     checkpointId: forkOf.checkpointId,
     parentRunId: forkOf.parentRunId,
     parentMatchId: forkOf.parentMatchId,
+    parentRulesetId: forkOf.parentRulesetId,
     parentBoundaryTraceRef: forkOf.parentBoundaryTraceId
       ? hashStableState({ traceId: forkOf.parentBoundaryTraceId }).slice(0, 16)
       : null,

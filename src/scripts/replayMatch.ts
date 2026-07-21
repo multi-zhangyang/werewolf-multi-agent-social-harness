@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { replayWerewolfSocialEpisode } from "../harness/replay";
-import type { MatchArtifact } from "../harness/artifacts";
+import { assertValidMatchArtifactIntegrity, type MatchArtifact } from "../harness/artifacts";
 import { countSocialStepCommits } from "../harness/social";
 
 interface ReplayCliOptions {
@@ -33,6 +33,7 @@ if (hasFlag("help")) {
 async function main(): Promise<void> {
   const options = parseOptions();
   const artifact = JSON.parse(await readFile(options.artifact, "utf8")) as MatchArtifact;
+  assertValidMatchArtifactIntegrity(artifact);
   const replay = replayWerewolfSocialEpisode(artifact.socialEpisode, {
     stopOnMismatch: options.stopOnMismatch,
     agentSnapshotFrames: artifact.agentSnapshotFrames

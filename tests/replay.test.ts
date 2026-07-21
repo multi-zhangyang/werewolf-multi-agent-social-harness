@@ -5,6 +5,7 @@ import {
   buildHarnessCheckpointAtPrefix,
   buildMatchArtifact,
   forkHarnessRunOptions,
+  validateMatchArtifactIntegrity,
   validateHarnessCheckpoint,
   type MatchArtifact
 } from "../src/harness/artifacts";
@@ -23,6 +24,7 @@ import {
   type SocialParallelEnvironment
 } from "../src/harness/social";
 import type { HarnessReasoner, HarnessRunResult, HarnessStepRecord } from "../src/harness/types";
+import { WEREWOLF_CLASSIC_9_SEAT_RULESET_ID } from "../src/core/types";
 
 const reasoner: HarnessReasoner = {
   async think(input) {
@@ -44,6 +46,58 @@ const reasoner: HarnessReasoner = {
 };
 
 describe("harness trajectory replay", () => {
+  it("binds ruleset semantics across artifacts, checkpoints, forks, and model-free replay", async () => {
+    const initialState = createGame({ id: "ruleset-replay-binding", seed: "ruleset-replay-binding" });
+    const profiles = profilesFromModels(["alpha", "beta"], 0.4);
+    const agents = resolveAgentConfigs(initialState.players, profiles, 0, 0.4);
+    const result = await runHarnessMatch({ initialState, agents, reasoner, maxTransitions: 8 });
+    const artifact = buildMatchArtifact({
+      runId: "ruleset-replay-binding",
+      matchId: "ruleset-replay-binding",
+      seed: initialState.seed,
+      models: ["alpha", "beta"],
+      profiles,
+      resolvedAssignments: describeResolvedAssignments(initialState.players, agents),
+      result
+    });
+
+    expect(artifact.rulesetId).toBe(WEREWOLF_CLASSIC_9_SEAT_RULESET_ID);
+    expect(artifact.config.rulesetId).toBe(WEREWOLF_CLASSIC_9_SEAT_RULESET_ID);
+    expect(artifact.initialState.config.rulesetId).toBe(WEREWOLF_CLASSIC_9_SEAT_RULESET_ID);
+    expect(artifact.finalState.config.rulesetId).toBe(WEREWOLF_CLASSIC_9_SEAT_RULESET_ID);
+    expect(validateMatchArtifactIntegrity(artifact)).toEqual([]);
+
+    const unsupportedArtifact = cloneJson(artifact);
+    unsupportedArtifact.config.rulesetId = "werewolf.unknown.v1" as never;
+    expect(validateMatchArtifactIntegrity(unsupportedArtifact).join(" ")).toMatch(
+      /config\.rulesetId must be a supported Werewolf ruleset id/
+    );
+
+    const legacyArtifact = cloneJson(artifact) as Omit<typeof artifact, "rulesetId"> & { rulesetId?: string };
+    delete legacyArtifact.rulesetId;
+    expect(validateMatchArtifactIntegrity(legacyArtifact as typeof artifact).join(" ")).toMatch(/rulesetId must be a supported Werewolf ruleset id/);
+
+    const missingRulesetEpisode = cloneJson(artifact.socialEpisode);
+    delete (missingRulesetEpisode.initialState as { config?: { rulesetId?: string } }).config?.rulesetId;
+    const replay = replayWerewolfSocialEpisode(missingRulesetEpisode, { stopOnMismatch: false });
+    expect(replay.ok).toBe(false);
+    expect(replay.replayedSteps).toBe(0);
+    expect(replay.replayedBatches).toBe(0);
+    expect(replay.mismatches.join(" ")).toMatch(/ruleset binding: initialState\.config\.rulesetId is unsupported or missing/i);
+
+    const checkpoint = buildFinalHarnessCheckpoint({ artifact, checkpointId: "ruleset-replay-checkpoint" });
+    expect(checkpoint.source.rulesetId).toBe(WEREWOLF_CLASSIC_9_SEAT_RULESET_ID);
+    expect(validateHarnessCheckpoint(checkpoint)).toEqual([]);
+
+    const forgedCheckpoint = cloneJson(checkpoint);
+    forgedCheckpoint.source.rulesetId = "werewolf.unknown.v1" as never;
+    expect(validateHarnessCheckpoint(forgedCheckpoint).join(" ")).toMatch(/source\.rulesetId must be a supported Werewolf ruleset id/);
+
+    const forkOptions = forkHarnessRunOptions({ checkpoint, reasoner, maxTransitions: 1, reason: "ruleset binding proof" });
+    expect(forkOptions.initialState.config.rulesetId).toBe(WEREWOLF_CLASSIC_9_SEAT_RULESET_ID);
+    expect(forkOptions.forkOf).toMatchObject({ parentRulesetId: WEREWOLF_CLASSIC_9_SEAT_RULESET_ID });
+  });
+
   it("round-trips a real run artifact without calling a reasoner", async () => {
     const initialState = createGame({ id: "replay-roundtrip", seed: "replay-roundtrip" });
     const profiles = profilesFromModels(["alpha", "beta"], 0.4);

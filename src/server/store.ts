@@ -5,7 +5,12 @@ import type { GameConfig, GameState, MatchMetrics } from "../core/types";
 import type { AdversarialEvaluation, HarnessAgentProfile, HarnessEvaluationReport, HarnessStepRecord } from "../harness/types";
 import type { HarnessAssignmentConfig, ResolvedAgentAssignment } from "../harness/profiles";
 import type { SocialEpisodeArtifact } from "../harness/social";
-import { assertValidMatchArtifactIntegrity, type HarnessCheckpoint, type MatchArtifact } from "../harness/artifacts";
+import {
+  assertValidHarnessCheckpoint,
+  assertValidMatchArtifactIntegrity,
+  type HarnessCheckpoint,
+  type MatchArtifact
+} from "../harness/artifacts";
 import type {
   PublicTournamentArtifactFiles,
   ResearchTournamentArtifactFiles,
@@ -265,6 +270,7 @@ export function createMatchRecordFromState(options: {
 }
 
 export function saveCheckpoint(checkpoint: HarnessCheckpoint): void {
+  assertValidHarnessCheckpoint(checkpoint);
   checkpoints.set(checkpoint.checkpointId, cloneJson(checkpoint));
 }
 

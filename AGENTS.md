@@ -25189,3 +25189,57 @@ budget rejection, an actual atomic parallel tournament batch, matrix dimension
 expansion, normalized research artifact persistence, and both tournament and
 matrix server paths. It is unrelated to provider selection: the generic
 `grok-4.5` streaming reasoner path remains unchanged.
+
+## 13.254 Werewolf Ruleset Semantic Binding Lock
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+`werewolf.classic-9-seat.v1` is the explicit semantic identity for the current
+deterministic Werewolf adapter. It identifies the engine rules used to create
+and interpret a state/trajectory; it is neither a model choice, scheduler
+condition, UI setting, nor a generic harness-envelope field.
+
+- New `GameConfig` instances inherit the supported ruleset explicitly from
+  `DEFAULT_CONFIG`; forged or unsupported runtime state is rejected by game
+  creation, pending-action discovery, command application, and the Werewolf
+  environment constructor.
+- A canonical match artifact derives its top-level `rulesetId` only from its
+  initial state. Its top-level config, both states, and the native social
+  episode initial/final states must all carry the same supported identifier and
+  the same complete config snapshot.
+- Replay validates the recorded initial/final ruleset and complete config
+  binding before constructing an environment or applying a recorded command.
+  Missing legacy-shaped records and unsupported ids fail closed; replay still
+  creates no actor, policy, reasoner, or provider.
+- Werewolf checkpoint source provenance records the ruleset. Checkpoint state
+  and execution prefix must bind to it; a fork records `parentRulesetId` and a
+  child artifact may not silently reinterpret the restored checkpoint under a
+  different ruleset.
+- Persistence, CLI replay, and server replay validate canonical artifact or
+  checkpoint integrity first. `rulesetId` is safe provenance metadata for
+  redacted summaries and JSONL headers, but it does not reveal hidden role,
+  seed, private message, provider, or model evidence.
+- This is a Werewolf specialization. Generic social episode/checkpoint/replay
+  envelopes remain domain-neutral. Do not silently map legacy artifacts missing
+  this binding to the current ruleset; a future persistence-version migration
+  requires an explicit evidence-backed compatibility decision.
+
+Validation completed for this slice:
+
+```bash
+npx vitest run tests/serverCheckpointApi.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=verbose
+npm test -- --maxWorkers=1 --no-file-parallelism --reporter=dot
+npm run typecheck
+npm run build
+npm run test:e2e
+git diff --check
+```
+
+The full deterministic suite completed with 39 test files and 417 tests
+passing. The production build retains the existing large-JavaScript-chunk
+warning; it is performance follow-up work, not a semantic-binding failure.

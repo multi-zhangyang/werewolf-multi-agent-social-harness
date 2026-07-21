@@ -1,4 +1,5 @@
 import { getPendingActions } from "../core/engine";
+import { isSupportedWerewolfRulesetId } from "../core/roles";
 import { isAgentPendingAction, type AgentPendingAction } from "../core/pending";
 import type { GameCommand, GameState, PendingAction } from "../core/types";
 import { WerewolfEnvironment } from "./environment";
@@ -35,6 +36,23 @@ export function replayWerewolfSocialEpisode(
     auditAgentSnapshots?: boolean;
   } = {}
 ): SocialEpisodeReplayResult<GameState> {
+  const rulesetMismatches = validateWerewolfReplayRulesetBinding(episode);
+  if (rulesetMismatches.length) {
+    const initialState = cloneJson(episode.initialState as GameState);
+    return {
+      ok: false,
+      replayedSteps: 0,
+      replayedBatches: 0,
+      rejectedSteps: 0,
+      finalState: initialState,
+      finalHash: hashStableState(initialState),
+      expectedFinalHash: hashStableState(episode.finalState as GameState),
+      messages: [],
+      messagesHash: hashStableState([]),
+      expectedMessagesHash: hashStableState(episode.messages),
+      mismatches: rulesetMismatches.map((mismatch) => `Werewolf ruleset binding: ${mismatch}`)
+    };
+  }
   const hasInlineSnapshots = episode.steps.some((step) => step.actorSnapshotsAfterStep !== undefined);
   return replaySocialEpisode({
     episode: episode as SocialEpisodeArtifact<GameState, unknown, unknown, GameCommand>,
@@ -50,6 +68,36 @@ export function replayWerewolfSocialEpisode(
       return validateRecordedWerewolfStepEvidence(step, context.state);
     }
   });
+}
+
+/** Fail closed before creating a domain environment or applying any recorded command. */
+function validateWerewolfReplayRulesetBinding(episode: SocialEpisodeArtifact): string[] {
+  const errors: string[] = [];
+  const initialState = episode.initialState as GameState | undefined;
+  const finalState = episode.finalState as GameState | undefined;
+  const initialRulesetId = initialState?.config?.rulesetId;
+  const finalRulesetId = finalState?.config?.rulesetId;
+  if (!isSupportedWerewolfRulesetId(initialRulesetId)) {
+    errors.push(`initialState.config.rulesetId is unsupported or missing (${formatRulesetId(initialRulesetId)}).`);
+  }
+  if (!isSupportedWerewolfRulesetId(finalRulesetId)) {
+    errors.push(`finalState.config.rulesetId is unsupported or missing (${formatRulesetId(finalRulesetId)}).`);
+  }
+  if (initialRulesetId !== finalRulesetId) {
+    errors.push("initialState.config.rulesetId does not match finalState.config.rulesetId.");
+  }
+  if (hashStableState(initialState?.config) !== hashStableState(finalState?.config)) {
+    errors.push("initialState.config does not match finalState.config.");
+  }
+  return errors;
+}
+
+function formatRulesetId(value: unknown): string {
+  return typeof value === "string" && value ? value : "<missing>";
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 /**

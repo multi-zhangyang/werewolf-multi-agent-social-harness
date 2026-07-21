@@ -3,7 +3,7 @@ import { applyCommand, createGame, getPendingActions, livingPlayers } from "../s
 import { isAgentPendingAction } from "../src/core/pending";
 import { createPlayerView, serializePublicState } from "../src/core/view";
 import { hashStableState } from "../src/harness/hash";
-import type { GameState, PendingAction, PlayerState, Role } from "../src/core/types";
+import { WEREWOLF_CLASSIC_9_SEAT_RULESET_ID, type GameState, type PendingAction, type PlayerState, type Role } from "../src/core/types";
 
 function advanceSystem(state: GameState): GameState {
   let next = state;
@@ -28,6 +28,26 @@ function pendingByKind<K extends PendingAction["kind"]>(state: GameState, kind: 
 }
 
 describe("game-core state machine", () => {
+  it("binds every created game to a supported explicit ruleset and rejects unknown semantics", () => {
+    const state = createGame({ id: "ruleset-id", seed: "ruleset-id" });
+    expect(state.config.rulesetId).toBe(WEREWOLF_CLASSIC_9_SEAT_RULESET_ID);
+
+    expect(() =>
+      createGame({
+        id: "unknown-ruleset",
+        seed: "unknown-ruleset",
+        config: { rulesetId: "werewolf.unknown.v1" as never }
+      })
+    ).toThrow(/Unsupported Werewolf ruleset/);
+
+    const forgedState = {
+      ...state,
+      config: { ...state.config, rulesetId: "werewolf.unknown.v1" as never }
+    };
+    expect(() => getPendingActions(forgedState)).toThrow(/Unsupported Werewolf ruleset/);
+    expect(() => applyCommand(forgedState, { type: "system.advance", actorId: "system" })).toThrow(/Unsupported Werewolf ruleset/);
+  });
+
   it("runs a night cycle, resolves hunter shot, and resumes day speech", () => {
     let state = createGame({ id: "test-night-hunter", seed: "night-hunter", config: { lastWords: "none" } });
     state = advanceSystem(state);

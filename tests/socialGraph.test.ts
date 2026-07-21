@@ -215,6 +215,7 @@ function createExposureArtifact(options: {
     runId: "social-graph-exposure-run",
     createdAt: "2026-01-01T00:00:00.000Z",
     seed: state.seed,
+    rulesetId: state.config.rulesetId,
     config: state.config,
     models: ["stub-model"],
     profiles: [{ id: "profile-p1", model: "stub-model", temperature: 0 }],

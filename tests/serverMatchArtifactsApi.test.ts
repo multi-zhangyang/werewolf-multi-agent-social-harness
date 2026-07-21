@@ -145,7 +145,8 @@ describe("server-owned match artifact persistence", () => {
       artifactVersion: "harness.match.v2",
       kind: "match",
       runId: matchId,
-      matchId
+      matchId,
+      rulesetId: "werewolf.classic-9-seat.v1"
     });
     expect(records.some((record) => record.type === "match_metrics")).toBe(true);
     expect(records.some((record) => record.type === "evaluation_report")).toBe(true);
