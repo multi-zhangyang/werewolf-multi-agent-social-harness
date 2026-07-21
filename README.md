@@ -286,4 +286,18 @@ export TOURNAMENT_TIMEOUT_MS=600000
 
 The API route `POST /api/matches/run` accepts `models`, `profiles`, `assignment`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, and optional game `config`; completed responses include public state, summary, `hasArtifact`, and artifact counters. Ordinary UI reads the default `postgame-redacted` artifact projections with sanitized exposure records; `truth-redacted` is the public/share projection, while full private/postgame truth requires an explicit `view=full` artifact or JSONL request. `POST /api/harness/probe` accepts `model`, `timeoutMs`/`timeout`, and optional `seed`. `POST /api/tournaments/run` accepts `models`, `profiles`, `assignment`, `games`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, `continueOnError`, and optional game `config`; it returns bounded, redaction-safe episode summaries plus `gamesCompleted`, `gamesTruncated`, and `gamesFailed`. `gamesCompleted` means the domain reached a terminal outcome; `gamesTruncated` means an auditable run hit a configured bound; `gamesFailed` is an execution failure. `ok: true` means no failures, not that every game reached terminal state. Full trajectory/social evidence remains server-owned in match artifacts and tournament packs.
 
+`POST /api/experiments/matrix/run` adds the reusable experiment-matrix control
+plane (`harness.experiment-matrix.v1`): it schedules normalized tournament cells
+from explicit cells or dimensions, preserves `completed` / `truncated` /
+`failed` cell and game counts, and returns server-recorded model/profile and
+descriptive pairwise statistics. Terminal completed seats are the only
+win-rate/reward denominator; bounded and failed episodes remain visible rather
+than being promoted to completed results. `exportArtifacts: true` writes a
+local-only research bundle to `MATRIX_ARTIFACT_BASE_DIR` (or a namespaced
+`matrices` child under `TOURNAMENT_ARTIFACT_BASE_DIR`). Registered matrix
+downloads are allowlisted and are intentionally separate from public
+tournament-share routes. The Cockpit's **实验矩阵** workspace consumes these
+server projections and download URLs; it does not calculate winners, p-values,
+or artifact paths locally.
+
 `POST /api/tournaments/run` also accepts `{ "spec": { ... } }`; top-level request fields such as `games`, `maxTransitions`, `timeout`, `profiles`, and `assignment` override the embedded spec using the same normalizer as `arena:tournament -- --spec`.

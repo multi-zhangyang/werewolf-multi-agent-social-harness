@@ -69,7 +69,8 @@ export interface ExperimentMatrixCellResult {
   id: string;
   label: string;
   group: string;
-  status: "completed" | "failed";
+  /** Aggregate lifecycle of the cell's tournament episodes. */
+  status: "completed" | "truncated" | "failed";
   elapsedMs: number;
   tournament?: TournamentResult;
   error?: string;
@@ -84,9 +85,11 @@ export interface ExperimentMatrixResult {
   status: "completed" | "partial" | "failed";
   cellsRequested: number;
   cellsCompleted: number;
+  cellsTruncated: number;
   cellsFailed: number;
   gamesRequested: number;
   gamesCompleted: number;
+  gamesTruncated: number;
   gamesFailed: number;
   cells: ExperimentMatrixCellResult[];
   statistics: ExperimentMatrixStatistics;
@@ -100,6 +103,7 @@ export interface ExperimentMatrixStatistics {
   denominatorPolicy: {
     seatLevelRows: string;
     completedEpisodeRows: string;
+    truncatedEpisodes: string;
     failedEpisodes: string;
     significance: string;
     superiorityClaims: false;
@@ -107,9 +111,11 @@ export interface ExperimentMatrixStatistics {
   status: {
     cellsRequested: number;
     cellsCompleted: number;
+    cellsTruncated: number;
     cellsFailed: number;
     gamesRequested: number;
     gamesCompleted: number;
+    gamesTruncated: number;
     gamesFailed: number;
     completedSeatRows: number;
   };
@@ -262,12 +268,13 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
         includeArtifacts: options.includeArtifacts,
         reasoner: options.reasoner
       });
+      const gamesTruncated = tournament.gamesTruncated ?? tournament.episodes.filter((episode) => episode.status === "truncated").length;
       cells.push({
         index,
         id: cell.id,
         label: cell.label,
         group: cell.group,
-        status: tournament.gamesFailed ? "failed" : "completed",
+        status: tournament.gamesFailed ? "failed" : gamesTruncated > 0 ? "truncated" : "completed",
         elapsedMs: Math.round(performance.now() - started),
         tournament
       });
@@ -289,18 +296,21 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
   const statistics = buildExperimentMatrixStatistics(options.experiment, cells);
   const cellsFailed = cells.filter((cell) => cell.status === "failed").length;
   const cellsCompleted = cells.filter((cell) => cell.status === "completed").length;
+  const cellsTruncated = cells.filter((cell) => cell.status === "truncated").length;
   return {
     artifactVersion: MATRIX_ARTIFACT_VERSION,
     kind: "experiment-matrix-result",
     experiment: options.experiment,
     createdAt,
     completedAt,
-    status: cellsFailed === 0 ? "completed" : cellsCompleted > 0 ? "partial" : "failed",
+    status: cellsFailed === 0 ? "completed" : cellsCompleted + cellsTruncated > 0 ? "partial" : "failed",
     cellsRequested: options.experiment.cells.length,
     cellsCompleted,
+    cellsTruncated,
     cellsFailed,
     gamesRequested: sumCells(cells, (cell) => cell.tournament?.gamesRequested ?? 0),
     gamesCompleted: sumCells(cells, (cell) => cell.tournament?.gamesCompleted ?? 0),
+    gamesTruncated: sumCells(cells, gamesTruncatedForCell),
     gamesFailed: sumCells(cells, (cell) => cell.tournament?.gamesFailed ?? 0),
     cells,
     statistics
@@ -322,8 +332,10 @@ export function buildExperimentMatrixStatistics(
     experimentHash: hashStableState(experiment),
     denominatorPolicy: {
       seatLevelRows: "Each completed player seat with an observed outcome contributes one Bernoulli win/loss row for model/profile win-rate estimates.",
-      completedEpisodeRows: "Completed tournament episodes are counted; failed episodes remain in status denominators and do not disappear.",
-      failedEpisodes: "Failed cells and episodes are listed in matrix status denominators; they are excluded from win-rate numerators and denominators.",
+      completedEpisodeRows: "Only terminally completed tournament episodes contribute seat-level outcome rows.",
+      truncatedEpisodes:
+        "Truncated cells and episodes remain in matrix status denominators and are excluded from outcome and scorecard denominators.",
+      failedEpisodes: "Failed cells and episodes remain in matrix status denominators and are excluded from outcome and scorecard denominators.",
       significance:
         "Pairwise model comparisons use an unpaired seat-level two-proportion z-test with Holm correction. This is a descriptive screening statistic, not a causal or paired-seed superiority claim.",
       superiorityClaims: false
@@ -331,9 +343,11 @@ export function buildExperimentMatrixStatistics(
     status: {
       cellsRequested: experiment.cells.length,
       cellsCompleted: cells.filter((cell) => cell.status === "completed").length,
+      cellsTruncated: cells.filter((cell) => cell.status === "truncated").length,
       cellsFailed: cells.filter((cell) => cell.status === "failed").length,
       gamesRequested: sumCells(cells, (cell) => cell.tournament?.gamesRequested ?? 0),
       gamesCompleted: sumCells(cells, (cell) => cell.tournament?.gamesCompleted ?? 0),
+      gamesTruncated: sumCells(cells, gamesTruncatedForCell),
       gamesFailed: sumCells(cells, (cell) => cell.tournament?.gamesFailed ?? 0),
       completedSeatRows: rows.length
     },
@@ -390,9 +404,11 @@ export async function writeExperimentMatrixArtifactDirectory(
     status: result.status,
     cellsRequested: result.cellsRequested,
     cellsCompleted: result.cellsCompleted,
+    cellsTruncated: result.cellsTruncated,
     cellsFailed: result.cellsFailed,
     gamesRequested: result.gamesRequested,
     gamesCompleted: result.gamesCompleted,
+    gamesTruncated: result.gamesTruncated,
     gamesFailed: result.gamesFailed,
     experimentHash: result.statistics.experimentHash,
     files: {
@@ -615,10 +631,15 @@ function matrixCellRecord(cell: ExperimentMatrixCellResult): object {
     tournamentSeed: cell.tournament?.seed ?? null,
     gamesRequested: cell.tournament?.gamesRequested ?? null,
     gamesCompleted: cell.tournament?.gamesCompleted ?? null,
+    gamesTruncated: cell.tournament ? gamesTruncatedForCell(cell) : null,
     gamesFailed: cell.tournament?.gamesFailed ?? null,
     models: cell.tournament?.models ?? [],
     error: cell.error ?? null
   };
+}
+
+function gamesTruncatedForCell(cell: ExperimentMatrixCellResult): number {
+  return cell.tournament?.gamesTruncated ?? cell.tournament?.episodes.filter((episode) => episode.status === "truncated").length ?? 0;
 }
 
 function matrixSummaryMarkdown(result: ExperimentMatrixResult): string {
@@ -630,9 +651,11 @@ function matrixSummaryMarkdown(result: ExperimentMatrixResult): string {
     `- Status: ${result.status}`,
     `- Cells requested: ${result.cellsRequested}`,
     `- Cells completed: ${result.cellsCompleted}`,
+    `- Cells truncated: ${result.cellsTruncated}`,
     `- Cells failed: ${result.cellsFailed}`,
     `- Games requested: ${result.gamesRequested}`,
     `- Games completed: ${result.gamesCompleted}`,
+    `- Games truncated: ${result.gamesTruncated}`,
     `- Games failed: ${result.gamesFailed}`,
     `- Completed seat rows: ${result.statistics.status.completedSeatRows}`,
     "",

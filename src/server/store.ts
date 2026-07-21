@@ -11,6 +11,7 @@ import type {
   ResearchTournamentArtifactFiles,
   TournamentArtifactWriteResult
 } from "../harness/tournamentArtifacts";
+import type { ExperimentMatrixArtifactWriteResult } from "../harness/experimentMatrix";
 import type { MatchComparisonArtifact } from "../harness/matchComparison";
 
 
@@ -47,6 +48,7 @@ const matches = new Map<string, StoredMatchEntry>();
 const checkpoints = new Map<string, HarnessCheckpoint>();
 const comparisons = new Map<string, MatchComparisonArtifact>();
 const tournamentArtifactSets = new Map<string, StoredTournamentArtifactSet>();
+const experimentMatrixArtifactSets = new Map<string, StoredExperimentMatrixArtifactSet>();
 const tournamentPublicShares = new Map<string, StoredTournamentPublicShare>();
 const artifactRecoveryAudits = new Map<string, StoredArtifactRecoveryAuditRecord>();
 
@@ -112,6 +114,34 @@ export interface StoredTournamentArtifactSet {
     assignmentTruthRedacted: boolean;
     publicShareSafe: boolean;
   };
+}
+
+/**
+ * Only writer-produced, relative files are registered here.  The server uses
+ * this allowlist for every matrix download; callers never receive outputDir.
+ */
+export interface StoredExperimentMatrixArtifactFiles {
+  manifest: string;
+  specNormalized: string;
+  cells: string;
+  statistics: string;
+  summaryMarkdown: string;
+  modelStatsCsv: string;
+  profileStatsCsv: string;
+  pairwiseModelComparisonsCsv: string;
+  tournaments: Array<{
+    cellId: string;
+    manifest: string;
+  }>;
+}
+
+export interface StoredExperimentMatrixArtifactSet {
+  id: string;
+  createdAt: string;
+  matrixId: string;
+  outputDir: string;
+  files: ExperimentMatrixArtifactWriteResult["files"];
+  relativeFiles: StoredExperimentMatrixArtifactFiles;
 }
 
 export interface StoredTournamentPublicShare {
@@ -331,6 +361,21 @@ export function listTournamentArtifactSets(): StoredTournamentArtifactSet[] {
   return [...tournamentArtifactSets.values()].map((set) => cloneJson(set)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+export function saveExperimentMatrixArtifactSet(set: StoredExperimentMatrixArtifactSet): void {
+  experimentMatrixArtifactSets.set(set.id, cloneJson(set));
+}
+
+export function getExperimentMatrixArtifactSet(id: string): StoredExperimentMatrixArtifactSet | undefined {
+  const set = experimentMatrixArtifactSets.get(id);
+  return set ? cloneJson(set) : undefined;
+}
+
+export function listExperimentMatrixArtifactSets(): StoredExperimentMatrixArtifactSet[] {
+  return [...experimentMatrixArtifactSets.values()]
+    .map((set) => cloneJson(set))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
 export interface TournamentPublicShareEventRetentionPolicy {
   maxEvents: number;
   /** When null/undefined, age-based pruning is disabled. */
@@ -534,6 +579,7 @@ export function clearServerStoreForTests(): void {
   checkpoints.clear();
   comparisons.clear();
   tournamentArtifactSets.clear();
+  experimentMatrixArtifactSets.clear();
   tournamentPublicShares.clear();
   artifactRecoveryAudits.clear();
 }

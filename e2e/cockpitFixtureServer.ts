@@ -65,6 +65,7 @@ function configureFixtureRuntime(): void {
     "MATCH_ARTIFACT_BASE_DIR",
     "CHECKPOINT_ARTIFACT_BASE_DIR",
     "TOURNAMENT_ARTIFACT_BASE_DIR",
+    "MATRIX_ARTIFACT_BASE_DIR",
     "COMPARISON_ARTIFACT_BASE_DIR"
   ]) {
     delete process.env[key];

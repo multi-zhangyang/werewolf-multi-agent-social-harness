@@ -87,7 +87,7 @@ import { legacyMetricPromotionPolicyFromSummary, resolveRecordedMetricPromotion 
 import { countSocialStepCommits, deriveSocialExposureRecords, isSocialStepCommitted, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
 import type { SocialStateMutationJournalEntry } from "./harness/socialState";
 
-type Workspace = "runs" | "timeline" | "society" | "lineage" | "evaluation" | "compare" | "packs";
+type Workspace = "runs" | "timeline" | "society" | "lineage" | "evaluation" | "experiments" | "compare" | "packs";
 
 const DEFAULT_TABLE_SCROLL = { x: "max-content" } as const;
 
@@ -106,6 +106,7 @@ function parseWorkspaceFromSearch(search: string): Workspace | null {
     raw === "society" ||
     raw === "lineage" ||
     raw === "evaluation" ||
+    raw === "experiments" ||
     raw === "compare" ||
     raw === "packs"
   ) {
@@ -190,6 +191,12 @@ interface ConfigResponse {
     protocol?: string;
     endpoint?: string;
     models?: string[];
+  };
+  artifactExport?: {
+    tournamentConfigured?: boolean;
+    matrixConfigured?: boolean;
+    checkpointConfigured?: boolean;
+    matchConfigured?: boolean;
   };
 }
 
@@ -520,6 +527,106 @@ interface TournamentRunResponse {
   error?: string;
 }
 
+interface ExperimentMatrixSubjectStat {
+  subjectType: "model" | "profile";
+  subjectId: string;
+  model?: string;
+  profileId?: string;
+  policyName?: string;
+  seatGames: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  rewardCount: number;
+  rewardMean: number;
+}
+
+interface ExperimentMatrixPairwiseComparison {
+  leftModel: string;
+  rightModel: string;
+  leftSeatGames: number;
+  rightSeatGames: number;
+  winRateDiff: number;
+  pValueTwoSided: number | null;
+  pValueHolm: number | null;
+  warning: string;
+}
+
+interface ExperimentMatrixStatisticsView {
+  kind?: string;
+  matrixId?: string;
+  denominatorPolicy?: {
+    seatLevelRows?: string;
+    completedEpisodeRows?: string;
+    truncatedEpisodes?: string;
+    failedEpisodes?: string;
+    significance?: string;
+    superiorityClaims?: false;
+  };
+  status?: {
+    cellsRequested?: number;
+    cellsCompleted?: number;
+    cellsTruncated?: number;
+    cellsFailed?: number;
+    gamesRequested?: number;
+    gamesCompleted?: number;
+    gamesTruncated?: number;
+    gamesFailed?: number;
+    completedSeatRows?: number;
+  };
+  modelStats?: ExperimentMatrixSubjectStat[];
+  profileStats?: ExperimentMatrixSubjectStat[];
+  pairwiseModelComparisons?: ExperimentMatrixPairwiseComparison[];
+}
+
+interface ExperimentMatrixCellSummary {
+  index: number;
+  id: string;
+  label: string;
+  group: string;
+  status: "completed" | "truncated" | "failed";
+  elapsedMs: number;
+  gamesRequested: number;
+  gamesCompleted: number;
+  gamesTruncated: number;
+  gamesFailed: number;
+  models: string[];
+  profileCount?: number;
+  hasArtifacts?: boolean;
+  error?: string | null;
+}
+
+interface ExperimentMatrixArtifactSetSummary {
+  artifactSetId: string;
+  id: string;
+  createdAt: string;
+  matrixId: string;
+  files: Record<string, unknown>;
+  downloads: Record<string, unknown>;
+}
+
+interface ExperimentMatrixRunResponse {
+  summary?: {
+    ok?: boolean;
+    matrixId?: string;
+    status?: "completed" | "partial" | "failed";
+    cellsRequested?: number;
+    cellsCompleted?: number;
+    cellsTruncated?: number;
+    cellsFailed?: number;
+    gamesRequested?: number;
+    gamesCompleted?: number;
+    gamesTruncated?: number;
+    gamesFailed?: number;
+    failureReason?: string | null;
+    artifacts?: ExperimentMatrixArtifactSetSummary | null;
+  };
+  artifacts?: ExperimentMatrixArtifactSetSummary | null;
+  cells?: ExperimentMatrixCellSummary[];
+  statistics?: ExperimentMatrixStatisticsView;
+  error?: string;
+}
+
 interface ReplayResponse {
   summary?: {
     kind?: "replay";
@@ -711,6 +818,7 @@ const workspaceItems: Array<{
   { id: "society", label: "社会", description: "agent、消息、关系证据", icon: <TeamOutlined /> },
   { id: "lineage", label: "谱系", description: "checkpoint、fork、branch tree", icon: <ApiOutlined /> },
   { id: "evaluation", label: "评测", description: "指标、证据、告警", icon: <SafetyCertificateOutlined /> },
+  { id: "experiments", label: "实验矩阵", description: "矩阵控制面、统计与研究工件", icon: <DatabaseOutlined /> },
   { id: "compare", label: "对比", description: "基准与候选工件矩阵", icon: <SwapOutlined /> },
   { id: "packs", label: "公开包", description: "锦标赛工件与分享链接", icon: <ShareAltOutlined /> }
 ];
@@ -764,6 +872,10 @@ export function App() {
   const [mobileContextOpen, setMobileContextOpen] = useState(false);
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [tournamentPacks, setTournamentPacks] = useState<TournamentArtifactSetSummary[]>([]);
+  const [matrixResult, setMatrixResult] = useState<ExperimentMatrixRunResponse | null>(null);
+  const [matrixArtifactSets, setMatrixArtifactSets] = useState<ExperimentMatrixArtifactSetSummary[]>([]);
+  const [matrixGames, setMatrixGames] = useState("2");
+  const [matrixExportArtifacts, setMatrixExportArtifacts] = useState(false);
   const [selectedPackId, setSelectedPackId] = useState("");
   const [packShares, setPackShares] = useState<TournamentPublicShareSummary[]>([]);
   const [shareInventory, setShareInventory] = useState<TournamentPublicShareInventory | null>(null);
@@ -1425,6 +1537,75 @@ export function App() {
     [artifact?.matchId, artifact?.runId, artifactView, candidateId, comparison, comparisonRequestContext, selectedMatch?.id, setActionStatus]
   );
 
+  const handleRefreshMatrixArtifacts = useCallback(async () => {
+    setBusy("matrix-artifacts");
+    try {
+      const response = await apiJson<{ artifactSets: ExperimentMatrixArtifactSetSummary[] }>("/api/experiments/matrix/artifacts");
+      const sets = response.artifactSets ?? [];
+      setMatrixArtifactSets(sets);
+      setActionStatus(`实验矩阵研究工件已刷新：${sets.length} 套`);
+    } catch (nextError) {
+      setActionStatus("实验矩阵研究工件刷新失败", errorMessage(nextError));
+    } finally {
+      setBusy(null);
+    }
+  }, [setActionStatus]);
+
+  const handleRunMatrixExperiment = useCallback(async () => {
+    if (!selectedModel) {
+      setActionStatus("无法运行实验矩阵：没有可用模型", "请先确认 /api/config 返回模型列表。");
+      return;
+    }
+    setBusy("matrix-run");
+    setActionStatus("正在通过 harness control plane 运行实验矩阵...");
+    try {
+      const games = Math.min(10, Math.max(1, parsePositiveInteger(matrixGames, 1)));
+      const transitions = parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS);
+      const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
+      const matrixId = `ui-matrix-${Date.now()}`;
+      const exportArtifacts = matrixExportArtifacts && Boolean(config?.artifactExport?.matrixConfigured);
+      const response = await apiJson<ExperimentMatrixRunResponse>("/api/experiments/matrix/run", {
+        method: "POST",
+        body: JSON.stringify({
+          version: "harness.experiment-matrix.v1",
+          kind: "matrix",
+          id: matrixId,
+          continueOnError: true,
+          base: {
+            models: [selectedModel],
+            games,
+            seed: matrixId,
+            maxTransitions: transitions,
+            timeout: timeoutMs,
+            continueOnError: true
+          },
+          cells: [
+            {
+              id: `${matrixId}-selected-model`,
+              label: selectedModel,
+              group: "cockpit-selected-model",
+              models: [selectedModel]
+            }
+          ],
+          exportArtifacts
+        })
+      });
+      setMatrixResult(response);
+      const artifactSet = response.artifacts ?? response.summary?.artifacts ?? null;
+      if (artifactSet) {
+        setMatrixArtifactSets((current) => [artifactSet, ...current.filter((item) => item.artifactSetId !== artifactSet.artifactSetId)]);
+      }
+      const summary = response.summary;
+      setActionStatus(
+        `实验矩阵完成：${summary?.matrixId ?? matrixId} · completed=${summary?.gamesCompleted ?? 0} · truncated=${summary?.gamesTruncated ?? 0} · failed=${summary?.gamesFailed ?? 0}`,
+        summary?.failureReason ?? response.error ?? null
+      );
+    } catch (nextError) {
+      setActionStatus("实验矩阵运行失败", errorMessage(nextError));
+    } finally {
+      setBusy(null);
+    }
+  }, [config?.artifactExport?.matrixConfigured, matrixExportArtifacts, matrixGames, maxTransitions, selectedModel, setActionStatus, timeoutSeconds]);
 
   const handleRefreshTournamentPacks = useCallback(async () => {
     setBusy("packs");
@@ -2306,6 +2487,27 @@ export function App() {
           warnings={warnings}
           onInspectMetric={(metric, decision) => setInspector(inspectorFromMetric(metric, decision))}
           onInspectWarning={(warning) => setInspector(inspectorFromWarning(warning))}
+        />
+      )
+    },
+    {
+      key: "experiments",
+      label: "实验矩阵",
+      children: (
+        <ExperimentsWorkspace
+          result={matrixResult}
+          artifactSets={matrixArtifactSets}
+          games={matrixGames}
+          exportArtifacts={matrixExportArtifacts}
+          exportAvailable={Boolean(config?.artifactExport?.matrixConfigured)}
+          selectedModel={selectedModel}
+          maxTransitions={maxTransitions}
+          timeoutSeconds={timeoutSeconds}
+          busy={busy}
+          onGamesChange={setMatrixGames}
+          onExportArtifactsChange={setMatrixExportArtifacts}
+          onRun={() => void handleRunMatrixExperiment()}
+          onRefreshArtifacts={() => void handleRefreshMatrixArtifacts()}
         />
       )
     },
@@ -4721,6 +4923,233 @@ function CompareWorkspace({
   );
 }
 
+function ExperimentsWorkspace({
+  result,
+  artifactSets,
+  games,
+  exportArtifacts,
+  exportAvailable,
+  selectedModel,
+  maxTransitions,
+  timeoutSeconds,
+  busy,
+  onGamesChange,
+  onExportArtifactsChange,
+  onRun,
+  onRefreshArtifacts
+}: {
+  result: ExperimentMatrixRunResponse | null;
+  artifactSets: ExperimentMatrixArtifactSetSummary[];
+  games: string;
+  exportArtifacts: boolean;
+  exportAvailable: boolean;
+  selectedModel: string;
+  maxTransitions: string;
+  timeoutSeconds: string;
+  busy: string | null;
+  onGamesChange: (value: string) => void;
+  onExportArtifactsChange: (value: boolean) => void;
+  onRun: () => void;
+  onRefreshArtifacts: () => void;
+}) {
+  const cells = result?.cells ?? [];
+  const statistics = result?.statistics;
+  const summary = result?.summary;
+  const cellColumns: TableProps<ExperimentMatrixCellSummary>["columns"] = [
+    { title: "cell", dataIndex: "label", render: (value: string, row) => <Text>{value || row.id}</Text> },
+    { title: "group", dataIndex: "group", responsive: ["md"] },
+    { title: "models", dataIndex: "models", render: (models: string[]) => models.join(", ") || "n/a" },
+    {
+      title: "lifecycle",
+      dataIndex: "status",
+      render: (value: ExperimentMatrixCellSummary["status"]) => (
+        <Tag color={value === "completed" ? "success" : value === "truncated" ? "warning" : "error"}>{value}</Tag>
+      )
+    },
+    { title: "completed", dataIndex: "gamesCompleted", align: "right" },
+    { title: "truncated", dataIndex: "gamesTruncated", align: "right" },
+    { title: "failed", dataIndex: "gamesFailed", align: "right" },
+    { title: "elapsed", dataIndex: "elapsedMs", render: (value: number) => `${value}ms`, responsive: ["lg"] },
+    { title: "error", dataIndex: "error", render: (value?: string | null) => value ?? "—", responsive: ["lg"] }
+  ];
+  const statColumns: TableProps<ExperimentMatrixSubjectStat>["columns"] = [
+    { title: "subject", dataIndex: "subjectId", render: (value: string) => <Text code>{value}</Text> },
+    { title: "model", dataIndex: "model", render: (value?: string) => value ?? "—" },
+    { title: "policy", dataIndex: "policyName", render: (value?: string) => value ?? "—", responsive: ["lg"] },
+    { title: "seats", dataIndex: "seatGames", align: "right" },
+    { title: "wins/losses", render: (_, row) => `${row.wins}/${row.losses}` },
+    { title: "win rate", dataIndex: "winRate", render: (value: number) => `${(value * 100).toFixed(1)}%` },
+    { title: "mean reward", dataIndex: "rewardMean", render: (value: number) => value.toFixed(3), responsive: ["md"] }
+  ];
+  const comparisonColumns: TableProps<ExperimentMatrixPairwiseComparison>["columns"] = [
+    { title: "left", dataIndex: "leftModel", render: (value: string) => <Text code>{value}</Text> },
+    { title: "right", dataIndex: "rightModel", render: (value: string) => <Text code>{value}</Text> },
+    { title: "seat rows", render: (_, row) => `${row.leftSeatGames}/${row.rightSeatGames}` },
+    { title: "Δ win rate", dataIndex: "winRateDiff", render: (value: number) => value.toFixed(4) },
+    { title: "p / Holm", render: (_, row) => `${formatMatrixPValue(row.pValueTwoSided)} / ${formatMatrixPValue(row.pValueHolm)}` },
+    { title: "boundary", dataIndex: "warning", render: (value: string) => <Text type="secondary">{value}</Text>, responsive: ["xl"] }
+  ];
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Card
+        title="实验矩阵控制面"
+        extra={
+          <Space wrap>
+            <Select
+              aria-label="矩阵游戏局数"
+              style={{ width: 120 }}
+              value={games}
+              disabled={Boolean(busy)}
+              options={["1", "2", "3", "5"].map((value) => ({ value, label: `${value} games` }))}
+              onChange={onGamesChange}
+            />
+            <Select
+              aria-label="导出矩阵研究工件"
+              style={{ width: 190 }}
+              value={exportArtifacts ? "export" : "summary"}
+              disabled={Boolean(busy) || !exportAvailable}
+              options={[
+                { value: "summary", label: "仅返回服务端摘要" },
+                { value: "export", label: "导出本地研究工件" }
+              ]}
+              onChange={(value) => onExportArtifactsChange(value === "export")}
+            />
+            <Button icon={decorativeIcon(<ReloadOutlined />)} loading={busy === "matrix-artifacts"} disabled={Boolean(busy)} onClick={onRefreshArtifacts}>
+              刷新研究工件
+            </Button>
+            <Button
+              type="primary"
+              icon={decorativeIcon(<ExperimentOutlined />)}
+              loading={busy === "matrix-run"}
+              disabled={!selectedModel || Boolean(busy)}
+              onClick={onRun}
+            >
+              运行矩阵
+            </Button>
+          </Space>
+        }
+      >
+        <Space direction="vertical" size="small" style={{ width: "100%" }}>
+          <Text type="secondary">
+            该工作区提交 `POST /api/experiments/matrix/run`，由 harness 调度 cell 与 tournament；当前选择 model={selectedModel || "n/a"}
+            、games={games}、maxTransitions={maxTransitions || "n/a"}、timeout={timeoutSeconds || "n/a"}s。
+          </Text>
+          <Text type="secondary">
+            completed、truncated、failed 是不同的生命周期。截断仍保留在状态分母中，但不进入胜率、奖励或 scorecard 分母。
+            {exportAvailable ? " 导出的内容为仅本地可读的 research artifact，不会进入公开分享路径。" : " 当前未配置研究工件目录，因此只能运行并查看服务端摘要。"}
+          </Text>
+          <Alert
+            type="info"
+            showIcon
+            message="模型比较只作描述性筛选"
+            description={
+              statistics?.denominatorPolicy?.significance ??
+              "Pairwise p 值由服务端记录的 completed seat rows 生成；它不是独立样本、因果结论或模型优劣声明。"
+            }
+          />
+        </Space>
+      </Card>
+
+      <Row gutter={[16, 16]}>
+        {[
+          ["requested", summary?.gamesRequested ?? statistics?.status?.gamesRequested ?? 0],
+          ["completed", summary?.gamesCompleted ?? statistics?.status?.gamesCompleted ?? 0],
+          ["truncated", summary?.gamesTruncated ?? statistics?.status?.gamesTruncated ?? 0],
+          ["failed", summary?.gamesFailed ?? statistics?.status?.gamesFailed ?? 0]
+        ].map(([label, value]) => (
+          <Col xs={12} md={6} key={String(label)}>
+            <Card size="small">
+              <Statistic title={String(label)} value={Number(value)} valueStyle={{ color: label === "failed" ? "#cf1322" : label === "truncated" ? "#d48806" : undefined }} />
+            </Card>
+          </Col>
+        ))}
+      </Row>
+
+      <Card title="已记录的 Matrix Cells" extra={<Tag>{cells.length} cells</Tag>}>
+        <Table
+          rowKey="id"
+          size="small"
+          bordered
+          columns={cellColumns}
+          dataSource={cells}
+          pagination={{ pageSize: 6 }}
+          locale={{ emptyText: <Empty description="尚未运行矩阵。结果只会来自服务端控制面响应。" /> }}
+        />
+      </Card>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} xl={12}>
+          <Card title="模型统计" extra={<Tag>completed seat rows {statistics?.status?.completedSeatRows ?? 0}</Tag>}>
+            <Table
+              rowKey={(row) => `model:${row.subjectId}`}
+              size="small"
+              bordered
+              columns={statColumns}
+              dataSource={statistics?.modelStats ?? []}
+              pagination={{ pageSize: 6 }}
+              locale={{ emptyText: <Empty description="没有 terminal completed outcome rows。" /> }}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} xl={12}>
+          <Card title="Profile 统计">
+            <Table
+              rowKey={(row) => `profile:${row.subjectId}`}
+              size="small"
+              bordered
+              columns={statColumns}
+              dataSource={statistics?.profileStats ?? []}
+              pagination={{ pageSize: 6 }}
+              locale={{ emptyText: <Empty description="没有 terminal completed outcome rows。" /> }}
+            />
+          </Card>
+        </Col>
+      </Row>
+
+      <Card title="描述性 Pairwise 比较">
+        <Table
+          rowKey={(row) => `${row.leftModel}:${row.rightModel}`}
+          size="small"
+          bordered
+          columns={comparisonColumns}
+          dataSource={statistics?.pairwiseModelComparisons ?? []}
+          pagination={{ pageSize: 6 }}
+          locale={{ emptyText: <Empty description="需要至少两个有 completed outcome rows 的模型。" /> }}
+        />
+      </Card>
+
+      <Card title="本地研究工件注册表" extra={<Tag>{artifactSets.length} sets</Tag>}>
+        <Table
+          rowKey="artifactSetId"
+          size="small"
+          bordered
+          columns={[
+            { title: "set", dataIndex: "artifactSetId", render: (value: string) => <Text code>{shortId(value)}</Text> },
+            { title: "matrix", dataIndex: "matrixId", ellipsis: true },
+            { title: "created", dataIndex: "createdAt", render: (value: string) => formatDate(value) },
+            {
+              title: "registered downloads",
+              render: (_, row: ExperimentMatrixArtifactSetSummary) => (
+                <Space wrap>
+                  {matrixArtifactDownloadEntries(row.downloads).map((file) => (
+                    <Button key={file.key} size="small" type="link" href={file.href} target="_blank" rel="noreferrer">
+                      {file.label}
+                    </Button>
+                  ))}
+                </Space>
+              )
+            }
+          ]}
+          dataSource={artifactSets}
+          pagination={{ pageSize: 6 }}
+          locale={{ emptyText: <Empty description="未注册矩阵研究工件。工件只能由服务端注册并提供下载 URL。" /> }}
+        />
+      </Card>
+    </Space>
+  );
+}
+
 function PacksWorkspace({
   packs,
   selectedPackId,
@@ -5744,6 +6173,26 @@ function formatModelRewardDensity(
     .join(" · ");
 }
 
+function formatMatrixPValue(value: number | null): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(4) : "n/a";
+}
+
+function matrixArtifactDownloadEntries(downloads: Record<string, unknown>): Array<{ key: string; label: string; href: string }> {
+  const entries: Array<{ key: string; label: string; href: string }> = [];
+  for (const [key, value] of Object.entries(downloads)) {
+    if (typeof value === "string") {
+      entries.push({ key, label: key, href: value });
+      continue;
+    }
+    if (key === "tournaments" && Array.isArray(value)) {
+      for (const item of value) {
+        if (!isRecord(item) || typeof item.cellId !== "string" || typeof item.manifest !== "string") continue;
+        entries.push({ key: `tournament:${item.cellId}`, label: `tournament ${item.cellId}`, href: item.manifest });
+      }
+    }
+  }
+  return entries;
+}
 
 function formatDate(value: string): string {
   const date = new Date(value);

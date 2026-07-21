@@ -81,6 +81,35 @@ test("renders recorded server truth without a provider and never requests a full
   expect(pageErrors).toEqual([]);
 });
 
+test("renders matrix lifecycle and statistics only from the harness API response", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.goto("/?workspace=experiments", { waitUntil: "domcontentloaded" });
+  const experimentPanel = page.getByRole("tabpanel", { name: "实验矩阵" });
+  await expect(experimentPanel).toBeVisible();
+
+  const games = experimentPanel.getByRole("combobox", { name: "矩阵游戏局数" });
+  await games.click();
+  await games.press("ArrowUp");
+  await games.press("Enter");
+  const matrixResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "POST" && url.pathname === "/api/experiments/matrix/run";
+  });
+  await experimentPanel.getByRole("button", { name: "运行矩阵" }).click();
+  const response = await matrixResponse;
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+  expect(body.summary).toMatchObject({ kind: "experiment-matrix", gamesRequested: 1, ok: true });
+  expect(body.summary.gamesCompleted + body.summary.gamesTruncated + body.summary.gamesFailed).toBe(1);
+  expect(body.cells).toHaveLength(1);
+  expect(body.cells[0]).toMatchObject({ gamesRequested: 1 });
+  await expect(experimentPanel.getByText("已记录的 Matrix Cells")).toBeVisible();
+  await expect(experimentPanel.locator(".ant-tag").filter({ hasText: new RegExp(`^${body.cells[0].status}$`) })).toBeVisible();
+  await expect(experimentPanel.getByText("描述性 Pairwise 比较")).toBeVisible();
+  expect(pageErrors).toEqual([]);
+});
+
 test.describe("compact cockpit", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
@@ -90,6 +119,7 @@ test.describe("compact cockpit", () => {
       ["society", "社会"],
       ["lineage", "谱系"],
       ["evaluation", "评测"],
+      ["experiments", "实验矩阵"],
       ["compare", "对比"],
       ["packs", "公开包"]
     ] as const;
