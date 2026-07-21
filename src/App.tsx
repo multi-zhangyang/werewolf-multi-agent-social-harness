@@ -87,6 +87,7 @@ import { legacyMetricPromotionPolicyFromSummary, resolveRecordedMetricPromotion 
 import { countSocialStepCommits, deriveSocialExposureRecords, isSocialStepCommitted, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
 import { isSafeHarnessCheckpointBoundary } from "./harness/episodeArtifacts";
 import type { SocialStateMutationJournalEntry } from "./harness/socialState";
+import { SocialEvidenceGraph } from "./components/cockpit/SocialEvidenceGraph";
 import { WerewolfReviewBoard } from "./components/cockpit/WerewolfReviewBoard";
 import { buildWerewolfReviewModel } from "./components/cockpit/werewolfReviewProjection";
 
@@ -142,20 +143,20 @@ type SocialGraphArtifact = (
 };
 type ProjectedSocialStep = RedactedSocialStepDto;
 
-interface SocialGraphNode {
+export interface SocialGraphNode {
   id: string;
   sent: number;
   received: number;
   observed: number;
 }
 
-interface SocialGraphMessageEdge {
+export interface SocialGraphMessageEdge {
   sourceId: string;
   targetId: string;
   messages: number;
 }
 
-interface SocialGraphExposureEdge {
+export interface SocialGraphExposureEdge {
   sourceId: string;
   targetId: string;
   channelId: string;
@@ -2558,6 +2559,7 @@ export function App() {
           channels={channels}
           onSelectAgent={handleSelectAgent}
           onSelectMessage={handleSelectMessage}
+          onInspectExposure={(edge) => setInspector(inspectorFromSocialExposure(edge))}
         />
       )
     },
@@ -3725,7 +3727,8 @@ function SocietyWorkspace({
   messages,
   channels,
   onSelectAgent,
-  onSelectMessage
+  onSelectMessage,
+  onInspectExposure
 }: {
   artifact: ProjectedMatchArtifact | null;
   agents: AgentHarnessState[];
@@ -3734,6 +3737,7 @@ function SocietyWorkspace({
   channels: SocialChannel[];
   onSelectAgent: (agent: AgentHarnessState) => void;
   onSelectMessage: (message: SocialMessage) => void;
+  onInspectExposure: (edge: SocialGraphExposureEdge) => void;
 }) {
   const socialGraph = useMemo(
     () => (artifact ? buildSocialGraph(artifact) : { nodes: [], messageEdges: [], exposureEdges: [] }),
@@ -3877,6 +3881,16 @@ function SocietyWorkspace({
           </Card>
         </Col>
       </Row>
+
+      <SocialEvidenceGraph
+        graph={socialGraph}
+        selectedAgentId={selectedAgent?.playerId}
+        onSelectAgent={(agentId) => {
+          const agent = agents.find((candidate) => candidate.playerId === agentId);
+          if (agent) onSelectAgent(agent);
+        }}
+        onSelectExposure={onInspectExposure}
+      />
 
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={8}>
@@ -6698,6 +6712,28 @@ function inspectorFromMessage(message: SocialMessage): InspectorItem {
       ["content", message.content]
     ],
     json: safeMessageInspectorJson(message)
+  };
+}
+
+function inspectorFromSocialExposure(edge: SocialGraphExposureEdge): InspectorItem {
+  return {
+    kind: "social-exposure",
+    title: `Exposure ${edge.sourceId} → ${edge.targetId}`,
+    subtitle: `${edge.visibility} · ${edge.channelId}`,
+    fields: [
+      ["source", edge.sourceId],
+      ["observer", edge.targetId],
+      ["channel", edge.channelId],
+      ["visibility", edge.visibility],
+      ["kind", edge.kind ?? "message"],
+      ["messages", edge.messages],
+      ["observations", edge.observations],
+      ["evidence", edge.evidenceCount],
+      ["action kinds", edge.actionKinds.join(", ") || "n/a"],
+      ["traces", edge.traceIds.map(shortId).join(", ") || "n/a"],
+      ["turns", edge.turnIndexes.join(", ") || "n/a"]
+    ],
+    json: edge
   };
 }
 

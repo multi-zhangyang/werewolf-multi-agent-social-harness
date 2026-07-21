@@ -13,3 +13,114 @@ body,
 body {
   background: #f4f6fa;
 }
+
+.social-evidence-graph__canvas {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #dfe6f1;
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(220, 234, 255, 0.56), rgba(255, 255, 255, 0) 56%),
+    linear-gradient(145deg, #fbfdff, #f3f7fc);
+}
+
+.social-evidence-graph__canvas svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 230px;
+}
+
+.social-evidence-graph__ring {
+  fill: none;
+  stroke: #d8e3f2;
+  stroke-dasharray: 3 7;
+  stroke-width: 1;
+}
+
+.social-evidence-graph__message-edge {
+  fill: none;
+  stroke: #8fa6c2;
+  stroke-dasharray: 5 5;
+  opacity: 0.55;
+}
+
+.social-evidence-graph__exposure-edge {
+  fill: none;
+  cursor: pointer;
+  opacity: 0.84;
+  transition: opacity 160ms ease, stroke-width 160ms ease;
+}
+
+.social-evidence-graph__interactive-edge:hover .social-evidence-graph__exposure-edge,
+.social-evidence-graph__interactive-edge:focus .social-evidence-graph__exposure-edge {
+  opacity: 1;
+  stroke-width: 6;
+  outline: none;
+}
+
+.social-evidence-graph__exposure-edge--public {
+  stroke: #41a46d;
+}
+
+.social-evidence-graph__exposure-edge--team {
+  stroke: #477ee8;
+}
+
+.social-evidence-graph__exposure-edge--private {
+  stroke: #d28a29;
+}
+
+.social-evidence-graph__arrow--public {
+  fill: #41a46d;
+}
+
+.social-evidence-graph__arrow--team {
+  fill: #477ee8;
+}
+
+.social-evidence-graph__arrow--private {
+  fill: #d28a29;
+}
+
+.social-evidence-graph__node {
+  cursor: pointer;
+  outline: none;
+}
+
+.social-evidence-graph__node circle {
+  fill: #f8fbff;
+  stroke: #5f7fa9;
+  stroke-width: 2;
+  filter: drop-shadow(0 2px 3px rgba(51, 83, 124, 0.14));
+  transition: fill 160ms ease, stroke 160ms ease, stroke-width 160ms ease;
+}
+
+.social-evidence-graph__node:hover circle,
+.social-evidence-graph__node:focus circle,
+.social-evidence-graph__node.is-selected circle {
+  fill: #e7f0ff;
+  stroke: #2168d8;
+  stroke-width: 3;
+}
+
+.social-evidence-graph__node-label {
+  fill: #20344e;
+  font-family: Geist, "Noto Sans SC", sans-serif;
+  font-size: 13px;
+  font-weight: 650;
+  pointer-events: none;
+}
+
+.social-evidence-graph__node-meta {
+  fill: #667f9e;
+  font-family: Geist, "Noto Sans SC", sans-serif;
+  font-size: 8px;
+  pointer-events: none;
+}
+
+@media (max-width: 576px) {
+  .social-evidence-graph__canvas svg {
+    min-height: 188px;
+  }
+}

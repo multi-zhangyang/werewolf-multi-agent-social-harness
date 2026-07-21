@@ -25535,3 +25535,51 @@ Do not expose a public unrecorded execution-mode option solely to force
 legacy/scaffold checkpoint or fork comparisons. Production checkpoint/fork
 tests remain scaffold-backed and artifacts remain implementation-neutral;
 replay authority must never depend on an actor runtime mode.
+
+## 13.260 Server-Projected Social Evidence Graph Lock
+
+Timestamp: `2026-07-21`
+
+The cockpit now has a compact, deterministic social evidence graph in the
+existing Society workspace. It is a presentation of recorded harness facts,
+not a browser social simulator, a graph database, or a second agent-state
+owner.
+
+- `SocialEvidenceGraph` consumes only the existing `buildSocialGraph()` output:
+  agent roster plus message envelopes and server-projected scoped exposure
+  records. It never invokes the engine, applies a command, derives a hidden
+  relationship, or fabricates an exposure from recipient envelopes.
+- The small fixed Werewolf roster uses a stable roster-sorted ring layout,
+  rather than a client-side force simulation. Equal recorded inputs have equal
+  positions and activity counts, making the presentation reproducible and
+  inspectable.
+- Dashed edges identify recorded message envelopes. Public, team, and private
+  arrows identify only recorded exposure evidence and retain channel, trace,
+  turn, and evidence counts. An absent projected exposure record yields no
+  arrow; the UI may not fill it in from a message recipient list.
+- Node selection uses the existing Agent Evidence Inspector. Edge selection
+  uses the same inspector with only the projected exposure record. Neither
+  interaction mutates an artifact, environment state, replay cursor, agent
+  state, or hidden truth.
+- The graph remains an enhancement over the exact tables, not a replacement
+  for them. Tables retain complete accessibility and audit detail; the graph
+  provides the high-level society topology missing from a table-only cockpit.
+
+Validation recorded:
+
+```bash
+npm run typecheck
+npx vitest run tests/socialGraph.test.ts tests/socialEvidenceGraph.test.ts \
+  tests/werewolfReviewProjection.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism
+npm run build
+npm run test:e2e
+```
+
+The fixture browser suite includes a graph interaction check: it renders from a
+postgame-redacted server artifact, opens the existing Agent Inspector on node
+selection, and observes no `view=full` artifact request. A Playwright trace
+was visually inspected at the fixed fixture viewport; no screenshot baseline
+is persisted by this lock. Future visual changes should preserve the same
+projection/redaction and narrow-viewport checks before adding a visual
+baseline workflow.
