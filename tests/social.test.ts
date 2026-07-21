@@ -1852,6 +1852,174 @@ describe("generic social harness feedback and failure contract", () => {
   });
 });
 
+describe("social topology and runtime-identity authority", () => {
+  it("owns initial channel topology, rejects duplicates, and prevents caller mutation", () => {
+    const channel: SocialChannel = {
+      id: "immutable-table",
+      kind: "public",
+      participantIds: ["a", "b"],
+      readableBy: "all"
+    };
+    expect(
+      () =>
+        new SocialCommunicationBus([
+          channel,
+          { id: "immutable-table", kind: "public", participantIds: ["a"], readableBy: "all" }
+        ])
+    ).toThrow(/duplicate social channel/i);
+
+    const bus = new SocialCommunicationBus([channel]);
+    channel.participantIds.splice(1);
+    channel.readableBy = "postgame";
+    expect(bus.listChannels()).toEqual([
+      { id: "immutable-table", kind: "public", participantIds: ["a", "b"], readableBy: "all" }
+    ]);
+  });
+
+  it("keeps postgame channels and messages outside every live observation and rejects forged observation evidence", async () => {
+    const postgameChannel: SocialChannel = {
+      id: "postgame-review",
+      kind: "private",
+      participantIds: ["a", "b"],
+      readableBy: "postgame"
+    };
+    const bus = new SocialCommunicationBus([postgameChannel], [], { runtimeActorIds: ["a", "b"] });
+    const message = bus.publish({
+      channelId: postgameChannel.id,
+      senderId: "a",
+      recipientIds: ["b"],
+      visibility: "postgame",
+      content: "hidden until the final review"
+    });
+    expect(message.deliveryReceipts).toBeUndefined();
+    expect(bus.observe("a")).toEqual({ channels: [], messages: [] });
+    expect(bus.observe("b")).toEqual({ channels: [], messages: [] });
+
+    const artifact = await runSocialEpisode({
+      id: "postgame-observation-proof",
+      environment: new SequencedEnvironment(["a", "b"]),
+      actors: [
+        new TestActor("a", {
+          messages: [
+            {
+              channelId: postgameChannel.id,
+              senderId: "a",
+              recipientIds: ["b"],
+              visibility: "postgame",
+              content: "recorded only for final review"
+            }
+          ]
+        }),
+        new TestActor("b")
+      ],
+      channels: [postgameChannel],
+      schedulerMode: "aec",
+      hashState,
+      assembleObservation(context) {
+        return { ...context.environmentObservation, visibleMessages: context.visibleSocial.messages, channels: context.visibleSocial.channels };
+      }
+    });
+    expect(artifact.steps[1]?.observation.visibleMessages).toEqual([]);
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+    const forged = clone(artifact);
+    forged.steps[1]!.observation.visibleMessages = [forged.messages[0]!];
+    expect(validateSocialEpisodeArtifact(forged).join(" ")).toMatch(/non-visible social message/i);
+  });
+
+  it("limits all-channel visibility to the immutable actor roster and records every actual public delivery", () => {
+    const channel: SocialChannel = {
+      id: "roster-public",
+      kind: "public",
+      participantIds: ["a"],
+      readableBy: "all"
+    };
+    const bus = new SocialCommunicationBus([channel], [], { runtimeActorIds: ["a", "b"] });
+    const message = bus.publish({
+      channelId: channel.id,
+      senderId: "a",
+      recipientIds: ["a"],
+      visibility: "public",
+      content: "visible to the run roster"
+    });
+    expect(bus.observe("b").messages.map((entry) => entry.id)).toEqual([message.id]);
+    expect(bus.observe("outside")).toEqual({ channels: [], messages: [] });
+    expect(message.deliveryReceipts?.map((receipt) => receipt.observerId)).toEqual(["a", "b"]);
+  });
+
+  it("fails artifact validation when a canonical delivery receipt omits a runtime-visible actor", async () => {
+    const channel: SocialChannel = {
+      id: "receipt-public",
+      kind: "public",
+      participantIds: ["a"],
+      readableBy: "all"
+    };
+    const artifact = await runSocialEpisode({
+      id: "receipt-completeness",
+      environment: new SequencedEnvironment(["a", "b"]),
+      actors: [
+        new TestActor("a", {
+          messages: [
+            {
+              channelId: channel.id,
+              senderId: "a",
+              recipientIds: ["a"],
+              visibility: "public",
+              content: "the whole roster can observe this"
+            }
+          ]
+        }),
+        new TestActor("b")
+      ],
+      channels: [channel],
+      schedulerMode: "aec",
+      hashState
+    });
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+    const forged = clone(artifact);
+    forged.messages[0]!.deliveryReceipts = forged.messages[0]!.deliveryReceipts?.filter((receipt) => receipt.observerId === "a");
+    expect(validateSocialEpisodeArtifact(forged).join(" ")).toMatch(/observer set does not match runtime visibility/i);
+  });
+
+  it("rejects message visibility that bypasses the declared communication topology", () => {
+    const table: SocialChannel = { id: "table-only", kind: "public", participantIds: ["a", "b", "c"], readableBy: "all" };
+    const bus = new SocialCommunicationBus([table], [], { runtimeActorIds: ["a", "b", "c"] });
+    expect(() =>
+      bus.publish({
+        channelId: table.id,
+        senderId: "a",
+        recipientIds: ["b"],
+        visibility: "private",
+        content: "unauthorized direct message"
+      })
+    ).toThrow(/not compatible/i);
+    expect(() =>
+      bus.publish({
+        channelId: table.id,
+        senderId: "a",
+        recipientIds: ["outside"],
+        visibility: "public",
+        content: "unauthorized recipient"
+      })
+    ).toThrow(/not allowed/i);
+  });
+
+  it("rejects empty or duplicate actor identities before any scheduler mode can mutate an environment", async () => {
+    for (const schedulerMode of ["aec", "aec-batched-decision", "parallel"] as const) {
+      const environment = new TestEnvironment({ doneAfterSteps: 1 });
+      await expect(
+        runSocialEpisode({
+          id: `duplicate-actor-${schedulerMode}`,
+          environment,
+          actors: [new TestActor("a"), new TestActor("a")],
+          schedulerMode,
+          hashState
+        })
+      ).rejects.toThrow(/duplicate actor id/i);
+      expect(environment.stepCalls).toBe(0);
+    }
+  });
+});
+
 class TestActor implements SocialActor<TestObservation, TestPending, TestCommand> {
   readonly profile: SocialAgentProfile;
   readonly observations: TestObservation[] = [];

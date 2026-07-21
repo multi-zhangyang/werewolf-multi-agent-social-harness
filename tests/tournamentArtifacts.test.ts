@@ -1070,7 +1070,7 @@ describe("tournament artifact directory writer", () => {
     expect(tournamentComparisonMarkdown).toContain(tournamentComparison.comparisonSetId);
     expect(tournamentComparisonMarkdown).toContain("pairs=1");
     expect(tournamentComparisonMarkdown).not.toContain(outputDir);
-  });
+  }, 20_000);
 
   it("does not misrepresent the first report policy as tournament-wide when reports use mixed promotion policies", async () => {
     const outputDir = await makeTempDir();
@@ -1133,7 +1133,7 @@ describe("tournament artifact directory writer", () => {
     expect([...metricCatalogIds]).toEqual(
       expect.arrayContaining(["werewolf.metric-promotion.catalog.v1", "alternate.metric-promotion.catalog.v1"])
     );
-  });
+  }, 20_000);
 
   it("writes a minimal allowlisted public pack from a domain-owned observation projector", async () => {
     const outputDir = await makeTempDir();

@@ -24960,3 +24960,76 @@ npx vitest run tests/providerAdapters.test.ts tests/reasonerProposal.test.ts \
   --testTimeout=30000 --maxWorkers=1 --no-file-parallelism
 npm run typecheck
 ```
+
+## 13.250 Runtime Authority Correction: Recorded State, Social Topology, And Core Replay Evidence
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+This lock corrects audit-confirmed authority gaps. It is not a prompt, JSON, or
+provider change.
+
+### 13.250.1 Checkpoint And Fork Boundary
+
+- A forkable checkpoint must restore the same durable actor-state hash recorded
+  on its final complete native boundary. A self-consistent replacement of
+  `checkpoint.agents` plus `source.agentsHash` is invalid.
+- If that boundary uses a compacted frame, its frame id must match both the
+  recorded boundary hash and `source.agentSnapshotFrameId`.
+- Structural checkpoint validation happens before any domain environment or
+  actor restore factory can execute. Empty/no-snapshot prefixes are not
+  forkable actor-state checkpoints.
+- A terminal rejected failed run may still be persisted as an
+  environment/message replay artifact, but it is explicitly environment-only:
+  every generic or Werewolf fork entry point rejects it before actor restoration
+  because no post-receipt actor snapshot exists for that boundary.
+
+### 13.250.2 Social Visibility And Identity Boundary
+
+- `SocialCommunicationBus` owns cloned channel topology from construction;
+  duplicate channel ids and external mutation of caller-owned channel objects
+  cannot silently change a running experiment.
+- The runner rejects empty or duplicate actor ids before environment mutation
+  and records the sorted immutable `runtimeActorIds` roster in new artifacts.
+- `readableBy: "all"` is bounded by that runtime roster. Direct bus use without
+  a roster fails conservatively to channel participants instead of granting an
+  arbitrary outsider visibility.
+- `readableBy: "postgame"` is never available through live `observe()`, never
+  creates a delivery receipt, and cannot be claimed in recorded live
+  observations. Postgame reading belongs to artifact projection/readers.
+- Channel kind controls message visibility: public/system -> public, team ->
+  team, private -> private, and postgame-readable channels -> postgame.
+  Public recipient metadata never converts a broadcast to an undeclared direct
+  message; its recipients must still be within the effective run topology.
+- Delivery receipts on canonical rostered artifacts must exactly equal the
+  runtime-visible observer set.
+
+### 13.250.3 Werewolf Core And Replay Evidence
+
+- `applyCommand()` itself permits `system.advance` only when the sole core
+  pending action is system advance; the environment wrapper is not the only
+  rule guard.
+- A living werewolf can record only one night kill ballot. Direct core calls
+  cannot overwrite an earlier ballot while another wolf remains pending.
+- Werewolf native replay now validates each recorded pending action against the
+  deterministic pre-step core pending queue and validates the command family.
+  A legal replayed command is insufficient when its recorded authorization
+  evidence has been forged.
+
+### 13.250.4 Validation Required After Changes Here
+
+```bash
+npx vitest run tests/engine.test.ts tests/social.test.ts \
+  tests/genericHarnessContract.test.ts tests/replay.test.ts \
+  --testTimeout=30000 --maxWorkers=1 --no-file-parallelism
+npx vitest run tests/artifacts.test.ts --testNamePattern='validates social sidecar' \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism
+npm run typecheck
+```
+
+Before claiming the broader refactor complete, rerun the full test/build
+ladder and a bounded real streaming probe/match with the configured generic
+`grok-4.5` runtime selection. Do not add a provider-specific branch.

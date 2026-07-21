@@ -1011,6 +1011,15 @@ export function validateHarnessCheckpointEnvelope<
   }
 
   const lastStep = checkpoint.executionPrefix.steps.at(-1);
+  // Failed runs may be persisted as environment/message replay evidence even
+  // when their final native record is a rejected decision and therefore has
+  // no post-receipt actor snapshot. They are not forkable; the fork runtime
+  // performs the stricter restore-boundary guard before creating anything.
+  const terminalRejectedFailureBoundary =
+    checkpoint.source.status === "failed" &&
+    checkpoint.executionPrefix.status === "failed" &&
+    lastStep?.commitStatus === "rejected" &&
+    Boolean(lastStep?.failure);
   if (lastStep) {
     if (checkpoint.source.boundaryTraceId !== lastStep.traceId) {
       errors.push(
@@ -1031,19 +1040,16 @@ export function validateHarnessCheckpointEnvelope<
     if (checkpoint.source.boundarySchedulerMode !== lastStep.schedulerMode) {
       errors.push("source.boundarySchedulerMode mismatch with final native step.");
     }
+    if (!terminalRejectedFailureBoundary) validateCheckpointBoundaryAgentSnapshot(checkpoint, lastStep, errors);
   } else {
     if (checkpoint.source.boundaryTraceId !== undefined) errors.push("source.boundaryTraceId must be undefined when native prefix is empty.");
     if (checkpoint.source.boundaryTurnIndex !== undefined) errors.push("source.boundaryTurnIndex must be undefined when native prefix is empty.");
     if (checkpoint.source.boundarySchedulerMode !== undefined) errors.push("source.boundarySchedulerMode must be undefined when native prefix is empty.");
+    errors.push("Forkable checkpoint executionPrefix requires a recorded native boundary with durable actor snapshots.");
   }
 
   validateCheckpointMessages(checkpoint.executionPrefix.messages, checkpoint.source.lastMessageSeq, errors);
   for (const error of validateSocialEpisodeArtifact(checkpoint.executionPrefix)) errors.push(`executionPrefix: ${error}`);
-  const terminalRejectedFailureBoundary =
-    checkpoint.source.status === "failed" &&
-    checkpoint.executionPrefix.status === "failed" &&
-    checkpoint.executionPrefix.steps.at(-1)?.commitStatus === "rejected" &&
-    Boolean(checkpoint.executionPrefix.steps.at(-1)?.failure);
   if (!endsAtCompleteNativeBatch(checkpoint.executionPrefix.steps) && !terminalRejectedFailureBoundary) {
     errors.push("executionPrefix ends in the middle of a native scheduler batch.");
   }
@@ -1054,6 +1060,61 @@ export function validateHarnessCheckpointEnvelope<
     errors.push("source.agentSnapshotFrameId does not match source.agentsHash.");
   }
   return errors;
+}
+
+/**
+ * A checkpoint is allowed to restore only the exact durable actor state that
+ * the parent native trajectory recorded after its final complete scheduler
+ * batch. Hashing checkpoint.agents against its own source field is not enough:
+ * that would make a self-consistent forged memory/belief/relationship snapshot
+ * forkable. Frame IDs are identity evidence when a canonical artifact compacts
+ * the snapshot payload into a sidecar.
+ */
+function validateCheckpointBoundaryAgentSnapshot<
+  TState,
+  TAgentState,
+  TObservation,
+  TPending,
+  TCommand,
+  TSource extends HarnessCheckpointSource
+>(
+  checkpoint: HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand, TSource>,
+  boundary: SocialHarnessStep<TObservation, TPending, TCommand>,
+  errors: string[]
+): void {
+  const recordedHash = boundary.actorSnapshotsHashAfterStep;
+  const recordedFrameId = boundary.actorSnapshotFrameIdAfterStep;
+  const recordedAgents = boundary.actorSnapshotsAfterStep;
+  if (!recordedHash) {
+    errors.push("executionPrefix final boundary is missing a durable actor snapshot hash.");
+    return;
+  }
+  if (checkpoint.source.agentsHash !== recordedHash) {
+    errors.push(
+      `source.agentsHash does not match final boundary actor snapshot hash: ${checkpoint.source.agentsHash} !== ${recordedHash}.`
+    );
+  }
+  if (Array.isArray(recordedAgents)) {
+    const actualRecordedHash = hashStableState(recordedAgents);
+    if (actualRecordedHash !== recordedHash) {
+      errors.push(
+        `executionPrefix final boundary actor snapshot hash mismatch: expected ${actualRecordedHash}, received ${recordedHash}.`
+      );
+    }
+  } else if (!recordedFrameId) {
+    errors.push("executionPrefix final boundary actor snapshot requires inline agents or a compacted frame reference.");
+  }
+
+  if (recordedFrameId) {
+    if (recordedFrameId !== harnessAgentSnapshotFrameId(recordedHash)) {
+      errors.push("executionPrefix final boundary actor snapshot frame id does not match its snapshot hash.");
+    }
+    if (checkpoint.source.agentSnapshotFrameId !== recordedFrameId) {
+      errors.push("source.agentSnapshotFrameId does not match final boundary actor snapshot frame id.");
+    }
+  } else if (checkpoint.source.agentSnapshotFrameId !== undefined) {
+    errors.push("source.agentSnapshotFrameId is present but final boundary has no actor snapshot frame id.");
+  }
 }
 
 /**

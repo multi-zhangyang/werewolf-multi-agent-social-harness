@@ -37,6 +37,23 @@ export interface SocialEpisodeReplayResult<TState = unknown> {
   mismatches: string[];
 }
 
+/**
+ * Domain adapters can bind recorded pending-action evidence to the actual
+ * replay pre-state without making the generic replayer import a domain. This
+ * remains a pure audit callback: replay still creates no actor, policy,
+ * reasoner, or provider.
+ */
+export type SocialRecordedStepValidator<TState, TObservation, TPending, TCommand> = (
+  step: SocialHarnessStep<TObservation, TPending, TCommand>,
+  context: {
+    index: number;
+    state: TState;
+    pendingActions: readonly TPending[];
+    schedulerMode: "aec" | "aec-batched-decision" | "parallel";
+    batch: readonly SocialHarnessStep<TObservation, TPending, TCommand>[];
+  }
+) => readonly string[];
+
 export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TAgentState = unknown>(options: {
   episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
   environment: SocialEnvironment<TState, TObservation, TPending, TCommand>;
@@ -54,13 +71,17 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
   auditAgentSnapshots?: boolean;
   /** Optional recorded, compacted durable actor-state sidecar. */
   agentSnapshotFrames?: HarnessAgentSnapshotFrame<TAgentState>[];
+  /** Optional domain-owned binding of recorded action evidence to replay state. */
+  validateRecordedStep?: SocialRecordedStepValidator<TState, TObservation, TPending, TCommand>;
 }): SocialEpisodeReplayResult<TState> {
   const { episode } = options;
   const mismatches: string[] = [];
   const stopOnMismatch = options.stopOnMismatch ?? true;
   const initialMessageCount = episode.execution?.initialMessageCount ?? 0;
   const initialMessages = episode.messages.slice(0, initialMessageCount);
-  const bus = new SocialCommunicationBus(episode.channels, initialMessages);
+  const bus = new SocialCommunicationBus(episode.channels, initialMessages, {
+    runtimeActorIds: episode.runtimeActorIds
+  });
   let replayedSteps = 0;
   let replayedBatches = 0;
   let rejectedSteps = 0;
@@ -119,6 +140,8 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
       }
       return;
     }
+    validateRecordedStepEvidence(step, index, [step]);
+    if (stopOnMismatch && mismatches.length) return;
 
     const beforeEventSeq = options.eventSeq?.(options.environment.snapshot());
     const beforeMessageSeq = bus.listMessages().at(-1)?.seq ?? 0;
@@ -160,6 +183,10 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
       }
       return;
     }
+    for (const [offset, step] of batch.entries()) {
+      validateRecordedStepEvidence(step, startIndex + offset, batch);
+    }
+    if (stopOnMismatch && mismatches.length) return;
     if (!isParallelEnvironment(options.environment)) {
       addMismatch(`Native parallel batch ${batch[0]?.batchId ?? "unknown"}: environment does not implement stepBatch().`);
       return;
@@ -228,6 +255,23 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
 
   function addMismatch(message: string): void {
     mismatches.push(message);
+  }
+
+  function validateRecordedStepEvidence(
+    step: SocialHarnessStep<TObservation, TPending, TCommand>,
+    index: number,
+    batch: readonly SocialHarnessStep<TObservation, TPending, TCommand>[]
+  ): void {
+    if (!options.validateRecordedStep) return;
+    const state = options.environment.snapshot();
+    const errors = options.validateRecordedStep(step, {
+      index,
+      state,
+      pendingActions: options.environment.pendingActions(),
+      schedulerMode: step.schedulerMode,
+      batch
+    });
+    for (const error of errors) addMismatch(`Native step ${index} ${step.traceId}: recorded pending/action evidence mismatch: ${error}`);
   }
 
   function finalizeReplay(): SocialEpisodeReplayResult<TState> {

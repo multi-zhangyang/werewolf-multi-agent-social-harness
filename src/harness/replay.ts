@@ -1,5 +1,6 @@
+import { getPendingActions } from "../core/engine";
 import { isAgentPendingAction, type AgentPendingAction } from "../core/pending";
-import type { GameCommand, GameState } from "../core/types";
+import type { GameCommand, GameState, PendingAction } from "../core/types";
 import { WerewolfEnvironment } from "./environment";
 import type { HarnessAgentSnapshotFrame } from "./episodeArtifacts";
 import { hashStableState } from "./hash";
@@ -41,8 +42,50 @@ export function replayWerewolfSocialEpisode(
     eventSeq: (state) => state.events.at(-1)?.seq ?? 0,
     stopOnMismatch: options.stopOnMismatch,
     agentSnapshotFrames: options.agentSnapshotFrames ? [...options.agentSnapshotFrames] : undefined,
-    auditAgentSnapshots: options.auditAgentSnapshots ?? (hasInlineSnapshots || options.agentSnapshotFrames !== undefined)
+    auditAgentSnapshots: options.auditAgentSnapshots ?? (hasInlineSnapshots || options.agentSnapshotFrames !== undefined),
+    validateRecordedStep(step, context) {
+      return validateRecordedWerewolfStepEvidence(step, context.state);
+    }
   });
+}
+
+/**
+ * Binds the recorded scheduler authorization to deterministic core state
+ * before replay commits a command. Applying a legal command alone is not
+ * proof that the artifact truthfully records what the actor was allowed to do.
+ */
+function validateRecordedWerewolfStepEvidence(
+  step: { actorId: string; pendingAction: unknown; action: { kind: string; command: GameCommand } },
+  state: GameState
+): string[] {
+  const errors: string[] = [];
+  const recorded = step.pendingAction as Partial<PendingAction> | undefined;
+  if (!recorded || typeof recorded.kind !== "string" || typeof recorded.phase !== "string" || typeof recorded.actorId !== "string") {
+    return ["recorded pendingAction is missing kind, phase, or actor identity."];
+  }
+  const actual = getPendingActions(state).find(
+    (candidate) => candidate.kind === recorded.kind && candidate.phase === recorded.phase && candidate.actorId === recorded.actorId
+  );
+  if (!actual) {
+    return [`recorded pending ${recorded.kind}/${recorded.phase}/${recorded.actorId} is not available in replay state.`];
+  }
+  if (hashStableState(recorded) !== hashStableState(actual)) {
+    errors.push(`recorded pendingAction does not equal the replay pending action for ${actual.kind}/${actual.actorId}.`);
+  }
+  if (step.actorId !== actual.actorId) {
+    errors.push(`scheduled actor ${step.actorId} does not match replay pending actor ${actual.actorId}.`);
+  }
+  const expectedKind = actionKindForCommand(step.action.command);
+  if (expectedKind !== actual.kind) {
+    errors.push(`command ${step.action.command.type} resolves ${expectedKind}, not replay pending ${actual.kind}.`);
+  }
+  if (step.action.kind !== step.action.command.type && step.action.kind !== expectedKind) {
+    errors.push(`recorded action kind ${step.action.kind} does not match command ${step.action.command.type}.`);
+  }
+  if (step.action.command.actorId !== actual.actorId) {
+    errors.push(`command actor ${step.action.command.actorId} does not match replay pending actor ${actual.actorId}.`);
+  }
+  return errors;
 }
 
 /** Legacy Werewolf trajectory compatibility replay. Native social replay is the canonical path. */

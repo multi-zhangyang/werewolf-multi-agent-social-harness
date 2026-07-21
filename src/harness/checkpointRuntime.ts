@@ -68,6 +68,7 @@ export function buildSocialCheckpointForkSeed<TState, TAgentState, TObservation,
   options: CreateGenericForkProvenanceOptions = {}
 ): SocialCheckpointForkSeed<TState, TAgentState> {
   assertStructurallyValidCheckpoint(checkpoint);
+  assertForkableRecordedActorBoundary(checkpoint);
   return {
     initialState: structuredClone(checkpoint.state),
     initialAgentStates: structuredClone(checkpoint.agents),
@@ -86,6 +87,7 @@ export async function runForkedHarnessEpisode<TState, TAgentState, TObservation,
   options: RunForkedHarnessEpisodeOptions<TState, TAgentState, TObservation, TPending, TCommand>
 ): Promise<ForkedHarnessEpisodeResult<TState, TObservation, TPending, TCommand, TAgentState>> {
   assertStructurallyValidCheckpoint(options.checkpoint);
+  assertForkableRecordedActorBoundary(options.checkpoint);
   const domainErrors = options.validateCheckpoint?.(options.checkpoint) ?? [];
   if (domainErrors.length) {
     throw new Error(`Invalid domain checkpoint ${options.checkpoint.checkpointId}: ${domainErrors.join(" ")}`);
@@ -110,4 +112,31 @@ function assertStructurallyValidCheckpoint<TState, TAgentState, TObservation, TP
 ): void {
   const errors = validateHarnessCheckpointEnvelope(checkpoint);
   if (errors.length) throw new Error(`Invalid harness checkpoint ${checkpoint.checkpointId}: ${errors.join(" ")}`);
+}
+
+/**
+ * Persistence of a failed/environment-only checkpoint is useful for audit and
+ * replay, but restoration is a stronger authority. Never hand actor state to
+ * a domain restore factory unless the selected final native boundary recorded
+ * exactly that durable state.
+ */
+function assertForkableRecordedActorBoundary<TState, TAgentState, TObservation, TPending, TCommand>(
+  checkpoint: HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand>
+): void {
+  const boundary = checkpoint.executionPrefix.steps.at(-1);
+  if (!boundary?.actorSnapshotsHashAfterStep) {
+    throw new Error(
+      `Checkpoint ${checkpoint.checkpointId} is not forkable: final native boundary has no recorded durable actor snapshot.`
+    );
+  }
+  if (boundary.actorSnapshotsHashAfterStep !== checkpoint.source.agentsHash) {
+    throw new Error(
+      `Checkpoint ${checkpoint.checkpointId} is not forkable: final boundary actor snapshot hash does not match source.agentsHash.`
+    );
+  }
+  if (boundary.actorSnapshotFrameIdAfterStep !== checkpoint.source.agentSnapshotFrameId) {
+    throw new Error(
+      `Checkpoint ${checkpoint.checkpointId} is not forkable: final boundary actor snapshot frame id does not match source.agentSnapshotFrameId.`
+    );
+  }
 }

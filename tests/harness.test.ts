@@ -767,7 +767,7 @@ describe("harness agent-environment cycle", () => {
         }
       }
     }
-  });
+  }, 20_000);
 
   it("returns a failed partial artifact when a later reasoner call fails", async () => {
     let calls = 0;

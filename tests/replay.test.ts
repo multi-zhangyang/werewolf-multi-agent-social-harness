@@ -127,6 +127,26 @@ describe("harness trajectory replay", () => {
     expect(commandReplay.mismatches.join("\n")).toMatch(/postStateHash mismatch/);
   });
 
+  it("rejects a canonical Werewolf artifact whose recorded pending authorization was forged", async () => {
+    const result = await buildReplayableRun("replay-pending-evidence-tamper");
+    const forged = cloneJson(result.socialEpisode);
+    const inspectStep = forged.steps.find(
+      (step) => step.commitStatus === "committed" && step.action.command.type === "seer.inspect"
+    );
+    if (!inspectStep) throw new Error("Expected a committed seer inspect native step.");
+
+    inspectStep.pendingAction = {
+      kind: "vote",
+      phase: "day_vote",
+      actorId: inspectStep.actorId,
+      legalTargetIds: []
+    };
+
+    const replay = replayWerewolfSocialEpisode(forged, { stopOnMismatch: false });
+    expect(replay.ok).toBe(false);
+    expect(replay.mismatches.join("\n")).toMatch(/recorded pending\/action evidence mismatch|recorded pending/i);
+  });
+
   it("does not apply a rejected command or publish its message draft", () => {
     const draft = counterMessageDraft("rejected message must remain a draft");
     const episode = counterEpisode({

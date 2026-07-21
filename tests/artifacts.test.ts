@@ -1142,6 +1142,19 @@ describe("match artifact JSONL export", () => {
     expect(deriveSocialExposureRecords(artifact.socialEpisode).length).toBeGreaterThan(0);
     expect(artifact.agents.some((agent) => (agent.social?.journal?.entries.length ?? 0) > 0)).toBe(true);
 
+    const pendingEvidenceTamper = cloneJson(artifact);
+    const inspectStep = pendingEvidenceTamper.socialEpisode.steps.find((step: any) =>
+      step.commitStatus === "committed" && step.action.command.type === "seer.inspect"
+    );
+    if (!inspectStep) throw new Error("Expected a recorded Seer inspect step.");
+    inspectStep.pendingAction = {
+      kind: "vote",
+      phase: "day_vote",
+      actorId: inspectStep.actorId,
+      legalTargetIds: []
+    } as any;
+    expect(validateMatchArtifactIntegrity(pendingEvidenceTamper).join("\n")).toMatch(/recorded pending\/action evidence mismatch/i);
+
     const seqTamper = cloneJson(artifact);
     seqTamper.socialEpisode.messages[0].seq = 99;
     expect(validateMatchArtifactIntegrity(seqTamper).join("\n")).toMatch(/socialEpisode\.messages\[0\] sequence mismatch/);

@@ -173,6 +173,7 @@ describe("generic social harness contract", () => {
   });
 
   it("records a non-Werewolf episode and checkpoint through the generic artifact envelope", async () => {
+    const agents = [{ id: "a", durableMemoryVersion: 1 }];
     const episode = await runHarnessEpisode<LedgerState, LedgerObservation, LedgerPending, LedgerCommand>({
       id: "ledger-generic-artifact-envelope",
       environment: new LedgerEnvironment({ actorIds: ["a"] }),
@@ -187,6 +188,7 @@ describe("generic social harness contract", () => {
       schedulerMode: "aec",
       hashState: hashStableState,
       hashMessages: hashStableState,
+      captureAgentSnapshots: () => agents,
       assembleObservation(context) {
         return {
           ...context.environmentObservation,
@@ -196,7 +198,6 @@ describe("generic social harness contract", () => {
       }
     });
 
-    const agents = [{ id: "a", durableMemoryVersion: 1 }];
     const envelope = {
       artifactVersion: "ledger.episode.v1",
       kind: "ledger-episode",
@@ -255,6 +256,42 @@ describe("generic social harness contract", () => {
     const tampered = JSON.parse(JSON.stringify(checkpoint)) as typeof checkpoint;
     tampered.source.messagesHash = "tampered";
     expect(validateHarnessCheckpointEnvelope(tampered).join(" ")).toMatch(/source\.messagesHash mismatch/);
+
+    const forgedActorState = JSON.parse(JSON.stringify(checkpoint)) as typeof checkpoint;
+    forgedActorState.agents = [{ id: "forged", durableMemoryVersion: 999 }];
+    forgedActorState.source.agentsHash = hashStableState(forgedActorState.agents);
+    expect(validateHarnessCheckpointEnvelope(forgedActorState).join(" ")).toMatch(/does not match final boundary actor snapshot hash/i);
+
+    let environmentRestores = 0;
+    let actorRestores = 0;
+    await expect(
+      runForkedHarnessEpisode({
+        checkpoint: forgedActorState,
+        runtime: {
+          createEnvironment(initialState) {
+            environmentRestores += 1;
+            return new LedgerEnvironment({ initialState, actorIds: ["a"] });
+          },
+          restoreActors(agentStates) {
+            actorRestores += 1;
+            return agentStates.map((agent) => new LedgerActor(agent.id as LedgerActorId, () => ({
+              actorId: agent.id as LedgerActorId,
+              kind: "record",
+              command: { actorId: agent.id as LedgerActorId, entry: "forbidden" }
+            })));
+          }
+        },
+        verifyCheckpointReplay: () => [],
+        episode: {
+          id: "ledger-forged-checkpoint-fork",
+          schedulerMode: "aec",
+          hashState: hashStableState,
+          hashMessages: hashStableState
+        }
+      })
+    ).rejects.toThrow(/final boundary actor snapshot hash/i);
+    expect(environmentRestores).toBe(0);
+    expect(actorRestores).toBe(0);
   });
 
   it("builds a generic native-prefix checkpoint, replays it without actors, and executes a restored non-Werewolf fork", async () => {

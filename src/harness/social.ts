@@ -460,6 +460,10 @@ export interface SocialEpisodeArtifact<TState = unknown, TObservation = unknown,
     initialMessagesHash?: string;
   };
   schedulerMode: SocialResolvedSchedulerMode;
+  /** Immutable actor registry for this live execution. It bounds `readableBy:
+   * "all"` and makes delivery receipts auditable. Absent only on legacy
+   * artifacts, where visibility deliberately falls back to channel members. */
+  runtimeActorIds?: string[];
   profiles: SocialAgentProfile[];
   channels: SocialChannel[];
   initialState: TState;
@@ -652,9 +656,11 @@ export function deriveSocialExposureRecords<TState, TObservation, TPending, TCom
 }
 
 export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TCommand>(
-  episode: Pick<SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>, "channels" | "steps" | "messages">
+  episode: Pick<SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>, "channels" | "steps" | "messages" | "runtimeActorIds">
 ): string[] {
   const errors: string[] = [];
+  const runtimeActorIds = normalizeRuntimeActorIds(episode.runtimeActorIds, errors, "runtimeActorIds");
+  const runtimeActorIdSet = runtimeActorIds ? new Set(runtimeActorIds) : undefined;
   const channelsById = new Map<string, SocialChannel>();
   for (const [index, channel] of episode.channels.entries()) {
     if (!channel.id.trim()) {
@@ -680,9 +686,9 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
     if (messagesBySeq.has(message.seq)) errors.push(`Duplicate social message seq ${message.seq}.`);
     messagesById.set(message.id, message);
     messagesBySeq.set(message.seq, message);
-    validateMessageEnvelope(message, channelsById, `messages[${index}]`, errors);
+    validateMessageEnvelope(message, channelsById, `messages[${index}]`, errors, runtimeActorIdSet);
     validateSpeechActs(message, `messages[${index}]`, errors);
-    validateDeliveryReceipts(message, channelsById, `messages[${index}]`, errors);
+    validateDeliveryReceipts(message, channelsById, `messages[${index}]`, errors, runtimeActorIds);
   }
 
   const stepsByTraceId = new Map<string, SocialHarnessStep<TObservation, TPending, TCommand>>();
@@ -746,7 +752,7 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
       if (committed.seq !== observedMessage.seq) {
         errors.push(`steps[${index}] observation message seq mismatch for ${observedMessage.id}: ${observedMessage.seq} !== ${committed.seq}.`);
       }
-      if (!messageVisibleToObserver(committed, observed.observerId, channelsById)) {
+      if (!messageVisibleToObserver(committed, observed.observerId, channelsById, runtimeActorIdSet)) {
         errors.push(`steps[${index}] observation for ${observed.observerId} includes non-visible social message ${committed.id}/${committed.seq}.`);
       }
     }
@@ -895,12 +901,48 @@ function sameOptionalRange(left: [number, number] | undefined, right: [number, n
   return left[0] === right[0] && left[1] === right[1];
 }
 
+/**
+ * The runner's actor registry is an identity boundary, not a convenience map.
+ * Reject ambiguity before any environment observation, decision, message, or
+ * transition can occur; a later Map overwrite would make profile attribution
+ * and recorded social evidence irrecoverably ambiguous.
+ */
+function assertUniqueSocialActorRegistry<TObservation, TPending, TCommand>(
+  actors: readonly SocialActor<TObservation, TPending, TCommand>[]
+): string[] {
+  const ids = new Set<string>();
+  for (const [index, actor] of actors.entries()) {
+    const actorId = actor.id?.trim();
+    if (!actorId) throw new Error(`Social actor registry contains an empty actor id at index ${index}.`);
+    if (ids.has(actorId)) throw new Error(`Social actor registry contains duplicate actor id ${actorId}.`);
+    ids.add(actorId);
+  }
+  return [...ids].sort();
+}
+
 export class SocialCommunicationBus {
   private readonly channels = new Map<string, SocialChannel>();
   private readonly messages: SocialMessage[] = [];
+  private readonly runtimeActorIds?: readonly string[];
+  private readonly runtimeActorIdSet?: ReadonlySet<string>;
 
-  constructor(channels: SocialChannel[] = [], initialMessages: SocialMessage[] = []) {
-    for (const channel of channels) this.channels.set(channel.id, channel);
+  constructor(
+    channels: SocialChannel[] = [],
+    initialMessages: SocialMessage[] = [],
+    options: { runtimeActorIds?: readonly string[] } = {}
+  ) {
+    const roster = options.runtimeActorIds?.map((actorId) => actorId.trim());
+    if (roster) {
+      const seen = new Set<string>();
+      for (const actorId of roster) {
+        if (!actorId) throw new Error("Runtime actor roster contains an empty actor id.");
+        if (seen.has(actorId)) throw new Error(`Runtime actor roster contains duplicate actor ${actorId}.`);
+        seen.add(actorId);
+      }
+      this.runtimeActorIds = [...roster].sort();
+      this.runtimeActorIdSet = new Set(this.runtimeActorIds);
+    }
+    for (const channel of channels) this.addChannel(channel);
     this.restoreMessages(initialMessages);
   }
 
@@ -946,7 +988,7 @@ export class SocialCommunicationBus {
         id,
         seq,
         speechActs: normalizeSpeechActs(draft, id, seq),
-        deliveryReceipts: deliveryReceiptsForMessage(draft, this.channels.get(draft.channelId), id, seq),
+        deliveryReceipts: deliveryReceiptsForMessage(draft, this.channels.get(draft.channelId), id, seq, this.runtimeActorIds),
         createdAt: deterministicMessageTimestamp(seq)
       };
     });
@@ -975,9 +1017,15 @@ export class SocialCommunicationBus {
       throw new Error(`Sender ${message.senderId} is not in channel ${message.channelId}.`);
     }
     for (const recipientId of message.recipientIds) {
-      if (!channel.participantIds.includes(recipientId) && channel.readableBy !== "all") {
+      if (!recipientIsAllowedInChannel(channel, recipientId, this.runtimeActorIdSet)) {
         throw new Error(`Recipient ${recipientId} is not allowed in channel ${message.channelId}.`);
       }
+    }
+    const expectedVisibility = expectedMessageVisibilityForChannel(channel);
+    if (message.visibility !== expectedVisibility) {
+      throw new Error(
+        `Message visibility ${message.visibility} is not compatible with ${channel.kind} channel ${message.channelId}; expected ${expectedVisibility}.`
+      );
     }
     const speechActs = message.speechActs;
     if (speechActs !== undefined && !Array.isArray(speechActs)) throw new Error(`Social message speechActs must be an array.`);
@@ -986,15 +1034,13 @@ export class SocialCommunicationBus {
   }
 
   observe(agentId: string): { channels: SocialChannel[]; messages: SocialMessage[] } {
-    const channels = [...this.channels.values()].filter(
-      (channel) => channel.readableBy === "all" || channel.participantIds.includes(agentId)
+    const channels = [...this.channels.values()].filter((channel) =>
+      canObserveChannelAtRuntime(channel, agentId, this.runtimeActorIdSet)
     );
     const channelIds = new Set(channels.map((channel) => channel.id));
     const messages = this.messages.filter((message) => {
       if (!channelIds.has(message.channelId)) return false;
-      if (message.visibility === "public") return true;
-      if (message.visibility === "postgame") return false;
-      return message.senderId === agentId || message.recipientIds.includes(agentId);
+      return messageVisibleToObserver(message, agentId, this.channels, this.runtimeActorIdSet);
     });
     return {
       channels: channels.map(cloneJson),
@@ -1028,8 +1074,9 @@ export interface SocialEpisodeOptions<TState, TObservation, TPending extends { a
 export async function runSocialEpisode<TState, TObservation, TPending extends { actorId?: string }, TCommand>(
   options: SocialEpisodeOptions<TState, TObservation, TPending, TCommand>
 ): Promise<SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>> {
+  const runtimeActorIds = assertUniqueSocialActorRegistry(options.actors);
   const defaultSchedulerMode = normalizeSchedulerMode(options.schedulerMode ?? "aec");
-  const bus = new SocialCommunicationBus(options.channels ?? [], options.initialMessages ?? []);
+  const bus = new SocialCommunicationBus(options.channels ?? [], options.initialMessages ?? [], { runtimeActorIds });
   const initialMessages = bus.listMessages();
   const execution = {
     schemaVersion: "harness.social-execution.v1" as const,
@@ -1061,6 +1108,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
       status: "failed",
       execution,
       schedulerMode: defaultSchedulerMode,
+      runtimeActorIds,
       profiles: options.actors.map((actor) => cloneJson(actor.profile)),
       channels: bus.listChannels(),
       initialState,
@@ -1456,6 +1504,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     status,
     execution,
     schedulerMode: defaultSchedulerMode,
+    runtimeActorIds,
     profiles: options.actors.map((actor) => cloneJson(actor.profile)),
     channels: bus.listChannels(),
     initialState,
@@ -2939,10 +2988,11 @@ function deliveryReceiptsForMessage(
   message: Omit<SocialMessage, "id" | "seq" | "createdAt">,
   channel: SocialChannel | undefined,
   messageId: string,
-  messageSeq: number
+  messageSeq: number,
+  runtimeActorIds?: readonly string[]
 ): SocialDeliveryReceipt[] | undefined {
   if (!channel || message.visibility === "postgame") return undefined;
-  const observerIds = visibleObserverIdsForMessage(message, channel);
+  const observerIds = visibleObserverIdsForMessage(message, channel, runtimeActorIds);
   if (!observerIds.length) return undefined;
   const turnIndex = numberMetadata(asRecord(message.metadata)?.turnIndex);
   return observerIds.map((observerId, index) => ({
@@ -2958,19 +3008,19 @@ function deliveryReceiptsForMessage(
   }));
 }
 
-function visibleObserverIdsForMessage(message: Omit<SocialMessage, "id" | "seq" | "createdAt">, channel: SocialChannel): string[] {
-  const ids = new Set<string>();
-  if (message.visibility === "public") {
-    for (const participantId of channel.participantIds) ids.add(participantId);
-    if (channel.readableBy === "all") {
-      ids.add(message.senderId);
-      for (const recipientId of message.recipientIds) ids.add(recipientId);
-    }
-  } else {
-    ids.add(message.senderId);
-    for (const recipientId of message.recipientIds) ids.add(recipientId);
+function visibleObserverIdsForMessage(
+  message: Omit<SocialMessage, "id" | "seq" | "createdAt">,
+  channel: SocialChannel,
+  runtimeActorIds?: readonly string[]
+): string[] {
+  if (message.visibility === "postgame" || channel.readableBy === "postgame") return [];
+  if (message.visibility === "private") {
+    return [...new Set([message.senderId, ...message.recipientIds])].filter((observerId) => observerId.trim()).sort();
   }
-  return [...ids].filter((observerId) => observerId.trim()).sort();
+  if ((channel.kind === "public" || channel.kind === "system") && channel.readableBy === "all" && runtimeActorIds) {
+    return [...runtimeActorIds].filter((observerId) => observerId.trim()).sort();
+  }
+  return [...new Set(channel.participantIds)].filter((observerId) => observerId.trim()).sort();
 }
 
 function speechActKindFromSocialFact(kind: string | undefined): SocialSpeechActKind | undefined {
@@ -3028,7 +3078,8 @@ function validateMessageEnvelope(
   message: SocialMessage,
   channelsById: Map<string, SocialChannel>,
   label: string,
-  errors: string[]
+  errors: string[],
+  runtimeActorIds?: ReadonlySet<string>
 ): void {
   const channel = channelsById.get(message.channelId);
   if (!channel) {
@@ -3039,9 +3090,15 @@ function validateMessageEnvelope(
     errors.push(`${label}.senderId ${message.senderId} is not in channel ${message.channelId}.`);
   }
   for (const recipientId of message.recipientIds) {
-    if (!channel.participantIds.includes(recipientId) && channel.readableBy !== "all") {
+    if (!recipientIsAllowedInChannel(channel, recipientId, runtimeActorIds)) {
       errors.push(`${label}.recipientIds includes ${recipientId}, which is not allowed in channel ${message.channelId}.`);
     }
+  }
+  const expectedVisibility = expectedMessageVisibilityForChannel(channel);
+  if (message.visibility !== expectedVisibility) {
+    errors.push(
+      `${label}.visibility ${message.visibility} is not compatible with ${channel.kind} channel ${message.channelId}; expected ${expectedVisibility}.`
+    );
   }
 }
 
@@ -3083,9 +3140,17 @@ function validateDeliveryReceipts(
   message: SocialMessage,
   channelsById: Map<string, SocialChannel>,
   label: string,
-  errors: string[]
+  errors: string[],
+  runtimeActorIds?: readonly string[]
 ): void {
-  if (message.deliveryReceipts === undefined) return;
+  const channel = channelsById.get(message.channelId);
+  const expectedObservers = channel ? visibleObserverIdsForMessage(message, channel, runtimeActorIds) : [];
+  if (message.deliveryReceipts === undefined) {
+    if (runtimeActorIds && expectedObservers.length) {
+      errors.push(`${label}.deliveryReceipts must record every runtime-visible observer.`);
+    }
+    return;
+  }
   if (!Array.isArray(message.deliveryReceipts)) {
     errors.push(`${label}.deliveryReceipts must be an array.`);
     return;
@@ -3106,9 +3171,16 @@ function validateDeliveryReceipts(
     observers.add(receipt.observerId);
     if (receipt.visibility !== message.visibility) errors.push(`${receiptLabel}.visibility ${receipt.visibility} does not match ${message.visibility}.`);
     if (!receipt.redactionPolicy?.trim()) errors.push(`${receiptLabel}.redactionPolicy is missing.`);
-    if (!messageVisibleToObserver(message, receipt.observerId, channelsById)) {
+    if (!messageVisibleToObserver(message, receipt.observerId, channelsById, runtimeActorIds ? new Set(runtimeActorIds) : undefined)) {
       errors.push(`${receiptLabel}.observerId ${receipt.observerId} cannot see message ${message.id}/${message.seq}.`);
     }
+  }
+  const recordedObservers = [...observers].sort();
+  if (
+    recordedObservers.length !== expectedObservers.length ||
+    recordedObservers.some((observerId, index) => observerId !== expectedObservers[index])
+  ) {
+    errors.push(`${label}.deliveryReceipts observer set does not match runtime visibility.`);
   }
 }
 
@@ -3117,13 +3189,74 @@ function isSeqRange(range: [number, number]): boolean {
   return Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start;
 }
 
-function messageVisibleToObserver(message: SocialMessage, observerId: string, channelsById: Map<string, SocialChannel>): boolean {
+export function canObserveChannelAtRuntime(
+  channel: SocialChannel,
+  observerId: string,
+  runtimeActorIds?: ReadonlySet<string>
+): boolean {
+  if (channel.readableBy === "postgame") return false;
+  // `all` is meaningful only for table/system broadcasts. A malformed team
+  // or private channel must not widen hidden topology by changing this field.
+  if (channel.kind === "team" || channel.kind === "private") return channel.participantIds.includes(observerId);
+  if (channel.readableBy === "all") {
+    return runtimeActorIds ? runtimeActorIds.has(observerId) : channel.participantIds.includes(observerId);
+  }
+  return channel.participantIds.includes(observerId);
+}
+
+function recipientIsAllowedInChannel(
+  channel: SocialChannel,
+  recipientId: string,
+  runtimeActorIds?: ReadonlySet<string>
+): boolean {
+  if (channel.participantIds.includes(recipientId)) return true;
+  // A public/system `all` channel's effective topology is the immutable run
+  // roster. Recipient ids remain audit metadata only; they cannot turn a
+  // broadcast into a direct message or authorize an actor outside that roster.
+  return (
+    (channel.kind === "public" || channel.kind === "system") &&
+    channel.readableBy === "all" &&
+    Boolean(runtimeActorIds?.has(recipientId))
+  );
+}
+
+function expectedMessageVisibilityForChannel(channel: SocialChannel): SocialMessage["visibility"] {
+  if (channel.readableBy === "postgame") return "postgame";
+  if (channel.kind === "public" || channel.kind === "system") return "public";
+  if (channel.kind === "team") return "team";
+  return "private";
+}
+
+function normalizeRuntimeActorIds(
+  runtimeActorIds: readonly string[] | undefined,
+  errors: string[],
+  label: string
+): string[] | undefined {
+  if (runtimeActorIds === undefined) return undefined;
+  const seen = new Set<string>();
+  for (const [index, actorId] of runtimeActorIds.entries()) {
+    if (!actorId?.trim()) errors.push(`${label}[${index}] is missing actor id.`);
+    else if (seen.has(actorId)) errors.push(`${label}[${index}] duplicates actor ${actorId}.`);
+    seen.add(actorId);
+  }
+  const sorted = [...runtimeActorIds].sort();
+  if (sorted.some((actorId, index) => actorId !== runtimeActorIds[index])) {
+    errors.push(`${label} must be sorted for canonical artifact identity.`);
+  }
+  return [...runtimeActorIds];
+}
+
+function messageVisibleToObserver(
+  message: SocialMessage,
+  observerId: string,
+  channelsById: Map<string, SocialChannel>,
+  runtimeActorIds?: ReadonlySet<string>
+): boolean {
   const channel = channelsById.get(message.channelId);
   if (!channel) return false;
-  const canReadChannel = channel.readableBy === "all" || channel.participantIds.includes(observerId);
-  if (!canReadChannel) return false;
-  if (message.visibility === "public") return true;
+  if (!canObserveChannelAtRuntime(channel, observerId, runtimeActorIds)) return false;
   if (message.visibility === "postgame") return false;
+  if (message.visibility === "public" || message.visibility === "team") return true;
   return message.senderId === observerId || message.recipientIds.includes(observerId);
 }
 

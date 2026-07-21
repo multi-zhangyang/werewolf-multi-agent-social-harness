@@ -135,6 +135,42 @@ describe("game-core state machine", () => {
     expect(isAgentPendingAction(pending[0])).toBe(false);
   });
 
+  it("keeps system phase advancement inside the core pending-action authority", () => {
+    let state = createGame({ id: "test-core-system-advance", seed: "core-system-advance" });
+    state = applyCommand(state, { type: "system.advance", actorId: "system" });
+    expect(state.phase).toBe("night_seer");
+    const before = state;
+    const beforeHash = hashStableState(before);
+
+    expect(() => applyCommand(before, { type: "system.advance", actorId: "system" })).toThrow(/sole pending action/i);
+    expect(hashStableState(before)).toBe(beforeHash);
+    expect(before.phase).toBe("night_seer");
+    expect(pendingByKind(before, "inspect")).toHaveLength(1);
+    expect(before.night.seerInspection).toBeUndefined();
+  });
+
+  it("rejects a duplicate direct core wolf kill vote without overwriting the recorded ballot", () => {
+    let state = createGame({ id: "test-core-duplicate-wolf-vote", seed: "core-duplicate-wolf-vote" });
+    state = advanceSystem(state);
+    const inspect = pendingByKind(state, "inspect")[0];
+    state = applyCommand(state, { type: "seer.inspect", actorId: inspect.actorId, targetId: inspect.legalTargetIds[0] });
+
+    const firstVote = pendingByKind(state, "kill")[0];
+    const firstTarget = firstVote.legalTargetIds[0];
+    state = applyCommand(state, { type: "werewolf.killVote", actorId: firstVote.actorId, targetId: firstTarget });
+    const before = state;
+    const beforeHash = hashStableState(before);
+    const secondTarget = firstVote.legalTargetIds.find((targetId) => targetId !== firstTarget) ?? firstTarget;
+
+    expect(pendingByKind(before, "kill").some((pending) => pending.actorId !== firstVote.actorId)).toBe(true);
+    expect(() =>
+      applyCommand(before, { type: "werewolf.killVote", actorId: firstVote.actorId, targetId: secondTarget })
+    ).toThrow(/already cast/i);
+    expect(hashStableState(before)).toBe(beforeHash);
+    expect(before.night.wolfVotes[firstVote.actorId]).toBe(firstTarget);
+    expect(before.events.filter((event) => event.type === "werewolves.voted" && event.actorId === firstVote.actorId)).toHaveLength(1);
+  });
+
   it("runs a public day-one sheriff election and makes the elected vote weight effective", () => {
     let state = createGame({
       id: "test-sheriff-election",

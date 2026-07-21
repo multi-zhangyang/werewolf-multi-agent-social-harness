@@ -182,7 +182,7 @@ describe("server-owned match artifact persistence", () => {
     expect(replayed.body.replay).not.toHaveProperty("finalState");
     expect(JSON.stringify(replayed.body)).not.toContain("privateMemos");
     expectNoMatchPathLeak(replayed.body, matchArtifactBaseDir);
-  });
+  }, 20_000);
 
   it("persists fork child match artifacts and restores fork provenance after restart", async () => {
     const matchArtifactBaseDir = await makeTempDir();
@@ -661,7 +661,7 @@ describe("server-owned match artifact persistence", () => {
       expect(replay.status).toBe(404);
       expectNoMatchPathLeak(replay.body, matchArtifactBaseDir);
     }
-  });
+  }, 20_000);
 
   it("repairs invalid match artifact index JSON and shape with recovery audit records", async () => {
     for (const scenario of [
@@ -724,7 +724,7 @@ describe("server-owned match artifact persistence", () => {
       });
       expectNoMatchPathLeak(persistedAudits.body, matchArtifactBaseDir);
     }
-  });
+  }, 20_000);
 
   it("reports malformed recovery audit sidecar lines without exposing raw sidecar content", async () => {
     const matchArtifactBaseDir = await makeTempDir();

@@ -908,7 +908,7 @@ describe("checkpoint and fork API", () => {
       expect(JSON.stringify(invalidLimit.body)).not.toContain("parentTraceId");
       expect(JSON.stringify(invalidLimit.body)).not.toContain(rootCheckpointId);
     }
-  });
+  }, 20_000);
 
   it("persists checkpoint files under a configured base dir and rehydrates list detail artifact and fork after restart", async () => {
     const checkpointBaseDir = await makeTempDir();

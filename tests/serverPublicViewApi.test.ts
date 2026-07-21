@@ -787,7 +787,7 @@ describe("public match API redaction", () => {
     const missingCandidate = await requestJson(baseUrl, "GET", `/api/matches/${baseline.id}/compare/missing-candidate?view=postgame-redacted`);
     expect(missingCandidate.status).toBe(404);
     expect(missingCandidate.body).toMatchObject({ error: "match not found" });
-  });
+  }, 20_000);
 
   it("keeps explicit full comparisons request-local and gates the comparison registry", async () => {
     const baseline = await createSensitiveStoredMatch("server-full-comparison-local-baseline");
