@@ -605,7 +605,8 @@ app.post("/api/matches/:id/replay", async (req, res, next) => {
     const body = requestBodyObject(req.body);
     assertAllowedBodyFields(body, ["stopOnMismatch"], "server-owned replay");
     const replay = replayWerewolfSocialEpisode(match.artifact.socialEpisode, {
-      stopOnMismatch: body.stopOnMismatch !== false
+      stopOnMismatch: body.stopOnMismatch !== false,
+      agentSnapshotFrames: match.artifact.agentSnapshotFrames
     });
     res.status(replay.ok ? 200 : 409).json(
       serializeSocialReplayResult(replay, {

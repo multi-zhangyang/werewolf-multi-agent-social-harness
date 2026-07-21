@@ -1,7 +1,11 @@
 import { isAgentPendingAction, type AgentPendingAction } from "../core/pending";
 import type { GameCommand, GameState } from "../core/types";
 import { WerewolfEnvironment } from "./environment";
-import { auditRecordedSocialAgentSnapshots, type RecordedSocialAgentStateAuditResult } from "./episodeArtifacts";
+import {
+  auditRecordedSocialAgentSnapshots,
+  type HarnessAgentSnapshotFrame,
+  type RecordedSocialAgentStateAuditResult
+} from "./episodeArtifacts";
 import { hashStableState } from "./hash";
 import {
   isSocialParallelJointStep,
@@ -37,12 +41,12 @@ export interface SocialEpisodeReplayResult<TState = unknown> {
   messages: SocialMessage[];
   messagesHash?: string;
   expectedMessagesHash?: string;
-  /** Present only when the episode contains recorded inline actor snapshots. */
+  /** Present when the episode contains inline snapshots or an external frame registry. */
   agentStateAudit?: RecordedSocialAgentStateAuditResult;
   mismatches: string[];
 }
 
-export function replaySocialEpisode<TState, TObservation, TPending, TCommand>(options: {
+export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TAgentState = unknown>(options: {
   episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
   environment: SocialEnvironment<TState, TObservation, TPending, TCommand>;
   hashState?: (state: TState) => string;
@@ -55,8 +59,10 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand>(op
    * only the final expected-state comparison is intentionally deferred.
    */
   validateExpectedFinalState?: boolean;
-  /** Defaults to true when inline durable actor snapshots are present. */
+  /** Defaults to true when durable snapshots or an external frame registry are present. */
   auditAgentSnapshots?: boolean;
+  /** Optional recorded, compacted durable actor-state sidecar. */
+  agentSnapshotFrames?: HarnessAgentSnapshotFrame<TAgentState>[];
 }): SocialEpisodeReplayResult<TState> {
   const { episode } = options;
   const mismatches: string[] = [];
@@ -259,15 +265,17 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand>(op
       addMismatch(`Replay messages hash mismatch ${messagesHash} !== ${expectedMessagesHash}.`);
     }
 
-    // A domain may compact snapshots into an external frame registry (the
-    // Werewolf artifact does so after execution).  Generic replay can audit
-    // only inline payloads; a frame-backed domain keeps its own resolver and
-    // validator rather than treating the missing inline body as corruption.
-    const hasRecordedActorSnapshots = episode.steps.some((step) => step.actorSnapshotsAfterStep !== undefined);
+    const hasRecordedActorSnapshots = episode.steps.some(
+      (step) =>
+        step.actorSnapshotsAfterStep !== undefined ||
+        step.actorSnapshotsHashAfterStep !== undefined ||
+        step.actorSnapshotFrameIdAfterStep !== undefined
+    );
+    const hasExternalFrames = options.agentSnapshotFrames !== undefined;
     const agentStateAudit =
-      options.auditAgentSnapshots === false || !hasRecordedActorSnapshots
+      options.auditAgentSnapshots === false || (!hasRecordedActorSnapshots && !hasExternalFrames)
         ? undefined
-        : auditRecordedSocialAgentSnapshots({ episode });
+        : auditRecordedSocialAgentSnapshots({ episode, snapshotFrames: options.agentSnapshotFrames });
     for (const mismatch of agentStateAudit?.mismatches ?? []) {
       addMismatch(`Recorded agent state audit: ${mismatch}`);
     }
@@ -291,15 +299,23 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand>(op
 
 export function replayWerewolfSocialEpisode(
   episode: SocialEpisodeArtifact,
-  options: { stopOnMismatch?: boolean } = {}
+  options: {
+    stopOnMismatch?: boolean;
+    agentSnapshotFrames?: readonly HarnessAgentSnapshotFrame<unknown>[];
+    /** A checkpoint prefix can intentionally omit its parent's frame sidecar. */
+    auditAgentSnapshots?: boolean;
+  } = {}
 ): SocialEpisodeReplayResult<GameState> {
+  const hasInlineSnapshots = episode.steps.some((step) => step.actorSnapshotsAfterStep !== undefined);
   return replaySocialEpisode({
     episode: episode as SocialEpisodeArtifact<GameState, unknown, unknown, GameCommand>,
     environment: new WerewolfEnvironment(episode.initialState as GameState) as unknown as SocialEnvironment<GameState, unknown, unknown, GameCommand>,
     hashState: hashStableState,
     hashMessages: hashStableState,
     eventSeq: (state) => state.events.at(-1)?.seq ?? 0,
-    stopOnMismatch: options.stopOnMismatch
+    stopOnMismatch: options.stopOnMismatch,
+    agentSnapshotFrames: options.agentSnapshotFrames ? [...options.agentSnapshotFrames] : undefined,
+    auditAgentSnapshots: options.auditAgentSnapshots ?? (hasInlineSnapshots || options.agentSnapshotFrames !== undefined)
   });
 }
 
