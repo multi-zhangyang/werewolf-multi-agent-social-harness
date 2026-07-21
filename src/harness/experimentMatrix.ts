@@ -12,7 +12,7 @@ import type { HarnessAssignmentConfig } from "./profiles";
 import { redactSecrets } from "./redaction";
 import { runTournament, type TournamentResult } from "./tournament";
 import { writeTournamentArtifactDirectory } from "./tournamentArtifacts";
-import type { HarnessAgentProfile, HarnessReasoner } from "./types";
+import type { HarnessAgentProfile, HarnessReasoner, WerewolfJointPhaseScheduler } from "./types";
 
 export const MATRIX_EXPERIMENT_VERSION = "harness.experiment-matrix.v1";
 export const MATRIX_ARTIFACT_VERSION = "harness.experiment-matrix-artifact.v1";
@@ -31,6 +31,7 @@ export interface MatrixExperimentDimensionsV1 {
   seeds?: string[];
   games?: Array<string | number>;
   maxTransitions?: Array<string | number>;
+  jointPhaseSchedulers?: WerewolfJointPhaseScheduler[];
   temperatures?: Array<string | number>;
 }
 
@@ -271,6 +272,7 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
           games: tournament.games,
           seed: tournament.seed,
           maxTransitions: tournament.maxTransitions,
+          jointPhaseScheduler: tournament.jointPhaseScheduler,
           config: tournament.config,
           temperature: tournament.temperature,
           continueOnError: tournament.continueOnError,
@@ -477,6 +479,7 @@ function dimensionCells(
   const seeds = dimensionArray(dimensions.seeds, base.seed ?? matrixId);
   const games = dimensionArray(dimensions.games, base.games);
   const maxTransitions = dimensionArray(dimensions.maxTransitions, base.maxTransitions);
+  const jointPhaseSchedulers = dimensionArray(dimensions.jointPhaseSchedulers, base.jointPhaseScheduler);
   const temperatures = dimensionArray(dimensions.temperatures, base.temperature);
   const cells: Array<{ id?: string; label?: string; group?: string; spec: TournamentExperimentSpecV1 }> = [];
   for (const model of models) {
@@ -485,19 +488,24 @@ function dimensionCells(
         for (const seed of seeds) {
           for (const gameCount of games) {
             for (const maxTransition of maxTransitions) {
-              for (const temperature of temperatures) {
-                const spec: TournamentExperimentSpecV1 = {
-                  ...base,
-                  ...(model === undefined ? {} : { models: model as TournamentExperimentSpecV1["models"] }),
-                  ...(profile === undefined ? {} : { profiles: profile as TournamentExperimentSpecV1["profiles"] }),
-                  ...(assignment === undefined ? {} : { assignment: assignment as TournamentExperimentSpecV1["assignment"] }),
-                  ...(seed === undefined ? {} : { seed: String(seed) }),
-                  ...(gameCount === undefined ? {} : { games: gameCount as TournamentExperimentSpecV1["games"] }),
-                  ...(maxTransition === undefined ? {} : { maxTransitions: maxTransition as TournamentExperimentSpecV1["maxTransitions"] }),
-                  ...(temperature === undefined ? {} : { temperature: temperature as TournamentExperimentSpecV1["temperature"] })
-                };
-                const id = `${matrixId}-c${cells.length + 1}`;
-                cells.push({ id, label: id, group: String(seed ?? "default"), spec: { ...spec, id } });
+              for (const jointPhaseScheduler of jointPhaseSchedulers) {
+                for (const temperature of temperatures) {
+                  const spec: TournamentExperimentSpecV1 = {
+                    ...base,
+                    ...(model === undefined ? {} : { models: model as TournamentExperimentSpecV1["models"] }),
+                    ...(profile === undefined ? {} : { profiles: profile as TournamentExperimentSpecV1["profiles"] }),
+                    ...(assignment === undefined ? {} : { assignment: assignment as TournamentExperimentSpecV1["assignment"] }),
+                    ...(seed === undefined ? {} : { seed: String(seed) }),
+                    ...(gameCount === undefined ? {} : { games: gameCount as TournamentExperimentSpecV1["games"] }),
+                    ...(maxTransition === undefined ? {} : { maxTransitions: maxTransition as TournamentExperimentSpecV1["maxTransitions"] }),
+                    ...(jointPhaseScheduler === undefined
+                      ? {}
+                      : { jointPhaseScheduler: jointPhaseScheduler as TournamentExperimentSpecV1["jointPhaseScheduler"] }),
+                    ...(temperature === undefined ? {} : { temperature: temperature as TournamentExperimentSpecV1["temperature"] })
+                  };
+                  const id = `${matrixId}-c${cells.length + 1}`;
+                  cells.push({ id, label: id, group: String(seed ?? "default"), spec: { ...spec, id } });
+                }
               }
             }
           }
@@ -634,6 +642,7 @@ function matrixCellRecord(cell: ExperimentMatrixCellResult): object {
     gamesCompleted: cell.tournament?.gamesCompleted ?? null,
     gamesTruncated: cell.tournament ? gamesTruncatedForCell(cell) : null,
     gamesFailed: cell.tournament?.gamesFailed ?? null,
+    jointPhaseScheduler: cell.tournament?.experiment.jointPhaseScheduler ?? null,
     models: cell.tournament?.models ?? [],
     error: cell.error ?? null
   };

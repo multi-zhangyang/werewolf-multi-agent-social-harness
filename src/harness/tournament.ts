@@ -20,8 +20,10 @@ import type {
   HarnessReasoner,
   HarnessRunResult,
   HarnessStepRecord,
-  PolicyName
+  PolicyName,
+  WerewolfJointPhaseScheduler
 } from "./types";
+import { DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER, WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS } from "./types";
 import { countSocialStepCommitsByActor, isSocialStepCommitted, type SocialEpisodeArtifact } from "./social";
 import { runTournamentEpisodes } from "./tournamentRunner";
 
@@ -33,6 +35,7 @@ export interface TournamentOptions {
   reasoner: HarnessReasoner;
   config?: Partial<GameConfig> & { roles?: Role[] };
   maxTransitions?: number;
+  jointPhaseScheduler?: WerewolfJointPhaseScheduler;
   temperature?: number;
   assignment?: HarnessAssignmentConfig;
   continueOnError?: boolean;
@@ -57,6 +60,8 @@ export interface TournamentEpisode {
   /** Tournament-level status preserves the harness lifecycle outcome. */
   status: HarnessRunResult["status"] | "failed";
   harnessStatus?: HarnessRunResult["status"];
+  /** Recorded control-plane condition for this episode's joint action phases. */
+  jointPhaseScheduler?: WerewolfJointPhaseScheduler;
   winner?: Team;
   phase?: string;
   day?: number;
@@ -151,6 +156,7 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
   if (profiles.length === 0) throw new Error("Tournament requires at least one Agent profile or model.");
   if (!Number.isInteger(options.games) || options.games <= 0) throw new Error("Tournament games must be a positive integer.");
   const models = Array.from(new Set(profiles.map((profile) => profile.model)));
+  const jointPhaseScheduler = resolveJointPhaseScheduler(options);
   const experiment = buildEffectiveExperiment(options, { models, profiles, assignment, temperature: defaultTemperature });
 
   const episodes: TournamentEpisode[] = [];
@@ -181,7 +187,8 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
         initialState: prepared.initialState,
         agents: prepared.agents,
         reasoner: options.reasoner,
-        maxTransitions: options.maxTransitions
+        maxTransitions: options.maxTransitions,
+        jointPhaseScheduler
       });
       let artifactRecord: TournamentMatchArtifactRecord | undefined;
       if (options.includeArtifacts || options.artifactSink) {
@@ -226,7 +233,8 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
         record.prepared.agents,
         assignment,
         record.prepared.resolvedAssignments,
-        record.result.artifactInfo
+        record.result.artifactInfo,
+        jointPhaseScheduler
       );
       episodes.push(episode);
       if (episode.status === "completed") accumulateCompletedEpisode(modelStats, profileStats, episode);
@@ -241,6 +249,7 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
       seed: record.seed,
       ...(prepared ? { runId: prepared.runId, matchId: prepared.initialState.id } : {}),
       status: "failed",
+      jointPhaseScheduler,
       assignment,
       resolvedAssignments: prepared?.resolvedAssignments ?? [],
       agents: (initialState?.players ?? []).map((player) => ({
@@ -292,12 +301,28 @@ function buildEffectiveExperiment(
     assignment: runtime.assignment,
     games: options.games,
     maxTransitions: options.maxTransitions,
+    jointPhaseScheduler: resolveJointPhaseScheduler(options),
     timeoutMs: options.experiment?.timeoutMs,
     temperature: runtime.temperature,
     json: options.experiment?.json ?? "summary",
     continueOnError: options.continueOnError ?? false,
     config: options.config
   };
+}
+
+function resolveJointPhaseScheduler(options: TournamentOptions): WerewolfJointPhaseScheduler {
+  const requested = options.jointPhaseScheduler;
+  const recorded = options.experiment?.jointPhaseScheduler;
+  if (requested && recorded && requested !== recorded) {
+    throw new Error(`Tournament scheduler mismatch: options=${requested}, experiment=${recorded}.`);
+  }
+  const scheduler = requested ?? recorded ?? DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER;
+  if (scheduler === "parallel" && (options.maxTransitions === undefined || options.maxTransitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS)) {
+    throw new Error(
+      `jointPhaseScheduler=parallel requires maxTransitions >= ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS} (system.advance + seer.inspect + joint wolf batch).`
+    );
+  }
+  return scheduler;
 }
 
 export function buildRoleBalancedAgents(
@@ -320,7 +345,8 @@ function summarizeEpisode(
     runId?: string;
     matchId?: string;
     artifact?: MatchArtifact;
-  }
+  },
+  jointPhaseScheduler?: WerewolfJointPhaseScheduler
 ): TournamentEpisode {
   const modelByPlayer = new Map(agents.map((agent) => [agent.playerId, agent.model]));
   const profileByPlayer = new Map(agents.map((agent) => [agent.playerId, agent.profileId]));
@@ -333,6 +359,7 @@ function summarizeEpisode(
     matchId: artifactInfo?.matchId,
     status: result.status,
     harnessStatus: result.status,
+    jointPhaseScheduler,
     winner: result.state.winner,
     phase: result.state.phase,
     day: result.state.day,

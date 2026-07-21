@@ -202,4 +202,74 @@ describe("role-balanced tournament harness", () => {
     expect(result.alphaSeatGames).toBe(0);
     expect(result.betaSeatGames).toBe(0);
   });
+
+  it("executes an explicit parallel scheduler condition and records it in the tournament experiment", async () => {
+    const result = await runTsxJson<{
+      scheduler: string;
+      hasParallelBatch: boolean;
+      parallelStepCount: number;
+      status: string;
+    }>(`
+      import { runTournament } from "./src/harness/tournament.ts";
+
+      const reasoner = {
+        async think(input) {
+          const content = input.action.kind === "speech" ? "公开发言" : "parallel tournament memo";
+          return {
+            content,
+            completion: {
+              content,
+              latencyMs: 1,
+              usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+              providerRequestId: "parallel-tournament-" + input.traceId,
+              attempts: 1
+            }
+          };
+        }
+      };
+
+      const result = await runTournament({
+        models: ["alpha", "beta"],
+        games: 1,
+        seed: "parallel-tournament",
+        reasoner,
+        maxTransitions: 4,
+        jointPhaseScheduler: "parallel"
+      });
+      const steps = result.episodes[0]?.socialEpisode?.steps ?? [];
+      console.log(JSON.stringify({
+        scheduler: result.experiment.jointPhaseScheduler,
+        hasParallelBatch: steps.some((step) => step.schedulerMode === "parallel" && step.atomic === true),
+        parallelStepCount: steps.filter((step) => step.schedulerMode === "parallel").length,
+        status: result.episodes[0]?.status
+      }));
+    `);
+
+    expect(result.scheduler).toBe("parallel");
+    expect(result.hasParallelBatch).toBe(true);
+    expect(result.parallelStepCount).toBeGreaterThan(1);
+    expect(result.status).toBe("truncated");
+  });
+
+  it("fails closed when a direct tournament requests an unreachable parallel scheduler batch", async () => {
+    const result = await runTsxJson<{ error: string }>(`
+      import { runTournament } from "./src/harness/tournament.ts";
+
+      try {
+        await runTournament({
+          models: ["alpha"],
+          games: 1,
+          seed: "parallel-budget-rejection",
+          reasoner: { async think() { throw new Error("must not call reasoner"); } },
+          maxTransitions: 3,
+          jointPhaseScheduler: "parallel"
+        });
+        throw new Error("expected parallel budget rejection");
+      } catch (error) {
+        console.log(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      }
+    `);
+
+    expect(result.error).toMatch(/parallel requires maxTransitions >= 4/);
+  });
 });

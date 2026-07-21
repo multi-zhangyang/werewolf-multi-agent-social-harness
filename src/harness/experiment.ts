@@ -4,7 +4,12 @@ import {
   profilesFromUnknown,
   type HarnessAssignmentConfig
 } from "./profiles";
-import type { HarnessAgentProfile } from "./types";
+import {
+  DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER,
+  WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS,
+  type HarnessAgentProfile,
+  type WerewolfJointPhaseScheduler
+} from "./types";
 
 export const TOURNAMENT_EXPERIMENT_VERSION = "werewolf.experiment.v1";
 
@@ -18,6 +23,11 @@ export interface TournamentExperimentSpecV1 {
   assignment?: HarnessAssignmentConfig | string;
   games?: number | string;
   maxTransitions?: number | string;
+  /**
+   * Explicit experimental condition for simultaneous Werewolf phases. This is
+   * a harness scheduler selection, not a model/provider option.
+   */
+  jointPhaseScheduler?: WerewolfJointPhaseScheduler;
   timeout?: string | number;
   timeoutMs?: string | number;
   temperature?: number | string;
@@ -36,6 +46,7 @@ export interface NormalizedTournamentExperiment {
   assignment?: HarnessAssignmentConfig;
   games: number;
   maxTransitions?: number;
+  jointPhaseScheduler: WerewolfJointPhaseScheduler;
   timeoutMs?: number;
   temperature: number;
   json: "summary" | "full";
@@ -67,6 +78,12 @@ export function normalizeTournamentExperimentSpec(
   const models = modelsFromProfiles(profiles);
   if (!models.length) throw new Error("Experiment spec requires at least one model or profile.");
 
+  const maxTransitions = parseOptionalNonNegativeInteger(specRecord.maxTransitions ?? defaultRecord.maxTransitions, "maxTransitions");
+  const jointPhaseScheduler =
+    parseOptionalJointPhaseScheduler(specRecord.jointPhaseScheduler ?? defaultRecord.jointPhaseScheduler) ??
+    DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER;
+  assertJointPhaseSchedulerBudget(jointPhaseScheduler, maxTransitions);
+
   return {
     version: TOURNAMENT_EXPERIMENT_VERSION,
     id,
@@ -76,7 +93,8 @@ export function normalizeTournamentExperimentSpec(
     profiles,
     assignment: assignmentFromUnknown(specRecord.assignment ?? defaultRecord.assignment),
     games: parsePositiveInteger(specRecord.games ?? defaultRecord.games ?? 3, "games"),
-    maxTransitions: parseOptionalNonNegativeInteger(specRecord.maxTransitions ?? defaultRecord.maxTransitions, "maxTransitions"),
+    maxTransitions,
+    jointPhaseScheduler,
     timeoutMs: parseOptionalDurationMs(specRecord.timeoutMs ?? specRecord.timeout ?? defaultRecord.timeoutMs ?? defaultRecord.timeout, "timeout"),
     temperature,
     json: parseJsonMode(specRecord.json ?? defaultRecord.json),
@@ -150,6 +168,32 @@ function parseOptionalNonNegativeInteger(value: unknown, name: string): number |
   const parsed = typeof value === "number" ? value : Number(String(value));
   if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative integer.`);
   return parsed;
+}
+
+function parseOptionalJointPhaseScheduler(value: unknown): WerewolfJointPhaseScheduler | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (value === "aec-batched-decision" || value === "parallel") return value;
+  throw new Error('jointPhaseScheduler must be "aec-batched-decision" or "parallel".');
+}
+
+/**
+ * A parallel Werewolf condition is meaningful only when its first joint
+ * environment transition can be reached. Enforce this at the experiment
+ * normalization boundary so a persisted condition cannot silently execute
+ * with the default AEC scheduler or produce an invalid partial comparison.
+ */
+function assertJointPhaseSchedulerBudget(
+  jointPhaseScheduler: WerewolfJointPhaseScheduler | undefined,
+  maxTransitions: number | undefined
+): void {
+  if (
+    jointPhaseScheduler === "parallel" &&
+    (maxTransitions === undefined || maxTransitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS)
+  ) {
+    throw new Error(
+      `jointPhaseScheduler=parallel requires maxTransitions >= ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS} (system.advance + seer.inspect + joint wolf batch).`
+    );
+  }
 }
 
 function parseOptionalDurationMs(value: unknown, name: string): number | undefined {

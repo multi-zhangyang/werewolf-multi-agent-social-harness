@@ -25145,3 +25145,47 @@ git diff --check
 The real `grok-4.5` probe remains on the existing generic OpenAI-compatible
 streaming path. No model-specific adapter, parser, prompt, fallback, or
 model-name branch was added by this replay-frame work.
+
+## 13.253 Tournament And Matrix Scheduler Experiment Lock
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+`jointPhaseScheduler` is a normalized, recorded Werewolf experiment condition,
+not an implicit runtime default and not a model/provider property.
+
+- `TournamentExperimentSpecV1` / `NormalizedTournamentExperiment` record one
+  of `aec-batched-decision` or `parallel`; omitted input is normalized to the
+  existing `aec-batched-decision` default so every new tournament artifact has
+  an explicit condition.
+- The condition flows unchanged through tournament options, matrix cells,
+  CLI/API overrides, `runHarnessMatch()`, `spec.normalized.json`, nested matrix
+  tournament artifacts, and safe server limits summaries. Matrix dimensions
+  expose `jointPhaseSchedulers` for true scheduler control groups.
+- `parallel` requires `maxTransitions >= 4` at normalized experiment and direct
+  tournament boundaries. This reaches the first complete atomic wolf batch;
+  a short or unbounded request fails closed instead of silently measuring the
+  default AEC scheduler.
+- The scheduler remains a control-plane condition. It does not make model
+  calls parallel by itself, alter command legality, bypass `stepBatch()`, or
+  turn a batched decision collection into a parallel environment transition.
+
+Focused validation recorded:
+
+```bash
+npm run typecheck
+npx vitest run tests/experiment.test.ts tests/tournament.test.ts \
+  tests/experimentMatrix.test.ts tests/serverTournamentArtifactsApi.test.ts \
+  tests/serverExperimentMatrixApi.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=dot
+git diff --check
+```
+
+The regression suite proves normalized default/parallel conditions, direct
+budget rejection, an actual atomic parallel tournament batch, matrix dimension
+expansion, normalized research artifact persistence, and both tournament and
+matrix server paths. It is unrelated to provider selection: the generic
+`grok-4.5` streaming reasoner path remains unchanged.

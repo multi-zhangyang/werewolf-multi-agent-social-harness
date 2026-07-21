@@ -23,6 +23,7 @@ describe("tournament experiment spec", () => {
       seed: "wolf-vs-village-smoke",
       games: 3,
       maxTransitions: 24,
+      jointPhaseScheduler: "aec-batched-decision",
       timeoutMs: 300000,
       temperature: 0.7,
       json: "summary",
@@ -114,6 +115,30 @@ describe("tournament experiment spec", () => {
 
     expect(experiment.maxTransitions).toBe(0);
     expect(() => normalizeTournamentExperimentSpec({ models: "alpha", maxTransitions: -1 })).toThrow(/maxTransitions/);
+  });
+
+  it("records the joint-phase scheduler as an experiment condition and rejects an unreachable parallel condition", () => {
+    const parallel = normalizeTournamentExperimentSpec({
+      models: ["alpha", "beta"],
+      games: 1,
+      maxTransitions: 4,
+      jointPhaseScheduler: "parallel"
+    });
+    const defaulted = normalizeTournamentExperimentSpec({ models: ["alpha"], games: 1, maxTransitions: 0 });
+
+    expect(parallel.jointPhaseScheduler).toBe("parallel");
+    expect(defaulted.jointPhaseScheduler).toBe("aec-batched-decision");
+    expect(() =>
+      normalizeTournamentExperimentSpec({
+        models: ["alpha"],
+        games: 1,
+        maxTransitions: 3,
+        jointPhaseScheduler: "parallel"
+      })
+    ).toThrow(/parallel requires maxTransitions >= 4/);
+    expect(() => normalizeTournamentExperimentSpec({ models: ["alpha"], jointPhaseScheduler: "unknown" })).toThrow(
+      /jointPhaseScheduler/
+    );
   });
 
   it("keeps provider-qualified model ids intact in string model lists", () => {

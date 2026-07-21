@@ -49,7 +49,8 @@ describe("experiment matrix server API", () => {
       base: {
         games: 1,
         seed: "server-matrix-artifacts",
-        maxTransitions: 0,
+        maxTransitions: 4,
+        jointPhaseScheduler: "parallel",
         continueOnError: true
       },
       cells: [
@@ -124,6 +125,7 @@ describe("experiment matrix server API", () => {
       gamesCompleted: 0,
       gamesTruncated: 1,
       gamesFailed: 0,
+      jointPhaseScheduler: "parallel",
       models: ["alpha", "beta"],
       hasArtifacts: true
     });
@@ -156,6 +158,18 @@ describe("experiment matrix server API", () => {
       files: exported.body.artifacts.files
     });
     expectNoArtifactPathLeak(manifest.body, artifactBaseDir);
+
+    const normalizedSpec = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/experiments/matrix/artifacts/${artifactSetId}/files/spec.normalized.json`
+    );
+    expect(normalizedSpec.status).toBe(200);
+    expect(normalizedSpec.body.cells[0]?.tournament).toMatchObject({
+      maxTransitions: 4,
+      jointPhaseScheduler: "parallel"
+    });
+    expectNoArtifactPathLeak(normalizedSpec.body, artifactBaseDir);
 
     const statistics = await requestJson(baseUrl, "GET", `/api/experiments/matrix/artifacts/${artifactSetId}/files/statistics.json`);
     expect(statistics.status).toBe(200);

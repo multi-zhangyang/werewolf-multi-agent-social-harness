@@ -157,10 +157,11 @@ Experiment specs make tournament runs reproducible. The checked-in spec at `expe
 npm run arena:tournament -- --spec=experiments/wolf-vs-village.json
 ```
 
-Spec fields are normalized by the harness, not by ad hoc CLI parsing: `id`, `kind`, `seed`, `games`, `maxTransitions`, `timeout`/`timeoutMs`, `profiles`, `assignment`, `temperature`, `json`, `continueOnError`, and optional game `config`. Environment values are defaults, spec fields override them, and explicit CLI flags override the spec:
+Spec fields are normalized by the harness, not by ad hoc CLI parsing: `id`, `kind`, `seed`, `games`, `maxTransitions`, `jointPhaseScheduler`, `timeout`/`timeoutMs`, `profiles`, `assignment`, `temperature`, `json`, `continueOnError`, and optional game `config`. `jointPhaseScheduler` is an experiment condition, not a model option: the explicit values are `aec-batched-decision` (the recorded default) and `parallel`. A `parallel` condition requires `maxTransitions >= 4`, so the first atomic joint wolf-vote batch is actually reachable instead of being silently compared as the default scheduler. Matrix dimensions may use `jointPhaseSchedulers` to construct scheduler control groups. Environment values are defaults, spec fields override them, and explicit CLI flags override the spec:
 
 ```bash
 npm run arena:tournament -- --spec=experiments/wolf-vs-village.json --games=1 --maxTransitions=2 --timeout=90s
+npm run arena:tournament -- --games=1 --maxTransitions=4 --jointPhaseScheduler=parallel --timeout=90s
 ```
 
 The `wolf-vs-village` spec uses team assignment, so werewolf seats are resolved to `wolf-profile` and village seats rotate between `village-profile-a` and `village-profile-b`; it is not just model rotation by seat. The checked-in models are placeholders for contract examples; replace them with runtime-configured live models before claiming real provider validation.
@@ -413,7 +414,7 @@ export TOURNAMENT_GAMES=3
 export TOURNAMENT_TIMEOUT_MS=600000
 ```
 
-The API route `POST /api/matches/run` accepts `models`, `profiles`, `assignment`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, and optional game `config`; completed responses include public state, summary, `hasArtifact`, and artifact counters. Ordinary UI reads the default `postgame-redacted` artifact projections with sanitized exposure records; `truth-redacted` is the public/share projection, while full private/postgame truth requires an explicit `view=full` artifact or JSONL request. `POST /api/harness/probe` accepts `model`, `timeoutMs`/`timeout`, and optional `seed`. `POST /api/tournaments/run` accepts `models`, `profiles`, `assignment`, `games`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, `continueOnError`, and optional game `config`; it returns bounded, redaction-safe episode summaries plus `gamesCompleted`, `gamesTruncated`, and `gamesFailed`. `gamesCompleted` means the domain reached a terminal outcome; `gamesTruncated` means an auditable run hit a configured bound; `gamesFailed` is an execution failure. `ok: true` means no failures, not that every game reached terminal state. Full trajectory/social evidence remains server-owned in match artifacts and tournament packs.
+The API route `POST /api/matches/run` accepts `models`, `profiles`, `assignment`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, and optional game `config`; completed responses include public state, summary, `hasArtifact`, and artifact counters. Ordinary UI reads the default `postgame-redacted` artifact projections with sanitized exposure records; `truth-redacted` is the public/share projection, while full private/postgame truth requires an explicit `view=full` artifact or JSONL request. `POST /api/harness/probe` accepts `model`, `timeoutMs`/`timeout`, and optional `seed`. `POST /api/tournaments/run` accepts `models`, `profiles`, `assignment`, `games`, `maxTransitions`, `jointPhaseScheduler`, `timeoutMs`/`timeout`, `temperature`, `seed`, `continueOnError`, and optional game `config`; it returns bounded, redaction-safe episode summaries plus `gamesCompleted`, `gamesTruncated`, and `gamesFailed`. The normalized scheduler is retained in the experiment artifact and API limits summary; it is never inferred from a model name. `gamesCompleted` means the domain reached a terminal outcome; `gamesTruncated` means an auditable run hit a configured bound; `gamesFailed` is an execution failure. `ok: true` means no failures, not that every game reached terminal state. Full trajectory/social evidence remains server-owned in match artifacts and tournament packs.
 
 `POST /api/experiments/matrix/run` adds the reusable experiment-matrix control
 plane (`harness.experiment-matrix.v1`): it schedules normalized tournament cells
@@ -429,4 +430,4 @@ tournament-share routes. The Cockpit's **实验矩阵** workspace consumes these
 server projections and download URLs; it does not calculate winners, p-values,
 or artifact paths locally.
 
-`POST /api/tournaments/run` also accepts `{ "spec": { ... } }`; top-level request fields such as `games`, `maxTransitions`, `timeout`, `profiles`, and `assignment` override the embedded spec using the same normalizer as `arena:tournament -- --spec`.
+`POST /api/tournaments/run` also accepts `{ "spec": { ... } }`; top-level request fields such as `games`, `maxTransitions`, `jointPhaseScheduler`, `timeout`, `profiles`, and `assignment` override the embedded spec using the same normalizer as `arena:tournament -- --spec`.

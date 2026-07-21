@@ -38,6 +38,33 @@ afterEach(async () => {
 });
 
 describe("tournament artifact server API", () => {
+  it("accepts a bounded parallel scheduler as a recorded tournament condition and rejects an unreachable one", async () => {
+    const baseUrl = await startServer({});
+
+    const accepted = await requestJson(baseUrl, "POST", "/api/tournaments/run", {
+      models: ["alpha", "beta"],
+      games: 1,
+      seed: "server-parallel-tournament",
+      maxTransitions: 4,
+      jointPhaseScheduler: "parallel"
+    });
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.summary.limits).toMatchObject({
+      maxTransitions: 4,
+      jointPhaseScheduler: "parallel"
+    });
+
+    const rejected = await requestJson(baseUrl, "POST", "/api/tournaments/run", {
+      models: ["alpha"],
+      games: 1,
+      seed: "server-parallel-too-short",
+      maxTransitions: 3,
+      jointPhaseScheduler: "parallel"
+    });
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.error).toMatch(/parallel requires maxTransitions >= 4/);
+  });
+
   it("exports exactly the strict public pack and does not register research files", async () => {
     const artifactBaseDir = await makeTempDir();
     const baseUrl = await startServer({ artifactBaseDir });

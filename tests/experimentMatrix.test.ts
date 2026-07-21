@@ -110,18 +110,19 @@ describe("experiment matrix harness", () => {
       kind: "matrix",
       base: {
         games: 1,
-        maxTransitions: 0,
+        maxTransitions: 4,
         continueOnError: true
       },
       dimensions: {
         models: [["alpha"], ["beta"]],
         seeds: ["seed-a", "seed-b"],
-        games: [1, 2]
+        games: [1, 2],
+        jointPhaseSchedulers: ["aec-batched-decision", "parallel"]
       }
     });
 
-    expect(matrix.cells).toHaveLength(8);
-    expect(new Set(matrix.cells.map((cell) => cell.id)).size).toBe(8);
+    expect(matrix.cells).toHaveLength(16);
+    expect(new Set(matrix.cells.map((cell) => cell.id)).size).toBe(16);
     expect(matrix.cells.map((cell) => cell.tournament.models)).toEqual(
       expect.arrayContaining([["alpha"], ["beta"]])
     );
@@ -129,7 +130,27 @@ describe("experiment matrix harness", () => {
       expect.arrayContaining(["seed-a", "seed-b"])
     );
     expect(matrix.cells.map((cell) => cell.tournament.games)).toEqual(expect.arrayContaining([1, 2]));
-    expect(matrix.cells.every((cell) => cell.tournament.maxTransitions === 0)).toBe(true);
+    expect(matrix.cells.every((cell) => cell.tournament.maxTransitions === 4)).toBe(true);
+    expect(matrix.cells.map((cell) => cell.tournament.jointPhaseScheduler)).toEqual(
+      expect.arrayContaining(["aec-batched-decision", "parallel"])
+    );
+  });
+
+  it("preserves explicitly different scheduler conditions for matrix cells", () => {
+    const matrix = normalizeMatrixExperimentSpec({
+      version: MATRIX_EXPERIMENT_VERSION,
+      id: "scheduler-matrix",
+      base: { models: ["alpha"], games: 1, maxTransitions: 4 },
+      cells: [
+        { id: "aec", jointPhaseScheduler: "aec-batched-decision" },
+        { id: "parallel", jointPhaseScheduler: "parallel" }
+      ]
+    });
+
+    expect(matrix.cells.map((cell) => [cell.id, cell.tournament.jointPhaseScheduler])).toEqual([
+      ["aec", "aec-batched-decision"],
+      ["parallel", "parallel"]
+    ]);
   });
 
   it("runs matrix cells through the tournament harness without inventing outcome rows for truncated games", async () => {
@@ -295,7 +316,8 @@ describe("experiment matrix harness", () => {
       base: {
         games: 1,
         seed: "artifact-matrix",
-        maxTransitions: 0,
+        maxTransitions: 4,
+        jointPhaseScheduler: "parallel",
         continueOnError: true
       },
       cells: [
@@ -368,6 +390,12 @@ describe("experiment matrix harness", () => {
     });
     expect(JSON.stringify(manifest)).not.toContain(outputDir);
     expect(flattenManifestFiles(manifest.files).every((file) => !path.isAbsolute(file))).toBe(true);
+
+    const normalizedSpec = await readJson<Record<string, any>>(path.join(outputDir, "spec.normalized.json"));
+    expect(normalizedSpec.cells[0]?.tournament).toMatchObject({
+      maxTransitions: 4,
+      jointPhaseScheduler: "parallel"
+    });
 
     const cells = await readJsonl<Record<string, any>>(path.join(outputDir, "cells.jsonl"));
     expect(cells).toHaveLength(1);

@@ -1237,6 +1237,7 @@ app.post("/api/tournaments/run", async (req, res) => {
       games: experiment.games,
       seed: experiment.seed,
       maxTransitions: experiment.maxTransitions,
+      jointPhaseScheduler: experiment.jointPhaseScheduler,
       config: experiment.config,
       temperature: experiment.temperature,
       continueOnError: experiment.continueOnError,
@@ -1262,6 +1263,7 @@ app.post("/api/tournaments/run", async (req, res) => {
           assignment: result.assignment,
           games: experiment.games,
           maxTransitions: experiment.maxTransitions,
+          jointPhaseScheduler: experiment.jointPhaseScheduler,
           timeoutMs: experiment.timeoutMs,
           elapsedMs: Math.round(performance.now() - startedAt),
           timedOut: abortController.signal.aborted
@@ -1287,6 +1289,7 @@ app.post("/api/tournaments/run", async (req, res) => {
         games: experiment.games,
         limits: {
           maxTransitions: experiment.maxTransitions ?? null,
+          jointPhaseScheduler: experiment.jointPhaseScheduler ?? DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER,
           timeoutMs: experiment.timeoutMs ?? null
         },
         elapsedMs: Math.round(performance.now() - startedAt),
@@ -1686,8 +1689,8 @@ function buildMatchSummary(
     assignment?: HarnessAssignmentConfig;
     resolvedAssignments: ResolvedAgentAssignment[];
     maxTransitions?: number;
-    timeoutMs?: number;
     jointPhaseScheduler?: "aec-batched-decision" | "parallel";
+    timeoutMs?: number;
     elapsedMs: number;
   }
 ): object {
@@ -4932,6 +4935,7 @@ function buildTournamentSummary(
     assignment?: HarnessAssignmentConfig;
     games: number;
     maxTransitions?: number;
+    jointPhaseScheduler?: "aec-batched-decision" | "parallel";
     timeoutMs?: number;
     elapsedMs: number;
     timedOut: boolean;
@@ -4976,6 +4980,7 @@ function buildTournamentSummary(
     rejectedSteps: stepTotals.rejectedSteps,
     limits: {
       maxTransitions: options.maxTransitions ?? null,
+      jointPhaseScheduler: options.jointPhaseScheduler ?? DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER,
       timeoutMs: options.timeoutMs ?? null
     },
     elapsedMs: options.elapsedMs,
@@ -7047,6 +7052,7 @@ function serializeTournamentEpisodeSummaryForApi(episode: TournamentEpisode): ob
     matchId: episode.matchId,
     status: episode.status,
     harnessStatus: episode.harnessStatus,
+    jointPhaseScheduler: episode.jointPhaseScheduler ?? null,
     winner: episode.winner ?? null,
     phase: episode.phase ?? null,
     day: episode.day ?? null,
@@ -7384,6 +7390,7 @@ function normalizeTournamentExperimentRequest(body: unknown): NormalizedTourname
         seed: typeof record.seed === "string" ? record.seed : undefined,
         games: record.games,
         maxTransitions: record.maxTransitions ?? record.steps,
+        jointPhaseScheduler: record.jointPhaseScheduler as TournamentExperimentSpecV1["jointPhaseScheduler"],
         timeout: record.timeoutMs ?? record.timeout,
         temperature: record.temperature,
         json: record.json as TournamentExperimentSpecV1["json"],
@@ -7397,6 +7404,7 @@ function normalizeTournamentExperimentRequest(body: unknown): NormalizedTourname
     assignment: process.env.AGENT_ASSIGNMENT,
     games: 3,
     maxTransitions: process.env.MATCH_MAX_TRANSITIONS,
+    jointPhaseScheduler: process.env.WEREWOLF_JOINT_PHASE_SCHEDULER as TournamentExperimentSpecV1["jointPhaseScheduler"],
     timeout: process.env.TOURNAMENT_TIMEOUT_MS,
     temperature: process.env.AGENT_TEMPERATURE ?? 0.7
   });
@@ -7412,6 +7420,7 @@ function normalizeMatrixExperimentRequest(body: unknown): NormalizedMatrixExperi
     seed: typeof record.seed === "string" ? record.seed : undefined,
     games: record.games,
     maxTransitions: record.maxTransitions ?? record.steps,
+    jointPhaseScheduler: record.jointPhaseScheduler as TournamentExperimentSpecV1["jointPhaseScheduler"],
     timeout: record.timeoutMs ?? record.timeout,
     temperature: record.temperature,
     json: record.json as TournamentExperimentSpecV1["json"],
@@ -7424,6 +7433,7 @@ function normalizeMatrixExperimentRequest(body: unknown): NormalizedMatrixExperi
     assignment: process.env.AGENT_ASSIGNMENT,
     games: 3,
     maxTransitions: process.env.MATCH_MAX_TRANSITIONS,
+    jointPhaseScheduler: process.env.WEREWOLF_JOINT_PHASE_SCHEDULER as TournamentExperimentSpecV1["jointPhaseScheduler"],
     timeout: process.env.TOURNAMENT_TIMEOUT_MS,
     temperature: process.env.AGENT_TEMPERATURE ?? 0.7
   });
@@ -7452,6 +7462,7 @@ function serializeExperimentMatrixCellSummaryForApi(cell: ExperimentMatrixCellRe
     gamesCompleted: cell.tournament?.gamesCompleted ?? 0,
     gamesTruncated: matrixGamesTruncated(cell),
     gamesFailed: cell.tournament?.gamesFailed ?? 0,
+    jointPhaseScheduler: cell.tournament?.experiment.jointPhaseScheduler ?? null,
     models: cell.tournament?.models ?? [],
     profileCount: cell.tournament?.profiles.length ?? 0,
     episodes: cell.tournament?.episodes.map(serializeTournamentEpisodeSummaryForApi) ?? [],
