@@ -74,7 +74,7 @@ import {
   type MatchComparisonRowGroup,
   type ResolvePackSeededComparisonSource
 } from "./harness/matchComparisonView";
-import type { PostgameMatchProjectionDto, RedactedHarnessStepDto, RedactedSocialStepDto } from "./server/artifactProjection";
+import type { PostgameMatchProjectionDto, PostgameReplayFrameDto, RedactedHarnessStepDto, RedactedSocialStepDto } from "./server/artifactProjection";
 import type {
   AgentHarnessState,
   HarnessEvaluationWarning,
@@ -85,6 +85,7 @@ import type {
 import { DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER, WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS } from "./harness/types";
 import { legacyMetricPromotionPolicyFromSummary, resolveRecordedMetricPromotion } from "./harness/evaluation";
 import { countSocialStepCommits, deriveSocialExposureRecords, isSocialStepCommitted, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
+import { isSafeHarnessCheckpointBoundary } from "./harness/episodeArtifacts";
 import type { SocialStateMutationJournalEntry } from "./harness/socialState";
 import { WerewolfReviewBoard } from "./components/cockpit/WerewolfReviewBoard";
 import { buildWerewolfReviewModel } from "./components/cockpit/werewolfReviewProjection";
@@ -651,6 +652,12 @@ interface ReplayResponse {
   error?: string;
 }
 
+interface ReplayFrameResponse {
+  frame: PostgameReplayFrameDto;
+}
+
+type ReplayFrameLoadState = "idle" | "loading" | "error";
+
 interface CheckpointSummary {
   kind?: "checkpoint";
   ok?: boolean;
@@ -871,6 +878,13 @@ export function App() {
   const inspectTournamentComparisonRef = useRef<(pack: TournamentArtifactSetSummary) => Promise<boolean>>(async () => false);
   const [candidateId, setCandidateId] = useState<string>(initialCompareSelection.candidateId ?? "");
   const [replay, setReplay] = useState<ReplayResponse | null>(null);
+  // Cursor state is presentation-only. The server owns replay, state hashes,
+  // redaction, and native batch-boundary validation.
+  const [replayFrame, setReplayFrame] = useState<PostgameReplayFrameDto | null>(null);
+  const [replayFrameCursorIndex, setReplayFrameCursorIndex] = useState<number | null>(null);
+  const [replayFrameLoadState, setReplayFrameLoadState] = useState<ReplayFrameLoadState>("idle");
+  const [replayFrameError, setReplayFrameError] = useState<string | null>(null);
+  const replayFrameLoadSeqRef = useRef(0);
   const [inspector, setInspector] = useState<InspectorItem | null>(null);
   const [rawOpen, setRawOpen] = useState(false);
   const [mobileContextOpen, setMobileContextOpen] = useState(false);
@@ -898,7 +912,14 @@ export function App() {
   const channels = artifact?.socialEpisode?.channels ?? [];
   const metrics = artifact?.evaluationReport?.metrics ?? [];
   const warnings = artifact?.evaluationReport?.warnings ?? [];
-  const werewolfReview = useMemo(() => buildWerewolfReviewModel(artifact), [artifact]);
+  const werewolfReviewSource = useMemo(
+    () =>
+      replayFrame
+        ? { projection: replayFrame.projection, finalState: replayFrame.state }
+        : artifact,
+    [artifact, replayFrame]
+  );
+  const werewolfReview = useMemo(() => buildWerewolfReviewModel(werewolfReviewSource), [werewolfReviewSource]);
   const activeWorkspace = workspaceItems.find((item) => item.id === workspace) ?? workspaceItems[0];
   const isCompactLayout = !screens.lg;
   const isNarrowLayout = !screens.xl;
@@ -1028,6 +1049,11 @@ export function App() {
         setArtifact(nextArtifact);
         setArtifactView(view);
         setReplay(null);
+        replayFrameLoadSeqRef.current += 1;
+        setReplayFrame(null);
+        setReplayFrameCursorIndex(null);
+        setReplayFrameLoadState("idle");
+        setReplayFrameError(null);
         setComparison(null);
         setComparisonRequestContext(null);
         setCandidateArtifact(null);
@@ -1225,6 +1251,57 @@ export function App() {
       setBusy(null);
     }
   }, [currentMatchId, setActionStatus]);
+
+  const handleLoadReplayFrame = useCallback(
+    async (index: number) => {
+      if (!artifact || !currentMatchId) {
+        setActionStatus("无法定位回放帧：尚未选择带工件的 run。");
+        return;
+      }
+      if (artifactView !== "postgame-redacted") {
+        setActionStatus("原生步骤回放帧仅在 postgame-redacted 本地复盘视图可用。");
+        return;
+      }
+      const step = artifact.socialEpisode.steps[index];
+      if (!step) {
+        setActionStatus("无法定位回放帧：原生步骤不存在。");
+        return;
+      }
+      if (!isSafeHarnessCheckpointBoundary(artifact.socialEpisode.steps, index)) {
+        setActionStatus("该步骤处于原子并行批次中间；只能在完整批次末尾定位服务端回放局面。");
+        return;
+      }
+      const requestSeq = replayFrameLoadSeqRef.current + 1;
+      replayFrameLoadSeqRef.current = requestSeq;
+      setReplayFrame(null);
+      setReplayFrameLoadState("loading");
+      setReplayFrameError(null);
+      setBusy("replay-frame");
+      try {
+        const response = await apiJson<ReplayFrameResponse>(`/api/matches/${encodeURIComponent(currentMatchId)}/replay/frame`, {
+          method: "POST",
+          body: JSON.stringify({ nativeStepCount: index + 1 })
+        });
+        if (requestSeq !== replayFrameLoadSeqRef.current) return;
+        assertServerReplayFrame(response.frame, step, index + 1);
+        setReplayFrame(response.frame);
+        setReplayFrameCursorIndex(index);
+        setReplayFrameLoadState("idle");
+        setActionStatus(
+          `已定位服务端回放帧：native #${index + 1} · state=${shortId(response.frame.cursor.stateHash)} · messages=${response.frame.cursor.messageCount}`
+        );
+      } catch (nextError) {
+        if (requestSeq !== replayFrameLoadSeqRef.current) return;
+        const message = errorMessage(nextError);
+        setReplayFrameLoadState("error");
+        setReplayFrameError(message);
+        setActionStatus("服务端回放帧加载失败", message);
+      } finally {
+        if (requestSeq === replayFrameLoadSeqRef.current) setBusy(null);
+      }
+    },
+    [artifact, artifactView, currentMatchId, setActionStatus]
+  );
 
   const handleCandidateChange = useCallback(
     async (value: string) => {
@@ -2436,11 +2513,15 @@ export function App() {
           selectedStepIndex={selectedStepIndex}
           selectedStep={selectedStep}
           onSelectStep={handleSelectStep}
+          onSelectReplayFrame={(index) => void handleLoadReplayFrame(index)}
           onReplay={handleReplay}
           onDownloadJsonl={handleDownloadArtifact}
           onDownloadMatch={handleDownloadMatchArtifact}
           artifactView={artifactView}
           replay={replay}
+          replayFrame={replayFrame}
+          replayFrameCursorIndex={replayFrameCursorIndex}
+          replayFrameLoadState={replayFrameLoadState}
           busy={busy}
         />
       )
@@ -2448,7 +2529,22 @@ export function App() {
     {
       key: "domain",
       label: "狼人杀复盘",
-      children: <WerewolfReviewBoard review={werewolfReview} />
+      children: (
+        <WerewolfReviewBoard
+          review={werewolfReview}
+          source={
+            replayFrame
+              ? {
+                  kind: "replay-frame",
+                  nativeStepCount: replayFrame.cursor.nativeStepCount,
+                  stateHash: replayFrame.cursor.stateHash ?? replayFrame.cursor.recordedPostStateHash
+                }
+              : { kind: "artifact-final" }
+          }
+          loading={replayFrameLoadState === "loading"}
+          error={replayFrameLoadState === "error" ? replayFrameError : null}
+        />
+      )
     },
     {
       key: "society",
@@ -3240,22 +3336,30 @@ function TimelineWorkspace({
   selectedStepIndex,
   selectedStep,
   onSelectStep,
+  onSelectReplayFrame,
   onReplay,
   onDownloadJsonl,
   onDownloadMatch,
   artifactView,
   replay,
+  replayFrame,
+  replayFrameCursorIndex,
+  replayFrameLoadState,
   busy
 }: {
   artifact: ProjectedMatchArtifact | null;
   selectedStepIndex: number;
   selectedStep: ProjectedSocialStep | null;
   onSelectStep: (index: number) => void;
+  onSelectReplayFrame: (index: number) => void;
   onReplay: () => void;
   onDownloadJsonl: () => void;
   onDownloadMatch: () => void;
   artifactView: ArtifactView;
   replay: ReplayResponse | null;
+  replayFrame: PostgameReplayFrameDto | null;
+  replayFrameCursorIndex: number | null;
+  replayFrameLoadState: ReplayFrameLoadState;
   busy: string | null;
 }) {
   const steps = artifact?.socialEpisode.steps ?? [];
@@ -3265,6 +3369,13 @@ function TimelineWorkspace({
   const selectedLegacyStep = selectedStep ? legacyStepByTraceId.get(selectedStep.traceId) ?? null : null;
   const schedulerCounts = useMemo(() => countSocialSchedulerModes(steps), [steps]);
   const { committedSteps, rejectedSteps } = useMemo(() => countSocialStepCommits(steps), [steps]);
+  const replayFrameBoundaryIndexes = useMemo(
+    () => steps.flatMap((_, index) => (isSafeHarnessCheckpointBoundary(steps, index) ? [index] : [])),
+    [steps]
+  );
+  const replayFrameCursorPosition = replayFrameCursorIndex === null ? -1 : replayFrameBoundaryIndexes.indexOf(replayFrameCursorIndex);
+  const canLoadSelectedReplayFrame =
+    artifactView === "postgame-redacted" && selectedStepIndex >= 0 && isSafeHarnessCheckpointBoundary(steps, selectedStepIndex);
   const progress = steps.length ? ((selectedStepIndex + 1) / steps.length) * 100 : 0;
   const columns: TableProps<ProjectedSocialStep>["columns"] = [
     { title: "#", width: 64, render: (_, __, index) => index + 1 },
@@ -3347,6 +3458,69 @@ function TimelineWorkspace({
             <Text type="secondary">
               主时间线来自原生 social episode 执行工件；system、committed 与 rejected 步骤均为可选择、可审计证据，确定性 replay 不重新调用模型。
             </Text>
+            {artifactView === "postgame-redacted" ? (
+              <Card size="small" title="服务端回放游标" data-testid="server-replay-cursor-controls">
+                <Space direction="vertical" size="small" style={{ width: "100%" }}>
+                  <Text type="secondary">
+                    游标只接受完整原生 scheduler 边界。浏览器不会应用命令或推断状态；每次跳转都由服务端从 canonical artifact 无模型重放。
+                  </Text>
+                  <Space wrap>
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        const previous = replayFrameBoundaryIndexes[replayFrameCursorPosition - 1];
+                        if (previous !== undefined) onSelectReplayFrame(previous);
+                      }}
+                      disabled={replayFrameCursorPosition <= 0 || replayFrameLoadState === "loading"}
+                    >
+                      上一帧
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        const next = replayFrameBoundaryIndexes[replayFrameCursorPosition + 1];
+                        if (next !== undefined) onSelectReplayFrame(next);
+                      }}
+                      disabled={
+                        replayFrameCursorPosition < 0 ||
+                        replayFrameCursorPosition >= replayFrameBoundaryIndexes.length - 1 ||
+                        replayFrameLoadState === "loading"
+                      }
+                    >
+                      下一帧
+                    </Button>
+                    <Select
+                      aria-label="跳转服务端回放帧"
+                      size="small"
+                      style={{ minWidth: 220, maxWidth: "100%" }}
+                      placeholder="跳转到完整原生边界"
+                      value={replayFrameCursorIndex ?? undefined}
+                      loading={replayFrameLoadState === "loading"}
+                      onChange={(value) => onSelectReplayFrame(Number(value))}
+                      options={replayFrameBoundaryIndexes.map((index) => {
+                        const step = steps[index];
+                        return {
+                          value: index,
+                          label: `#${index + 1} · turn ${step?.turnIndex ?? "?"} · ${readSocialCommitStatus(step ?? {})}`
+                        };
+                      })}
+                    />
+                    <Tag color={replayFrame ? "success" : "default"}>
+                      {replayFrame
+                        ? `frame #${replayFrame.cursor.nativeStepCount} · ${shortId(replayFrame.cursor.stateHash)}`
+                        : "尚未请求服务端帧"}
+                    </Tag>
+                  </Space>
+                </Space>
+              </Card>
+            ) : (
+              <Alert
+                type="warning"
+                showIcon
+                message="真相脱敏视图不暴露原生 scheduler 游标"
+                description="原生步骤序列可能反推出夜间角色节奏；该视图仅显示最终公共投影。"
+              />
+            )}
             <Row gutter={[12, 12]}>
               <Col xs={24} sm={12} xl={6}>
                 <Statistic title="native steps" value={steps.length} prefix={<ApiOutlined />} />
@@ -3448,6 +3622,23 @@ function TimelineWorkspace({
                   ["event seq", selectedStep.eventSeqRange ? rangeLabel(selectedStep.eventSeqRange) : "none"]
                 ])}
               />
+              {canLoadSelectedReplayFrame ? (
+                <Button
+                  type="primary"
+                  onClick={() => onSelectReplayFrame(selectedStepIndex)}
+                  loading={replayFrameLoadState === "loading" && replayFrameCursorIndex === selectedStepIndex}
+                  disabled={artifactView !== "postgame-redacted" || replayFrameLoadState === "loading"}
+                >
+                  定位服务端回放帧
+                </Button>
+              ) : artifactView === "postgame-redacted" ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="当前行仅供审计"
+                  description="该行位于原子 scheduler 批次中间。请通过上方游标跳转到该批次的最终行，以避免伪造中间局面。"
+                />
+              ) : null}
               {selectedStep.failure || selectedStep.error ? (
                 <Alert
                   showIcon
@@ -6046,6 +6237,41 @@ function assertArtifactMatchesId(artifact: ProjectedMatchArtifact, id: string, l
   }
   if (artifact.runId !== id && artifact.matchId !== id) {
     throw new Error(`${label} identity mismatch: expected ${shortId(id)}, got ${shortId(artifact.matchId ?? artifact.runId)}.`);
+  }
+}
+
+/**
+ * This verifies only server response shape and its binding to the already
+ * recorded native boundary. The browser deliberately does not apply commands
+ * or recompute a hash from a redacted state projection.
+ */
+function assertServerReplayFrame(frame: PostgameReplayFrameDto, step: ProjectedSocialStep, nativeStepCount: number): void {
+  if (
+    frame.artifactVersion !== "server.match-replay-frame.v1" ||
+    frame.kind !== "match-replay-frame" ||
+    frame.authority !== "native-social-episode" ||
+    frame.source !== "server-owned-match-artifact"
+  ) {
+    throw new Error("Replay frame is not a server-owned native replay projection.");
+  }
+  if (
+    frame.projection?.view !== "postgame-redacted" ||
+    frame.projection.privateEvidenceRedacted !== true ||
+    frame.projection.postgameTruthRedacted !== false
+  ) {
+    throw new Error("Replay frame must be a postgame-redacted projection.");
+  }
+  if (frame.cursor.nativeStepCount !== nativeStepCount) {
+    throw new Error("Replay frame cursor does not match the requested native step.");
+  }
+  if (!isRecord(frame.state)) {
+    throw new Error("Replay frame is missing a server-projected state.");
+  }
+  if (step.postStateHash && frame.cursor.recordedPostStateHash !== step.postStateHash) {
+    throw new Error("Replay frame recorded state hash does not match the selected native step.");
+  }
+  if (step.postStateHash && frame.cursor.stateHash !== undefined && frame.cursor.stateHash !== step.postStateHash) {
+    throw new Error("Replay frame deterministic state hash does not match the selected native step.");
   }
 }
 

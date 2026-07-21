@@ -28,6 +28,8 @@ export function replayWerewolfSocialEpisode(
   episode: SocialEpisodeArtifact,
   options: {
     stopOnMismatch?: boolean;
+    /** Prefix review derives its final state from recorded commands, not a parent finalState. */
+    validateExpectedFinalState?: boolean;
     agentSnapshotFrames?: readonly HarnessAgentSnapshotFrame<unknown>[];
     /** A checkpoint prefix can intentionally omit its parent's frame sidecar. */
     auditAgentSnapshots?: boolean;
@@ -41,6 +43,7 @@ export function replayWerewolfSocialEpisode(
     hashMessages: hashStableState,
     eventSeq: (state) => state.events.at(-1)?.seq ?? 0,
     stopOnMismatch: options.stopOnMismatch,
+    validateExpectedFinalState: options.validateExpectedFinalState,
     agentSnapshotFrames: options.agentSnapshotFrames ? [...options.agentSnapshotFrames] : undefined,
     auditAgentSnapshots: options.auditAgentSnapshots ?? (hasInlineSnapshots || options.agentSnapshotFrames !== undefined),
     validateRecordedStep(step, context) {

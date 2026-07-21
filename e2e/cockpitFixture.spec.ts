@@ -150,6 +150,58 @@ test("renders a projection-safe Werewolf postgame review board", async ({ page }
   expect(await seatBoard.textContent()).not.toMatch(/狼人|预言家|女巫|猎人|村民/);
 });
 
+test("loads a server-authoritative native replay frame without a browser-side game transition", async ({ page }) => {
+  const pageErrors: string[] = [];
+  const artifactViews: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.endsWith("/artifact")) artifactViews.push(url.searchParams.get("view") ?? "default");
+  });
+
+  await page.goto("/?workspace=timeline", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+  const controls = page.getByTestId("server-replay-cursor-controls");
+  await expect(controls).toBeVisible();
+  const cursor = controls.getByRole("combobox", { name: "跳转服务端回放帧" });
+  const frameResponse = page.waitForResponse((response) => isReplayFrameResponse(response));
+  await cursor.click();
+  await cursor.press("ArrowDown");
+  await cursor.press("Enter");
+  const response = await frameResponse;
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+  expect(body.frame).toMatchObject({
+    artifactVersion: "server.match-replay-frame.v1",
+    kind: "match-replay-frame",
+    authority: "native-social-episode",
+    source: "server-owned-match-artifact",
+    projection: { view: "postgame-redacted", privateEvidenceRedacted: true },
+    cursor: { nativeStepCount: expect.any(Number), stateHash: expect.any(String), recordedPostStateHash: expect.any(String) }
+  });
+  expect(body.frame.cursor.nativeStepCount).toBeGreaterThan(0);
+  expect(body.frame).not.toHaveProperty("agents");
+  expect(body.frame).not.toHaveProperty("socialEpisode");
+  expect(JSON.stringify(body.frame)).not.toContain("privateMemos");
+
+  await page.getByRole("menuitem", { name: /狼人杀复盘/ }).click();
+  const board = page.getByTestId("werewolf-review-board");
+  await expect(board.getByText("狼人杀回放局面")).toBeVisible();
+  await expect(board).toContainText("服务端基于已记录原生步骤重放");
+
+  const projection = page.getByRole("combobox", { name: "工件投影" });
+  const truthArtifact = page.waitForResponse((next) => isArtifactResponse(next, "truth-redacted"));
+  await projection.click();
+  await projection.press("ArrowDown");
+  await projection.press("Enter");
+  await truthArtifact;
+  await page.getByRole("menuitem", { name: /时间线/ }).click();
+  await expect(page.getByText("真相脱敏视图不暴露原生 scheduler 游标")).toBeVisible();
+  await expect(page.getByTestId("server-replay-cursor-controls")).toHaveCount(0);
+  expect(artifactViews).not.toContain("full");
+  expect(pageErrors).toEqual([]);
+});
+
 test.describe("compact cockpit", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
@@ -219,6 +271,11 @@ function isArtifactResponse(response: Response, view: "postgame-redacted" | "tru
 function isReplayResponse(response: Response): boolean {
   const url = new URL(response.url());
   return response.request().method() === "POST" && url.pathname === `/api/matches/${fixtureMatchId}/replay`;
+}
+
+function isReplayFrameResponse(response: Response): boolean {
+  const url = new URL(response.url());
+  return response.request().method() === "POST" && url.pathname === `/api/matches/${fixtureMatchId}/replay/frame`;
 }
 
 function isComparisonResponse(response: Response, view: "postgame-redacted" | "truth-redacted"): boolean {

@@ -271,6 +271,48 @@ export interface BuildHarnessCheckpointAtPrefixOptions<TState, TObservation, TPe
   }) => readonly string[];
 }
 
+/**
+ * A display/review prefix is deliberately weaker than a checkpoint: it binds
+ * a complete native scheduler boundary to a model-free environment/message
+ * replay, but never resolves, restores, or exposes durable agent state.
+ */
+export interface ReplayableSocialPrefix<
+  TState,
+  TObservation,
+  TPending,
+  TCommand,
+  TReplay extends HarnessCheckpointPrefixReplayResult<TState> = HarnessCheckpointPrefixReplayResult<TState>
+> {
+  /** Zero-based index of the selected complete native scheduler boundary. */
+  stepIndex: number;
+  /** One-based native-step count, suitable for an external cursor contract. */
+  nativeStepCount: number;
+  step: SocialHarnessStep<TObservation, TPending, TCommand>;
+  /** The inclusive message sequence limit covered by this native prefix. */
+  maxMessageSeq: number;
+  /** Canonical, derived prefix used only as input to deterministic replay/projection. */
+  episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
+  replay: TReplay;
+}
+
+export interface BuildReplayableSocialPrefixOptions<
+  TState,
+  TObservation,
+  TPending,
+  TCommand,
+  TReplay extends HarnessCheckpointPrefixReplayResult<TState> = HarnessCheckpointPrefixReplayResult<TState>
+> {
+  episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
+  selector: HarnessCheckpointPrefixSelector;
+  /**
+   * The injected callback is a deterministic domain replay seam. It receives
+   * no actor, policy, reasoner, provider, or restore factory.
+   */
+  replayPrefix: (
+    episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>
+  ) => TReplay;
+}
+
 export interface CreateGenericForkProvenanceOptions {
   createdAt?: string;
   reason?: string;
@@ -620,6 +662,75 @@ export function buildHarnessCheckpointFromEpisode<TState, TObservation, TPending
     executionPrefix
   };
   return checkpoint;
+}
+
+/**
+ * Select and replay a complete native prefix without checkpoint/fork actor
+ * semantics. This is the generic seam for server-owned replay review frames:
+ * a domain supplies deterministic replay, while the harness owns selector,
+ * batch-boundary, message-prefix, and hash integrity rules.
+ */
+export function buildReplayableSocialPrefix<
+  TState,
+  TObservation,
+  TPending,
+  TCommand,
+  TReplay extends HarnessCheckpointPrefixReplayResult<TState>
+>(
+  options: BuildReplayableSocialPrefixOptions<TState, TObservation, TPending, TCommand, TReplay>
+): ReplayableSocialPrefix<TState, TObservation, TPending, TCommand, TReplay> {
+  const selected = resolveHarnessCheckpointPrefixSelection(options.episode, options.selector);
+  assertSafeHarnessCheckpointBoundary(options.episode.steps, selected.index);
+  const steps = cloneArtifact(options.episode.steps.slice(0, selected.index + 1));
+  const maxMessageSeq = latestMessageSeqForHarnessPrefix(options.episode, steps);
+  const messages = cloneArtifact(options.episode.messages.filter((message) => message.seq <= maxMessageSeq));
+
+  // The replay callback, not an action-text reconstruction or the parent
+  // final state, is the sole source of the selected prefix state.
+  const episode = cloneArtifact({
+    ...options.episode,
+    status: "truncated" as const,
+    terminationReason: undefined,
+    truncationReason: `replay review boundary after native step ${selected.index + 1}`,
+    failureReason: undefined,
+    error: undefined,
+    finalState: options.episode.initialState,
+    steps,
+    messages,
+    exposureRecords: undefined,
+    exposureSummary: undefined,
+    metrics: undefined
+  });
+  const replay = options.replayPrefix(episode);
+  if (replay.mismatches.length) {
+    throw new HarnessCheckpointSelectionError(
+      "prefix_replay_mismatch",
+      `Cannot build replay review frame at step ${selected.index + 1}: ${replay.mismatches.join(" ")}`
+    );
+  }
+  episode.finalState = cloneArtifact(replay.finalState);
+  const replayedStateHash = hashStableState(episode.finalState);
+  if (replay.finalHash !== undefined && replay.finalHash !== replayedStateHash) {
+    throw new HarnessCheckpointSelectionError(
+      "prefix_replay_mismatch",
+      `Cannot build replay review frame at step ${selected.index + 1}: replay final hash does not match its final state.`
+    );
+  }
+  const replayedMessagesHash = hashStableState(episode.messages);
+  if (replay.messagesHash !== undefined && replay.messagesHash !== replayedMessagesHash) {
+    throw new HarnessCheckpointSelectionError(
+      "prefix_replay_mismatch",
+      `Cannot build replay review frame at step ${selected.index + 1}: replay messages hash does not match the selected prefix.`
+    );
+  }
+  return {
+    stepIndex: selected.index,
+    nativeStepCount: selected.index + 1,
+    step: cloneArtifact(selected.step),
+    maxMessageSeq,
+    episode,
+    replay
+  };
 }
 
 /**

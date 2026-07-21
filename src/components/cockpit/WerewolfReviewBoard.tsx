@@ -1,4 +1,4 @@
-import { Alert, Badge, Card, Col, Descriptions, Empty, Flex, Row, Space, Table, Tag, Timeline, Typography } from "antd";
+import { Alert, Badge, Card, Col, Descriptions, Empty, Flex, Row, Space, Spin, Table, Tag, Timeline, Typography } from "antd";
 import { CrownOutlined, EyeInvisibleOutlined, UserOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import type { Role } from "../../core/types";
@@ -20,7 +20,39 @@ const ROLE_LABELS: Record<Role, string> = {
   hunter: "猎人"
 };
 
-export function WerewolfReviewBoard({ review }: { review: WerewolfReviewModel | null }) {
+export function WerewolfReviewBoard({
+  review,
+  source = { kind: "artifact-final" },
+  loading = false,
+  error = null
+}: {
+  review: WerewolfReviewModel | null;
+  source?: { kind: "artifact-final" | "replay-frame"; nativeStepCount?: number; stateHash?: string };
+  loading?: boolean;
+  error?: string | null;
+}) {
+  if (loading) {
+    return (
+      <Card bordered={false} data-testid="werewolf-review-board">
+        <Flex vertical align="center" gap="middle" style={{ minHeight: 180, justifyContent: "center" }}>
+          <Spin />
+          <Text type="secondary">正在从服务端的已记录原生步骤重建回放局面…</Text>
+        </Flex>
+      </Card>
+    );
+  }
+  if (error) {
+    return (
+      <Card bordered={false} data-testid="werewolf-review-board">
+        <Alert
+          type="error"
+          showIcon
+          message="服务端回放帧不可用"
+          description={error}
+        />
+      </Card>
+    );
+  }
   if (!review) {
     return (
       <Card bordered={false} data-testid="werewolf-review-board">
@@ -35,11 +67,13 @@ export function WerewolfReviewBoard({ review }: { review: WerewolfReviewModel | 
       <Alert
         type={truthRedacted ? "warning" : "info"}
         showIcon
-        message={truthRedacted ? "真相脱敏局面" : "狼人杀赛后复盘"}
+        message={truthRedacted ? "真相脱敏局面" : source.kind === "replay-frame" ? "狼人杀回放局面" : "狼人杀赛后复盘"}
         description={
           truthRedacted
             ? "仅显示服务端投影中的公开局面、公开发言、公开投票和公开事件；座位身份不会由浏览器推断。"
-            : "这是本地赛后复盘工件，不是 live public state。私有推理和证据已脱敏；本面板不显示夜间私密动作或阵营关系。"
+            : source.kind === "replay-frame"
+              ? `这是服务端基于已记录原生步骤重放的第 ${source.nativeStepCount ?? "?"} 帧，不是浏览器推演或 live state。state hash：${source.stateHash ?? "n/a"}`
+              : "这是本地赛后复盘工件，不是 live public state。私有推理和证据已脱敏；本面板不显示夜间私密动作或阵营关系。"
         }
       />
 

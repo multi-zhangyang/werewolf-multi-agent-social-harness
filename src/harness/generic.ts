@@ -11,6 +11,7 @@ export type { HarnessAgentSnapshotProvider, HarnessEpisodeOptions } from "./runn
 export { replaySocialEpisode } from "./socialReplay";
 export type { SocialEpisodeReplayResult } from "./socialReplay";
 export {
+  buildReplayableSocialPrefix,
   buildHarnessCheckpointAtPrefix,
   buildHarnessCheckpointFromEpisode,
   compactRecordedSocialAgentSnapshots,
@@ -22,10 +23,12 @@ export {
   validateHarnessEpisodeArtifactEnvelope
 } from "./episodeArtifacts";
 export type {
+  BuildReplayableSocialPrefixOptions,
   GenericForkProvenance,
   HarnessAgentSnapshotFrame,
   HarnessCheckpointEnvelope,
-  HarnessEpisodeArtifactEnvelope
+  HarnessEpisodeArtifactEnvelope,
+  ReplayableSocialPrefix
 } from "./episodeArtifacts";
 export { buildSocialCheckpointForkSeed, runForkedHarnessEpisode } from "./checkpointRuntime";
 export type {

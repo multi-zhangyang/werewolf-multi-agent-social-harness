@@ -261,4 +261,35 @@ export interface PostgameMatchProjectionDto
   agentSnapshotFrames?: RedactedAgentSnapshotFrameDto[];
 }
 
+/**
+ * A transient, server-derived frame after one complete native scheduler
+ * boundary. It is intentionally not a MatchArtifact, checkpoint, or replay
+ * authority: the browser receives only a redacted state projection and audit
+ * counters, never commands, observations, actor state, or provider evidence.
+ */
+export interface PostgameReplayFrameDto {
+  artifactVersion: "server.match-replay-frame.v1";
+  kind: "match-replay-frame";
+  authority: "native-social-episode";
+  source: "server-owned-match-artifact";
+  cursor: {
+    nativeStepCount: number;
+    messageCount: number;
+    eventCount: number;
+    /** Hash produced by canonical deterministic prefix replay. */
+    stateHash?: string;
+    /** Present when the selected recorded native step carried a post-state hash. */
+    recordedPostStateHash?: string;
+  };
+  projection: PostgameMatchProjectionDto["projection"];
+  /** Server-redacted prefix state; it is not a claim about the final artifact state. */
+  state: PostgameMatchProjectionDto["finalState"];
+  replay: {
+    ok: true;
+    replayedSteps: number;
+    replayedBatches: number;
+    rejectedSteps: number;
+  };
+}
+
 export type MatchArtifactViewDto = MatchArtifact | PostgameMatchProjectionDto;
