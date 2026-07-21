@@ -13,7 +13,7 @@ import type { AgentPendingAction } from "../core/pending";
 import type { ModelCompletionResult } from "../agents/modelClient";
 import type { ProviderFailureKind, ProviderFailureStage, ProviderRetryHistoryEntry, ProviderStreamTelemetry } from "../agents/schema";
 import type { SocialChannel, SocialEpisodeArtifact, SocialMessage } from "./social";
-import type { AgentSocialState, EvidenceRef } from "./socialState";
+import type { AgentSocialState, EvidenceRef, MemoryRetrievalRecord, MemoryVisibility } from "./socialState";
 import type { GenericForkProvenance } from "./episodeArtifacts";
 
 export type PolicyName = "balanced" | "wolf-deceiver" | "village-analyst" | "seer-information" | "witch-conservative" | "hunter-punisher";
@@ -150,6 +150,14 @@ export interface ReasonerInput {
   action: AgentPendingAction;
   agent: ReasonerAgentContext;
   policyPlan: PolicyPlan;
+  /**
+   * Content-free deterministic selection evidence retained with the decision.
+   * It proves the bounded context offered to the optional reasoner; it is not
+   * a claim about hidden model reasoning or environment authority.
+   */
+  memoryRetrieval?: MemoryRetrievalRecord;
+  /** Actor-private cloned excerpts corresponding exactly to memoryRetrieval. */
+  recalledMemory?: ReasonerMemoryEntry[];
 }
 
 export type HarnessPlayerView = PlayerView & {
@@ -189,6 +197,20 @@ export interface ReasonerAgentContext {
   beliefs: Record<string, AgentBelief>;
   lastIntent?: string;
   socialStateHash?: string;
+}
+
+/**
+ * The small read-only memory payload an actor may offer its own reasoner.
+ * Full observations, action payloads, and arbitrary social-state metadata are
+ * intentionally excluded; those remain in the actor's private snapshot.
+ */
+export interface ReasonerMemoryEntry {
+  memorySeq: number;
+  kind: string;
+  source: string;
+  visibility: MemoryVisibility;
+  tags: string[];
+  content?: string;
 }
 
 export interface ReasonerOutput {
@@ -241,6 +263,8 @@ export interface PolicyPlan {
   pressureTargetId?: string;
   arbitration?: PolicyArbitrationSummary;
   reasonerProposal?: ReasonerActionProposal;
+  /** Deterministic actor-memory selection available to policy/reasoner before arbitration. */
+  memoryRetrieval?: MemoryRetrievalRecord;
 }
 
 export interface HarnessTurnTrace {
@@ -256,6 +280,8 @@ export interface HarnessTurnTrace {
   confidence: number;
   strategyTags: string[];
   arbitration?: PolicyArbitrationSummary;
+  /** Content-free record of the bounded actor memory made available this turn. */
+  memoryRetrieval?: MemoryRetrievalRecord;
   beliefs: Record<string, AgentBelief>;
   privateMemo: string;
   publicSpeech?: string;

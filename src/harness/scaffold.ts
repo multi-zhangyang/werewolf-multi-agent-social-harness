@@ -13,6 +13,7 @@ import {
 import {
   appendSocialMemory,
   createAgentSocialState,
+  retrieveMemoryContext,
   type AgentSocialState,
   type BeliefClaim,
   type BetrayalKind,
@@ -26,6 +27,8 @@ import {
   type GoalRecord,
   type GossipRecord,
   type GossipValence,
+  type MemoryRetrievalRecord,
+  type SocialMemoryEntry,
   type MemoryVisibility,
   type NormSanctionKind,
   type NormSanctionRecord,
@@ -71,6 +74,10 @@ export interface AgentDecisionInput<TObservation = unknown, TPending = unknown, 
   agent: AgentScaffoldState<TObservation, TPending, TCommand>;
   observation: TObservation;
   pendingAction: TPending;
+  /** Content-free deterministic selection record for this actor turn. */
+  memoryRetrieval?: MemoryRetrievalRecord;
+  /** Cloned actor-private entries corresponding exactly to memoryRetrieval. */
+  recalledMemory?: Array<SocialMemoryEntry<TObservation, TPending, TCommand>>;
 }
 
 export type AgentActionCandidateSource =
@@ -342,7 +349,13 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
         throw new Error(`Scaffolded actor ${this.id} cannot decide before observe().`);
       }
       const observation = state.lastObservation;
-      const memo = await this.reasoner?.reflect(this.decisionInput(observation, pending));
+      const recall = retrieveMemoryContext(state.social.memory, {
+        actorId: this.id,
+        traceId: this.workingObservationContext()?.traceId,
+        limit: 6
+      });
+      const input = this.decisionInput(observation, pending, recall.evidence, recall.entries);
+      const memo = await this.reasoner?.reflect(cloneJson(input));
       if (memo) {
         this.remember({
           kind: "memo",
@@ -357,7 +370,6 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
           }
         }, scaffoldMutationContext(this.workingObservationContext()));
       }
-      const input = this.decisionInput(observation, pending);
       const { action, arbitration } = await this.selectAction(input, memo);
       if (action.actorId !== this.id) {
         throw new Error(`Policy ${this.policy.id} returned action for ${action.actorId}, expected ${this.id}.`);
@@ -376,10 +388,12 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
         metadata: arbitration
           ? {
               policyId: this.policy.id,
-              arbitration
+              arbitration,
+              memoryRetrieval: cloneJson(input.memoryRetrieval)
             }
           : {
-              policyId: this.policy.id
+              policyId: this.policy.id,
+              memoryRetrieval: cloneJson(input.memoryRetrieval)
             }
       }, scaffoldMutationContext(this.workingObservationContext()));
       return cloneJson(actionWithArbitration);
@@ -405,13 +419,13 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
   ): Promise<{ action: SocialAction<TCommand>; arbitration?: AgentActionArbitrationSummary }> {
     const generated = this.policy.generateCandidates?.(cloneJson(input));
     if (!generated && !this.actionArbitrator && !this.candidateScorers.length) {
-      return { action: this.policy.decide(input) };
+      return { action: this.policy.decide(cloneJson(input)) };
     }
-    const candidates = generated ?? [candidateFromPolicyAction(this.id, this.policy.id, this.policy.decide(input))];
+    const candidates = generated ?? [candidateFromPolicyAction(this.id, this.policy.id, this.policy.decide(cloneJson(input)))];
     const normalized = await this.scoreCandidates(normalizeCandidates(this.id, candidates), input, reasonerMemo);
     const decision = this.actionArbitrator
       ? await this.actionArbitrator.arbitrate({
-          ...this.decisionInput(input.observation, input.pendingAction),
+          ...cloneJson(input),
           policyId: this.policy.id,
           reasonerMemo,
           candidates: cloneJson(normalized)
@@ -445,7 +459,7 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
       let next = cloneJson(candidate);
       for (const scorer of this.candidateScorers) {
         const contribution = await scorer.score({
-          ...this.decisionInput(input.observation, input.pendingAction),
+          ...cloneJson(input),
           policyId: this.policy.id,
           reasonerMemo,
           candidate: cloneJson(next),
@@ -459,11 +473,18 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
     return scored;
   }
 
-  private decisionInput(observation: TObservation, pending: TPending): AgentDecisionInput<TObservation, TPending, TCommand> {
+  private decisionInput(
+    observation: TObservation,
+    pending: TPending,
+    memoryRetrieval?: MemoryRetrievalRecord,
+    recalledMemory?: Array<SocialMemoryEntry<TObservation, TPending, TCommand>>
+  ): AgentDecisionInput<TObservation, TPending, TCommand> {
     return {
       agent: cloneJson(this.workingState()),
       observation: cloneJson(observation),
-      pendingAction: cloneJson(pending)
+      pendingAction: cloneJson(pending),
+      memoryRetrieval: cloneJson(memoryRetrieval),
+      recalledMemory: cloneJson(recalledMemory)
     };
   }
 

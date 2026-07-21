@@ -77,6 +77,7 @@ function buildHarnessMessages(input: ReasonerInput): ChatMessage[] {
         `当前技能=${JSON.stringify(input.view.you.ability)}`,
         `当前私有事实=${privateFactSummary(input)}`,
         `信念Top=${beliefSummary(input.agent.beliefs)}`,
+        `已检索记忆=${recalledMemorySummary(input)}`,
         `公开玩家=${input.view.publicPlayers
           .map((player) => `${player.id}/${player.name}/${player.alive ? "alive" : "dead"}/${player.revealedRole ?? "hidden"}`)
           .join("; ")}`,
@@ -167,4 +168,21 @@ function beliefSummary(beliefs: ReasonerInput["agent"]["beliefs"]): string {
     .slice(0, 5)
     .map(([playerId, belief]) => `${playerId}:${Math.round(belief.wolfProb * 100)}%(${belief.rationaleTags.join("/") || "无证据"})`)
     .join(", ");
+}
+
+/**
+ * The actor already selected these entries deterministically. This rendering
+ * is bounded and read-only: it neither exposes a memory store nor lets model
+ * text mutate memory, policy, or the environment.
+ */
+function recalledMemorySummary(input: ReasonerInput): string {
+  const entries = input.recalledMemory ?? [];
+  if (!entries.length) return "none";
+  return entries
+    .slice(0, 6)
+    .map((entry) => {
+      const content = entry.content?.replace(/\s+/g, " ").slice(0, 480);
+      return `#${entry.memorySeq}/${entry.kind}/${entry.source}/${entry.tags.join(",") || "untagged"}${content ? `:${content}` : ""}`;
+    })
+    .join(" | ");
 }

@@ -698,6 +698,7 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
       errors.push(`trajectory[${index}] command type mismatch with socialEpisode step ${step.traceId}: ${socialCommandType} !== ${step.command.type}.`);
     }
   }
+  validateRecordedMemoryRetrieval(artifact, errors);
   const lastSuccessfulStep = artifact.trajectory.at(-1);
   const lastSuccessfulSnapshot = lastSuccessfulStep ? resolveAgentSnapshotsAfterStep(artifact, lastSuccessfulStep) : undefined;
   if (artifact.status !== "failed" && lastSuccessfulSnapshot) {
@@ -763,6 +764,125 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
   validateEvaluationPromotionIntegrity(artifact.evaluationReport, errors);
 
   return errors;
+}
+
+/**
+ * Recall is decision evidence, never replay input. Validate its immutable
+ * metadata binding without reconstructing an actor, rerunning selection, or
+ * exposing memory content from a private snapshot.
+ */
+function validateRecordedMemoryRetrieval(artifact: MatchArtifact, errors: string[]): void {
+  const socialStepByTrace = new Map(artifact.socialEpisode.steps.map((step) => [step.traceId, step]));
+  for (const [index, step] of artifact.trajectory.entries()) {
+    const retrieval = step.policyPlan.memoryRetrieval;
+    const traceRetrieval = step.turnTrace.memoryRetrieval;
+    if (retrieval === undefined && traceRetrieval === undefined) continue;
+    const label = `trajectory[${index}].memoryRetrieval`;
+    validateMemoryRetrievalRecord(retrieval, label, step.actorId, step.traceId, errors);
+    if (hashStableState(retrieval) !== hashStableState(traceRetrieval)) {
+      errors.push(`${label} does not match turnTrace.memoryRetrieval.`);
+    }
+
+    const socialStep = socialStepByTrace.get(step.traceId);
+    const metadata = socialStep?.action.metadata as Record<string, unknown> | undefined;
+    const metadataPlan = metadata?.policyPlan as Record<string, unknown> | undefined;
+    const metadataTrace = metadata?.turnTrace as Record<string, unknown> | undefined;
+    if (hashStableState(metadataPlan?.memoryRetrieval) !== hashStableState(retrieval)) {
+      errors.push(`${label} does not match socialEpisode action policyPlan evidence.`);
+    }
+    if (hashStableState(metadataTrace?.memoryRetrieval) !== hashStableState(traceRetrieval)) {
+      errors.push(`${label} does not match socialEpisode action turnTrace evidence.`);
+    }
+
+    const snapshots = resolveAgentSnapshotsAfterStep(artifact, step);
+    const actor = snapshots?.find((candidate) => candidate.playerId === step.actorId);
+    if (!actor) continue;
+    const decision = actor.social?.memory.entries.find(
+      (entry) =>
+        entry.kind === "decision" &&
+        entry.evidenceRefs.some((ref) => ref.artifact === "trace" && ref.traceId === step.traceId)
+    );
+    if (!decision) {
+      errors.push(`${label} is missing the committed decision-memory evidence in its actor snapshot.`);
+      continue;
+    }
+    const decisionMetadata = decision.metadata as Record<string, unknown> | undefined;
+    if (hashStableState(decisionMetadata?.memoryRetrieval) !== hashStableState(retrieval)) {
+      errors.push(`${label} does not match its committed decision-memory evidence.`);
+    }
+  }
+}
+
+function validateMemoryRetrievalRecord(
+  value: unknown,
+  label: string,
+  actorId: string,
+  traceId: string,
+  errors: string[]
+): void {
+  if (!isRecord(value)) {
+    errors.push(`${label} must be a memory retrieval record.`);
+    return;
+  }
+  if (value.version !== "harness.memory-retrieval.v1") errors.push(`${label}.version must be harness.memory-retrieval.v1.`);
+  if (value.actorId !== actorId) errors.push(`${label}.actorId must match ${actorId}.`);
+  if (value.traceId !== undefined && value.traceId !== traceId) errors.push(`${label}.traceId must match ${traceId}.`);
+  const query = isRecord(value.query) ? value.query : undefined;
+  if (!query) {
+    errors.push(`${label}.query must be an object.`);
+  } else {
+    for (const key of Object.keys(query)) {
+      if (!["limit", "tags", "visibility", "source", "ranking"].includes(key)) {
+        errors.push(`${label}.query.${key} is not permitted in recorded retrieval evidence.`);
+      }
+    }
+    if (!Number.isInteger(query.limit) || (query.limit as number) < 0) errors.push(`${label}.query.limit must be a non-negative integer.`);
+    if (query.ranking !== "importance_then_salience_then_recency") {
+      errors.push(`${label}.query.ranking must be importance_then_salience_then_recency.`);
+    }
+    if (query.tags !== undefined && (!Array.isArray(query.tags) || query.tags.some((tag) => typeof tag !== "string"))) {
+      errors.push(`${label}.query.tags must be a string array when present.`);
+    }
+    if (query.visibility !== undefined && typeof query.visibility !== "string") errors.push(`${label}.query.visibility must be a string when present.`);
+    if (query.source !== undefined && typeof query.source !== "string") errors.push(`${label}.query.source must be a string when present.`);
+  }
+  if (!Array.isArray(value.selected)) {
+    errors.push(`${label}.selected must be an array.`);
+    return;
+  }
+  const selectedSeqs = new Set<number>();
+  for (const [selectedIndex, selection] of value.selected.entries()) {
+    const itemLabel = `${label}.selected[${selectedIndex}]`;
+    if (!isRecord(selection)) {
+      errors.push(`${itemLabel} must be an object.`);
+      continue;
+    }
+    for (const key of Object.keys(selection)) {
+      if (!["memorySeq", "rank", "score", "scoreReasons", "kind", "source", "visibility", "tags", "evidenceRefs"].includes(key)) {
+        errors.push(`${itemLabel}.${key} is not permitted in recorded retrieval evidence.`);
+      }
+    }
+    if (!Number.isInteger(selection.memorySeq) || (selection.memorySeq as number) <= 0 || selectedSeqs.has(selection.memorySeq as number)) {
+      errors.push(`${itemLabel}.memorySeq must be a unique positive integer.`);
+    }
+    selectedSeqs.add(selection.memorySeq as number);
+    if (selection.rank !== selectedIndex + 1) errors.push(`${itemLabel}.rank must equal ${selectedIndex + 1}.`);
+    if (typeof selection.score !== "number" || !Number.isFinite(selection.score)) errors.push(`${itemLabel}.score must be finite.`);
+    if (
+      !Array.isArray(selection.scoreReasons) ||
+      selection.scoreReasons.join(",") !== "importance,salience,recency_tiebreak"
+    ) {
+      errors.push(`${itemLabel}.scoreReasons must record the stable ranking inputs.`);
+    }
+    if (typeof selection.kind !== "string" || !selection.kind) errors.push(`${itemLabel}.kind must be a non-empty string.`);
+    if (typeof selection.source !== "string" || !selection.source) errors.push(`${itemLabel}.source must be a non-empty string.`);
+    if (typeof selection.visibility !== "string" || !selection.visibility) errors.push(`${itemLabel}.visibility must be a non-empty string.`);
+    if (!Array.isArray(selection.tags) || selection.tags.some((tag) => typeof tag !== "string")) errors.push(`${itemLabel}.tags must be a string array.`);
+    if (!Array.isArray(selection.evidenceRefs) || !selection.evidenceRefs.length) errors.push(`${itemLabel}.evidenceRefs must be a non-empty array.`);
+    for (const forbidden of ["content", "observation", "action", "metadata"]) {
+      if (forbidden in selection) errors.push(`${itemLabel} must not persist raw memory ${forbidden}.`);
+    }
+  }
 }
 
 function validateEvaluationPromotionIntegrity(report: HarnessEvaluationReport, errors: string[]): void {

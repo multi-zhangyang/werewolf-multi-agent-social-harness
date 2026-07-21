@@ -35,6 +35,45 @@ export interface MemoryStore<TObservation = unknown, TPending = unknown, TComman
   entries: Array<SocialMemoryEntry<TObservation, TPending, TCommand>>;
 }
 
+/**
+ * Stable evidence for the deterministic recall context exposed to one agent
+ * decision.  This deliberately records references and ranking inputs only;
+ * raw memory content remains private actor state and is never duplicated into
+ * the durable decision evidence.
+ */
+export const MEMORY_RETRIEVAL_VERSION = "harness.memory-retrieval.v1" as const;
+
+export interface MemoryRetrievalSelection {
+  memorySeq: number;
+  rank: number;
+  score: number;
+  scoreReasons: Array<"importance" | "salience" | "recency_tiebreak">;
+  kind: SocialMemoryEntry["kind"];
+  source: string;
+  visibility: MemoryVisibility;
+  tags: string[];
+  evidenceRefs: EvidenceRef[];
+}
+
+export interface MemoryRetrievalRecord {
+  version: typeof MEMORY_RETRIEVAL_VERSION;
+  actorId: string;
+  traceId?: string;
+  query: {
+    limit: number;
+    tags?: string[];
+    visibility?: MemoryVisibility;
+    source?: string;
+    ranking: "importance_then_salience_then_recency";
+  };
+  selected: MemoryRetrievalSelection[];
+}
+
+export interface RetrievedMemoryContext<TObservation = unknown, TPending = unknown, TCommand = unknown> {
+  evidence: MemoryRetrievalRecord;
+  entries: Array<SocialMemoryEntry<TObservation, TPending, TCommand>>;
+}
+
 export interface BeliefContradiction {
   value: unknown;
   confidence: number;
@@ -719,6 +758,58 @@ export function retrieveMemory<TObservation, TPending, TCommand>(
     .sort((a, b) => memoryScore(b) - memoryScore(a) || b.seq - a.seq)
     .slice(0, options.limit ?? matches.length)
     .map(cloneJson);
+}
+
+/**
+ * Read a bounded, deterministic selection from one actor's memory without
+ * changing the store or journal.  Consumers receive cloned entries for
+ * private policy/reasoner context and a content-free evidence record suitable
+ * for plans, receipts, snapshots, and artifacts.
+ */
+export function retrieveMemoryContext<TObservation, TPending, TCommand>(
+  store: MemoryStore<TObservation, TPending, TCommand>,
+  options: {
+    actorId: string;
+    traceId?: string;
+    limit?: number;
+    tags?: string[];
+    visibility?: MemoryVisibility;
+    source?: string;
+  }
+): RetrievedMemoryContext<TObservation, TPending, TCommand> {
+  const limit = Math.max(0, Math.floor(options.limit ?? store.entries.length));
+  const entries = retrieveMemory(store, {
+    limit,
+    tags: options.tags,
+    visibility: options.visibility,
+    source: options.source
+  });
+  return {
+    evidence: {
+      version: MEMORY_RETRIEVAL_VERSION,
+      actorId: options.actorId,
+      traceId: options.traceId,
+      query: {
+        limit,
+        tags: options.tags ? [...options.tags] : undefined,
+        visibility: options.visibility,
+        source: options.source,
+        ranking: "importance_then_salience_then_recency"
+      },
+      selected: entries.map((entry, index) => ({
+        memorySeq: entry.seq,
+        rank: index + 1,
+        score: roundMemoryScore(memoryScore(entry)),
+        scoreReasons: ["importance", "salience", "recency_tiebreak"],
+        kind: entry.kind,
+        source: entry.source,
+        visibility: entry.visibility,
+        tags: [...entry.tags],
+        evidenceRefs: cloneJson(entry.evidenceRefs)
+      }))
+    },
+    entries: cloneJson(entries)
+  };
 }
 
 export function upsertBelief(store: BeliefStore, input: {
@@ -2062,6 +2153,10 @@ function beliefId(subject: string, predicate: string): string {
 
 function memoryScore(entry: SocialMemoryEntry): number {
   return entry.importance * 2 + entry.salience + entry.seq / 1_000_000;
+}
+
+function roundMemoryScore(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
 }
 
 function mergeEvidenceRefs(existing: EvidenceRef[], incoming: EvidenceRef[]): EvidenceRef[] {
