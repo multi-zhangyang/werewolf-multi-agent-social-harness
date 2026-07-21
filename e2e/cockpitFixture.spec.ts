@@ -202,6 +202,26 @@ test("loads a server-authoritative native replay frame without a browser-side ga
   expect(pageErrors).toEqual([]);
 });
 
+test("renders social evidence as a server-projected graph and keeps interaction in the existing inspector", async ({ page }) => {
+  const artifactViews: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.endsWith("/artifact")) artifactViews.push(url.searchParams.get("view") ?? "default");
+  });
+
+  await page.goto("/?workspace=society", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+  const graph = page.getByTestId("social-evidence-graph");
+  await expect(graph).toBeVisible();
+  await expect(graph.getByRole("img", { name: "Agent 社会可见性与通信证据图" })).toBeVisible();
+
+  const agentNode = graph.getByRole("button", { name: "查看 agent p1 的社会证据" });
+  await expect(agentNode).toBeVisible();
+  await agentNode.click();
+  await expect(page.getByText("Agent p1")).toBeVisible();
+  expect(artifactViews).not.toContain("full");
+});
+
 test.describe("compact cockpit", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
