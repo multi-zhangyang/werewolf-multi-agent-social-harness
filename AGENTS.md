@@ -24583,3 +24583,92 @@ These cover action-owned trace ids, trace-prefix failure cleanup, receipt
 isolation, duplicate joint actors, AEC batch-abort evidence, parallel snapshot
 atomicity, native replay, and artifact integrity. Full build/API/E2E validation
 remains required before declaring the broader refactor complete.
+
+## 13.245 Experiment Matrix Lifecycle And Research Artifact Lock
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+Goal id:
+
+```text
+harness.experiment-matrix-control-plane.v1
+```
+
+### 13.245.1 Capability
+
+`src/harness/experimentMatrix.ts` is a domain-control aggregation layer over
+normalized tournament experiments. It does not create an alternate Werewolf
+runner, frontend simulation, or model-to-model chat path. Each matrix cell
+delegates to the tournament/harness control plane and records its result,
+statistics, nested artifacts, and lifecycle evidence.
+
+### 13.245.2 Lifecycle And Evaluation Rules
+
+- Matrix cells preserve `completed | truncated | failed`; `failed` has
+  precedence over `truncated` when a tournament contains both.
+- Result and statistics records preserve `cellsTruncated` and
+  `gamesTruncated` alongside requested/completed/failed counts.
+- Matrix-level `status: "completed"` and `ok: true` mean no control-plane or
+  episode failure. They do **not** claim every episode reached a domain terminal
+  state; bounded runs remain visible as truncated.
+- Only terminal completed episode seats enter model/profile win-rate, reward,
+  Wilson interval, and pairwise descriptive statistics. Truncated and failed
+  episodes stay in lifecycle denominators and cannot become synthetic scorecard
+  rows.
+- Pairwise output is an unpaired seat-level descriptive screening statistic
+  with Holm adjustment. `superiorityClaims: false` must remain explicit in the
+  artifact and cockpit; no causal or model-superiority conclusion may be made.
+
+### 13.245.3 Artifact And API Authority
+
+- `POST /api/experiments/matrix/run` normalizes a `harness.experiment-matrix.v1`
+  request and executes the real harness/tournament path. Nested `spec` requests
+  may use top-level tournament-shaped overrides only through the normalizer.
+- Filesystem fields are rejected in the request base, inline cells, and nested
+  cell specs. The API never accepts a client-selected output directory.
+- Exported matrix bundles are research-full because nested tournament manifests
+  include research identifiers and seeds. They are restricted to local research
+  artifact access and are never connected to tournament public-share routes.
+- Matrix artifact sets retain only writer-validated relative paths in their
+  registry. Download routes use the registered allowlist, path normalization,
+  containment, regular-file and symlink checks. A registered nested tournament
+  `manifest.json` does not authorize adjacent trajectory, episode, or match
+  files.
+- `MATRIX_ARTIFACT_BASE_DIR` is the dedicated root. When the matrix root falls
+  back from `TOURNAMENT_ARTIFACT_BASE_DIR`, it is namespaced as `matrices/` to
+  prevent distinct UUID artifact recovery schemas from scanning one another.
+- Registry recovery validates the generated directory identity and the fixed
+  matrix manifest/file shape before restoring an artifact set after process
+  memory is cleared.
+
+### 13.245.4 Cockpit Authority
+
+- The React `experiments` workspace consumes only API summary/cell/statistics
+  DTOs and server-provided registered download URLs. It does not recompute
+  winners, seat rows, p-values, or artifact paths.
+- This workspace is independent of match comparison state and must not change
+  truth-redacted comparison route context, canonical id assertions, artifact
+  bootstrap ordering, or `view=full` restrictions.
+- Matrix artifact discovery is user-initiated, not a required bootstrap call,
+  so unavailable local research routes cannot break recorded-match cockpit
+  loading.
+
+### 13.245.5 Validation Recorded
+
+```bash
+npm run typecheck
+npx vitest run tests/experimentMatrix.test.ts tests/serverExperimentMatrixApi.test.ts \
+  --testTimeout=30000 --maxWorkers=1 --no-file-parallelism --reporter=verbose
+npm run build
+npx playwright test e2e/cockpitFixture.spec.ts --config=playwright.config.ts
+```
+
+The focused matrix tests cover tri-state aggregation, completed-only outcome
+rows, artifact manifests/JSONL/Markdown, request override normalization,
+allowlisted nested downloads, traversal rejection, and registry rehydration.
+The cockpit fixture test covers server-owned matrix lifecycle rendering while
+the existing truth-redacted artifact/comparison regression remains active.

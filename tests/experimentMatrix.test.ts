@@ -168,16 +168,19 @@ describe("experiment matrix harness", () => {
       kind: "experiment-matrix-result",
       status: "completed",
       cellsRequested: 2,
-      cellsCompleted: 2,
+      cellsCompleted: 0,
+      cellsTruncated: 2,
       cellsFailed: 0,
       gamesRequested: 2,
-      gamesCompleted: 2,
+      gamesCompleted: 0,
+      gamesTruncated: 2,
       gamesFailed: 0
     });
     expect(result.cells.every((cell) => cell.tournament?.artifacts?.length === 1)).toBe(true);
-    expect(result.statistics.status.completedSeatRows).toBe(18);
-    expect(result.statistics.modelStats.map((stats) => stats.subjectId)).toEqual(["alpha", "beta", "gamma"]);
-    expect(result.statistics.modelStats.every((stats) => stats.seatGames === 0 && stats.winRateWilson95 === null)).toBe(true);
+    expect(result.cells.every((cell) => cell.status === "truncated")).toBe(true);
+    expect(result.statistics.status).toMatchObject({ gamesTruncated: 2, completedSeatRows: 0 });
+    expect(result.statistics.modelStats).toEqual([]);
+    expect(result.statistics.profileStats).toEqual([]);
   });
 
   it("aggregates outcome statistics and descriptive pairwise significance from recorded seat outcomes", () => {
@@ -339,10 +342,12 @@ describe("experiment matrix harness", () => {
       matrixId: "artifact-matrix",
       status: "completed",
       cellsRequested: 1,
-      cellsCompleted: 1,
+      cellsCompleted: 0,
+      cellsTruncated: 1,
       cellsFailed: 0,
       gamesRequested: 1,
-      gamesCompleted: 1,
+      gamesCompleted: 0,
+      gamesTruncated: 1,
       gamesFailed: 0,
       files: {
         manifest: "manifest.json",
@@ -369,8 +374,9 @@ describe("experiment matrix harness", () => {
     expect(cells[0]).toMatchObject({
       type: "matrix_cell",
       id: "artifact-alpha-beta",
-      status: "completed",
-      gamesCompleted: 1,
+      status: "truncated",
+      gamesCompleted: 0,
+      gamesTruncated: 1,
       gamesFailed: 0,
       models: ["alpha", "beta"]
     });
@@ -382,25 +388,28 @@ describe("experiment matrix harness", () => {
       matrixId: "artifact-matrix",
       status: {
         cellsRequested: 1,
-        cellsCompleted: 1,
-        gamesCompleted: 1,
-        completedSeatRows: 9
+        cellsCompleted: 0,
+        cellsTruncated: 1,
+        gamesCompleted: 0,
+        gamesTruncated: 1,
+        completedSeatRows: 0
       }
     });
 
     const summaryMarkdown = await readFile(path.join(outputDir, "summary.md"), "utf8");
     expect(summaryMarkdown).toContain("# Experiment Matrix Summary: artifact-matrix");
+    expect(summaryMarkdown).toContain("Games truncated: 1");
     expect(summaryMarkdown).toContain("## Pairwise Model Comparisons");
     expect(summaryMarkdown).toContain("descriptive screening statistic");
     expect(summaryMarkdown).not.toContain(outputDir);
 
     const modelStatsCsv = await readFile(path.join(outputDir, "model_stats.csv"), "utf8");
     expect(modelStatsCsv).toMatch(/^subject_type,subject_id,model,profile_id,policy_name,seat_games,/);
-    expect(modelStatsCsv).toContain("model,alpha,alpha,");
+    expect(modelStatsCsv.trim().split(/\r?\n/)).toHaveLength(1);
 
     const pairwiseCsv = await readFile(path.join(outputDir, "pairwise_model_comparisons.csv"), "utf8");
     expect(pairwiseCsv).toMatch(/^left_model,right_model,left_seat_games,right_seat_games,/);
-    expect(pairwiseCsv).toContain("two_proportion_z_test_unpaired_seat_level");
+    expect(pairwiseCsv.trim().split(/\r?\n/)).toHaveLength(1);
 
     const nestedManifest = await readJson<Record<string, any>>(path.join(outputDir, "tournaments", "artifact-alpha-beta", "manifest.json"));
     expect(nestedManifest).toMatchObject({

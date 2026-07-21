@@ -31,6 +31,17 @@ import {
   type NormalizedTournamentExperiment,
   type TournamentExperimentSpecV1
 } from "../harness/experiment";
+import {
+  MATRIX_ARTIFACT_VERSION,
+  mergeMatrixExperimentOverrides,
+  normalizeMatrixExperimentSpec,
+  runExperimentMatrix,
+  writeExperimentMatrixArtifactDirectory,
+  type ExperimentMatrixArtifactWriteResult,
+  type ExperimentMatrixCellResult,
+  type ExperimentMatrixResult,
+  type NormalizedMatrixExperiment
+} from "../harness/experimentMatrix";
 import { legacyMetricPromotionPolicyFromSummary, summarizeEvaluationWarnings } from "../harness/evaluation";
 import {
   assertAssignmentProfileReferences,
@@ -108,22 +119,27 @@ import {
   deleteTournamentPublicShare,
   getCheckpoint,
   getComparison,
+  getExperimentMatrixArtifactSet,
   getMatch,
   getTournamentArtifactSet,
   getTournamentPublicShare,
   listArtifactRecoveryAuditRecords,
   listCheckpoints,
   listComparisons,
+  listExperimentMatrixArtifactSets,
   listMatches,
   listTournamentArtifactSets,
   listTournamentPublicShares,
   saveArtifactRecoveryAuditRecord,
   saveCheckpoint,
   saveComparison,
+  saveExperimentMatrixArtifactSet,
   saveMatch,
   saveTournamentArtifactSet,
   saveTournamentPublicShare,
   type StoredArtifactRecoveryAuditRecord,
+  type StoredExperimentMatrixArtifactFiles,
+  type StoredExperimentMatrixArtifactSet,
   type StoredTournamentArtifactFiles,
   type StoredPublicTournamentArtifactFiles,
   type StoredResearchTournamentArtifactFiles,
@@ -154,6 +170,7 @@ const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOURNAMENT_ARTIFACT_SET_INDEX_FILE = "artifact_sets.index.json";
+const MATRIX_ARTIFACT_SET_INDEX_FILE = "matrix_artifact_sets.index.json";
 const TOURNAMENT_PUBLIC_SHARE_INDEX_FILE = "tournament_public_shares.index.json";
 const CHECKPOINT_ARTIFACT_INDEX_FILE = "checkpoints.index.json";
 const CHECKPOINT_ARTIFACT_DIR = "checkpoints";
@@ -197,6 +214,7 @@ export interface ServerAppDependencies {
    */
   artifactAccessBindHost?: string;
   tournamentArtifactBaseDir?: string;
+  matrixArtifactBaseDir?: string;
   checkpointArtifactBaseDir?: string;
   matchArtifactBaseDir?: string;
   comparisonArtifactBaseDir?: string;
@@ -226,6 +244,12 @@ const createReasoner =
   dependencies.createReasoner ??
   ((abortSignal: AbortSignal): HarnessReasoner => new OpenAIHarnessReasoner(modelClientFromEnv(process.env, { abortSignal })));
 const tournamentArtifactBaseDir = normalizeOptionalDirectory(dependencies.tournamentArtifactBaseDir ?? process.env.TOURNAMENT_ARTIFACT_BASE_DIR);
+/** Keep matrix directories outside the tournament root so recovery scans have one artifact schema per root. */
+const matrixArtifactBaseDir = normalizeOptionalDirectory(
+  dependencies.matrixArtifactBaseDir ??
+    process.env.MATRIX_ARTIFACT_BASE_DIR ??
+    (tournamentArtifactBaseDir ? path.join(tournamentArtifactBaseDir, "matrices") : undefined)
+);
 const checkpointArtifactBaseDir = normalizeOptionalDirectory(dependencies.checkpointArtifactBaseDir ?? process.env.CHECKPOINT_ARTIFACT_BASE_DIR);
 const matchArtifactBaseDir = normalizeOptionalDirectory(dependencies.matchArtifactBaseDir ?? process.env.MATCH_ARTIFACT_BASE_DIR);
 const comparisonArtifactBaseDir = normalizeOptionalDirectory(
@@ -263,7 +287,13 @@ app.get("/api/config", (_req, res) => {
     policyNames: POLICY_NAMES,
     defaultProfiles: profilesFromModels(provider.models, Number(process.env.AGENT_TEMPERATURE ?? 0.7)),
     provider,
-    chatCompletionsUrl: provider.protocol === "openai-chat-completions" ? provider.endpoint : null
+    chatCompletionsUrl: provider.protocol === "openai-chat-completions" ? provider.endpoint : null,
+    artifactExport: {
+      tournamentConfigured: Boolean(tournamentArtifactBaseDir),
+      matrixConfigured: Boolean(matrixArtifactBaseDir),
+      checkpointConfigured: Boolean(checkpointArtifactBaseDir),
+      matchConfigured: Boolean(matchArtifactBaseDir)
+    }
   });
 });
 
@@ -1223,6 +1253,149 @@ app.post("/api/tournaments/run", async (req, res) => {
   }
 });
 
+/**
+ * Matrix execution is a control-plane API over tournament experiments.  Its
+ * response deliberately contains aggregate, recorded truth only: raw
+ * tournament results stay inside local/research artifact sets.
+ */
+app.post("/api/experiments/matrix/run", async (req, res) => {
+  let experiment: NormalizedMatrixExperiment;
+  let exportArtifacts = false;
+  try {
+    const body = requestBodyObject(req.body);
+    assertForbiddenMatrixRequestFields(body, "experiment matrix run");
+    exportArtifacts = parseOptionalBoolean(body.exportArtifacts, "exportArtifacts") ?? false;
+    if (exportArtifacts && !matrixArtifactBaseDir) {
+      throw new HttpError(
+        400,
+        "Experiment matrix artifact export requires configured MATRIX_ARTIFACT_BASE_DIR or TOURNAMENT_ARTIFACT_BASE_DIR."
+      );
+    }
+    experiment = normalizeMatrixExperimentRequest(body);
+  } catch (error) {
+    const status = error instanceof HttpError ? error.status : 400;
+    const failure = publicApiFailureFromError(error);
+    res.status(status).json({
+      summary: {
+        kind: "experiment-matrix",
+        ok: false,
+        endpoint: providerConfigSummaryFromEnv().endpoint,
+        failureReason: failure.message,
+        providerFailure: failure.providerFailure ?? null
+      },
+      error: failure.message
+    });
+    return;
+  }
+
+  const timeoutMs = matrixExperimentTimeoutMs(experiment);
+  const abortController = new AbortController();
+  const timeout = timeoutMs
+    ? setTimeout(() => abortController.abort(new Error(`Matrix timeout exceeded ${timeoutMs}ms.`)), timeoutMs)
+    : undefined;
+  timeout?.unref();
+  const startedAt = performance.now();
+  try {
+    const result = await runExperimentMatrix({
+      experiment,
+      includeArtifacts: exportArtifacts,
+      reasoner: createReasoner(abortController.signal)
+    });
+    const artifactSet = exportArtifacts
+      ? await persistExperimentMatrixArtifactSet({ result, baseDir: matrixArtifactBaseDir })
+      : null;
+    const serializedArtifacts = artifactSet ? serializeExperimentMatrixArtifactSet(artifactSet) : null;
+    res.status(result.cellsFailed || result.gamesFailed ? 207 : 200).json({
+      summary: {
+        ...buildExperimentMatrixSummary(result, {
+          timeoutMs,
+          elapsedMs: Math.round(performance.now() - startedAt),
+          timedOut: abortController.signal.aborted
+        }),
+        artifacts: serializedArtifacts
+      },
+      artifacts: serializedArtifacts,
+      cells: result.cells.map(serializeExperimentMatrixCellSummaryForApi),
+      statistics: result.statistics
+    });
+  } catch (error) {
+    const failure = publicApiFailureFromError(error);
+    res.status(500).json({
+      summary: {
+        kind: "experiment-matrix",
+        ok: false,
+        endpoint: providerConfigSummaryFromEnv().endpoint,
+        matrixId: experiment.id,
+        cellsRequested: experiment.cells.length,
+        limits: { timeoutMs: timeoutMs ?? null },
+        elapsedMs: Math.round(performance.now() - startedAt),
+        timedOut: abortController.signal.aborted,
+        failureReason: failure.message,
+        providerFailure: failure.providerFailure ?? null
+      },
+      error: failure.message
+    });
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+});
+
+app.get("/api/experiments/matrix/artifacts", async (req, res, next) => {
+  try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
+    await loadExperimentMatrixArtifactSetIndex(matrixArtifactBaseDir);
+    res.json({
+      artifactSets: listExperimentMatrixArtifactSetsForBaseDir(matrixArtifactBaseDir).map(serializeExperimentMatrixArtifactSet)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get(/^\/api\/experiments\/matrix\/artifacts\/([^/]+)\/files\/(.+)$/, async (req, res, next) => {
+  try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
+    const params = req.params as unknown as string[];
+    const artifactSetId = params[0];
+    const requestedPath = params[1];
+    await loadExperimentMatrixArtifactSetIndex(matrixArtifactBaseDir);
+    const artifactSet = getExperimentMatrixArtifactSetForBaseDir(artifactSetId, matrixArtifactBaseDir);
+    if (!artifactSet) {
+      res.status(404).json({ error: "experiment matrix artifact set not found" });
+      return;
+    }
+    const file = await resolveRegisteredExperimentMatrixArtifactFile(artifactSet, requestedPath, matrixArtifactBaseDir);
+    let content: Buffer;
+    try {
+      content = await readFile(file.absolutePath);
+    } catch (error) {
+      if (isFileReadNotFound(error)) {
+        res.status(404).json({ error: "experiment matrix artifact file not found" });
+        return;
+      }
+      throw new HttpError(500, "experiment matrix artifact file could not be read");
+    }
+    res.type(contentTypeForArtifactFile(file.relativePath)).send(content);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/experiments/matrix/artifacts/:id", async (req, res, next) => {
+  try {
+    assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
+    await loadExperimentMatrixArtifactSetIndex(matrixArtifactBaseDir);
+    const artifactSet = getExperimentMatrixArtifactSetForBaseDir(req.params.id, matrixArtifactBaseDir);
+    if (!artifactSet) {
+      res.status(404).json({ error: "experiment matrix artifact set not found" });
+      return;
+    }
+    res.json(serializeExperimentMatrixArtifactSet(artifactSet));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/tournament-artifacts", async (req, res, next) => {
   try {
     assertLocalResearchArtifactAccess(req, artifactAccessBindHost);
@@ -1591,7 +1764,7 @@ function requestBodyObject(body: unknown): Record<string, unknown> {
 
 function normalizeOptionalDirectory(value: unknown): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
-  if (typeof value !== "string") throw new HttpError(500, "Configured tournament artifact base directory must be a string.");
+  if (typeof value !== "string") throw new HttpError(500, "Configured artifact base directory must be a string.");
   const trimmed = value.trim();
   return trimmed ? path.resolve(trimmed) : undefined;
 }
@@ -1615,6 +1788,23 @@ function assertForbiddenTournamentRequestFields(body: Record<string, unknown>, c
   assertForbiddenBodyFields(body, FORBIDDEN_TOURNAMENT_BODY_FIELDS, context);
   if (isRecord(body.spec)) {
     assertForbiddenBodyFields(body.spec, FORBIDDEN_TOURNAMENT_BODY_FIELDS, `${context} spec`);
+  }
+}
+
+function assertForbiddenMatrixRequestFields(body: Record<string, unknown>, context: string): void {
+  assertForbiddenTournamentRequestFields(body, context);
+  const spec = isRecord(body.spec) ? body.spec : body;
+  if (isRecord(spec.base)) {
+    assertForbiddenBodyFields(spec.base, FORBIDDEN_TOURNAMENT_BODY_FIELDS, `${context} base`);
+  }
+  if (Array.isArray(spec.cells)) {
+    spec.cells.forEach((cell, index) => {
+      if (!isRecord(cell)) return;
+      assertForbiddenBodyFields(cell, FORBIDDEN_TOURNAMENT_BODY_FIELDS, `${context} cell ${index + 1}`);
+      if (isRecord(cell.spec)) {
+        assertForbiddenBodyFields(cell.spec, FORBIDDEN_TOURNAMENT_BODY_FIELDS, `${context} cell ${index + 1} spec`);
+      }
+    });
   }
 }
 
@@ -4671,6 +4861,50 @@ function buildTournamentSummary(
   };
 }
 
+function buildExperimentMatrixSummary(
+  result: ExperimentMatrixResult,
+  options: { timeoutMs?: number; elapsedMs: number; timedOut: boolean }
+): object {
+  const failures = result.cells
+    .filter((cell) => cell.status === "failed")
+    .map((cell) => ({
+      index: cell.index,
+      id: cell.id,
+      label: cell.label,
+      group: cell.group,
+      error: sanitizeApiErrorText(cell.error ?? "Experiment matrix cell failed."),
+      gamesFailed: cell.tournament?.gamesFailed ?? 0
+    }));
+  return {
+    kind: "experiment-matrix",
+    // Matrix status reports control-plane execution health. Truncation remains
+    // visible in counters and cells but does not turn a bounded study into an
+    // API failure.
+    ok: result.status === "completed",
+    endpoint: providerConfigSummaryFromEnv().endpoint,
+    matrixId: result.experiment.id,
+    status: result.status,
+    cellsRequested: result.cellsRequested,
+    cellsCompleted: result.cellsCompleted,
+    cellsTruncated: result.cellsTruncated,
+    cellsFailed: result.cellsFailed,
+    gamesRequested: result.gamesRequested,
+    gamesCompleted: result.gamesCompleted,
+    gamesTruncated: result.gamesTruncated,
+    gamesFailed: result.gamesFailed,
+    limits: { timeoutMs: options.timeoutMs ?? null },
+    elapsedMs: options.elapsedMs,
+    timedOut: options.timedOut,
+    denominatorPolicy: result.statistics.denominatorPolicy,
+    statisticStatus: result.statistics.status,
+    modelStats: result.statistics.modelStats,
+    profileStats: result.statistics.profileStats,
+    pairwiseModelComparisons: result.statistics.pairwiseModelComparisons,
+    failures,
+    failureReason: failures.length ? failures.map((failure) => `${failure.id}: ${failure.error}`).join(" | ") : null
+  };
+}
+
 async function persistTournamentArtifactSet(options: {
   result: TournamentResult;
   experimentId: string;
@@ -4761,6 +4995,157 @@ async function registerTournamentMatchArtifacts(result: TournamentResult): Promi
   }
   if (wroteDiskArtifact) {
     await writeMatchArtifactIndex(matchArtifactBaseDir);
+  }
+}
+
+/** Matrix bundles contain research-full nested tournament artifacts. They have
+ * their own registry/root and are never eligible for the public-share API. */
+async function persistExperimentMatrixArtifactSet(options: {
+  result: ExperimentMatrixResult;
+  baseDir: string | undefined;
+}): Promise<StoredExperimentMatrixArtifactSet> {
+  if (!options.baseDir) {
+    throw new HttpError(
+      400,
+      "Experiment matrix artifact export requires configured MATRIX_ARTIFACT_BASE_DIR or TOURNAMENT_ARTIFACT_BASE_DIR."
+    );
+  }
+  const id = randomUUID();
+  const baseDir = path.resolve(options.baseDir);
+  const outputDir = resolveGeneratedArtifactDirectory(baseDir, id);
+  const createdAt = new Date().toISOString();
+  let written: ExperimentMatrixArtifactWriteResult;
+  try {
+    written = await writeExperimentMatrixArtifactDirectory(options.result, { outputDir, createdAt, overwrite: false });
+  } catch {
+    throw new HttpError(500, "Experiment matrix artifact export failed.");
+  }
+  const set: StoredExperimentMatrixArtifactSet = {
+    id,
+    createdAt,
+    matrixId: options.result.experiment.id,
+    outputDir: written.outputDir,
+    files: written.files,
+    relativeFiles: relativeExperimentMatrixArtifactFiles(written)
+  };
+  await loadExperimentMatrixArtifactSetIndex(baseDir);
+  saveExperimentMatrixArtifactSet(set);
+  await writeExperimentMatrixArtifactSetIndex(baseDir);
+  return set;
+}
+
+async function loadExperimentMatrixArtifactSetIndex(baseDir: string | undefined): Promise<void> {
+  if (!baseDir) return;
+  const root = path.resolve(baseDir);
+  let parsed: unknown;
+  let rewrite = false;
+  const loadedIds = new Set<string>();
+  try {
+    parsed = JSON.parse(await readFile(experimentMatrixArtifactSetIndexPath(root), "utf8")) as unknown;
+  } catch (error) {
+    if (!isFileReadNotFound(error) && !(error instanceof SyntaxError)) {
+      throw new HttpError(500, "Experiment matrix artifact set index could not be read.");
+    }
+    rewrite = error instanceof SyntaxError;
+  }
+  if (parsed !== undefined) {
+    if (!isRecord(parsed) || parsed.kind !== "experiment-matrix-artifact-set-index" || !Array.isArray(parsed.artifactSets)) {
+      rewrite = true;
+    } else {
+      for (const record of parsed.artifactSets) {
+        const set = await storedExperimentMatrixArtifactSetFromIndexRecord(root, record);
+        if (!set) {
+          rewrite = true;
+          continue;
+        }
+        saveExperimentMatrixArtifactSet(set);
+        loadedIds.add(set.id);
+      }
+    }
+  }
+  const scanned = await loadExperimentMatrixArtifactSetsFromManifests(root, loadedIds);
+  if (rewrite || scanned.length) await writeExperimentMatrixArtifactSetIndex(root);
+}
+
+async function writeExperimentMatrixArtifactSetIndex(baseDir: string): Promise<void> {
+  const root = path.resolve(baseDir);
+  await mkdir(root, { recursive: true });
+  const index = {
+    artifactVersion: "harness.experiment-matrix-artifact-set-index.v1",
+    kind: "experiment-matrix-artifact-set-index",
+    updatedAt: new Date().toISOString(),
+    artifactSets: listExperimentMatrixArtifactSetsForBaseDir(root).map((set) => ({
+      id: set.id,
+      createdAt: set.createdAt,
+      matrixId: set.matrixId,
+      relativeFiles: set.relativeFiles
+    }))
+  };
+  await writeFile(experimentMatrixArtifactSetIndexPath(root), `${JSON.stringify(redactSecrets(index), null, 2)}\n`, "utf8");
+}
+
+function experimentMatrixArtifactSetIndexPath(baseDir: string): string {
+  return path.join(path.resolve(baseDir), MATRIX_ARTIFACT_SET_INDEX_FILE);
+}
+
+async function storedExperimentMatrixArtifactSetFromIndexRecord(
+  baseDir: string,
+  value: unknown
+): Promise<StoredExperimentMatrixArtifactSet | null> {
+  if (!isRecord(value) || typeof value.id !== "string") return null;
+  const indexedFiles = experimentMatrixArtifactFilesFromUnknown(value.relativeFiles);
+  if (!indexedFiles) return null;
+  const restored = await storedExperimentMatrixArtifactSetFromManifestDirectory(baseDir, value.id);
+  return restored && equalExperimentMatrixArtifactFiles(restored.relativeFiles, indexedFiles) ? restored : null;
+}
+
+async function loadExperimentMatrixArtifactSetsFromManifests(baseDir: string, skipIds: Set<string>): Promise<string[]> {
+  let entries: Array<{ isDirectory(): boolean; name: string }>;
+  try {
+    entries = await readdir(path.resolve(baseDir), { withFileTypes: true });
+  } catch (error) {
+    if (isFileReadNotFound(error)) return [];
+    throw new HttpError(500, "Experiment matrix artifact set directory could not be read.");
+  }
+  const loaded: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !GENERATED_ARTIFACT_SET_ID_PATTERN.test(entry.name) || skipIds.has(entry.name)) continue;
+    const restored = await storedExperimentMatrixArtifactSetFromManifestDirectory(baseDir, entry.name);
+    if (!restored) continue;
+    saveExperimentMatrixArtifactSet(restored);
+    skipIds.add(restored.id);
+    loaded.push(restored.id);
+  }
+  return loaded;
+}
+
+async function storedExperimentMatrixArtifactSetFromManifestDirectory(
+  baseDir: string,
+  id: string
+): Promise<StoredExperimentMatrixArtifactSet | null> {
+  if (!GENERATED_ARTIFACT_SET_ID_PATTERN.test(id)) return null;
+  try {
+    const root = path.resolve(baseDir);
+    const outputDir = resolveGeneratedArtifactDirectory(root, id);
+    await assertExistingArtifactSetDirectoryInsideBase(root, outputDir);
+    const manifestPath = resolveUnderDirectory(outputDir, "manifest.json");
+    await assertRegularFileInsideArtifactSet({ baseDir: root, outputDir, absolutePath: manifestPath });
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as unknown;
+    if (!isRecord(manifest) || manifest.artifactVersion !== MATRIX_ARTIFACT_VERSION || manifest.kind !== "experiment-matrix") return null;
+    const createdAt = stringField(manifest, "createdAt");
+    const matrixId = stringField(manifest, "matrixId");
+    const relativeFiles = experimentMatrixArtifactFilesFromUnknown(manifest.files);
+    if (!createdAt || !matrixId || !relativeFiles) return null;
+    return {
+      id,
+      createdAt,
+      matrixId,
+      outputDir,
+      files: absoluteExperimentMatrixArtifactFiles(outputDir, relativeFiles),
+      relativeFiles
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -5320,6 +5705,68 @@ function isExpectedPublicTournamentArtifactFileSet(files: StoredPublicTournament
   );
 }
 
+function experimentMatrixArtifactFilesFromUnknown(value: unknown): StoredExperimentMatrixArtifactFiles | null {
+  if (!isRecord(value)) return null;
+  const manifest = stringField(value, "manifest");
+  const specNormalized = stringField(value, "specNormalized");
+  const cells = stringField(value, "cells");
+  const statistics = stringField(value, "statistics");
+  const summaryMarkdown = stringField(value, "summaryMarkdown");
+  const modelStatsCsv = stringField(value, "modelStatsCsv");
+  const profileStatsCsv = stringField(value, "profileStatsCsv");
+  const pairwiseModelComparisonsCsv = stringField(value, "pairwiseModelComparisonsCsv");
+  if (
+    !manifest ||
+    !specNormalized ||
+    !cells ||
+    !statistics ||
+    !summaryMarkdown ||
+    !modelStatsCsv ||
+    !profileStatsCsv ||
+    !pairwiseModelComparisonsCsv ||
+    !Array.isArray(value.tournaments)
+  ) {
+    return null;
+  }
+  const tournaments: StoredExperimentMatrixArtifactFiles["tournaments"] = [];
+  for (const item of value.tournaments) {
+    if (!isRecord(item)) return null;
+    const cellId = stringField(item, "cellId");
+    const tournamentManifest = stringField(item, "manifest");
+    if (!cellId || !tournamentManifest) return null;
+    tournaments.push({ cellId, manifest: tournamentManifest });
+  }
+  const files = {
+    manifest,
+    specNormalized,
+    cells,
+    statistics,
+    summaryMarkdown,
+    modelStatsCsv,
+    profileStatsCsv,
+    pairwiseModelComparisonsCsv,
+    tournaments
+  } satisfies StoredExperimentMatrixArtifactFiles;
+  return isExpectedExperimentMatrixArtifactFileSet(files) ? files : null;
+}
+
+function isExpectedExperimentMatrixArtifactFileSet(files: StoredExperimentMatrixArtifactFiles): boolean {
+  return (
+    files.manifest === "manifest.json" &&
+    files.specNormalized === "spec.normalized.json" &&
+    files.cells === "cells.jsonl" &&
+    files.statistics === "statistics.json" &&
+    files.summaryMarkdown === "summary.md" &&
+    files.modelStatsCsv === "model_stats.csv" &&
+    files.profileStatsCsv === "profile_stats.csv" &&
+    files.pairwiseModelComparisonsCsv === "pairwise_model_comparisons.csv" &&
+    files.tournaments.every((file) => {
+      if (!/^[A-Za-z0-9_.-]+$/.test(file.cellId)) return false;
+      return file.manifest === `tournaments/${file.cellId}/manifest.json`;
+    })
+  );
+}
+
 function isWriterTournamentMatchArtifactFile(file: string, extension: ".json" | ".jsonl"): boolean {
   if (!file.startsWith("matches/") || !file.endsWith(extension)) return false;
   const matchStem = file.slice("matches/".length, -extension.length);
@@ -5370,7 +5817,33 @@ function absolutePublicTournamentArtifactFiles(
   };
 }
 
+function absoluteExperimentMatrixArtifactFiles(
+  outputDir: string,
+  files: StoredExperimentMatrixArtifactFiles
+): ExperimentMatrixArtifactWriteResult["files"] {
+  const resolve = (relativePath: string) => resolveUnderDirectory(outputDir, normalizeRequestedArtifactPath(relativePath));
+  return {
+    manifest: resolve(files.manifest),
+    specNormalized: resolve(files.specNormalized),
+    cells: resolve(files.cells),
+    statistics: resolve(files.statistics),
+    summaryMarkdown: resolve(files.summaryMarkdown),
+    modelStatsCsv: resolve(files.modelStatsCsv),
+    profileStatsCsv: resolve(files.profileStatsCsv),
+    pairwiseModelComparisonsCsv: resolve(files.pairwiseModelComparisonsCsv),
+    tournamentsDir: resolveUnderDirectory(outputDir, "tournaments"),
+    tournaments: files.tournaments.map((file) => ({ cellId: file.cellId, manifest: resolve(file.manifest) }))
+  };
+}
+
 function equalTournamentArtifactFiles(left: StoredTournamentArtifactFiles, right: StoredTournamentArtifactFiles): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function equalExperimentMatrixArtifactFiles(
+  left: StoredExperimentMatrixArtifactFiles,
+  right: StoredExperimentMatrixArtifactFiles
+): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
@@ -5387,6 +5860,26 @@ function getTournamentArtifactSetForBaseDir(id: string, baseDir: string | undefi
 }
 
 function isTournamentArtifactSetInsideBaseDir(set: StoredTournamentArtifactSet, baseDir: string): boolean {
+  const root = path.resolve(baseDir);
+  const outputDir = path.resolve(set.outputDir);
+  return outputDir !== root && outputDir.startsWith(root + path.sep);
+}
+
+function listExperimentMatrixArtifactSetsForBaseDir(baseDir: string | undefined): StoredExperimentMatrixArtifactSet[] {
+  if (!baseDir) return listExperimentMatrixArtifactSets();
+  return listExperimentMatrixArtifactSets().filter((set) => isExperimentMatrixArtifactSetInsideBaseDir(set, baseDir));
+}
+
+function getExperimentMatrixArtifactSetForBaseDir(
+  id: string,
+  baseDir: string | undefined
+): StoredExperimentMatrixArtifactSet | undefined {
+  const set = getExperimentMatrixArtifactSet(id);
+  if (!set || (baseDir && !isExperimentMatrixArtifactSetInsideBaseDir(set, baseDir))) return undefined;
+  return set;
+}
+
+function isExperimentMatrixArtifactSetInsideBaseDir(set: StoredExperimentMatrixArtifactSet, baseDir: string): boolean {
   const root = path.resolve(baseDir);
   const outputDir = path.resolve(set.outputDir);
   return outputDir !== root && outputDir.startsWith(root + path.sep);
@@ -6062,8 +6555,30 @@ function tournamentArtifactDownloads(set: StoredTournamentArtifactSet): StoredTo
   return mapTournamentArtifactFiles(set.relativeFiles, (relativePath) => tournamentArtifactDownloadUrl(set.id, relativePath));
 }
 
+function serializeExperimentMatrixArtifactSet(set: StoredExperimentMatrixArtifactSet): object {
+  return {
+    artifactSetId: set.id,
+    id: set.id,
+    createdAt: set.createdAt,
+    matrixId: set.matrixId,
+    files: set.relativeFiles,
+    downloads: experimentMatrixArtifactDownloads(set)
+  };
+}
+
+function experimentMatrixArtifactDownloads(set: StoredExperimentMatrixArtifactSet): StoredExperimentMatrixArtifactFiles {
+  return mapExperimentMatrixArtifactFiles(set.relativeFiles, (relativePath) => experimentMatrixArtifactDownloadUrl(set.id, relativePath));
+}
+
 function tournamentArtifactDownloadUrl(artifactSetId: string, relativePath: string): string {
   return `/api/tournament-artifacts/${encodeURIComponent(artifactSetId)}/files/${relativePath
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/")}`;
+}
+
+function experimentMatrixArtifactDownloadUrl(artifactSetId: string, relativePath: string): string {
+  return `/api/experiments/matrix/artifacts/${encodeURIComponent(artifactSetId)}/files/${relativePath
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/")}`;
@@ -6100,6 +6615,27 @@ function relativeTournamentArtifactFiles(written: TournamentArtifactWriteResult)
     matches: written.files.matches.map((file) => relativeArtifactPath(written.outputDir, file)),
     matchesJsonl: written.files.matchesJsonl.map((file) => relativeArtifactPath(written.outputDir, file))
   } satisfies StoredResearchTournamentArtifactFiles;
+}
+
+function relativeExperimentMatrixArtifactFiles(
+  written: ExperimentMatrixArtifactWriteResult
+): StoredExperimentMatrixArtifactFiles {
+  return {
+    manifest: relativeArtifactPath(written.outputDir, written.files.manifest),
+    specNormalized: relativeArtifactPath(written.outputDir, written.files.specNormalized),
+    cells: relativeArtifactPath(written.outputDir, written.files.cells),
+    statistics: relativeArtifactPath(written.outputDir, written.files.statistics),
+    summaryMarkdown: relativeArtifactPath(written.outputDir, written.files.summaryMarkdown),
+    modelStatsCsv: relativeArtifactPath(written.outputDir, written.files.modelStatsCsv),
+    profileStatsCsv: relativeArtifactPath(written.outputDir, written.files.profileStatsCsv),
+    pairwiseModelComparisonsCsv: relativeArtifactPath(written.outputDir, written.files.pairwiseModelComparisonsCsv),
+    // Matrix writer already returns nested tournament manifests relative to the
+    // matrix root. Validate those strings rather than treating them as cwd paths.
+    tournaments: written.files.tournaments.map((file) => ({
+      cellId: file.cellId,
+      manifest: normalizeRequestedArtifactPath(file.manifest.split(path.sep).join("/"))
+    }))
+  };
 }
 
 function relativeArtifactPath(rootDir: string, absolutePath: string): string {
@@ -6146,6 +6682,23 @@ function mapTournamentArtifactFiles(
   } satisfies StoredResearchTournamentArtifactFiles;
 }
 
+function mapExperimentMatrixArtifactFiles(
+  files: StoredExperimentMatrixArtifactFiles,
+  mapFile: (relativePath: string) => string
+): StoredExperimentMatrixArtifactFiles {
+  return {
+    manifest: mapFile(files.manifest),
+    specNormalized: mapFile(files.specNormalized),
+    cells: mapFile(files.cells),
+    statistics: mapFile(files.statistics),
+    summaryMarkdown: mapFile(files.summaryMarkdown),
+    modelStatsCsv: mapFile(files.modelStatsCsv),
+    profileStatsCsv: mapFile(files.profileStatsCsv),
+    pairwiseModelComparisonsCsv: mapFile(files.pairwiseModelComparisonsCsv),
+    tournaments: files.tournaments.map((file) => ({ cellId: file.cellId, manifest: mapFile(file.manifest) }))
+  };
+}
+
 async function resolveRegisteredTournamentArtifactFile(
   set: StoredTournamentArtifactSet,
   requestedPath: string | undefined,
@@ -6161,8 +6714,26 @@ async function resolveRegisteredTournamentArtifactFile(
   return { relativePath, absolutePath };
 }
 
+async function resolveRegisteredExperimentMatrixArtifactFile(
+  set: StoredExperimentMatrixArtifactSet,
+  requestedPath: string | undefined,
+  baseDir: string | undefined
+): Promise<{ relativePath: string; absolutePath: string }> {
+  const relativePath = normalizeRequestedArtifactPath(requestedPath);
+  if (!registeredExperimentMatrixArtifactFiles(set).has(relativePath)) {
+    throw new HttpError(404, "experiment matrix artifact file not found");
+  }
+  const absolutePath = resolveUnderDirectory(set.outputDir, relativePath);
+  await assertRegularFileInsideArtifactSet({ baseDir, outputDir: set.outputDir, absolutePath });
+  return { relativePath, absolutePath };
+}
+
 function registeredTournamentArtifactFiles(set: StoredTournamentArtifactSet): Set<string> {
   return new Set(flattenTournamentArtifactFiles(set.relativeFiles));
+}
+
+function registeredExperimentMatrixArtifactFiles(set: StoredExperimentMatrixArtifactSet): Set<string> {
+  return new Set(flattenExperimentMatrixArtifactFiles(set.relativeFiles));
 }
 
 function flattenTournamentArtifactFiles(files: StoredTournamentArtifactFiles): string[] {
@@ -6191,6 +6762,20 @@ function flattenTournamentArtifactFiles(files: StoredTournamentArtifactFiles): s
     files.leaderboardCsv,
     ...files.matches,
     ...files.matchesJsonl
+  ];
+}
+
+function flattenExperimentMatrixArtifactFiles(files: StoredExperimentMatrixArtifactFiles): string[] {
+  return [
+    files.manifest,
+    files.specNormalized,
+    files.cells,
+    files.statistics,
+    files.summaryMarkdown,
+    files.modelStatsCsv,
+    files.profileStatsCsv,
+    files.pairwiseModelComparisonsCsv,
+    ...files.tournaments.map((file) => file.manifest)
   ];
 }
 
@@ -6689,6 +7274,64 @@ function normalizeTournamentExperimentRequest(body: unknown): NormalizedTourname
     timeout: process.env.TOURNAMENT_TIMEOUT_MS,
     temperature: process.env.AGENT_TEMPERATURE ?? 0.7
   });
+}
+
+function normalizeMatrixExperimentRequest(body: unknown): NormalizedMatrixExperiment {
+  const record = isRecord(body) ? body : {};
+  const specInput = record.spec ?? record;
+  const overrides = removeUndefined({
+    models: record.models,
+    profiles: record.profiles,
+    assignment: record.assignment as TournamentExperimentSpecV1["assignment"],
+    seed: typeof record.seed === "string" ? record.seed : undefined,
+    games: record.games,
+    maxTransitions: record.maxTransitions ?? record.steps,
+    timeout: record.timeoutMs ?? record.timeout,
+    temperature: record.temperature,
+    json: record.json as TournamentExperimentSpecV1["json"],
+    continueOnError: record.continueOnError,
+    config: record.config as TournamentExperimentSpecV1["config"]
+  }) as Partial<TournamentExperimentSpecV1>;
+  return normalizeMatrixExperimentSpec(mergeMatrixExperimentOverrides(specInput, overrides), {
+    models: normalizeModelList(process.env.LLM_MODELS),
+    profiles: process.env.AGENT_PROFILES,
+    assignment: process.env.AGENT_ASSIGNMENT,
+    games: 3,
+    maxTransitions: process.env.MATCH_MAX_TRANSITIONS,
+    timeout: process.env.TOURNAMENT_TIMEOUT_MS,
+    temperature: process.env.AGENT_TEMPERATURE ?? 0.7
+  });
+}
+
+function matrixExperimentTimeoutMs(experiment: NormalizedMatrixExperiment): number | undefined {
+  const timeouts = experiment.cells.map((cell) => cell.tournament.timeoutMs);
+  if (timeouts.some((value) => typeof value !== "number" || !Number.isFinite(value) || value <= 0)) return undefined;
+  return (timeouts as number[]).reduce((sum, value) => sum + value, 0);
+}
+
+function matrixGamesTruncated(cell: ExperimentMatrixCellResult): number {
+  return cell.tournament?.gamesTruncated ?? cell.tournament?.episodes.filter((episode) => episode.status === "truncated").length ?? 0;
+}
+
+function serializeExperimentMatrixCellSummaryForApi(cell: ExperimentMatrixCellResult): object {
+  return {
+    index: cell.index,
+    id: cell.id,
+    label: cell.label,
+    group: cell.group,
+    status: cell.status,
+    elapsedMs: cell.elapsedMs,
+    tournamentSeed: cell.tournament?.seed ?? null,
+    gamesRequested: cell.tournament?.gamesRequested ?? 0,
+    gamesCompleted: cell.tournament?.gamesCompleted ?? 0,
+    gamesTruncated: matrixGamesTruncated(cell),
+    gamesFailed: cell.tournament?.gamesFailed ?? 0,
+    models: cell.tournament?.models ?? [],
+    profileCount: cell.tournament?.profiles.length ?? 0,
+    episodes: cell.tournament?.episodes.map(serializeTournamentEpisodeSummaryForApi) ?? [],
+    error: cell.error ? sanitizeApiErrorText(cell.error) : null,
+    hasArtifacts: Boolean(cell.tournament?.artifacts?.length)
+  };
 }
 
 function removeUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {

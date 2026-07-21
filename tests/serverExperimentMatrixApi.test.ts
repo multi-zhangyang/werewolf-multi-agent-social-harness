@@ -71,10 +71,12 @@ describe("experiment matrix server API", () => {
       matrixId: "server-matrix-artifacts",
       status: "completed",
       cellsRequested: 1,
-      cellsCompleted: 1,
+      cellsCompleted: 0,
+      cellsTruncated: 1,
       cellsFailed: 0,
       gamesRequested: 1,
-      gamesCompleted: 1,
+      gamesCompleted: 0,
+      gamesTruncated: 1,
       gamesFailed: 0,
       artifacts: {
         artifactSetId: expect.any(String),
@@ -103,8 +105,10 @@ describe("experiment matrix server API", () => {
       matrixId: "server-matrix-artifacts",
       status: {
         cellsRequested: 1,
-        cellsCompleted: 1,
-        gamesCompleted: 1
+        cellsCompleted: 0,
+        cellsTruncated: 1,
+        gamesCompleted: 0,
+        gamesTruncated: 1
       },
       denominatorPolicy: {
         superiorityClaims: false
@@ -115,9 +119,10 @@ describe("experiment matrix server API", () => {
       id: "server-matrix-alpha-beta",
       label: "Alpha Beta",
       group: "baseline",
-      status: "completed",
+      status: "truncated",
       gamesRequested: 1,
-      gamesCompleted: 1,
+      gamesCompleted: 0,
+      gamesTruncated: 1,
       gamesFailed: 0,
       models: ["alpha", "beta"],
       hasArtifacts: true
@@ -241,11 +246,13 @@ describe("experiment matrix server API", () => {
       ok: true,
       matrixId: "server-matrix-overrides",
       gamesRequested: 1,
-      gamesCompleted: 1
+      gamesCompleted: 0,
+      gamesTruncated: 1
     });
     expect(exported.body.cells[0]).toMatchObject({
       gamesRequested: 1,
-      gamesCompleted: 1,
+      gamesCompleted: 0,
+      gamesTruncated: 1,
       models: ["override-alpha", "override-beta"]
     });
     expect(JSON.stringify(exported.body)).not.toContain("stale-model");

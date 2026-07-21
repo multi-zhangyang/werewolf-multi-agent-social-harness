@@ -351,6 +351,60 @@ curl -X POST http://localhost:8787/api/tournaments/run \
   -d '{"spec":{"version":"werewolf.experiment.v1","id":"wolf-vs-village","kind":"tournament","profiles":[{"id":"wolf","model":"model-wolf"},{"id":"village","model":"model-village"}],"assignment":{"strategy":"team","teams":{"werewolves":"wolf","village":"village"},"fallback":"error"}},"games":1,"maxTransitions":2}'
 ```
 
+## Experiment Matrix Control Plane
+
+`MatrixExperimentSpecV1` (`"harness.experiment-matrix.v1"`) composes many
+normalized tournament experiments without changing the generic tournament
+contract. A matrix may enumerate explicit `cells`, or expand `dimensions` for
+models, profiles, assignments, seeds, game counts, transition bounds, and
+temperatures. Every cell is run by the harness tournament control plane; the
+matrix is an aggregation and artifact layer, not a browser-side simulation.
+
+```bash
+npm run arena:matrix -- --spec=experiments/matrix-smoke.json
+```
+
+The local API accepts a matrix directly or under `spec`:
+
+```bash
+curl -X POST http://localhost:8787/api/experiments/matrix/run \
+  -H 'content-type: application/json' \
+  -d '{"version":"harness.experiment-matrix.v1","id":"model-screen","kind":"matrix","base":{"models":["model-a","model-b"],"games":2,"maxTransitions":24},"dimensions":{"seeds":["screen-a","screen-b"]}}'
+```
+
+Top-level tournament-shaped fields (`models`, `profiles`, `assignment`, `seed`,
+`games`, `maxTransitions`, `timeout`, `temperature`, `config`) are safe
+overrides for the matrix `base` when the request contains `spec`. Server-side
+validation rejects output directories and related filesystem controls both in
+the base and in every cell.
+
+Matrix lifecycle accounting is deliberately not binary:
+
+- `cellsCompleted` / `gamesCompleted`: domain-terminal episodes.
+- `cellsTruncated` / `gamesTruncated`: deliberately bounded, auditable,
+  non-terminal episodes.
+- `cellsFailed` / `gamesFailed`: preparation or execution failures.
+
+The matrix result remains `status: "completed"` / `ok: true` if its control
+plane scheduled without failures, even if bounded cells are truncated. This
+does not imply a terminal game outcome: lifecycle counters and each cell's
+`completed | truncated | failed` status remain explicit. Model/profile win-rate
+and reward tables use terminal completed seats only; truncated and failed
+episodes remain in status denominators and never become synthetic scorecard
+rows. Pairwise p-values are descriptive, unpaired seat-level screening values
+with Holm adjustment, not claims of causal or statistical model superiority.
+
+With `exportArtifacts: true`, the server writes an allowlisted research bundle
+only when `MATRIX_ARTIFACT_BASE_DIR` is configured. If only
+`TOURNAMENT_ARTIFACT_BASE_DIR` is configured, matrix bundles are placed under
+`<tournament-root>/matrices` so tournament and matrix recovery scanners cannot
+confuse each other's UUID directories. Matrix bundles are local research
+artifacts because their nested tournament manifests include research identity
+and seed material; they are never eligible for public tournament-share routes.
+The only registered downloads are the matrix manifest/spec/cells/statistics,
+summary and CSV files, plus each nested tournament `manifest.json` — not the
+entire nested tournament directory.
+
 ## Artifact Requirements
 
 A serious multi-agent adversarial harness must preserve:
