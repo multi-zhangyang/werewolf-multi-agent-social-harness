@@ -70,14 +70,34 @@ export interface AgentScaffoldState<TObservation = unknown, TPending = unknown, 
   lastAction?: SocialAction<TCommand>;
 }
 
-export interface AgentDecisionInput<TObservation = unknown, TPending = unknown, TCommand = unknown> {
-  agent: AgentScaffoldState<TObservation, TPending, TCommand>;
+export interface AgentReasonerOutput<TAdvice = unknown> {
+  /** Private reflection/memo. It is advisory and never an environment command. */
+  memo: string;
+  /** Optional typed domain advice; policy/arbitration must still validate it. */
+  advice?: TAdvice;
+}
+
+export interface AgentDecisionInput<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+> {
+  /** A cloned, actor-private canonical state projection. */
+  agent: TAgentState;
+  /** A cloned social-state projection available to generic scorers. */
+  social: AgentSocialState<TObservation, TPending, TCommand>;
   observation: TObservation;
   pendingAction: TPending;
+  /** Runner-owned transaction/evidence context for this staged decision. */
+  observationContext?: SocialActorObservationContext<TPending>;
   /** Content-free deterministic selection record for this actor turn. */
   memoryRetrieval?: MemoryRetrievalRecord;
   /** Cloned actor-private entries corresponding exactly to memoryRetrieval. */
   recalledMemory?: Array<SocialMemoryEntry<TObservation, TPending, TCommand>>;
+  /** Present only after the optional reasoner completes. */
+  reasoner?: AgentReasonerOutput<TReasonerAdvice>;
 }
 
 export type AgentActionCandidateSource =
@@ -154,10 +174,16 @@ export interface AgentActionArbitrationSummary {
   candidates: AgentActionCandidateSummary[];
 }
 
-export interface AgentActionArbitrationInput<TObservation = unknown, TPending = unknown, TCommand = unknown>
-  extends AgentDecisionInput<TObservation, TPending, TCommand> {
+export interface AgentActionArbitrationInput<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+> extends AgentDecisionInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice> {
   policyId: string;
   reasonerMemo?: string;
+  reasonerAdvice?: TReasonerAdvice;
   candidates: Array<AgentActionCandidate<TCommand>>;
 }
 
@@ -168,25 +194,43 @@ export interface AgentActionArbitrationDecision {
   evidenceRefs?: EvidenceRef[];
 }
 
-export interface AgentActionArbitrator<TObservation = unknown, TPending = unknown, TCommand = unknown> {
+export interface AgentActionArbitrator<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+> {
   id: string;
   arbitrate(
-    input: AgentActionArbitrationInput<TObservation, TPending, TCommand>
+    input: AgentActionArbitrationInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>
   ): AgentActionArbitrationDecision | Promise<AgentActionArbitrationDecision>;
 }
 
-export interface AgentActionCandidateScoringInput<TObservation = unknown, TPending = unknown, TCommand = unknown>
-  extends AgentDecisionInput<TObservation, TPending, TCommand> {
+export interface AgentActionCandidateScoringInput<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+> extends AgentDecisionInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice> {
   policyId: string;
   reasonerMemo?: string;
+  reasonerAdvice?: TReasonerAdvice;
   candidate: AgentActionCandidate<TCommand>;
   candidates: Array<AgentActionCandidate<TCommand>>;
 }
 
-export interface AgentActionCandidateScorer<TObservation = unknown, TPending = unknown, TCommand = unknown> {
+export interface AgentActionCandidateScorer<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+> {
   id: string;
   score(
-    input: AgentActionCandidateScoringInput<TObservation, TPending, TCommand>
+    input: AgentActionCandidateScoringInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>
   ):
     | AgentActionCandidateScoreContribution
     | undefined
@@ -221,34 +265,103 @@ export interface AgentActionCandidateScorerConfig {
   options?: unknown;
 }
 
-export type AgentActionCandidateScorerFactory<TObservation = unknown, TPending = unknown, TCommand = unknown> = (
+export type AgentActionCandidateScorerFactory<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+> = (
   config: AgentActionCandidateScorerConfig
-) => AgentActionCandidateScorer<TObservation, TPending, TCommand>;
+) => AgentActionCandidateScorer<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
 
-export type AgentActionCandidateScorerRegistry<TObservation = unknown, TPending = unknown, TCommand = unknown> = Record<
+export type AgentActionCandidateScorerRegistry<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+> = Record<
   string,
-  AgentActionCandidateScorerFactory<TObservation, TPending, TCommand>
+  AgentActionCandidateScorerFactory<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>
 >;
 
-export interface AgentPolicy<TObservation = unknown, TPending = unknown, TCommand = unknown> {
+export interface AgentPolicy<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+> {
   id: string;
-  decide(input: AgentDecisionInput<TObservation, TPending, TCommand>): SocialAction<TCommand>;
-  generateCandidates?(input: AgentDecisionInput<TObservation, TPending, TCommand>): Array<AgentActionCandidate<TCommand>>;
+  decide(input: AgentDecisionInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>): SocialAction<TCommand>;
+  generateCandidates?(
+    input: AgentDecisionInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>
+  ): Array<AgentActionCandidate<TCommand>>;
 }
 
-export interface AgentReasoner<TObservation = unknown, TPending = unknown, TCommand = unknown> {
+export interface AgentReasoner<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+> {
   id: string;
-  reflect(input: AgentDecisionInput<TObservation, TPending, TCommand>): Promise<string> | string;
+  reflect(
+    input: AgentDecisionInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>
+  ): Promise<string | AgentReasonerOutput<TReasonerAdvice>> | string | AgentReasonerOutput<TReasonerAdvice>;
 }
 
-export interface ScaffoldedActorOptions<TObservation = unknown, TPending = unknown, TCommand = unknown> {
+/**
+ * Domain-neutral bridge for actors whose canonical private state is not the
+ * default {@link AgentScaffoldState}. The scaffold still owns transaction
+ * staging, candidate/arbitration sequencing, and receipt-gated replacement;
+ * the adapter only reduces and records its single serializable domain state.
+ */
+export interface ScaffoldCanonicalStateAdapter<
+  TAgentState,
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TReasonerAdvice = unknown
+> {
+  clone(state: TAgentState): TAgentState;
+  socialState(state: TAgentState): AgentSocialState<TObservation, TPending, TCommand>;
+  observe(input: {
+    state: TAgentState;
+    observation: TObservation;
+    context?: SocialActorObservationContext<TPending>;
+  }): void;
+  afterDecision(input: {
+    state: TAgentState;
+    observation: TObservation;
+    pendingAction: TPending;
+    action: SocialAction<TCommand>;
+    decisionInput: AgentDecisionInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
+    reasonerOutput?: AgentReasonerOutput<TReasonerAdvice>;
+    arbitration?: AgentActionArbitrationSummary;
+    context?: SocialActorObservationContext<TPending>;
+  }): void;
+}
+
+export interface ScaffoldedActorOptions<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+> {
   id: string;
   profile: SocialAgentProfile;
-  policy: AgentPolicy<TObservation, TPending, TCommand>;
-  reasoner?: AgentReasoner<TObservation, TPending, TCommand>;
-  candidateScorers?: Array<AgentActionCandidateScorer<TObservation, TPending, TCommand>>;
-  actionArbitrator?: AgentActionArbitrator<TObservation, TPending, TCommand>;
+  policy: AgentPolicy<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
+  reasoner?: AgentReasoner<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
+  candidateScorers?: Array<AgentActionCandidateScorer<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>>;
+  actionArbitrator?: AgentActionArbitrator<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
   initialSocialState?: AgentSocialState<TObservation, TPending, TCommand>;
+  /** Required together with canonicalStateAdapter; it is the sole durable private state owner. */
+  initialCanonicalState?: TAgentState;
+  canonicalStateAdapter?: ScaffoldCanonicalStateAdapter<TAgentState, TObservation, TPending, TCommand, TReasonerAdvice>;
   maxMemoryEntries?: number;
 }
 
@@ -257,31 +370,40 @@ export interface ScaffoldedActorOptions<TObservation = unknown, TPending = unkno
  * its observation, social ingestion, memo, and action decision isolated from
  * the durable agent state until a committed receipt arrives.
  */
-interface StagedScaffoldTurn<TObservation = unknown, TPending = unknown, TCommand = unknown> {
+interface StagedScaffoldTurn<TAgentState, TObservation = unknown, TPending = unknown> {
   traceId: string;
-  state: AgentScaffoldState<TObservation, TPending, TCommand>;
+  state: TAgentState;
   seenMessageIds: Set<string>;
   observationContext?: SocialActorObservationContext<TPending>;
+  observation?: TObservation;
 }
 
-export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, TCommand = unknown>
+export class ScaffoldedSocialActor<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+>
   implements SocialActor<TObservation, TPending, TCommand>
 {
   readonly id: string;
   readonly profile: SocialAgentProfile;
-  readonly policy: AgentPolicy<TObservation, TPending, TCommand>;
-  readonly reasoner?: AgentReasoner<TObservation, TPending, TCommand>;
-  readonly candidateScorers: Array<AgentActionCandidateScorer<TObservation, TPending, TCommand>>;
-  readonly actionArbitrator?: AgentActionArbitrator<TObservation, TPending, TCommand>;
+  readonly policy: AgentPolicy<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
+  readonly reasoner?: AgentReasoner<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
+  readonly candidateScorers: Array<AgentActionCandidateScorer<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>>;
+  readonly actionArbitrator?: AgentActionArbitrator<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
   readonly maxMemoryEntries: number;
-  private mutableState: AgentScaffoldState<TObservation, TPending, TCommand>;
+  private readonly canonicalStateAdapter?: ScaffoldCanonicalStateAdapter<TAgentState, TObservation, TPending, TCommand, TReasonerAdvice>;
+  private mutableState: TAgentState;
   private latestObservationContext?: SocialActorObservationContext<TPending>;
+  private latestObservation?: TObservation;
   private readonly seenMessageIds = new Set<string>();
-  private readonly stagedTurns = new Map<string, StagedScaffoldTurn<TObservation, TPending, TCommand>>();
+  private readonly stagedTurns = new Map<string, StagedScaffoldTurn<TAgentState, TObservation, TPending>>();
   private latestStagedTraceId?: string;
-  private activeStagedTurn?: StagedScaffoldTurn<TObservation, TPending, TCommand>;
+  private activeStagedTurn?: StagedScaffoldTurn<TAgentState, TObservation, TPending>;
 
-  constructor(options: ScaffoldedActorOptions<TObservation, TPending, TCommand>) {
+  constructor(options: ScaffoldedActorOptions<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>) {
     this.id = options.id;
     this.profile = cloneJson(options.profile);
     this.policy = options.policy;
@@ -289,6 +411,20 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
     this.candidateScorers = [...(options.candidateScorers ?? [])];
     this.actionArbitrator = options.actionArbitrator;
     this.maxMemoryEntries = options.maxMemoryEntries ?? 200;
+    this.canonicalStateAdapter = options.canonicalStateAdapter;
+    if (this.canonicalStateAdapter) {
+      if (options.initialCanonicalState === undefined) {
+        throw new Error(`Scaffolded actor ${options.id} requires initialCanonicalState with canonicalStateAdapter.`);
+      }
+      if (options.initialSocialState) {
+        throw new Error(`Scaffolded actor ${options.id} cannot combine initialSocialState with canonicalStateAdapter.`);
+      }
+      this.mutableState = this.canonicalStateAdapter.clone(options.initialCanonicalState);
+      return;
+    }
+    if (options.initialCanonicalState !== undefined) {
+      throw new Error(`Scaffolded actor ${options.id} requires canonicalStateAdapter for initialCanonicalState.`);
+    }
     if (options.initialSocialState && options.initialSocialState.agentId !== options.id) {
       throw new Error(`Initial social state belongs to ${options.initialSocialState.agentId}, expected ${options.id}.`);
     }
@@ -305,29 +441,40 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
             profile: options.profile,
             maxMemoryEntries: this.maxMemoryEntries
           })
-    };
-    hydrateSeenSocialMessageIds(this.mutableState.social, this.seenMessageIds);
+    } as TAgentState;
+    hydrateSeenSocialMessageIds(this.defaultState().social, this.seenMessageIds);
   }
 
-  get state(): AgentScaffoldState<TObservation, TPending, TCommand> {
-    return cloneJson(this.mutableState);
+  get state(): TAgentState {
+    return this.cloneState(this.mutableState);
   }
 
   observe(observation: TObservation, context?: SocialActorObservationContext<TPending>): void {
     const stagedTurn = context?.transactional === true && context.traceId ? this.createStagedTurn(context) : undefined;
     if (!stagedTurn) this.latestObservationContext = cloneJson(context);
     this.withActiveStagedTurn(stagedTurn, () => {
-      const state = this.workingState();
+      const observed = cloneJson(observation);
+      if (stagedTurn) stagedTurn.observation = cloneJson(observed);
+      else this.latestObservation = cloneJson(observed);
+      if (this.canonicalStateAdapter) {
+        this.canonicalStateAdapter.observe({
+          state: this.workingState(),
+          observation: observed,
+          context: cloneJson(this.workingObservationContext())
+        });
+        return;
+      }
+      const state = this.defaultState();
       state.observations += 1;
-      state.lastObservation = cloneJson(observation);
+      state.lastObservation = observed;
       this.remember({
         kind: "observation",
-        observation: cloneJson(observation),
+        observation: cloneJson(observed),
         source: "observation",
         visibility: "private",
         evidenceRefs: [{ artifact: "observation", seq: state.observations }]
       }, scaffoldMutationContext(this.workingObservationContext()));
-      const visibleMessages = extractVisibleSocialMessagesFromObservation(observation);
+      const visibleMessages = extractVisibleSocialMessagesFromObservation(observed);
       if (visibleMessages.length) {
         ingestVisibleSocialMessages({
           social: state.social,
@@ -345,18 +492,25 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
     const stagedTurn = this.latestStagedTraceId ? this.stagedTurns.get(this.latestStagedTraceId) : undefined;
     return this.withActiveStagedTurnAsync(stagedTurn, async () => {
       const state = this.workingState();
-      if (state.lastObservation === undefined) {
+      const observation = this.workingObservation();
+      if (observation === undefined) {
         throw new Error(`Scaffolded actor ${this.id} cannot decide before observe().`);
       }
-      const observation = state.lastObservation;
-      const recall = retrieveMemoryContext(state.social.memory, {
+      const recall = retrieveMemoryContext(this.workingSocialState().memory, {
         actorId: this.id,
         traceId: this.workingObservationContext()?.traceId,
         limit: 6
       });
       const input = this.decisionInput(observation, pending, recall.evidence, recall.entries);
-      const memo = await this.reasoner?.reflect(cloneJson(input));
-      if (memo) {
+      const reasonerOutput = normalizeAgentReasonerOutput(await this.reasoner?.reflect(cloneJson(input)));
+      const memo = reasonerOutput?.memo;
+      const decisionInput = reasonerOutput
+        ? {
+            ...input,
+            reasoner: cloneJson(reasonerOutput)
+          }
+        : input;
+      if (memo && !this.canonicalStateAdapter) {
         this.remember({
           kind: "memo",
           pendingAction: cloneJson(pending),
@@ -370,32 +524,46 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
           }
         }, scaffoldMutationContext(this.workingObservationContext()));
       }
-      const { action, arbitration } = await this.selectAction(input, memo);
+      const { action, arbitration } = await this.selectAction(decisionInput, memo);
       if (action.actorId !== this.id) {
         throw new Error(`Policy ${this.policy.id} returned action for ${action.actorId}, expected ${this.id}.`);
       }
       const actionWithArbitration = arbitration ? withArbitrationMetadata(action, arbitration) : action;
-      state.decisions += 1;
-      state.lastAction = cloneJson(actionWithArbitration);
-      this.remember({
-        kind: "decision",
-        pendingAction: cloneJson(pending),
-        action: cloneJson(actionWithArbitration),
-        source: "policy",
-        visibility: "private",
-        evidenceRefs: [{ artifact: "action", description: `policy:${this.policy.id}` }],
-        tags: arbitration ? ["policy-decision", "action-arbitration"] : ["policy-decision"],
-        metadata: arbitration
-          ? {
-              policyId: this.policy.id,
-              arbitration,
-              memoryRetrieval: cloneJson(input.memoryRetrieval)
-            }
-          : {
-              policyId: this.policy.id,
-              memoryRetrieval: cloneJson(input.memoryRetrieval)
-            }
-      }, scaffoldMutationContext(this.workingObservationContext()));
+      if (this.canonicalStateAdapter) {
+        this.canonicalStateAdapter.afterDecision({
+          state,
+          observation: cloneJson(observation),
+          pendingAction: cloneJson(pending),
+          action: cloneJson(actionWithArbitration),
+          decisionInput: cloneJson(decisionInput),
+          reasonerOutput: cloneJson(reasonerOutput),
+          arbitration: cloneJson(arbitration),
+          context: cloneJson(this.workingObservationContext())
+        });
+      } else {
+        const defaultState = this.defaultState();
+        defaultState.decisions += 1;
+        defaultState.lastAction = cloneJson(actionWithArbitration);
+        this.remember({
+          kind: "decision",
+          pendingAction: cloneJson(pending),
+          action: cloneJson(actionWithArbitration),
+          source: "policy",
+          visibility: "private",
+          evidenceRefs: [{ artifact: "action", description: `policy:${this.policy.id}` }],
+          tags: arbitration ? ["policy-decision", "action-arbitration"] : ["policy-decision"],
+          metadata: arbitration
+            ? {
+                policyId: this.policy.id,
+                arbitration,
+                memoryRetrieval: cloneJson(decisionInput.memoryRetrieval)
+              }
+            : {
+                policyId: this.policy.id,
+                memoryRetrieval: cloneJson(decisionInput.memoryRetrieval)
+              }
+        }, scaffoldMutationContext(this.workingObservationContext()));
+      }
       return cloneJson(actionWithArbitration);
     });
   }
@@ -408,13 +576,16 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
     if (this.latestStagedTraceId === transactionId) this.latestStagedTraceId = undefined;
     if (receipt.status !== "committed") return;
 
-    this.mutableState = cloneJson(stagedTurn.state);
-    this.seenMessageIds.clear();
-    for (const messageId of stagedTurn.seenMessageIds) this.seenMessageIds.add(messageId);
+    this.mutableState = this.cloneState(stagedTurn.state);
+    this.latestObservation = cloneJson(stagedTurn.observation);
+    if (!this.canonicalStateAdapter) {
+      this.seenMessageIds.clear();
+      for (const messageId of stagedTurn.seenMessageIds) this.seenMessageIds.add(messageId);
+    }
   }
 
   private async selectAction(
-    input: AgentDecisionInput<TObservation, TPending, TCommand>,
+    input: AgentDecisionInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>,
     reasonerMemo?: string
   ): Promise<{ action: SocialAction<TCommand>; arbitration?: AgentActionArbitrationSummary }> {
     const generated = this.policy.generateCandidates?.(cloneJson(input));
@@ -428,6 +599,7 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
           ...cloneJson(input),
           policyId: this.policy.id,
           reasonerMemo,
+          reasonerAdvice: cloneJson(input.reasoner?.advice),
           candidates: cloneJson(normalized)
         })
       : defaultActionArbitrationDecision(normalized);
@@ -450,7 +622,7 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
 
   private async scoreCandidates(
     candidates: Array<AgentActionCandidate<TCommand>>,
-    input: AgentDecisionInput<TObservation, TPending, TCommand>,
+    input: AgentDecisionInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>,
     reasonerMemo?: string
   ): Promise<Array<AgentActionCandidate<TCommand>>> {
     if (!this.candidateScorers.length) return candidates;
@@ -462,6 +634,7 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
           ...cloneJson(input),
           policyId: this.policy.id,
           reasonerMemo,
+          reasonerAdvice: cloneJson(input.reasoner?.advice),
           candidate: cloneJson(next),
           candidates: cloneJson(candidates)
         });
@@ -478,11 +651,13 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
     pending: TPending,
     memoryRetrieval?: MemoryRetrievalRecord,
     recalledMemory?: Array<SocialMemoryEntry<TObservation, TPending, TCommand>>
-  ): AgentDecisionInput<TObservation, TPending, TCommand> {
+  ): AgentDecisionInput<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice> {
     return {
-      agent: cloneJson(this.workingState()),
+      agent: this.cloneState(this.workingState()),
+      social: cloneJson(this.workingSocialState()),
       observation: cloneJson(observation),
       pendingAction: cloneJson(pending),
+      observationContext: cloneJson(this.workingObservationContext()),
       memoryRetrieval: cloneJson(memoryRetrieval),
       recalledMemory: cloneJson(recalledMemory)
     };
@@ -492,7 +667,7 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
     entry: Omit<ScaffoldMemoryEntry<TObservation, TPending, TCommand>, "seq" | "createdAt">,
     context?: SocialStateMutationContext
   ): void {
-    appendSocialMemory(this.workingState().social, {
+    appendSocialMemory(this.defaultState().social, {
       kind: entry.kind,
       source: entry.source,
       visibility: entry.visibility,
@@ -510,7 +685,7 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
   }
 
   private syncCompatibilityMemory(): void {
-    const state = this.workingState();
+    const state = this.defaultState();
     state.memory = state.social.memory.entries.map((memoryEntry) => ({
       seq: memoryEntry.seq,
       kind: memoryEntry.kind === "observation" || memoryEntry.kind === "decision" || memoryEntry.kind === "memo" ? memoryEntry.kind : "memo",
@@ -531,13 +706,13 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
 
   private createStagedTurn(
     context: SocialActorObservationContext<TPending>
-  ): StagedScaffoldTurn<TObservation, TPending, TCommand> {
+  ): StagedScaffoldTurn<TAgentState, TObservation, TPending> {
     const traceId = context.traceId;
     if (!traceId) throw new Error(`Scaffolded actor ${this.id} requires traceId for a staged turn.`);
     const transactionId = context.transactionId ?? traceId;
-    const stagedTurn: StagedScaffoldTurn<TObservation, TPending, TCommand> = {
+    const stagedTurn: StagedScaffoldTurn<TAgentState, TObservation, TPending> = {
       traceId,
-      state: cloneJson(this.mutableState),
+      state: this.cloneState(this.mutableState),
       seenMessageIds: new Set(this.seenMessageIds),
       observationContext: cloneJson(context)
     };
@@ -546,8 +721,29 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
     return stagedTurn;
   }
 
-  private workingState(): AgentScaffoldState<TObservation, TPending, TCommand> {
+  private workingState(): TAgentState {
     return this.activeStagedTurn?.state ?? this.mutableState;
+  }
+
+  private defaultState(): AgentScaffoldState<TObservation, TPending, TCommand> {
+    if (this.canonicalStateAdapter) {
+      throw new Error(`Scaffolded actor ${this.id} uses canonicalStateAdapter and has no default scaffold state.`);
+    }
+    return this.workingState() as unknown as AgentScaffoldState<TObservation, TPending, TCommand>;
+  }
+
+  private cloneState(state: TAgentState): TAgentState {
+    return this.canonicalStateAdapter ? this.canonicalStateAdapter.clone(state) : cloneJson(state);
+  }
+
+  private workingSocialState(): AgentSocialState<TObservation, TPending, TCommand> {
+    return this.canonicalStateAdapter
+      ? this.canonicalStateAdapter.socialState(this.workingState())
+      : this.defaultState().social;
+  }
+
+  private workingObservation(): TObservation | undefined {
+    return this.activeStagedTurn?.observation ?? this.latestObservation ?? (this.canonicalStateAdapter ? undefined : this.defaultState().lastObservation);
   }
 
   private workingSeenMessageIds(): Set<string> {
@@ -559,7 +755,7 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
   }
 
   private withActiveStagedTurn<TResult>(
-    stagedTurn: StagedScaffoldTurn<TObservation, TPending, TCommand> | undefined,
+    stagedTurn: StagedScaffoldTurn<TAgentState, TObservation, TPending> | undefined,
     operation: () => TResult
   ): TResult {
     const previous = this.activeStagedTurn;
@@ -572,7 +768,7 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
   }
 
   private async withActiveStagedTurnAsync<TResult>(
-    stagedTurn: StagedScaffoldTurn<TObservation, TPending, TCommand> | undefined,
+    stagedTurn: StagedScaffoldTurn<TAgentState, TObservation, TPending> | undefined,
     operation: () => Promise<TResult>
   ): Promise<TResult> {
     const previous = this.activeStagedTurn;
@@ -585,9 +781,15 @@ export class ScaffoldedSocialActor<TObservation = unknown, TPending = unknown, T
   }
 }
 
-export function createScaffoldedActor<TObservation, TPending, TCommand>(
-  options: ScaffoldedActorOptions<TObservation, TPending, TCommand>
-): ScaffoldedSocialActor<TObservation, TPending, TCommand> {
+export function createScaffoldedActor<
+  TObservation,
+  TPending,
+  TCommand,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>,
+  TReasonerAdvice = unknown
+>(
+  options: ScaffoldedActorOptions<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>
+): ScaffoldedSocialActor<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice> {
   return new ScaffoldedSocialActor(options);
 }
 
@@ -643,41 +845,41 @@ export function createWeightedSocialStateCandidateScorer<
       const evidenceRefs: EvidenceRef[] = [];
       let delta = 0;
       for (const targetId of targetIds) {
-        const relationship = input.agent.social.relationships.edges[targetId];
+        const relationship = input.social.relationships.edges[targetId];
         if (relationship) {
           const contribution = weightedRelationshipContribution(relationship, options.relationshipWeights ?? {});
           delta += contribution.delta;
           reasons.push(...contribution.reasons);
           evidenceRefs.push(...relationship.evidenceRefs);
         }
-        const reputation = input.agent.social.reputation.records[targetId];
+        const reputation = input.social.reputation.records[targetId];
         if (reputation) {
           const contribution = weightedReputationContribution(reputation, options.reputationWeights ?? {});
           delta += contribution.delta;
           reasons.push(...contribution.reasons);
           evidenceRefs.push(...reputation.evidenceRefs);
         }
-        for (const claim of Object.values(input.agent.social.beliefs.claims).filter((item) => item.subject === targetId)) {
+        for (const claim of Object.values(input.social.beliefs.claims).filter((item) => item.subject === targetId)) {
           const contribution = weightedBeliefContribution(claim, options.beliefPredicateWeights ?? {});
           delta += contribution.delta;
           reasons.push(...contribution.reasons);
           evidenceRefs.push(...claim.evidenceRefs);
         }
         if (options.activeGoalWeight) {
-          for (const goal of input.agent.social.goals.goals.filter((item) => item.status === "active" && socialRecordTargets(item, targetId))) {
+          for (const goal of input.social.goals.goals.filter((item) => item.status === "active" && socialRecordTargets(item, targetId))) {
             delta += goal.priority * options.activeGoalWeight;
             reasons.push(`goal:${goal.kind}`);
             evidenceRefs.push(...goal.evidenceRefs);
           }
         }
         if (options.activeNormWeight) {
-          for (const norm of Object.values(input.agent.social.norms.norms).filter((item) => item.status === "active" && socialRecordTargets(item, targetId))) {
+          for (const norm of Object.values(input.social.norms.norms).filter((item) => item.status === "active" && socialRecordTargets(item, targetId))) {
             delta += norm.confidence * options.activeNormWeight;
             reasons.push(`norm:${norm.kind}`);
             evidenceRefs.push(...norm.evidenceRefs);
           }
         }
-        for (const commitment of Object.values(input.agent.social.commitments?.records ?? {}).filter((item) =>
+        for (const commitment of Object.values(input.social.commitments?.records ?? {}).filter((item) =>
           commitmentTargets(item, targetId)
         )) {
           const contribution = weightedCommitmentContribution(commitment, options.commitmentStatusWeights ?? {});
@@ -685,7 +887,7 @@ export function createWeightedSocialStateCandidateScorer<
           reasons.push(...contribution.reasons);
           evidenceRefs.push(...commitment.evidenceRefs);
         }
-        for (const coalition of Object.values(input.agent.social.coalitions?.records ?? {}).filter((item) =>
+        for (const coalition of Object.values(input.social.coalitions?.records ?? {}).filter((item) =>
           coalitionTargets(item, targetId)
         )) {
           const contribution = weightedCoalitionContribution(coalition, options.coalitionStatusWeights ?? {});
@@ -693,13 +895,13 @@ export function createWeightedSocialStateCandidateScorer<
           reasons.push(...contribution.reasons);
           evidenceRefs.push(...coalition.evidenceRefs);
         }
-        for (const gossip of Object.values(input.agent.social.gossip?.records ?? {}).filter((item) => gossipTargets(item, targetId))) {
+        for (const gossip of Object.values(input.social.gossip?.records ?? {}).filter((item) => gossipTargets(item, targetId))) {
           const contribution = weightedGossipContribution(gossip, options.gossipValenceWeights ?? {});
           delta += contribution.delta;
           reasons.push(...contribution.reasons);
           evidenceRefs.push(...gossip.evidenceRefs);
         }
-        for (const sanction of Object.values(input.agent.social.normSanctions?.records ?? {}).filter((item) =>
+        for (const sanction of Object.values(input.social.normSanctions?.records ?? {}).filter((item) =>
           normSanctionTargets(item, targetId)
         )) {
           const contribution = weightedNormSanctionContribution(sanction, {
@@ -710,7 +912,7 @@ export function createWeightedSocialStateCandidateScorer<
           reasons.push(...contribution.reasons);
           evidenceRefs.push(...sanction.evidenceRefs);
         }
-        for (const repair of Object.values(input.agent.social.trustRepairs?.records ?? {}).filter((item) =>
+        for (const repair of Object.values(input.social.trustRepairs?.records ?? {}).filter((item) =>
           trustRepairTargets(item, targetId)
         )) {
           const contribution = weightedTrustRepairContribution(repair, {
@@ -721,7 +923,7 @@ export function createWeightedSocialStateCandidateScorer<
           reasons.push(...contribution.reasons);
           evidenceRefs.push(...repair.evidenceRefs);
         }
-        for (const betrayal of Object.values(input.agent.social.betrayals?.records ?? {}).filter((item) =>
+        for (const betrayal of Object.values(input.social.betrayals?.records ?? {}).filter((item) =>
           betrayalTargets(item, targetId)
         )) {
           const contribution = weightedBetrayalContribution(betrayal, {
@@ -756,6 +958,17 @@ function candidateFromPolicyAction<TCommand>(actorId: string, policyId: string, 
     action: cloneJson(action),
     reasons: ["legacy policy decision"],
     evidenceRefs: [{ artifact: "action", description: `policy:${policyId}` }]
+  };
+}
+
+function normalizeAgentReasonerOutput<TAdvice>(
+  value: string | AgentReasonerOutput<TAdvice> | undefined
+): AgentReasonerOutput<TAdvice> | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "string") return { memo: value };
+  return {
+    memo: value.memo,
+    advice: cloneJson(value.advice)
   };
 }
 
