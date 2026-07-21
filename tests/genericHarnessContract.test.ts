@@ -7,12 +7,15 @@ import { ScaffoldedSocialActor } from "../src/harness/scaffold";
 import { createSocialStateEvaluator } from "../src/harness/socialEvaluator";
 import { appendSocialMemory, createAgentSocialState } from "../src/harness/socialState";
 import {
+  HarnessCheckpointSelectionError,
+  buildHarnessCheckpointAtPrefix,
   validateHarnessCheckpointEnvelope,
   validateHarnessCheckpointReplay,
   validateHarnessEpisodeArtifactEnvelope,
   type HarnessCheckpointEnvelope,
   type HarnessEpisodeArtifactEnvelope
 } from "../src/harness/episodeArtifacts";
+import { runForkedHarnessEpisode } from "../src/harness/checkpointRuntime";
 import {
   runSocialEpisode,
   validateSocialEpisodeArtifact,
@@ -234,6 +237,145 @@ describe("generic social harness contract", () => {
     const tampered = JSON.parse(JSON.stringify(checkpoint)) as typeof checkpoint;
     tampered.source.messagesHash = "tampered";
     expect(validateHarnessCheckpointEnvelope(tampered).join(" ")).toMatch(/source\.messagesHash mismatch/);
+  });
+
+  it("builds a generic native-prefix checkpoint, replays it without actors, and executes a restored non-Werewolf fork", async () => {
+    const parentActors = new Map<LedgerActorId, CheckpointLedgerActor>(
+      (["a", "b", "c"] as LedgerActorId[]).map((id) => [id, new CheckpointLedgerActor(id, `parent-${id}`)])
+    );
+    const parent = await runHarnessEpisode<LedgerState, LedgerObservation, LedgerPending, LedgerCommand>({
+      id: "ledger-generic-prefix-parent",
+      environment: new LedgerEnvironment(),
+      actors: [...parentActors.values()],
+      channels: [publicChannel],
+      schedulerMode: "aec",
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      captureAgentSnapshots: () => [...parentActors.values()].map((actor) => actor.snapshot())
+    });
+    const parentReplay = replaySocialEpisode({
+      episode: parent,
+      environment: new LedgerEnvironment(),
+      hashState: hashStableState,
+      hashMessages: hashStableState
+    });
+    expect(parentReplay.ok).toBe(true);
+    expect(parentReplay.agentStateAudit).toMatchObject({ ok: true, checkedNativeSteps: 3, checkedSnapshots: 3 });
+
+    const checkpoint = buildHarnessCheckpointAtPrefix({
+      artifactVersion: "ledger.checkpoint.v1",
+      kind: "ledger-checkpoint",
+      checkpointId: "ledger-prefix-after-a",
+      createdAt: "2026-07-21T01:00:00.000Z",
+      sourceArtifactVersion: "ledger.episode.v1",
+      runId: parent.id,
+      sourceStatus: parent.status,
+      episode: parent,
+      selector: { nativeStepCount: 1 },
+      resolveAgentSnapshot({ step }) {
+        if (!Array.isArray(step.actorSnapshotsAfterStep) || !step.actorSnapshotsHashAfterStep) return undefined;
+        return {
+          agents: step.actorSnapshotsAfterStep as LedgerCheckpointActorState[],
+          agentsHash: step.actorSnapshotsHashAfterStep,
+          frameId: step.actorSnapshotFrameIdAfterStep
+        };
+      },
+      replayPrefix: (executionPrefix) =>
+        replaySocialEpisode({
+          episode: executionPrefix,
+          environment: new LedgerEnvironment(),
+          hashState: hashStableState,
+          hashMessages: hashStableState,
+          validateExpectedFinalState: false
+        }),
+      validateAgentSnapshot({ agents, step }) {
+        return agents.some((agent) => !agent.id) || !step.traceId ? ["ledger actor state is malformed"] : [];
+      }
+    });
+
+    expect(checkpoint.executionPrefix.steps).toHaveLength(1);
+    expect(checkpoint.executionPrefix.messages).toEqual([]);
+    expect(checkpoint.state).toMatchObject({ turn: 1, done: false, entries: ["a:parent-a"] });
+    expect(checkpoint.agents).toEqual([
+      { id: "a", committedEntries: ["a:parent-a"] },
+      { id: "b", committedEntries: [] },
+      { id: "c", committedEntries: [] }
+    ]);
+    expect(validateHarnessCheckpointEnvelope(checkpoint)).toEqual([]);
+    expect(
+      validateHarnessCheckpointReplay(checkpoint, (executionPrefix) =>
+        replaySocialEpisode({
+          episode: executionPrefix,
+          environment: new LedgerEnvironment(),
+          hashState: hashStableState,
+          hashMessages: hashStableState
+        })
+      )
+    ).toEqual([]);
+
+    const forked = await runForkedHarnessEpisode({
+      checkpoint,
+      createdAt: "2026-07-21T01:00:01.000Z",
+      reason: "ledger continuation proof",
+      runtime: {
+        createEnvironment(initialState) {
+          return new LedgerEnvironment({ initialState });
+        },
+        restoreActors(agentStates) {
+          return agentStates.map((state) => new CheckpointLedgerActor(state.id, `fork-${state.id}`, state));
+        }
+      },
+      episode: {
+        id: "ledger-generic-prefix-fork",
+        schedulerMode: "aec",
+        hashState: hashStableState,
+        hashMessages: hashStableState
+      }
+    });
+
+    expect(forked.seed.initialState).toEqual(checkpoint.state);
+    expect(forked.seed.initialAgentStates).toEqual(checkpoint.agents);
+    expect(forked.seed.forkOf).toMatchObject({
+      checkpointId: checkpoint.checkpointId,
+      parentRunId: parent.id,
+      parentBoundaryTraceId: checkpoint.source.boundaryTraceId,
+      parentStateHash: checkpoint.source.stateHash,
+      parentNativeStepCount: 1,
+      parentMessageCount: 0
+    });
+    expect(forked.socialEpisode.initialState).toEqual(checkpoint.state);
+    expect(forked.socialEpisode.steps[0]).toMatchObject({ actorId: "b", preStateHash: checkpoint.source.stateHash });
+    expect(forked.socialEpisode.finalState).toMatchObject({
+      done: true,
+      entries: ["a:parent-a", "b:fork-b", "c:fork-c"]
+    });
+
+    const withoutSnapshot = clone(parent);
+    delete withoutSnapshot.steps[0]?.actorSnapshotsAfterStep;
+    delete withoutSnapshot.steps[0]?.actorSnapshotsHashAfterStep;
+    expect(() =>
+      buildHarnessCheckpointAtPrefix({
+        artifactVersion: "ledger.checkpoint.v1",
+        kind: "ledger-checkpoint",
+        sourceArtifactVersion: "ledger.episode.v1",
+        episode: withoutSnapshot,
+        selector: { nativeStepCount: 1 },
+        replayPrefix: () => {
+          throw new Error("replay must not run when durable snapshots are absent");
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "missing_agent_snapshots" } satisfies Partial<HarnessCheckpointSelectionError>));
+
+    const tamperedSnapshot = clone(parent);
+    (tamperedSnapshot.steps[0]?.actorSnapshotsAfterStep as LedgerCheckpointActorState[])[0]!.committedEntries.push("tampered");
+    const tamperedReplay = replaySocialEpisode({
+      episode: tamperedSnapshot,
+      environment: new LedgerEnvironment(),
+      hashState: hashStableState,
+      hashMessages: hashStableState
+    });
+    expect(tamperedReplay.ok).toBe(false);
+    expect(tamperedReplay.mismatches.join(" ")).toMatch(/Recorded agent state audit: .*snapshot hash mismatch/);
   });
 
   it("records an environment-rejected proposal without mutating state or committing its message", async () => {
@@ -482,20 +624,64 @@ class LedgerActor implements SocialActor<LedgerObservation, LedgerPending, Ledge
   }
 }
 
+interface LedgerCheckpointActorState {
+  id: LedgerActorId;
+  committedEntries: string[];
+}
+
+/** A tiny durable actor used only to prove generic checkpoint restoration. */
+class CheckpointLedgerActor implements SocialActor<LedgerObservation, LedgerPending, LedgerCommand> {
+  readonly profile: SocialAgentProfile;
+  private state: LedgerCheckpointActorState;
+
+  constructor(
+    readonly id: LedgerActorId,
+    private readonly entry: string,
+    restored?: LedgerCheckpointActorState
+  ) {
+    this.profile = { id: `checkpoint-${id}`, model: `deterministic-${id}`, policyId: "ledger-checkpoint" };
+    this.state = restored ? clone(restored) : { id, committedEntries: [] };
+  }
+
+  observe(): void {
+    // The Ledger environment owns observations; this fixture's durable state
+    // changes exclusively at the post-environment receipt boundary.
+  }
+
+  decide(pending: LedgerPending): SocialAction<LedgerCommand> {
+    return {
+      actorId: this.id,
+      kind: pending.kind,
+      command: { actorId: this.id, entry: this.entry }
+    };
+  }
+
+  onStepResult(receipt: SocialActorStepReceipt<LedgerObservation, LedgerPending, LedgerCommand>): void {
+    if (receipt.status === "committed") this.state.committedEntries.push(`${this.id}:${this.entry}`);
+  }
+
+  snapshot(): LedgerCheckpointActorState {
+    return clone(this.state);
+  }
+}
+
 class LedgerEnvironment implements SocialEnvironment<LedgerState, LedgerObservation, LedgerPending, LedgerCommand> {
-  private readonly state: LedgerState = {
-    turn: 0,
-    done: false,
-    entries: [],
-    secrets: { a: "token-a", b: "token-b", c: "token-c" }
-  };
+  private readonly state: LedgerState;
   stepCalls = 0;
   private readonly actorIds: LedgerActorId[];
   private readonly rejectedEntry?: string;
 
-  constructor(options: { actorIds?: LedgerActorId[]; rejectedEntry?: string } = {}) {
+  constructor(options: { actorIds?: LedgerActorId[]; rejectedEntry?: string; initialState?: LedgerState } = {}) {
     this.actorIds = options.actorIds ?? ["a", "b", "c"];
     this.rejectedEntry = options.rejectedEntry;
+    this.state = clone(
+      options.initialState ?? {
+        turn: 0,
+        done: false,
+        entries: [],
+        secrets: { a: "token-a", b: "token-b", c: "token-c" }
+      }
+    );
   }
 
   snapshot(): LedgerState {

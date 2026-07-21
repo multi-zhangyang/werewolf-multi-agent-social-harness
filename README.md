@@ -286,6 +286,58 @@ checkpoint selector or lineage authority.
 `view=full` is local/debug access only. Fork execution always restores the
 canonical validated checkpoint stored by the server, not an API projection.
 
+### Domain-neutral checkpoint and fork contract
+
+The Werewolf server routes remain Werewolf adapters, but the underlying
+checkpoint operation is now reusable without importing Werewolf state, roles,
+or a reasoner. `buildHarnessCheckpointAtPrefix()` selects exactly one complete
+native scheduler boundary, resolves the domain-owned durable actor snapshot at
+that boundary, replays the prefix without actors or model calls, and emits the
+existing generic `HarnessCheckpointEnvelope`. `runForkedHarnessEpisode()` then
+asks the domain only to restore its environment and actors from that recorded
+state; it does not deserialize policy closures or provider clients.
+
+```ts
+import { buildHarnessCheckpointAtPrefix } from "./src/harness/episodeArtifacts";
+import { runForkedHarnessEpisode } from "./src/harness/checkpointRuntime";
+
+const checkpoint = buildHarnessCheckpointAtPrefix({
+  artifactVersion: "ledger.checkpoint.v1",
+  kind: "ledger-checkpoint",
+  sourceArtifactVersion: "ledger.episode.v1",
+  episode,
+  selector: { nativeStepCount: 12 },
+  // Domain-owned durable actor state; never recreated by a model during replay.
+  resolveAgentSnapshot,
+  replayPrefix: replayLedgerEpisode
+});
+
+const fork = await runForkedHarnessEpisode({
+  checkpoint,
+  runtime: { createEnvironment, restoreActors },
+  episode: { id: "ledger-fork-01", schedulerMode: "aec" }
+});
+```
+
+`runHarnessEpisode()` also accepts an opt-in `captureAgentSnapshots` callback.
+It records a cloned full actor-state snapshot only after an environment commit
+and receipt delivery (after the full receipt set in a parallel batch), then binds the
+snapshot hash to the native step. `replaySocialEpisode()` audits inline
+recorded snapshots when present; that audit checks hashes, rejected-step
+non-mutation, and shared parallel-batch state without constructing an actor or
+calling a model. Domains with compacted/redacted frame stores keep their own
+frame resolver and stronger schema validation.
+
+The generic tournament control plane can likewise persist a minimal research
+run set through `buildGenericTournamentRunSetArtifact()` and
+`writeGenericTournamentRunSetArtifact()`. Its fixed layout is
+`manifest.json`, `episodes.jsonl`, `metrics.jsonl`, and one canonical
+`episodes/<index>.json` file per materialized domain episode. This layer owns
+only ordered seeds and `completed | truncated | failed` accounting; domain
+adapters own artifact validation, replay/fork codecs, redaction, public shares,
+and any role/team/winner leaderboard semantics. Runtime `prepared` objects are
+intentionally never serialized.
+
 Historical end-to-end validation on 2026-07-14 used the then user-specified configured
 OpenAI-compatible endpoint and `tencent/hy3:free`. The streaming probe passed
 1/1. A first match with a 40-second bound timed out and correctly remained a

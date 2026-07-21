@@ -24741,3 +24741,106 @@ only and is pinned through the lock file to 9.2.4, which carries
 `shell-quote` 1.9.0. The bundled API is local research software: direct
 Internet exposure requires an authenticated, rate-limited deployment layer;
 the repository must not imply that setting `HOST=0.0.0.0` alone is safe.
+
+## 13.247 Generic Checkpoint, Recorded Agent State, And Tournament Run-Set Lock
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+### 13.247.1 Generic Fork Authority
+
+The generic control plane owns a reusable native-prefix checkpoint and fork
+operation without importing Werewolf state, roles, teams, reasoners, or UI:
+
+- `src/harness/episodeArtifacts.ts` owns exactly-one prefix selectors, complete
+  batch-boundary checks, message-prefix selection, durable actor-snapshot hash
+  binding, model-free prefix replay handoff, and generic fork provenance.
+- `src/harness/checkpointRuntime.ts` owns data-only fork seeds and the thin
+  `runForkedHarnessEpisode()` operation. A domain supplies only an environment
+  factory and durable actor restore factory. It must not persist or reconstruct
+  a policy closure, provider client, socket, staged turn, or model response.
+- `src/harness/artifacts.ts` remains the richer Werewolf compatibility layer.
+  Its fork options reuse the generic provenance builder while retaining
+  Werewolf-specific seed/player/evidence checks.
+
+Every prefix checkpoint is restricted to a complete native scheduler boundary
+and requires a recorded actor snapshot at that boundary. It is incorrect to use
+the final actor state for an earlier boundary, infer private actor state from
+commands, or retry a model to recreate memory/beliefs. A domain replay callback
+reconstructs environment state and communication messages only; it has no actor
+or provider factory.
+
+### 13.247.2 Recorded Actor State Audit
+
+`runHarnessEpisode()` has an opt-in `captureAgentSnapshots` callback. It runs
+only after the environment commits and actor receipts have been delivered (for
+true parallel batches, after the full receipt set), clones its serializable output, and
+binds the snapshot hash to the native step. It is never a decision hook and may
+not call a reasoner/provider.
+
+`replaySocialEpisode()` audits inline recorded snapshots without constructing
+actors: it verifies snapshot/hash pairs, frame-id/hash identity when present,
+rejected-step non-mutation, and one shared post-receipt snapshot for an atomic
+parallel batch. It does not claim to regenerate a model-derived memo or belief.
+Compacted/redacted external frame registries remain domain-owned and must use
+their domain resolver/validator; their missing inline payload is not generic
+corruption.
+
+### 13.247.3 Generic Tournament Artifact Boundary
+
+`src/harness/genericTournamentArtifacts.ts` is the minimal reusable research
+writer for `harness.tournament-run-set.v1`:
+
+- It records deterministic episode order/seed and honest
+  `completed | truncated | failed` denominators.
+- It accepts a domain-owned canonical artifact adapter and optional generic
+  evaluation report, validates artifacts before persistence, and writes only
+  `manifest.json`, `episodes.jsonl`, `metrics.jsonl`, and
+  `episodes/<index>.json`.
+- It never serializes generic `TPrepared`, since that may contain factories,
+  provider clients, secrets, or other runtime-only state.
+- It deliberately has no winner, role, team, seat, reward, public-share, or
+  redaction semantics. Those remain domain adapter and server responsibilities.
+
+### 13.247.4 Non-Werewolf Proof And Validation
+
+`tests/genericHarnessContract.test.ts` uses the independent Ledger domain to
+prove: scoped observations; checkpoint at the first native prefix; no-model
+prefix replay; durable actor-state restore; an actual continuation fork; fork
+lineage hashes; and detection of a tampered inline actor snapshot.
+
+`tests/genericTournamentArtifacts.test.ts` proves a completed/truncated/failed
+Ledger run set, ordered filesystem artifact layout, the absence of prepared
+runtime state from persisted payloads, lifecycle accounting rejection, and
+domain artifact integrity rejection.
+
+Focused validation recorded for this lock:
+
+```bash
+npm run typecheck
+npx vitest run tests/genericHarnessContract.test.ts tests/social.test.ts \
+  --testTimeout=30000 --maxWorkers=1 --no-file-parallelism
+npx vitest run tests/genericTournamentArtifacts.test.ts tests/genericTournamentRunner.test.ts \
+  --testTimeout=30000 --maxWorkers=1 --no-file-parallelism --reporter=verbose
+npx vitest run tests/genericHarnessContract.test.ts tests/artifacts.test.ts \
+  tests/replay.test.ts tests/werewolfAdapter.test.ts \
+  --testTimeout=30000 --maxWorkers=1 --no-file-parallelism
+```
+
+Broader validation completed after this lock:
+
+```bash
+npm test -- --maxWorkers=1 --no-file-parallelism
+# 36 test files, 385 tests passed
+npm run build
+npx playwright test e2e/cockpitFixture.spec.ts --config=playwright.config.ts
+# 4/4 passed
+git diff --check
+```
+
+The production build still reports the pre-existing main JavaScript chunk-size
+warning (about 1.15 MB uncompressed / 358 KB gzip). This is a performance
+follow-up, not a claim that the generic harness refactor removed bundle debt.

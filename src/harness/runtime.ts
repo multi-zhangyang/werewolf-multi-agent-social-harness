@@ -1,6 +1,26 @@
 import type { AgentPendingAction } from "../core/pending";
 import type { GameCommand, GameState } from "../core/types";
 export { runHarnessEpisode } from "./runner";
+export type { HarnessAgentSnapshotProvider, HarnessEpisodeOptions } from "./runner";
+export { buildSocialCheckpointForkSeed, runForkedHarnessEpisode } from "./checkpointRuntime";
+export type {
+  ForkedHarnessEpisodeResult,
+  RunForkedHarnessEpisodeOptions,
+  SocialCheckpointForkSeed,
+  SocialCheckpointRuntimeAdapter
+} from "./checkpointRuntime";
+export {
+  buildGenericTournamentRunSetArtifact,
+  validateGenericTournamentRunSetArtifact,
+  writeGenericTournamentRunSetArtifact
+} from "./genericTournamentArtifacts";
+export type {
+  BuildGenericTournamentRunSetOptions,
+  GenericTournamentArtifactAdapter,
+  GenericTournamentArtifactDirectory,
+  GenericTournamentRunSetArtifact,
+  GenericTournamentRunSetEpisode
+} from "./genericTournamentArtifacts";
 export type { SocialEpisodeArtifact, SocialEpisodeOptions } from "./social";
 import type {
   HarnessAgentConfig,

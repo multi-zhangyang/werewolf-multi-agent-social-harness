@@ -20,6 +20,7 @@ import { replayWerewolfSocialEpisode } from "./replay";
 import { redactSecrets } from "./redaction";
 import {
   HARNESS_AGENT_SNAPSHOT_FRAME_VERSION,
+  createGenericForkProvenance,
   harnessAgentSnapshotFrameId,
   validateHarnessCheckpointEnvelope,
   validateHarnessCheckpointReplay,
@@ -1057,6 +1058,12 @@ export function forkHarnessRunOptions(options: {
   reason?: string;
 }): HarnessRunOptions {
   assertValidHarnessCheckpoint(options.checkpoint);
+  const genericFork = createGenericForkProvenance(options.checkpoint, {
+    createdAt: options.createdAt,
+    reason: options.reason,
+    parentArtifactId: options.checkpoint.source.matchId ?? options.checkpoint.source.runId,
+    parentEvidenceTraceIds: inheritedEvidenceTraceIdsFromCheckpoint(options.checkpoint)
+  });
   return {
     initialState: cloneJson(options.checkpoint.state),
     initialAgentStates: cloneJson(options.checkpoint.agents),
@@ -1066,24 +1073,8 @@ export function forkHarnessRunOptions(options: {
     reasoner: options.reasoner,
     maxTransitions: options.maxTransitions,
     forkOf: {
-      schemaVersion: "harness.fork-provenance.v2",
-      checkpointArtifactVersion: HARNESS_CHECKPOINT_VERSION,
-      checkpointId: options.checkpoint.checkpointId,
-      parentRunId: options.checkpoint.source.runId,
-      parentArtifactId: options.checkpoint.source.matchId ?? options.checkpoint.source.runId,
+      ...genericFork,
       parentMatchId: options.checkpoint.source.matchId,
-      parentBoundaryTraceId: options.checkpoint.source.boundaryTraceId,
-      parentEvidenceTraceIds: inheritedEvidenceTraceIdsFromCheckpoint(options.checkpoint),
-      parentBoundaryTurnIndex: options.checkpoint.source.boundaryTurnIndex,
-      parentStateHash: options.checkpoint.source.stateHash,
-      parentExecutionPrefixHash: options.checkpoint.source.executionPrefixHash,
-      parentAgentsHash: options.checkpoint.source.agentsHash,
-      parentChannelsHash: options.checkpoint.source.channelsHash,
-      parentMessagesHash: options.checkpoint.source.messagesHash,
-      parentNativeStepCount: options.checkpoint.source.nativeStepCount,
-      parentMessageCount: options.checkpoint.source.messageCount,
-      createdAt: options.createdAt ?? new Date().toISOString(),
-      reason: options.reason
     }
   };
 }

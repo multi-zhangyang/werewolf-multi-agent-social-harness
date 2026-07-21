@@ -1,7 +1,9 @@
 import { hashStableState } from "./hash";
 import {
+  isSocialStepCommitted,
   validateSocialEpisodeArtifact,
   type SocialEpisodeArtifact,
+  type SocialHarnessStep,
   type SocialEpisodeStatus,
   type SocialMessage,
   type SocialResolvedSchedulerMode
@@ -133,6 +135,482 @@ export interface HarnessCheckpointReplayResult {
   mismatches: readonly string[];
   finalHash?: string;
   messagesHash?: string;
+}
+
+/**
+ * A generic checkpoint can only be created at a complete native execution
+ * boundary.  These error codes are deliberately domain-neutral: a domain may
+ * add stricter validation for its own actor snapshots, but it must not
+ * reinterpret a partial joint batch as a valid continuation point.
+ */
+export type HarnessCheckpointSelectionErrorCode =
+  | "ambiguous_selector"
+  | "selector_not_found"
+  | "missing_agent_snapshots"
+  | "unsafe_batch_boundary"
+  | "prefix_replay_mismatch";
+
+export class HarnessCheckpointSelectionError extends Error {
+  constructor(
+    readonly code: HarnessCheckpointSelectionErrorCode,
+    message: string
+  ) {
+    super(message);
+    this.name = "HarnessCheckpointSelectionError";
+  }
+}
+
+/** Select exactly one native step as a checkpoint boundary. */
+export interface HarnessCheckpointPrefixSelector {
+  traceId?: string;
+  nativeTurnIndex?: number;
+  nativeStepCount?: number;
+}
+
+/**
+ * A domain owns the schema and restore semantics of an actor snapshot.  The
+ * harness owns only the stable ordering and integrity link used by checkpoints
+ * and provenance.
+ */
+export interface ResolvedHarnessAgentSnapshot<TAgentState> {
+  agents: TAgentState[];
+  agentsHash: string;
+  frameId?: string;
+}
+
+export type HarnessAgentSnapshotResolver<TState, TObservation, TPending, TCommand, TAgentState> = (input: {
+  episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
+  step: SocialHarnessStep<TObservation, TPending, TCommand>;
+  stepIndex: number;
+}) => ResolvedHarnessAgentSnapshot<TAgentState> | undefined;
+
+/**
+ * The prefix replay callback deliberately receives no actor, policy, or model
+ * factory.  It is a deterministic domain-state/message verifier only.
+ */
+export interface HarnessCheckpointPrefixReplayResult<TState> extends HarnessCheckpointReplayResult {
+  finalState: TState;
+}
+
+export interface BuildHarnessCheckpointFromEpisodeOptions<TState, TObservation, TPending, TCommand, TAgentState> {
+  artifactVersion: string;
+  kind: string;
+  checkpointId?: string;
+  createdAt?: string;
+  reason?: string;
+  sourceArtifactVersion: string;
+  runId?: string;
+  sourceStatus?: SocialEpisodeStatus;
+  failureReason?: string;
+  truncationReason?: string;
+  episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
+  /** Defaults to the execution prefix final state. */
+  state?: TState;
+  agents: TAgentState[];
+  agentSnapshotFrameId?: string;
+}
+
+export interface BuildHarnessCheckpointAtPrefixOptions<TState, TObservation, TPending, TCommand, TAgentState>
+  extends Omit<BuildHarnessCheckpointFromEpisodeOptions<TState, TObservation, TPending, TCommand, TAgentState>, "state" | "agents" | "agentSnapshotFrameId"> {
+  selector: HarnessCheckpointPrefixSelector;
+  resolveAgentSnapshot?: HarnessAgentSnapshotResolver<TState, TObservation, TPending, TCommand, TAgentState>;
+  replayPrefix: (
+    episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>
+  ) => HarnessCheckpointPrefixReplayResult<TState>;
+  /** Optional domain-owned semantic validation; generic code checks only hashes and batch safety. */
+  validateAgentSnapshot?: (input: {
+    agents: readonly TAgentState[];
+    step: SocialHarnessStep<TObservation, TPending, TCommand>;
+    stepIndex: number;
+    maxMessageSeq: number;
+  }) => readonly string[];
+}
+
+export interface CreateGenericForkProvenanceOptions {
+  createdAt?: string;
+  reason?: string;
+  parentArtifactId?: string;
+  parentEvidenceTraceIds?: string[];
+}
+
+/**
+ * Model-free verification result for recorded durable actor snapshots.  This
+ * audits recorded state/hash/batch relationships; it intentionally does not
+ * recreate actors or regenerate memory/belief mutations with a model.
+ */
+export interface RecordedSocialAgentStateAuditResult {
+  ok: boolean;
+  checkedNativeSteps: number;
+  checkedSnapshots: number;
+  mismatches: string[];
+}
+
+export interface AuditRecordedSocialAgentSnapshotsOptions<TState, TObservation, TPending, TCommand, TAgentState> {
+  episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
+  /** Require a durable state capture after every committed actor receipt. */
+  requireSnapshotsAfterCommitted?: boolean;
+  /** When provided, bind the last recorded state frame to an artifact's final actor snapshot. */
+  finalAgents?: readonly TAgentState[];
+  /** Optional pure, domain-owned validation of one recorded durable snapshot. */
+  validateSnapshot?: (input: {
+    agents: readonly TAgentState[];
+    step: SocialHarnessStep<TObservation, TPending, TCommand>;
+    stepIndex: number;
+  }) => readonly string[];
+}
+
+/**
+ * Audit inline actor snapshots currently carried by native social steps.
+ * Snapshot frames/redaction schemas remain optional domain-level artifact
+ * concerns; this verifies the generic causal invariants shared by every
+ * domain without touching an actor, policy, reasoner, or provider.
+ */
+export function auditRecordedSocialAgentSnapshots<TState, TObservation, TPending, TCommand, TAgentState>(
+  options: AuditRecordedSocialAgentSnapshotsOptions<TState, TObservation, TPending, TCommand, TAgentState>
+): RecordedSocialAgentStateAuditResult {
+  const mismatches: string[] = [];
+  const requireSnapshots = options.requireSnapshotsAfterCommitted ?? false;
+  let checkedSnapshots = 0;
+  let previousHash: string | undefined;
+  const parallelHashesByBatch = new Map<string, Set<string>>();
+
+  for (const [stepIndex, step] of options.episode.steps.entries()) {
+    const committed = isSocialStepCommitted(step);
+    const hasAgents = Array.isArray(step.actorSnapshotsAfterStep);
+    const hasHash = typeof step.actorSnapshotsHashAfterStep === "string";
+    if (hasAgents !== hasHash) {
+      mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot payload/hash must be recorded together.`);
+      continue;
+    }
+    if (!hasAgents) {
+      if (committed && requireSnapshots) {
+        mismatches.push(`Native step ${stepIndex} ${step.traceId}: committed step is missing a durable actor snapshot.`);
+      }
+      continue;
+    }
+
+    const agents = step.actorSnapshotsAfterStep as TAgentState[];
+    const actualHash = hashStableState(agents);
+    checkedSnapshots += 1;
+    if (actualHash !== step.actorSnapshotsHashAfterStep) {
+      mismatches.push(
+        `Native step ${stepIndex} ${step.traceId}: actor snapshot hash mismatch ${actualHash} !== ${step.actorSnapshotsHashAfterStep}.`
+      );
+    }
+    if (
+      step.actorSnapshotFrameIdAfterStep !== undefined &&
+      step.actorSnapshotFrameIdAfterStep !== harnessAgentSnapshotFrameId(step.actorSnapshotsHashAfterStep!)
+    ) {
+      mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame id does not match its hash.`);
+    }
+    if (!committed && previousHash !== undefined && step.actorSnapshotsHashAfterStep !== previousHash) {
+      mismatches.push(`Native step ${stepIndex} ${step.traceId}: rejected step changed the recorded durable actor state.`);
+    }
+    if (step.schedulerMode === "parallel" && step.atomic && step.batchId) {
+      const hashes = parallelHashesByBatch.get(step.batchId) ?? new Set<string>();
+      hashes.add(step.actorSnapshotsHashAfterStep!);
+      parallelHashesByBatch.set(step.batchId, hashes);
+    }
+    for (const error of options.validateSnapshot?.({ agents, step, stepIndex }) ?? []) {
+      mismatches.push(`Native step ${stepIndex} ${step.traceId}: ${error}`);
+    }
+    previousHash = step.actorSnapshotsHashAfterStep;
+  }
+
+  for (const [batchId, hashes] of parallelHashesByBatch) {
+    if (hashes.size > 1) {
+      mismatches.push(`Parallel batch ${batchId}: native steps do not share one post-receipt actor snapshot.`);
+    }
+  }
+  if (options.finalAgents !== undefined && previousHash !== undefined) {
+    const finalAgentsHash = hashStableState(options.finalAgents);
+    if (previousHash !== finalAgentsHash) {
+      mismatches.push(`Final actor snapshot hash mismatch ${previousHash} !== ${finalAgentsHash}.`);
+    }
+  }
+  return {
+    ok: mismatches.length === 0,
+    checkedNativeSteps: options.episode.steps.length,
+    checkedSnapshots,
+    mismatches
+  };
+}
+
+/**
+ * Build a structurally complete checkpoint from a final or already-sliced
+ * episode.  It does not invoke a domain replay factory; callers that need
+ * deterministic replay proof should use validateHarnessCheckpointReplay().
+ */
+export function buildHarnessCheckpointFromEpisode<TState, TObservation, TPending, TCommand, TAgentState>(
+  options: BuildHarnessCheckpointFromEpisodeOptions<TState, TObservation, TPending, TCommand, TAgentState>
+): HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand> {
+  const executionPrefix = cloneArtifact(options.episode);
+  const state = cloneArtifact(options.state ?? executionPrefix.finalState);
+  const agents = cloneArtifact(options.agents);
+  const boundary = executionPrefix.steps.at(-1);
+  const lastMessage = executionPrefix.messages.at(-1);
+  const runId = options.runId ?? executionPrefix.id;
+  const checkpoint: HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand> = {
+    artifactVersion: options.artifactVersion,
+    kind: options.kind,
+    checkpointId: options.checkpointId ?? `${runId}:checkpoint:native:${executionPrefix.steps.length}`,
+    createdAt: options.createdAt ?? new Date().toISOString(),
+    reason: options.reason,
+    source: {
+      sourceArtifactVersion: options.sourceArtifactVersion,
+      runId,
+      status: options.sourceStatus ?? executionPrefix.status,
+      boundaryTraceId: boundary?.traceId,
+      boundaryTurnIndex: boundary?.turnIndex,
+      boundaryBatchId: boundary?.batchId,
+      boundaryBatchIndex: boundary?.batchIndex,
+      boundarySchedulerMode: boundary?.schedulerMode,
+      nativeStepCount: executionPrefix.steps.length,
+      messageCount: executionPrefix.messages.length,
+      lastMessageSeq: lastMessage?.seq,
+      stateHash: hashStableState(state),
+      executionPrefixHash: hashStableState(executionPrefix),
+      agentsHash: hashStableState(agents),
+      channelsHash: hashStableState(executionPrefix.channels),
+      messagesHash: hashStableState(executionPrefix.messages),
+      agentSnapshotFrameId: options.agentSnapshotFrameId,
+      failureReason: options.failureReason,
+      truncationReason: options.truncationReason
+    },
+    state,
+    agents,
+    executionPrefix
+  };
+  return checkpoint;
+}
+
+/**
+ * Build a checkpoint from a recorded native prefix.  A domain supplies only
+ * (a) how its durable actor states are resolved and (b) a model-free replay
+ * callback.  The harness constructs the prefix, validates batch safety, and
+ * binds the resulting state/message/agent hashes into the common envelope.
+ */
+export function buildHarnessCheckpointAtPrefix<TState, TObservation, TPending, TCommand, TAgentState>(
+  options: BuildHarnessCheckpointAtPrefixOptions<TState, TObservation, TPending, TCommand, TAgentState>
+): HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand> {
+  const selected = resolveHarnessCheckpointPrefixSelection(options.episode, options.selector);
+  assertSafeHarnessCheckpointBoundary(options.episode.steps, selected.index);
+  const snapshot = resolveHarnessAgentSnapshotAtStep({
+    episode: options.episode,
+    step: selected.step,
+    stepIndex: selected.index,
+    resolver: options.resolveAgentSnapshot
+  });
+  if (!snapshot) {
+    throw new HarnessCheckpointSelectionError(
+      "missing_agent_snapshots",
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: no durable agent snapshot was recorded for this boundary.`
+    );
+  }
+  const snapshotHash = hashStableState(snapshot.agents);
+  if (snapshotHash !== snapshot.agentsHash) {
+    throw new HarnessCheckpointSelectionError(
+      "missing_agent_snapshots",
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: agent snapshot hash mismatch.`
+    );
+  }
+
+  const steps = cloneArtifact(options.episode.steps.slice(0, selected.index + 1));
+  const maxMessageSeq = latestMessageSeqForHarnessPrefix(options.episode, steps);
+  const messages = cloneArtifact(options.episode.messages.filter((message) => message.seq <= maxMessageSeq));
+  const agentValidationErrors = options.validateAgentSnapshot?.({
+    agents: snapshot.agents,
+    step: selected.step,
+    stepIndex: selected.index,
+    maxMessageSeq
+  }) ?? [];
+  if (agentValidationErrors.length) {
+    throw new HarnessCheckpointSelectionError(
+      "missing_agent_snapshots",
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: ${agentValidationErrors.join(" ")}`
+    );
+  }
+
+  // The replay callback derives the real prefix final state.  Do not infer it
+  // from command text or from the completed parent artifact.
+  const executionPrefix = cloneArtifact({
+    ...options.episode,
+    status: "truncated" as const,
+    terminationReason: undefined,
+    truncationReason: `checkpoint boundary after native step ${selected.index + 1}`,
+    failureReason: undefined,
+    error: undefined,
+    finalState: options.episode.initialState,
+    steps,
+    messages,
+    exposureRecords: undefined,
+    exposureSummary: undefined,
+    metrics: undefined
+  });
+  const replay = options.replayPrefix(executionPrefix);
+  if (replay.mismatches.length) {
+    throw new HarnessCheckpointSelectionError(
+      "prefix_replay_mismatch",
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: ${replay.mismatches.join(" ")}`
+    );
+  }
+  executionPrefix.finalState = cloneArtifact(replay.finalState);
+  const replayedStateHash = hashStableState(executionPrefix.finalState);
+  if (replay.finalHash !== undefined && replay.finalHash !== replayedStateHash) {
+    throw new HarnessCheckpointSelectionError(
+      "prefix_replay_mismatch",
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: replay final hash does not match its final state.`
+    );
+  }
+  const replayedMessagesHash = hashStableState(executionPrefix.messages);
+  if (replay.messagesHash !== undefined && replay.messagesHash !== replayedMessagesHash) {
+    throw new HarnessCheckpointSelectionError(
+      "prefix_replay_mismatch",
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: replay messages hash does not match the selected prefix.`
+    );
+  }
+
+  return buildHarnessCheckpointFromEpisode({
+    artifactVersion: options.artifactVersion,
+    kind: options.kind,
+    checkpointId: options.checkpointId,
+    createdAt: options.createdAt,
+    reason: options.reason,
+    sourceArtifactVersion: options.sourceArtifactVersion,
+    runId: options.runId,
+    sourceStatus: options.sourceStatus ?? options.episode.status,
+    failureReason: options.failureReason,
+    truncationReason: options.truncationReason,
+    episode: executionPrefix,
+    state: executionPrefix.finalState,
+    agents: snapshot.agents,
+    agentSnapshotFrameId: snapshot.frameId
+  });
+}
+
+export function resolveHarnessCheckpointPrefixSelection<TState, TObservation, TPending, TCommand>(
+  episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>,
+  selector: HarnessCheckpointPrefixSelector
+): { index: number; step: SocialHarnessStep<TObservation, TPending, TCommand> } {
+  const selectorNames = [
+    selector.traceId !== undefined ? "traceId" : undefined,
+    selector.nativeTurnIndex !== undefined ? "nativeTurnIndex" : undefined,
+    selector.nativeStepCount !== undefined ? "nativeStepCount" : undefined
+  ].filter((value): value is string => Boolean(value));
+  if (selectorNames.length !== 1) {
+    throw new HarnessCheckpointSelectionError(
+      selectorNames.length === 0 ? "selector_not_found" : "ambiguous_selector",
+      selectorNames.length === 0
+        ? "Prefix checkpoint requires exactly one selector."
+        : `Prefix checkpoint selector is ambiguous: ${selectorNames.join(", ")}.`
+    );
+  }
+  const index =
+    selector.traceId !== undefined
+      ? episode.steps.findIndex((step) => step.traceId === selector.traceId)
+      : selector.nativeTurnIndex !== undefined
+        ? episode.steps.findIndex((step) => step.turnIndex === selector.nativeTurnIndex)
+        : (selector.nativeStepCount ?? 0) - 1;
+  const step = episode.steps[index];
+  if (!step) {
+    throw new HarnessCheckpointSelectionError("selector_not_found", "Prefix checkpoint selector did not match a native social execution step.");
+  }
+  return { index, step };
+}
+
+export function assertSafeHarnessCheckpointBoundary(
+  steps: readonly SocialHarnessStep[],
+  stepIndex: number
+): void {
+  if (!isSafeHarnessCheckpointBoundary(steps, stepIndex)) {
+    throw new HarnessCheckpointSelectionError(
+      "unsafe_batch_boundary",
+      "Prefix checkpoint cannot be built from the middle of a native scheduler batch."
+    );
+  }
+}
+
+export function isSafeHarnessCheckpointBoundary(steps: readonly SocialHarnessStep[], stepIndex: number): boolean {
+  if (stepIndex < 0) return steps.length === 0;
+  const step = steps[stepIndex];
+  if (!step) return false;
+  const nextStep = steps[stepIndex + 1];
+  if (!step.batchId || nextStep?.batchId !== step.batchId) return true;
+  return step.schedulerMode === "aec" && !step.atomic;
+}
+
+export function latestMessageSeqForHarnessPrefix<TState, TObservation, TPending, TCommand>(
+  episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>,
+  steps: readonly SocialHarnessStep<TObservation, TPending, TCommand>[]
+): number {
+  let messageSeq = episode.execution?.initialMessageCount ?? 0;
+  for (const step of steps) {
+    if (step.messageSeqRange) messageSeq = Math.max(messageSeq, step.messageSeqRange[1]);
+  }
+  return messageSeq;
+}
+
+export function resolveHarnessAgentSnapshotAtStep<TState, TObservation, TPending, TCommand, TAgentState>(input: {
+  episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
+  step: SocialHarnessStep<TObservation, TPending, TCommand>;
+  stepIndex: number;
+  resolver?: HarnessAgentSnapshotResolver<TState, TObservation, TPending, TCommand, TAgentState>;
+}): ResolvedHarnessAgentSnapshot<TAgentState> | undefined {
+  const resolved = input.resolver?.({
+    episode: input.episode,
+    step: input.step,
+    stepIndex: input.stepIndex
+  });
+  if (resolved) {
+    return {
+      agents: cloneArtifact(resolved.agents),
+      agentsHash: resolved.agentsHash,
+      frameId: resolved.frameId
+    };
+  }
+  if (!Array.isArray(input.step.actorSnapshotsAfterStep)) return undefined;
+  const agents = cloneArtifact(input.step.actorSnapshotsAfterStep) as TAgentState[];
+  return {
+    agents,
+    agentsHash: input.step.actorSnapshotsHashAfterStep ?? hashStableState(agents),
+    frameId: input.step.actorSnapshotFrameIdAfterStep
+  };
+}
+
+/** Build domain-neutral lineage from a validated checkpoint envelope. */
+export function createGenericForkProvenance<
+  TState,
+  TAgentState,
+  TObservation,
+  TPending,
+  TCommand,
+  TSource extends HarnessCheckpointSource,
+  TCheckpointArtifactVersion extends string = string
+>(
+  checkpoint: HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand, TSource> & {
+    artifactVersion: TCheckpointArtifactVersion;
+  },
+  options: CreateGenericForkProvenanceOptions = {}
+): GenericForkProvenance<TCheckpointArtifactVersion> {
+  return {
+    schemaVersion: HARNESS_FORK_PROVENANCE_VERSION,
+    checkpointArtifactVersion: checkpoint.artifactVersion,
+    checkpointId: checkpoint.checkpointId,
+    parentRunId: checkpoint.source.runId,
+    parentArtifactId: options.parentArtifactId,
+    parentBoundaryTraceId: checkpoint.source.boundaryTraceId,
+    parentEvidenceTraceIds: options.parentEvidenceTraceIds,
+    parentBoundaryTurnIndex: checkpoint.source.boundaryTurnIndex,
+    parentStateHash: checkpoint.source.stateHash,
+    parentExecutionPrefixHash: checkpoint.source.executionPrefixHash,
+    parentAgentsHash: checkpoint.source.agentsHash,
+    parentChannelsHash: checkpoint.source.channelsHash,
+    parentMessagesHash: checkpoint.source.messagesHash,
+    parentNativeStepCount: checkpoint.source.nativeStepCount,
+    parentMessageCount: checkpoint.source.messageCount,
+    createdAt: options.createdAt ?? new Date().toISOString(),
+    reason: options.reason
+  };
 }
 
 /**
@@ -374,4 +852,13 @@ function endsAtCompleteNativeBatch(steps: SocialEpisodeArtifact["steps"]): boole
     contiguousBatchSize += 1;
   }
   return contiguousBatchSize === boundary.batchSize;
+}
+
+/**
+ * Harness artifacts are required to be serializable.  Clone at every generic
+ * artifact boundary so checkpoint builders never retain a domain actor's
+ * mutable state object.
+ */
+function cloneArtifact<T>(value: T): T {
+  return structuredClone(value);
 }
