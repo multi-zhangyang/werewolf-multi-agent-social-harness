@@ -33,7 +33,7 @@ The runtime does not use a local scripted substitute when the API key is missing
 export LLM_CHAT_COMPLETIONS_URL="https://your-openai-compatible-provider.example/v1/chat/completions"
 export LLM_PROVIDER_PROTOCOL="openai-chat-completions"
 export LLM_API_KEY="..."
-export LLM_MODELS="model-a,model-b"
+export LLM_MODELS="grok-4.5"
 export LLM_STREAM=true
 export LLM_TIMEOUT_MS=120000
 export LLM_RETRY_COUNT=2
@@ -47,7 +47,9 @@ Provider integration policy:
 - OpenAI-compatible Chat Completions adapters must follow the OpenAI-compatible `/chat/completions` request and SSE streaming shapes.
 - OpenAI Responses support is implemented as a separate `openai-responses` protocol adapter with `/responses`, `input`/`instructions`, and `response.output_text.delta` stream events.
 - Anthropic support is implemented as a separate `anthropic-messages` protocol adapter with Messages/SDK-shaped `system`, `messages`, `stream`, and `content_block_delta` events. Anthropic Messages requires explicit `ANTHROPIC_MAX_TOKENS`; this is not sent by the default Chat Completions adapter.
-- Concrete model ids are runtime configuration, not project defaults.
+- Concrete model ids remain runtime configuration. The checked-in local template
+  currently selects `grok-4.5`; changing it must not create a provider- or
+  model-specific adapter branch.
 - Select the adapter explicitly with `LLM_PROVIDER_PROTOCOL`; never infer protocol from a model string.
 - Default `agent:probe`, `arena:match`, and `arena:tournament` CLI summaries expose only provider protocol/configuration state, bounded metrics, safe failure classification, and stream-completion status. They deliberately omit provider endpoints, provider request ids, and raw provider errors. `--json=full` is explicit local/debug output and must not be published without applying the artifact redaction policy.
 
@@ -247,6 +249,26 @@ uses deep whitelists: legal targets and provider request/stream telemetry are
 removed, `infosByAgent` is omitted, private/team speech acts are not exposed,
 nested agent metadata is stripped, and evidence-ref descriptions are removed.
 
+### Cockpit projection boundaries
+
+The React Cockpit is a presentation and analysis surface over server-owned
+projections; it is never a source of game truth. Its **狼人杀复盘** workspace
+renders a narrow review model rather than receiving a raw `GameState` in JSX:
+
+- `postgame-redacted` is a clearly labelled local postgame review. Private
+  reasoner evidence is redacted, but it may reveal a seat's role so the game can
+  be reviewed after it ends. It is not a public/live-game view.
+- `truth-redacted` is the public/share-safe view. The review board displays
+  only public phase/day data, seat status, public speeches, sheriff/exile
+  ballots, deaths without a source id, and public event metadata. It never
+  derives or renders a seat role, team, ability, night action, private social
+  message, agent state, model/profile identity, winner, or raw event payload.
+
+The client-side selector fails closed: even if an incorrectly shaped upstream
+`truth-redacted` payload contains hidden fields, they are not copied into the
+review model. The authoritative server projection and its API tests remain the
+security boundary; the selector is a second containment boundary for the UI.
+
 Replay has CLI, server-owned API, and programmatic entries:
 
 ```bash
@@ -325,8 +347,11 @@ and receipt delivery (after the full receipt set in a parallel batch), then bind
 snapshot hash to the native step. `replaySocialEpisode()` audits inline
 recorded snapshots when present; that audit checks hashes, rejected-step
 non-mutation, and shared parallel-batch state without constructing an actor or
-calling a model. Domains with compacted/redacted frame stores keep their own
-frame resolver and stronger schema validation.
+calling a model. Canonical compacted match artifacts use the generic
+`harness.agent-snapshot-frame.v1` sidecar registry: its frame id/hash/payload
+binding, references, and final-agent hash are audited model-free during replay.
+Domain adapters may add stronger domain-specific snapshot schema checks, but
+they must not reconstruct durable agent state from commands or retry a model.
 
 The generic tournament control plane can likewise persist a minimal research
 run set through `buildGenericTournamentRunSetArtifact()` and

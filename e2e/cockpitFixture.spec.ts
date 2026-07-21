@@ -39,9 +39,14 @@ test("renders recorded server truth without a provider and never requests a full
 
   // The public comparison DTO intentionally contains neither run ids nor
   // seeds. Its route context must still make the actual matrix current.
-  await page.getByRole("tab", { name: "对比", exact: true }).click();
+  // The tab strip can overflow after every cockpit workspace is registered.
+  // Use the primary navigation path, which invokes the same workspace state
+  // transition without relying on rc-tabs' transient horizontal scroll offset.
+  await page.getByRole("menuitem", { name: /对比/ }).click();
+  const comparePanel = page.getByRole("tabpanel", { name: "对比" });
+  await expect(comparePanel).toBeVisible();
   const truthComparison = page.waitForResponse((response) => isComparisonResponse(response, "truth-redacted"));
-  const candidate = page.getByRole("combobox", { name: "候选运行" });
+  const candidate = comparePanel.getByRole("combobox", { name: "候选运行" });
   await candidate.click();
   await candidate.press("ArrowDown");
   await candidate.press("Enter");
@@ -110,12 +115,37 @@ test("renders matrix lifecycle and statistics only from the harness API response
   expect(pageErrors).toEqual([]);
 });
 
+test("renders a projection-safe Werewolf postgame review board", async ({ page }) => {
+  await page.goto("/?workspace=domain", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+  await expect(page.getByRole("tabpanel", { name: "狼人杀复盘" })).toBeVisible();
+  const board = page.getByTestId("werewolf-review-board");
+  const seatBoard = page.getByRole("region", { name: "狼人杀座位复盘" });
+  await expect(board.getByText("狼人杀赛后复盘")).toBeVisible();
+  await expect(seatBoard.getByRole("listitem")).toHaveCount(9);
+  await expect(board.locator('[data-testid^="werewolf-seat-role-"]')).toHaveCount(9);
+
+  const projection = page.getByRole("combobox", { name: "工件投影" });
+  const truthArtifact = page.waitForResponse((response) => isArtifactResponse(response, "truth-redacted"));
+  await projection.click();
+  await projection.press("ArrowDown");
+  await projection.press("Enter");
+  await truthArtifact;
+
+  await expect(board.getByText("真相脱敏局面")).toBeVisible();
+  await expect(seatBoard.getByRole("listitem")).toHaveCount(9);
+  await expect(seatBoard).toContainText("身份隐藏");
+  await expect(board.locator('[data-testid^="werewolf-seat-role-"]')).toHaveCount(0);
+  expect(await seatBoard.textContent()).not.toMatch(/狼人|预言家|女巫|猎人|村民/);
+});
+
 test.describe("compact cockpit", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
   test("keeps every artifact workspace within the viewport", async ({ page }) => {
     const workspaces = [
       ["timeline", "时间线"],
+      ["domain", "狼人杀复盘"],
       ["society", "社会"],
       ["lineage", "谱系"],
       ["evaluation", "评测"],
