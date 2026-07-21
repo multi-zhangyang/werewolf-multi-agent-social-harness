@@ -1071,6 +1071,7 @@ export function forkHarnessRunOptions(options: {
   reason?: string;
 }): HarnessRunOptions {
   assertValidHarnessCheckpoint(options.checkpoint);
+  assertForkableWerewolfCheckpointBoundary(options.checkpoint);
   const genericFork = createGenericForkProvenance(options.checkpoint, {
     createdAt: options.createdAt,
     reason: options.reason,
@@ -1137,6 +1138,25 @@ export function assertValidHarnessCheckpoint(checkpoint: HarnessCheckpoint): voi
   const errors = validateHarnessCheckpoint(checkpoint);
   if (errors.length) {
     throw new Error(`Invalid harness checkpoint ${checkpoint.checkpointId}: ${errors.join(" ")}`);
+  }
+}
+
+function assertForkableWerewolfCheckpointBoundary(checkpoint: HarnessCheckpoint): void {
+  const boundary = checkpoint.executionPrefix.steps.at(-1);
+  if (!boundary?.actorSnapshotsHashAfterStep) {
+    throw new Error(
+      `Checkpoint ${checkpoint.checkpointId} is not forkable: final native boundary has no recorded durable actor snapshot.`
+    );
+  }
+  if (boundary.actorSnapshotsHashAfterStep !== checkpoint.source.agentsHash) {
+    throw new Error(
+      `Checkpoint ${checkpoint.checkpointId} is not forkable: final boundary actor snapshot hash does not match source.agentsHash.`
+    );
+  }
+  if (boundary.actorSnapshotFrameIdAfterStep !== checkpoint.source.agentSnapshotFrameId) {
+    throw new Error(
+      `Checkpoint ${checkpoint.checkpointId} is not forkable: final boundary actor snapshot frame id does not match source.agentSnapshotFrameId.`
+    );
   }
 }
 

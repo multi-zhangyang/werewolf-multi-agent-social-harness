@@ -234,6 +234,10 @@ export function applyCommand(state: GameState, command: GameCommand): GameState 
   assertPhaseAllows(state, command);
 
   if (command.type === "system.advance") {
+    const pending = getPendingActions(state);
+    if (pending.length !== 1 || pending[0]?.kind !== "advance" || pending[0].actorId !== "system") {
+      throw new Error("System advance is only legal when the sole pending action is system advance.");
+    }
     return advancePhase(state);
   }
   if (command.type === "seer.inspect") {
@@ -261,6 +265,9 @@ export function applyCommand(state: GameState, command: GameCommand): GameState 
     const actor = requireAliveRole(state, command.actorId, "werewolf");
     const target = requireLivingTarget(state, command.targetId);
     if (target.role === "werewolf") throw new Error("Werewolves cannot night-kill another werewolf in this ruleset.");
+    if (state.night.wolfVotes[actor.id] !== undefined) {
+      throw new Error("Werewolf already cast a night kill vote.");
+    }
     let next = cloneState(state);
     next.night.wolfVotes[actor.id] = target.id;
     next = appendEvent(next, {
