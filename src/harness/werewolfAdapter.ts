@@ -243,7 +243,9 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         view: cloneJson(this.latest.observation.view),
         action: cloneJson(pending),
         agent: toReasonerAgentContext(stagedActor.state),
-        policyPlan: cloneJson(plan)
+        policyPlan: cloneJson(plan),
+        memoryRetrieval: cloneJson(plan.memoryRetrieval),
+        recalledMemory: stagedActor.reasonerMemoryEntries(plan.memoryRetrieval)
       };
       const reasonerOutput = await this.options.reasoner.think(reasonerInput);
       const actionProposal = reasonerOutput.actionProposal;
@@ -273,6 +275,7 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         confidence: plan.confidence,
         strategyTags: plan.strategyTags,
         arbitration: cloneJson(plan.arbitration),
+        memoryRetrieval: cloneJson(plan.memoryRetrieval),
         beliefs: cloneJson(stagedActor.state.beliefs),
         privateMemo: reasonerOutput.content,
         publicSpeech,

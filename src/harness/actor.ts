@@ -10,13 +10,15 @@ import {
   appendSocialMemory,
   createAgentSocialState,
   pushSocialGoal,
+  retrieveMemoryContext,
   setSocialLastPlan,
   upsertSocialBelief,
   type AgentSocialState,
   type EvidenceRef,
+  type MemoryRetrievalRecord,
   type SocialStateMutationContext,
 } from "./socialState";
-import type { AgentHarnessState, HarnessPlayerView, PolicyPlan, ReasonerActionProposal } from "./types";
+import type { AgentHarnessState, HarnessPlayerView, PolicyPlan, ReasonerActionProposal, ReasonerMemoryEntry } from "./types";
 
 interface ObserveContext {
   traceId: string;
@@ -55,8 +57,45 @@ export class WerewolfAgentActor {
     if (!this.latestView) {
       throw new Error(`Agent ${this.state.playerId} cannot plan without first observing.`);
     }
+    const recalled = retrieveMemoryContext(this.ensureSocialState().memory, {
+      actorId: this.state.playerId,
+      traceId: this.latestObserveContext?.traceId,
+      // The first contract intentionally has no domain-specific semantic
+      // query: all recall remains actor-scoped and uses the store's stable
+      // importance/salience/recency ranking.
+      limit: 6
+    });
     const plan = planAction(this.latestView, action, this.state);
-    return plan;
+    return {
+      ...plan,
+      memoryRetrieval: recalled.evidence
+    };
+  }
+
+  /**
+   * Return only the selected actor-owned recall entries for optional reasoner
+   * context. The reasoner receives clones and cannot mutate durable memory.
+   */
+  reasonerMemoryEntries(retrieval: MemoryRetrievalRecord | undefined): ReasonerMemoryEntry[] {
+    if (!retrieval) return [];
+    if (retrieval.actorId !== this.state.playerId) {
+      throw new Error(`Memory retrieval belongs to ${retrieval.actorId}, expected ${this.state.playerId}.`);
+    }
+    const bySeq = new Map(this.ensureSocialState().memory.entries.map((entry) => [entry.seq, entry]));
+    return retrieval.selected.flatMap((selection) => {
+      const entry = bySeq.get(selection.memorySeq);
+      if (!entry) return [];
+      return [
+        {
+          memorySeq: entry.seq,
+          kind: entry.kind,
+          source: entry.source,
+          visibility: entry.visibility,
+          tags: [...entry.tags],
+          content: entry.content ? entry.content.slice(0, 480) : undefined
+        }
+      ];
+    });
   }
 
   act(plan: PolicyPlan): GameCommand {
@@ -187,7 +226,8 @@ export class WerewolfAgentActor {
         targetId: plan.targetId,
         claimedRole: plan.claimedRole,
         pressureTargetId: plan.pressureTargetId,
-        arbitration: cloneJson(plan.arbitration)
+        arbitration: cloneJson(plan.arbitration),
+        memoryRetrieval: cloneJson(plan.memoryRetrieval)
       }
     }, mutationContextFromPending(context));
     this.updateSocialHash();

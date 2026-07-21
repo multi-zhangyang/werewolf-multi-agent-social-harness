@@ -34,6 +34,7 @@ describe("OpenAIHarnessReasoner advisory candidates", () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({ model: input.agent.model, stream: true });
+    expect(requests[0].messages.map((message) => message.content).join("\n")).toContain("已检索记忆=#1/observation/environment/");
     expect(output.content).toContain("当前公开信息不足");
     expect(output.content).not.toContain("ACTION_CANDIDATE");
     expect(output.actionProposal).toMatchObject({ commandType: "seer.inspect", targetId: alternateTarget, confidence: 0.84 });
@@ -84,6 +85,7 @@ function createSeerInput(): {
   };
   actor.observe(harnessView, { traceId: "reasoner-proposal:1", turnIndex: 1 });
   const policyPlan = actor.plan(action);
+  const recalledMemory = actor.reasonerMemoryEntries(policyPlan.memoryRetrieval);
   return {
     actor,
     action,
@@ -101,7 +103,9 @@ function createSeerInput(): {
         beliefs: state.beliefs,
         socialStateHash: state.socialStateHash
       },
-      policyPlan
+      policyPlan,
+      memoryRetrieval: policyPlan.memoryRetrieval,
+      recalledMemory
     }
   };
 }

@@ -74,6 +74,20 @@ describe("Werewolf generic social adapter", () => {
         expect(input.action.kind).toBe("inspect");
         expect(input.view.you.id).toBe(seer.id);
         expect(input.agent.socialStateHash).toEqual(expect.any(String));
+        expect(input.memoryRetrieval).toMatchObject({
+          version: "harness.memory-retrieval.v1",
+          actorId: seer.id,
+          selected: [
+            {
+              memorySeq: 1,
+              rank: 1,
+              kind: "observation"
+            }
+          ]
+        });
+        expect(input.recalledMemory).toEqual([
+          expect.objectContaining({ memorySeq: 1, kind: "observation", source: "environment" })
+        ]);
         const content = `adapter memo:${input.agent.model}:${input.action.kind}:${input.policyPlan.policyName}`;
         return {
           content,
@@ -137,6 +151,12 @@ describe("Werewolf generic social adapter", () => {
     expect(actor.state.privateMemos).toEqual([expect.stringContaining("adapter memo:deterministic-inspect:inspect")]);
     expect(actor.state.socialStateHash).toEqual(expect.any(String));
     expect(actor.state.social?.memory.entries.map((entry) => entry.kind)).toEqual(["observation", "memo", "decision"]);
+    const committedDecision = actor.state.social?.memory.entries.find((entry) => entry.kind === "decision");
+    expect(committedDecision?.metadata?.memoryRetrieval).toMatchObject({
+      version: "harness.memory-retrieval.v1",
+      actorId: seer.id,
+      selected: [{ memorySeq: 1, rank: 1 }]
+    });
     expect(reasonerCalls).toHaveLength(1);
     expect(reasonerCalls[0]).toContain("werewolf-social-adapter:social-adapter:1");
     const seerMessage = artifact.messages.find((message) => message.metadata?.kind === "private-seer-inspect");
@@ -239,6 +259,11 @@ describe("Werewolf generic social adapter", () => {
         playerId: seer.id,
         actionKind: "inspect",
         commandType: "seer.inspect",
+        memoryRetrieval: {
+          version: "harness.memory-retrieval.v1",
+          actorId: seer.id,
+          selected: [{ memorySeq: 1, rank: 1 }]
+        },
         privateMemo: expect.stringContaining("adapter memo:deterministic-inspect:inspect"),
         agentStateHash: actor.state.socialStateHash
       }

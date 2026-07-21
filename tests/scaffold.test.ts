@@ -96,7 +96,53 @@ describe("scaffolded social actor", () => {
       content: "memo:a:vote:1",
       metadata: { reasonerId: "memo-only-reasoner" }
     });
-    expect(state.memory[2].metadata).toEqual({ policyId: "policy-a" });
+    expect(state.memory[2].metadata).toMatchObject({ policyId: "policy-a" });
+  });
+
+  it("provides deterministic cloned recall to scaffold policy and reasoner without granting store mutation", async () => {
+    let reasonerRecallSeqs: number[] = [];
+    let policyRecallSeqs: number[] = [];
+    const actor = createScaffoldedActor<TestObservation, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      reasoner: {
+        id: "recall-reader",
+        reflect(input) {
+          reasonerRecallSeqs = (input.recalledMemory ?? []).map((entry) => entry.seq);
+          input.recalledMemory?.[0]?.tags.push("reasoner-mutation-attempt");
+          return "private recall memo";
+        }
+      },
+      policy: {
+        id: "recall-policy",
+        decide(input) {
+          policyRecallSeqs = (input.recalledMemory ?? []).map((entry) => entry.seq);
+          input.memoryRetrieval?.selected[0]?.tags.push("policy-mutation-attempt");
+          return {
+            actorId: "a",
+            kind: "act",
+            command: { actorId: "a", value: "recall-policy" }
+          };
+        }
+      }
+    });
+
+    actor.observe({ turn: 1 });
+    await actor.decide({ actorId: "a", kind: "act" });
+    const state = actor.state;
+    const decision = state.social.memory.entries.find((entry) => entry.kind === "decision");
+
+    expect(reasonerRecallSeqs).toEqual([1]);
+    expect(policyRecallSeqs).toEqual([1]);
+    expect(state.social.memory.entries[0].tags).not.toContain("reasoner-mutation-attempt");
+    expect(decision?.metadata?.memoryRetrieval).toMatchObject({
+      version: "harness.memory-retrieval.v1",
+      actorId: "a",
+      selected: [{ memorySeq: 1, rank: 1, tags: [] }]
+    });
+    expect(decision?.metadata?.memoryRetrieval).not.toMatchObject({
+      selected: [{ tags: expect.arrayContaining(["policy-mutation-attempt"]) }]
+    });
   });
 
   it("rejects policy actions for the wrong actor id", async () => {
@@ -674,7 +720,7 @@ describe("scaffolded social actor", () => {
     expect(state.social.journal?.entries.map((entry) => entry.afterSummary?.memorySeq)).toEqual([1, 2, 3, 4]);
     expect(state.lastAction?.metadata?.arbitration).toBeUndefined();
     expect(state.memory.at(-1)?.tags).toEqual(["policy-decision"]);
-    expect(state.memory.at(-1)?.metadata).toEqual({ policyId: "policy-a" });
+    expect(state.memory.at(-1)?.metadata).toMatchObject({ policyId: "policy-a" });
   });
 
   it("keeps social stores serializable and prevents reasoner input mutation from becoming state or policy input", async () => {

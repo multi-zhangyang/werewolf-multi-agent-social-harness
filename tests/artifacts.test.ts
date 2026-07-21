@@ -1144,6 +1144,17 @@ describe("match artifact JSONL export", () => {
     expect(deriveSocialExposureRecords(artifact.socialEpisode).length).toBeGreaterThan(0);
     expect(artifact.agents.some((agent) => (agent.social?.journal?.entries.length ?? 0) > 0)).toBe(true);
 
+    const retrievalTamper = cloneJson(artifact);
+    const retrievalStep = retrievalTamper.trajectory.find((step) => step.policyPlan.memoryRetrieval);
+    if (!retrievalStep?.policyPlan.memoryRetrieval?.selected[0] || !retrievalStep.turnTrace.memoryRetrieval?.selected[0]) {
+      throw new Error("Expected recorded actor-memory retrieval evidence.");
+    }
+    retrievalStep.turnTrace.memoryRetrieval.selected[0].rank = 2;
+    (retrievalStep.policyPlan.memoryRetrieval.selected[0] as unknown as Record<string, unknown>).content = "must-not-persist";
+    const retrievalErrors = validateMatchArtifactIntegrity(retrievalTamper).join("\n");
+    expect(retrievalErrors).toMatch(/does not match turnTrace\.memoryRetrieval/);
+    expect(retrievalErrors).toMatch(/must not persist raw memory content/);
+
     const pendingEvidenceTamper = cloneJson(artifact);
     const inspectStep = pendingEvidenceTamper.socialEpisode.steps.find((step: any) =>
       step.commitStatus === "committed" && step.action.command.type === "seer.inspect"

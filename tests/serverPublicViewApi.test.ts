@@ -232,13 +232,16 @@ describe("public match API redaction", () => {
       expect(step.policyPlan).not.toHaveProperty("targetId");
       expect(step.policyPlan).not.toHaveProperty("pressureTargetId");
       expect(step.policyPlan).not.toHaveProperty("arbitration");
+      expect(step.policyPlan).not.toHaveProperty("memoryRetrieval");
       expect(step.reasonerOutput).not.toHaveProperty("providerRequestId");
       expect(step.reasonerOutput).not.toHaveProperty("retryHistory");
       expect(step.reasonerOutput).not.toHaveProperty("stream");
       expect(step.turnTrace).not.toHaveProperty("providerRequestId");
       expect(step.turnTrace).not.toHaveProperty("retryHistory");
       expect(step.turnTrace).not.toHaveProperty("stream");
+      expect(step.turnTrace).not.toHaveProperty("memoryRetrieval");
     }
+    expect(JSON.stringify(projected.body)).not.toContain("memoryRetrieval");
     for (const step of projected.body.socialEpisode.steps) {
       expect(step.pendingAction).not.toHaveProperty("legalTargetIds");
       expect(step.pendingAction).not.toHaveProperty("legalPoisonTargetIds");

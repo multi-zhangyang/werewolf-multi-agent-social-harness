@@ -25243,3 +25243,63 @@ git diff --check
 The full deterministic suite completed with 39 test files and 417 tests
 passing. The production build retains the existing large-JavaScript-chunk
 warning; it is performance follow-up work, not a semantic-binding failure.
+
+## 13.255 Deterministic Memory Retrieval Evidence Lock
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+Actor memory recall is a deterministic, auditable input to a decision; it is
+not a second model-owned memory store, a free-text fact extractor, or an
+environment authority.
+
+- `retrieveMemoryContext()` in `socialState.ts` reads only the actor's existing
+  committed `MemoryStore`, applies the stable importance/salience/recency
+  ranking, returns cloned entries for private use, and does not mutate memory
+  or the social journal.
+- The durable `harness.memory-retrieval.v1` record contains the actor/trace,
+  bounded query/ranking policy, selected memory sequence references, scores,
+  reasons, tags, visibility, and evidence refs. It must never contain raw
+  memory content, observation, action, or arbitrary metadata.
+- `ScaffoldedSocialActor` supplies cloned selected entries to its policy and
+  reasoner inputs. The production Werewolf actor binds the selection to its
+  deterministic policy plan and supplies at most six cloned excerpts to the
+  optional OpenAI-compatible reasoner; it has no mutable store handle. Its
+  action candidate remains advisory and still passes existing policy
+  arbitration and environment legality.
+- Werewolf stores the same content-free selection in its policy plan, native
+  action envelope, turn trace, and the committed decision-memory entry. The
+  artifact validator checks those bindings and any available recorded actor
+  snapshot. A rejected transactional decision may retain native proposal
+  evidence but cannot commit durable actor state.
+- Postgame-redacted projections intentionally omit recall evidence and all
+  private excerpts. Full local artifacts retain the content-free selection
+  record as decision evidence; replay only applies recorded commands and never
+  recreates actors, dynamically retrieves memory, invokes a reasoner, or makes
+  a provider call.
+- This evidence proves that a bounded recall context was supplied to the
+  actor/reasoner. It does not claim to prove an LLM's hidden internal causal
+  reasoning. Future semantic changes to ranking/query behavior require a new
+  retrieval version rather than silently reinterpreting recorded evidence.
+
+Validation completed for this slice:
+
+```bash
+npm run typecheck
+npx vitest run tests/socialState.test.ts tests/scaffold.test.ts \
+  tests/reasonerProposal.test.ts tests/werewolfAdapter.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=dot
+npx vitest run tests/artifacts.test.ts tests/serverPublicViewApi.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --reporter=dot
+npm run build
+npm run test:e2e
+git diff --check
+```
+
+The full deterministic suite completed with 39 test files and 419 tests
+passing. The production build retains the existing large-JavaScript-chunk
+warning as a separate performance follow-up.

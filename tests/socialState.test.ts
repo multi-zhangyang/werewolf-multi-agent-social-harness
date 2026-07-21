@@ -39,6 +39,7 @@ import {
   recordSocialCoalitionEvidence,
   recordSocialBetrayalEvidence,
   retrieveMemory,
+  retrieveMemoryContext,
   setSocialLastPlan,
   updateCommitmentStatus,
   updateGoalStatus,
@@ -423,6 +424,68 @@ describe("agent social state stores", () => {
         content: "unsupported memory without evidence"
       })
     ).toThrow(/evidence ref/);
+  });
+
+  it("records deterministic, content-free evidence for bounded actor-memory recall", () => {
+    const store = createMemoryStore(4);
+    appendMemory(store, {
+      kind: "message",
+      source: "b",
+      visibility: "public",
+      content: "older social evidence",
+      salience: 0.4,
+      importance: 0.3,
+      evidenceRefs: [evidence],
+      tags: ["claim"]
+    });
+    appendMemory(store, {
+      kind: "memo",
+      source: "reasoner",
+      visibility: "private",
+      content: "high-priority private recall",
+      salience: 0.9,
+      importance: 0.8,
+      evidenceRefs: [{ artifact: "trace", traceId: "turn-2" }],
+      tags: ["reasoner-memo"]
+    });
+
+    const before = JSON.stringify(store);
+    const recall = retrieveMemoryContext(store, {
+      actorId: "a",
+      traceId: "turn-3",
+      limit: 1
+    });
+
+    expect(recall.evidence).toEqual({
+      version: "harness.memory-retrieval.v1",
+      actorId: "a",
+      traceId: "turn-3",
+      query: {
+        limit: 1,
+        tags: undefined,
+        visibility: undefined,
+        source: undefined,
+        ranking: "importance_then_salience_then_recency"
+      },
+      selected: [
+        {
+          memorySeq: 2,
+          rank: 1,
+          score: 2.500002,
+          scoreReasons: ["importance", "salience", "recency_tiebreak"],
+          kind: "memo",
+          source: "reasoner",
+          visibility: "private",
+          tags: ["reasoner-memo"],
+          evidenceRefs: [{ artifact: "trace", traceId: "turn-2" }]
+        }
+      ]
+    });
+    expect(recall.entries).toHaveLength(1);
+    expect(recall.entries[0].content).toBe("high-priority private recall");
+    recall.entries[0].content = "caller mutation";
+    expect(JSON.stringify(store)).toBe(before);
+    expect(JSON.stringify(recall.evidence)).not.toContain("high-priority private recall");
   });
 
   it("stores belief claims with evidence and preserves contradictions", () => {
