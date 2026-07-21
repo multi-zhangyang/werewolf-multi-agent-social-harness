@@ -86,8 +86,10 @@ import { DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER, WEREWOLF_PARALLEL_MIN_MAX_TRANS
 import { legacyMetricPromotionPolicyFromSummary, resolveRecordedMetricPromotion } from "./harness/evaluation";
 import { countSocialStepCommits, deriveSocialExposureRecords, isSocialStepCommitted, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
 import type { SocialStateMutationJournalEntry } from "./harness/socialState";
+import { WerewolfReviewBoard } from "./components/cockpit/WerewolfReviewBoard";
+import { buildWerewolfReviewModel } from "./components/cockpit/werewolfReviewProjection";
 
-type Workspace = "runs" | "timeline" | "society" | "lineage" | "evaluation" | "experiments" | "compare" | "packs";
+type Workspace = "runs" | "timeline" | "domain" | "society" | "lineage" | "evaluation" | "experiments" | "compare" | "packs";
 
 const DEFAULT_TABLE_SCROLL = { x: "max-content" } as const;
 
@@ -103,6 +105,7 @@ function parseWorkspaceFromSearch(search: string): Workspace | null {
   if (
     raw === "runs" ||
     raw === "timeline" ||
+    raw === "domain" ||
     raw === "society" ||
     raw === "lineage" ||
     raw === "evaluation" ||
@@ -815,6 +818,7 @@ const workspaceItems: Array<{
 }> = [
   { id: "runs", label: "运行", description: "实验注册表与真实执行", icon: <DatabaseOutlined /> },
   { id: "timeline", label: "时间线", description: "step / trace / action debugger", icon: <BranchesOutlined /> },
+  { id: "domain", label: "狼人杀复盘", description: "赛后局面、公开发言与投票", icon: <RobotOutlined /> },
   { id: "society", label: "社会", description: "agent、消息、关系证据", icon: <TeamOutlined /> },
   { id: "lineage", label: "谱系", description: "checkpoint、fork、branch tree", icon: <ApiOutlined /> },
   { id: "evaluation", label: "评测", description: "指标、证据、告警", icon: <SafetyCertificateOutlined /> },
@@ -894,6 +898,7 @@ export function App() {
   const channels = artifact?.socialEpisode?.channels ?? [];
   const metrics = artifact?.evaluationReport?.metrics ?? [];
   const warnings = artifact?.evaluationReport?.warnings ?? [];
+  const werewolfReview = useMemo(() => buildWerewolfReviewModel(artifact), [artifact]);
   const activeWorkspace = workspaceItems.find((item) => item.id === workspace) ?? workspaceItems[0];
   const isCompactLayout = !screens.lg;
   const isNarrowLayout = !screens.xl;
@@ -2439,6 +2444,11 @@ export function App() {
           busy={busy}
         />
       )
+    },
+    {
+      key: "domain",
+      label: "狼人杀复盘",
+      children: <WerewolfReviewBoard review={werewolfReview} />
     },
     {
       key: "society",
