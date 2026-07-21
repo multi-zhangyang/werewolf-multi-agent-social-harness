@@ -378,6 +378,91 @@ describe("Werewolf generic social adapter", () => {
     expect(internal.pendingProposals.size).toBe(0);
   });
 
+  it("cleans transactional proposals when a runner-owned trace-collision receipt differs from policy trace evidence", async () => {
+    const initialState = createGame({ id: "werewolf-trace-collision-cleanup", seed: "werewolf-trace-collision-cleanup" });
+    const nightSeerState = applyCommand(initialState, { type: "system.advance", actorId: "system" });
+    const inspect = getPendingActions(nightSeerState).find((action) => action.kind === "inspect");
+    if (!inspect || inspect.kind !== "inspect") throw new Error("Expected the night seer inspect action.");
+    const nightWolvesState = applyCommand(nightSeerState, {
+      type: "seer.inspect",
+      actorId: inspect.actorId,
+      targetId: inspect.legalTargetIds[0]
+    });
+    const wolves = nightWolvesState.players.filter((player) => player.role === "werewolf");
+    expect(wolves).toHaveLength(2);
+
+    const adapters = wolves.map(
+      (wolf) =>
+        new WerewolfSocialActorAdapter({
+          actor: new WerewolfAgentActor({
+            playerId: wolf.id,
+            profileId: `${wolf.id}-trace-collision-profile`,
+            model: "trace-collision-model",
+            temperature: 0,
+            policyName: policyForRole(wolf.role),
+            turns: 0,
+            observations: 0,
+            beliefs: {},
+            privateMemos: []
+          }),
+          reasoner: {
+            async think(input) {
+              const content = `trace collision memo:${input.traceId}:${input.agent.playerId}`;
+              return {
+                content,
+                completion: {
+                  content,
+                  latencyMs: 1,
+                  usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+                  attempts: 1
+                }
+              };
+            }
+          },
+          players: nightWolvesState.players
+        })
+    );
+
+    const artifact = await runSocialEpisode({
+      id: "werewolf-trace-collision-cleanup",
+      environment: WerewolfSocialEnvironment.fromState(nightWolvesState),
+      actors: adapters,
+      channels: createWerewolfSocialChannels(nightWolvesState.players),
+      schedulerMode: "aec-batched-decision",
+      maxTransitions: 1,
+      hashState: hashStableState,
+      eventSeq: werewolfEventSeq,
+      assembleObservation: assembleWerewolfSocialObservation,
+      // Deliberately collide the two policy trace ids. The generic runner
+      // emits a unique scheduler-owned rejection trace id in this case.
+      traceIdForDecision: () => "policy-trace-collision"
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(artifact.steps).toHaveLength(1);
+    expect(artifact.steps[0]).toMatchObject({
+      actorId: "system",
+      traceId: expect.stringContaining("trace_identity:rejected"),
+      commitStatus: "rejected",
+      failure: { stage: "trace_identity" }
+    });
+    expect(artifact.steps[0]?.traceId).not.toBe("policy-trace-collision");
+    expect(artifact.finalState).toEqual(nightWolvesState);
+    for (const adapter of adapters) {
+      expect(adapter.state).toMatchObject({ turns: 0, observations: 0, beliefs: {}, privateMemos: [] });
+      expect(adapter.state.social?.memory.entries).toEqual([]);
+      expect(adapter.state.social?.journal?.entries ?? []).toEqual([]);
+      const internal = adapter as unknown as {
+        stagedActors: Map<string, unknown>;
+        pendingProposals: Map<string, unknown>;
+        turnTraces: Map<string, unknown>;
+      };
+      expect(internal.stagedActors.size).toBe(0);
+      expect(internal.pendingProposals.size).toBe(0);
+      expect(internal.turnTraces.size).toBe(0);
+    }
+  });
+
   it("maps every Werewolf command to adapter-owned typed speech acts", () => {
     const initialState = createGame({ id: "werewolf-speech-act-mapping", seed: "werewolf-speech-act-mapping" });
     const state = applyCommand(initialState, { type: "system.advance", actorId: "system" });

@@ -164,6 +164,13 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
   private readonly pendingProposals = new Map<
     string,
     {
+      /**
+       * Runner-owned action trace evidence. This deliberately remains
+       * separate from the map key: a runner can reject a decision using its
+       * own scheduler trace while retaining the policy trace in the rejected
+       * action evidence.
+       */
+      traceId: string;
       plan: PolicyPlan;
       privateMemo: string;
       pendingAction: AgentPendingAction;
@@ -302,7 +309,11 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         agentStateHash: expectedAgentStateHash
       };
       this.turnTraces.set(this.latest.traceId, trace);
-      this.pendingProposals.set(this.latest.traceId, {
+      // Private turn state is transaction-scoped, never action-trace-scoped.
+      // In particular, a scheduler-level rejection can deliver a unique
+      // runner trace id that differs from the policy-provided trace id.
+      this.pendingProposals.set(this.latest.transactionId, {
+        traceId: this.latest.traceId,
         plan: cloneJson(plan),
         privateMemo: reasonerOutput.content,
         pendingAction: cloneJson(pending),
@@ -339,12 +350,23 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
     const transactionId = receipt.transactionId ?? receipt.traceId;
     const stagedActor = this.stagedActors.get(transactionId);
     this.stagedActors.delete(transactionId);
-    const proposal = this.pendingProposals.get(receipt.traceId);
-    this.pendingProposals.delete(receipt.traceId);
-    if (!proposal || !stagedActor || receipt.status !== "committed") return;
+    const proposal = this.pendingProposals.get(transactionId);
+    this.pendingProposals.delete(transactionId);
+    if (!proposal || !stagedActor || receipt.status !== "committed") {
+      // A proposal/trace is only durable after a committed receipt. Clearing
+      // the speculative trace prevents rejected trace-collision decisions
+      // from accumulating actor-private state.
+      if (proposal) this.turnTraces.delete(proposal.traceId);
+      return;
+    }
+    if (receipt.traceId !== proposal.traceId) {
+      throw new Error(
+        `Committed receipt trace mismatch for ${this.id}: expected ${proposal.traceId}, received ${receipt.traceId}.`
+      );
+    }
 
     stagedActor.commitTurn(proposal.plan, proposal.privateMemo, {
-      traceId: receipt.traceId,
+      traceId: proposal.traceId,
       turnIndex: receipt.turnIndex,
       pendingAction: proposal.pendingAction,
       providerRequestId: proposal.providerRequestId
