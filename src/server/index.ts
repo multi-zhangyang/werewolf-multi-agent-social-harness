@@ -3,7 +3,7 @@ import { appendFile, lstat, mkdir, readFile, readdir, realpath, writeFile } from
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import { modelClientFromEnv, providerConfigSummaryFromEnv } from "../agents/providerRegistry";
+import { modelClientFromEnv, providerConfigSummaryFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
 import { normalizeModelList } from "../agents/schema";
 import { applyCommand, createGame, getPendingActions } from "../core/engine";
 import { isAgentPendingAction } from "../core/pending";
@@ -276,8 +276,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     service: "werewolf-multi-agent-arena",
-    provider,
-    chatCompletionsUrl: provider.protocol === "openai-chat-completions" ? provider.endpoint : null,
+    provider: providerDiagnosticSummaryFromEnv(),
     models: provider.models
   });
 });
@@ -289,8 +288,7 @@ app.get("/api/config", (_req, res) => {
     models: provider.models,
     policyNames: POLICY_NAMES,
     defaultProfiles: profilesFromModels(provider.models, Number(process.env.AGENT_TEMPERATURE ?? 0.7)),
-    provider,
-    chatCompletionsUrl: provider.protocol === "openai-chat-completions" ? provider.endpoint : null,
+    provider: providerDiagnosticSummaryFromEnv(),
     artifactExport: {
       tournamentConfigured: Boolean(tournamentArtifactBaseDir),
       matrixConfigured: Boolean(matrixArtifactBaseDir),
@@ -887,7 +885,7 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
       summary: {
         kind: "fork",
         ok: false,
-        endpoint: providerConfigSummaryFromEnv().endpoint,
+        provider: providerDiagnosticSummaryFromEnv(),
         checkpointId: checkpoint.checkpointId,
         forkOf: null,
         models,
@@ -952,7 +950,7 @@ app.post("/api/matches/run", async (req, res, next) => {
       summary: {
         kind: "match",
         ok: false,
-        endpoint: providerConfigSummaryFromEnv().endpoint,
+        provider: providerDiagnosticSummaryFromEnv(),
         seed: typeof req.body?.seed === "string" && req.body.seed.trim() ? req.body.seed : null,
         models,
         profileCount: profiles.length,
@@ -1052,7 +1050,7 @@ app.post("/api/matches/run", async (req, res, next) => {
       summary: {
         kind: "match",
         ok: false,
-        endpoint: providerConfigSummaryFromEnv().endpoint,
+        provider: providerDiagnosticSummaryFromEnv(),
         seed: record.state.seed,
         models,
         profileCount: profiles.length,
@@ -1134,7 +1132,7 @@ app.post("/api/harness/probe", async (req, res) => {
       summary: {
         kind: "probe",
         ok: false,
-        endpoint: providerConfigSummaryFromEnv().endpoint,
+        provider: providerDiagnosticSummaryFromEnv(),
         model,
         timeoutMs: timeoutMs ?? null,
         elapsedMs: Math.round(performance.now() - startedAt),
@@ -1168,7 +1166,7 @@ app.post("/api/tournaments/run", async (req, res) => {
       summary: {
         kind: "tournament",
         ok: false,
-        endpoint: providerConfigSummaryFromEnv().endpoint,
+        provider: providerDiagnosticSummaryFromEnv(),
         evaluation: null,
         failureReason: failure.message,
         providerFailure: failure.providerFailure ?? null
@@ -1232,7 +1230,7 @@ app.post("/api/tournaments/run", async (req, res) => {
       summary: {
         kind: "tournament",
         ok: false,
-        endpoint: providerConfigSummaryFromEnv().endpoint,
+        provider: providerDiagnosticSummaryFromEnv(),
         experimentId: experiment.id,
         seed: experiment.seed,
         models: experiment.models,
@@ -1283,7 +1281,7 @@ app.post("/api/experiments/matrix/run", async (req, res) => {
       summary: {
         kind: "experiment-matrix",
         ok: false,
-        endpoint: providerConfigSummaryFromEnv().endpoint,
+        provider: providerDiagnosticSummaryFromEnv(),
         failureReason: failure.message,
         providerFailure: failure.providerFailure ?? null
       },
@@ -1328,7 +1326,7 @@ app.post("/api/experiments/matrix/run", async (req, res) => {
       summary: {
         kind: "experiment-matrix",
         ok: false,
-        endpoint: providerConfigSummaryFromEnv().endpoint,
+        provider: providerDiagnosticSummaryFromEnv(),
         matrixId: experiment.id,
         cellsRequested: experiment.cells.length,
         limits: { timeoutMs: timeoutMs ?? null },
@@ -1651,7 +1649,7 @@ function buildMatchSummary(
   return {
     kind: "match",
     ok: result.status !== "failed" && harnessFailures.length === 0,
-    endpoint: providerConfigSummaryFromEnv().endpoint,
+    provider: providerDiagnosticSummaryFromEnv(),
     seed: options.seed,
     models: options.models,
     profileCount: options.profiles.length,
@@ -4571,7 +4569,6 @@ interface PublicProviderFailureSummary {
   retryable?: boolean;
   attempts?: number;
   maxAttempts?: number;
-  providerRequestId?: string;
 }
 
 interface PublicApiFailure {
@@ -4606,7 +4603,6 @@ function publicProviderFailureSummary(failure: ProviderFailureSummary): PublicPr
   if (failure.retryable !== undefined) summary.retryable = failure.retryable;
   if (failure.attempts !== undefined) summary.attempts = failure.attempts;
   if (failure.maxAttempts !== undefined) summary.maxAttempts = failure.maxAttempts;
-  if (failure.providerRequestId) summary.providerRequestId = sanitizeApiErrorText(failure.providerRequestId);
   return summary;
 }
 
@@ -4657,7 +4653,7 @@ function buildProbeSummary(options: {
   return {
     kind: "probe",
     ok: true,
-    endpoint: providerConfigSummaryFromEnv().endpoint,
+    provider: providerDiagnosticSummaryFromEnv(),
     source: "diagnostic-probe",
     applied: false,
     model: options.model,
@@ -4838,7 +4834,7 @@ function buildTournamentSummary(
     kind: "tournament",
     status,
     ok: result.gamesFailed === 0,
-    endpoint: providerConfigSummaryFromEnv().endpoint,
+    provider: providerDiagnosticSummaryFromEnv(),
     experimentId: options.experimentId ?? null,
     seed: options.seed,
     models: options.models,
@@ -4885,7 +4881,7 @@ function buildExperimentMatrixSummary(
     // visible in counters and cells but does not turn a bounded study into an
     // API failure.
     ok: result.status === "completed",
-    endpoint: providerConfigSummaryFromEnv().endpoint,
+    provider: providerDiagnosticSummaryFromEnv(),
     matrixId: result.experiment.id,
     status: result.status,
     cellsRequested: result.cellsRequested,

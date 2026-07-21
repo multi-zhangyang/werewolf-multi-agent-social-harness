@@ -25033,3 +25033,34 @@ npm run typecheck
 Before claiming the broader refactor complete, rerun the full test/build
 ladder and a bounded real streaming probe/match with the configured generic
 `grok-4.5` runtime selection. Do not add a provider-specific branch.
+
+## 13.251 Server-Safe Provider Diagnostics Lock
+
+Timestamp:
+
+```text
+2026-07-21
+```
+
+The local server is a control/API plane, not an endpoint-discovery or provider
+telemetry surface. Its default health, configuration, probe, match, fork,
+tournament, and experiment-matrix responses therefore expose only the safe
+provider diagnostic `{ protocol, configured }`, plus the models explicitly
+selected for a requested experiment where applicable. They must not serialize:
+
+- a provider URL or chat-completions URL;
+- provider request ids;
+- raw provider body/header/retry detail;
+- a credential or a value derived from one.
+
+Provider endpoint selection and request ids remain local runtime/trace details.
+They may be used by the configured client and retained in canonical local
+artifacts only under the existing redaction policy; they are not cockpit/API
+summary fields. React configuration DTOs must consume the safe diagnostic only
+and must never need an endpoint to render the model selector or run controls.
+
+Regression proof for this lock includes `/api/health`, `/api/config`, successful
+and failed safe diagnostics, postgame artifact projections, typecheck, and the
+production build. A future server response that reintroduces `endpoint`,
+`chatCompletionsUrl`, or `providerRequestId` into a default/public response is
+an authority/redaction regression.

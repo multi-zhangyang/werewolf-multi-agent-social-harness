@@ -192,7 +192,7 @@ interface ConfigResponse {
   }>;
   provider?: {
     protocol?: string;
-    endpoint?: string;
+    configured?: boolean;
     models?: string[];
   };
   artifactExport?: {

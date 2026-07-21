@@ -73,6 +73,25 @@ describe("public match API redaction", () => {
     assertPublicMatchResponse(listed.body[0]);
   });
 
+  it("exposes only safe provider diagnostics from health and cockpit configuration routes", async () => {
+    const [health, config] = await Promise.all([
+      requestJson(baseUrl, "GET", "/api/health"),
+      requestJson(baseUrl, "GET", "/api/config")
+    ]);
+
+    for (const response of [health, config]) {
+      expect(response.status).toBe(200);
+      expect(response.body.provider).toMatchObject({
+        protocol: expect.any(String),
+        configured: expect.any(Boolean)
+      });
+      expect(response.body.provider).not.toHaveProperty("endpoint");
+      expect(response.body).not.toHaveProperty("chatCompletionsUrl");
+      expect(JSON.stringify(response.body)).not.toContain('"endpoint"');
+      expect(JSON.stringify(response.body)).not.toContain('"chatCompletionsUrl"');
+    }
+  });
+
   it("defaults artifact reads to a private-evidence-redacted projection and keeps full postgame truth explicit", async () => {
     const record = await createSensitiveStoredMatch("server-public-redaction-artifact");
 
@@ -1045,6 +1064,10 @@ describe("public match API redaction", () => {
 	    expect(run.body.summary).toMatchObject({
 	      status: "truncated",
 	      truncationReason: expect.stringContaining("maxTransitions"),
+	      provider: {
+	        protocol: expect.any(String),
+	        configured: expect.any(Boolean)
+	      },
 	      profileCount: 3,
 	      modelCount: 2,
 	      nativeSteps: expect.any(Number),
@@ -1057,8 +1080,12 @@ describe("public match API redaction", () => {
 	      })
 	    });
 	    expect(run.body.summary).not.toHaveProperty("profiles");
+	    expect(run.body.summary.provider).not.toHaveProperty("endpoint");
 	    const publicRunSummary = JSON.stringify(run.body.summary);
 	    expect(publicRunSummary).not.toContain("wolf-profile");
+	    expect(publicRunSummary).not.toContain('"endpoint"');
+	    expect(publicRunSummary).not.toContain('"chatCompletionsUrl"');
+	    expect(publicRunSummary).not.toContain('"providerRequestId"');
 	    expect(publicRunSummary).not.toContain("seer-profile");
 	    expect(publicRunSummary).not.toContain("wolf-deceiver");
 	    expect(publicRunSummary).not.toContain("seer-information");
@@ -1495,13 +1522,13 @@ describe("public match API redaction", () => {
         providerStage: "http_response",
         status: 503,
         attempts: 1,
-        maxAttempts: 2,
-        providerRequestId: "failed-public-match-request"
+        maxAttempts: 2
       }
     });
     expect(detailJson).not.toContain("raw-failed-match-token-should-not-appear");
     expect(detailJson).not.toContain("upstream failed-match body leaked");
     expect(detailJson).not.toContain("failed-match retry body leaked");
+    expect(detailJson).not.toContain("failed-public-match-request");
     expect(detailJson).not.toContain("retryCause");
 
     const listed = await requestJson(baseUrl, "GET", "/api/matches");
@@ -1571,12 +1598,12 @@ describe("public match API redaction", () => {
       status: 502,
       retryable: true,
       attempts: 2,
-      maxAttempts: 3,
-      providerRequestId: "failed-public-probe-request"
+      maxAttempts: 3
     });
     expect(json).not.toContain("raw-provider-token-should-not-appear");
     expect(json).not.toContain("upstream body leaked");
     expect(json).not.toContain("retry body leaked");
+    expect(json).not.toContain("failed-public-probe-request");
     expect(json).not.toContain("authorization");
     expect(json).not.toContain("retryCause");
 
