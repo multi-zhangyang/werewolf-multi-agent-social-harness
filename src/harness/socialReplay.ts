@@ -1,9 +1,11 @@
 import {
   auditRecordedSocialAgentSnapshots,
+  resolveHarnessAgentSnapshotFrame,
   type HarnessAgentSnapshotFrame,
   type RecordedSocialAgentStateAuditResult
 } from "./episodeArtifacts";
 import {
+  deriveSocialExposureRecords,
   isSocialParallelJointStep,
   isSocialStepCommitted,
   isSocialStepNonReplayableFailure,
@@ -11,6 +13,7 @@ import {
   validateSocialParallelBatchLayout,
   type SocialEpisodeArtifact,
   type SocialEnvironment,
+  type SocialExposureRecord,
   type SocialHarnessStep,
   type SocialMessage,
   type SocialParallelEnvironment
@@ -55,6 +58,50 @@ export type SocialRecordedStepValidator<TState, TObservation, TPending, TCommand
   }
 ) => readonly string[];
 
+/**
+ * Pure, domain-owned validation of a durable actor-state snapshot recorded at
+ * a completed receipt boundary. The generic replayer supplies only recorded
+ * evidence: environment snapshots, committed messages, scoped observations,
+ * and the prior durable snapshot. It never instantiates an actor, evaluates a
+ * policy, parses free text, or calls a reasoner/provider.
+ *
+ * The callback runs once at the end of a complete native batch. For a true
+ * parallel batch that means one invocation after the joint `stepBatch()` and
+ * all recorded receipts, never against an invented per-member intermediary.
+ */
+export type SocialRecordedAgentStateValidator<TState, TObservation, TPending, TCommand, TAgentState> = (input: {
+  /** Recorded prefix only; no future steps or messages are exposed. */
+  episodePrefix: Pick<SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>, "steps" | "messages" | "channels" | "runtimeActorIds">;
+  /** Last native step in this completed receipt boundary. */
+  step: SocialHarnessStep<TObservation, TPending, TCommand>;
+  /** Zero-based index of `step` in the full episode. */
+  stepIndex: number;
+  /** One sequential step or every member of one completed parallel batch. */
+  batch: readonly SocialHarnessStep<TObservation, TPending, TCommand>[];
+  /** Durable actor state from the preceding captured receipt boundary, when available. */
+  priorAgents?: readonly TAgentState[];
+  /** Durable actor state recorded after this receipt boundary. */
+  recordedAgents: readonly TAgentState[];
+  /** Exact replay environment state before this native boundary. */
+  stateBefore: TState;
+  /** Exact replay environment state after this native boundary. */
+  stateAfter: TState;
+  /** All committed social messages through this boundary. */
+  committedMessages: readonly SocialMessage[];
+  /**
+   * Canonical actor-scoped message exposures derived from observations in the
+   * recorded prefix. The helper has already enforced channel/runtime-audience
+   * rules; it is evidence, not an inference from message text.
+   */
+  scopedExposureRecords: readonly SocialExposureRecord[];
+  /**
+   * Channel-authorized message slices at this committed boundary. These do
+   * not replace `scopedExposureRecords`: a validator that needs proof of an
+   * actual observation must use the latter.
+   */
+  visibleMessagesByActor: Readonly<Record<string, readonly SocialMessage[]>>;
+}) => readonly string[];
+
 export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TAgentState = unknown>(options: {
   episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
   environment: SocialEnvironment<TState, TObservation, TPending, TCommand>;
@@ -74,6 +121,12 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
   agentSnapshotFrames?: HarnessAgentSnapshotFrame<TAgentState>[];
   /** Optional domain-owned binding of recorded action evidence to replay state. */
   validateRecordedStep?: SocialRecordedStepValidator<TState, TObservation, TPending, TCommand>;
+  /**
+   * Optional domain-owned semantic audit of receipt-gated durable agent state.
+   * This augments structural snapshot/hash validation; it does not rerun an
+   * agent or infer a belief from language.
+   */
+  validateRecordedAgentState?: SocialRecordedAgentStateValidator<TState, TObservation, TPending, TCommand, TAgentState>;
   /** Required when replaying an artifact that recorded adapter provenance. */
   domainAdapter?: SocialDomainAdapterManifest;
 }): SocialEpisodeReplayResult<TState> {
@@ -88,6 +141,7 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
   let replayedSteps = 0;
   let replayedBatches = 0;
   let rejectedSteps = 0;
+  let previousAgentSnapshots: TAgentState[] | undefined;
 
   // This happens before the first environment snapshot/step. An environment
   // supplied by the caller must not get a chance to reinterpret a trajectory
@@ -154,7 +208,8 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
     validateRecordedStepEvidence(step, index, [step]);
     if (stopOnMismatch && mismatches.length) return;
 
-    const beforeEventSeq = options.eventSeq?.(options.environment.snapshot());
+    const stateBefore = options.environment.snapshot();
+    const beforeEventSeq = options.eventSeq?.(stateBefore);
     const beforeMessageSeq = bus.listMessages().at(-1)?.seq ?? 0;
     try {
       bus.validateMessages(step.action.messages ?? []);
@@ -166,7 +221,7 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
     }
     replayedSteps += 1;
     replayedBatches += 1;
-    validateCommittedOutcome([step], index, beforeEventSeq, beforeMessageSeq);
+    validateCommittedOutcome([step], index, stateBefore, beforeEventSeq, beforeMessageSeq);
   }
 
   function replayParallelBatch(batch: Array<SocialHarnessStep<TObservation, TPending, TCommand>>, startIndex: number): void {
@@ -202,7 +257,8 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
       addMismatch(`Native parallel batch ${batch[0]?.batchId ?? "unknown"}: environment does not implement stepBatch().`);
       return;
     }
-    const beforeEventSeq = options.eventSeq?.(options.environment.snapshot());
+    const stateBefore = options.environment.snapshot();
+    const beforeEventSeq = options.eventSeq?.(stateBefore);
     const beforeMessageSeq = bus.listMessages().at(-1)?.seq ?? 0;
     try {
       bus.validateMessages(batch.flatMap((step) => step.action.messages ?? []));
@@ -217,12 +273,13 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
     }
     replayedSteps += batch.length;
     replayedBatches += 1;
-    validateCommittedOutcome(batch, startIndex, beforeEventSeq, beforeMessageSeq, { parallel: true });
+    validateCommittedOutcome(batch, startIndex, stateBefore, beforeEventSeq, beforeMessageSeq, { parallel: true });
   }
 
   function validateCommittedOutcome(
     steps: Array<SocialHarnessStep<TObservation, TPending, TCommand>>,
     startIndex: number,
+    stateBefore: TState,
     beforeEventSeq: number | undefined,
     beforeMessageSeq: number,
     optionsMode: { parallel?: boolean } = {}
@@ -262,6 +319,7 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
         addMismatch(`Native steps ${startIndex}-${startIndex + steps.length - 1}: committed message envelopes do not match recorded messages.`);
       }
     }
+    validateRecordedAgentStateBoundary(steps, startIndex, stateBefore, afterState);
   }
 
   function addMismatch(message: string): void {
@@ -283,6 +341,69 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
       batch
     });
     for (const error of errors) addMismatch(`Native step ${index} ${step.traceId}: recorded pending/action evidence mismatch: ${error}`);
+  }
+
+  function validateRecordedAgentStateBoundary(
+    batch: Array<SocialHarnessStep<TObservation, TPending, TCommand>>,
+    startIndex: number,
+    stateBefore: TState,
+    stateAfter: TState
+  ): void {
+    if (!options.validateRecordedAgentState) return;
+    const stepIndex = startIndex + batch.length - 1;
+    const boundaryStep = batch.at(-1);
+    if (!boundaryStep) return;
+    const recordedAgents = resolveRecordedAgentSnapshot(boundaryStep);
+    if (!recordedAgents) return;
+    const prefixSteps = structuredClone(episode.steps.slice(0, stepIndex + 1));
+    const committedMessages = bus.listMessages();
+    const episodePrefix = {
+      steps: prefixSteps,
+      messages: committedMessages,
+      channels: structuredClone(episode.channels),
+      runtimeActorIds: structuredClone(episode.runtimeActorIds)
+    } satisfies Pick<SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>, "steps" | "messages" | "channels" | "runtimeActorIds">;
+    const recordedBatch = prefixSteps.slice(startIndex, stepIndex + 1);
+    const step = recordedBatch.at(-1);
+    if (!step) return;
+    const actorIds = new Set([
+      ...(episode.runtimeActorIds ?? []),
+      ...episode.profiles.map((profile) => profile.id),
+      ...prefixSteps.map((candidate) => candidate.actorId)
+    ]);
+    const visibleMessagesByActor = Object.fromEntries(
+      [...actorIds]
+        .filter((actorId) => actorId !== "system")
+        .sort()
+        .map((actorId) => [actorId, bus.observe(actorId).messages])
+    ) as Record<string, readonly SocialMessage[]>;
+    const scopedExposureRecords = deriveSocialExposureRecords(episodePrefix, { includeSelf: true });
+    const errors = options.validateRecordedAgentState({
+      episodePrefix,
+      step,
+      stepIndex,
+      batch: recordedBatch,
+      priorAgents: previousAgentSnapshots ? structuredClone(previousAgentSnapshots) : undefined,
+      recordedAgents,
+      stateBefore: structuredClone(stateBefore),
+      stateAfter: structuredClone(stateAfter),
+      committedMessages,
+      scopedExposureRecords,
+      visibleMessagesByActor
+    });
+    for (const error of errors) {
+      addMismatch(`Recorded agent state semantic audit at native step ${stepIndex} ${step.traceId}: ${error}`);
+    }
+    previousAgentSnapshots = structuredClone(recordedAgents);
+  }
+
+  function resolveRecordedAgentSnapshot(step: SocialHarnessStep<TObservation, TPending, TCommand>): TAgentState[] | undefined {
+    if (Array.isArray(step.actorSnapshotsAfterStep) && typeof step.actorSnapshotsHashAfterStep === "string") {
+      return structuredClone(step.actorSnapshotsAfterStep as TAgentState[]);
+    }
+    if (!options.agentSnapshotFrames) return undefined;
+    const resolved = resolveHarnessAgentSnapshotFrame({ frames: options.agentSnapshotFrames, step });
+    return resolved ? resolved.agents : undefined;
   }
 
   function finalizeReplay(): SocialEpisodeReplayResult<TState> {

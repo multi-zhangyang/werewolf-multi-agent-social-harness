@@ -9,7 +9,7 @@
 export { runHarnessEpisode } from "./runner";
 export type { HarnessAgentSnapshotProvider, HarnessEpisodeOptions } from "./runner";
 export { replaySocialEpisode } from "./socialReplay";
-export type { SocialEpisodeReplayResult } from "./socialReplay";
+export type { SocialEpisodeReplayResult, SocialRecordedAgentStateValidator, SocialRecordedStepValidator } from "./socialReplay";
 export {
   buildReplayableSocialPrefix,
   buildHarnessCheckpointAtPrefix,

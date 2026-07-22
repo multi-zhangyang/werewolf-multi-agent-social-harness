@@ -403,8 +403,17 @@ non-mutation, and shared parallel-batch state without constructing an actor or
 calling a model. Canonical compacted match artifacts use the generic
 `harness.agent-snapshot-frame.v1` sidecar registry: its frame id/hash/payload
 binding, references, and final-agent hash are audited model-free during replay.
-Domain adapters may add stronger domain-specific snapshot schema checks, but
-they must not reconstruct durable agent state from commands or retry a model.
+When a domain needs stronger causal proof, it may pass the optional
+`validateRecordedAgentState` replay callback. The callback receives only the
+completed receipt boundary: prior/current recorded snapshots, pre/post
+environment state, committed messages, channel-authorized slices, and canonical
+scoped-observation exposures from the recorded prefix. It runs once after a
+complete `stepBatch()` rather than against a fictional intermediate parallel
+state. It is a pure audit seam—never actor reconstruction, free-text belief
+inference, policy execution, or a model call—and works for inline and compacted
+snapshot frames. Domain adapters may add this or other stronger snapshot schema
+checks, but they must not reconstruct durable agent state from commands or
+retry a model.
 The same post-receipt rule applies to a fork child through
 `SocialCheckpointRuntimeAdapter.captureAgentSnapshots`. Omitting that optional
 runtime callback preserves execution compatibility but intentionally leaves the

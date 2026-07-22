@@ -340,9 +340,19 @@ deterministic playback. Playback:
 6. for an adapter-bound artifact, exact-matches the supplied replay runtime
    manifest before calling `environment.step()` or `stepBatch()`;
 7. verifies pre/post state hashes, domain event ranges, message ranges and
-   envelopes, final state hash, and final message hash.
+   envelopes, final state hash, and final message hash;
+8. when a domain supplies `validateRecordedAgentState`, audits a recorded
+   receipt-after durable snapshot against its prior snapshot, the replay
+   pre/post state, committed messages, and canonical scoped-observation
+   exposures. A true parallel batch is audited once only after its full atomic
+   receipt boundary.
 
 Playback constructs no actors and invokes no policy, reasoner, or provider.
+The optional agent-state callback is pure and receives only recorded prefix
+evidence; it cannot use future steps, reconstruct an actor, or obtain a model
+judgment. This provides a domain-neutral seam for rejecting a rehashed social
+memory/belief/relationship snapshot whose cited evidence was never visible to
+that actor, without making the generic harness understand a domain's beliefs.
 `replayHarnessTrajectory()` remains only for legacy trajectory/checkpoint
 migration; it is not the match-v2 execution authority.
 
