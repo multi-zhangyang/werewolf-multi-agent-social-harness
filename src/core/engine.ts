@@ -340,7 +340,9 @@ export function computeMetrics(state: GameState): {
   deceptionSurvivalScore: number;
 } {
   const byId = new Map(state.players.map((player) => [player.id, player]));
-  const dayVotes = state.votes.filter((vote) => !vote.abstain && vote.targetId);
+  const dayVotes = state.votes.filter(
+    (vote) => (vote.kind ?? "exile") === "exile" && !vote.abstain && vote.targetId
+  );
   const wolfVotes = dayVotes.filter((vote) => byId.get(vote.voterId)?.team === "werewolves");
   const villageVotes = dayVotes.filter((vote) => byId.get(vote.voterId)?.team === "village");
   const wolfAccuracy = ratio(

@@ -529,7 +529,9 @@ export function evaluateAdversarialMatch(state: GameState, agents: AgentHarnessS
 
   function computeVoteAccuracy(current: GameState): AdversarialEvaluation["voteAccuracyByAgent"] {
     const stats: AdversarialEvaluation["voteAccuracyByAgent"] = {};
-    for (const vote of current.votes.filter((item) => !item.abstain && item.targetId)) {
+    for (const vote of current.votes.filter(
+      (item) => (item.kind ?? "exile") === "exile" && !item.abstain && item.targetId
+    )) {
       const voter = playerById.get(vote.voterId);
       const target = playerById.get(vote.targetId!);
       if (!voter || !target) continue;
@@ -547,7 +549,13 @@ export function evaluateAdversarialMatch(state: GameState, agents: AgentHarnessS
     for (const speech of current.speeches.filter((item) => item.pressureTargetId)) {
       const record = (influence[speech.playerId] ??= { pressureCount: 0, voteFollowCount: 0, influenceRate: 0 });
       record.pressureCount += 1;
-      const laterVotes = current.votes.filter((vote) => vote.day === speech.day && vote.targetId === speech.pressureTargetId && vote.voterId !== speech.playerId);
+      const laterVotes = current.votes.filter(
+        (vote) =>
+          (vote.kind ?? "exile") === "exile" &&
+          vote.day === speech.day &&
+          vote.targetId === speech.pressureTargetId &&
+          vote.voterId !== speech.playerId
+      );
       record.voteFollowCount += laterVotes.length;
       record.influenceRate = round3(record.voteFollowCount / Math.max(1, record.pressureCount));
     }
@@ -559,6 +567,7 @@ export function evaluateAdversarialMatch(state: GameState, agents: AgentHarnessS
     for (const wolf of current.players.filter((player) => player.team === "werewolves")) {
       const wolfSurvivalDays = wolf.eliminatedAt?.day ?? current.day;
       const misdirectVotes = current.votes.filter((vote) => {
+        if ((vote.kind ?? "exile") !== "exile") return false;
         const voter = playerById.get(vote.voterId);
         const target = vote.targetId ? playerById.get(vote.targetId) : undefined;
         return voter?.team === "village" && target?.team === "village";
@@ -1134,7 +1143,9 @@ function voteEvidenceForPlayer(state: GameState, playerId: string): HarnessMetri
     .filter((event) => event.type === "vote.cast" && event.actorId === playerId)
     .map(eventToEvidenceRef);
   if (refs.length) return refs;
-  const voteRecords = state.votes.filter((vote) => vote.voterId === playerId);
+  const voteRecords = state.votes.filter(
+    (vote) => (vote.kind ?? "exile") === "exile" && vote.voterId === playerId
+  );
   if (voteRecords.length) {
     return voteRecords.map((vote, index) =>
       stateEvidence(`vote records for ${playerId}`, {
@@ -1179,6 +1190,7 @@ function misdirectVoteEvidence(state: GameState): HarnessMetricEvidenceRef[] {
     .map(eventToEvidenceRef);
   if (refs.length) return refs;
   const voteRecords = state.votes.filter((vote) => {
+    if ((vote.kind ?? "exile") !== "exile") return false;
     if (vote.abstain || !vote.targetId) return false;
     const voter = playerById.get(vote.voterId);
     const target = playerById.get(vote.targetId);
@@ -2318,7 +2330,12 @@ function falseRoleClaimPressureVoteFollowRecords(
     if (!claim?.pressureTargetId || claim.day === undefined) continue;
     const voteCommand = voteCommandFromSocialStep(stepByTraceId.get(exposure.observedAtTraceId), exposure.observerId);
     if (!voteCommand) continue;
-    const vote = state.votes.find((item) => item.day === claim.day && item.voterId === exposure.observerId);
+    const vote = state.votes.find(
+      (item) =>
+        (item.kind ?? "exile") === "exile" &&
+        item.day === claim.day &&
+        item.voterId === exposure.observerId
+    );
     if (!vote) continue;
     if (Boolean(vote.abstain) !== voteCommand.abstain) continue;
     if (!vote.abstain && vote.targetId !== voteCommand.targetId) continue;
