@@ -26352,3 +26352,75 @@ git diff --check
 ```
 
 The complete deterministic run passed **44 test files / 471 tests**. The production build retained only the existing Vite chunk-size warning, and the Cockpit Playwright run ended with status `passed`. No live provider validation was needed because this lock changes generic provenance handling and adds a fully fake-SSE regression; it does not change provider/runtime behavior.
+
+## 13.274 Server-Owned Live Public Match View Lock
+
+Timestamp: `2026-07-22`
+
+Running-match presentation is now a deliberately narrow, ephemeral public
+projection. It is not an artifact, checkpoint, replay frame, browser-side
+`GameState`, agent state, or a second execution path.
+
+### 13.274.1 Harness and Adapter Boundary
+
+- `HarnessRunOptions.onLivePublicState` is a Werewolf presentation observer.
+  It runs only after a committed environment receipt and receives a cloned,
+  white-listed `WerewolfLivePublicState`.
+- The generic `afterEnvironmentStep` lifecycle now covers committed system
+  transitions as well as actor receipts. Thus the first role-reveal advance,
+  resolution transitions, and terminal transition do not silently bypass the
+  observer contract.
+- The adapter projects directly from `GameState`; it does not reuse broad
+  `serializePublicState()`. Internal `night_*` phases compress to `night`,
+  while `hunter_shot` and other non-night internal phases compress to `day`.
+- The live state includes only phase, day, public seats, public speech, public
+  votes, public deaths, and a day-speech seat. It excludes roles, teams,
+  abilities, pending actions, raw phases, private/team messages, private
+  social state, provider/reasoner data, hashes, traces, batches, revisions,
+  seeds, winner, and end reason.
+- Emission deduplicates by the hash of this safe projection rather than a
+  native state hash or receipt counter, so private night actions and parallel
+  fan-out cannot manufacture a visible cadence. Observer exceptions and
+  accidental rejected thenables are isolated from committed harness truth.
+
+### 13.274.2 Server and Cockpit Boundary
+
+- `POST /api/matches/run` retains its historical synchronous contract by
+  default. Explicit `{ live: true }` returns `202` and starts the ordinary
+  harness run in the background.
+- The server caches only the latest strict public frame in app-local memory.
+  `GET /api/matches/:id/live` is `no-store`/`nosniff`, contains no revision or
+  timestamp, and falls back honestly to a `running` marker without fabricating
+  a frame if a process restart lost the ephemeral cache.
+- Once the regular artifact is persisted, the frame disappears and the route
+  returns a terminal lifecycle plus only `artifactAvailable`. It never embeds
+  a trajectory, checkpoint, artifact, or postgame truth.
+- React validates and copies only this live DTO into a separate view model.
+  It polls the server projection but never advances or reconstructs a game.
+  The live board intentionally has no replay, scheduler, role, model, trace,
+  private-social, or artifact controls. A terminal artifact switches through
+  the existing `postgame-redacted` API path; a failure with no artifact stays a
+  closed terminal message rather than falling back to stale UI state.
+
+### 13.274.3 Validation Recorded
+
+```bash
+npm run typecheck
+npx vitest run tests/werewolfLiveProjection.test.ts tests/werewolfAdapter.test.ts \
+  tests/social.test.ts tests/serverPublicViewApi.test.ts --maxWorkers=1 \
+  --no-file-parallelism --testTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npm run test:e2e
+git diff --check
+```
+
+The focused suite passed **4 files / 117 tests**. The full deterministic
+suite passed **45 files / 479 tests**, and the fixture Cockpit suite passed
+**12/12**. Build completed with only the pre-existing Vite main-chunk-size
+warning. The browser regression deliberately injected role, team, private
+memo, raw phase, trace, weight, and private-night fields into a mock live
+response and proved that the live render projection dropped them. This slice
+does not alter model/reasoner runtime behavior, so no live provider call was
+needed or claimed.

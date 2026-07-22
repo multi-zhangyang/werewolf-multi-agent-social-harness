@@ -27,6 +27,7 @@ import {
   createWerewolfMessageDrafts,
   createWerewolfJointPhaseSchedulerResolver,
   createWerewolfSocialChannels,
+  projectWerewolfLivePublicState,
   projectWerewolfSocialStepsToHarnessTrajectory,
   recordWerewolfEnvironmentStepFailure,
   runWerewolfSocialHarnessPrefix,
@@ -49,6 +50,86 @@ import {
 } from "../src/harness/types";
 
 describe("Werewolf generic social adapter", () => {
+  it("projects a strict live-public table without role, night, cadence, or private social fields", () => {
+    const state = createGame({ id: "live-public-projection", seed: "live-public-projection" });
+    const hunter = state.players.find((player) => player.role === "hunter");
+    if (!hunter) throw new Error("Expected a hunter.");
+    hunter.alive = false;
+    hunter.eliminatedAt = { day: 1, phase: "hunter_shot", reason: "hunter_shot" };
+    state.phase = "night_witch";
+    state.night.seerInspection = { actorId: "p1", targetId: "p2", resultTeam: "werewolves" };
+    state.night.wolfVotes = { p3: "p4" };
+    state.wolfWhispers.push({ day: 1, playerId: "p3", text: "private-wolf-sentinel", strategyTags: [] });
+
+    const live = projectWerewolfLivePublicState(state);
+    const serialized = JSON.stringify(live);
+
+    expect(live.phase).toBe("night");
+    expect(live.players.find((player) => player.id === hunter.id)?.eliminatedAt).toEqual({ day: 1, reason: "hunter_shot" });
+    for (const forbidden of [
+      "role",
+      "team",
+      "ability",
+      "night_witch",
+      "seerInspection",
+      "wolfVotes",
+      "private-wolf-sentinel",
+      "wolfWhispers",
+      "\"phase\":\"hunter_shot\"",
+      "pendingAction",
+      "traceId",
+      "providerRequestId",
+      "retryHistory",
+      "strategyTags",
+      "claimedRole",
+      "pressureTargetId",
+      "weight"
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+    expect(state.phase).toBe("night_witch");
+    expect(state.night.seerInspection?.resultTeam).toBe("werewolves");
+  });
+
+  it("emits a live table after the system commit and suppresses private-night cadence", async () => {
+    const initialState = createGame({ id: "live-public-system-and-dedup", seed: "live-public-system-and-dedup" });
+    const agents = resolveAgentConfigs(initialState.players, profilesFromModels(["live-public-observer"], 0), 0, 0);
+    const observed = [] as Array<{ phase: string; day: number; players: number }>;
+
+    const result = await runHarnessMatch({
+      initialState,
+      agents,
+      maxTransitions: 2,
+      onLivePublicState: (state) => observed.push({ phase: state.phase, day: state.day, players: state.players.length })
+    });
+
+    // The first receipt is the system-owned role-reveal advance. The second
+    // receipt is the seer's private inspection, which changes native state
+    // but not the strict live-public projection.
+    expect(result.status).toBe("truncated");
+    expect(result.socialEpisode.steps.map((step) => step.actorId)).toEqual(["system", expect.any(String)]);
+    expect(observed).toEqual([{ phase: "night", day: 1, players: initialState.players.length }]);
+  });
+
+  it("isolates a live observer failure after an otherwise committed system receipt", async () => {
+    const initialState = createGame({ id: "live-public-observer-isolation", seed: "live-public-observer-isolation" });
+    const agents = resolveAgentConfigs(initialState.players, profilesFromModels(["live-public-isolation"], 0), 0, 0);
+
+    const result = await runHarnessMatch({
+      initialState,
+      agents,
+      maxTransitions: 1,
+      onLivePublicState: () => {
+        throw new Error("intentionally unavailable live cache");
+      }
+    });
+
+    expect(result.status).toBe("truncated");
+    expect(result.socialEpisode.steps).toHaveLength(1);
+    expect(result.socialEpisode.steps[0]).toMatchObject({ actorId: "system", commitStatus: "committed" });
+    expect(result.socialEpisode.failureReason).toBeUndefined();
+  });
+
   it("drives system.advance and the next agent action through runSocialEpisode", async () => {
     const initialState = createGame({ id: "werewolf-social-adapter", seed: "werewolf-social-adapter" });
     const seer = initialState.players.find((player) => player.role === "seer");

@@ -883,6 +883,7 @@ describe("generic social harness scheduler contract", () => {
   it("runs system transitions when no agent action is pending", async () => {
     const environment = new SystemThenAgentEnvironment();
     const actorA = new TestActor("a");
+    const committedFeedback: Array<{ actorId: string; tick: number }> = [];
 
     const artifact = await runSocialEpisode<TestState, TestObservation, TestPending, TestCommand>({
       id: "social-system-transition",
@@ -892,6 +893,9 @@ describe("generic social harness scheduler contract", () => {
       maxTransitions: 3,
       hashState,
       eventSeq,
+      afterEnvironmentStep(context) {
+        committedFeedback.push({ actorId: context.actorId, tick: context.feedback.state.tick });
+      },
       systemTransition(context) {
         if (context.state.tick !== 0) return undefined;
         return {
@@ -910,6 +914,10 @@ describe("generic social harness scheduler contract", () => {
 
     expect(artifact.status).toBe("completed");
     expect(environment.stepCalls).toBe(2);
+    expect(committedFeedback).toEqual([
+      { actorId: "system", tick: 1 },
+      { actorId: "a", tick: 2 }
+    ]);
     expect(actorA.observations).toEqual([{ agentId: "a", tick: 1, pendingKind: "act" }]);
     expect(artifact.steps).toHaveLength(2);
     expect(artifact.steps[0]).toMatchObject({

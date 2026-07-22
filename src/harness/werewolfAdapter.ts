@@ -69,12 +69,62 @@ import {
   type ReasonerMemoryEntry,
   type ReasonerOutput,
   type ReasonerOutputSummary,
+  type WerewolfLivePublicState,
   type WerewolfHarnessObservation
 } from "./types";
 import { WerewolfEnvironment } from "./environment";
 import { buildWerewolfHarnessRunResultFromParts } from "./werewolfResult";
 
 export const WEREWOLF_SYSTEM_ACTOR_ID = "system";
+
+/**
+ * Project only facts that are safe to render while a hidden-information match
+ * is still running. This deliberately does not reuse PlayerView or the wider
+ * PublicGameState: both can contain role revelation, night subphase, pending
+ * action, or cadence details that are inappropriate for a public live table.
+ */
+export function projectWerewolfLivePublicState(state: GameState): WerewolfLivePublicState {
+  return {
+    phase: publicLivePhase(state.phase),
+    day: state.day,
+    players: state.players
+      .map((player) => ({
+        id: player.id,
+        seat: player.seat,
+        name: player.name,
+        alive: player.alive,
+        isSheriff: player.isSheriff,
+        ...(player.eliminatedAt
+          ? {
+              eliminatedAt: {
+                day: player.eliminatedAt.day,
+                reason: player.eliminatedAt.reason
+              }
+            }
+          : {})
+      }))
+      .sort((left, right) => left.seat - right.seat),
+    speeches: state.speeches.map((speech) => ({
+      day: speech.day,
+      playerId: speech.playerId,
+      text: speech.text,
+      ...(speech.kind ? { kind: speech.kind } : {})
+    })),
+    votes: state.votes.map((vote) => ({
+      day: vote.day,
+      voterId: vote.voterId,
+      ...(vote.targetId ? { targetId: vote.targetId } : {}),
+      ...(vote.abstain ? { abstain: true } : {})
+    })),
+    deaths: state.deaths.map((death) => ({ day: death.day, playerId: death.playerId, reason: death.reason })),
+    ...(state.currentSpeakerSeat === undefined ? {} : { currentSpeakerSeat: state.currentSpeakerSeat })
+  };
+}
+
+function publicLivePhase(phase: Phase): WerewolfLivePublicState["phase"] {
+  if (phase === "game_over") return "game_over";
+  return phase.startsWith("night_") ? "night" : "day";
+}
 
 /**
  * Safe, versioned provenance for the first domain adapter. The hashes cover
@@ -173,6 +223,7 @@ export interface WerewolfSocialHarnessPrefixOptions
     | "executionLimits"
     | "jointPhaseScheduler"
     | "recordAgentSnapshots"
+    | "onLivePublicState"
   > {
   id?: string;
   schedulerMode?: WerewolfSocialHarnessPrefixSchedulerMode;
@@ -1033,6 +1084,7 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
   const initialState = cloneJson(options.initialState);
   const agentActors = initializeWerewolfAgentActors(initialState, options.agents, options.initialAgentStates);
   const agentSnapshotsByTraceId = new Map<string, AgentSnapshotAfterStep>();
+  let lastLivePublicStateHash: string | undefined;
   const recordAgentSnapshots = options.recordAgentSnapshots ?? true;
   const actors = [...agentActors.values()].map(
     (actor) =>
@@ -1059,15 +1111,36 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
     hashMessages: hashStableState,
     eventSeq: werewolfEventSeq,
     afterEnvironmentStep: (context) => {
-      if (!recordAgentSnapshots) return;
-      if (context.actorId === WEREWOLF_SYSTEM_ACTOR_ID) return;
-      const traceId = context.action.traceId;
-      if (!traceId) return;
-      const agents = snapshotAgentStates(actors);
-      agentSnapshotsByTraceId.set(traceId, {
-        agents,
-        hash: hashStableState(agents)
-      });
+      if (recordAgentSnapshots && context.actorId !== WEREWOLF_SYSTEM_ACTOR_ID) {
+        const traceId = context.action.traceId;
+        if (traceId) {
+          const agents = snapshotAgentStates(actors);
+          agentSnapshotsByTraceId.set(traceId, {
+            agents,
+            hash: hashStableState(agents)
+          });
+        }
+      }
+      if (!options.onLivePublicState) return;
+      // Parallel stepBatch calls this hook once per actor after every receipt
+      // has been delivered. Deduplicate by the safe public projection so a
+      // private batch cannot manufacture visible scheduler cadence.
+      try {
+        const publicState = projectWerewolfLivePublicState(context.feedback.state);
+        const publicStateHash = hashStableState(publicState);
+        if (publicStateHash === lastLivePublicStateHash) return;
+        lastLivePublicStateHash = publicStateHash;
+        const observerResult = (options.onLivePublicState as (state: WerewolfLivePublicState) => unknown)(cloneJson(publicState));
+        // The public observer is intentionally typed as synchronous. Still,
+        // isolate accidental JavaScript thenables so their rejection cannot
+        // become an unhandled process-level failure after a committed step.
+        if (isThenable(observerResult)) {
+          void Promise.resolve(observerResult).catch(() => undefined);
+        }
+      } catch {
+        // A live UI/cache observer is outside environment authority. It must
+        // never turn an already committed receipt into a harness failure.
+      }
     },
     assembleObservation: assembleWerewolfSocialObservation,
     systemTransition: werewolfSystemTransition,
@@ -1089,6 +1162,15 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
     agentStates: actors.map((actor) => cloneJson(actor.state)),
     channels: artifact.channels.map(cloneJson)
   };
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "then" in value &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
 }
 
 export async function runWerewolfSocialHarnessPrefixAsHarnessResult(

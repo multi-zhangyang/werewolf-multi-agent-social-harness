@@ -64,6 +64,33 @@ export const DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER: WerewolfJointPhaseScheduler
  */
 export const WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS = 4;
 
+/**
+ * Narrow, server-consumable observation of a running Werewolf table. It is a
+ * presentation projection, never a command, replay, checkpoint, or artifact
+ * authority. The adapter intentionally omits role/team truth, night state,
+ * scheduler cadence, pending actions, model/provider telemetry, and private
+ * social traffic.
+ */
+export interface WerewolfLivePublicState {
+  phase: "night" | "day" | "game_over";
+  day: number;
+  players: Array<{
+    id: string;
+    seat: number;
+    name: string;
+    alive: boolean;
+    isSheriff: boolean;
+    eliminatedAt?: { day: number; reason: string };
+  }>;
+  speeches: Array<{ day: number; playerId: string; text: string; kind?: "day" | "last_words" }>;
+  votes: Array<{ day: number; voterId: string; targetId?: string; abstain?: boolean }>;
+  deaths: Array<{ day: number; playerId: string; reason: string }>;
+  currentSpeakerSeat?: number;
+}
+
+/** Optional best-effort observer for server-owned running-table projections. */
+export type WerewolfLivePublicStateObserver = (state: WerewolfLivePublicState) => void;
+
 export interface HarnessRunOptions {
   initialState: GameState;
   agents: HarnessAgentConfig[];
@@ -89,6 +116,12 @@ export interface HarnessRunOptions {
   jointPhaseScheduler?: WerewolfJointPhaseScheduler;
   forkOf?: HarnessForkProvenance;
   recordAgentSnapshots?: boolean;
+  /**
+   * Receives a cloned, strict public projection only after a committed
+   * environment receipt. Observer errors are isolated by the domain adapter
+   * and cannot change harness/environment truth.
+   */
+  onLivePublicState?: WerewolfLivePublicStateObserver;
 }
 
 export type HarnessRunStatus = "completed" | "truncated" | "failed";

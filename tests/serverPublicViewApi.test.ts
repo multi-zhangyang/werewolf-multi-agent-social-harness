@@ -1267,6 +1267,110 @@ describe("public match API redaction", () => {
     expect(JSON.stringify(run.body.summary.evaluation)).not.toContain("seer-information");
   });
 
+  it("serves an ephemeral strict live-public projection before the terminal artifact exists", async () => {
+    await close(server);
+    let reasonerCalls = 0;
+    let enteredSecondDecision!: () => void;
+    let releaseSecondDecision!: () => void;
+    const secondDecisionEntered = new Promise<void>((resolve) => {
+      enteredSecondDecision = resolve;
+    });
+    const releaseGate = new Promise<void>((resolve) => {
+      releaseSecondDecision = resolve;
+    });
+    const app = createServerApp({
+      createReasoner: () => ({
+        async think(input) {
+          reasonerCalls += 1;
+          if (reasonerCalls === 2) {
+            enteredSecondDecision();
+            await releaseGate;
+          }
+          return fakeReasoner.think(input);
+        }
+      })
+    });
+    server = await listen(app);
+    const address = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
+    try {
+      const started = await requestJson(baseUrl, "POST", "/api/matches/run", {
+        models: ["alpha", "beta"],
+        seed: "server-live-public-projection",
+        maxTransitions: 4,
+        live: true
+      });
+      expect(started.status).toBe(202);
+      expect(started.body.status).toBe("running");
+      expect(started.body.hasArtifact).toBe(false);
+
+      await secondDecisionEntered;
+      const live = await requestJson(baseUrl, "GET", `/api/matches/${started.body.id}/live`);
+      expect(live.status).toBe(200);
+      expect(live.headers.get("cache-control")).toContain("no-store");
+      expect(live.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(live.body).toMatchObject({
+        artifactVersion: "server.match-live-projection.v1",
+        kind: "match-live-projection",
+        matchId: started.body.id,
+        lifecycle: "running",
+        artifactAvailable: false,
+        projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true },
+        publicState: { phase: "night" }
+      });
+      const liveJson = JSON.stringify(live.body);
+      for (const forbidden of [
+        "role",
+        "team",
+        "ability",
+        "night_wolves",
+        "seerInspection",
+        "wolfVotes",
+        "pendingAction",
+        "traceId",
+        "batchId",
+        "postStateHash",
+        "providerRequestId",
+        "retryHistory",
+        "alpha",
+        "beta"
+      ]) {
+        expect(liveJson).not.toContain(forbidden);
+      }
+      const unavailableArtifact = await requestJson(baseUrl, "GET", `/api/matches/${started.body.id}/artifact?view=truth-redacted`);
+      expect(unavailableArtifact.status).toBe(404);
+
+      releaseSecondDecision();
+      await waitFor(async () => {
+        const terminal = await requestJson(baseUrl, "GET", `/api/matches/${started.body.id}/live`);
+        return terminal.body.artifactAvailable === true ? terminal : undefined;
+      });
+      const artifact = await requestJson(baseUrl, "GET", `/api/matches/${started.body.id}/artifact?view=postgame-redacted`);
+      expect(artifact.status).toBe(200);
+    } finally {
+      releaseSecondDecision?.();
+    }
+  });
+
+  it("reports a missing ephemeral frame as running instead of fabricating a failure", async () => {
+    const record = createMatchRecord({ seed: "server-live-frame-restart", models: ["alpha"] });
+    record.status = "running";
+    saveMatch(record);
+
+    const live = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/live`);
+    expect(live.status).toBe(200);
+    expect(live.body).toEqual({
+      artifactVersion: "server.match-live-projection.v1",
+      kind: "match-live-projection",
+      matchId: record.id,
+      lifecycle: "running",
+      artifactAvailable: false
+    });
+    expect(live.body).not.toHaveProperty("publicState");
+    expect(live.body).not.toHaveProperty("projection");
+  });
+
   it("uses explicit profiles as the public and stored model source for match runs", async () => {
     const run = await requestJson(baseUrl, "POST", "/api/matches/run", {
       models: ["stale-model"],
@@ -1857,6 +1961,16 @@ async function close(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
+}
+
+async function waitFor<T>(read: () => Promise<T | undefined>, timeoutMs = 10_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read();
+    if (value !== undefined) return value;
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for server-owned live projection terminal state.");
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 async function requestJson(

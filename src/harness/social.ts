@@ -1348,6 +1348,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
         schedulerMode,
         hashState: options.hashState,
         eventSeq: options.eventSeq,
+        afterEnvironmentStep: options.afterEnvironmentStep,
         systemTransition: options.systemTransition,
         traceId: systemTraceId
       });
@@ -2147,6 +2148,7 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
   schedulerMode: SocialResolvedSchedulerMode;
   hashState?: (state: TState) => string;
   eventSeq?: (state: TState) => number;
+  afterEnvironmentStep?: SocialAfterEnvironmentStepHook<TState, TObservation, TPending, TCommand>;
   systemTransition?: SocialSystemTransitionProvider<TState, TObservation, TPending, TCommand>;
   traceId: string;
 }):
@@ -2235,15 +2237,43 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
     input.bus.publishMany(messages);
     const afterEventSeq = input.eventSeq?.(feedback.state);
     const afterSeq = input.bus.listMessages().at(-1)?.seq ?? beforeSeq;
+    const postStateHash = input.hashState?.(feedback.state);
+    const committedEventSeqRange = eventSeqRange(beforeEventSeq, afterEventSeq);
+    const committedMessageSeqRange = afterSeq > beforeSeq ? ([beforeSeq + 1, afterSeq] as [number, number]) : undefined;
+    const afterEnvironmentFailure = invokeAfterEnvironmentStep(input.afterEnvironmentStep, {
+      actor: undefined,
+      actorId,
+      profileId,
+      turnIndex: input.turnIndex,
+      batchId,
+      batchIndex: 1,
+      batchSize: 1,
+      schedulerMode: input.schedulerMode,
+      atomic: false,
+      resolutionPolicy: "system-transition",
+      pendingAction: cloneJson(transition.pendingAction),
+      observation: cloneJson(transition.observation),
+      action: cloneJson(transition.action),
+      preState: cloneJson(preState),
+      preStateHash,
+      decisionStateHash: preStateHash,
+      feedback: cloneJson(feedback),
+      postStateHash,
+      eventSeqRange: committedEventSeqRange,
+      messageSeqRange: committedMessageSeqRange
+    });
     return {
-      status: "ok",
+      status: afterEnvironmentFailure ? "failed" : "ok",
+      reason: afterEnvironmentFailure?.message,
       feedback,
       step: {
         ...base,
         commitStatus: "committed",
-        postStateHash: input.hashState?.(feedback.state),
-        eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
-        messageSeqRange: afterSeq > beforeSeq ? [beforeSeq + 1, afterSeq] : undefined,
+        postStateHash,
+        eventSeqRange: committedEventSeqRange,
+        messageSeqRange: committedMessageSeqRange,
+        error: afterEnvironmentFailure?.message,
+        failure: afterEnvironmentFailure,
         ...feedbackFields(feedback)
       }
     };

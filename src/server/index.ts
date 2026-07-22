@@ -59,6 +59,8 @@ import { OpenAIHarnessReasoner } from "../harness/reasoner";
 import { replayWerewolfSocialEpisode } from "../harness/replay";
 import { probeHarnessTurn, runHarnessMatch } from "../harness/runtime";
 import { hashStableState } from "../harness/hash";
+import { projectWerewolfLivePublicState } from "../harness/werewolfAdapter";
+import type { WerewolfLivePublicState } from "../harness/types";
 import {
   buildMatchComparisonArtifact,
   formatFilteredMatchComparisonMarkdown,
@@ -238,7 +240,36 @@ export interface ServerAppDependencies {
    * - TOURNAMENT_PUBLIC_SHARE_EVENT_MAX_AGE_MS=2592000000 (30d)
    */
   publicShareEventRetention?: TournamentPublicShareEventRetentionPolicy;
- }
+}
+
+interface RunningMatchLiveProjection {
+  artifactVersion: "server.match-live-projection.v1";
+  kind: "match-live-projection";
+  matchId: string;
+  lifecycle: "running";
+  artifactAvailable: false;
+  projection: {
+    view: "live-public";
+    privateEvidenceRedacted: true;
+    postgameTruthRedacted: true;
+  };
+  publicState: WerewolfLivePublicState;
+}
+
+interface TerminalMatchLiveProjection {
+  artifactVersion: "server.match-live-projection.v1";
+  kind: "match-live-projection";
+  matchId: string;
+  /**
+   * A process restart can discard the ephemeral frame while a persisted match
+   * record still says running. Report that honestly without inventing a local
+   * public state or misclassifying the run as failed.
+   */
+  lifecycle: "running" | "completed" | "truncated" | "failed";
+  artifactAvailable: boolean;
+}
+
+type MatchLiveProjection = RunningMatchLiveProjection | TerminalMatchLiveProjection;
 
 export function createServerApp(dependencies: ServerAppDependencies = {}): express.Express {
 const app = express();
@@ -269,6 +300,31 @@ const publicShareEventRetention = resolvePublicShareEventRetention(
   dependencies.publicShareEventRetention,
   process.env
 );
+// Running-table projections are ephemeral API views. They must never become a
+// match artifact, replay/checkpoint source, or store-owned canonical state.
+const liveMatchProjections = new Map<string, RunningMatchLiveProjection>();
+
+const setLiveProjection = (matchId: string, publicState: WerewolfLivePublicState): void => {
+  const current = liveMatchProjections.get(matchId);
+  const state = structuredClone(publicState);
+  // Safe-state equality, rather than a receipt/batch counter, prevents
+  // private night actions and parallel receipt fan-out becoming a cadence
+  // side-channel in the public revision number.
+  if (current && hashStableState(current.publicState) === hashStableState(state)) return;
+  liveMatchProjections.set(matchId, {
+    artifactVersion: "server.match-live-projection.v1",
+    kind: "match-live-projection",
+    matchId,
+    lifecycle: "running",
+    artifactAvailable: false,
+    projection: {
+      view: "live-public",
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: true
+    },
+    publicState: state
+  });
+};
 activePublicShareEventRetention = publicShareEventRetention;
 const publicShareDownloadBuckets = new Map<string, number[]>();
 
@@ -349,6 +405,40 @@ app.get("/api/matches/:id", async (req, res, next) => {
       return;
     }
     res.json(serializeStoredMatch(match));
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Ephemeral running-table view. This deliberately cannot expose a trajectory,
+ * checkpoint, command, or postgame artifact: it is only a server projection
+ * of safe public facts at a committed boundary.
+ */
+app.get("/api/matches/:id/live", async (req, res, next) => {
+  try {
+    const current = liveMatchProjections.get(req.params.id);
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    if (current) {
+      res.json(structuredClone(current));
+      return;
+    }
+    await loadMatchArtifactIndex(matchArtifactBaseDir);
+    const match = getMatch(req.params.id);
+    if (!match) {
+      res.status(404).json({ error: "match not found" });
+      return;
+    }
+    const lifecycle: TerminalMatchLiveProjection["lifecycle"] =
+      match.status === "running" ? "running" : match.artifact?.status === "truncated" ? "truncated" : match.status === "failed" ? "failed" : "completed";
+    res.json({
+      artifactVersion: "server.match-live-projection.v1",
+      kind: "match-live-projection",
+      matchId: match.id,
+      lifecycle,
+      artifactAvailable: Boolean(match.artifact)
+    } satisfies TerminalMatchLiveProjection);
   } catch (error) {
     next(error);
   }
@@ -1052,6 +1142,52 @@ app.post("/api/matches/run", async (req, res, next) => {
     ? setTimeout(() => abortController.abort(new Error(`Match timeout exceeded ${timeoutMs}ms.`)), timeoutMs)
     : undefined;
   timeout?.unref();
+  if (req.body?.live === true) {
+    // Preserve the established synchronous /api/matches/run contract unless a
+    // client explicitly asks for a server-owned running projection lifecycle.
+    setLiveProjection(record.id, projectWerewolfLivePublicState(record.state));
+    res.status(202).json(serializeStoredMatch(record));
+    void (async () => {
+      try {
+        const agents: HarnessAgentConfig[] = resolveAgentConfigs(record.state.players, profiles, 0, temperature, assignment);
+        const resolvedAssignments = describeResolvedAssignments(record.state.players, agents);
+        const result = await runHarnessMatch({
+          initialState: record.state,
+          agents,
+          reasoner: createReasoner(abortController.signal),
+          maxTransitions,
+          executionLimits: { abortSignal: abortController.signal },
+          jointPhaseScheduler,
+          onLivePublicState: (publicState) => setLiveProjection(record.id, publicState)
+        });
+        const artifact = buildMatchArtifact({
+          runId: record.id,
+          matchId: record.id,
+          createdAt: record.createdAt,
+          seed: record.state.seed,
+          models,
+          profiles,
+          assignment,
+          resolvedAssignments,
+          result
+        });
+        await persistMatchArtifact(artifact, matchArtifactBaseDir);
+        record.artifact = artifact;
+        saveMatch(record);
+        await writeMatchArtifactIndex(matchArtifactBaseDir);
+      } catch (error) {
+        const failure = publicApiFailureFromError(error);
+        delete record.artifact;
+        record.status = "failed";
+        record.error = failure.message;
+        saveMatch(record);
+      } finally {
+        liveMatchProjections.delete(record.id);
+        if (timeout) clearTimeout(timeout);
+      }
+    })();
+    return;
+  }
   let artifactFinalized = false;
 
   try {
