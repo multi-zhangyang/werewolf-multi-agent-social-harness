@@ -4,7 +4,11 @@ import {
   type SocialDomainAdapterManifest
 } from "./domainAdapter";
 import { hashStableJsonValue } from "./hash";
-import type { SocialResolvedSchedulerMode } from "./social";
+import type {
+  SocialEpisodeArtifact,
+  SocialResolvedSchedulerMode,
+  SocialRuntimeActorBinding
+} from "./social";
 
 /**
  * Portable, domain-neutral experiment control-plane input.
@@ -15,8 +19,10 @@ import type { SocialResolvedSchedulerMode } from "./social";
  * persisted experiment specification.
  */
 export const GENERIC_EXPERIMENT_SPEC_VERSION = "harness.experiment.v1" as const;
-export const GENERIC_EXPERIMENT_PROVENANCE_VERSION = "harness.experiment-provenance.v1" as const;
+export const LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION = "harness.experiment-provenance.v1" as const;
+export const GENERIC_EXPERIMENT_PROVENANCE_VERSION = "harness.experiment-provenance.v2" as const;
 export const GENERIC_EXPERIMENT_FORK_LINEAGE_VERSION = "harness.experiment-fork-lineage.v1" as const;
+export const GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION = "harness.experiment-execution-attestation.v1" as const;
 
 export type GenericExperimentKind = "episode" | "tournament";
 
@@ -135,11 +141,34 @@ export interface NormalizedGenericExperimentSpecV1 {
  * auditable after restart instead of becoming an opaque caller assertion.
  */
 export interface GenericExperimentProvenanceV1 {
-  schemaVersion: typeof GENERIC_EXPERIMENT_PROVENANCE_VERSION;
+  schemaVersion:
+    | typeof GENERIC_EXPERIMENT_PROVENANCE_VERSION
+    | typeof LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION;
   specVersion: typeof GENERIC_EXPERIMENT_SPEC_VERSION;
   specId: string;
   specHash: string;
   spec: NormalizedGenericExperimentSpecV1;
+  /** Required by v2 provenance; v1 remains parseable only as legacy metadata. */
+  executionAttestationRequired?: true;
+}
+
+export interface GenericExperimentExecutionActorAttestationV1 {
+  actorId: string;
+  profile: GenericExperimentProfileSpecV1;
+  modelAssignment?: GenericExperimentModelAssignmentV1;
+}
+
+/**
+ * Central control-plane binding between one portable spec and runner-authored
+ * execution facts. The adapter cannot supply this record directly.
+ */
+export interface GenericExperimentExecutionAttestationV1 {
+  schemaVersion: typeof GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION;
+  specHash: string;
+  schedulerMode: SocialResolvedSchedulerMode;
+  maxTransitions: number;
+  decisionTimeoutMs?: number;
+  actors: GenericExperimentExecutionActorAttestationV1[];
 }
 
 export type GenericExperimentForkChangeFieldV1 = Exclude<keyof NormalizedGenericExperimentSpecV1, "version">;
@@ -314,7 +343,8 @@ export function createGenericExperimentProvenance(input: unknown): GenericExperi
     specVersion: GENERIC_EXPERIMENT_SPEC_VERSION,
     specId: spec.id,
     specHash: hashStableJsonValue(spec),
-    spec
+    spec,
+    executionAttestationRequired: true
   };
 }
 
@@ -322,14 +352,28 @@ export function validateGenericExperimentProvenance(input: unknown, path = "expe
   if (!isRecord(input)) return [`${path} must be an object.`];
   const errors: string[] = [];
   const unknownFields = Object.keys(input).filter(
-    (key) => !["schemaVersion", "specVersion", "specId", "specHash", "spec"].includes(key)
+    (key) => !["schemaVersion", "specVersion", "specId", "specHash", "spec", "executionAttestationRequired"].includes(key)
   );
   if (unknownFields.length) errors.push(`${path} contains unknown field(s): ${unknownFields.sort().join(", ")}.`);
-  if (input.schemaVersion !== GENERIC_EXPERIMENT_PROVENANCE_VERSION) {
-    errors.push(`${path}.schemaVersion must be ${GENERIC_EXPERIMENT_PROVENANCE_VERSION}.`);
+  if (
+    input.schemaVersion !== GENERIC_EXPERIMENT_PROVENANCE_VERSION &&
+    input.schemaVersion !== LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION
+  ) {
+    errors.push(
+      `${path}.schemaVersion must be ${GENERIC_EXPERIMENT_PROVENANCE_VERSION} or legacy ${LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION}.`
+    );
   }
   if (input.specVersion !== GENERIC_EXPERIMENT_SPEC_VERSION) {
     errors.push(`${path}.specVersion must be ${GENERIC_EXPERIMENT_SPEC_VERSION}.`);
+  }
+  if (input.executionAttestationRequired !== undefined && input.executionAttestationRequired !== true) {
+    errors.push(`${path}.executionAttestationRequired must be true when present.`);
+  }
+  if (
+    input.schemaVersion === GENERIC_EXPERIMENT_PROVENANCE_VERSION &&
+    input.executionAttestationRequired !== true
+  ) {
+    errors.push(`${path}.executionAttestationRequired is required by ${GENERIC_EXPERIMENT_PROVENANCE_VERSION}.`);
   }
   let normalized: NormalizedGenericExperimentSpecV1 | undefined;
   try {
@@ -345,6 +389,163 @@ export function validateGenericExperimentProvenance(input: unknown, path = "expe
     errors.push(`${path}.spec must be the canonical normalized experiment spec.`);
   }
   return errors;
+}
+
+export function createGenericExperimentExecutionAttestation(
+  spec: NormalizedGenericExperimentSpecV1,
+  episode: Pick<
+    SocialEpisodeArtifact,
+    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "schedulerMode"
+  >
+): GenericExperimentExecutionAttestationV1 {
+  const evidenceErrors = validateGenericExperimentExecutionEvidence(spec, episode);
+  if (evidenceErrors.length) {
+    throw new Error(`Generic experiment execution evidence is invalid: ${evidenceErrors.join(" ")}`);
+  }
+  const profileById = new Map(spec.profiles.map((profile) => [profile.id, profile]));
+  const modelByProfileId = new Map(spec.modelAssignments.map((assignment) => [assignment.profileId, assignment]));
+  return {
+    schemaVersion: GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION,
+    specHash: hashStableJsonValue(spec),
+    schedulerMode: episode.schedulerMode,
+    maxTransitions: episode.execution!.maxTransitions!,
+    ...(episode.execution?.decisionTimeoutMs === undefined
+      ? {}
+      : { decisionTimeoutMs: episode.execution.decisionTimeoutMs }),
+    actors: episode.runtimeActors!.map((binding) => {
+      const profile = profileById.get(binding.profileId)!;
+      const modelAssignment = modelByProfileId.get(binding.profileId);
+      return {
+        actorId: binding.actorId,
+        profile: clonePortable(profile),
+        ...(modelAssignment === undefined ? {} : { modelAssignment: clonePortable(modelAssignment) })
+      };
+    })
+  };
+}
+
+export function validateGenericExperimentExecutionAttestation(
+  input: unknown,
+  spec: NormalizedGenericExperimentSpecV1,
+  episode: Pick<
+    SocialEpisodeArtifact,
+    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "schedulerMode"
+  >,
+  path = "executionAttestation"
+): string[] {
+  if (!isRecord(input)) return [`${path} must be an object.`];
+  let expected: GenericExperimentExecutionAttestationV1;
+  try {
+    expected = createGenericExperimentExecutionAttestation(spec, episode);
+  } catch (error) {
+    return [`${path} cannot be validated: ${error instanceof Error ? error.message : "invalid execution evidence"}`];
+  }
+  const unknownFields = Object.keys(input).filter(
+    (key) => !["schemaVersion", "specHash", "schedulerMode", "maxTransitions", "decisionTimeoutMs", "actors"].includes(key)
+  );
+  const errors = unknownFields.length
+    ? [`${path} contains unknown field(s): ${unknownFields.sort().join(", ")}.`]
+    : [];
+  if (hashStableJsonValue(input) !== hashStableJsonValue(expected)) {
+    errors.push(`${path} must exactly match the normalized spec and runner-authored execution evidence.`);
+  }
+  return errors;
+}
+
+/**
+ * Validate the portable control-plane spec against facts emitted by the
+ * generic social runner. This prevents an adapter from attaching the right
+ * spec hash while silently running a different actor/profile/model roster or
+ * ignoring transition/decision budgets.
+ *
+ * Assignment-policy semantics remain domain owned, but `runtimeActors` is the
+ * exact recorded output of that assignment. Retry, checkpoint, artifact-view,
+ * and provider-stream policies require their own lifecycle evidence and are
+ * deliberately not guessed here.
+ */
+export function validateGenericExperimentExecutionEvidence(
+  spec: NormalizedGenericExperimentSpecV1,
+  episode: Pick<
+    SocialEpisodeArtifact,
+    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles"
+  >,
+  path = "socialEpisode"
+): string[] {
+  const errors: string[] = [];
+  if (episode.execution?.maxTransitions !== spec.maxTransitions) {
+    errors.push(`${path}.execution.maxTransitions must match experiment.spec.maxTransitions.`);
+  }
+  if (episode.execution?.decisionTimeoutMs !== spec.timeoutPolicy.decisionTimeoutMs) {
+    errors.push(`${path}.execution.decisionTimeoutMs must match experiment.spec.timeoutPolicy.decisionTimeoutMs.`);
+  }
+  if (!Array.isArray(episode.runtimeActorIds) || episode.runtimeActorIds.length !== spec.actorCount) {
+    errors.push(`${path}.runtimeActorIds must contain experiment.spec.actorCount actors.`);
+  }
+  const runtimeActors = Array.isArray(episode.runtimeActors) ? episode.runtimeActors : undefined;
+  if (!runtimeActors || runtimeActors.length !== spec.actorCount) {
+    errors.push(`${path}.runtimeActors must contain experiment.spec.actorCount actor bindings.`);
+    return errors;
+  }
+  if (runtimeActors.some((binding) => !isRecord(binding))) {
+    errors.push(`${path}.runtimeActors must contain only actor-binding objects.`);
+    return errors;
+  }
+  const runtimeActorIds = Array.isArray(episode.runtimeActorIds) ? episode.runtimeActorIds : [];
+  if (
+    runtimeActors.some((binding, index) => binding.actorId !== runtimeActorIds[index])
+  ) {
+    errors.push(`${path}.runtimeActors must exactly bind the canonical runtimeActorIds roster.`);
+  }
+  const profileById = new Map(spec.profiles.map((profile) => [profile.id, profile]));
+  const modelByProfileId = new Map(
+    spec.modelAssignments.map((assignment) => [assignment.profileId, assignment.modelId])
+  );
+  for (const [index, binding] of runtimeActors.entries()) {
+    validateExperimentRuntimeActorBinding({
+      binding,
+      index,
+      profileById,
+      modelByProfileId,
+      path,
+      errors
+    });
+  }
+  return errors;
+}
+
+function validateExperimentRuntimeActorBinding(input: {
+  binding: SocialRuntimeActorBinding;
+  index: number;
+  profileById: ReadonlyMap<string, GenericExperimentProfileSpecV1>;
+  modelByProfileId: ReadonlyMap<string, string>;
+  path: string;
+  errors: string[];
+}): void {
+  const label = `${input.path}.runtimeActors[${input.index}]`;
+  const expected = input.profileById.get(input.binding.profileId);
+  if (!expected) {
+    input.errors.push(`${label}.profileId references a profile outside experiment.spec.profiles.`);
+    return;
+  }
+  if (input.binding.profileVersion !== expected.version) {
+    input.errors.push(`${label}.profileVersion must match the selected experiment profile version.`);
+  }
+  if (input.binding.policyId !== expected.policyId) {
+    input.errors.push(`${label}.policyId must match the selected experiment profile policyId.`);
+  }
+  if (input.binding.reasonerId !== expected.reasonerId) {
+    input.errors.push(`${label}.reasonerId must match the selected experiment profile reasonerId.`);
+  }
+  if (input.binding.personaId !== expected.personaId) {
+    input.errors.push(`${label}.personaId must match the selected experiment profile personaId.`);
+  }
+  if (input.binding.temperature !== expected.temperature) {
+    input.errors.push(`${label}.temperature must match the selected experiment profile temperature.`);
+  }
+  const expectedModel = input.modelByProfileId.get(expected.id);
+  if (expectedModel !== undefined && input.binding.model !== expectedModel) {
+    input.errors.push(`${label}.model must match experiment.spec.modelAssignments.`);
+  }
 }
 
 /**

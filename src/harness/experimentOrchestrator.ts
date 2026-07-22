@@ -1,8 +1,11 @@
 import { compareSocialDomainAdapterManifests } from "./domainAdapter";
 import type { HarnessEpisodeArtifactEnvelope } from "./episodeArtifacts";
 import {
+  createGenericExperimentExecutionAttestation,
   createGenericExperimentProvenance,
   normalizeGenericExperimentSpec,
+  validateGenericExperimentExecutionAttestation,
+  validateGenericExperimentExecutionEvidence,
   validateGenericExperimentProvenance,
   type GenericExperimentProvenanceV1,
   type GenericExperimentSpecV1,
@@ -350,6 +353,26 @@ function assertArtifactBinding(
   ) {
     throw new Error(`Generic experiment episode ${context.index} runtime actor count does not match the normalized spec.`);
   }
+  const executionEvidenceErrors = validateGenericExperimentExecutionEvidence(
+    spec,
+    artifact.socialEpisode,
+    `episode ${context.index} socialEpisode`
+  );
+  if (executionEvidenceErrors.length) {
+    throw new Error(`Generic experiment episode ${context.index} execution binding failed: ${executionEvidenceErrors.join(" ")}`);
+  }
+  if (!artifact.executionAttestation) {
+    throw new Error(`Generic experiment episode ${context.index} is missing its execution attestation.`);
+  }
+  const attestationErrors = validateGenericExperimentExecutionAttestation(
+    artifact.executionAttestation,
+    spec,
+    artifact.socialEpisode,
+    `episode ${context.index} executionAttestation`
+  );
+  if (attestationErrors.length) {
+    throw new Error(`Generic experiment episode ${context.index} execution attestation failed: ${attestationErrors.join(" ")}`);
+  }
   const adapterErrors = compareSocialDomainAdapterManifests(
     spec.domainAdapter,
     artifact.socialEpisode.domainAdapter,
@@ -375,6 +398,7 @@ function bindArtifactToExperiment<TArtifact extends GenericEpisodeEnvelope>(
     throw new Error("Generic experiment adapter did not return an episode artifact.");
   }
   const canonical = structuredClone(artifact);
+  let bound: TArtifact;
   if (canonical.experiment !== undefined) {
     const errors = validateGenericExperimentProvenance(
       canonical.experiment,
@@ -386,11 +410,26 @@ function bindArtifactToExperiment<TArtifact extends GenericEpisodeEnvelope>(
     if (hashStableJsonValue(canonical.experiment) !== hashStableJsonValue(experiment)) {
       throw new Error(`Generic experiment episode ${context.index} provenance does not match the normalized spec.`);
     }
-    return canonical;
+    bound = canonical;
+  } else {
+    bound = {
+      ...canonical,
+      experiment: structuredClone(experiment)
+    };
+  }
+  const executionAttestation = createGenericExperimentExecutionAttestation(
+    experiment.spec,
+    bound.socialEpisode
+  );
+  if (
+    bound.executionAttestation !== undefined &&
+    hashStableJsonValue(bound.executionAttestation) !== hashStableJsonValue(executionAttestation)
+  ) {
+    throw new Error(`Generic experiment episode ${context.index} execution attestation contradicts runner-authored evidence.`);
   }
   return {
-    ...canonical,
-    experiment: structuredClone(experiment)
+    ...bound,
+    executionAttestation
   };
 }
 
