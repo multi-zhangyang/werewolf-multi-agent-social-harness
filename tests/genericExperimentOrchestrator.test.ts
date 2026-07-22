@@ -225,6 +225,8 @@ describe("generic normalized experiment orchestration", () => {
       { id: "episode.counter_value", value: 1 }
     ]);
     expect(await restarted.getFailures("counter-experiment:counter-orchestration-seed:g1")).toEqual([]);
+    expect(await restarted.getEvaluationReport("counter-experiment:counter-orchestration-seed:g1"))
+      .toEqual(result.runSet.episodes[0]?.evaluationReport);
     const restartedRunStore = await HarnessExperimentRunStore.open({
       baseDirectory: path.join(root, "experiment-runs"),
       episodeStore: restarted
@@ -235,8 +237,20 @@ describe("generic normalized experiment orchestration", () => {
       gamesCompleted: 2,
       gamesUnstarted: 0,
       episodes: [
-        { index: 0, runId: "counter-experiment:counter-orchestration-seed:g1", metricCount: 1 },
-        { index: 1, runId: "counter-experiment:counter-orchestration-seed:g2", metricCount: 1 }
+        {
+          index: 0,
+          runId: "counter-experiment:counter-orchestration-seed:g1",
+          metricCount: 1,
+          evaluationReportId: "counter-experiment:g1:evaluation",
+          evaluationReportSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
+        },
+        {
+          index: 1,
+          runId: "counter-experiment:counter-orchestration-seed:g2",
+          metricCount: 1,
+          evaluationReportId: "counter-experiment:g2:evaluation",
+          evaluationReportSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
+        }
       ]
     });
     expect(decisions).toBe(2);

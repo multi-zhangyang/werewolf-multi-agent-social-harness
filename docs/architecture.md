@@ -107,7 +107,7 @@ content hashes, and formal symlink/non-directory/tampered revisions fail
 closed. Recovery performs no actor, policy, reasoner, or provider call.
 The current two-revision implementation assumes one server writer across
 processes and records only active/finalized lifecycle boundaries; a durable
-per-stage journal and full evaluation-report persistence remain separate work.
+per-stage journal remains separate work.
 
 Adapter callbacks receive cloned spec/provenance contexts, not the hidden
 control-plane authority object. In-flight prepare/run/artifact promises are
@@ -139,7 +139,7 @@ never constructs an actor, policy, reasoner, model client, or provider request.
 
 `HarnessEpisodeArtifactStore` is the domain-neutral, single-episode disk
 authority. It hashes run ids into fixed child directories, writes canonical
-artifact/trajectory/metrics/failures/checkpoint records atomically, rebuilds
+artifact/trajectory/full-evaluation/metrics/failures/checkpoint records atomically, rebuilds
 episode and checkpoint registries by recovery scan after restart, and invokes
 the supplied strong verifiers before put and after every read. Evaluation
 reports remain normalized evidence: arbitrary evaluator exception text is not
@@ -148,9 +148,11 @@ checkpoint operation requires a domain-owned verifier. Manifest digests,
 regenerated JSONL equality, regular-file checks, realpath containment, and
 symlink rejection prevent a persisted record from gaining authority through
 path or content tampering.
-The expanded layout uses manifest/index v2, while restart recovery retains a
-strict v1 reader for the earlier artifact/trajectory-only layout. Legacy
-recovery invents no metric or failure evidence. New checkpoint acceptance also
+The expanded layout uses manifest v3 and an `evaluation-report.json` envelope
+bound to the canonical artifact digest and evaluator-set hash. Metrics and
+reviewed failures must be exact derivations of that report. Restart recovery
+retains strict v1 artifact/trajectory and v2 metric/failure readers; neither
+legacy layout invents a missing complete report. New checkpoint acceptance also
 requires steps/messages to be an exact recorded prefix and static
 domain/adapter/roster/channel/experiment identity to match the parent episode.
 

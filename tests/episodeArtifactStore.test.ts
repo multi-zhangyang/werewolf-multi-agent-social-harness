@@ -148,6 +148,7 @@ describe("generic single-episode artifact store", () => {
     expect(trajectory.trim().split("\n")).toHaveLength(2);
     expect(await restarted.getMetrics(artifact.runId)).toEqual([]);
     expect(await restarted.getFailures(artifact.runId)).toEqual([]);
+    expect(await restarted.getEvaluationReport(artifact.runId)).toBeUndefined();
   });
 
   it("recovers the prior v1 artifact/trajectory layout without inventing evaluation evidence", async () => {
@@ -160,6 +161,7 @@ describe("generic single-episode artifact store", () => {
     const trajectoryText = await readFile(path.join(directory, "trajectory.jsonl"), "utf8");
     await rm(path.join(directory, "metrics.jsonl"));
     await rm(path.join(directory, "failures.jsonl"));
+    await rm(path.join(directory, "evaluation-report.json"));
     await rm(path.join(directory, "checkpoints.index.json"));
     await rm(path.join(directory, "checkpoints"), { recursive: true });
     await writeFile(path.join(directory, "manifest.json"), `${JSON.stringify({
@@ -182,7 +184,50 @@ describe("generic single-episode artifact store", () => {
     expect(await restarted.get(artifact.runId)).toEqual(artifact);
     expect(await restarted.getMetrics(artifact.runId)).toEqual([]);
     expect(await restarted.getFailures(artifact.runId)).toEqual([]);
+    expect(await restarted.getEvaluationReport(artifact.runId)).toBeUndefined();
     expect(await restarted.listCheckpoints(artifact.runId)).toEqual([]);
+  });
+
+  it("recovers the prior v2 metric/failure layout without inventing a complete evaluation report", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const report = runEvaluationRegistry({
+      id: "legacy-v2-evaluation",
+      context: {
+        id: artifact.runId,
+        status: artifact.status,
+        initialState: artifact.initialState,
+        finalState: artifact.finalState,
+        agents: artifact.agents,
+        trajectory: artifact.socialEpisode.steps
+      },
+      evaluators: [{
+        id: "legacy.counter",
+        label: "Legacy counter",
+        version: "1",
+        evaluate: () => ({
+          evaluatorId: "legacy.counter",
+          label: "Legacy counter",
+          version: "1",
+          metrics: [{ id: "legacy.value", label: "Legacy value", scope: "episode", value: 1, source: "legacy.counter" }]
+        })
+      }]
+    });
+    const store = await HarnessEpisodeArtifactStore.open({ baseDirectory: root, verifyArtifact: counterVerifier() });
+    const entry = await store.put(artifact, { evaluationReport: report });
+    const directory = path.join(root, "episodes", entry.directoryKey);
+    await rm(path.join(directory, "evaluation-report.json"));
+    const manifestPath = path.join(directory, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.schemaVersion = "harness.episode-store-manifest.v2";
+    delete manifest.evaluationSha256;
+    delete manifest.files.evaluation;
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+    const restarted = await HarnessEpisodeArtifactStore.open({ baseDirectory: root, verifyArtifact: counterVerifier() });
+    expect(await restarted.getMetrics(artifact.runId)).toEqual(report.metrics);
+    expect(await restarted.getFailures(artifact.runId)).toEqual([]);
+    expect(await restarted.getEvaluationReport(artifact.runId)).toBeUndefined();
   });
 
   it("persists normalized metrics and reviewed failure rows without serializing evaluator exception text", async () => {
@@ -231,7 +276,6 @@ describe("generic single-episode artifact store", () => {
       ]
     });
     if (!evaluationReport.failures?.[0]) throw new Error("counter fixture did not record evaluator failure");
-    evaluationReport.failures[0].message = rawFailure;
     const store = await HarnessEpisodeArtifactStore.open({
       baseDirectory: root,
       verifyArtifact: counterVerifier()
@@ -240,6 +284,7 @@ describe("generic single-episode artifact store", () => {
     const entry = await store.put(artifact, { evaluationReport });
     expect(entry).toMatchObject({ metricCount: 1, failureCount: 1, checkpointCount: 0 });
     expect(await store.getMetrics(artifact.runId)).toEqual(evaluationReport.metrics);
+    expect(await store.getEvaluationReport(artifact.runId)).toEqual(evaluationReport);
     expect(await store.getFailures(artifact.runId)).toEqual([
       expect.objectContaining({
         source: "evaluator",
@@ -253,8 +298,10 @@ describe("generic single-episode artifact store", () => {
     const episodeDirectory = path.join(root, "episodes", entry.directoryKey);
     const metricsText = await readFile(path.join(episodeDirectory, "metrics.jsonl"), "utf8");
     const failuresText = await readFile(path.join(episodeDirectory, "failures.jsonl"), "utf8");
+    const evaluationText = await readFile(path.join(episodeDirectory, "evaluation-report.json"), "utf8");
     expect(metricsText).toContain("counter.final-value");
     expect(failuresText).not.toContain(rawFailure);
+    expect(evaluationText).not.toContain(rawFailure);
 
     const restarted = await HarnessEpisodeArtifactStore.open({
       baseDirectory: root,
@@ -262,9 +309,67 @@ describe("generic single-episode artifact store", () => {
     });
     expect(await restarted.getMetrics(artifact.runId)).toEqual(evaluationReport.metrics);
     expect(await restarted.getFailures(artifact.runId)).toHaveLength(1);
+    expect(await restarted.getEvaluationReport(artifact.runId)).toEqual(evaluationReport);
+
+    const forgedRoot = await temporaryStoreRoot();
+    const forgedStore = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: forgedRoot,
+      verifyArtifact: counterVerifier()
+    });
+    const forgedReport = structuredClone(evaluationReport);
+    forgedReport.failures![0]!.message = rawFailure;
+    await expect(forgedStore.put(artifact, { evaluationReport: forgedReport }))
+      .rejects.toThrow(/unreviewed evaluator failure/i);
+    expect(JSON.stringify(await forgedStore.list())).not.toContain(rawFailure);
 
     await writeFile(path.join(episodeDirectory, "metrics.jsonl"), `${metricsText.trim()} ${rawFailure}\n`, "utf8");
     await expect(restarted.get(artifact.runId)).rejects.toThrow(/canonical recovery validation/i);
+  });
+
+  it("distinguishes a zero-metric report from no report and binds the complete report across restart", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const report = runEvaluationRegistry({
+      id: "counter-zero-metric-evaluation",
+      createdAt: "2026-07-22T13:01:30.000Z",
+      context: {
+        id: artifact.runId,
+        status: artifact.status,
+        initialState: artifact.initialState,
+        finalState: artifact.finalState,
+        agents: artifact.agents,
+        trajectory: artifact.socialEpisode.steps
+      },
+      evaluators: [{
+        id: "counter.zero",
+        label: "Counter zero output",
+        version: "1",
+        evaluate: () => ({
+          evaluatorId: "counter.zero",
+          label: "Counter zero output",
+          version: "1",
+          metrics: [],
+          output: { checked: true, finalValue: artifact.finalState.value }
+        })
+      }]
+    });
+    const store = await HarnessEpisodeArtifactStore.open({ baseDirectory: root, verifyArtifact: counterVerifier() });
+    const entry = await store.put(artifact, { evaluationReport: report });
+    expect(entry).toMatchObject({ metricCount: 0, evaluationReportId: report.id });
+    const firstRead = await store.getEvaluationReport(artifact.runId);
+    expect(firstRead).toEqual(report);
+    firstRead!.outputs["counter.zero"] = { checked: false };
+    expect(await store.getEvaluationReport(artifact.runId)).toEqual(report);
+
+    const restarted = await HarnessEpisodeArtifactStore.open({ baseDirectory: root, verifyArtifact: counterVerifier() });
+    expect(await restarted.getEvaluationReport(artifact.runId)).toEqual(report);
+    expect(await restarted.getMetrics(artifact.runId)).toEqual([]);
+
+    const evaluationPath = path.join(root, "episodes", entry.directoryKey, "evaluation-report.json");
+    const persisted = JSON.parse(await readFile(evaluationPath, "utf8"));
+    persisted.report.outputs["counter.zero"].checked = false;
+    await writeFile(evaluationPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+    await expect(restarted.getEvaluationReport(artifact.runId)).rejects.toThrow(/canonical recovery validation/i);
   });
 
   it("strongly verifies, persists, rehydrates, and recovers the checkpoint registry", async () => {

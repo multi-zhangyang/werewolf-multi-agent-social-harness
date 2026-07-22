@@ -109,6 +109,7 @@ export type {
 export {
   HARNESS_EPISODE_CHECKPOINT_INDEX_VERSION,
   HARNESS_EPISODE_CHECKPOINT_MANIFEST_VERSION,
+  HARNESS_EPISODE_EVALUATION_RECORD_VERSION,
   HARNESS_EPISODE_FAILURE_ROW_VERSION,
   HARNESS_EPISODE_METRIC_ROW_VERSION,
   HARNESS_EPISODE_STORE_INDEX_VERSION,
@@ -129,6 +130,7 @@ export type {
   HarnessEpisodeCheckpointStoreIndex,
   HarnessEpisodeCheckpointStoreManifest,
   HarnessEpisodeFailureRow,
+  HarnessEpisodeEvaluationRecordV1,
   HarnessEpisodeMetricRow,
   HarnessEpisodeStoreEntry,
   HarnessEpisodeStoreIndex,

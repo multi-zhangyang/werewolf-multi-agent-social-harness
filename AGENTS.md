@@ -27097,8 +27097,7 @@ model-specific implementation.
 
 Known boundaries remain explicit: the current store records active/finalized
 revisions rather than every intermediate preparing/running stage; cross-process
-writes require a single server writer; complete evaluation reports are not yet
-stored as canonical sidecars; and malicious deletion of a whole finalized
+writes require a single server writer; and malicious deletion of a whole finalized
 revision requires an external trusted HEAD/WORM log to prove rollback.
 
 ## 13.284 North Mini Code Runtime Selection And Live Validation Lock
@@ -27136,3 +27135,35 @@ modelLatencyMs=59949
 
 The earlier historical Grok/Laguna execution locks remain historical evidence;
 this newest lock is the current runtime selection authority.
+
+## 13.285 Canonical Full Evaluation Report Persistence Lock
+
+Timestamp: `2026-07-22`
+
+The episode artifact plane now persists the complete normalized evaluation
+authority rather than retaining only metric/failure projections:
+
+- New writes use `harness.episode-store-manifest.v3` and always publish
+  `evaluation-report.json`. The file is explicit `null` when no report exists,
+  so an absent evaluation is distinct from a completed zero-metric report.
+- A typed `harness.episode-evaluation.v1` record binds the complete
+  `HarnessEvaluationReport` to the canonical episode run id, artifact SHA-256,
+  evaluator registry/set hash, manifest report id, metrics JSONL, and reviewed
+  failure JSONL.
+- `getEvaluationReport()` reuses the same canonical load path as artifact,
+  metrics, and failure reads. It performs digest, cross-file, artifact verifier,
+  report structure, registry coverage, metric count, controlled failure, and
+  clone-isolation checks; it never calls an evaluator, reasoner, actor, or
+  provider during recovery.
+- Experiment run references now retain and revalidate the canonical evaluation
+  report id and stable hash, rather than trusting metric/failure counts alone.
+- Strict readers retain v1 artifact/trajectory and v2 metric/failure layouts.
+  Legacy recovery returns `undefined` for the unavailable complete report and
+  never fabricates outputs, warnings, registry, summary, or promotion evidence.
+- Raw evaluator exception text is still forbidden. A caller-tampered failure
+  message now fails before publication instead of being copied into the full
+  report file.
+
+The report remains an internal artifact-plane authority. Public/server views
+must continue to use the existing redaction/projection policy rather than
+returning private evaluator outputs directly.

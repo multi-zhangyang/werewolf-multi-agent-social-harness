@@ -127,7 +127,7 @@ export function runEvaluationRegistry<
   }
   const metrics = moduleResults.flatMap((moduleResult) => moduleResult.metrics);
   const moduleRuns: EvaluationModuleRun[] = moduleResults;
-  return {
+  const report: HarnessEvaluationReport = {
     id: options.id,
     createdAt: options.createdAt ?? new Date().toISOString(),
     status: failures.length ? "incomplete" : "completed",
@@ -140,6 +140,7 @@ export function runEvaluationRegistry<
     warnings: collectEvaluationWarnings(moduleRuns, promotionPolicy),
     summary: summarizeMetrics(metrics, promotionPolicy)
   };
+  return JSON.parse(JSON.stringify(report)) as HarnessEvaluationReport;
 }
 
 function evaluatorFallbackModuleResult(evaluator: EvaluatorManifestSource): HarnessEvaluationModuleResult {
@@ -168,6 +169,31 @@ function assertEvaluationModuleResult(value: unknown): asserts value is HarnessE
     throw new Error("invalid evaluator module identity");
   }
   if (!Array.isArray(value.metrics)) throw new Error("invalid evaluator metrics");
+  if (value.output !== undefined) assertStrictJsonData(value.output);
+  if (value.manifest !== undefined) assertStrictJsonData(value.manifest);
+}
+
+function assertStrictJsonData(value: unknown, seen = new Set<object>()): void {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("invalid non-finite evaluator data");
+    return;
+  }
+  if (typeof value !== "object" || seen.has(value)) throw new Error("invalid non-JSON evaluator data");
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) assertStrictJsonData(item, seen);
+  } else {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw new Error("invalid evaluator object prototype");
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      // Optional object properties are normalized away by the report builder;
+      // array holes/undefined values still fail through the recursive branch.
+      if (item === undefined) continue;
+      assertStrictJsonData(item, seen);
+    }
+  }
+  seen.delete(value);
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

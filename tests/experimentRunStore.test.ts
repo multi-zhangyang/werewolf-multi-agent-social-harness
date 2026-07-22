@@ -20,7 +20,7 @@ afterEach(async () => {
 describe("restart-safe experiment run store", () => {
   it("publishes the active schedule before preparation and recovers without executing episode authority", async () => {
     const root = await temporaryRoot();
-    const reads = { artifacts: 0, metrics: 0, failures: 0 };
+    const reads = { artifacts: 0, metrics: 0, failures: 0, evaluations: 0 };
     const authority = emptyAuthority(reads);
     const experiment = createGenericExperimentProvenance(experimentSpec(2));
     const store = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
@@ -40,13 +40,13 @@ describe("restart-safe experiment run store", () => {
       episodes: []
     });
     expect(await restarted.list()).toMatchObject([{ runSetId: "restart-safe-run", revision: 1, state: "active" }]);
-    expect(reads).toEqual({ artifacts: 0, metrics: 0, failures: 0 });
+    expect(reads).toEqual({ artifacts: 0, metrics: 0, failures: 0, evaluations: 0 });
     await expect(restarted.begin({ runSetId: "restart-safe-run", experiment })).rejects.toThrow(/already exists/i);
   });
 
   it("finalizes reviewed pre-artifact failure references and rejects revision rollback through a symlink", async () => {
     const root = await temporaryRoot();
-    const reads = { artifacts: 0, metrics: 0, failures: 0 };
+    const reads = { artifacts: 0, metrics: 0, failures: 0, evaluations: 0 };
     const authority = emptyAuthority(reads);
     const experiment = createGenericExperimentProvenance(experimentSpec(2));
     const store = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
@@ -81,7 +81,7 @@ describe("restart-safe experiment run store", () => {
       gamesUnstarted: 1,
       episodes: [{ status: "failed", error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE }]
     });
-    expect(reads).toEqual({ artifacts: 0, metrics: 0, failures: 0 });
+    expect(reads).toEqual({ artifacts: 0, metrics: 0, failures: 0, evaluations: 0 });
 
     const revisions = await revisionDirectory(root, "failed-run");
     const names = (await readdir(revisions)).sort();
@@ -95,7 +95,7 @@ describe("restart-safe experiment run store", () => {
 
   it("fails closed when a formally published record is changed without its manifest", async () => {
     const root = await temporaryRoot();
-    const authority = emptyAuthority({ artifacts: 0, metrics: 0, failures: 0 });
+    const authority = emptyAuthority({ artifacts: 0, metrics: 0, failures: 0, evaluations: 0 });
     const experiment = createGenericExperimentProvenance(experimentSpec(1));
     const store = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
     await store.begin({ runSetId: "tampered-run", experiment, createdAt: "2026-07-22T15:00:00.000Z" });
@@ -112,7 +112,7 @@ describe("restart-safe experiment run store", () => {
   });
 });
 
-function emptyAuthority(reads: { artifacts: number; metrics: number; failures: number }) {
+function emptyAuthority(reads: { artifacts: number; metrics: number; failures: number; evaluations: number }) {
   return {
     async get(): Promise<Artifact | undefined> {
       reads.artifacts += 1;
@@ -124,6 +124,10 @@ function emptyAuthority(reads: { artifacts: number; metrics: number; failures: n
     },
     async getFailures() {
       reads.failures += 1;
+      return undefined;
+    },
+    async getEvaluationReport() {
+      reads.evaluations += 1;
       return undefined;
     }
   };
