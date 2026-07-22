@@ -26699,3 +26699,75 @@ and the environment validated it. The bounded real match completed with
 `ok: true`, **2/2 committed native steps**, `harnessErrors: 0`, one real model
 turn, and the expected `maxTransitions=2` truncation rather than failure. Both
 live validations used only `poolside/laguna-s-2.1:free`.
+
+## 13.279 Lifecycle-Inclusive Tournament Execution Telemetry Lock
+
+Timestamp: `2026-07-22`
+
+A bounded real streaming tournament exposed a denominator-presentation bug:
+the episode had one completed provider stream and two committed native steps,
+but the CLI printed zero calls/tokens/latency in `modelStats` because that
+historical aggregate is intentionally completed-only.
+
+The correction preserves, rather than weakens, that statistical contract:
+
+- `modelStats` and `profileStats` remain completed-only outcome aggregates.
+  Truncated or failed partial games cannot affect wins, rewards, roles, seats,
+  or leaderboard promotion.
+- CLI and server tournament summaries now expose a separate versioned
+  `executionTelemetry` projection with schema
+  `harness.tournament-execution-telemetry.v1`.
+- The projection reuses the exact reducer used by `cost_latency.json`; it does
+  not introduce a competing third aggregation path.
+- Calls, tokens, latency, attempts, harness errors, and native/committed/
+  rejected steps include completed, truncated, and failed episodes that
+  actually produced a `HarnessRunResult`.
+- Preparation failures and unstarted episodes remain lifecycle evidence but
+  cannot invent provider calls, tokens, latency, attempts, or steps.
+- When the CLI does not retain per-match artifacts, attempt telemetry falls
+  back to the already-recorded episode trajectory. It still does not call a
+  provider or reconstruct a trace.
+- The exported `recordCommittedReceiptOutcome()` helper now fails closed on a
+  non-committed receipt, matching the guard already enforced by both production
+  actor lifecycles. A library caller can no longer bypass the receipt gate and
+  append a false durable outcome.
+
+No provider/model-specific branch, parser, prompt, fallback, or adapter was
+added. The only live model used for this validation was the current user-selected
+`poolside/laguna-s-2.1:free` through the ordinary OpenAI-compatible streaming
+path.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/scaffold.test.ts tests/tournament.test.ts \
+  tests/tournamentArtifacts.test.ts --maxWorkers=1 --no-file-parallelism \
+  --testTimeout=60000 --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npm run test:e2e
+npm run arena:tournament -- --models=poolside/laguna-s-2.1:free \
+  --games=1 --maxTransitions=2 --timeout=180s --json=summary
+git diff --check
+```
+
+The focused first pass passed **3 files / 46 tests**. After the live attempt
+fallback correction, the affected tournament suites passed **2 files / 16
+tests** and typecheck passed again. The complete deterministic suite passed
+**45 files / 486 tests**. Production build passed with only the existing Vite
+chunk-size warning. The Playwright fixture cockpit passed **13/13**, including
+server-owned live-to-postgame handoff, server-authoritative replay frames,
+social graph projection, compact viewport containment, bounded drawers,
+roster validation, heterogeneous Agent submission, and tournament scheduler
+submission.
+
+The final bounded real tournament returned `ok: true` and the expected
+`status: truncated` at `maxTransitions=2`, with **2 native / 2 committed / 0
+rejected** steps, **0 harness errors**, and one completed real provider call.
+The new lifecycle-inclusive telemetry reported **500 prompt tokens**, **212
+completion tokens**, **7,860 ms provider latency**, and attempts
+`count=1,sum=1,max=1,missing=0`. The completed-only `modelStats` correctly
+remained zero, proving that execution observability was restored without
+promoting a partial outcome into leaderboard statistics.

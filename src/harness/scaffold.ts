@@ -1614,6 +1614,9 @@ export function recordCommittedReceiptOutcome<TSocialObservation, TReceiptObserv
   receipt: SocialActorStepReceipt<TReceiptObservation, TPending, TCommand>,
   context?: SocialStateMutationContext
 ): void {
+  if (receipt.status !== "committed") {
+    throw new Error("Cannot record environment outcome from a non-committed receipt.");
+  }
   const infoValues = Object.values(receipt.info ?? {});
   appendSocialMemory(
     social,

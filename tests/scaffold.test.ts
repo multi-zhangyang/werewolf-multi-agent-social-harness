@@ -3,6 +3,7 @@ import {
   WEIGHTED_SOCIAL_STATE_CANDIDATE_SCORER_KIND,
   createWeightedSocialStateCandidateScorer,
   createScaffoldedActor,
+  recordCommittedReceiptOutcome,
   resolveAgentActionCandidateScorers,
   type AgentActionCandidateScorer,
   type AgentActionArbitrator,
@@ -49,6 +50,25 @@ const profile: SocialAgentProfile = {
 };
 
 describe("scaffolded social actor", () => {
+  it("rejects direct outcome recording for a non-committed receipt", () => {
+    const social = createAgentSocialState<TestObservation, TestPending, TestCommand>({ agentId: "a", profile });
+    expect(() =>
+      recordCommittedReceiptOutcome(social, {
+        id: "receipt-rejected",
+        status: "rejected",
+        traceId: "trace-rejected",
+        turnIndex: 1,
+        actorId: "a",
+        pendingAction: { actorId: "a", kind: "act" },
+        reward: 0,
+        terminated: false,
+        truncated: false
+      })
+    ).toThrow(/non-committed receipt/);
+    expect(social.memory.entries).toHaveLength(0);
+    expect(social.journal?.entries ?? []).toHaveLength(0);
+  });
+
   it("requires observe before decide", async () => {
     const actor = createScaffoldedActor<TestObservation, TestPending, TestCommand>({
       id: "a",

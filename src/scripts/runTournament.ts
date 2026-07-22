@@ -18,6 +18,7 @@ import { runTournament } from "../harness/tournament";
 import {
   summarizeTournamentMetricPromotionsFromMetrics,
   summarizeTournamentMetricPromotionsFromReports,
+  summarizeTournamentExecutionTelemetry,
   writeTournamentArtifactDirectory,
   type ResearchTournamentArtifactFiles,
   type TournamentArtifactWriteResult
@@ -159,6 +160,7 @@ async function main(): Promise<void> {
       ...episodeStepTotals,
       modelStats: result.modelStats,
       profileStats: result.profileStats,
+      executionTelemetry: summarizeTournamentExecutionTelemetry(result),
       evaluation: summarizeTournamentEvaluation(result.episodes),
       evaluationReports: summarizeTournamentEvaluationReports(result.episodes),
       artifacts: artifacts ? summarizeArtifactWrite(artifacts) : null,

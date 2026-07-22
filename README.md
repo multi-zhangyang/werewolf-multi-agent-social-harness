@@ -230,6 +230,16 @@ counts. Strict public/share packs intentionally omit those research inputs and
 are not leaderboard-rebuild authority. CSV files do not replace replay or JSONL
 evidence.
 
+Tournament outcome aggregates and execution telemetry deliberately use
+different denominators. `modelStats` / `profileStats` remain completed-only so
+bounded or failed partial games cannot affect wins, rewards, roles, seats, or
+leaderboards. CLI and server tournament summaries additionally expose
+`executionTelemetry` (`harness.tournament-execution-telemetry.v1`), derived by
+the same reducer as `cost_latency.json`; it includes calls, tokens, latency,
+harness errors, and committed/rejected/native steps from every completed,
+truncated, or failed episode that actually produced a harness result. Preparation
+failures and unstarted episodes never invent provider or step usage.
+
 The API also stores a `MatchArtifact` for completed `/api/matches/run` records:
 
 ```bash

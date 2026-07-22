@@ -26,6 +26,7 @@ import type {
   HarnessEvaluatorManifestEntry,
   HarnessForkProvenance,
   HarnessMetricRecord,
+  HarnessStepRecord,
   ProviderFailureSummary
 } from "./types";
 import { sanitizePersistedProviderDiagnostics } from "./providerFailure";
@@ -901,7 +902,7 @@ function publicCostLatencyReport(
   aliases: Map<string, string>
 ): Record<string, unknown> {
   const source = buildCostLatencyReport(result, artifactRecords, createdAt, true);
-  const sourceRecord = isRecord(source) ? source : {};
+  const sourceRecord: Record<string, unknown> = source;
   const byModel = isRecord(sourceRecord.byModel) ? sourceRecord.byModel : {};
   const episodes = Array.isArray(sourceRecord.episodes) ? sourceRecord.episodes : [];
   return {
@@ -2242,7 +2243,7 @@ function buildCostLatencyReport(
   artifactRecords: TournamentMatchArtifactRecord[],
   createdAt: string,
   redactTruth = false
-): object {
+) {
   const artifactsByIndex = new Map(artifactRecords.map((record) => [record.index, record.artifact]));
   const totals = createEmptyCostLatencyStats();
   const byModel = new Map<string, ReturnType<typeof createEmptyCostLatencyStats>>();
@@ -2286,7 +2287,7 @@ function buildCostLatencyReport(
     totals.committedSteps += episodeStats.committedSteps;
     totals.rejectedSteps += episodeStats.rejectedSteps;
 
-    const traceStats = traceCostLatencyStats(artifact);
+    const traceStats = traceCostLatencyStats(artifact, episode.trajectory);
     mergeTraceStats(episodeStats, traceStats);
     mergeTraceStats(totals, traceStats);
     for (const [model, stats] of traceStats.byModel.entries()) {
@@ -2345,6 +2346,44 @@ function buildCostLatencyReport(
     totals: finalizeCostLatencyStats(totals),
     byModel: Object.fromEntries([...byModel.entries()].map(([model, stats]) => [model, finalizeCostLatencyStats(stats)])),
     episodes
+  };
+}
+
+/**
+ * Lifecycle-inclusive execution telemetry for runtime/API/CLI summaries.
+ *
+ * Outcome, reward, role, and seat aggregates intentionally remain completed-
+ * only in TournamentResult.modelStats/profileStats. This projection answers a
+ * different question: what work actually ran, including bounded truncated and
+ * failed episodes that produced a HarnessRunResult. It reuses the canonical
+ * cost/latency artifact reducer so summaries cannot drift from exported
+ * cost_latency.json semantics.
+ */
+export function summarizeTournamentExecutionTelemetry(result: TournamentResult) {
+  const source = buildCostLatencyReport(result, collectArtifactRecords(result), "runtime-summary");
+  const episodesWithHarnessResult = result.episodes.filter(
+    (episode) => episode.harnessStatus !== undefined || episode.socialEpisode !== undefined
+  );
+  return {
+    schemaVersion: "harness.tournament-execution-telemetry.v1",
+    denominatorPolicy: {
+      outcomeAggregates: "completed episodes only; see modelStats/profileStats",
+      executionAggregates: "completed, truncated, and failed episodes that produced a harness result",
+      preparationFailures: "excluded from model calls, tokens, latency, and step totals",
+      unstartedEpisodes: "excluded from execution totals"
+    },
+    lifecycle: {
+      episodesWithHarnessResult: episodesWithHarnessResult.length,
+      completed: episodesWithHarnessResult.filter((episode) => episode.status === "completed").length,
+      truncated: episodesWithHarnessResult.filter((episode) => episode.status === "truncated").length,
+      failed: episodesWithHarnessResult.filter((episode) => episode.status === "failed").length,
+      preparationFailed: result.episodes.filter(
+        (episode) => episode.status === "failed" && episode.harnessStatus === undefined && episode.socialEpisode === undefined
+      ).length,
+      unstarted: result.gamesUnstarted ?? Math.max(0, result.gamesRequested - result.episodes.length)
+    },
+    totals: source.totals,
+    byModel: source.byModel
   };
 }
 
@@ -2767,7 +2806,10 @@ function addModelUsage(stats: ReturnType<typeof createEmptyCostLatencyStats>, us
   stats.latencyMs += usage.latencyMs;
 }
 
-function traceCostLatencyStats(artifact: MatchArtifact | undefined): ReturnType<typeof createEmptyCostLatencyStats> & {
+function traceCostLatencyStats(
+  artifact: MatchArtifact | undefined,
+  fallbackTrajectory: readonly HarnessStepRecord[] = []
+): ReturnType<typeof createEmptyCostLatencyStats> & {
   byModel: Map<string, ReturnType<typeof createEmptyCostLatencyStats>>;
 } {
   const stats = Object.assign(createEmptyCostLatencyStats(), {
@@ -2779,7 +2821,7 @@ function traceCostLatencyStats(artifact: MatchArtifact | undefined): ReturnType<
   }));
   const traces = nativeTraces.length
     ? nativeTraces
-    : (artifact?.trajectory ?? []).map((step) => ({
+    : (artifact?.trajectory ?? fallbackTrajectory).map((step) => ({
         model: step.model,
         attempts: step.reasonerOutput.attempts
       }));

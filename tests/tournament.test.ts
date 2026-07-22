@@ -67,8 +67,34 @@ describe("role-balanced tournament harness", () => {
         rewardTotal: number;
         averageReward: number;
       };
+      executionTelemetry: {
+        lifecycle: {
+          episodesWithHarnessResult: number;
+          completed: number;
+          truncated: number;
+          failed: number;
+        };
+        totals: {
+          calls: number;
+          promptTokens: number;
+          completionTokens: number;
+          nativeSteps: number;
+          committedSteps: number;
+          rejectedSteps: number;
+          attempts: { count: number; sum: number; max: number; missing: number; average: number };
+        };
+        byModel: Record<string, {
+          calls: number;
+          promptTokens: number;
+          completionTokens: number;
+          nativeSteps: number;
+          committedSteps: number;
+          rejectedSteps: number;
+        }>;
+      };
     }>(`
       import { runTournament } from "./src/harness/tournament.ts";
+      import { summarizeTournamentExecutionTelemetry } from "./src/harness/tournamentArtifacts.ts";
 
       const tournamentStubReasoner = {
         async think(input) {
@@ -110,7 +136,8 @@ describe("role-balanced tournament harness", () => {
         episodeAgentCounts: result.episodes.map((episode) => episode.agents.length),
         episodesHaveEvaluation: result.episodes.every((episode) => Boolean(episode.evaluation)),
         alpha: result.modelStats.alpha,
-        beta: result.modelStats.beta
+        beta: result.modelStats.beta,
+        executionTelemetry: summarizeTournamentExecutionTelemetry(result)
       }));
     `);
 
@@ -143,6 +170,26 @@ describe("role-balanced tournament harness", () => {
     expect(alpha.rewardTotal + beta.rewardTotal).toBe(0);
     expect(alpha.averageReward).toBe(0);
     expect(beta.averageReward).toBe(0);
+    expect(result.executionTelemetry.lifecycle).toEqual({
+      episodesWithHarnessResult: 2,
+      completed: 0,
+      truncated: 2,
+      failed: 0,
+      preparationFailed: 0,
+      unstarted: 0
+    });
+    expect(result.executionTelemetry.totals.calls).toBeGreaterThan(0);
+    expect(result.executionTelemetry.totals.promptTokens).toBeGreaterThan(0);
+    expect(result.executionTelemetry.totals.completionTokens).toBeGreaterThan(0);
+    expect(result.executionTelemetry.totals.nativeSteps).toBeGreaterThan(0);
+    expect(result.executionTelemetry.totals.nativeSteps).toBe(
+      result.executionTelemetry.totals.committedSteps + result.executionTelemetry.totals.rejectedSteps
+    );
+    expect(result.executionTelemetry.totals.attempts.count).toBe(result.executionTelemetry.totals.calls);
+    expect(result.executionTelemetry.totals.attempts.missing).toBe(0);
+    expect(Object.values(result.executionTelemetry.byModel).reduce((sum, stats) => sum + stats.calls, 0)).toBe(
+      result.executionTelemetry.totals.calls
+    );
   });
 
   it("counts returned failed harness results without aggregating them as completed exposure", async () => {
@@ -158,8 +205,12 @@ describe("role-balanced tournament harness", () => {
       firstSocialStatus?: string;
       alphaSeatGames: number;
       betaSeatGames: number;
+      executionFailed: number;
+      executionHarnessErrors: number;
+      executionNativeSteps: number;
     }>(`
       import { runTournament } from "./src/harness/tournament.ts";
+      import { summarizeTournamentExecutionTelemetry } from "./src/harness/tournamentArtifacts.ts";
 
       const failingReasoner = {
         async think(input) {
@@ -175,6 +226,7 @@ describe("role-balanced tournament harness", () => {
         maxTransitions: 4,
         continueOnError: true
       });
+      const executionTelemetry = summarizeTournamentExecutionTelemetry(result);
       console.log(JSON.stringify({
         gamesRequested: result.gamesRequested,
         gamesCompleted: result.gamesCompleted,
@@ -186,7 +238,10 @@ describe("role-balanced tournament harness", () => {
         firstMetricErrors: result.episodes[0]?.metrics?.harnessErrorCount,
         firstSocialStatus: result.episodes[0]?.socialEpisode?.status,
         alphaSeatGames: result.modelStats.alpha.seatGames,
-        betaSeatGames: result.modelStats.beta.seatGames
+        betaSeatGames: result.modelStats.beta.seatGames,
+        executionFailed: executionTelemetry.lifecycle.failed,
+        executionHarnessErrors: executionTelemetry.totals.harnessErrors,
+        executionNativeSteps: executionTelemetry.totals.nativeSteps
       }));
     `);
 
@@ -201,6 +256,9 @@ describe("role-balanced tournament harness", () => {
     expect(result.firstSocialStatus).toBe("failed");
     expect(result.alphaSeatGames).toBe(0);
     expect(result.betaSeatGames).toBe(0);
+    expect(result.executionFailed).toBe(2);
+    expect(result.executionHarnessErrors).toBe(2);
+    expect(result.executionNativeSteps).toBeGreaterThan(0);
   });
 
   it("executes an explicit parallel scheduler condition and records it in the tournament experiment", async () => {
