@@ -159,14 +159,23 @@ export type {
 export {
   HARNESS_EXPERIMENT_RUN_INDEX_VERSION,
   HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION,
+  HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V2,
   HARNESS_EXPERIMENT_RUN_RECORD_VERSION,
+  HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2,
   HarnessExperimentRunStore
 } from "./experimentRunStore";
 export type {
   GenericExperimentEpisodeAuthority,
   HarnessExperimentRunEpisodeReferenceV1,
   HarnessExperimentRunManifestV1,
+  HarnessExperimentRunManifestV2,
+  HarnessExperimentRunManifest,
+  HarnessExperimentRunCurrentEpisodeV2,
+  HarnessExperimentRunRecovery,
+  HarnessExperimentRunResume,
+  HarnessExperimentRunRecord,
   HarnessExperimentRunRecordV1,
+  HarnessExperimentRunRecordV2,
   HarnessExperimentRunStoreEntry,
   HarnessExperimentRunStoreIndexV1,
   HarnessExperimentRunStoreOptions
