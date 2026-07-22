@@ -314,6 +314,46 @@ raw request bodies, runtime clients/factories, and abort signals are rejected.
 This is the contract a second domain can import from `src/harness/generic.ts`
 without importing Werewolf core types.
 
+`createGenericExperimentProvenance()` turns that normalized record into
+`harness.experiment-provenance.v1` by retaining the canonical spec and its
+stable hash. `HarnessEpisodeArtifactEnvelope.experiment` and
+`HarnessCheckpointSource.experiment` carry the identity through persistence and
+checkpoint selection. For an experiment-bound fork, the caller supplies the
+child provenance and explicitly names every changed top-level spec field.
+`harness.experiment-fork-lineage.v1` records both specs/hashes plus before/after
+field hashes; validation rejects omitted, invented, duplicate, reordered, or
+tampered declarations. Generic code verifies integrity but never guesses what
+a seed/profile/model/scheduler/domain-config change means to a domain.
+
+`runGenericExperiment()` is the reusable composition root above this contract.
+It resolves evaluator ids before preparing any episode, schedules stable
+`${seed}:gN` episode identities, delegates domain execution, binds the exact
+experiment provenance into each canonical episode, runs the evaluator registry,
+passes the normalized evaluation report to `HarnessEpisodeArtifactStore`, and
+builds `harness.tournament-run-set.v1`. Missing evaluator ids, adapter identity
+mismatches, scheduler/actor-count mismatches, and contradictory provenance fail
+closed. The generic runner has no provider/model branch and does not turn model
+output into environment authority.
+
+Every adapter callback receives a fresh clone of normalized spec/provenance;
+mutating it cannot rewrite hidden authority or another episode. The shared run
+deadline races in-flight prepare/run/artifact work as well as stopping new
+scheduling. Before evaluation, generic identity/status/state/agent/social
+fields are compared with the canonical artifact. The public execution result
+omits preparation objects and raw domain results.
+
+The single-episode store persists `artifact.json`, `trajectory.jsonl`,
+`metrics.jsonl`, reviewed `failures.jsonl`, and a hashed checkpoint registry.
+Checkpoint writes/reads/recovery require a separate domain strong verifier;
+restart recovery revalidates content hashes, canonical JSONL, ordinary-file
+status, realpath containment, and symlink absence. Reading these records never
+constructs an actor or reruns a reasoner/provider.
+The current manifest is v2; a strict compatibility reader recovers the prior
+v1 artifact/trajectory-only layout with empty sidecars. Directory hashes are
+re-derived from recorded identities, failure rows reject unknown fields, and a
+checkpoint must be an exact step/message prefix of its verified parent rather
+than merely an internally self-consistent checkpoint with the same run id.
+
 The older contract below remains the Werewolf adapter specialization and CLI /
 API compatibility surface; it is not the definition of the generic harness.
 
@@ -554,6 +594,13 @@ state, agent states, channel topology, and committed message prefix, then starts
 a new lineage that cites the parent native boundary and hashes. Neither
 trajectory length nor a legacy trajectory prefix is a checkpoint selector,
 replay input, or fork-provenance authority.
+
+When the parent checkpoint is experiment-bound, fork creation also requires a
+child experiment provenance and explicit changed-field declarations, even when
+the declarations are empty because the spec is unchanged. The child episode
+envelope must exactly match the lineage's child spec hash. Omitting experiment
+metadata remains allowed only for artifacts/checkpoints created before this
+optional binding existed.
 
 `GET /api/checkpoints/:id/artifact` defaults to `truth-redacted`. Explicit
 `?view=full` is local/debug access only; the fork endpoint restores the

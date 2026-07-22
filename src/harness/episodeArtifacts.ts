@@ -1,5 +1,13 @@
 import { hashStableState } from "./hash";
 import {
+  createGenericExperimentForkLineage,
+  validateGenericExperimentForkLineage,
+  validateGenericExperimentProvenance,
+  type GenericExperimentForkChangeDeclarationV1,
+  type GenericExperimentForkLineageV1,
+  type GenericExperimentProvenanceV1
+} from "./experimentSpec";
+import {
   cloneSocialDomainAdapterManifest,
   compareSocialDomainAdapterManifests,
   validateSocialDomainAdapterManifest,
@@ -46,6 +54,8 @@ export interface GenericForkProvenance<TCheckpointArtifactVersion extends string
   parentMessageCount: number;
   /** Same safe adapter identity recorded by the parent checkpoint, when present. */
   parentDomainAdapter?: SocialDomainAdapterManifest;
+  /** Optional v1 experiment authority; absent only for legacy/unbound artifacts. */
+  experimentLineage?: GenericExperimentForkLineageV1;
   createdAt: string;
   reason?: string;
 }
@@ -73,6 +83,8 @@ export interface HarnessEpisodeArtifactEnvelope<
   agents: TAgentState[];
   /** Optional compacted durable actor-state sidecar for the native episode. */
   agentSnapshotFrames?: HarnessAgentSnapshotFrame<TAgentState>[];
+  /** Stable normalized control-plane authority for this episode. */
+  experiment?: GenericExperimentProvenanceV1;
   forkOf?: TForkProvenance;
 }
 
@@ -123,6 +135,8 @@ export interface HarnessCheckpointSource {
   messagesHash: string;
   /** Mirrors executionPrefix.domainAdapter for adapter-bound checkpoints. */
   domainAdapter?: SocialDomainAdapterManifest;
+  /** Parent experiment authority retained across checkpoint/restart/fork. */
+  experiment?: GenericExperimentProvenanceV1;
   agentSnapshotFrameId?: string;
   failureReason?: string;
   truncationReason?: string;
@@ -264,6 +278,7 @@ export interface BuildHarnessCheckpointFromEpisodeOptions<TState, TObservation, 
   /** Defaults to the execution prefix final state. */
   state?: TState;
   agents: TAgentState[];
+  experiment?: GenericExperimentProvenanceV1;
   agentSnapshotFrameId?: string;
 }
 
@@ -342,6 +357,10 @@ export interface CreateGenericForkProvenanceOptions {
   reason?: string;
   parentArtifactId?: string;
   parentEvidenceTraceIds?: string[];
+  /** Required with an experiment-bound checkpoint, even when the spec is unchanged. */
+  childExperiment?: GenericExperimentProvenanceV1;
+  /** Caller-declared semantic fields; generic code verifies exact coverage but never invents them. */
+  changedExperimentFields?: readonly GenericExperimentForkChangeDeclarationV1[];
 }
 
 /**
@@ -678,6 +697,7 @@ export function buildHarnessCheckpointFromEpisode<TState, TObservation, TPending
       channelsHash: hashStableState(executionPrefix.channels),
       messagesHash: hashStableState(executionPrefix.messages),
       domainAdapter: executionPrefix.domainAdapter ? cloneSocialDomainAdapterManifest(executionPrefix.domainAdapter) : undefined,
+      experiment: options.experiment ? cloneArtifact(options.experiment) : undefined,
       agentSnapshotFrameId: options.agentSnapshotFrameId,
       failureReason: options.failureReason,
       truncationReason: options.truncationReason
@@ -882,6 +902,7 @@ export function buildHarnessCheckpointAtPrefix<TState, TObservation, TPending, T
     episode: executionPrefix,
     state: executionPrefix.finalState,
     agents: snapshot.agents,
+    experiment: options.experiment,
     agentSnapshotFrameId: snapshot.frameId
   });
 }
@@ -1029,6 +1050,22 @@ export function createGenericForkProvenance<
   },
   options: CreateGenericForkProvenanceOptions = {}
 ): GenericForkProvenance<TCheckpointArtifactVersion> {
+  const parentExperiment = checkpoint.source.experiment;
+  if (Boolean(parentExperiment) !== Boolean(options.childExperiment)) {
+    throw new Error(
+      "Experiment-bound fork provenance requires both checkpoint source.experiment and childExperiment."
+    );
+  }
+  if (!parentExperiment && options.changedExperimentFields !== undefined) {
+    throw new Error("changedExperimentFields requires experiment-bound parent and child specs.");
+  }
+  const experimentLineage = parentExperiment && options.childExperiment
+    ? createGenericExperimentForkLineage({
+        parent: parentExperiment,
+        child: options.childExperiment,
+        changedFields: options.changedExperimentFields ?? []
+      })
+    : undefined;
   return {
     schemaVersion: HARNESS_FORK_PROVENANCE_VERSION,
     checkpointArtifactVersion: checkpoint.artifactVersion,
@@ -1048,6 +1085,7 @@ export function createGenericForkProvenance<
     parentDomainAdapter: checkpoint.source.domainAdapter
       ? cloneSocialDomainAdapterManifest(checkpoint.source.domainAdapter)
       : undefined,
+    ...(experimentLineage === undefined ? {} : { experimentLineage }),
     createdAt: options.createdAt ?? new Date().toISOString(),
     reason: options.reason
   };
@@ -1072,6 +1110,9 @@ export function validateHarnessEpisodeArtifactEnvelope<
   if (!isNonemptyString(artifact.kind)) errors.push("kind is required.");
   if (!isNonemptyString(artifact.runId)) errors.push("runId is required.");
   if (!isNonemptyString(artifact.createdAt)) errors.push("createdAt is required.");
+  if (artifact.experiment !== undefined && artifact.runId !== artifact.socialEpisode.id) {
+    errors.push("runId must match socialEpisode.id.");
+  }
   if (artifact.socialEpisode.status !== artifact.status) {
     errors.push(`socialEpisode.status mismatch: expected ${artifact.status}, received ${artifact.socialEpisode.status}.`);
   }
@@ -1112,16 +1153,73 @@ export function validateHarnessEpisodeArtifactEnvelope<
     });
     for (const mismatch of audit.mismatches) errors.push(`agentSnapshots: ${mismatch}`);
   }
-  if (artifact.forkOf) {
-    errors.push(...validateGenericForkProvenance(artifact.forkOf));
-    if (artifact.forkOf.parentDomainAdapter && !artifact.socialEpisode.domainAdapter) {
+  if (artifact.experiment !== undefined) {
+    const experimentErrors = validateGenericExperimentProvenance(artifact.experiment, "experiment");
+    errors.push(...experimentErrors);
+    if (!artifact.socialEpisode.domainAdapter) {
+      errors.push("socialEpisode.domainAdapter is required when experiment provenance is present.");
+    } else if (!experimentErrors.length) {
+      for (const error of compareSocialDomainAdapterManifests(
+        artifact.experiment.spec.domainAdapter,
+        artifact.socialEpisode.domainAdapter,
+        { recordedPath: "experiment.spec.domainAdapter", runtimePath: "socialEpisode.domainAdapter" }
+      )) {
+        errors.push(error);
+      }
+      if (artifact.experiment.spec.schedulerMode !== artifact.socialEpisode.schedulerMode) {
+        errors.push("experiment.spec.schedulerMode must match socialEpisode.schedulerMode.");
+      }
+      if (!artifact.socialEpisode.runtimeActorIds) {
+        errors.push("socialEpisode.runtimeActorIds is required when experiment provenance is present.");
+      } else if (artifact.experiment.spec.actorCount !== artifact.socialEpisode.runtimeActorIds.length) {
+        errors.push("experiment.spec.actorCount must match socialEpisode.runtimeActorIds length.");
+      }
+    }
+  }
+  if (artifact.forkOf !== undefined) {
+    if (!isRecord(artifact.forkOf)) {
+      errors.push("forkOf must be an object when present.");
+      return errors;
+    }
+    const forkOf = artifact.forkOf as GenericForkProvenance;
+    errors.push(...validateGenericForkProvenance(forkOf));
+    if (forkOf.parentDomainAdapter !== undefined && !artifact.socialEpisode.domainAdapter) {
       errors.push("socialEpisode.domainAdapter is required when forkOf records parent adapter provenance.");
+    }
+    if (forkOf.experimentLineage !== undefined) {
+      const lineageErrors = validateGenericExperimentForkLineage(
+        forkOf.experimentLineage,
+        "forkOf.experimentLineage"
+      );
+      if (artifact.experiment === undefined) {
+        errors.push("experiment is required when forkOf records experiment lineage.");
+      } else if (!isRecord(artifact.experiment)) {
+        // The experiment validator above already records the canonical shape
+        // error; never dereference an explicit null/non-object legacy forgery.
+      } else if (!lineageErrors.length && artifact.experiment.specHash !== forkOf.experimentLineage.child.specHash) {
+        errors.push("experiment.specHash must match forkOf.experimentLineage.child.specHash.");
+      } else if (!lineageErrors.length && hashStableState(artifact.experiment) !== hashStableState(forkOf.experimentLineage.child)) {
+        errors.push("experiment must exactly match forkOf.experimentLineage.child.");
+      }
+      if (forkOf.parentDomainAdapter === undefined) {
+        errors.push("forkOf.parentDomainAdapter is required when experiment lineage is present.");
+      } else if (!lineageErrors.length) {
+        for (const error of compareSocialDomainAdapterManifests(
+          forkOf.experimentLineage.parent.spec.domainAdapter,
+          forkOf.parentDomainAdapter,
+          { recordedPath: "forkOf.experimentLineage.parent.spec.domainAdapter", runtimePath: "forkOf.parentDomainAdapter" }
+        )) {
+          errors.push(error);
+        }
+      }
     }
   }
   return errors;
 }
 
-export function validateGenericForkProvenance(provenance: GenericForkProvenance): string[] {
+export function validateGenericForkProvenance(input: unknown): string[] {
+  if (!isRecord(input)) return ["forkOf must be an object."];
+  const provenance = input as unknown as GenericForkProvenance;
   const errors: string[] = [];
   if (provenance.schemaVersion !== HARNESS_FORK_PROVENANCE_VERSION) {
     errors.push(`forkOf.schemaVersion must be ${HARNESS_FORK_PROVENANCE_VERSION}.`);
@@ -1129,8 +1227,11 @@ export function validateGenericForkProvenance(provenance: GenericForkProvenance)
   if (!isNonemptyString(provenance.checkpointArtifactVersion)) errors.push("forkOf.checkpointArtifactVersion is required.");
   if (!isNonemptyString(provenance.checkpointId)) errors.push("forkOf.checkpointId is required.");
   if (!isNonemptyString(provenance.createdAt)) errors.push("forkOf.createdAt is required.");
-  if (provenance.parentDomainAdapter) {
+  if (provenance.parentDomainAdapter !== undefined) {
     errors.push(...validateSocialDomainAdapterManifest(provenance.parentDomainAdapter, "forkOf.parentDomainAdapter"));
+  }
+  if (provenance.experimentLineage !== undefined) {
+    errors.push(...validateGenericExperimentForkLineage(provenance.experimentLineage, "forkOf.experimentLineage"));
   }
   for (const field of [
     "parentStateHash",
@@ -1159,6 +1260,11 @@ export function validateGenericForkProvenance(provenance: GenericForkProvenance)
   ) {
     errors.push("forkOf.parentEvidenceTraceIds must contain nonempty trace ids when present.");
   }
+  for (const field of ["parentRunId", "parentArtifactId", "parentBoundaryTraceId", "reason"] as const) {
+    if (provenance[field] !== undefined && !isNonemptyString(provenance[field])) {
+      errors.push(`forkOf.${field} must be a nonempty string when present.`);
+    }
+  }
   return errors;
 }
 
@@ -1184,6 +1290,9 @@ export function validateHarnessCheckpointEnvelope<
   if (!isNonemptyString(checkpoint.createdAt)) errors.push("createdAt is required.");
   if (!isNonemptyString(checkpoint.source.sourceArtifactVersion)) errors.push("source.sourceArtifactVersion is required.");
   if (!isNonemptyString(checkpoint.source.runId)) errors.push("source.runId is required.");
+  if (checkpoint.source.experiment !== undefined && checkpoint.source.runId !== checkpoint.executionPrefix.id) {
+    errors.push("source.runId must match executionPrefix.id.");
+  }
   if (checkpoint.executionPrefix.domainAdapter) {
     if (!checkpoint.source.domainAdapter) {
       errors.push("source.domainAdapter is required when executionPrefix records adapter provenance.");
@@ -1199,6 +1308,29 @@ export function validateHarnessCheckpointEnvelope<
   } else if (checkpoint.source.domainAdapter) {
     errors.push(...validateSocialDomainAdapterManifest(checkpoint.source.domainAdapter, "source.domainAdapter"));
     errors.push("source.domainAdapter must be absent when executionPrefix has no adapter provenance.");
+  }
+  if (checkpoint.source.experiment !== undefined) {
+    const experimentErrors = validateGenericExperimentProvenance(checkpoint.source.experiment, "source.experiment");
+    errors.push(...experimentErrors);
+    if (!checkpoint.executionPrefix.domainAdapter) {
+      errors.push("executionPrefix.domainAdapter is required when source.experiment records adapter-bound authority.");
+    } else if (!experimentErrors.length) {
+      for (const error of compareSocialDomainAdapterManifests(
+        checkpoint.source.experiment.spec.domainAdapter,
+        checkpoint.executionPrefix.domainAdapter,
+        { recordedPath: "source.experiment.spec.domainAdapter", runtimePath: "executionPrefix.domainAdapter" }
+      )) {
+        errors.push(error);
+      }
+      if (checkpoint.source.experiment.spec.schedulerMode !== checkpoint.executionPrefix.schedulerMode) {
+        errors.push("source.experiment.spec.schedulerMode must match executionPrefix.schedulerMode.");
+      }
+      if (!checkpoint.executionPrefix.runtimeActorIds) {
+        errors.push("executionPrefix.runtimeActorIds is required when source.experiment is present.");
+      } else if (checkpoint.source.experiment.spec.actorCount !== checkpoint.executionPrefix.runtimeActorIds.length) {
+        errors.push("source.experiment.spec.actorCount must match executionPrefix.runtimeActorIds length.");
+      }
+    }
   }
 
   const actualStateHash = hashStableState(checkpoint.state);
@@ -1395,6 +1527,10 @@ function validateCheckpointMessages(messages: readonly SocialMessage[], lastMess
 
 function isNonemptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function assertCanonicalHarnessAgentSnapshotFrame<TAgentState>(frame: HarnessAgentSnapshotFrame<TAgentState>, label: string): void {

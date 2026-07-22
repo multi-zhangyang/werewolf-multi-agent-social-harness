@@ -3,6 +3,7 @@ import {
   validateSocialDomainAdapterManifest,
   type SocialDomainAdapterManifest
 } from "./domainAdapter";
+import { hashStableJsonValue } from "./hash";
 import type { SocialResolvedSchedulerMode } from "./social";
 
 /**
@@ -14,6 +15,8 @@ import type { SocialResolvedSchedulerMode } from "./social";
  * persisted experiment specification.
  */
 export const GENERIC_EXPERIMENT_SPEC_VERSION = "harness.experiment.v1" as const;
+export const GENERIC_EXPERIMENT_PROVENANCE_VERSION = "harness.experiment-provenance.v1" as const;
+export const GENERIC_EXPERIMENT_FORK_LINEAGE_VERSION = "harness.experiment-fork-lineage.v1" as const;
 
 export type GenericExperimentKind = "episode" | "tournament";
 
@@ -126,6 +129,65 @@ export interface NormalizedGenericExperimentSpecV1 {
   domainConfig: GenericJsonObject;
 }
 
+/**
+ * Canonical, portable experiment authority embedded in episode/checkpoint
+ * artifacts.  The full normalized spec is retained so a hash is independently
+ * auditable after restart instead of becoming an opaque caller assertion.
+ */
+export interface GenericExperimentProvenanceV1 {
+  schemaVersion: typeof GENERIC_EXPERIMENT_PROVENANCE_VERSION;
+  specVersion: typeof GENERIC_EXPERIMENT_SPEC_VERSION;
+  specId: string;
+  specHash: string;
+  spec: NormalizedGenericExperimentSpecV1;
+}
+
+export type GenericExperimentForkChangeFieldV1 = Exclude<keyof NormalizedGenericExperimentSpecV1, "version">;
+
+/** The caller selects the fields whose semantics changed; the harness only verifies that declaration. */
+export interface GenericExperimentForkChangeDeclarationV1 {
+  field: GenericExperimentForkChangeFieldV1;
+  reason?: string;
+}
+
+/** Stable before/after evidence for one explicitly declared top-level spec change. */
+export interface GenericExperimentForkChangedFieldV1 extends GenericExperimentForkChangeDeclarationV1 {
+  parentValueHash: string;
+  childValueHash: string;
+}
+
+export interface GenericExperimentForkLineageV1 {
+  schemaVersion: typeof GENERIC_EXPERIMENT_FORK_LINEAGE_VERSION;
+  parent: GenericExperimentProvenanceV1;
+  child: GenericExperimentProvenanceV1;
+  changedFields: GenericExperimentForkChangedFieldV1[];
+}
+
+const NORMALIZED_SPEC_CHANGE_FIELDS = [
+  "id",
+  "kind",
+  "domainId",
+  "domainAdapter",
+  "seed",
+  "episodeCount",
+  "actorCount",
+  "schedulerMode",
+  "profiles",
+  "modelAssignments",
+  "assignmentPolicy",
+  "maxTransitions",
+  "timeoutPolicy",
+  "retryPolicy",
+  "evaluatorIds",
+  "artifactPolicy",
+  "checkpointPolicy",
+  "providerPolicy",
+  "continueOnError",
+  "domainConfig"
+] as const satisfies readonly GenericExperimentForkChangeFieldV1[];
+
+const NORMALIZED_SPEC_CHANGE_FIELD_SET = new Set<string>(NORMALIZED_SPEC_CHANGE_FIELDS);
+
 const INPUT_FIELDS = new Set<keyof GenericExperimentSpecV1>([
   "version",
   "id",
@@ -167,6 +229,22 @@ const FORBIDDEN_PORTABLE_KEYS = new Set([
   "secret",
   "token"
 ]);
+const FORBIDDEN_PORTABLE_KEY_FRAGMENTS = [
+  "apikey",
+  "authorization",
+  "baseurl",
+  "credential",
+  "endpoint",
+  "header",
+  "maxcompletiontoken",
+  "maxtoken",
+  "provideroverride",
+  "provideroption",
+  "rawprovider",
+  "requestbody",
+  "secret",
+  "tokenvalue"
+] as const;
 
 export function normalizeGenericExperimentSpec(
   input: unknown,
@@ -226,6 +304,181 @@ export function validateGenericExperimentSpec(input: unknown): string[] {
   } catch (error) {
     return [error instanceof Error ? error.message : "Experiment spec is invalid."];
   }
+}
+
+/** Normalize once, then bind the complete portable spec to a stable identity. */
+export function createGenericExperimentProvenance(input: unknown): GenericExperimentProvenanceV1 {
+  const spec = normalizeGenericExperimentSpec(input);
+  return {
+    schemaVersion: GENERIC_EXPERIMENT_PROVENANCE_VERSION,
+    specVersion: GENERIC_EXPERIMENT_SPEC_VERSION,
+    specId: spec.id,
+    specHash: hashStableJsonValue(spec),
+    spec
+  };
+}
+
+export function validateGenericExperimentProvenance(input: unknown, path = "experiment"): string[] {
+  if (!isRecord(input)) return [`${path} must be an object.`];
+  const errors: string[] = [];
+  const unknownFields = Object.keys(input).filter(
+    (key) => !["schemaVersion", "specVersion", "specId", "specHash", "spec"].includes(key)
+  );
+  if (unknownFields.length) errors.push(`${path} contains unknown field(s): ${unknownFields.sort().join(", ")}.`);
+  if (input.schemaVersion !== GENERIC_EXPERIMENT_PROVENANCE_VERSION) {
+    errors.push(`${path}.schemaVersion must be ${GENERIC_EXPERIMENT_PROVENANCE_VERSION}.`);
+  }
+  if (input.specVersion !== GENERIC_EXPERIMENT_SPEC_VERSION) {
+    errors.push(`${path}.specVersion must be ${GENERIC_EXPERIMENT_SPEC_VERSION}.`);
+  }
+  let normalized: NormalizedGenericExperimentSpecV1 | undefined;
+  try {
+    normalized = normalizeGenericExperimentSpec(input.spec);
+  } catch (error) {
+    errors.push(`${path}.spec is invalid: ${error instanceof Error ? error.message : "invalid experiment spec"}`);
+  }
+  if (!normalized) return errors;
+  if (input.specId !== normalized.id) errors.push(`${path}.specId must match spec.id.`);
+  const expectedHash = hashStableJsonValue(normalized);
+  if (input.specHash !== expectedHash) errors.push(`${path}.specHash does not match the normalized spec.`);
+  if (hashStableJsonValue(input.spec) !== expectedHash) {
+    errors.push(`${path}.spec must be the canonical normalized experiment spec.`);
+  }
+  return errors;
+}
+
+/**
+ * Build fork lineage from caller-declared changed fields.  The harness never
+ * assigns semantic labels by guessing: it verifies that the explicit field
+ * set is complete and that each stable before/after hash matches both specs.
+ */
+export function createGenericExperimentForkLineage(input: {
+  parent: GenericExperimentProvenanceV1;
+  child: GenericExperimentProvenanceV1;
+  changedFields: readonly GenericExperimentForkChangeDeclarationV1[];
+}): GenericExperimentForkLineageV1 {
+  const errors = [
+    ...validateGenericExperimentProvenance(input.parent, "experimentLineage.parent"),
+    ...validateGenericExperimentProvenance(input.child, "experimentLineage.child")
+  ];
+  if (errors.length) throw new Error(`Invalid experiment fork lineage: ${errors.join(" ")}`);
+  const declared = normalizeExperimentChangeDeclarations(input.changedFields);
+  const actualChangedFields = changedExperimentFields(input.parent.spec, input.child.spec);
+  const declaredFields = declared.map(({ field }) => field);
+  if (hashStableJsonValue(declaredFields) !== hashStableJsonValue(actualChangedFields)) {
+    throw new Error(
+      `Invalid experiment fork lineage: changedFields must explicitly and exactly declare ${actualChangedFields.join(", ") || "no fields"}.`
+    );
+  }
+  return {
+    schemaVersion: GENERIC_EXPERIMENT_FORK_LINEAGE_VERSION,
+    parent: clonePortable(input.parent),
+    child: clonePortable(input.child),
+    changedFields: declared.map(({ field, reason }) => ({
+      field,
+      parentValueHash: hashExperimentField(input.parent.spec, field),
+      childValueHash: hashExperimentField(input.child.spec, field),
+      ...(reason === undefined ? {} : { reason })
+    }))
+  };
+}
+
+export function validateGenericExperimentForkLineage(input: unknown, path = "experimentLineage"): string[] {
+  if (!isRecord(input)) return [`${path} must be an object.`];
+  const errors: string[] = [];
+  const unknownFields = Object.keys(input).filter(
+    (key) => !["schemaVersion", "parent", "child", "changedFields"].includes(key)
+  );
+  if (unknownFields.length) errors.push(`${path} contains unknown field(s): ${unknownFields.sort().join(", ")}.`);
+  if (input.schemaVersion !== GENERIC_EXPERIMENT_FORK_LINEAGE_VERSION) {
+    errors.push(`${path}.schemaVersion must be ${GENERIC_EXPERIMENT_FORK_LINEAGE_VERSION}.`);
+  }
+  errors.push(...validateGenericExperimentProvenance(input.parent, `${path}.parent`));
+  errors.push(...validateGenericExperimentProvenance(input.child, `${path}.child`));
+  if (!Array.isArray(input.changedFields)) {
+    errors.push(`${path}.changedFields must be an array.`);
+    return errors;
+  }
+  if (errors.length) return errors;
+  const parent = input.parent as unknown as GenericExperimentProvenanceV1;
+  const child = input.child as unknown as GenericExperimentProvenanceV1;
+  let declarations: GenericExperimentForkChangeDeclarationV1[];
+  try {
+    declarations = normalizeExperimentChangeDeclarations(input.changedFields);
+  } catch (error) {
+    errors.push(`${path}.changedFields is invalid: ${error instanceof Error ? error.message : "invalid declaration"}`);
+    return errors;
+  }
+  const records = input.changedFields as Record<string, unknown>[];
+  const originalFields = records.map((record) => record.field);
+  if (hashStableJsonValue(originalFields) !== hashStableJsonValue(declarations.map(({ field }) => field))) {
+    errors.push(`${path}.changedFields must be sorted canonically by field.`);
+  }
+  const recordsByField = new Map(records.map((record) => [record.field, record]));
+  for (const [index, declaration] of declarations.entries()) {
+    const record = recordsByField.get(declaration.field)!;
+    if (record.reason !== declaration.reason) {
+      errors.push(`${path}.changedFields[${index}].reason must be canonical when present.`);
+    }
+    const expectedParentHash = hashExperimentField(parent.spec, declaration.field);
+    const expectedChildHash = hashExperimentField(child.spec, declaration.field);
+    if (record.parentValueHash !== expectedParentHash) {
+      errors.push(`${path}.changedFields[${index}].parentValueHash does not match parent.spec.${declaration.field}.`);
+    }
+    if (record.childValueHash !== expectedChildHash) {
+      errors.push(`${path}.changedFields[${index}].childValueHash does not match child.spec.${declaration.field}.`);
+    }
+    const allowed = new Set(["field", "parentValueHash", "childValueHash", "reason"]);
+    const unknown = Object.keys(record).filter((key) => !allowed.has(key));
+    if (unknown.length) errors.push(`${path}.changedFields[${index}] contains unknown field(s): ${unknown.sort().join(", ")}.`);
+  }
+  const actualChangedFields = changedExperimentFields(parent.spec, child.spec);
+  if (hashStableJsonValue(declarations.map(({ field }) => field)) !== hashStableJsonValue(actualChangedFields)) {
+    errors.push(`${path}.changedFields must explicitly and exactly declare ${actualChangedFields.join(", ") || "no fields"}.`);
+  }
+  return errors;
+}
+
+function changedExperimentFields(
+  parent: NormalizedGenericExperimentSpecV1,
+  child: NormalizedGenericExperimentSpecV1
+): GenericExperimentForkChangeFieldV1[] {
+  return NORMALIZED_SPEC_CHANGE_FIELDS
+    .filter((field) => hashExperimentField(parent, field) !== hashExperimentField(child, field))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function hashExperimentField(
+  spec: NormalizedGenericExperimentSpecV1,
+  field: GenericExperimentForkChangeFieldV1
+): string {
+  return hashStableJsonValue(
+    Object.prototype.hasOwnProperty.call(spec, field)
+      ? { present: true, value: spec[field] }
+      : { present: false }
+  );
+}
+
+function normalizeExperimentChangeDeclarations(input: unknown): GenericExperimentForkChangeDeclarationV1[] {
+  if (!Array.isArray(input)) throw new Error("changedFields must be an array.");
+  const declarations = input.map((entry, index) => {
+    const record = requireRecord(entry, `changedFields[${index}]`);
+    const field = requiredString(record.field, `changedFields[${index}].field`);
+    if (!NORMALIZED_SPEC_CHANGE_FIELD_SET.has(field)) {
+      throw new Error(`changedFields[${index}].field is not a normalized experiment field.`);
+    }
+    const reason = optionalString(record.reason, `changedFields[${index}].reason`);
+    return {
+      field: field as GenericExperimentForkChangeFieldV1,
+      ...(reason === undefined ? {} : { reason })
+    };
+  });
+  assertUnique(declarations.map(({ field }) => field), "changed experiment field");
+  return declarations.sort((left, right) => left.field.localeCompare(right.field));
+}
+
+function clonePortable<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function normalizeKind(value: unknown): GenericExperimentKind {
@@ -377,7 +630,10 @@ function normalizePortableJsonRecord(record: Record<string, unknown>, path: stri
   const result: GenericJsonObject = {};
   for (const key of Object.keys(record).sort((left, right) => left.localeCompare(right))) {
     const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (FORBIDDEN_PORTABLE_KEYS.has(normalizedKey)) {
+    if (
+      FORBIDDEN_PORTABLE_KEYS.has(normalizedKey) ||
+      FORBIDDEN_PORTABLE_KEY_FRAGMENTS.some((fragment) => normalizedKey.includes(fragment))
+    ) {
       throw new Error(`${path}.${key} is not allowed in a portable experiment spec.`);
     }
     result[key] = normalizePortableJsonValue(record[key], `${path}.${key}`);
@@ -387,7 +643,7 @@ function normalizePortableJsonRecord(record: Record<string, unknown>, path: stri
 
 function normalizePortableJsonValue(value: unknown, path: string): GenericJsonValue {
   if (value === null || typeof value === "boolean" || typeof value === "string") {
-    if (typeof value === "string" && /^https?:\/\//i.test(value.trim())) {
+    if (typeof value === "string" && /https?:\/\//i.test(value)) {
       throw new Error(`${path} must not contain an endpoint URL.`);
     }
     return value;
