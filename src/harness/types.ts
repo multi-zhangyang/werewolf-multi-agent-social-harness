@@ -253,6 +253,12 @@ export interface ReasonerOutput {
   content: string;
   completion: ModelCompletionResult;
   actionProposal?: ReasonerActionProposal;
+  /**
+   * Provider-neutral, uncommitted social intent. The domain policy must still
+   * whitelist identities, targets, channel visibility, and semantic shape
+   * before the harness may publish any corresponding speech act.
+   */
+  speechActDrafts?: ReasonerSocialSpeechActDraft[];
 }
 
 /**
@@ -268,6 +274,29 @@ export interface ReasonerActionProposal {
   abstain?: boolean;
   confidence?: number;
   rationale?: string;
+}
+
+export type ReasonerSocialSpeechActDraftKind =
+  | "claim"
+  | "request"
+  | "agreement"
+  | "disagreement"
+  | "commitment"
+  | "coalition_signal"
+  | "threat"
+  | "trust_repair";
+
+/**
+ * A deliberately narrow social-intent draft. It has no id, evidence refs,
+ * sender, audience, visibility, metadata, or store mutation fields: those are
+ * assigned only after domain-policy validation and message-bus publication.
+ */
+export interface ReasonerSocialSpeechActDraft {
+  kind: ReasonerSocialSpeechActDraftKind;
+  targetId?: string;
+  value?: string;
+  confidence?: number;
+  memberIds?: string[];
 }
 
 export type PolicyArbitrationObjective = "suspect-werewolf" | "target-village";
@@ -353,6 +382,7 @@ export interface ReasonerOutputSummary {
   retryHistory?: ProviderRetryHistoryEntry[];
   stream?: ProviderStreamTelemetry;
   actionProposal?: ReasonerActionProposal;
+  speechActDrafts?: ReasonerSocialSpeechActDraft[];
   actionProposalError?: string;
 }
 

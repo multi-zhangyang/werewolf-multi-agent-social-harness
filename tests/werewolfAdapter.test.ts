@@ -1543,6 +1543,37 @@ describe("Werewolf generic social adapter", () => {
         const content = speechByActor[input.agent.playerId];
         return {
           content,
+          speechActDrafts: input.agent.playerId === firstSpeaker.id
+            ? [
+                {
+                  kind: "claim",
+                  targetId: secondSpeaker.id,
+                  value: "后置位需要回应当前票型证据",
+                  confidence: 0.71
+                },
+                {
+                  kind: "commitment",
+                  targetId: secondSpeaker.id,
+                  value: "在投票前公开复核证据",
+                  confidence: 0.86
+                },
+                {
+                  kind: "coalition_signal",
+                  targetId: secondSpeaker.id,
+                  value: "共同核对票型",
+                  memberIds: [secondSpeaker.id],
+                  confidence: 0.73
+                },
+                // Unknown identities are rejected by domain policy before the
+                // communication bus assigns ids or evidence.
+                {
+                  kind: "commitment",
+                  targetId: "not-a-visible-seat",
+                  value: "invalid draft must not publish",
+                  confidence: 1
+                }
+              ]
+            : undefined,
           completion: {
             content,
             latencyMs: 1,
@@ -1553,6 +1584,7 @@ describe("Werewolf generic social adapter", () => {
         };
       }
     };
+    const actorStates = new Map<string, AgentHarnessState>();
     const actors = speakers.map((speaker) => {
       const actorState: AgentHarnessState = {
         playerId: speaker.id,
@@ -1565,6 +1597,7 @@ describe("Werewolf generic social adapter", () => {
         beliefs: {},
         privateMemos: []
       };
+      actorStates.set(speaker.id, actorState);
       return new WerewolfSocialActorAdapter({
         actor: new WerewolfAgentActor(actorState),
         reasoner,
@@ -1629,6 +1662,61 @@ describe("Werewolf generic social adapter", () => {
         claimedRole: "seer"
       }
     });
+    expect(publicSpeechMessages[0]?.speechActs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "claim",
+        subjectId: secondSpeaker.id,
+        targetId: secondSpeaker.id,
+        value: "后置位需要回应当前票型证据",
+        metadata: expect.objectContaining({ source: "reasoner.social-intent" })
+      }),
+      expect.objectContaining({
+        kind: "commitment",
+        subjectId: firstSpeaker.id,
+        targetId: secondSpeaker.id,
+        value: "在投票前公开复核证据",
+        metadata: expect.objectContaining({
+          source: "reasoner.social-intent",
+          promisedAction: "在投票前公开复核证据"
+        })
+      }),
+      expect.objectContaining({
+        kind: "coalition_signal",
+        subjectId: firstSpeaker.id,
+        targetId: secondSpeaker.id,
+        value: "共同核对票型",
+        metadata: expect.objectContaining({
+          source: "reasoner.social-intent",
+          memberIds: [firstSpeaker.id, secondSpeaker.id]
+        })
+      })
+    ]));
+    expect(JSON.stringify(publicSpeechMessages[0]?.speechActs)).not.toContain("not-a-visible-seat");
+    const secondSpeakerSocial = actorStates.get(secondSpeaker.id)?.social;
+    expect(Object.values(secondSpeakerSocial?.commitments?.records ?? {})).toEqual([
+      expect.objectContaining({
+        actorId: firstSpeaker.id,
+        targetId: secondSpeaker.id,
+        promisedAction: "在投票前公开复核证据",
+        evidenceRefs: [expect.objectContaining({ artifact: "message", id: publicSpeechMessages[0]?.id })]
+      })
+    ]);
+    expect(Object.values(secondSpeakerSocial?.coalitions?.records ?? {})).toEqual([
+      expect.objectContaining({
+        memberIds: [firstSpeaker.id, secondSpeaker.id],
+        targetId: secondSpeaker.id,
+        sharedGoal: "共同核对票型",
+        formationEvidenceRefs: [expect.objectContaining({ artifact: "message", id: publicSpeechMessages[0]?.id })]
+      })
+    ]);
+    expect(Object.values(secondSpeakerSocial?.gossip?.records ?? {})).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        speakerId: firstSpeaker.id,
+        subjectId: secondSpeaker.id,
+        claim: "后置位需要回应当前票型证据",
+        evidenceRefs: [expect.objectContaining({ artifact: "message", id: publicSpeechMessages[0]?.id })]
+      })
+    ]));
     expect(privateMemoMessages[0]).toMatchObject({
       id: "msg-2",
       seq: 2,

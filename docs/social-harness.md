@@ -199,6 +199,16 @@ The reasoner input is intentionally scoped. It receives:
 
 It does not receive full `GameState`, so custom reasoners cannot inspect hidden role truth through the harness interface. Team and private messages are filtered by the bus before they enter `view.social.messages`.
 
+For communicative turns, a reasoner may also return a bounded list of
+provider-neutral social-intent drafts (`claim`, `request`, `agreement`,
+`disagreement`, `commitment`, `coalition_signal`, `threat`, or
+`trust_repair`). A draft is not a message or social fact. It has no sender,
+audience, visibility, id, evidence, or arbitrary metadata. The Werewolf adapter
+first validates actor-visible targets and team membership, then the generic
+message bus commits the accepted act and assigns message evidence. Actor
+stores update only when that committed message later appears in the actor's
+scoped observation.
+
 ## Experiment Profiles
 
 Profiles can be provided by CLI/API as:

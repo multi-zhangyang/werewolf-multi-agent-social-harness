@@ -353,8 +353,16 @@ action or a private tactical memo plus an optional internal
 `ACTION_CANDIDATE` envelope for an action proposal. The envelope is advisory
 evidence only: `WerewolfAgentActor.applyReasonerProposal()` keeps the policy's
 command kind and accepts only legal target/resource choices, then the
-environment validates the resulting command again. Structured data is useful
-for typed commands and artifacts, but returning JSON is not agency.
+environment validates the resulting command again.
+
+For speech, last words, or team whisper, the same provider-neutral reasoner
+may optionally draft up to four bounded `SOCIAL_ACTS`. These drafts cannot set
+sender, subject authority, audience, visibility, message/evidence ids, or
+arbitrary metadata. The Werewolf policy rejects unknown targets, invalid team
+members, incomplete semantics, and duplicates; the message bus then assigns
+durable ids, delivery receipts, and message evidence. Only scoped observers
+may ingest committed acts into their own social ledgers. Structured data is
+useful for typed commands and artifacts, but returning JSON is not agency.
 
 ## Artifact Separation
 

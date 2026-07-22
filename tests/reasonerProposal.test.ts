@@ -56,6 +56,68 @@ describe("OpenAIHarnessReasoner advisory candidates", () => {
 
     expect(applied).toBe(input.policyPlan);
   });
+
+  it("parses bounded social-intent drafts while keeping public speech as plain text", async () => {
+    const { input } = createSeerInput();
+    const targetIds = input.view.publicPlayers
+      .map((player) => player.id)
+      .filter((playerId) => playerId !== input.agent.playerId);
+    const [targetId, allyId] = targetIds;
+    if (!targetId || !allyId) throw new Error("Expected visible speech targets.");
+    const speechInput: ReasonerInput = {
+      ...input,
+      view: { ...input.view, phase: "day_speech" },
+      action: {
+        kind: "speech",
+        phase: "day_speech",
+        actorId: input.agent.playerId,
+        legalPressureTargetIds: targetIds
+      },
+      policyPlan: {
+        ...input.policyPlan,
+        command: {
+          type: "speech.submit",
+          actorId: input.agent.playerId,
+          text: "policy placeholder"
+        }
+      }
+    };
+    const client: ModelClient = {
+      async complete(): Promise<ModelCompletionResult> {
+        return {
+          content: [
+            "我会先核对票型，再和后置位一起验证目标；如果证据不成立，我会公开修正。",
+            `SOCIAL_ACTS: [{"kind":"commitment","targetId":"${targetId}","value":"在投票前公开复核证据","confidence":0.86},{"kind":"coalition_signal","targetId":"${targetId}","value":"共同核对票型","memberIds":["${allyId}"],"confidence":0.73}]`
+          ].join("\n"),
+          latencyMs: 9,
+          usage: {},
+          attempts: 1,
+          stream: { enabled: true, completed: true, completedBy: "provider_stop_event" }
+        };
+      }
+    };
+
+    const output = await new OpenAIHarnessReasoner(client).think(speechInput);
+
+    expect(output.content).toBe("我会先核对票型，再和后置位一起验证目标；如果证据不成立，我会公开修正。");
+    expect(output.content).not.toContain("SOCIAL_ACTS");
+    expect(output.actionProposal).toBeUndefined();
+    expect(output.speechActDrafts).toEqual([
+      {
+        kind: "commitment",
+        targetId,
+        value: "在投票前公开复核证据",
+        confidence: 0.86
+      },
+      {
+        kind: "coalition_signal",
+        targetId,
+        value: "共同核对票型",
+        memberIds: [allyId],
+        confidence: 0.73
+      }
+    ]);
+  });
 });
 
 function createSeerInput(): {

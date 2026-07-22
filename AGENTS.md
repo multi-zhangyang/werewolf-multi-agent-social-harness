@@ -26974,3 +26974,83 @@ stream aborts**.
 Only `poolside/laguna-s-2.1:free` was used for live validation. No model- or
 provider-specific adapter, parser, prompt, branch, fallback, or token-limit
 request field was added.
+
+## 13.282 Provider-Neutral Typed Social Intent Production Lock
+
+Timestamp: `2026-07-22`
+
+The production Werewolf actor path now closes the previously fixture-only gap
+between a model-backed speaker and the evidence-backed society substrate:
+
+- `ReasonerOutput` may carry up to four provider-neutral social-intent drafts
+  for communicative turns. The reviewed kinds are `claim`, `request`,
+  `agreement`, `disagreement`, `commitment`, `coalition_signal`, `threat`, and
+  `trust_repair`.
+- A draft deliberately has no sender, subject authority, audience, visibility,
+  id, evidence refs, arbitrary metadata, store operation, or environment
+  command. It is not an Agent and cannot mutate social state.
+- `OpenAIHarnessReasoner` strips the optional `SOCIAL_ACTS:` control suffix
+  from the natural-language speech before the speech command is formed. The
+  provider request still uses the ordinary streaming chat-completions path and
+  does not add max-token fields.
+- The Werewolf policy boundary accepts only bounded known actor ids, legal team
+  members for private coordination, complete semantic fields, finite
+  confidence, and unique drafts. Unknown seats, invalid coalition members,
+  unsupported fields, incomplete acts, and duplicates never reach the bus.
+- The domain adapter assigns the actual speaker and message visibility. The
+  generic communication bus remains responsible for durable message/speech-act
+  ids, ordering, delivery receipts, evidence refs, and final channel
+  validation.
+- Actor stores still update only from committed messages that appear in the
+  actor's scoped observation. A production-equivalent two-speaker regression
+  proves that a first speaker's accepted claim, commitment, and coalition are
+  ingested into the second speaker's gossip/commitment/coalition stores with
+  committed message evidence, while an unknown target is rejected.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/reasonerProposal.test.ts tests/werewolfAdapter.test.ts \
+  tests/actorSocialClaims.test.ts --maxWorkers=1 --no-file-parallelism \
+  --testTimeout=60000 --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npm run test:e2e
+npm run agent:probe -- --models=poolside/laguna-s-2.1:free --timeout=90s
+```
+
+The focused suite passed **3 files / 51 tests**. The complete deterministic
+suite passed **48 files / 509 tests**. Production build passed with only the
+existing Vite main-chunk warning, and Playwright passed **14/14**.
+
+The real streaming probe passed with provider terminal
+`provider_stop_event`, environment-validated `seer.inspect`, **507 prompt / 287
+completion tokens**, and **13,263 ms** latency. A targeted real streaming
+day-speech run then passed through the production actor/policy/message-bus/
+environment/artifact path with **1 native / 1 committed / 0 rejected**, **0
+harness errors**, one public speech, and two accepted model-drafted speech acts
+(`claim`, `request`). Its stream completed by `provider_stop_event` with **582
+prompt / 235 completion tokens** and **4,460 ms** latency.
+
+A broader live run was also attempted to reach day speech from the normal
+night lifecycle. It correctly failed closed when the free provider returned a
+retryable HTTP 429 during the concurrent wolf decision batch; the peer's
+otherwise complete streamed proposal was rejected by the atomic batch rule.
+No 503 was observed, and this provider-rate-limit failure is not reported as a
+successful match or hidden behind aggregate metrics.
+
+Only `poolside/laguna-s-2.1:free` was used. No model/provider-specific parser,
+adapter, fallback, prompt branch, or execution path was introduced.
+
+Known completion gaps remain active rather than being hidden by this slice:
+
+- generic experiment specs still need execution authority for all recorded
+  policies and a durable experiment run/failure store;
+- the production Werewolf path still needs full multi-candidate scaffold
+  arbitration above its existing target arbitration;
+- receipt-driven adaptive social reducers and promoted outcome evaluators need
+  stricter evidence/denominator contracts;
+- full canonical evaluation reports and generic run sets need restart-safe
+  persistence and evidence-ref resolution.
