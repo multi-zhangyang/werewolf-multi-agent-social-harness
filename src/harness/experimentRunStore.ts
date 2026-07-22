@@ -764,6 +764,51 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     for (const [runSetId, entry] of recovered) this.entries.set(runSetId, entry);
   }
 
+  /**
+   * Rebuild only the derived index projection from each canonical head. Full
+   * revision-transition and episode-sidecar verification remains on open/get/
+   * list. Replaying every historical revision after every mutation made the
+   * write path quadratic as a long-lived server accumulated runs.
+   */
+  private async refreshIndexEntriesFromCanonicalHeads(): Promise<void> {
+    const recovered = new Map<string, HarnessExperimentRunStoreEntry>();
+    for (const child of await readdir(this.runsDirectory, { withFileTypes: true })) {
+      if (!DIRECTORY_KEY_PATTERN.test(child.name)) continue;
+      if (!child.isDirectory() || child.isSymbolicLink()) {
+        throw new Error("Stored experiment run identity path is not a safe directory.");
+      }
+      const runDirectory = path.join(this.runsDirectory, child.name);
+      const revisionsDirectory = path.join(runDirectory, REVISIONS_DIRECTORY);
+      await assertDirectoryInside(this.runsDirectory, runDirectory, "Stored experiment run directory is not safe.");
+      await assertDirectoryInside(runDirectory, revisionsDirectory, "Stored experiment revisions directory is not safe.");
+      const revisionEntries = (await readdir(revisionsDirectory, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && REVISION_DIRECTORY_PATTERN.test(entry.name))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      if (!revisionEntries.length) throw new Error("Stored experiment run has no canonical revision.");
+      for (const [position, entry] of revisionEntries.entries()) {
+        const revision = Number(REVISION_DIRECTORY_PATTERN.exec(entry.name)![1]);
+        if (revision !== position + 1) throw new Error("Experiment run revisions must be contiguous and ordered.");
+      }
+      const latest = revisionEntries.at(-1)!;
+      const revision = revisionEntries.length;
+      const revisionDirectory = path.join(revisionsDirectory, latest.name);
+      await assertDirectoryInside(revisionsDirectory, revisionDirectory, "Stored experiment revision directory is not safe.");
+      const recordText = await readSafeFile(revisionDirectory, RECORD_FILE);
+      const manifestText = await readSafeFile(revisionDirectory, MANIFEST_FILE);
+      const record = JSON.parse(recordText) as HarnessExperimentRunRecord;
+      const manifest = JSON.parse(manifestText) as HarnessExperimentRunManifest;
+      assertRunRecord(record);
+      assertManifest(manifest, record, child.name, revision, recordText, latest.name);
+      if (directoryKeyForRunSetId(record.runSetId) !== child.name) {
+        throw new Error("Stored experiment run directory key does not match runSetId.");
+      }
+      if (recovered.has(record.runSetId)) throw new Error("Experiment run store contains duplicate runSetId authority.");
+      recovered.set(record.runSetId, entryFromRecord(record, child.name, revision));
+    }
+    this.entries.clear();
+    for (const [runSetId, entry] of recovered) this.entries.set(runSetId, entry);
+  }
+
   private async acquireRunLease(runSetId: string, nonblocking = true): Promise<ChildProcessWithoutNullStreams> {
     const directoryKey = directoryKeyForRunSetId(runSetId);
     const lockDirectory = path.join(this.locksDirectory, `${directoryKey}.lock`);
@@ -1041,7 +1086,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       // index.json is a rebuildable projection. Refresh while holding one
       // global index lease so concurrent writers for different run ids cannot
       // erase one another through last-writer-wins rename.
-      await this.refreshEntriesFromCanonicalRuns();
+      await this.refreshIndexEntriesFromCanonicalHeads();
       const index: HarnessExperimentRunStoreIndexV1 = {
         schemaVersion: HARNESS_EXPERIMENT_RUN_INDEX_VERSION,
         kind: "experiment-run-index",
