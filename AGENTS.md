@@ -27757,3 +27757,58 @@ The focused runner suite passed **1 file / 8 tests**. The change is
 provider-neutral and makes no model call, provider selection, artifact schema,
 or domain transition change. The complete deterministic suite passed **49
 files / 534 tests**.
+
+## 13.293 Exact-Idempotent Canonical Episode Publication Lock
+
+Timestamp: `2026-07-22`
+
+`HarnessEpisodeArtifactStore.put()` now treats a repeated publication of the
+same immutable canonical episode as an idempotent retry instead of rejecting it
+solely because the run id already exists. This is a prerequisite for staged
+experiment recovery; it does not weaken run-id immutability.
+
+Before accepting a retry, the store still canonical-verifies the incoming
+artifact and validates the optional evaluation report. It then re-reads the
+existing canonical directory and requires exact stable equality across:
+
+- the complete episode artifact;
+- derived metric rows;
+- reviewed failure rows;
+- evaluation-report absence or presence;
+- the complete evaluation report when present.
+
+Any content, lifecycle, metric, failure, or evaluation drift for an existing
+run id fails closed as an immutable-content conflict. A report cannot be added,
+removed, or changed after first publication.
+
+The same rule covers a concurrent atomic publication race. If another writer
+wins the canonical directory rename after preflight, the losing writer removes
+only its own staging directory, re-opens the winning canonical authority, and
+returns the existing entry only when the full content is exact. It never
+overwrites or merges the winner. Exact retry also recovers the checkpoint
+registry and refreshes the derived store index without treating the index as
+episode content authority.
+
+This lock does not by itself make experiment resume complete. Automatic
+adoption still requires a durable v2 staged slot binding before `put()`, and an
+active v1 experiment run remains ambiguous and must not silently rerun a model.
+
+Validation recorded:
+
+```bash
+npm run typecheck
+npx vitest run tests/episodeArtifactStore.test.ts --maxWorkers=1 \
+  --no-file-parallelism --testTimeout=60000 --hookTimeout=60000 \
+  --teardownTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+git diff --check
+```
+
+The focused artifact-store suite passed **1 file / 14 tests**, including same-
+instance retry, restart retry, immutable evaluation drift, evaluation-presence
+drift, and concurrent exact publishers converging onto one canonical directory.
+The complete deterministic suite passed **49 files / 536 tests**.
+This slice changes no provider, model, reasoner, prompt, stream parser, domain
+adapter, or UI behavior and therefore makes no external model call.

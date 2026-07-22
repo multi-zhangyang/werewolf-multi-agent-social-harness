@@ -226,8 +226,11 @@ export class HarnessEpisodeArtifactStore<
 
     const directoryKey = directoryKeyForRunId(canonical.runId);
     const finalDirectory = path.join(this.episodesDirectory, directoryKey);
+    const existing = await this.loadDirectory(directoryKey, canonical.runId);
+    if (existing) {
+      return this.acceptExactEpisodeRetry(existing, canonical, metricRows, failureRows, evaluationReport);
+    }
     await assertPathMissing(finalDirectory, "Episode artifact already exists for this run id.");
-    if (this.entries.has(canonical.runId)) throw new Error("Episode artifact already exists for this run id.");
 
     const artifactText = jsonDocument(canonical);
     const trajectoryText = trajectoryJsonl(canonical);
@@ -263,12 +266,57 @@ export class HarnessEpisodeArtifactStore<
       await rename(temporaryDirectory, finalDirectory);
     } catch (error) {
       await rm(temporaryDirectory, { recursive: true, force: true });
+      // Another writer may have atomically published the same immutable run
+      // id after our preflight. Re-read canonical authority and accept only an
+      // exact content match; never overwrite or merge drift.
+      const concurrentlyPublished = await this.loadDirectory(directoryKey, canonical.runId);
+      if (concurrentlyPublished) {
+        return this.acceptExactEpisodeRetry(
+          concurrentlyPublished,
+          canonical,
+          metricRows,
+          failureRows,
+          evaluationReport
+        );
+      }
       throw error;
     }
 
     const entry = entryFromManifest(manifest);
     this.entries.set(entry.runId, entry);
     this.checkpoints.set(entry.runId, new Map());
+    await this.writeIndex();
+    return cloneEntry(entry);
+  }
+
+  private async acceptExactEpisodeRetry(
+    existing: {
+      artifact: TArtifact;
+      entry: HarnessEpisodeStoreEntry;
+      metrics: HarnessEpisodeMetricRow[];
+      failures: HarnessEpisodeFailureRow[];
+      evaluationReport?: HarnessEvaluationReport;
+    },
+    artifact: TArtifact,
+    metrics: HarnessEpisodeMetricRow[],
+    failures: HarnessEpisodeFailureRow[],
+    evaluationReport?: HarnessEvaluationReport
+  ): Promise<HarnessEpisodeStoreEntry> {
+    if (
+      hashStableJsonValue(existing.artifact) !== hashStableJsonValue(artifact) ||
+      hashStableJsonValue(existing.metrics) !== hashStableJsonValue(metrics) ||
+      hashStableJsonValue(existing.failures) !== hashStableJsonValue(failures) ||
+      (existing.evaluationReport === undefined) !== (evaluationReport === undefined) ||
+      (existing.evaluationReport !== undefined && evaluationReport !== undefined &&
+        hashStableJsonValue(existing.evaluationReport) !== hashStableJsonValue(evaluationReport))
+    ) {
+      throw new Error("Episode artifact run id already exists with different immutable content.");
+    }
+    const checkpoints = this.checkpoints.get(artifact.runId) ??
+      await this.recoverCheckpointRegistry(existing.entry.directoryKey, existing.artifact);
+    const entry = { ...existing.entry, checkpointCount: checkpoints.size };
+    this.entries.set(entry.runId, entry);
+    this.checkpoints.set(entry.runId, checkpoints);
     await this.writeIndex();
     return cloneEntry(entry);
   }

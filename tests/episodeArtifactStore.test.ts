@@ -489,6 +489,89 @@ describe("generic single-episode artifact store", () => {
     expect(await restarted.list()).toEqual([]);
   });
 
+  it("makes exact artifact publication retry idempotent and rejects immutable drift", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const evaluationReport = runEvaluationRegistry({
+      id: "idempotent-publication",
+      createdAt: "2026-07-22T13:02:00.000Z",
+      context: {
+        id: artifact.runId,
+        status: artifact.status,
+        initialState: artifact.initialState,
+        finalState: artifact.finalState,
+        agents: artifact.agents,
+        trajectory: artifact.socialEpisode.steps
+      },
+      evaluators: [{
+        id: "idempotent.counter",
+        label: "Idempotent counter",
+        version: "1",
+        evaluate: () => ({
+          evaluatorId: "idempotent.counter",
+          label: "Idempotent counter",
+          version: "1",
+          metrics: [{
+            id: "idempotent.value",
+            label: "Idempotent value",
+            scope: "episode",
+            value: artifact.finalState.value,
+            source: "idempotent.counter"
+          }]
+        })
+      }]
+    });
+    const store = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+
+    const first = await store.put(artifact, { evaluationReport });
+    expect(await store.put(structuredClone(artifact), {
+      evaluationReport: structuredClone(evaluationReport)
+    })).toEqual(first);
+
+    const restarted = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    expect(await restarted.put(structuredClone(artifact), {
+      evaluationReport: structuredClone(evaluationReport)
+    })).toEqual(first);
+
+    const driftedReport = structuredClone(evaluationReport);
+    driftedReport.metrics[0]!.label = "Changed after publication";
+    await expect(restarted.put(structuredClone(artifact), { evaluationReport: driftedReport }))
+      .rejects.toThrow(/different immutable content/i);
+    await expect(restarted.put(structuredClone(artifact)))
+      .rejects.toThrow(/different immutable content/i);
+  });
+
+  it("converges concurrent exact publishers onto one canonical episode directory", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const firstStore = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    const secondStore = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+
+    const [first, second] = await Promise.all([
+      firstStore.put(structuredClone(artifact)),
+      secondStore.put(structuredClone(artifact))
+    ]);
+
+    expect(second).toEqual(first);
+    const reopened = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    expect(await reopened.list()).toEqual([first]);
+  });
+
   it("binds recovery directories to identity hashes and rejects unknown failure fields", async () => {
     const root = await temporaryStoreRoot();
     const artifact = await buildCounterArtifact();
