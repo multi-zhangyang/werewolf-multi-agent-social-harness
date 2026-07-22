@@ -378,8 +378,23 @@ describe("generic social harness scheduler contract", () => {
   });
 
   it("rejects parallel scheduling unless the environment exposes stepBatch", async () => {
+    const adapter = {
+      schemaVersion: "harness.domain-adapter.v1" as const,
+      domainId: "social-test",
+      adapterId: "social-test.adapter",
+      adapterVersion: "1",
+      semanticHash: "social-test-adapter-v1",
+      components: [
+        { kind: "agent_state_schema" as const, id: "test-agent", version: "1", semanticHash: "agent-v1" },
+        { kind: "command_codec" as const, id: "test-command", version: "1", semanticHash: "command-v1" },
+        { kind: "environment" as const, id: "test-environment", version: "1", semanticHash: "environment-v1" },
+        { kind: "observation_projection" as const, id: "test-observation", version: "1", semanticHash: "observation-v1" },
+        { kind: "scheduler" as const, id: "test-scheduler", version: "1", semanticHash: "scheduler-v1" }
+      ]
+    };
     const artifact = await runSocialEpisode<TestState, TestObservation, TestPending, TestCommand>({
       id: "social-parallel-missing",
+      domainAdapter: adapter,
       environment: new TestEnvironment({ doneAfterSteps: 1 }),
       actors: [new TestActor("a"), new TestActor("b")],
       schedulerMode: "parallel",
@@ -389,6 +404,9 @@ describe("generic social harness scheduler contract", () => {
     expect(artifact.status).toBe("failed");
     expect(artifact.failureReason).toContain("stepBatch");
     expect(artifact.steps).toEqual([]);
+    expect(artifact.domainAdapter).toEqual(adapter);
+    expect(artifact.domainId).toBe("social-test");
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
   });
 
   it("runs true parallel through one environment stepBatch transition", async () => {

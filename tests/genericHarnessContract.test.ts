@@ -228,6 +228,84 @@ describe("generic social harness contract", () => {
     expect(environmentRestores).toBe(0);
     expect(actorRestores).toBe(0);
 
+    let inheritedVerifierCalls = 0;
+    let inheritedEnvironmentRestores = 0;
+    let inheritedActorRestores = 0;
+    const inherited = await runForkedHarnessEpisode({
+      checkpoint,
+      runtime: {
+        domainAdapter: ledgerDomainAdapter,
+        createEnvironment(initialState) {
+          inheritedEnvironmentRestores += 1;
+          return new LedgerEnvironment({ initialState, actorIds: ["a"] });
+        },
+        restoreActors(agentStates) {
+          inheritedActorRestores += 1;
+          return agentStates.map(
+            (agent) =>
+              new LedgerActor(agent.id as LedgerActorId, () => ({
+                actorId: agent.id as LedgerActorId,
+                kind: "record",
+                command: { actorId: agent.id as LedgerActorId, entry: "unused-after-terminal-checkpoint" }
+              }))
+          );
+        }
+      },
+      verifyCheckpointReplay: (candidate) => {
+        inheritedVerifierCalls += 1;
+        return validateHarnessCheckpointReplay(candidate, (executionPrefix) =>
+          replaySocialEpisode({
+            episode: executionPrefix,
+            environment: new LedgerEnvironment({ actorIds: ["a"] }),
+            hashState: hashStableState,
+            hashMessages: hashStableState,
+            domainAdapter: ledgerDomainAdapter,
+            auditAgentSnapshots: false
+          })
+        );
+      },
+      // Omission is intentional: an adapter-bound parent must inherit the
+      // already verified runtime manifest instead of producing legacy truth.
+      episode: {
+        id: "ledger-adapter-bound-inherited-fork",
+        hashState: hashStableState,
+        hashMessages: hashStableState
+      }
+    });
+    expect(inheritedVerifierCalls).toBe(1);
+    expect(inheritedEnvironmentRestores).toBe(1);
+    expect(inheritedActorRestores).toBe(1);
+    expect(inherited.socialEpisode.domainAdapter).toEqual(ledgerDomainAdapter);
+    expect(inherited.socialEpisode.domainId).toBe("ledger");
+    expect(
+      replaySocialEpisode({
+        episode: inherited.socialEpisode,
+        environment: new LedgerEnvironment({ initialState: inherited.socialEpisode.initialState, actorIds: ["a"] }),
+        hashState: hashStableState,
+        hashMessages: hashStableState
+      }).mismatches.join(" ")
+    ).toMatch(/runtime domainAdapter is required/i);
+
+    const inheritedEnvelope = {
+      artifactVersion: "ledger.episode.v1",
+      kind: "ledger-episode",
+      runId: inherited.socialEpisode.id,
+      createdAt: "2026-07-22T00:00:00.000Z",
+      status: inherited.socialEpisode.status,
+      initialState: inherited.socialEpisode.initialState,
+      finalState: inherited.socialEpisode.finalState,
+      socialEpisode: inherited.socialEpisode,
+      agents,
+      forkOf: inherited.seed.forkOf
+    } satisfies HarnessEpisodeArtifactEnvelope<LedgerState, LedgerObservation, LedgerPending, LedgerCommand, (typeof agents)[number]>;
+    expect(validateHarnessEpisodeArtifactEnvelope(inheritedEnvelope)).toEqual([]);
+    const forgedLegacyFork = clone(inheritedEnvelope);
+    delete forgedLegacyFork.socialEpisode.domainAdapter;
+    delete forgedLegacyFork.socialEpisode.domainId;
+    expect(validateHarnessEpisodeArtifactEnvelope(forgedLegacyFork).join(" ")).toMatch(
+      /socialEpisode\.domainAdapter is required when forkOf records parent adapter provenance/i
+    );
+
     const malformed = clone(ledgerDomainAdapter) as SocialDomainAdapterManifest;
     malformed.components = [...malformed.components].reverse();
     expect(validateSocialDomainAdapterManifest(malformed).join(" ")).toMatch(/sorted canonically/i);

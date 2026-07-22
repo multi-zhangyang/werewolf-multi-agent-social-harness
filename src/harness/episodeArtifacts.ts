@@ -1086,7 +1086,12 @@ export function validateHarnessEpisodeArtifactEnvelope<
     });
     for (const mismatch of audit.mismatches) errors.push(`agentSnapshots: ${mismatch}`);
   }
-  if (artifact.forkOf) errors.push(...validateGenericForkProvenance(artifact.forkOf));
+  if (artifact.forkOf) {
+    errors.push(...validateGenericForkProvenance(artifact.forkOf));
+    if (artifact.forkOf.parentDomainAdapter && !artifact.socialEpisode.domainAdapter) {
+      errors.push("socialEpisode.domainAdapter is required when forkOf records parent adapter provenance.");
+    }
+  }
   return errors;
 }
 

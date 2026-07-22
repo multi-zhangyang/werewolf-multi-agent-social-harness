@@ -1,11 +1,17 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { applyCommand, createGame, getPendingActions } from "../src/core/engine";
+import { OpenAICompatibleClient } from "../src/agents/openaiClient";
 import { isAgentPendingAction } from "../src/core/pending";
 import { ModelCallError } from "../src/agents/schema";
 import { WerewolfAgentActor } from "../src/harness/actor";
-import { buildFinalHarnessCheckpoint, buildMatchArtifact, toTrajectoryJsonl } from "../src/harness/artifacts";
+import {
+  assertValidMatchArtifactIntegrity,
+  buildFinalHarnessCheckpoint,
+  buildMatchArtifact,
+  toTrajectoryJsonl
+} from "../src/harness/artifacts";
 import { WerewolfEnvironment } from "../src/harness/environment";
 import { evaluateAdversarialMatch } from "../src/harness/evaluator";
 import { hashStableState } from "../src/harness/hash";
@@ -13,7 +19,8 @@ import { harnessFailureEvidenceFromEpisode } from "../src/harness/executionEvide
 import { werewolfHarnessTurnEvidenceFromEpisode } from "../src/harness/werewolfExecutionEvidence";
 import { policyForRole } from "../src/harness/policy";
 import { describeResolvedAssignments, profilesFromModels, resolveAgentConfigs } from "../src/harness/profiles";
-import { replayHarnessTrajectory } from "../src/harness/replay";
+import { replayHarnessTrajectory, replayWerewolfSocialEpisode } from "../src/harness/replay";
+import { OpenAIHarnessReasoner } from "../src/harness/reasoner";
 import { probeHarnessTurn, runHarnessMatch } from "../src/harness/runtime";
 import { isSocialStepCommitted } from "../src/harness/social";
 import type { AgentHarnessState, HarnessReasoner, HarnessTurnTrace } from "../src/harness/types";
@@ -1280,4 +1287,153 @@ describe("harness agent-environment cycle", () => {
     expect(replay.finalHash).toBe(artifact.trajectory.at(-1)?.postStateHash);
     expect(replay.finalHash).toBe(artifact.failureStateHash);
   });
+
+  it("contains a retried incomplete streaming provider failure through native rejection, artifact export, and replay", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock
+      .mockResolvedValueOnce(
+        sseResponse([
+          sseChunk({ id: "provider-success-request-id-sentinel", choices: [{ delta: { content: "先按既定策略行动，再根据公开局面复盘。" } }] }),
+          sseCompletionChunk({ id: "provider-success-request-id-sentinel", finishReason: "stop" }),
+          sseDoneChunk()
+        ])
+      )
+      .mockResolvedValueOnce(
+        sseResponse([
+          sseChunk({
+            id: "provider-incomplete-request-id-sentinel",
+            choices: [{ delta: { content: "partial-stream-sentinel" } }]
+          })
+        ])
+      )
+      .mockResolvedValueOnce(
+        sseResponse([
+          sseChunk({
+            id: "provider-incomplete-retry-request-id-sentinel",
+            choices: [{ delta: { content: "partial-stream-retry-sentinel" } }]
+          })
+        ])
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const initialState = createGame({
+        id: "provider-sse-failure-chain",
+        seed: "provider-sse-failure-chain",
+        // One wolf keeps the failure boundary sequential: the first model-backed
+        // seer action commits, then the single wolf action exercises retry and
+        // produces exactly one rejected native receipt.
+        config: {
+          roles: ["seer", "werewolf", "villager", "villager", "villager", "villager", "villager", "witch", "hunter"]
+        }
+      });
+      const profiles = profilesFromModels(["unit-model-alpha", "unit-model-beta"], 0.4);
+      const agents = resolveAgentConfigs(initialState.players, profiles, 0, 0.4);
+      const reasoner = new OpenAIHarnessReasoner(
+        new OpenAICompatibleClient({
+          baseURL: "https://provider.test/openai/v1",
+          apiKey: "unit-test-key",
+          timeoutMs: 10_000,
+          maxRetries: 1,
+          stream: true
+        })
+      );
+
+      const result = await runHarnessMatch({
+        initialState,
+        agents,
+        reasoner,
+        maxTransitions: 8
+      });
+      const artifact = buildMatchArtifact({
+        runId: "provider-sse-failure-chain",
+        seed: initialState.seed,
+        models: ["unit-model-alpha", "unit-model-beta"],
+        profiles,
+        resolvedAssignments: describeResolvedAssignments(initialState.players, agents),
+        result
+      });
+      const jsonl = toTrajectoryJsonl(artifact);
+      const harnessErrors = harnessFailureEvidenceFromEpisode(artifact.socialEpisode);
+      const payload = harnessErrors[0]?.payload as Record<string, unknown> | undefined;
+      const providerFailure = payload?.providerFailure as Record<string, unknown> | undefined;
+      const rejectedStep = artifact.socialEpisode.steps.at(-1);
+
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      for (const [, init] of fetchMock.mock.calls) {
+        const requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        expect(requestBody).toMatchObject({ stream: true });
+        expect(requestBody).not.toHaveProperty("max_tokens");
+        expect(requestBody).not.toHaveProperty("max_completion_tokens");
+      }
+      expect(result.status).toBe("failed");
+      expect(result.failureReason).toBe(
+        "Model provider failure (kind=stream_incomplete, stage=stream_finish, attempts=2/2)."
+      );
+      expect(result.trajectory).toHaveLength(1);
+      expect(rejectedStep).toMatchObject({
+        commitStatus: "rejected",
+        failure: {
+          stage: "actor_decide",
+          metadata: {
+            providerFailure: {
+              failureKind: "stream_incomplete",
+              providerStage: "stream_finish",
+              retryable: true,
+              attempts: 2,
+              maxAttempts: 2
+            }
+          }
+        }
+      });
+      expect(providerFailure).toMatchObject({
+        failureKind: "stream_incomplete",
+        providerStage: "stream_finish",
+        retryable: true,
+        attempts: 2,
+        maxAttempts: 2
+      });
+      expect(providerFailure).not.toHaveProperty("providerRequestId");
+      expect(providerFailure).not.toHaveProperty("retryHistory");
+      expect(JSON.stringify(artifact)).not.toContain("provider-success-request-id-sentinel");
+      expect(JSON.stringify(artifact)).not.toContain("provider-incomplete-request-id-sentinel");
+      expect(JSON.stringify(artifact)).not.toContain("partial-stream-sentinel");
+      expect(JSON.stringify(artifact)).not.toContain("partial-stream-retry-sentinel");
+      expect(jsonl).not.toContain("provider-success-request-id-sentinel");
+      expect(jsonl).not.toContain("provider-incomplete-request-id-sentinel");
+      expect(jsonl).not.toContain("partial-stream-sentinel");
+      expect(jsonl).not.toContain("partial-stream-retry-sentinel");
+      expect(() => assertValidMatchArtifactIntegrity(artifact)).not.toThrow();
+
+      const replay = replayWerewolfSocialEpisode(artifact.socialEpisode, {
+        agentSnapshotFrames: artifact.agentSnapshotFrames
+      });
+      expect(replay.ok).toBe(true);
+      expect(replay.mismatches).toEqual([]);
+      expect(replay.rejectedSteps).toBe(1);
+      expect(replay.finalHash).toBe(artifact.failureStateHash);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
+
+function sseResponse(lines: string[]): Response {
+  return new Response(lines.join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" }
+  });
+}
+
+function sseChunk(value: unknown): string {
+  return `data: ${JSON.stringify(value)}\n\n`;
+}
+
+function sseCompletionChunk(input: { id: string; finishReason: string }): string {
+  return sseChunk({ id: input.id, choices: [{ delta: {}, finish_reason: input.finishReason }] });
+}
+
+function sseDoneChunk(): string {
+  return "data: [DONE]\n\n";
+}

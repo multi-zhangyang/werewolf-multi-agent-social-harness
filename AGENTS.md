@@ -26315,3 +26315,40 @@ native commits with zero rejected steps, zero harness errors, and completed
 evaluation reports. These are intentionally truncated validation runs, not
 model-quality or terminal-tournament claims. No model-specific adapter,
 prompt/parser branch, fallback, or token-limit field was added.
+
+## 13.273 Adapter-Fork Provenance And Stream-Failure Evidence Lock
+
+Timestamp: `2026-07-22`
+
+Adapter provenance is now closed across generic failures and checkpoint forks:
+
+- A manifest-bearing checkpoint continuation inherits its already-verified runtime adapter manifest when the caller omits the child episode manifest. It cannot silently produce a legacy, unbound child artifact.
+- An artifact with `forkOf.parentDomainAdapter` must record a child `socialEpisode.domainAdapter`; structural envelope validation rejects the forged downgrade.
+- A parallel scheduler preflight failure preserves the requested adapter manifest and its domain id, so failed evidence has the same replay identity guarantees as a normal episode.
+
+The live-provider failure path has one production-equivalent, network-free integration proof. It drives the ordinary OpenAI-compatible streaming client through the production reasoner and Werewolf harness wrapper with fake SSE:
+
+```text
+completed stream -> committed seer receipt
+  -> incomplete stream -> bounded retry -> incomplete stream
+  -> rejected wolf receipt -> sanitized artifact/JSONL -> native replay
+```
+
+The test proves that all provider calls were streaming and had no max-token fields, that only closed failure telemetry survives artifact export, and that native replay consumes the rejected receipt without another model call. It uses a test-only endpoint/key and does not read environment files or make a network request. This is a generic streaming-boundary regression, not a model-specific branch, adapter, parser, fallback, or runtime configuration.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/genericHarnessContract.test.ts tests/social.test.ts \
+  --maxWorkers=1 --no-file-parallelism --testTimeout=60000 --reporter=verbose
+npx vitest run tests/harness.test.ts tests/openaiClient.test.ts \
+  --maxWorkers=1 --no-file-parallelism --testTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npm run test:e2e
+git diff --check
+```
+
+The complete deterministic run passed **44 test files / 471 tests**. The production build retained only the existing Vite chunk-size warning, and the Cockpit Playwright run ended with status `passed`. No live provider validation was needed because this lock changes generic provenance handling and adds a fully fake-SSE regression; it does not change provider/runtime behavior.
