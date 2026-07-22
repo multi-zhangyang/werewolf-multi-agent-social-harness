@@ -183,7 +183,17 @@ export class OpenAICompatibleClient implements ModelClient {
       throw networkModelCallError(error, "during_stream");
     }
 
-    return finishStream(content, started, usage, providerRequestId, sawProviderStop ? "provider_stop_event" : "reader_done");
+    // A non-empty partial delta followed by a transport EOF is not sufficient
+    // evidence that the provider completed the generation. Accepting it would
+    // let a truncated reasoner memo or speech draft enter local parsing and
+    // arbitration as if the model had finished. New OpenAI-compatible streams
+    // must therefore include an explicit terminal finish_reason.
+    //
+    // `reader_done` remains in the telemetry union for historical artifact
+    // compatibility, but this client no longer emits it for live requests.
+    if (content && !sawProviderStop) throw incompleteStreamModelCallError();
+
+    return finishStream(content, started, usage, providerRequestId, "provider_stop_event");
   }
 }
 
@@ -308,6 +318,14 @@ function finishStream(
       completedBy
     }
   };
+}
+
+function incompleteStreamModelCallError(): ModelCallError {
+  return new ModelCallError("LLM API stream ended before a provider completion event.", {
+    failureKind: "stream_incomplete",
+    providerStage: "stream_finish",
+    retryable: true
+  });
 }
 
 function openAISdkModelCallError(error: unknown, stage: ProviderFailureStage, timeoutMs: number): ModelCallError | undefined {
