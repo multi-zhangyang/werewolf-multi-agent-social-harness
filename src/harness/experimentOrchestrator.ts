@@ -34,6 +34,7 @@ import {
 import type { HarnessEvaluationReport } from "./types";
 
 type GenericEpisodeEnvelope = HarnessEpisodeArtifactEnvelope<unknown, unknown, unknown, unknown, unknown>;
+const RUN_LEASE_HELD = Symbol("generic-experiment-run-lease-held");
 
 export interface GenericExperimentEpisodeContext extends TournamentEpisodeContext {
   spec: NormalizedGenericExperimentSpecV1;
@@ -56,6 +57,9 @@ export interface GenericExperimentArtifactStore<TArtifact extends GenericEpisode
  * owned by GenericExperimentArtifactStore.
  */
 export interface GenericExperimentRunStore<TArtifact extends GenericEpisodeEnvelope> {
+  /** Optional single-host execution lease. Durable stores use this to prevent
+   * a live run from being mistaken for an interrupted run by another process. */
+  withRunLease?<TResult>(runSetId: string, operation: () => Promise<TResult>): Promise<TResult>;
   beginOrResume(input: {
     runSetId: string;
     experiment: GenericExperimentProvenanceV1;
@@ -245,6 +249,13 @@ export async function runGenericExperiment<
   const specHash = experiment.specHash;
   const now = options.now ?? (() => new Date().toISOString());
   const runSetId = options.runSetId ?? normalizedSpec.id;
+  const internalOptions = options as typeof options & { [RUN_LEASE_HELD]?: true };
+  if (options.runStore.withRunLease && !internalOptions[RUN_LEASE_HELD]) {
+    return options.runStore.withRunLease(runSetId, () => runGenericExperiment({
+      ...options,
+      [RUN_LEASE_HELD]: true
+    } as typeof internalOptions));
+  }
   const resumed = await options.runStore.beginOrResume({ runSetId, experiment });
   assertResumedExperiment(resumed.record, runSetId, experiment);
   let durableRecord = resumed.record;

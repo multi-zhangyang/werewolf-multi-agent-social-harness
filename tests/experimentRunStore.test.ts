@@ -18,6 +18,59 @@ afterEach(async () => {
 });
 
 describe("restart-safe experiment run store", () => {
+  it("converges concurrent run creation and same-slot mutation across independent store instances", async () => {
+    const root = await temporaryRoot();
+    const authority = emptyAuthority({ artifacts: 0, metrics: 0, failures: 0, evaluations: 0 });
+    const experiment = createGenericExperimentProvenance(experimentSpec(1));
+    const [first, second] = await Promise.all([
+      HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority }),
+      HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority })
+    ]);
+
+    const begun = await Promise.all([
+      first.beginOrResume({ runSetId: "concurrent-cas", experiment, createdAt: "2026-07-22T15:00:00.000Z" }),
+      second.beginOrResume({ runSetId: "concurrent-cas", experiment, createdAt: "2026-07-22T15:00:00.000Z" })
+    ]);
+    expect(begun.map((entry) => entry.disposition).sort()).toEqual(["active", "created"]);
+
+    const started = await Promise.all([
+      first.startEpisode({ runSetId: "concurrent-cas", index: 0, seed: `${experiment.spec.seed}:g1` }),
+      second.startEpisode({ runSetId: "concurrent-cas", index: 0, seed: `${experiment.spec.seed}:g1` })
+    ]);
+    expect(started[0]).toEqual(started[1]);
+    expect(started[0].currentEpisode?.phase).toBe("started");
+
+    const revisions = await revisionDirectory(root, "concurrent-cas");
+    expect((await readdir(revisions)).filter((name) => /^\d{12}(?:-|$)/.test(name)).sort()).toEqual([
+      "000000000001",
+      "000000000002"
+    ]);
+    await expect(HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority }))
+      .resolves.toBeDefined();
+  });
+
+  it("holds a kernel-released run lease for the complete live operation", async () => {
+    const root = await temporaryRoot();
+    const authority = emptyAuthority({ artifacts: 0, metrics: 0, failures: 0, evaluations: 0 });
+    const [first, second] = await Promise.all([
+      HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority }),
+      HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority })
+    ]);
+    let release!: () => void;
+    const held = first.withRunLease("lease-run", async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return "released";
+    });
+    while (!release) await new Promise((resolve) => setTimeout(resolve, 1));
+
+    await expect(second.withRunLease("lease-run", async () => "wrong"))
+      .rejects.toThrow(/already active in another process/i);
+    release();
+    await expect(held).resolves.toBe("released");
+    await expect(second.withRunLease("lease-run", async () => "reacquired"))
+      .resolves.toBe("reacquired");
+  });
+
   it("publishes the active schedule before preparation and recovers without executing episode authority", async () => {
     const root = await temporaryRoot();
     const reads = { artifacts: 0, metrics: 0, failures: 0, evaluations: 0 };
