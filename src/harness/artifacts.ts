@@ -1417,13 +1417,9 @@ export function forkHarnessRunOptions(options: {
   createdAt?: string;
   reason?: string;
 }): HarnessRunOptions {
-  assertValidHarnessCheckpoint(options.checkpoint);
-  assertForkableWerewolfCheckpointBoundary(options.checkpoint);
-  const genericFork = createGenericForkProvenance(options.checkpoint, {
+  const forkOf = createHarnessForkProvenance(options.checkpoint, {
     createdAt: options.createdAt,
-    reason: options.reason,
-    parentArtifactId: options.checkpoint.source.matchId ?? options.checkpoint.source.runId,
-    parentEvidenceTraceIds: inheritedEvidenceTraceIdsFromCheckpoint(options.checkpoint)
+    reason: options.reason
   });
   return {
     initialState: cloneJson(options.checkpoint.state),
@@ -1433,11 +1429,31 @@ export function forkHarnessRunOptions(options: {
     agents: cloneJson(options.agents ?? agentConfigsFromCheckpoint(options.checkpoint)),
     reasoner: options.reasoner,
     maxTransitions: options.maxTransitions,
-    forkOf: {
-      ...genericFork,
-      parentMatchId: options.checkpoint.source.matchId,
-      parentRulesetId: options.checkpoint.source.rulesetId,
-    }
+    forkOf
+  };
+}
+
+/**
+ * Build the single canonical Werewolf fork provenance record before optional
+ * reasoner construction. Server control-plane attempt records and the eventual
+ * harness run therefore bind to exactly the same checkpoint evidence.
+ */
+export function createHarnessForkProvenance(
+  checkpoint: HarnessCheckpoint,
+  options: { createdAt?: string; reason?: string } = {}
+): HarnessForkProvenance {
+  assertValidHarnessCheckpoint(checkpoint);
+  assertForkableWerewolfCheckpointBoundary(checkpoint);
+  const genericFork = createGenericForkProvenance(checkpoint, {
+    createdAt: options.createdAt,
+    reason: options.reason,
+    parentArtifactId: checkpoint.source.matchId ?? checkpoint.source.runId,
+    parentEvidenceTraceIds: inheritedEvidenceTraceIdsFromCheckpoint(checkpoint)
+  });
+  return {
+    ...genericFork,
+    parentMatchId: checkpoint.source.matchId,
+    parentRulesetId: checkpoint.source.rulesetId
   };
 }
 

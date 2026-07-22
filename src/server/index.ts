@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { modelClientFromEnv, providerConfigSummaryFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
-import { assertRuntimeModelsAvailable, normalizeModelList } from "../agents/schema";
+import { assertRuntimeModelsAvailable, isProviderFailureKind, normalizeModelList } from "../agents/schema";
 import { applyCommand, createGame, getPendingActions } from "../core/engine";
 import { isAgentPendingAction } from "../core/pending";
 import { DEFAULT_CONFIG } from "../core/roles";
@@ -16,6 +16,7 @@ import {
   buildFinalHarnessCheckpoint,
   buildHarnessCheckpointAtPrefix,
   buildMatchArtifact,
+  createHarnessForkProvenance,
   forkHarnessRunOptions,
   HarnessCheckpointSelectionError,
   MATCH_ARTIFACT_VERSION,
@@ -25,7 +26,11 @@ import {
   type HarnessCheckpointPrefixSelector,
   type MatchArtifact
 } from "../harness/artifacts";
-import { buildReplayableSocialPrefix, HarnessCheckpointSelectionError as GenericHarnessCheckpointSelectionError } from "../harness/episodeArtifacts";
+import {
+  buildReplayableSocialPrefix,
+  HarnessCheckpointSelectionError as GenericHarnessCheckpointSelectionError,
+  validateGenericForkProvenance
+} from "../harness/episodeArtifacts";
 import {
   mergeExperimentOverrides,
   normalizeTournamentExperimentSpec,
@@ -129,6 +134,7 @@ import {
   getTournamentPublicShare,
   listArtifactRecoveryAuditRecords,
   listCheckpoints,
+  listCheckpointForkAttempts,
   listComparisons,
   listExperimentMatrixArtifactSets,
   listMatches,
@@ -136,12 +142,15 @@ import {
   listTournamentPublicShares,
   saveArtifactRecoveryAuditRecord,
   saveCheckpoint,
+  saveCheckpointForkAttempt,
+  deleteCheckpointForkAttempt,
   saveComparison,
   saveExperimentMatrixArtifactSet,
   saveMatch,
   saveTournamentArtifactSet,
   saveTournamentPublicShare,
   type StoredArtifactRecoveryAuditRecord,
+  type StoredCheckpointForkAttempt,
   type StoredExperimentMatrixArtifactFiles,
   type StoredExperimentMatrixArtifactSet,
   type StoredTournamentArtifactFiles,
@@ -180,6 +189,7 @@ const TOURNAMENT_ARTIFACT_SET_INDEX_FILE = "artifact_sets.index.json";
 const MATRIX_ARTIFACT_SET_INDEX_FILE = "matrix_artifact_sets.index.json";
 const TOURNAMENT_PUBLIC_SHARE_INDEX_FILE = "tournament_public_shares.index.json";
 const CHECKPOINT_ARTIFACT_INDEX_FILE = "checkpoints.index.json";
+const CHECKPOINT_FORK_ATTEMPT_FILE = "checkpoint_fork_attempts.json";
 const CHECKPOINT_ARTIFACT_DIR = "checkpoints";
 const MATCH_ARTIFACT_INDEX_FILE = "matches.index.json";
 const MATCH_ARTIFACT_DIR = "matches";
@@ -198,6 +208,7 @@ const PERSISTED_MATCH_ARTIFACT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/
 const ARTIFACT_RECOVERY_AUDIT_MAX_LIMIT = 500;
 const CHECKPOINT_BRANCH_TREE_MAX_DEPTH_LIMIT = 100;
 const CHECKPOINT_BRANCH_TREE_MAX_NODES_LIMIT = 1000;
+let checkpointForkAttemptWriteQueue: Promise<void> = Promise.resolve();
 
 type ArtifactRecoveryReadResult<T> = { ok: true; artifact: T } | { ok: false; code: string };
 interface ArtifactRecoveryAuditQuery {
@@ -855,11 +866,17 @@ app.get("/api/matches/:id/fork-lineage", async (req, res, next) => {
     assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
     await loadServerArtifactStores();
     const match = getMatch(req.params.id);
-    if (!match) {
+    const attempt = listCheckpointForkAttempts().find((candidate) => candidate.childRunId === req.params.id);
+    if (!match && !attempt) {
       res.status(404).json({ error: "match not found" });
       return;
     }
-    if (!match.artifact) {
+    if (!match?.artifact && attempt) {
+      const checkpoint = getCheckpoint(attempt.forkOf.checkpointId);
+      res.json({ summary: buildCheckpointForkAttemptLineageSummary(attempt, checkpoint) });
+      return;
+    }
+    if (!match?.artifact) {
       res.status(404).json({ error: "match artifact not available" });
       return;
     }
@@ -913,7 +930,7 @@ app.get("/api/checkpoints/:id/forks", async (req, res, next) => {
       .flatMap((match) => (match.artifact?.forkOf?.checkpointId === checkpoint.checkpointId ? [match.artifact] : []))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     res.json({
-      summary: buildCheckpointForksSummary(checkpoint, forkArtifacts)
+      summary: buildCheckpointForksSummary(checkpoint, forkArtifacts, listCheckpointForkAttempts(checkpoint.checkpointId))
     });
   } catch (error) {
     next(error);
@@ -932,7 +949,13 @@ app.get("/api/checkpoints/:id/branch-tree", async (req, res, next) => {
     const artifacts = listMatches().flatMap((match) => (match.artifact ? [match.artifact] : []));
     const query = checkpointBranchTreeQueryFromRequest(req.query);
     res.json({
-      summary: buildCheckpointBranchTreeSummary(checkpoint, artifacts, listCheckpoints(), query)
+      summary: buildCheckpointBranchTreeSummary(
+        checkpoint,
+        artifacts,
+        listCheckpoints(),
+        listCheckpointForkAttempts(),
+        query
+      )
     });
   } catch (error) {
     next(error);
@@ -984,7 +1007,7 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
     assertForbiddenBodyFields(body, FORBIDDEN_CHECKPOINT_BODY_FIELDS, "checkpoint fork");
     assertAllowedBodyFields(body, ["reason", "maxTransitions", "timeoutMs", "timeout"], "checkpoint fork");
     assertValidHarnessCheckpoint(checkpoint);
-    reason = parseOptionalString(body.reason, "reason");
+    reason = parseOptionalBoundedString(body.reason, "reason", 256);
     maxTransitions = parseOptionalPositiveInteger(body.maxTransitions, "maxTransitions");
     timeoutMs = parseOptionalDurationMs(body.timeoutMs ?? body.timeout, "timeoutMs");
   } catch (error) {
@@ -999,7 +1022,43 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
     models,
     status: "running"
   });
+
+  let forkAttempt: StoredCheckpointForkAttempt;
+  try {
+    forkAttempt = {
+      schemaVersion: "server.checkpoint-fork-attempt.v1",
+      childRunId: record.id,
+      createdAt: record.createdAt,
+      updatedAt: record.createdAt,
+      status: "running",
+      forkOf: createHarnessForkProvenance(checkpoint, {
+        createdAt: record.createdAt,
+        reason
+      }),
+      limits: {
+        maxTransitions: maxTransitions ?? null,
+        timeoutMs: timeoutMs ?? null
+      }
+    };
+  } catch (error) {
+    record.status = "failed";
+    record.error = "Checkpoint fork provenance could not be created.";
+    saveMatch(record);
+    next(error);
+    return;
+  }
   saveMatch(record);
+  try {
+    saveCheckpointForkAttempt(forkAttempt);
+    await writeCheckpointForkAttemptStore(checkpointArtifactBaseDir);
+  } catch (error) {
+    deleteCheckpointForkAttempt(record.id);
+    record.status = "failed";
+    record.error = "Checkpoint fork attempt could not be persisted before execution.";
+    saveMatch(record);
+    next(error);
+    return;
+  }
 
   const startedAt = performance.now();
   const abortController = new AbortController();
@@ -1015,10 +1074,14 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
         checkpoint,
         reasoner: createReasoner(abortController.signal),
         maxTransitions,
+        createdAt: record.createdAt,
         reason
       }),
       executionLimits: { abortSignal: abortController.signal }
     };
+    if (hashStableState(forkOptions.forkOf) !== hashStableState(forkAttempt.forkOf)) {
+      throw new Error("Checkpoint fork execution provenance did not match the durable attempt record.");
+    }
     const resolvedAssignments = describeResolvedAssignments(forkOptions.initialState.players, forkOptions.agents);
     const result = await runHarnessMatch(forkOptions);
     const artifact = buildMatchArtifact({
@@ -1038,6 +1101,8 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
     const completedRecord = getMatch(record.id);
     if (!completedRecord?.artifact) throw new Error(`Finalized fork ${record.id} was not stored as an artifact-backed match.`);
     await writeMatchArtifactIndex(matchArtifactBaseDir);
+    deleteCheckpointForkAttempt(record.id);
+    await writeCheckpointForkAttemptStore(checkpointArtifactBaseDir);
     res.status(result.status === "failed" ? 207 : 200).json({
       ...serializeStoredMatch(completedRecord),
       summary: {
@@ -1061,10 +1126,32 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
       return;
     }
     const failure = publicApiFailureFromError(error);
+    const persistedFailureReason = failure.providerFailure
+      ? providerFailureApiMessage(failure.providerFailure)
+      : failure.code
+        ? sanitizeApiErrorText(failure.message).slice(0, 512)
+        : "Checkpoint fork execution failed before an artifact was recorded.";
     delete record.artifact;
     record.status = "failed";
-    record.error = failure.message;
+    record.error = persistedFailureReason;
     saveMatch(record);
+    const failedAttempt: StoredCheckpointForkAttempt = {
+      ...forkAttempt,
+      updatedAt: new Date().toISOString(),
+      status: "failed",
+      elapsedMs: Math.round(performance.now() - startedAt),
+      timedOut: abortController.signal.aborted,
+      failureCode: failure.code ?? "checkpoint_fork_execution_failed",
+      failureReason: persistedFailureReason,
+      providerFailure: failure.providerFailure ?? null
+    };
+    saveCheckpointForkAttempt(failedAttempt);
+    try {
+      await writeCheckpointForkAttemptStore(checkpointArtifactBaseDir);
+    } catch (persistenceError) {
+      next(persistenceError);
+      return;
+    }
     res.status(500).json({
       ...serializeStoredMatch(record),
       summary: {
@@ -1072,7 +1159,7 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
         ok: false,
         provider: providerDiagnosticSummaryFromEnv(),
         checkpointId: checkpoint.checkpointId,
-        forkOf: null,
+        forkOf: summarizeForkProvenance(failedAttempt.forkOf),
         models,
         profileCount: profiles.length,
         modelCount: models.length,
@@ -1083,10 +1170,10 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
         elapsedMs: Math.round(performance.now() - startedAt),
         timedOut: abortController.signal.aborted,
         evaluation: null,
-        failureReason: failure.message,
+        failureReason: persistedFailureReason,
         providerFailure: failure.providerFailure ?? null
       },
-      error: failure.message
+      error: persistedFailureReason
     });
   } finally {
     if (timeout) clearTimeout(timeout);
@@ -2076,6 +2163,13 @@ function parseOptionalString(value: unknown, name: string): string | undefined {
   return value;
 }
 
+function parseOptionalBoundedString(value: unknown, name: string, maxLength: number): string | undefined {
+  const parsed = parseOptionalString(value, name)?.trim();
+  if (!parsed) return undefined;
+  if (parsed.length > maxLength) throw new HttpError(400, `${name} must not exceed ${maxLength} characters.`);
+  return parsed;
+}
+
 function checkpointPrefixSelectorFromBody(body: Record<string, unknown>): HarnessCheckpointPrefixSelector | undefined {
   const hasTraceId = body.traceId !== undefined && body.traceId !== null && body.traceId !== "";
   const hasNativeTurnIndex = body.nativeTurnIndex !== undefined && body.nativeTurnIndex !== null && body.nativeTurnIndex !== "";
@@ -2192,15 +2286,30 @@ function serializeCheckpointSummary(checkpoint: HarnessCheckpoint): object {
   };
 }
 
-function buildCheckpointForksSummary(checkpoint: HarnessCheckpoint, artifacts: MatchArtifact[]): object {
+function buildCheckpointForksSummary(
+  checkpoint: HarnessCheckpoint,
+  artifacts: MatchArtifact[],
+  attempts: StoredCheckpointForkAttempt[] = []
+): object {
   const forks = artifacts.map((artifact) => buildForkChildSummary(artifact, checkpoint));
+  const artifactRunIds = new Set(artifacts.map((artifact) => artifact.runId));
+  const unresolvedAttempts = attempts
+    .filter((attempt) => !artifactRunIds.has(attempt.childRunId))
+    .map((attempt) => buildCheckpointForkAttemptSummary(attempt, checkpoint));
   return {
     kind: "checkpoint-forks",
-    schemaVersion: "server.checkpoint-forks-summary.v2",
-    ok: forks.every((fork) => isRecord(fork.lineage) && fork.lineage.ok === true),
+    schemaVersion: "server.checkpoint-forks-summary.v3",
+    ok:
+      forks.every((fork) => isRecord(fork.lineage) && fork.lineage.ok === true) &&
+      unresolvedAttempts.every((attempt) => isRecord(attempt.boundary) && attempt.boundary.ok === true),
     checkpoint: serializeCheckpointSummary(checkpoint),
-    childCount: forks.length,
-    forks
+    childCount: forks.length + unresolvedAttempts.length,
+    artifactChildCount: forks.length,
+    attemptCount: unresolvedAttempts.length,
+    failedAttemptCount: unresolvedAttempts.filter((attempt) => attempt.status === "failed").length,
+    runningAttemptCount: unresolvedAttempts.filter((attempt) => attempt.status === "running").length,
+    forks,
+    attempts: unresolvedAttempts
   };
 }
 
@@ -2208,6 +2317,7 @@ function buildCheckpointBranchTreeSummary(
   rootCheckpoint: HarnessCheckpoint,
   artifacts: MatchArtifact[],
   checkpoints: HarnessCheckpoint[],
+  attempts: StoredCheckpointForkAttempt[] = [],
   limits: CheckpointBranchTreeQuery = {}
 ): object {
   const checkpointById = new Map<string, HarnessCheckpoint>();
@@ -2226,6 +2336,18 @@ function buildCheckpointBranchTreeSummary(
     children.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
+  const artifactRunIds = new Set(artifacts.map((artifact) => artifact.runId));
+  const attemptsByParentCheckpoint = new Map<string, StoredCheckpointForkAttempt[]>();
+  for (const attempt of attempts) {
+    if (artifactRunIds.has(attempt.childRunId)) continue;
+    const current = attemptsByParentCheckpoint.get(attempt.forkOf.checkpointId) ?? [];
+    current.push(attempt);
+    attemptsByParentCheckpoint.set(attempt.forkOf.checkpointId, current);
+  }
+  for (const children of attemptsByParentCheckpoint.values()) {
+    children.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
   const checkpointsBySourceRun = new Map<string, HarnessCheckpoint[]>();
   for (const checkpoint of checkpointById.values()) {
     const sourceIds = new Set([checkpoint.source.runId, checkpoint.source.matchId].filter((id): id is string => Boolean(id)));
@@ -2241,20 +2363,23 @@ function buildCheckpointBranchTreeSummary(
 
   const checkpointNodes = new Map<string, object>();
   const matchNodes = new Map<string, object>();
+  const attemptNodes = new Map<string, object>();
   const edges = new Map<string, object>();
   const truncationReasons = new Set<string>();
   const truncation = {
     omittedCheckpoints: 0,
     omittedMatches: 0,
+    omittedAttempts: 0,
     omittedEdges: 0
   };
-  const nodeCount = () => checkpointNodes.size + matchNodes.size;
-  const recordOmittedNode = (kind: "checkpoint" | "match", reason: "maxDepth" | "maxNodes") => {
+  const nodeCount = () => checkpointNodes.size + matchNodes.size + attemptNodes.size;
+  const recordOmittedNode = (kind: "checkpoint" | "match" | "attempt", reason: "maxDepth" | "maxNodes") => {
     truncationReasons.add(reason);
     if (kind === "checkpoint") truncation.omittedCheckpoints += 1;
-    else truncation.omittedMatches += 1;
+    else if (kind === "match") truncation.omittedMatches += 1;
+    else truncation.omittedAttempts += 1;
   };
-  const canIncludeNode = (kind: "checkpoint" | "match", alreadyIncluded: boolean, depth: number): boolean => {
+  const canIncludeNode = (kind: "checkpoint" | "match" | "attempt", alreadyIncluded: boolean, depth: number): boolean => {
     if (limits.maxDepth !== undefined && depth > limits.maxDepth) {
       recordOmittedNode(kind, "maxDepth");
       return false;
@@ -2274,7 +2399,11 @@ function buildCheckpointBranchTreeSummary(
       depth,
       checkpointId: checkpoint.checkpointId,
       createdAt: checkpoint.createdAt,
-      childForkCount: artifactsByParentCheckpoint.get(checkpoint.checkpointId)?.length ?? 0,
+      childForkCount:
+        (artifactsByParentCheckpoint.get(checkpoint.checkpointId)?.length ?? 0) +
+        (attemptsByParentCheckpoint.get(checkpoint.checkpointId)?.length ?? 0),
+      artifactChildCount: artifactsByParentCheckpoint.get(checkpoint.checkpointId)?.length ?? 0,
+      childAttemptCount: attemptsByParentCheckpoint.get(checkpoint.checkpointId)?.length ?? 0,
       summary: serializeCheckpointSummary(checkpoint)
     });
     return true;
@@ -2291,6 +2420,23 @@ function buildCheckpointBranchTreeSummary(
       ...childSummary
     };
     matchNodes.set(artifact.runId, node);
+    return node;
+  };
+  const includeAttemptNode = (
+    attempt: StoredCheckpointForkAttempt,
+    checkpoint: HarnessCheckpoint,
+    depth: number
+  ): Record<string, unknown> | undefined => {
+    const existing = attemptNodes.get(attempt.childRunId);
+    const existingDepth = checkpointNodeDepth(existing);
+    if (isRecord(existing) && existingDepth !== null && existingDepth <= depth) return existing;
+    if (!canIncludeNode("attempt", Boolean(existing), depth)) return undefined;
+    const node = {
+      depth,
+      parentCheckpointId: checkpoint.checkpointId,
+      ...buildCheckpointForkAttemptSummary(attempt, checkpoint)
+    };
+    attemptNodes.set(attempt.childRunId, node);
     return node;
   };
   const queue: Array<{ kind: "checkpoint"; checkpoint: HarnessCheckpoint; depth: number } | { kind: "match"; artifact: MatchArtifact; depth: number }> = [
@@ -2328,6 +2474,24 @@ function buildCheckpointBranchTreeSummary(
         });
         if (!processedMatches.has(artifact.runId)) queue.push({ kind: "match", artifact, depth: childDepth });
       }
+      for (const attempt of attemptsByParentCheckpoint.get(checkpoint.checkpointId) ?? []) {
+        const childDepth = item.depth + 1;
+        const attemptSummary = includeAttemptNode(attempt, checkpoint, childDepth);
+        if (!attemptSummary) {
+          truncation.omittedEdges += 1;
+          continue;
+        }
+        const edgeId = `checkpoint-fork-attempt:${checkpoint.checkpointId}:${attempt.childRunId}`;
+        const boundary = isRecord(attemptSummary.boundary) ? attemptSummary.boundary : {};
+        edges.set(edgeId, {
+          id: edgeId,
+          kind: "checkpoint-fork-attempt",
+          fromCheckpointId: checkpoint.checkpointId,
+          toRunId: attempt.childRunId,
+          ok: boundary.ok === true,
+          boundaryStatus: typeof boundary.status === "string" ? boundary.status : "unknown"
+        });
+      }
     } else {
       const artifact = item.artifact;
       if (processedMatches.has(artifact.runId)) continue;
@@ -2356,22 +2520,30 @@ function buildCheckpointBranchTreeSummary(
 
   const checkpointList = [...checkpointNodes.values()].sort(branchNodeSort);
   const matchList = [...matchNodes.values()].sort(branchNodeSort);
+  const attemptList = [...attemptNodes.values()].sort(branchNodeSort);
   const edgeList = [...edges.values()].sort((a, b) => branchNodeId(a).localeCompare(branchNodeId(b)));
   const lineageOk = matchList.every((node) => {
     if (!isRecord(node) || !isRecord(node.lineage)) return true;
     return node.lineage.ok === true;
   });
-  const maxDepth = [...checkpointList, ...matchList].reduce((max, node) => Math.max(max, checkpointNodeDepth(node) ?? 0), 0);
+  const attemptLineageOk = attemptList.every((node) => isRecord(node) && isRecord(node.boundary) && node.boundary.ok === true);
+  const maxDepth = [...checkpointList, ...matchList, ...attemptList].reduce(
+    (max, node) => Math.max(max, checkpointNodeDepth(node) ?? 0),
+    0
+  );
   return {
     kind: "checkpoint-branch-tree",
-    schemaVersion: "server.checkpoint-branch-tree-summary.v2",
-    ok: lineageOk,
+    schemaVersion: "server.checkpoint-branch-tree-summary.v3",
+    ok: lineageOk && attemptLineageOk,
     okScope: "returned",
     rootCheckpointId: rootCheckpoint.checkpointId,
     root: serializeCheckpointSummary(rootCheckpoint),
     counts: {
       checkpoints: checkpointList.length,
       matches: matchList.length,
+      attempts: attemptList.length,
+      failedAttempts: attemptList.filter((node) => isRecord(node) && node.status === "failed").length,
+      runningAttempts: attemptList.filter((node) => isRecord(node) && node.status === "running").length,
       edges: edgeList.length,
       maxDepth
     },
@@ -2384,10 +2556,12 @@ function buildCheckpointBranchTreeSummary(
       reasons: [...truncationReasons].sort(),
       omittedCheckpoints: truncation.omittedCheckpoints,
       omittedMatches: truncation.omittedMatches,
+      omittedAttempts: truncation.omittedAttempts,
       omittedEdges: truncation.omittedEdges
     },
     checkpoints: checkpointList,
     matches: matchList,
+    attempts: attemptList,
     edges: edgeList
   };
 }
@@ -2409,6 +2583,73 @@ function buildForkChildSummary(artifact: MatchArtifact, checkpoint: HarnessCheck
     socialMessages: artifact.socialEpisode.messages.length,
     forkOf: artifact.forkOf ? summarizeForkProvenance(artifact.forkOf) : null,
     lineage
+  };
+}
+
+function buildCheckpointForkAttemptSummary(
+  attempt: StoredCheckpointForkAttempt,
+  checkpoint?: HarnessCheckpoint
+): Record<string, unknown> {
+  const checkpointSourceMatchesForkOf = checkpoint
+    ? checkpointSourceMatchesForkProvenance(checkpoint, attempt.forkOf)
+    : null;
+  return {
+    kind: "checkpoint-fork-attempt",
+    schemaVersion: attempt.schemaVersion,
+    runId: attempt.childRunId,
+    createdAt: attempt.createdAt,
+    updatedAt: attempt.updatedAt,
+    status: attempt.status,
+    hasArtifact: false,
+    forkOf: summarizeForkProvenance(attempt.forkOf),
+    limits: {
+      maxTransitions: attempt.limits.maxTransitions,
+      timeoutMs: attempt.limits.timeoutMs
+    },
+    elapsedMs: attempt.elapsedMs ?? null,
+    timedOut: attempt.timedOut ?? null,
+    failureCode: attempt.failureCode ?? null,
+    failureReason: attempt.failureReason ? sanitizeApiErrorText(attempt.failureReason) : null,
+    providerFailure: attempt.providerFailure ?? null,
+    boundary: {
+      status: attempt.status === "failed" ? "fork_attempt_failed_before_artifact" : "fork_attempt_running_before_artifact",
+      ok: false,
+      provenanceOk: checkpointSourceMatchesForkOf === true,
+      checkpointFound: Boolean(checkpoint),
+      checkpointSourceMatchesForkOf
+    }
+  };
+}
+
+function buildCheckpointForkAttemptLineageSummary(
+  attempt: StoredCheckpointForkAttempt,
+  checkpoint?: HarnessCheckpoint
+): object {
+  const summary = buildCheckpointForkAttemptSummary(attempt, checkpoint);
+  const boundary = isRecord(summary.boundary) ? summary.boundary : {};
+  return {
+    kind: "fork-lineage",
+    schemaVersion: "server.fork-lineage-summary.v3",
+    ok: boundary.ok === true,
+    isFork: true,
+    artifactAvailable: false,
+    runId: attempt.childRunId,
+    matchId: attempt.childRunId,
+    forkOf: summary.forkOf,
+    parent: {
+      checkpointId: attempt.forkOf.checkpointId,
+      runId: attempt.forkOf.parentRunId ?? null,
+      matchId: attempt.forkOf.parentMatchId ?? null,
+      checkpointFound: Boolean(checkpoint)
+    },
+    child: {
+      runId: attempt.childRunId,
+      matchId: attempt.childRunId,
+      status: attempt.status,
+      artifactAvailable: false,
+      failureReason: summary.failureReason
+    },
+    boundary
   };
 }
 
@@ -2600,6 +2841,7 @@ function profilesFromCheckpoint(checkpoint: HarnessCheckpoint): HarnessAgentProf
 async function loadServerArtifactStores(): Promise<void> {
   await loadMatchArtifactIndex(matchArtifactBaseDir);
   await loadCheckpointArtifactIndex(checkpointArtifactBaseDir);
+  await loadCheckpointForkAttemptStore(checkpointArtifactBaseDir);
   await loadComparisonArtifactIndex(comparisonArtifactBaseDir);
 }
 
@@ -2877,6 +3119,251 @@ async function persistCheckpointArtifact(checkpoint: HarnessCheckpoint, baseDir:
   });
 }
 
+async function loadCheckpointForkAttemptStore(baseDir: string | undefined): Promise<void> {
+  if (!baseDir) return;
+  const root = path.resolve(baseDir);
+  let parsed: unknown;
+  try {
+    const target = checkpointForkAttemptPath(root);
+    const info = await lstat(target);
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new HttpError(500, "Checkpoint fork-attempt store is not a safe regular file.");
+    }
+    parsed = JSON.parse(await readFile(target, "utf8"));
+  } catch (error) {
+    if (isFileReadNotFound(error)) return;
+    throw new HttpError(500, "Checkpoint fork-attempt store could not be read.");
+  }
+  if (
+    !isRecord(parsed) ||
+    parsed.artifactVersion !== "server.checkpoint-fork-attempt-store.v1" ||
+    parsed.kind !== "checkpoint-fork-attempt-store" ||
+    !Array.isArray(parsed.attempts)
+  ) {
+    throw new HttpError(500, "Checkpoint fork-attempt store has invalid shape.");
+  }
+  let rewriteAttemptStore = false;
+  for (const value of parsed.attempts) {
+    const parsedAttempt = parseStoredCheckpointForkAttempt(value);
+    if (!parsedAttempt) throw new HttpError(500, "Checkpoint fork-attempt store contains an invalid record.");
+    const checkpoint = getCheckpoint(parsedAttempt.forkOf.checkpointId);
+    if (!checkpoint || !checkpointSourceMatchesForkProvenance(checkpoint, parsedAttempt.forkOf)) {
+      throw new HttpError(500, "Checkpoint fork-attempt store contains inconsistent provenance.");
+    }
+    const activeAttempt = listCheckpointForkAttempts().find(
+      (candidate) => candidate.childRunId === parsedAttempt.childRunId && candidate.status === "running"
+    );
+    const artifact = getMatch(parsedAttempt.childRunId)?.artifact;
+    if (artifact) {
+      deleteCheckpointForkAttempt(parsedAttempt.childRunId);
+      rewriteAttemptStore = true;
+      continue;
+    }
+    const attempt =
+      parsedAttempt.status === "running" && !activeAttempt && !artifact
+        ? {
+            ...parsedAttempt,
+            updatedAt: new Date().toISOString(),
+            status: "failed" as const,
+            elapsedMs: Math.max(0, Date.now() - Date.parse(parsedAttempt.createdAt)),
+            timedOut: false,
+            failureCode: "checkpoint_fork_interrupted",
+            failureReason: "Checkpoint fork execution was interrupted before an artifact was recorded.",
+            providerFailure: null
+          }
+        : parsedAttempt;
+    if (attempt !== parsedAttempt) rewriteAttemptStore = true;
+    saveCheckpointForkAttempt(attempt);
+  }
+  if (rewriteAttemptStore) await writeCheckpointForkAttemptStore(baseDir);
+}
+
+async function writeCheckpointForkAttemptStore(baseDir: string | undefined): Promise<void> {
+  if (!baseDir) return;
+  const write = async () => {
+    const root = path.resolve(baseDir);
+    await mkdir(root, { recursive: true });
+    const target = checkpointForkAttemptPath(root);
+    await assertWritableRegularFileTarget(target, "Checkpoint fork-attempt store is not a safe regular file.");
+    const temporary = path.join(root, `.checkpoint-fork-attempts-${randomUUID()}.tmp`);
+    const store = {
+      artifactVersion: "server.checkpoint-fork-attempt-store.v1",
+      kind: "checkpoint-fork-attempt-store",
+      updatedAt: new Date().toISOString(),
+      attempts: listCheckpointForkAttempts()
+    };
+    try {
+      await writeFile(temporary, `${JSON.stringify(redactSecrets(store), null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+      await rename(temporary, target);
+    } catch (error) {
+      await rm(temporary, { force: true });
+      throw error;
+    }
+  };
+  const pending = checkpointForkAttemptWriteQueue.then(write, write);
+  checkpointForkAttemptWriteQueue = pending.then(
+    () => undefined,
+    () => undefined
+  );
+  await pending;
+}
+
+async function assertWritableRegularFileTarget(target: string, message: string): Promise<void> {
+  try {
+    const info = await lstat(target);
+    if (!info.isFile() || info.isSymbolicLink()) throw new HttpError(500, message);
+  } catch (error) {
+    if (isFileReadNotFound(error)) return;
+    throw error;
+  }
+}
+
+function parseStoredCheckpointForkAttempt(value: unknown): StoredCheckpointForkAttempt | null {
+  if (!isRecord(value)) return null;
+  const allowedFields = new Set([
+    "schemaVersion",
+    "childRunId",
+    "createdAt",
+    "updatedAt",
+    "status",
+    "forkOf",
+    "limits",
+    "elapsedMs",
+    "timedOut",
+    "failureCode",
+    "failureReason",
+    "providerFailure"
+  ]);
+  if (Object.keys(value).some((key) => !allowedFields.has(key))) return null;
+  if (value.schemaVersion !== "server.checkpoint-fork-attempt.v1") return null;
+  const childRunId = stringField(value, "childRunId");
+  const createdAt = stringField(value, "createdAt");
+  const updatedAt = stringField(value, "updatedAt");
+  if (!childRunId || !createdAt || !updatedAt) return null;
+  if (!GENERATED_ARTIFACT_SET_ID_PATTERN.test(childRunId)) return null;
+  if (!isSafeIsoTimestamp(createdAt) || !isSafeIsoTimestamp(updatedAt) || Date.parse(updatedAt) < Date.parse(createdAt)) return null;
+  if (value.status !== "running" && value.status !== "failed") return null;
+  if (!isRecord(value.forkOf) || validateGenericForkProvenance(value.forkOf).length > 0) return null;
+  const allowedForkFields = new Set([
+    "schemaVersion",
+    "checkpointArtifactVersion",
+    "checkpointId",
+    "parentRunId",
+    "parentArtifactId",
+    "parentMatchId",
+    "parentBoundaryTraceId",
+    "parentEvidenceTraceIds",
+    "parentBoundaryTurnIndex",
+    "parentStateHash",
+    "parentExecutionPrefixHash",
+    "parentAgentsHash",
+    "parentChannelsHash",
+    "parentMessagesHash",
+    "parentNativeStepCount",
+    "parentMessageCount",
+    "parentDomainAdapter",
+    "parentRulesetId",
+    "experimentLineage",
+    "createdAt",
+    "reason"
+  ]);
+  if (Object.keys(value.forkOf).some((key) => !allowedForkFields.has(key))) return null;
+  if (!GENERATED_ARTIFACT_SET_ID_PATTERN.test(stringField(value.forkOf, "checkpointId") ?? "")) return null;
+  if (typeof value.forkOf.parentRulesetId !== "string" || !value.forkOf.parentRulesetId.trim()) return null;
+  if (value.forkOf.parentMatchId !== undefined && (typeof value.forkOf.parentMatchId !== "string" || !value.forkOf.parentMatchId.trim())) {
+    return null;
+  }
+  if (value.forkOf.createdAt !== createdAt) return null;
+  if (typeof value.forkOf.reason === "string" && value.forkOf.reason.length > 256) return null;
+  if (!isRecord(value.limits)) return null;
+  if (Object.keys(value.limits).some((key) => key !== "maxTransitions" && key !== "timeoutMs")) return null;
+  const maxTransitions = value.limits.maxTransitions;
+  const timeoutMs = value.limits.timeoutMs;
+  if (maxTransitions !== null && (typeof maxTransitions !== "number" || !Number.isInteger(maxTransitions) || maxTransitions <= 0)) return null;
+  if (timeoutMs !== null && (typeof timeoutMs !== "number" || !Number.isInteger(timeoutMs) || timeoutMs <= 0)) return null;
+  for (const field of ["failureCode", "failureReason"] as const) {
+    if (
+      value[field] !== undefined &&
+      (typeof value[field] !== "string" || !value[field].trim() || value[field].length > (field === "failureCode" ? 128 : 512))
+    ) {
+      return null;
+    }
+  }
+  if (value.elapsedMs !== undefined && (typeof value.elapsedMs !== "number" || !Number.isInteger(value.elapsedMs) || value.elapsedMs < 0)) {
+    return null;
+  }
+  if (value.timedOut !== undefined && typeof value.timedOut !== "boolean") return null;
+  let providerFailure: PublicProviderFailureSummary | null | undefined;
+  if (value.providerFailure !== undefined && value.providerFailure !== null) {
+    if (!isRecord(value.providerFailure)) return null;
+    const providerRecord = value.providerFailure;
+    const allowedProviderFields = new Set([
+      "failureKind",
+      "providerStage",
+      "status",
+      "timeoutMs",
+      "aborted",
+      "retryable",
+      "attempts",
+      "maxAttempts"
+    ]);
+    if (Object.keys(providerRecord).some((key) => !allowedProviderFields.has(key))) return null;
+    if (
+      typeof providerRecord.failureKind !== "string" ||
+      !isProviderFailureKind(providerRecord.failureKind) ||
+      (providerRecord.providerStage !== undefined &&
+        (typeof providerRecord.providerStage !== "string" ||
+          ![
+            "before_start",
+            "during_request",
+            "during_stream",
+            "during_retry_delay",
+            "http_response",
+            "stream_start",
+            "stream_parse",
+            "stream_finish",
+            "non_stream_parse"
+          ].includes(providerRecord.providerStage))) ||
+      ["status", "timeoutMs", "attempts", "maxAttempts"].some(
+        (field) =>
+          providerRecord[field] !== undefined &&
+          (typeof providerRecord[field] !== "number" ||
+            !Number.isInteger(providerRecord[field]) ||
+            providerRecord[field] < 0)
+      ) ||
+      ["aborted", "retryable"].some(
+        (field) => providerRecord[field] !== undefined && typeof providerRecord[field] !== "boolean"
+      )
+    ) {
+      return null;
+    }
+    providerFailure = publicProviderFailureFromUnknown(providerRecord);
+    if (!providerFailure) return null;
+  } else if (value.providerFailure === null) {
+    providerFailure = null;
+  }
+  if (
+    value.status === "failed" &&
+    (typeof value.failureReason !== "string" || typeof value.failureCode !== "string" || typeof value.elapsedMs !== "number" || typeof value.timedOut !== "boolean")
+  ) {
+    return null;
+  }
+  if (
+    value.status === "running" &&
+    (value.elapsedMs !== undefined ||
+      value.timedOut !== undefined ||
+      value.failureCode !== undefined ||
+      value.failureReason !== undefined ||
+      value.providerFailure !== undefined)
+  ) {
+    return null;
+  }
+  return {
+    ...(value as unknown as StoredCheckpointForkAttempt),
+    ...(providerFailure === undefined ? {} : { providerFailure })
+  };
+}
+
 async function loadCheckpointArtifactIndex(baseDir: string | undefined): Promise<void> {
   if (!baseDir) return;
   const root = path.resolve(baseDir);
@@ -3084,6 +3571,10 @@ async function readCheckpointFromFile(
 
 function checkpointArtifactIndexPath(baseDir: string): string {
   return path.join(path.resolve(baseDir), CHECKPOINT_ARTIFACT_INDEX_FILE);
+}
+
+function checkpointForkAttemptPath(baseDir: string): string {
+  return path.join(path.resolve(baseDir), CHECKPOINT_FORK_ATTEMPT_FILE);
 }
 
 function checkpointArtifactDirectory(baseDir: string): string {
