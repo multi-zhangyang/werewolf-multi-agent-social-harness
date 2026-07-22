@@ -71,6 +71,7 @@ import {
   type ReasonerMemoryEntry,
   type ReasonerOutput,
   type ReasonerOutputSummary,
+  type ReasonerSocialSpeechActDraft,
   type WerewolfLivePublicState,
   type WerewolfHarnessObservation
 } from "./types";
@@ -459,7 +460,12 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         agentStateHash: expectedAgentStateHash
       };
       const reasonerSummary = reasonerOutput
-        ? summarizeReasonerOutput(reasonerOutput.content, reasonerOutput.completion, actionProposal)
+        ? summarizeReasonerOutput(
+            reasonerOutput.content,
+            reasonerOutput.completion,
+            actionProposal,
+            reasonerOutput.speechActDrafts
+          )
         : summarizePolicyOnlyOutput(privateMemo);
       const metadata: WerewolfSocialActionMetadata = {
         kind: WEREWOLF_HARNESS_TURN_METADATA_KIND,
@@ -786,7 +792,12 @@ function buildScaffoldedWerewolfAction(input: {
     agentStateHash: expectedAgentStateHash
   };
   const reasonerSummary = reasonerOutput
-    ? summarizeReasonerOutput(reasonerOutput.content, reasonerOutput.completion, reasonerOutput.actionProposal)
+    ? summarizeReasonerOutput(
+        reasonerOutput.content,
+        reasonerOutput.completion,
+        reasonerOutput.actionProposal,
+        reasonerOutput.speechActDrafts
+      )
     : summarizePolicyOnlyOutput(privateMemo);
   const metadata: WerewolfSocialActionMetadata = {
     kind: WEREWOLF_HARNESS_TURN_METADATA_KIND,
@@ -1353,7 +1364,7 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
       recipientIds: publicRecipientIds,
       visibility: "public",
       content: input.command.text,
-      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
+      speechActs: werewolfSpeechActsForMessage(input),
       metadata: {
         ...baseMetadata,
         kind: "public-speech",
@@ -1372,7 +1383,7 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
       recipientIds: publicRecipientIds,
       visibility: "public",
       content: input.command.text,
-      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
+      speechActs: werewolfSpeechActsForMessage(input),
       metadata: {
         ...baseMetadata,
         kind: "public-last-words",
@@ -1460,7 +1471,7 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
       runtimeAudienceIds: liveWolfAudienceIds,
       visibility: "team",
       content: input.command.text,
-      speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
+      speechActs: werewolfSpeechActsForMessage(input),
       metadata: {
         ...baseMetadata,
         kind: "werewolf-whisper",
@@ -1681,6 +1692,112 @@ function werewolfSpeechActsForCommand(command: GameCommand, actorId: string): So
   }
 
   return undefined;
+}
+
+/**
+ * Turn a reasoner's bounded social-intent drafts into message candidates only
+ * after domain-policy validation. The model cannot choose sender, audience,
+ * visibility, evidence ids, or arbitrary metadata; the communication bus
+ * assigns durable ids/evidence and performs the final channel validation.
+ */
+function werewolfSpeechActsForMessage(input: WerewolfMessageDraftInput): SocialSpeechAct[] | undefined {
+  const commandActs = werewolfSpeechActsForCommand(input.command, input.actorId) ?? [];
+  if (
+    input.command.type !== "speech.submit" &&
+    input.command.type !== "lastWords.submit" &&
+    input.command.type !== "werewolf.whisper"
+  ) {
+    return commandActs.length ? commandActs : undefined;
+  }
+  const draftedActs = validateReasonerSocialSpeechActDrafts(input);
+  const acts = [...commandActs, ...draftedActs];
+  return acts.length ? acts : undefined;
+}
+
+function validateReasonerSocialSpeechActDrafts(input: WerewolfMessageDraftInput): SocialSpeechAct[] {
+  const drafts = Array.isArray(input.reasonerOutput.speechActDrafts)
+    ? input.reasonerOutput.speechActDrafts.slice(0, 4)
+    : [];
+  if (!drafts.length || input.reasonerOutput.cognitionSource === "policy") return [];
+
+  const visibleActorIds = new Set(input.observation.publicPlayers.map((player) => player.id));
+  visibleActorIds.add(input.actorId);
+  const coalitionMemberIds = input.command.type === "werewolf.whisper"
+    ? new Set([input.actorId, ...(input.observation.privateInfo.werewolfAllies ?? [])])
+    : visibleActorIds;
+  const accepted: SocialSpeechAct[] = [];
+  const semanticKeys = new Set<string>();
+
+  for (const draft of drafts) {
+    if (!isReasonerSocialSpeechActDraft(draft)) continue;
+    const targetId = draft.targetId?.trim();
+    const value = draft.value?.trim();
+    const memberIds = [...new Set((draft.memberIds ?? []).map((id) => id.trim()).filter(Boolean))];
+    if (targetId && !visibleActorIds.has(targetId)) continue;
+    if (memberIds.some((id) => !coalitionMemberIds.has(id))) continue;
+    if ((draft.kind === "claim" || draft.kind === "agreement" || draft.kind === "disagreement") && !targetId) continue;
+    if ((draft.kind === "claim" || draft.kind === "commitment") && !value) continue;
+    if ((draft.kind === "request" || draft.kind === "threat" || draft.kind === "trust_repair") && !targetId) continue;
+    if (draft.kind === "coalition_signal" && (!value || !memberIds.length)) continue;
+
+    const normalizedMembers = draft.kind === "coalition_signal"
+      ? [...new Set([input.actorId, ...memberIds])].sort()
+      : [];
+    if (draft.kind === "coalition_signal" && normalizedMembers.length < 2) continue;
+    const semanticKey = JSON.stringify([draft.kind, targetId ?? null, value ?? null, normalizedMembers]);
+    if (semanticKeys.has(semanticKey)) continue;
+    semanticKeys.add(semanticKey);
+
+    const metadata: Record<string, unknown> = {
+      source: "reasoner.social-intent",
+      messageKind:
+        input.command.type === "werewolf.whisper"
+          ? "werewolf-whisper"
+          : input.command.type === "lastWords.submit"
+          ? "public-last-words"
+          : "public-speech"
+    };
+    if (draft.kind === "claim") metadata.topic = "reasoner_claim";
+    if (draft.kind === "commitment") metadata.promisedAction = value;
+    if (draft.kind === "coalition_signal") {
+      metadata.memberIds = normalizedMembers;
+      metadata.sharedGoal = value;
+    }
+    accepted.push({
+      id: "",
+      kind: draft.kind,
+      subjectId: draft.kind === "claim" ? targetId : input.actorId,
+      targetId,
+      value,
+      confidence: draft.confidence ?? 0.5,
+      evidenceRefs: [],
+      metadata
+    });
+  }
+  return accepted;
+}
+
+function isReasonerSocialSpeechActDraft(value: unknown): value is ReasonerSocialSpeechActDraft {
+  if (!value || typeof value !== "object") return false;
+  const draft = value as Partial<ReasonerSocialSpeechActDraft>;
+  if (
+    draft.kind !== "claim" &&
+    draft.kind !== "request" &&
+    draft.kind !== "agreement" &&
+    draft.kind !== "disagreement" &&
+    draft.kind !== "commitment" &&
+    draft.kind !== "coalition_signal" &&
+    draft.kind !== "threat" &&
+    draft.kind !== "trust_repair"
+  ) return false;
+  if (draft.targetId !== undefined && (typeof draft.targetId !== "string" || !draft.targetId.trim() || draft.targetId.length > 120)) return false;
+  if (draft.value !== undefined && (typeof draft.value !== "string" || !draft.value.trim() || draft.value.length > 240)) return false;
+  if (draft.confidence !== undefined && (!Number.isFinite(draft.confidence) || draft.confidence < 0 || draft.confidence > 1)) return false;
+  return draft.memberIds === undefined || (
+    Array.isArray(draft.memberIds) &&
+    draft.memberIds.length <= 12 &&
+    draft.memberIds.every((id) => typeof id === "string" && Boolean(id.trim()) && id.length <= 120)
+  );
 }
 
 export function toWerewolfSocialStep(step: HarnessStepRecord, metadata: WerewolfSocialStepMetadata): WerewolfSocialStep {
@@ -2084,7 +2201,8 @@ function summarizeReasonerOutput(
     retryHistory?: ReasonerOutputSummary["retryHistory"];
     stream?: ReasonerOutputSummary["stream"];
   },
-  actionProposal?: ReasonerOutputSummary["actionProposal"]
+  actionProposal?: ReasonerOutputSummary["actionProposal"],
+  speechActDrafts?: ReasonerOutputSummary["speechActDrafts"]
 ): ReasonerOutputSummary {
   return {
     content,
@@ -2095,7 +2213,8 @@ function summarizeReasonerOutput(
     attempts: completion.attempts,
     retryHistory: cloneJson(completion.retryHistory),
     stream: cloneJson(completion.stream),
-    actionProposal: cloneJson(actionProposal)
+    actionProposal: cloneJson(actionProposal),
+    speechActDrafts: cloneJson(speechActDrafts)
   };
 }
 

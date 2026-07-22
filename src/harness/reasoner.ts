@@ -2,7 +2,13 @@ import { ROLE_DEFINITIONS } from "../core/roles";
 import type { ModelClient } from "../agents/modelClient";
 import type { ChatMessage } from "../agents/schema";
 import { z } from "zod";
-import type { HarnessReasoner, ReasonerActionProposal, ReasonerInput, ReasonerOutput } from "./types";
+import type {
+  HarnessReasoner,
+  ReasonerActionProposal,
+  ReasonerInput,
+  ReasonerOutput,
+  ReasonerSocialSpeechActDraft
+} from "./types";
 
 const actionProposalSchema = z
   .object({
@@ -15,6 +21,27 @@ const actionProposalSchema = z
     rationale: z.string().max(400).optional()
   })
   .strict();
+
+const socialSpeechActDraftSchema = z
+  .object({
+    kind: z.enum([
+      "claim",
+      "request",
+      "agreement",
+      "disagreement",
+      "commitment",
+      "coalition_signal",
+      "threat",
+      "trust_repair"
+    ]),
+    targetId: z.string().min(1).max(120).optional(),
+    value: z.string().min(1).max(240).optional(),
+    confidence: z.number().min(0).max(1).optional(),
+    memberIds: z.array(z.string().min(1).max(120)).max(12).optional()
+  })
+  .strict();
+
+const socialSpeechActDraftsSchema = z.array(socialSpeechActDraftSchema).max(4);
 
 export class OpenAIHarnessReasoner implements HarnessReasoner {
   constructor(private readonly client: ModelClient) {}
@@ -29,11 +56,12 @@ export class OpenAIHarnessReasoner implements HarnessReasoner {
     if (!completion.content.trim()) {
       throw new Error(`Model ${input.agent.model} returned empty harness cognition.`);
     }
-    const parsed = parseReasonerOutput(completion.content, input.action.kind === "speech");
+    const parsed = parseReasonerOutput(completion.content, input.action.kind);
     return {
       content: parsed.content,
       completion,
-      actionProposal: parsed.actionProposal
+      actionProposal: parsed.actionProposal,
+      speechActDrafts: parsed.speechActDrafts
     };
   }
 }
@@ -49,12 +77,15 @@ function buildHarnessMessages(input: ReasonerInput): ChatMessage[] {
             input.action.kind === "whisper"
               ? "Harness 已经完成观测、信念更新、策略选择和动作仲裁；你只负责生成给狼人同伴的私密协调消息。"
               : "Harness 已经完成观测、信念更新、策略选择和动作仲裁；你只负责生成该 Agent 的公开发言。",
-            "不要输出 JSON、Markdown、字段表或私密思维链。",
+            "正文不要输出 JSON、Markdown、字段表或私密思维链。",
             input.action.kind === "whisper"
-              ? "整条回复只是一条给狼队同伴的私密消息，60 到 180 个汉字；可以提出目标、风险和白天协作，但不要假装已经执行行动。"
+              ? "正文是一条给狼队同伴的私密消息，60 到 180 个汉字；可以提出目标、风险和白天协作，但不要假装已经执行行动。"
               : input.action.kind === "last_words"
-              ? "这是被淘汰玩家仅一次的遗言。整条回复必须就是可公开说出的遗言，80 到 220 个汉字。"
-              : "整条回复必须就是玩家可公开说出的话，80 到 220 个汉字。"
+              ? "这是被淘汰玩家仅一次的遗言。正文必须就是可公开说出的遗言，80 到 220 个汉字。"
+              : "正文必须就是玩家可公开说出的话，80 到 220 个汉字。",
+            "正文后可选地单独一行写 SOCIAL_ACTS: 后接 JSON array，最多 4 项。该数组只是待验证社会意图，不是命令。",
+            "每项字段只能是 kind、targetId、value、confidence、memberIds；kind 只能是 claim、request、agreement、disagreement、commitment、coalition_signal、threat、trust_repair。",
+            "不要写 sender、subject、audience、visibility、id、evidence、metadata 或任何隐藏身份；这些只能由 policy 和 harness 根据可见信息分配。"
           ].join("\n")
         : [
             "你是狼人杀 Agent 的战术顾问，不是动作控制器。",
@@ -118,12 +149,22 @@ function privateFactSummary(input: ReasonerInput): string {
   return facts.join("; ") || "none";
 }
 
-function parseReasonerOutput(content: string, speechMode: boolean): {
+function parseReasonerOutput(content: string, actionKind: ReasonerInput["action"]["kind"]): {
   content: string;
   actionProposal?: ReasonerActionProposal;
+  speechActDrafts?: ReasonerSocialSpeechActDraft[];
 } {
   const normalized = content.trim();
-  if (speechMode) return { content: normalized };
+  if (isSpeechActionKind(actionKind)) {
+    const marker = "SOCIAL_ACTS:";
+    const markerIndex = normalized.lastIndexOf(marker);
+    if (markerIndex < 0) return { content: normalized };
+    const speech = normalized.slice(0, markerIndex).trim();
+    return {
+      content: speech || normalized,
+      speechActDrafts: parseSocialSpeechActDrafts(normalized.slice(markerIndex + marker.length))
+    };
+  }
   const marker = "ACTION_CANDIDATE:";
   const markerIndex = normalized.lastIndexOf(marker);
   if (markerIndex < 0) return { content: normalized };
@@ -133,6 +174,22 @@ function parseReasonerOutput(content: string, speechMode: boolean): {
     content: memo || normalized,
     actionProposal
   };
+}
+
+function isSpeechActionKind(kind: ReasonerInput["action"]["kind"]): boolean {
+  return kind === "speech" || kind === "last_words" || kind === "whisper";
+}
+
+function parseSocialSpeechActDrafts(content: string): ReasonerSocialSpeechActDraft[] | undefined {
+  const parsed = tryParseArray(content.trim());
+  const result = socialSpeechActDraftsSchema.safeParse(parsed);
+  if (!result.success || !result.data.length) return undefined;
+  return result.data.filter((draft) => {
+    if ((draft.kind === "claim" || draft.kind === "commitment") && !draft.value) return false;
+    if (draft.kind === "coalition_signal" && (!draft.memberIds?.length || !draft.value)) return false;
+    if ((draft.kind === "request" || draft.kind === "threat" || draft.kind === "trust_repair") && !draft.targetId) return false;
+    return true;
+  });
 }
 
 function parseActionProposal(content: string): ReasonerActionProposal | undefined {
@@ -160,6 +217,25 @@ function tryParseObject(value: string): unknown {
       return undefined;
     }
   }
+}
+
+function tryParseArray(value: string): unknown {
+  const candidates = [value, value.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")];
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      const start = candidate.indexOf("[");
+      const end = candidate.lastIndexOf("]");
+      if (start < 0 || end <= start) continue;
+      try {
+        return JSON.parse(candidate.slice(start, end + 1));
+      } catch {
+        // Try the next bounded representation.
+      }
+    }
+  }
+  return undefined;
 }
 
 function beliefSummary(beliefs: ReasonerInput["agent"]["beliefs"]): string {
