@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { HarnessCheckpointEnvelope, HarnessEpisodeArtifactEnvelope } from "./episodeArtifacts";
@@ -17,6 +18,7 @@ export const HARNESS_EPISODE_CHECKPOINT_INDEX_VERSION = "harness.episode-checkpo
 export const HARNESS_EPISODE_CHECKPOINT_MANIFEST_VERSION = "harness.episode-checkpoint-manifest.v1";
 
 const EPISODES_DIRECTORY = "episodes";
+const LOCKS_DIRECTORY = "locks";
 const INDEX_FILE = "index.json";
 const ARTIFACT_FILE = "artifact.json";
 const MANIFEST_FILE = "manifest.json";
@@ -30,6 +32,7 @@ const CHECKPOINT_FILE = "checkpoint.json";
 const DIRECTORY_KEY_PATTERN = /^[a-f0-9]{64}$/;
 const LEGACY_EPISODE_STORE_MANIFEST_V1_VERSION = "harness.episode-store-manifest.v1";
 const LEGACY_EPISODE_STORE_MANIFEST_V2_VERSION = "harness.episode-store-manifest.v2";
+const STORE_LEASE_ACQUIRED_MARKER = "HARNESS_EPISODE_STORE_LEASE_ACQUIRED\n";
 
 type GenericEpisodeEnvelope = HarnessEpisodeArtifactEnvelope<unknown, unknown, unknown, unknown, unknown>;
 type GenericCheckpointEnvelope = HarnessCheckpointEnvelope<unknown, unknown, unknown, unknown, unknown>;
@@ -170,10 +173,13 @@ export interface HarnessEpisodeArtifactStoreOptions<
  * Domain-neutral, single-episode persistence with a fixed server-owned layout:
  *
  *   <base>/index.json
+ *   <base>/locks/store.lock
  *   <base>/episodes/<sha256(runId)>/{manifest.json,artifact.json,trajectory.jsonl}
  *
  * Neither run ids nor artifact data become paths. Every artifact is strongly
  * verified before publication and again on every read/recovery operation.
+ * Canonical episode/checkpoint directories are authority; both indexes are
+ * rebuildable projections serialized by a single-host kernel lease.
  */
 export class HarnessEpisodeArtifactStore<
   TArtifact extends GenericEpisodeEnvelope,
@@ -181,6 +187,7 @@ export class HarnessEpisodeArtifactStore<
 > {
   private readonly root: string;
   private readonly episodesDirectory: string;
+  private readonly locksDirectory: string;
   private readonly verifyArtifact: CanonicalEpisodeArtifactVerifier<TArtifact>;
   private readonly verifyCheckpoint?: CanonicalHarnessCheckpointVerifier<TCheckpoint>;
   private readonly now: () => string;
@@ -194,6 +201,7 @@ export class HarnessEpisodeArtifactStore<
     }
     this.root = path.resolve(options.baseDirectory);
     this.episodesDirectory = path.join(this.root, EPISODES_DIRECTORY);
+    this.locksDirectory = path.join(this.root, LOCKS_DIRECTORY);
     this.verifyArtifact = options.verifyArtifact;
     this.verifyCheckpoint = options.verifyCheckpoint;
     this.now = options.now ?? (() => new Date().toISOString());
@@ -223,15 +231,7 @@ export class HarnessEpisodeArtifactStore<
       : undefined;
     const metricRows = metricRowsForArtifact(canonical, evaluationReport);
     const failureRows = failureRowsForArtifact(canonical, evaluationReport);
-
     const directoryKey = directoryKeyForRunId(canonical.runId);
-    const finalDirectory = path.join(this.episodesDirectory, directoryKey);
-    const existing = await this.loadDirectory(directoryKey, canonical.runId);
-    if (existing) {
-      return this.acceptExactEpisodeRetry(existing, canonical, metricRows, failureRows, evaluationReport);
-    }
-    await assertPathMissing(finalDirectory, "Episode artifact already exists for this run id.");
-
     const artifactText = jsonDocument(canonical);
     const trajectoryText = trajectoryJsonl(canonical);
     const metricsText = jsonLines(metricRows);
@@ -247,6 +247,54 @@ export class HarnessEpisodeArtifactStore<
       evaluationText,
       evaluationReport?.id
     );
+    return this.withStoreLease(() => this.putUnderLease({
+      canonical,
+      evaluationReport,
+      metricRows,
+      failureRows,
+      directoryKey,
+      artifactText,
+      trajectoryText,
+      metricsText,
+      failuresText,
+      evaluationText,
+      manifest
+    }));
+  }
+
+  private async putUnderLease(prepared: {
+    canonical: TArtifact;
+    evaluationReport?: HarnessEvaluationReport;
+    metricRows: HarnessEpisodeMetricRow[];
+    failureRows: HarnessEpisodeFailureRow[];
+    directoryKey: string;
+    artifactText: string;
+    trajectoryText: string;
+    metricsText: string;
+    failuresText: string;
+    evaluationText: string;
+    manifest: HarnessEpisodeStoreManifest;
+  }): Promise<HarnessEpisodeStoreEntry> {
+    const {
+      canonical,
+      evaluationReport,
+      metricRows,
+      failureRows,
+      directoryKey,
+      artifactText,
+      trajectoryText,
+      metricsText,
+      failuresText,
+      evaluationText,
+      manifest
+    } = prepared;
+    const finalDirectory = path.join(this.episodesDirectory, directoryKey);
+    const existing = await this.loadDirectory(directoryKey, canonical.runId, false);
+    if (existing) {
+      return this.acceptExactEpisodeRetry(existing, canonical, metricRows, failureRows, evaluationReport);
+    }
+    await assertPathMissing(finalDirectory, "Episode artifact already exists for this run id.");
+
     const temporaryDirectory = path.join(this.episodesDirectory, `.tmp-${randomUUID()}`);
     await mkdir(temporaryDirectory, { recursive: false });
     try {
@@ -269,7 +317,7 @@ export class HarnessEpisodeArtifactStore<
       // Another writer may have atomically published the same immutable run
       // id after our preflight. Re-read canonical authority and accept only an
       // exact content match; never overwrite or merge drift.
-      const concurrentlyPublished = await this.loadDirectory(directoryKey, canonical.runId);
+      const concurrentlyPublished = await this.loadDirectory(directoryKey, canonical.runId, false);
       if (concurrentlyPublished) {
         return this.acceptExactEpisodeRetry(
           concurrentlyPublished,
@@ -285,7 +333,7 @@ export class HarnessEpisodeArtifactStore<
     const entry = entryFromManifest(manifest);
     this.entries.set(entry.runId, entry);
     this.checkpoints.set(entry.runId, new Map());
-    await this.writeIndex();
+    await this.writeIndex(true, [entry.runId]);
     return cloneEntry(entry);
   }
 
@@ -312,12 +360,15 @@ export class HarnessEpisodeArtifactStore<
     ) {
       throw new Error("Episode artifact run id already exists with different immutable content.");
     }
-    const checkpoints = this.checkpoints.get(artifact.runId) ??
-      await this.recoverCheckpointRegistry(existing.entry.directoryKey, existing.artifact);
+    const checkpoints = await this.recoverCheckpointRegistry(
+      existing.entry.directoryKey,
+      existing.artifact,
+      false
+    );
     const entry = { ...existing.entry, checkpointCount: checkpoints.size };
     this.entries.set(entry.runId, entry);
     this.checkpoints.set(entry.runId, checkpoints);
-    await this.writeIndex();
+    await this.writeIndex(true, [entry.runId]);
     return cloneEntry(entry);
   }
 
@@ -328,6 +379,7 @@ export class HarnessEpisodeArtifactStore<
   }
 
   async list(): Promise<HarnessEpisodeStoreEntry[]> {
+    await this.refreshEntriesFromCanonicalEpisodes();
     const verified: HarnessEpisodeStoreEntry[] = [];
     for (const entry of [...this.entries.values()].sort(compareEntries)) {
       const loaded = await this.loadDirectory(entry.directoryKey, entry.runId);
@@ -363,8 +415,36 @@ export class HarnessEpisodeArtifactStore<
     const canonical = jsonClone(checkpoint, "Harness checkpoint is not JSON serializable.");
     assertCheckpointIdentity(canonical, loadedEpisode.artifact);
     await this.assertCanonicalCheckpoint(canonical);
+    const directoryKey = directoryKeyForCheckpointId(canonical.checkpointId);
+    const checkpointText = jsonDocument(canonical);
+    const manifest = checkpointManifestFor(canonical, directoryKey, checkpointText);
+    return this.withStoreLease(() => this.putCheckpointUnderLease({
+      runId,
+      canonical,
+      episode: loadedEpisode,
+      directoryKey,
+      checkpointText,
+      manifest
+    }));
+  }
 
-    const checkpointEntries = this.checkpoints.get(runId) ?? new Map<string, HarnessEpisodeCheckpointStoreEntry>();
+  private async putCheckpointUnderLease(prepared: {
+    runId: string;
+    canonical: TCheckpoint;
+    episode: {
+      artifact: TArtifact;
+      entry: HarnessEpisodeStoreEntry;
+    };
+    directoryKey: string;
+    checkpointText: string;
+    manifest: HarnessEpisodeCheckpointStoreManifest;
+  }): Promise<HarnessEpisodeCheckpointStoreEntry> {
+    const { runId, canonical, episode: loadedEpisode, directoryKey, checkpointText, manifest } = prepared;
+    assertCheckpointIdentity(canonical, loadedEpisode.artifact);
+    const checkpointEntries = await this.scanCanonicalCheckpointHeads(
+      loadedEpisode.entry.directoryKey,
+      loadedEpisode.artifact
+    );
     if (checkpointEntries.has(canonical.checkpointId)) {
       throw new Error("Harness checkpoint already exists for this checkpoint id.");
     }
@@ -374,11 +454,8 @@ export class HarnessEpisodeArtifactStore<
       checkpointsDirectory,
       "Episode checkpoint directory is not safe."
     );
-    const directoryKey = directoryKeyForCheckpointId(canonical.checkpointId);
     const finalDirectory = path.join(checkpointsDirectory, directoryKey);
     await assertPathMissing(finalDirectory, "Harness checkpoint already exists for this checkpoint id.");
-    const checkpointText = jsonDocument(canonical);
-    const manifest = checkpointManifestFor(canonical, directoryKey, checkpointText);
     const temporaryDirectory = path.join(checkpointsDirectory, `.tmp-${randomUUID()}`);
     await mkdir(temporaryDirectory, { recursive: false });
     try {
@@ -396,7 +473,7 @@ export class HarnessEpisodeArtifactStore<
     this.checkpoints.set(runId, checkpointEntries);
     this.updateCheckpointCount(runId, checkpointEntries.size);
     await this.writeCheckpointIndex(runId, loadedEpisode.entry.directoryKey, checkpointEntries);
-    await this.writeIndex();
+    await this.writeIndex(true, [entry.runId]);
     return cloneCheckpointEntry(entry);
   }
 
@@ -404,12 +481,27 @@ export class HarnessEpisodeArtifactStore<
     assertRunId(runId);
     assertCheckpointId(checkpointId);
     const loadedEpisode = await this.loadKnownEpisode(runId);
-    const known = this.checkpoints.get(runId)?.get(checkpointId);
-    if (!loadedEpisode || !known) return undefined;
+    if (!loadedEpisode) return undefined;
+    const directoryKey = directoryKeyForCheckpointId(checkpointId);
+    const checkpointDirectory = path.join(
+      this.episodesDirectory,
+      loadedEpisode.entry.directoryKey,
+      CHECKPOINTS_DIRECTORY,
+      directoryKey
+    );
+    try {
+      const stat = await lstat(checkpointDirectory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error("Stored harness checkpoint identity path is not a safe directory.");
+      }
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
     const loaded = await this.loadCheckpointDirectory(
       loadedEpisode.entry.directoryKey,
       loadedEpisode.artifact,
-      known.directoryKey,
+      directoryKey,
       checkpointId
     );
     if (!loaded) throw new Error("Stored harness checkpoint failed canonical recovery validation.");
@@ -440,16 +532,32 @@ export class HarnessEpisodeArtifactStore<
     await assertDirectory(this.root, "Episode artifact store root is not a safe directory.");
     await mkdir(this.episodesDirectory, { recursive: true });
     await assertDirectoryInside(this.root, this.episodesDirectory, "Episode artifact directory is not safe.");
+    await mkdir(this.locksDirectory, { recursive: true });
+    await assertDirectoryInside(this.root, this.locksDirectory, "Episode artifact store locks directory is not safe.");
     await assertWritableFileTarget(path.join(this.root, INDEX_FILE), "Episode artifact index is not a safe regular file.");
 
+    await this.withStoreLease(async () => {
+      await this.refreshEntriesFromCanonicalEpisodes(true);
+      await this.writeIndex(false);
+    });
+  }
+
+  private async refreshEntriesFromCanonicalEpisodes(publishCheckpointIndexes = false): Promise<void> {
     const recovered = new Map<string, HarnessEpisodeStoreEntry>();
     const recoveredCheckpoints = new Map<string, Map<string, HarnessEpisodeCheckpointStoreEntry>>();
     const children = await readdir(this.episodesDirectory, { withFileTypes: true });
     for (const child of children) {
-      if (!child.isDirectory() || !DIRECTORY_KEY_PATTERN.test(child.name)) continue;
+      if (!DIRECTORY_KEY_PATTERN.test(child.name)) continue;
+      if (!child.isDirectory() || child.isSymbolicLink()) {
+        throw new Error("Stored episode identity path is not a safe directory.");
+      }
       const loaded = await this.loadDirectory(child.name);
       if (!loaded || recovered.has(loaded.entry.runId)) continue;
-      const checkpoints = await this.recoverCheckpointRegistry(child.name, loaded.artifact);
+      const checkpoints = await this.recoverCheckpointRegistry(
+        child.name,
+        loaded.artifact,
+        publishCheckpointIndexes
+      );
       recovered.set(loaded.entry.runId, { ...loaded.entry, checkpointCount: checkpoints.size });
       recoveredCheckpoints.set(loaded.entry.runId, checkpoints);
     }
@@ -457,7 +565,147 @@ export class HarnessEpisodeArtifactStore<
     for (const [runId, entry] of recovered) this.entries.set(runId, entry);
     this.checkpoints.clear();
     for (const [runId, entries] of recoveredCheckpoints) this.checkpoints.set(runId, entries);
-    await this.writeIndex();
+  }
+
+  /**
+   * Merge this instance's freshly verified mutations with the globally locked
+   * derived index. The index is never read authority: open/get/list recover
+   * from canonical directories and re-run all strong verifiers. Holding the
+   * lease while reading and replacing this projection prevents peer writers
+   * from erasing one another without replaying every historical episode.
+   */
+  private async mergeEntriesFromPublishedIndex(dirtyRunIds: readonly string[]): Promise<void> {
+    const dirtyRunIdSet = new Set(dirtyRunIds);
+    let projected: Map<string, HarnessEpisodeStoreEntry> | undefined;
+    try {
+      const text = await readSafeFile(this.root, INDEX_FILE);
+      projected = parseEpisodeStoreIndexEntries(JSON.parse(text) as unknown);
+    } catch (error) {
+      if (!isMissing(error)) projected = undefined;
+    }
+    if (!projected) {
+      await this.refreshEntriesFromCanonicalEpisodes(true);
+      return;
+    }
+    for (const entry of projected.values()) {
+      const directory = path.join(this.episodesDirectory, entry.directoryKey);
+      try {
+        const stat = await lstat(directory);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) {
+          throw new Error("Stored episode identity path is not a safe directory.");
+        }
+      } catch (error) {
+        if (isMissing(error)) {
+          await this.refreshEntriesFromCanonicalEpisodes(true);
+          return;
+        }
+        throw error;
+      }
+      if (dirtyRunIdSet.has(entry.runId)) continue;
+      const manifest = JSON.parse(await readSafeFile(directory, MANIFEST_FILE)) as unknown;
+      const canonicalProjection = projectionEntryFromManifest(manifest, entry.directoryKey);
+      if (!canonicalProjection) {
+        await this.refreshEntriesFromCanonicalEpisodes(true);
+        return;
+      }
+      const checkpointDirectoryCount = await this.countProjectionCheckpointDirectories(entry.directoryKey);
+      canonicalProjection.checkpointCount = checkpointDirectoryCount;
+      if (checkpointDirectoryCount > 0 || entry.checkpointCount > 0) {
+        const loaded = await this.loadDirectory(entry.directoryKey, entry.runId, false);
+        if (!loaded) {
+          await this.refreshEntriesFromCanonicalEpisodes(true);
+          return;
+        }
+        const canonicalCheckpoints = await this.scanCanonicalCheckpointHeads(
+          entry.directoryKey,
+          loaded.artifact
+        );
+        canonicalProjection.checkpointCount = canonicalCheckpoints.size;
+        if (canonicalCheckpoints.size !== checkpointDirectoryCount) {
+          await this.refreshEntriesFromCanonicalEpisodes(true);
+          return;
+        }
+      }
+      if (hashStableJsonValue(canonicalProjection) !== hashStableJsonValue(entry)) {
+        await this.refreshEntriesFromCanonicalEpisodes(true);
+        return;
+      }
+    }
+    const knownDirectoryKeys = new Set([
+      ...[...projected.values()].map((entry) => entry.directoryKey),
+      ...dirtyRunIds.flatMap((runId) => {
+        const entry = this.entries.get(runId);
+        return entry ? [entry.directoryKey] : [];
+      })
+    ]);
+    for (const child of await readdir(this.episodesDirectory, { withFileTypes: true })) {
+      if (!DIRECTORY_KEY_PATTERN.test(child.name)) continue;
+      if (!child.isDirectory() || child.isSymbolicLink()) {
+        throw new Error("Stored episode identity path is not a safe directory.");
+      }
+      if (knownDirectoryKeys.has(child.name)) continue;
+      const loaded = await this.loadDirectory(child.name);
+      if (!loaded || projected.has(loaded.entry.runId)) continue;
+      const checkpoints = await this.recoverCheckpointRegistry(child.name, loaded.artifact, true);
+      projected.set(loaded.entry.runId, { ...loaded.entry, checkpointCount: checkpoints.size });
+    }
+    for (const runId of dirtyRunIds) {
+      const entry = this.entries.get(runId);
+      if (entry) projected.set(runId, cloneEntry(entry));
+    }
+    this.entries.clear();
+    for (const [runId, entry] of projected) this.entries.set(runId, entry);
+  }
+
+  private async countProjectionCheckpointDirectories(episodeDirectoryKey: string): Promise<number> {
+    const checkpointsDirectory = path.join(this.episodesDirectory, episodeDirectoryKey, CHECKPOINTS_DIRECTORY);
+    let count = 0;
+    for (const child of await readdir(checkpointsDirectory, { withFileTypes: true })) {
+      if (!DIRECTORY_KEY_PATTERN.test(child.name)) continue;
+      if (!child.isDirectory() || child.isSymbolicLink()) {
+        throw new Error("Stored harness checkpoint identity path is not a safe directory.");
+      }
+      count += 1;
+    }
+    return count;
+  }
+
+  private async scanCanonicalCheckpointHeads(
+    episodeDirectoryKey: string,
+    artifact: TArtifact
+  ): Promise<Map<string, HarnessEpisodeCheckpointStoreEntry>> {
+    const episodeDirectory = path.join(this.episodesDirectory, episodeDirectoryKey);
+    const checkpointsDirectory = path.join(episodeDirectory, CHECKPOINTS_DIRECTORY);
+    const recovered = new Map<string, HarnessEpisodeCheckpointStoreEntry>();
+    const children = await readdir(checkpointsDirectory, { withFileTypes: true });
+    const checkpointDirectories = children.filter(
+      (child) => DIRECTORY_KEY_PATTERN.test(child.name) && child.isDirectory() && !child.isSymbolicLink()
+    );
+    if (checkpointDirectories.length > 0 && !this.verifyCheckpoint) {
+      throw new Error("Stored harness checkpoints require an explicit canonical checkpoint verifier.");
+    }
+    for (const child of checkpointDirectories) {
+      const directory = path.join(checkpointsDirectory, child.name);
+      try {
+        await assertDirectoryInside(checkpointsDirectory, directory, "Stored harness checkpoint directory is not safe.");
+        const manifestText = await readSafeFile(directory, MANIFEST_FILE);
+        const checkpointText = await readSafeFile(directory, CHECKPOINT_FILE);
+        const manifest = JSON.parse(manifestText) as unknown;
+        const checkpoint = JSON.parse(checkpointText) as TCheckpoint;
+        if (!isValidCheckpointManifest(manifest, child.name, checkpoint)) continue;
+        if (directoryKeyForCheckpointId(checkpoint.checkpointId) !== child.name) continue;
+        if (checkpoint.source.runId !== artifact.runId) continue;
+        if (sha256(checkpointText) !== manifest.checkpointSha256) continue;
+        assertCheckpointIdentity(checkpoint, artifact);
+        await this.assertCanonicalCheckpoint(checkpoint);
+        const entry = checkpointEntryFromManifest(manifest);
+        if (!recovered.has(entry.checkpointId)) recovered.set(entry.checkpointId, entry);
+      } catch (error) {
+        if (isRecord(error) && typeof error.code === "string" && error.code !== "ENOENT") throw error;
+        // A corrupt checkpoint is not canonical index membership.
+      }
+    }
+    return recovered;
   }
 
   private async loadKnownEpisode(
@@ -470,17 +718,33 @@ export class HarnessEpisodeArtifactStore<
     evaluationReport?: HarnessEvaluationReport;
   } | undefined> {
     assertRunId(runId);
-    const known = this.entries.get(runId);
-    if (!known) return undefined;
-    const loaded = await this.loadDirectory(known.directoryKey, runId);
+    const directoryKey = directoryKeyForRunId(runId);
+    try {
+      const stat = await lstat(path.join(this.episodesDirectory, directoryKey));
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error("Stored episode identity path is not a safe directory.");
+      }
+    } catch (error) {
+      if (isMissing(error)) {
+        this.entries.delete(runId);
+        this.checkpoints.delete(runId);
+        return undefined;
+      }
+      throw error;
+    }
+    const loaded = await this.loadDirectory(directoryKey, runId);
     if (!loaded) throw new Error("Stored episode artifact failed canonical recovery validation.");
-    loaded.entry.checkpointCount = this.checkpoints.get(runId)?.size ?? 0;
+    const checkpoints = await this.recoverCheckpointRegistry(directoryKey, loaded.artifact, false);
+    loaded.entry.checkpointCount = checkpoints.size;
+    this.entries.set(runId, cloneEntry(loaded.entry));
+    this.checkpoints.set(runId, checkpoints);
     return loaded;
   }
 
   private async loadDirectory(
     directoryKey: string,
-    expectedRunId?: string
+    expectedRunId?: string,
+    verifyCanonical = true
   ): Promise<{
     artifact: TArtifact;
     entry: HarnessEpisodeStoreEntry;
@@ -505,7 +769,7 @@ export class HarnessEpisodeArtifactStore<
       if (isValidLegacyV1Manifest(manifest, directoryKey, artifact)) {
         if (sha256(artifactText) !== manifest.artifactSha256) return undefined;
         if (sha256(recordedTrajectory) !== manifest.trajectorySha256) return undefined;
-        await this.assertCanonical(artifact);
+        if (verifyCanonical) await this.assertCanonical(artifact);
         return {
           artifact,
           entry: entryForArtifact(artifact, directoryKey),
@@ -524,7 +788,7 @@ export class HarnessEpisodeArtifactStore<
         const metrics = parseMetricRows(recordedMetrics, artifact.runId, manifest.evaluationReportId);
         const failures = parseFailureRows(recordedFailures, artifact.runId);
         if (metrics.length !== manifest.metricCount || failures.length !== manifest.failureCount) return undefined;
-        await this.assertCanonical(artifact);
+        if (verifyCanonical) await this.assertCanonical(artifact);
         return { artifact, entry: entryFromManifest(manifest), metrics, failures, evaluationReport: undefined };
       }
       if (!isValidManifest(manifest, directoryKey, artifact)) return undefined;
@@ -542,9 +806,10 @@ export class HarnessEpisodeArtifactStore<
       const evaluationReport = parseEvaluationRecord(recordedEvaluation, artifact, artifactText, manifest.evaluationReportId);
       if (hashStableJsonValue(evaluationReport?.metrics ?? []) !== hashStableJsonValue(metrics.map(metricFromRow))) return undefined;
       if (hashStableJsonValue(failureRowsForArtifact(artifact, evaluationReport)) !== hashStableJsonValue(failures)) return undefined;
-      await this.assertCanonical(artifact);
+      if (verifyCanonical) await this.assertCanonical(artifact);
       return { artifact, entry: entryFromManifest(manifest), metrics, failures, evaluationReport };
-    } catch {
+    } catch (error) {
+      if (isRecord(error) && typeof error.code === "string" && error.code !== "ENOENT") throw error;
       return undefined;
     }
   }
@@ -590,7 +855,8 @@ export class HarnessEpisodeArtifactStore<
 
   private async recoverCheckpointRegistry(
     episodeDirectoryKey: string,
-    artifact: TArtifact
+    artifact: TArtifact,
+    publishIndex = true
   ): Promise<Map<string, HarnessEpisodeCheckpointStoreEntry>> {
     const episodeDirectory = path.join(this.episodesDirectory, episodeDirectoryKey);
     const checkpointsDirectory = path.join(episodeDirectory, CHECKPOINTS_DIRECTORY);
@@ -614,7 +880,7 @@ export class HarnessEpisodeArtifactStore<
       if (loaded.checkpoint.source.sourceArtifactVersion !== artifact.artifactVersion) continue;
       recovered.set(loaded.entry.checkpointId, loaded.entry);
     }
-    await this.writeCheckpointIndex(artifact.runId, episodeDirectoryKey, recovered);
+    if (publishIndex) await this.writeCheckpointIndex(artifact.runId, episodeDirectoryKey, recovered);
     return recovered;
   }
 
@@ -681,7 +947,40 @@ export class HarnessEpisodeArtifactStore<
     if (existing) this.entries.set(runId, { ...existing, checkpointCount });
   }
 
-  private async writeIndex(): Promise<void> {
+  private async withStoreLease<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
+    const lease = await this.acquireStoreLease();
+    try {
+      return await operation();
+    } finally {
+      await releaseStoreLease(lease);
+    }
+  }
+
+  private async acquireStoreLease(): Promise<ChildProcessWithoutNullStreams> {
+    const lockDirectory = path.join(this.locksDirectory, "store.lock");
+    try {
+      await mkdir(lockDirectory, { recursive: false });
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+    }
+    await assertDirectoryInside(this.locksDirectory, lockDirectory, "Episode artifact store lease path is not safe.");
+    const child = spawn(
+      "/usr/bin/flock",
+      ["--exclusive", lockDirectory, "/bin/sh", "-c", `printf '${STORE_LEASE_ACQUIRED_MARKER}'; cat >/dev/null`],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    try {
+      await waitForStoreLease(child);
+      return child;
+    } catch (error) {
+      child.stdin.end();
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      throw error;
+    }
+  }
+
+  private async writeIndex(refreshFromCanonical = true, dirtyRunIds: readonly string[] = []): Promise<void> {
+    if (refreshFromCanonical) await this.mergeEntriesFromPublishedIndex(dirtyRunIds);
     const index: HarnessEpisodeStoreIndex = {
       schemaVersion: HARNESS_EPISODE_STORE_INDEX_VERSION,
       kind: "episode-store-index",
@@ -786,6 +1085,89 @@ function entryFromManifest(manifest: HarnessEpisodeStoreManifest): HarnessEpisod
     checkpointCount: 0,
     ...(manifest.evaluationReportId ? { evaluationReportId: manifest.evaluationReportId } : {})
   };
+}
+
+function projectionEntryFromManifest(value: unknown, directoryKey: string): HarnessEpisodeStoreEntry | undefined {
+  if (!isRecord(value)) return undefined;
+  const legacyV1 = value.schemaVersion === LEGACY_EPISODE_STORE_MANIFEST_V1_VERSION;
+  const legacyV2 = value.schemaVersion === LEGACY_EPISODE_STORE_MANIFEST_V2_VERSION;
+  const current = value.schemaVersion === HARNESS_EPISODE_STORE_MANIFEST_VERSION;
+  if (
+    (!legacyV1 && !legacyV2 && !current) ||
+    value.manifestKind !== "episode-store-manifest" ||
+    !isNonemptyString(value.runId) ||
+    directoryKeyForRunId(value.runId) !== directoryKey ||
+    value.directoryKey !== directoryKey ||
+    !isNonemptyString(value.artifactVersion) ||
+    !isNonemptyString(value.kind) ||
+    !isNonemptyString(value.createdAt) ||
+    (value.status !== "completed" && value.status !== "truncated" && value.status !== "failed") ||
+    !isNonnegativeInteger(value.nativeStepCount) ||
+    !isNonnegativeInteger(value.messageCount)
+  ) return undefined;
+  const metricCount = legacyV1 ? 0 : value.metricCount;
+  const failureCount = legacyV1 ? 0 : value.failureCount;
+  if (!isNonnegativeInteger(metricCount) || !isNonnegativeInteger(failureCount)) return undefined;
+  if (value.evaluationReportId !== undefined && !isNonemptyString(value.evaluationReportId)) return undefined;
+  return {
+    runId: value.runId,
+    artifactVersion: value.artifactVersion,
+    kind: value.kind,
+    createdAt: value.createdAt,
+    status: value.status,
+    directoryKey,
+    nativeStepCount: value.nativeStepCount,
+    messageCount: value.messageCount,
+    metricCount,
+    failureCount,
+    checkpointCount: 0,
+    ...(isNonemptyString(value.evaluationReportId) ? { evaluationReportId: value.evaluationReportId } : {})
+  };
+}
+
+function parseEpisodeStoreIndexEntries(value: unknown): Map<string, HarnessEpisodeStoreEntry> | undefined {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== HARNESS_EPISODE_STORE_INDEX_VERSION ||
+    value.kind !== "episode-store-index" ||
+    !isNonemptyString(value.updatedAt) ||
+    !Array.isArray(value.entries)
+  ) return undefined;
+  const recovered = new Map<string, HarnessEpisodeStoreEntry>();
+  for (const candidate of value.entries) {
+    if (
+      !isRecord(candidate) ||
+      !isNonemptyString(candidate.runId) ||
+      !isNonemptyString(candidate.artifactVersion) ||
+      !isNonemptyString(candidate.kind) ||
+      !isNonemptyString(candidate.createdAt) ||
+      (candidate.status !== "completed" && candidate.status !== "truncated" && candidate.status !== "failed") ||
+      !isNonemptyString(candidate.directoryKey) ||
+      directoryKeyForRunId(candidate.runId) !== candidate.directoryKey ||
+      !isNonnegativeInteger(candidate.nativeStepCount) ||
+      !isNonnegativeInteger(candidate.messageCount) ||
+      !isNonnegativeInteger(candidate.metricCount) ||
+      !isNonnegativeInteger(candidate.failureCount) ||
+      !isNonnegativeInteger(candidate.checkpointCount) ||
+      (candidate.evaluationReportId !== undefined && !isNonemptyString(candidate.evaluationReportId)) ||
+      recovered.has(candidate.runId)
+    ) return undefined;
+    recovered.set(candidate.runId, {
+      runId: candidate.runId,
+      artifactVersion: candidate.artifactVersion,
+      kind: candidate.kind,
+      createdAt: candidate.createdAt,
+      status: candidate.status,
+      directoryKey: candidate.directoryKey,
+      nativeStepCount: candidate.nativeStepCount,
+      messageCount: candidate.messageCount,
+      metricCount: candidate.metricCount,
+      failureCount: candidate.failureCount,
+      checkpointCount: candidate.checkpointCount,
+      ...(isNonemptyString(candidate.evaluationReportId) ? { evaluationReportId: candidate.evaluationReportId } : {})
+    });
+  }
+  return recovered;
 }
 
 function isValidManifest(
@@ -1563,6 +1945,57 @@ function isNonemptyString(value: unknown): value is string {
   return typeof value === "string" && Boolean(value.trim());
 }
 
+function isNonnegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
 function isNotFound(error: unknown): boolean {
   return isRecord(error) && error.code === "ENOENT";
+}
+
+function isMissing(error: unknown): boolean {
+  return isNotFound(error);
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return isRecord(error) && (error.code === "EEXIST" || error.code === "ENOTEMPTY");
+}
+
+async function waitForStoreLease(child: ChildProcessWithoutNullStreams): Promise<void> {
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  await new Promise<void>((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    const onStdout = (chunk: string) => {
+      stdout += chunk;
+      if (stdout.includes(STORE_LEASE_ACQUIRED_MARKER)) finish(resolve);
+    };
+    const onStderr = (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-1_024); };
+    const onError = (error: Error) => finish(() => reject(error));
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => finish(() => reject(new Error(
+      `Episode artifact store lease failed before acquisition (code=${code}, signal=${signal}${stderr ? `, detail=${stderr.trim()}` : ""}).`
+    )));
+    const finish = (callback: () => void) => {
+      child.stdout.off("data", onStdout);
+      child.stderr.off("data", onStderr);
+      child.off("error", onError);
+      child.off("exit", onExit);
+      callback();
+    };
+    child.stdout.on("data", onStdout);
+    child.stderr.on("data", onStderr);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
+async function releaseStoreLease(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", () => resolve());
+  });
+  child.stdin.end();
+  await exited;
 }

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { fork, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SocialDomainAdapterManifest } from "../src/harness/domainAdapter";
@@ -8,6 +10,8 @@ import type { HarnessCheckpointEnvelope, HarnessEpisodeArtifactEnvelope } from "
 import { runEvaluationRegistry } from "../src/harness/evaluation";
 import {
   HarnessEpisodeArtifactStore,
+  type HarnessEpisodeCheckpointStoreEntry,
+  type HarnessEpisodeStoreEntry,
   buildHarnessCheckpointFromEpisode,
   deriveHarnessEpisodeTrajectoryJsonl,
   replaySocialEpisode,
@@ -115,8 +119,11 @@ class CounterEnvironment implements SocialEnvironment<CounterState, CounterObser
 }
 
 const temporaryDirectories: string[] = [];
+const workerProcesses = new Set<ChildProcess>();
 
 afterEach(async () => {
+  await Promise.all([...workerProcesses].map(stopWorker));
+  workerProcesses.clear();
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -393,6 +400,11 @@ describe("generic single-episode artifact store", () => {
     expect(await store.getCheckpoint(artifact.runId, checkpointOne.checkpointId)).toEqual(checkpointOne);
     expect((await store.list())[0]).toMatchObject({ checkpointCount: 2 });
 
+    const checkpointIndexPath = path.join(root, "episodes", episodeEntry.directoryKey, "checkpoints.index.json");
+    const staleCheckpointIndex = JSON.parse(await readFile(checkpointIndexPath, "utf8"));
+    staleCheckpointIndex.entries = [];
+    await writeFile(checkpointIndexPath, `${JSON.stringify(staleCheckpointIndex, null, 2)}\n`, "utf8");
+
     const restarted = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
       baseDirectory: root,
       verifyArtifact: counterVerifier(),
@@ -400,6 +412,11 @@ describe("generic single-episode artifact store", () => {
     });
     expect(await restarted.listCheckpoints(artifact.runId)).toEqual([firstEntry, secondEntry]);
     expect(await restarted.getCheckpoint(artifact.runId, checkpointTwo.checkpointId)).toEqual(checkpointTwo);
+    const repairedCheckpointIndex = JSON.parse(await readFile(checkpointIndexPath, "utf8"));
+    expect(repairedCheckpointIndex.entries.map((entry: HarnessEpisodeCheckpointStoreEntry) => entry.checkpointId)).toEqual([
+      checkpointOne.checkpointId,
+      checkpointTwo.checkpointId
+    ]);
 
     const checkpointsDirectory = path.join(root, "episodes", episodeEntry.directoryKey, "checkpoints");
     const firstPath = path.join(checkpointsDirectory, firstEntry.directoryKey, "checkpoint.json");
@@ -414,6 +431,14 @@ describe("generic single-episode artifact store", () => {
 
     await expect(restarted.getCheckpoint(artifact.runId, checkpointOne.checkpointId)).rejects.toThrow(/canonical recovery validation/i);
     await expect(restarted.getCheckpoint(artifact.runId, checkpointTwo.checkpointId)).rejects.toThrow(/canonical recovery validation/i);
+    await restarted.put(counterArtifactWithRunId(artifact, "counter-after-tampered-checkpoints"));
+    const repairedAfterTamper = JSON.parse(await readFile(path.join(root, "index.json"), "utf8")) as {
+      entries: HarnessEpisodeStoreEntry[];
+    };
+    expect(repairedAfterTamper.entries.find((entry) => entry.runId === artifact.runId)?.checkpointCount).toBe(0);
+    expect((JSON.parse(await readFile(checkpointIndexPath, "utf8")) as {
+      entries: HarnessEpisodeCheckpointStoreEntry[];
+    }).entries).toEqual([]);
     const recovered = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
       baseDirectory: root,
       verifyArtifact: counterVerifier(),
@@ -570,6 +595,145 @@ describe("generic single-episode artifact store", () => {
       verifyArtifact: counterVerifier()
     });
     expect(await reopened.list()).toEqual([first]);
+  });
+
+  it("discovers peer publications and preserves different concurrent episodes in the derived index", async () => {
+    const root = await temporaryStoreRoot();
+    const base = await buildCounterArtifact();
+    const firstArtifact = counterArtifactWithRunId(base, "counter-ledger-run-a");
+    const secondArtifact = counterArtifactWithRunId(base, "counter-ledger-run-b");
+    const firstStore = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    const secondStore = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+
+    const [first, second] = await Promise.all([
+      firstStore.put(firstArtifact),
+      secondStore.put(secondArtifact)
+    ]);
+
+    expect(await firstStore.get(secondArtifact.runId)).toEqual(secondArtifact);
+    expect(await secondStore.get(firstArtifact.runId)).toEqual(firstArtifact);
+    const rawIndex = JSON.parse(await readFile(path.join(root, "index.json"), "utf8")) as {
+      entries: HarnessEpisodeStoreEntry[];
+    };
+    expect(rawIndex.entries.map((entry) => entry.runId).sort()).toEqual([
+      firstArtifact.runId,
+      secondArtifact.runId
+    ].sort());
+    expect((await firstStore.list()).map((entry) => entry.runId).sort()).toEqual(
+      [first.runId, second.runId].sort()
+    );
+    rawIndex.entries[0]!.checkpointCount = 999;
+    await writeFile(path.join(root, "index.json"), `${JSON.stringify(rawIndex, null, 2)}\n`, "utf8");
+    const thirdArtifact = counterArtifactWithRunId(base, "counter-ledger-run-c");
+    await secondStore.put(thirdArtifact);
+    const repairedIndex = JSON.parse(await readFile(path.join(root, "index.json"), "utf8")) as {
+      entries: HarnessEpisodeStoreEntry[];
+    };
+    expect(repairedIndex.entries.map((entry) => [entry.runId, entry.checkpointCount]).sort()).toEqual([
+      [firstArtifact.runId, 0],
+      [secondArtifact.runId, 0],
+      [thirdArtifact.runId, 0]
+    ].sort());
+  });
+
+  it("preserves different episode publications from two real Node processes", async () => {
+    const root = await temporaryStoreRoot();
+    const storeRoot = path.join(root, "store");
+    const base = await buildCounterArtifact();
+    const firstArtifact = counterArtifactWithRunId(base, "counter-process-run-a");
+    const secondArtifact = counterArtifactWithRunId(base, "counter-process-run-b");
+    const firstFile = path.join(root, "candidate-a.json");
+    const secondFile = path.join(root, "candidate-b.json");
+    await Promise.all([
+      writeFile(firstFile, JSON.stringify(firstArtifact), "utf8"),
+      writeFile(secondFile, JSON.stringify(secondArtifact), "utf8")
+    ]);
+    const expectedHashes = [hashStableState(firstArtifact), hashStableState(secondArtifact)];
+    const firstWorker = startEpisodeStoreWorker(storeRoot, firstFile, expectedHashes);
+    const firstReady = waitForWorkerMessage(firstWorker, "READY");
+    const secondWorker = startEpisodeStoreWorker(storeRoot, secondFile, expectedHashes);
+    const secondReady = waitForWorkerMessage(secondWorker, "READY");
+
+    await Promise.all([firstReady, secondReady]);
+    const firstDone = waitForWorkerMessage(firstWorker, "DONE");
+    const secondDone = waitForWorkerMessage(secondWorker, "DONE");
+    await Promise.all([
+      sendWorkerMessage(firstWorker, { type: "GO" }),
+      sendWorkerMessage(secondWorker, { type: "GO" })
+    ]);
+    const results = await Promise.all([firstDone, secondDone]);
+    expect(results.every((result) => result.type === "DONE")).toBe(true);
+    await Promise.all([waitForWorkerExit(firstWorker), waitForWorkerExit(secondWorker)]);
+
+    const rawIndex = JSON.parse(await readFile(path.join(storeRoot, "index.json"), "utf8")) as {
+      entries: HarnessEpisodeStoreEntry[];
+    };
+    expect(rawIndex.entries.map((entry) => entry.runId).sort()).toEqual([
+      firstArtifact.runId,
+      secondArtifact.runId
+    ].sort());
+  }, 30_000);
+
+  it("serializes peer checkpoint publication and rebuilds both derived indexes from canonical directories", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const verifier = counterVerifier();
+    const checkpointVerifier = counterCheckpointVerifier();
+    const publisher = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
+      baseDirectory: root,
+      verifyArtifact: verifier,
+      verifyCheckpoint: checkpointVerifier
+    });
+    const episode = await publisher.put(artifact);
+    const firstStore = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
+      baseDirectory: root,
+      verifyArtifact: verifier,
+      verifyCheckpoint: checkpointVerifier
+    });
+    const secondStore = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
+      baseDirectory: root,
+      verifyArtifact: verifier,
+      verifyCheckpoint: checkpointVerifier
+    });
+    const staleUnrelatedPublisher = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
+      baseDirectory: root,
+      verifyArtifact: verifier,
+      verifyCheckpoint: checkpointVerifier
+    });
+    const firstCheckpoint = buildCounterCheckpoint(artifact, "checkpoint-concurrent-a", "2026-07-22T13:10:00.000Z");
+    const secondCheckpoint = buildCounterCheckpoint(artifact, "checkpoint-concurrent-b", "2026-07-22T13:11:00.000Z");
+
+    await Promise.all([
+      firstStore.putCheckpoint(artifact.runId, firstCheckpoint),
+      secondStore.putCheckpoint(artifact.runId, secondCheckpoint)
+    ]);
+    const exactRetry = await firstStore.put(structuredClone(artifact));
+    expect(exactRetry.checkpointCount).toBe(2);
+    await staleUnrelatedPublisher.put(counterArtifactWithRunId(artifact, "counter-after-peer-checkpoints"));
+
+    const rawCheckpointIndex = JSON.parse(await readFile(
+      path.join(root, "episodes", episode.directoryKey, "checkpoints.index.json"),
+      "utf8"
+    )) as { entries: HarnessEpisodeCheckpointStoreEntry[] };
+    expect(rawCheckpointIndex.entries.map((entry) => entry.checkpointId).sort()).toEqual([
+      firstCheckpoint.checkpointId,
+      secondCheckpoint.checkpointId
+    ].sort());
+    const rawRootIndex = JSON.parse(await readFile(path.join(root, "index.json"), "utf8")) as {
+      entries: HarnessEpisodeStoreEntry[];
+    };
+    expect(rawRootIndex.entries.find((entry) => entry.runId === artifact.runId)?.checkpointCount).toBe(2);
+    expect(await firstStore.getCheckpoint(artifact.runId, secondCheckpoint.checkpointId)).toEqual(secondCheckpoint);
+    expect((await secondStore.listCheckpoints(artifact.runId)).map((entry) => entry.checkpointId).sort()).toEqual([
+      firstCheckpoint.checkpointId,
+      secondCheckpoint.checkpointId
+    ].sort());
   });
 
   it("binds recovery directories to identity hashes and rejects unknown failure fields", async () => {
@@ -741,6 +905,13 @@ function buildCounterCheckpoint(
   });
 }
 
+function counterArtifactWithRunId(artifact: CounterArtifact, runId: string): CounterArtifact {
+  const cloned = structuredClone(artifact);
+  cloned.runId = runId;
+  cloned.socialEpisode.id = runId;
+  return cloned;
+}
+
 function counterCheckpointVerifier() {
   return (checkpoint: CounterCheckpoint) => {
     const mismatches = [...validateHarnessCheckpointEnvelope(checkpoint)];
@@ -780,4 +951,103 @@ function counterCheckpointVerifier() {
 
 function rawSha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+interface EpisodeStoreWorkerMessage {
+  type: "READY" | "DONE" | "ERROR";
+  message?: string;
+}
+
+function startEpisodeStoreWorker(baseDirectory: string, artifactFile: string, expectedHashes: string[]): ChildProcess {
+  const child = fork(
+    fileURLToPath(new URL("./fixtures/episodeArtifactStoreConcurrentWorker.ts", import.meta.url)),
+    [baseDirectory, artifactFile, expectedHashes.join(",")],
+    {
+      execArgv: ["--import", "tsx"],
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+      stdio: ["ignore", "ignore", "pipe", "ipc"]
+    }
+  );
+  child.stderr?.resume();
+  workerProcesses.add(child);
+  child.once("exit", () => workerProcesses.delete(child));
+  return child;
+}
+
+function waitForWorkerMessage(
+  child: ChildProcess,
+  expectedType: EpisodeStoreWorkerMessage["type"]
+): Promise<EpisodeStoreWorkerMessage> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.reject(new Error(`Episode store worker already exited before ${expectedType}.`));
+  }
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => finish(() => reject(new Error(`Worker did not send ${expectedType}.`))), 15_000);
+    const onMessage = (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      const message = value as EpisodeStoreWorkerMessage;
+      if (message.type === "ERROR") {
+        finish(() => reject(new Error(message.message ?? "Episode store worker failed.")));
+      } else if (message.type === expectedType) {
+        finish(() => resolve(message));
+      }
+    };
+    const onError = (error: Error) => finish(() => reject(error));
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => finish(() => reject(new Error(
+      `Episode store worker exited before ${expectedType} (code=${code}, signal=${signal}).`
+    )));
+    const finish = (callback: () => void) => {
+      clearTimeout(timeout);
+      child.off("message", onMessage);
+      child.off("error", onError);
+      child.off("exit", onExit);
+      callback();
+    };
+    child.on("message", onMessage);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
+function waitForWorkerExit(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return child.exitCode === 0 && child.signalCode === null
+      ? Promise.resolve()
+      : Promise.reject(new Error(`Episode store worker exited abnormally (code=${child.exitCode}, signal=${child.signalCode}).`));
+  }
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => finish(() => reject(error));
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => finish(() => {
+      if (code === 0 && signal === null) resolve();
+      else reject(new Error(`Episode store worker exited abnormally (code=${code}, signal=${signal}).`));
+    });
+    const finish = (callback: () => void) => {
+      child.off("error", onError);
+      child.off("exit", onExit);
+      callback();
+    };
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
+async function stopWorker(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = waitForAnyWorkerExit(child);
+  child.kill("SIGKILL");
+  await exited;
+}
+
+function sendWorkerMessage(child: ChildProcess, message: { type: string }): Promise<void> {
+  if (!child.connected || typeof child.send !== "function") {
+    return Promise.reject(new Error("Episode store worker IPC channel is not connected."));
+  }
+  return new Promise((resolve, reject) => {
+    child.send!(message, (error) => error ? reject(error) : resolve());
+  });
+}
+
+function waitForAnyWorkerExit(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => child.once("exit", () => resolve()));
 }
