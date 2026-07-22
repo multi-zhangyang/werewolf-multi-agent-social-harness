@@ -47,6 +47,30 @@ export type WerewolfResultEvaluator = HarnessEvaluator<
   HarnessStepRecord
 >;
 
+/** Canonical deterministic evaluator registry used by Werewolf run results
+ * and by the generic experiment control plane when binding evaluator ids. */
+export function createWerewolfResultEvaluationSuite(
+  additionalEvaluators: readonly WerewolfResultEvaluator[] = []
+): WerewolfResultEvaluator[] {
+  return [
+    ...createWerewolfEvaluationSuite(),
+    createSocialStateEvaluator(),
+    createCommitmentCoalitionAssociationEvaluator(),
+    createCommitmentCoalitionLifecycleTemporalAssociationEvaluator(),
+    createNormSanctionLifecycleTemporalAssociationEvaluator(),
+    createGossipExposureTemporalAssociationEvaluator(),
+    createTrustRepairLifecycleTemporalAssociationEvaluator(),
+    createTrustRepairRelationshipTemporalAssociationEvaluator(),
+    createTrustRepairReputationTemporalAssociationEvaluator(),
+    createBetrayalLifecycleTemporalAssociationEvaluator(),
+    createDeceptionBeliefShiftEvaluator(),
+    createDeceptionReputationAssociationEvaluator(),
+    createSocialFactIngestEvidenceEvaluator(),
+    createSocialDynamicsEvaluator(),
+    ...additionalEvaluators
+  ];
+}
+
 export interface BuildWerewolfHarnessRunResultOptions {
   status: HarnessRunStatus;
   truncationReason?: string;
@@ -88,23 +112,7 @@ export function buildWerewolfHarnessRunResultFromParts(options: BuildWerewolfHar
       metrics,
       socialEpisode
     },
-    evaluators: [
-      ...createWerewolfEvaluationSuite(),
-      createSocialStateEvaluator(),
-      createCommitmentCoalitionAssociationEvaluator(),
-      createCommitmentCoalitionLifecycleTemporalAssociationEvaluator(),
-      createNormSanctionLifecycleTemporalAssociationEvaluator(),
-      createGossipExposureTemporalAssociationEvaluator(),
-      createTrustRepairLifecycleTemporalAssociationEvaluator(),
-      createTrustRepairRelationshipTemporalAssociationEvaluator(),
-      createTrustRepairReputationTemporalAssociationEvaluator(),
-      createBetrayalLifecycleTemporalAssociationEvaluator(),
-      createDeceptionBeliefShiftEvaluator(),
-      createDeceptionReputationAssociationEvaluator(),
-      createSocialFactIngestEvidenceEvaluator(),
-      createSocialDynamicsEvaluator(),
-      ...(options.additionalEvaluators ?? [])
-    ],
+    evaluators: createWerewolfResultEvaluationSuite(options.additionalEvaluators),
     promotionPolicy: WEREWOLF_METRIC_PROMOTION_POLICY
   });
   // Compatibility result evaluation is a pure domain reduction, not a

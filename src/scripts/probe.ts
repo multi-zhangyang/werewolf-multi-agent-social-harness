@@ -193,6 +193,7 @@ async function main(): Promise<void> {
 
 function parseOptions(): ProbeOptions {
   const models = normalizeModelList(readArg("models") ?? process.env.LLM_MODELS);
+  if (models.length === 0) throw new Error("Probe requires at least one configured model id.");
   assertRuntimeModelsAvailable(models, "Probe");
   return {
     models,

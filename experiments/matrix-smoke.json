@@ -15,7 +15,6 @@
       "id": "openai-compatible-streaming-pilot",
       "label": "OpenAI-compatible streaming pilot",
       "group": "openai-compatible",
-      "models": ["your-model-id"],
       "seed": "matrix-smoke-openai-compatible"
     }
   ]

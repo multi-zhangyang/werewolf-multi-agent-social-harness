@@ -1,3 +1,4 @@
+import path from "node:path";
 import { createGame } from "../core/engine";
 import { assertRuntimeModelsAvailable } from "../agents/schema";
 import type { GameConfig, GameState, MatchMetrics, Role, Team } from "../core/types";
@@ -10,7 +11,15 @@ import {
   type HarnessAssignmentConfig,
   type ResolvedAgentAssignment
 } from "./profiles";
-import { buildMatchArtifact, type MatchArtifact } from "./artifacts";
+import { buildMatchArtifact, validateMatchArtifactIntegrity, type MatchArtifact } from "./artifacts";
+import { HarnessEpisodeArtifactStore } from "./episodeArtifactStore";
+import { HarnessExperimentRunStore } from "./experimentRunStore";
+import {
+  runGenericExperiment,
+  type GenericExperimentArtifactStore,
+  type GenericExperimentRunStore
+} from "./experimentOrchestrator";
+import type { GenericExperimentSpecV1, GenericJsonObject } from "./experimentSpec";
 import { runHarnessMatch } from "./runtime";
 import type {
   AdversarialEvaluation,
@@ -28,6 +37,46 @@ import { DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER, WEREWOLF_PARALLEL_MIN_MAX_TRANS
 import { countSocialStepCommitsByActor, isSocialStepCommitted, type SocialEpisodeArtifact } from "./social";
 import type { SocialExecutionLimits } from "./social";
 import { runTournamentEpisodes } from "./tournamentRunner";
+import {
+  createWerewolfSocialDomainAdapterManifest,
+  WEREWOLF_PROFILE_POLICY_SELECTOR_ID
+} from "./werewolfAdapter";
+import { createWerewolfResultEvaluationSuite } from "./werewolfResult";
+
+export interface TournamentOrchestrationOptions {
+  artifactStore: GenericExperimentArtifactStore<MatchArtifact>;
+  runStore: GenericExperimentRunStore<MatchArtifact>;
+  /** Stable durable run authority. Defaults to the normalized experiment id. */
+  runSetId?: string;
+}
+
+export interface OpenedTournamentOrchestrationOptions extends TournamentOrchestrationOptions {
+  artifactStore: HarnessEpisodeArtifactStore<MatchArtifact>;
+  runStore: HarnessExperimentRunStore<MatchArtifact>;
+}
+
+export async function openTournamentOrchestration(options: {
+  baseDirectory: string;
+  runSetId?: string;
+}): Promise<OpenedTournamentOrchestrationOptions> {
+  const root = path.resolve(options.baseDirectory);
+  const artifactStore = await HarnessEpisodeArtifactStore.open<MatchArtifact>({
+    baseDirectory: path.join(root, "episodes"),
+    verifyArtifact: (artifact) => {
+      const mismatches = validateMatchArtifactIntegrity(artifact);
+      return { ok: mismatches.length === 0, mismatches };
+    }
+  });
+  const runStore = await HarnessExperimentRunStore.open({
+    baseDirectory: path.join(root, "runs"),
+    episodeStore: artifactStore
+  });
+  return {
+    artifactStore,
+    runStore,
+    ...(options.runSetId === undefined ? {} : { runSetId: options.runSetId })
+  };
+}
 
 export interface TournamentOptions {
   models: string[];
@@ -45,6 +94,9 @@ export interface TournamentOptions {
   includeArtifacts?: boolean;
   artifactSink?: (record: TournamentMatchArtifactRecord) => void | Promise<void>;
   experiment?: NormalizedTournamentExperiment;
+  /** When present, production execution uses the V2 durable experiment
+   * lifecycle instead of calling the episode scheduler directly. */
+  orchestration?: TournamentOrchestrationOptions;
 }
 
 export interface TournamentMatchArtifactRecord {
@@ -155,6 +207,7 @@ interface WerewolfTournamentExecution {
 }
 
 export async function runTournament(options: TournamentOptions): Promise<TournamentResult> {
+  if (options.orchestration) return runDurableTournament(options);
   const defaultTemperature = options.temperature ?? 0.7;
   const profiles = options.profiles?.length ? options.profiles : profilesFromModels(options.models, defaultTemperature);
   const assignment = options.assignment ?? { strategy: "profile-rotation" as const };
@@ -288,6 +341,266 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
     modelStats,
     profileStats,
     artifacts: options.includeArtifacts ? artifactRecords : undefined
+  };
+}
+
+interface DurableWerewolfEpisodeResult {
+  result: HarnessRunResult;
+  agents: HarnessAgentConfig[];
+  resolvedAssignments: ResolvedAgentAssignment[];
+  runId: string;
+}
+
+async function runDurableTournament(options: TournamentOptions): Promise<TournamentResult> {
+  const orchestration = options.orchestration!;
+  const defaultTemperature = options.temperature ?? 0.7;
+  const profiles = options.profiles?.length ? options.profiles : profilesFromModels(options.models, defaultTemperature);
+  const assignment = options.assignment ?? { strategy: "profile-rotation" as const };
+  if (profiles.length === 0) throw new Error("Tournament requires at least one Agent profile or model.");
+  if (!Number.isInteger(options.games) || options.games <= 0) throw new Error("Tournament games must be a positive integer.");
+  const models = Array.from(new Set(profiles.map((profile) => profile.model)));
+  assertRuntimeModelsAvailable(models, "Tournament");
+  const jointPhaseScheduler = resolveJointPhaseScheduler(options);
+  const experiment = buildEffectiveExperiment(options, { models, profiles, assignment, temperature: defaultTemperature });
+  const genericSpec = buildWerewolfGenericExperimentSpec({
+    options,
+    experiment,
+    profiles,
+    assignment,
+    defaultTemperature,
+    jointPhaseScheduler
+  });
+  const runSetId = orchestration.runSetId ?? experiment.id;
+  const execution = await runGenericExperiment({
+    spec: genericSpec,
+    runSetId,
+    artifactStore: orchestration.artifactStore,
+    runStore: orchestration.runStore,
+    abortSignal: options.executionLimits?.abortSignal,
+    adapter: {
+      domainId: "werewolf",
+      prepareEpisode(context) {
+        const runId = durableWerewolfRunId(experiment.id, context.specHash, context.index);
+        const initialState = createGame({ id: runId, seed: context.seed, config: options.config });
+        const agents = resolveAgentConfigs(initialState.players, profiles, context.index, defaultTemperature, assignment);
+        return {
+          initialState,
+          agents,
+          resolvedAssignments: describeResolvedAssignments(initialState.players, agents),
+          runId
+        };
+      },
+      async runEpisode(prepared): Promise<DurableWerewolfEpisodeResult> {
+        const result = await runHarnessMatch({
+          initialState: prepared.initialState,
+          agents: prepared.agents,
+          reasoner: options.reasoner,
+          maxTransitions: options.maxTransitions,
+          executionLimits: options.executionLimits,
+          jointPhaseScheduler
+        });
+        return {
+          result,
+          agents: prepared.agents,
+          resolvedAssignments: prepared.resolvedAssignments,
+          runId: prepared.runId
+        };
+      },
+      lifecycleOf: (episode) => episode.result.status,
+      artifactForEpisode(episode, context) {
+        return buildMatchArtifact({
+          runId: episode.runId,
+          matchId: episode.result.state.id,
+          seed: context.seed,
+          models,
+          profiles,
+          assignment,
+          resolvedAssignments: episode.resolvedAssignments,
+          result: episode.result
+        });
+      },
+      evaluation: {
+        reportForEpisode: (episode) => episode.result.evaluationReport
+      }
+    }
+  });
+
+  const episodes = execution.runSet.episodes.map((record): TournamentEpisode => {
+    if (!record.artifact) {
+      return {
+        index: record.index,
+        seed: record.seed,
+        status: "failed",
+        jointPhaseScheduler,
+        assignment,
+        resolvedAssignments: [],
+        agents: [],
+        error: record.error ?? "Tournament episode failed before producing a harness result."
+      };
+    }
+    return summarizeArtifactEpisode(
+      record.index,
+      record.seed,
+      record.artifact,
+      assignment,
+      jointPhaseScheduler,
+      options.includeArtifacts ?? false
+    );
+  });
+  const modelStats = initializeModelStats(models);
+  const profileStats = initializeProfileStats(profiles);
+  for (const episode of episodes) {
+    if (episode.status === "completed") accumulateCompletedEpisode(modelStats, profileStats, episode);
+  }
+  const artifacts = options.includeArtifacts
+    ? execution.runSet.episodes.flatMap((record) => record.artifact ? [{
+        index: record.index,
+        seed: record.seed,
+        runId: record.artifact.runId,
+        matchId: record.artifact.matchId,
+        artifact: structuredClone(record.artifact)
+      }] : [])
+    : undefined;
+  if (options.artifactSink) {
+    for (const record of execution.runSet.episodes) {
+      if (!record.artifact) continue;
+      await options.artifactSink({
+        index: record.index,
+        seed: record.seed,
+        runId: record.artifact.runId,
+        matchId: record.artifact.matchId,
+        artifact: structuredClone(record.artifact)
+      });
+    }
+  }
+  return {
+    experiment,
+    seed: options.seed,
+    models,
+    profiles,
+    gamesRequested: execution.runSet.gamesRequested,
+    gamesCompleted: execution.runSet.gamesCompleted,
+    gamesFailed: execution.runSet.gamesFailed,
+    gamesTruncated: execution.runSet.gamesTruncated,
+    gamesUnstarted: execution.runSet.gamesUnstarted,
+    maxTransitions: options.maxTransitions,
+    assignment,
+    episodes,
+    modelStats,
+    profileStats,
+    artifacts
+  };
+}
+
+function buildWerewolfGenericExperimentSpec(input: {
+  options: TournamentOptions;
+  experiment: NormalizedTournamentExperiment;
+  profiles: HarnessAgentProfile[];
+  assignment: HarnessAssignmentConfig;
+  defaultTemperature: number;
+  jointPhaseScheduler: WerewolfJointPhaseScheduler;
+}): GenericExperimentSpecV1 {
+  const probe = createGame({ id: "werewolf-experiment-spec", seed: input.options.seed, config: input.options.config });
+  const evaluatorIds = createWerewolfResultEvaluationSuite().map((evaluator) => evaluator.id);
+  return {
+    id: input.experiment.id,
+    kind: "tournament",
+    domainId: "werewolf",
+    domainAdapter: createWerewolfSocialDomainAdapterManifest(probe.config.rulesetId),
+    seed: input.options.seed,
+    episodeCount: input.options.games,
+    actorCount: probe.players.length,
+    schedulerMode: "aec",
+    profiles: input.profiles.map((profile) => ({
+      id: profile.id,
+      version: "1",
+      policyId: WEREWOLF_PROFILE_POLICY_SELECTOR_ID,
+      temperature: profile.temperature ?? input.defaultTemperature
+    })),
+    modelAssignments: input.profiles.map((profile) => ({ profileId: profile.id, modelId: profile.model })),
+    assignmentPolicy: {
+      id: `werewolf.assignment.${input.assignment.strategy ?? "profile-rotation"}`,
+      version: "1",
+      configuration: portableJsonObject(input.assignment)
+    },
+    maxTransitions: input.options.maxTransitions ?? 320,
+    timeoutPolicy: {
+      id: "harness.deadline",
+      version: "1",
+      ...(input.experiment.timeoutMs === undefined ? {} : { runTimeoutMs: input.experiment.timeoutMs }),
+      ...(input.options.executionLimits?.decisionTimeoutMs === undefined
+        ? {}
+        : { decisionTimeoutMs: input.options.executionLimits.decisionTimeoutMs })
+    },
+    retryPolicy: { id: "harness.episode-attempt", version: "1", maxAttempts: 1 },
+    evaluatorIds,
+    artifactPolicy: { id: "harness.canonical-episode", version: "1", visibility: "research-full" },
+    checkpointPolicy: { id: "harness.final-checkpoint", version: "1", mode: "final" },
+    providerPolicy: { id: "openai-compatible.streaming", version: "1", stream: true },
+    continueOnError: input.options.continueOnError ?? false,
+    domainConfig: portableJsonObject({
+      gameConfig: structuredClone(probe.config),
+      jointPhaseScheduler: input.jointPhaseScheduler
+    })
+  };
+}
+
+function portableJsonObject(value: unknown): GenericJsonObject {
+  return JSON.parse(JSON.stringify(value)) as GenericJsonObject;
+}
+
+function durableWerewolfRunId(experimentId: string, specHash: string, index: number): string {
+  const safeExperimentId = sanitizeId(experimentId).slice(0, 72) || "tournament";
+  return `${safeExperimentId}-${specHash.slice(0, 12)}-g${index + 1}`;
+}
+
+function summarizeArtifactEpisode(
+  index: number,
+  seed: string,
+  artifact: MatchArtifact,
+  assignment: HarnessAssignmentConfig,
+  jointPhaseScheduler: WerewolfJointPhaseScheduler,
+  includeArtifact: boolean
+): TournamentEpisode {
+  const agentStateByPlayer = new Map(artifact.agents.map((agent) => [agent.playerId, agent]));
+  const rewardByPlayer = new Map(artifact.evaluation.agentRewards.map((reward) => [reward.playerId, reward.reward]));
+  const assignmentByPlayer = new Map(artifact.resolvedAssignments.map((record) => [record.playerId, record]));
+  return {
+    index,
+    seed,
+    runId: artifact.runId,
+    matchId: artifact.matchId,
+    status: artifact.status,
+    harnessStatus: artifact.status,
+    jointPhaseScheduler,
+    winner: artifact.finalState.winner,
+    phase: artifact.finalState.phase,
+    day: artifact.finalState.day,
+    metrics: artifact.metrics,
+    evaluation: artifact.evaluation,
+    evaluationReport: artifact.evaluationReport,
+    forkOf: artifact.forkOf,
+    trajectory: artifact.trajectory,
+    socialEpisode: artifact.socialEpisode,
+    assignment,
+    resolvedAssignments: artifact.resolvedAssignments,
+    agents: artifact.finalState.players.map((player) => {
+      const resolved = assignmentByPlayer.get(player.id);
+      const agentState = agentStateByPlayer.get(player.id);
+      return {
+        playerId: player.id,
+        seat: player.seat,
+        profileId: resolved?.profileId,
+        model: resolved?.model ?? agentState?.model ?? "unknown",
+        role: player.role,
+        team: player.team,
+        policyName: agentState?.policyName,
+        won: artifact.finalState.winner ? player.team === artifact.finalState.winner : undefined,
+        reward: rewardByPlayer.get(player.id)
+      };
+    }),
+    error: artifact.status === "failed" ? artifact.failureReason : undefined,
+    ...(includeArtifact ? { artifact: structuredClone(artifact) } : {})
   };
 }
 

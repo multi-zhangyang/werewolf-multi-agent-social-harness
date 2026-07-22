@@ -48,6 +48,11 @@ import {
   type ExperimentMatrixResult,
   type NormalizedMatrixExperiment
 } from "../harness/experimentMatrix";
+import {
+  HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2,
+  type HarnessExperimentRunRecord,
+  type HarnessExperimentRunStoreEntry
+} from "../harness/experimentRunStore";
 import { legacyMetricPromotionPolicyFromSummary, summarizeEvaluationWarnings } from "../harness/evaluation";
 import {
   assertAssignmentProfileReferences,
@@ -90,7 +95,12 @@ import {
   summarizeModelRewardsWithDensity
 } from "../harness/tournamentEvaluationSummary";
 import type { EvidenceRef } from "../harness/socialState";
-import { runTournament, type TournamentEpisode, type TournamentResult } from "../harness/tournament";
+import {
+  openTournamentOrchestration,
+  runTournament,
+  type TournamentEpisode,
+  type TournamentResult
+} from "../harness/tournament";
 import {
   assertPublicTournamentMatchArtifact,
   summarizeTournamentExecutionTelemetry,
@@ -232,6 +242,9 @@ export interface ServerAppDependencies {
    */
   artifactAccessBindHost?: string;
   tournamentArtifactBaseDir?: string;
+  /** Durable V2 experiment run/episode authority used by production
+   * tournament and matrix execution. */
+  experimentRunBaseDir?: string;
   matrixArtifactBaseDir?: string;
   checkpointArtifactBaseDir?: string;
   matchArtifactBaseDir?: string;
@@ -313,6 +326,11 @@ const createReasoner =
   dependencies.createReasoner ??
   ((abortSignal: AbortSignal): HarnessReasoner => new OpenAIHarnessReasoner(modelClientFromEnv(process.env, { abortSignal })));
 const tournamentArtifactBaseDir = normalizeOptionalDirectory(dependencies.tournamentArtifactBaseDir ?? process.env.TOURNAMENT_ARTIFACT_BASE_DIR);
+const experimentRunBaseDir = normalizeOptionalDirectory(
+  dependencies.experimentRunBaseDir ??
+    process.env.EXPERIMENT_RUN_BASE_DIR ??
+    (tournamentArtifactBaseDir ? path.join(tournamentArtifactBaseDir, ".experiment-runs") : undefined)
+);
 /** Keep matrix directories outside the tournament root so recovery scans have one artifact schema per root. */
 const matrixArtifactBaseDir = normalizeOptionalDirectory(
   dependencies.matrixArtifactBaseDir ??
@@ -1489,6 +1507,35 @@ app.post("/api/harness/probe", async (req, res) => {
   }
 });
 
+app.get("/api/experiments/runs", async (req, res, next) => {
+  try {
+    assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
+    if (!experimentRunBaseDir) throw new HttpError(404, "Experiment run authority is not configured.");
+    const authority = await openTournamentOrchestration({ baseDirectory: experimentRunBaseDir });
+    const entries = await authority.runStore.list();
+    res.json({
+      artifactVersion: "server.experiment-run-index.v1",
+      kind: "experiment-run-index",
+      entries: entries.map(serializeExperimentRunIndexEntry)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/experiments/runs/:runSetId", async (req, res, next) => {
+  try {
+    assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
+    if (!experimentRunBaseDir) throw new HttpError(404, "Experiment run authority is not configured.");
+    const authority = await openTournamentOrchestration({ baseDirectory: experimentRunBaseDir });
+    const entry = await authority.runStore.get(req.params.runSetId);
+    if (!entry) throw new HttpError(404, "Experiment run was not found.");
+    res.json(serializeExperimentRunRecord(entry));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/tournaments/run", async (req, res) => {
   let experiment: NormalizedTournamentExperiment;
   let exportArtifacts = false;
@@ -1524,6 +1571,12 @@ app.post("/api/tournaments/run", async (req, res) => {
   const startedAt = performance.now();
 
   try {
+    const orchestration = experimentRunBaseDir
+      ? await openTournamentOrchestration({
+          baseDirectory: experimentRunBaseDir,
+          runSetId: `${experiment.id}:${hashStableState(experiment).slice(0, 16)}`
+        })
+      : undefined;
     const result = await runTournament({
       models: experiment.models,
       profiles: experiment.profiles,
@@ -1538,7 +1591,8 @@ app.post("/api/tournaments/run", async (req, res) => {
       experiment,
       includeArtifacts: exportArtifacts,
       reasoner: createReasoner(abortController.signal),
-      executionLimits: { abortSignal: abortController.signal }
+      executionLimits: { abortSignal: abortController.signal },
+      orchestration
     });
     const artifactSet = exportArtifacts
       ? await persistTournamentArtifactSet({
@@ -1647,7 +1701,8 @@ app.post("/api/experiments/matrix/run", async (req, res) => {
       experiment,
       includeArtifacts: exportArtifacts,
       reasoner: createReasoner(abortController.signal),
-      executionLimits: { abortSignal: abortController.signal }
+      executionLimits: { abortSignal: abortController.signal },
+      orchestrationBaseDirectory: experimentRunBaseDir
     });
     const artifactSet = exportArtifacts
       ? await persistExperimentMatrixArtifactSet({ result, baseDir: matrixArtifactBaseDir })
@@ -7927,6 +7982,62 @@ function contentTypeForArtifactFile(relativePath: string): string {
 
 function isFileReadNotFound(error: unknown): boolean {
   return isRecord(error) && (error.code === "ENOENT" || error.code === "EISDIR" || error.code === "ENOTDIR");
+}
+
+function serializeExperimentRunIndexEntry(entry: HarnessExperimentRunStoreEntry): object {
+  return {
+    artifactVersion: "server.experiment-run-status.v1",
+    kind: "experiment-run-status",
+    runSetId: entry.runSetId,
+    specId: entry.specId,
+    specHash: entry.specHash,
+    domainId: entry.domainId,
+    state: entry.state,
+    revision: entry.revision,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+    gamesRequested: entry.gamesRequested,
+    gamesCompleted: entry.gamesCompleted,
+    gamesTruncated: entry.gamesTruncated,
+    gamesFailed: entry.gamesFailed,
+    gamesInFlight: entry.gamesInFlight ?? 0,
+    gamesUnstarted: entry.gamesUnstarted
+  };
+}
+
+function serializeExperimentRunRecord(record: HarnessExperimentRunRecord): object {
+  return {
+    artifactVersion: "server.experiment-run-status.v1",
+    kind: "experiment-run-status",
+    runSetId: record.runSetId,
+    specId: record.experiment.specId,
+    specHash: record.experiment.specHash,
+    domainId: record.experiment.spec.domainId,
+    state: record.state,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    gamesRequested: record.gamesRequested,
+    gamesCompleted: record.gamesCompleted,
+    gamesTruncated: record.gamesTruncated,
+    gamesFailed: record.gamesFailed,
+    gamesInFlight: record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 ? record.gamesInFlight : 0,
+    gamesUnstarted: record.gamesUnstarted,
+    currentEpisode: record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 && record.currentEpisode
+      ? structuredClone(record.currentEpisode)
+      : null,
+    episodes: record.episodes.map((episode) => ({
+      index: episode.index,
+      seed: episode.seed,
+      status: episode.status,
+      runId: episode.runId ?? null,
+      artifactSha256: episode.artifactSha256 ?? null,
+      metricCount: episode.metricCount,
+      failureCount: episode.failureCount,
+      evaluationReportId: episode.evaluationReportId ?? null,
+      evaluationReportSha256: episode.evaluationReportSha256 ?? null,
+      error: episode.error ?? null
+    }))
+  };
 }
 
 function serializeTournamentEpisodeSummaryForApi(episode: TournamentEpisode): object {

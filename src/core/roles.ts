@@ -85,6 +85,119 @@ export const DEFAULT_CONFIG: GameConfig = {
   }
 };
 
+const GAME_CONFIG_FIELDS = new Set([
+  "rulesetId",
+  "seats",
+  "roles",
+  "sheriff",
+  "sheriffVoteWeight",
+  "wolfDiscussion",
+  "revealOnDeath",
+  "lastWords",
+  "maxDays",
+  "timers"
+]);
+const TIMER_FIELDS = new Set(["speechSeconds", "debateSeconds", "voteSeconds", "nightActionSeconds"]);
+const VALID_ROLES = new Set<Role>(["villager", "werewolf", "seer", "witch", "hunter"]);
+
+/** Runtime parser for the current Werewolf ruleset. A ruleset id is useful
+ * replay authority only if unknown enum/number/object values cannot silently
+ * acquire accidental engine semantics. */
+export function normalizeWerewolfGameConfig(input?: unknown): GameConfig {
+  if (input !== undefined && (!input || typeof input !== "object" || Array.isArray(input))) {
+    throw new Error("Werewolf config must be an object.");
+  }
+  const source = (input ?? {}) as Record<string, unknown>;
+  assertKnownFields(source, GAME_CONFIG_FIELDS, "Werewolf config");
+  const timerInput = source.timers;
+  if (timerInput !== undefined && (!timerInput || typeof timerInput !== "object" || Array.isArray(timerInput))) {
+    throw new Error("Werewolf config timers must be an object.");
+  }
+  const timers = (timerInput ?? {}) as Record<string, unknown>;
+  assertKnownFields(timers, TIMER_FIELDS, "Werewolf config timers");
+  const roles = source.roles === undefined ? [...DEFAULT_CONFIG.roles] : normalizeRoles(source.roles);
+  const config: GameConfig = {
+    rulesetId: source.rulesetId === undefined ? DEFAULT_CONFIG.rulesetId : normalizeRulesetId(source.rulesetId),
+    seats: source.seats === undefined ? DEFAULT_CONFIG.seats : positiveInteger(source.seats, "seats"),
+    roles,
+    sheriff: source.sheriff === undefined ? DEFAULT_CONFIG.sheriff : enumValue(source.sheriff, ["off", "day1"], "sheriff"),
+    sheriffVoteWeight: source.sheriffVoteWeight === undefined
+      ? DEFAULT_CONFIG.sheriffVoteWeight
+      : positiveFinite(source.sheriffVoteWeight, "sheriffVoteWeight"),
+    wolfDiscussion: source.wolfDiscussion === undefined
+      ? DEFAULT_CONFIG.wolfDiscussion
+      : enumValue(source.wolfDiscussion, ["off", "one_turn"], "wolfDiscussion"),
+    revealOnDeath: source.revealOnDeath === undefined
+      ? DEFAULT_CONFIG.revealOnDeath
+      : booleanValue(source.revealOnDeath, "revealOnDeath"),
+    lastWords: source.lastWords === undefined
+      ? DEFAULT_CONFIG.lastWords
+      : enumValue(source.lastWords, ["none", "firstNightOnly", "all"], "lastWords"),
+    maxDays: source.maxDays === undefined ? DEFAULT_CONFIG.maxDays : positiveInteger(source.maxDays, "maxDays"),
+    timers: {
+      speechSeconds: timerValue(timers.speechSeconds, DEFAULT_CONFIG.timers.speechSeconds, "speechSeconds"),
+      debateSeconds: timerValue(timers.debateSeconds, DEFAULT_CONFIG.timers.debateSeconds, "debateSeconds"),
+      voteSeconds: timerValue(timers.voteSeconds, DEFAULT_CONFIG.timers.voteSeconds, "voteSeconds"),
+      nightActionSeconds: timerValue(timers.nightActionSeconds, DEFAULT_CONFIG.timers.nightActionSeconds, "nightActionSeconds")
+    }
+  };
+  if (config.roles.length !== config.seats) {
+    throw new Error(`Role count (${config.roles.length}) must equal seat count (${config.seats}).`);
+  }
+  return config;
+}
+
+function normalizeRulesetId(value: unknown): WerewolfRulesetId {
+  assertSupportedWerewolfRulesetId(value);
+  return value;
+}
+
+function normalizeRoles(value: unknown): Role[] {
+  if (!Array.isArray(value) || value.some((role) => typeof role !== "string" || !VALID_ROLES.has(role as Role))) {
+    throw new Error("Werewolf config roles must contain only supported role ids.");
+  }
+  return value.slice() as Role[];
+}
+
+function enumValue<T extends string>(value: unknown, allowed: readonly T[], field: string): T {
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    throw new Error(`Werewolf config ${field} must be one of: ${allowed.join(", ")}.`);
+  }
+  return value as T;
+}
+
+function booleanValue(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`Werewolf config ${field} must be a boolean.`);
+  return value;
+}
+
+function positiveFinite(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`Werewolf config ${field} must be a finite positive number.`);
+  }
+  return value;
+}
+
+function positiveInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`Werewolf config ${field} must be a positive integer.`);
+  }
+  return value;
+}
+
+function timerValue(value: unknown, fallback: number, field: string): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(`Werewolf config timers.${field} must be a non-negative integer.`);
+  }
+  return value;
+}
+
+function assertKnownFields(record: Record<string, unknown>, fields: ReadonlySet<string>, label: string): void {
+  const unknown = Object.keys(record).filter((key) => !fields.has(key));
+  if (unknown.length) throw new Error(`${label} contains unknown field(s): ${unknown.sort().join(", ")}.`);
+}
+
 export function teamForRole(role: Role): Team {
   return ROLE_DEFINITIONS[role].team;
 }
