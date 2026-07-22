@@ -135,6 +135,42 @@ describe("agent social state stores", () => {
       privateNarrative: "do not duplicate this payload into the journal"
     });
     expect(state.beliefs.claims).toEqual({});
+    expect(() =>
+      addSocialTheoryOfMindAttribution(state, {
+        id: "msg-mental:act-vote:missing-receipt-proof",
+        observerId: "a",
+        subjectId: "b",
+        kind: "stated_intent",
+        proposition: { predicate: "vote_intent", targetId: "c" },
+        source: "speech_act",
+        sourceMessageId: "msg-mental",
+        sourceMessageSeq: 9,
+        sourceSpeechActId: "act-vote-receipt",
+        sourceSpeechActKind: "vote_intent",
+        sourceDeliveryReceiptId: "msg-mental:delivery:1:a",
+        visibility: "public",
+        evidenceRefs: [{ artifact: "message", id: "msg-mental", seq: 9 }]
+      })
+    ).toThrow(/matching delivery receipt evidence/);
+    expect(() =>
+      addSocialTheoryOfMindAttribution(state, {
+        id: "msg-mental:act-vote:dangling-receipt-proof",
+        observerId: "a",
+        subjectId: "b",
+        kind: "stated_intent",
+        proposition: { predicate: "vote_intent", targetId: "c" },
+        source: "speech_act",
+        sourceMessageId: "msg-mental",
+        sourceMessageSeq: 9,
+        sourceSpeechActId: "act-vote-dangling",
+        sourceSpeechActKind: "vote_intent",
+        visibility: "public",
+        evidenceRefs: [
+          { artifact: "message", id: "msg-mental", seq: 9 },
+          { artifact: "delivery_receipt", id: "msg-mental:delivery:1:a", seq: 9 }
+        ]
+      })
+    ).toThrow(/requires sourceDeliveryReceiptId/);
     expect(state.journal?.entries).toMatchObject([
       {
         store: "theoryOfMind",

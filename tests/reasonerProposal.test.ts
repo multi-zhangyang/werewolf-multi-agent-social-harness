@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ModelClient, ModelCompletionResult } from "../src/agents/modelClient";
 import { applyCommand, createGame } from "../src/core/engine";
-import { WerewolfAgentActor } from "../src/harness/actor";
+import { WerewolfAgentActor, applyWerewolfReasonerProposal } from "../src/harness/actor";
 import { WerewolfEnvironment } from "../src/harness/environment";
 import { policyForRole } from "../src/harness/policy";
 import { OpenAIHarnessReasoner } from "../src/harness/reasoner";
-import type { AgentHarnessState, HarnessPlayerView, ReasonerInput } from "../src/harness/types";
+import type { AgentHarnessState, HarnessPlayerView, PolicyPlan, ReasonerInput } from "../src/harness/types";
 
 describe("OpenAIHarnessReasoner advisory candidates", () => {
   it("uses one streaming cognition request and keeps the candidate advisory", async () => {
@@ -55,6 +55,74 @@ describe("OpenAIHarnessReasoner advisory candidates", () => {
     });
 
     expect(applied).toBe(input.policyPlan);
+  });
+
+  it("rejects poison advice when the pending action has no poison authority", () => {
+    const plan: PolicyPlan = {
+      policyName: "witch-conservative",
+      command: { type: "witch.act", actorId: "witch" },
+      intent: "preserve resources",
+      confidence: 0.7,
+      strategyTags: []
+    };
+    const applied = applyWerewolfReasonerProposal(
+      plan,
+      {
+        kind: "witch",
+        phase: "night_witch",
+        actorId: "witch",
+        canSave: false,
+        canPoison: false,
+        legalPoisonTargetIds: ["p2"]
+      },
+      { commandType: "witch.act", poisonTargetId: "p2", confidence: 1 }
+    );
+
+    expect(applied).toBe(plan);
+  });
+
+  it("rejects false abstention advice without a legal vote target", () => {
+    const plan: PolicyPlan = {
+      policyName: "village-analyst",
+      command: { type: "vote.cast", actorId: "voter", targetId: "p2" },
+      intent: "vote from public evidence",
+      confidence: 0.6,
+      strategyTags: []
+    };
+    const applied = applyWerewolfReasonerProposal(
+      plan,
+      {
+        kind: "vote",
+        phase: "day_vote",
+        actorId: "voter",
+        legalTargetIds: ["p2", "p3"]
+      },
+      { commandType: "vote.cast", abstain: false, confidence: 1 }
+    );
+
+    expect(applied).toBe(plan);
+  });
+
+  it("rejects false abstention advice without a legal sheriff-vote target", () => {
+    const plan: PolicyPlan = {
+      policyName: "village-analyst",
+      command: { type: "sheriff.vote", actorId: "voter", targetId: "p2" },
+      intent: "vote for a sheriff candidate from public evidence",
+      confidence: 0.6,
+      strategyTags: []
+    };
+    const applied = applyWerewolfReasonerProposal(
+      plan,
+      {
+        kind: "sheriff_vote",
+        phase: "sheriff_vote",
+        actorId: "voter",
+        legalTargetIds: ["p2", "p3"]
+      },
+      { commandType: "sheriff.vote", abstain: false, confidence: 1 }
+    );
+
+    expect(applied).toBe(plan);
   });
 
   it("parses bounded social-intent drafts while keeping public speech as plain text", async () => {

@@ -15,6 +15,7 @@ import type { ProviderFailureKind, ProviderFailureStage, ProviderRetryHistoryEnt
 import type { SocialChannel, SocialEpisodeArtifact, SocialExecutionLimits, SocialMessage } from "./social";
 import type { AgentSocialState, EvidenceRef, MemoryRetrievalRecord, MemoryVisibility } from "./socialState";
 import type { GenericForkProvenance } from "./episodeArtifacts";
+import type { AgentActionArbitrationSummary } from "./scaffold";
 
 export type PolicyName = "balanced" | "wolf-deceiver" | "village-analyst" | "seer-information" | "witch-conservative" | "hunter-punisher";
 
@@ -400,6 +401,8 @@ export interface HarnessStepRecord {
   reasonerOutput: ReasonerOutputSummary;
   command: GameCommand;
   turnTrace: HarnessTurnTrace;
+  /** Generic agent candidate arbitration retained by the legacy trajectory projection. */
+  actionArbitration?: AgentActionArbitrationSummary;
   /** See {@link HarnessTurnTrace.agentStateHash}. */
   agentStateHash?: string;
   agentSnapshotsAfterStep?: AgentHarnessState[];
@@ -479,7 +482,16 @@ export interface HarnessMetricPromotionDecision {
 }
 
 export interface HarnessMetricEvidenceRef {
-  artifact: "trajectory" | "message" | "event" | "trace" | "observation" | "state" | "agent_state" | "metric";
+  artifact:
+    | "trajectory"
+    | "message"
+    | "delivery_receipt"
+    | "event"
+    | "trace"
+    | "observation"
+    | "state"
+    | "agent_state"
+    | "metric";
   id?: string;
   seq?: number;
   traceId?: string;

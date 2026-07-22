@@ -1265,6 +1265,23 @@ describe("match artifact JSONL export", () => {
     expect(journalErrors).toMatch(/missing evidenceRefs/);
     expect(journalErrors).toMatch(/messageSeqRange references missing seq 999/);
     expect(journalErrors).toMatch(/uses hidden truth/);
+
+    const receiptTamper = cloneJson(artifact);
+    const receiptJournalEntry = receiptTamper.agents
+      .flatMap((agent) => agent.social?.journal?.entries ?? [])
+      .find((entry) => entry.evidenceRefs.some((ref) => ref.artifact === "delivery_receipt"));
+    const receiptRef = receiptJournalEntry?.evidenceRefs.find((ref) => ref.artifact === "delivery_receipt");
+    if (!receiptJournalEntry || !receiptRef) throw new Error("Expected receipt-bound social journal evidence.");
+    receiptRef.id = "missing-delivery-receipt";
+    expect(validateMatchArtifactIntegrity(receiptTamper).join("\n")).toMatch(/references missing delivery receipt/);
+
+    const receiptMessageBindingTamper = cloneJson(artifact);
+    const receiptBoundEntry = receiptMessageBindingTamper.agents
+      .flatMap((agent) => agent.social?.journal?.entries ?? [])
+      .find((entry) => entry.evidenceRefs.some((ref) => ref.artifact === "delivery_receipt"));
+    if (!receiptBoundEntry) throw new Error("Expected receipt-bound journal entry.");
+    receiptBoundEntry.evidenceRefs = receiptBoundEntry.evidenceRefs.filter((ref) => ref.artifact !== "message");
+    expect(validateMatchArtifactIntegrity(receiptMessageBindingTamper).join("\n")).toMatch(/lacks matching message evidence/);
   }, 60000);
 
   it("validates recoverable per-step agent snapshots for prefix checkpoints", async () => {

@@ -27167,3 +27167,123 @@ authority rather than retaining only metric/failure projections:
 The report remains an internal artifact-plane authority. Public/server views
 must continue to use the existing redaction/projection policy rather than
 returning private evaluator outputs directly.
+
+## 13.286 Production Action Arbitration And Receipt-Bound Social Adaptation Lock
+
+Timestamp: `2026-07-22`
+
+Production Werewolf actors now use the existing generic scaffold candidate
+lifecycle instead of the former single-action fast path:
+
+- Every production actor decision has a complete deterministic policy
+  candidate. A distinct reasoner proposal becomes a second candidate only
+  after the existing Werewolf pending-action legality filter accepts it.
+- The optional reasoner is invoked exactly once per actor decision. Candidate
+  generation, scoring, arbitration, environment validation, replay, and
+  artifact recovery never call it again.
+- Candidate behavioral deduplication binds command plus uncommitted message
+  drafts. Identical reasoner behavior is removed, while the same environment
+  command with different typed social-intent drafts remains a distinct social
+  behavior candidate.
+- The generic default arbitrator retains its stable
+  `highest_final_score_then_candidate_id` rule. Werewolf does not define a
+  parallel model/provider-specific arbitrator.
+- `SocialAction.metadata.arbitration` is projected as
+  `HarnessStepRecord.actionArbitration`. It remains distinct from
+  `PolicyPlan.arbitration`, which is only the domain policy's target ranking.
+- The final environment command still passes the ordinary domain
+  `validateAction` and transition boundary. The reasoner never becomes the
+  command authority.
+- Full arbitration is not injected into the pre-selection canonical actor
+  state hash. Doing so would make candidate preview state disagree with the
+  selected post-arbitration state. The durable action and trajectory are the
+  arbitration evidence authority; actor state remains receipt-gated and
+  legacy/scaffold state parity is preserved.
+
+Two previously latent reasoner-advice legality defects are now closed:
+
+- Witch poison advice is rejected when `pending.canPoison` is false even if a
+  legacy legal-target list remains populated.
+- Vote and sheriff-vote advice without a target is accepted only for explicit
+  `abstain: true`; `abstain: false` without a target falls back to policy.
+- A completed but malformed/too-short reasoner speech cannot destroy the
+  already legal policy speech candidate.
+
+Message-derived social adaptation is now observer-receipt-bound for new
+runtime messages:
+
+- Ingestion resolves exactly one `SocialDeliveryReceipt` matching observer,
+  message id/sequence, channel, sender, and visibility before any
+  message-derived reducer runs.
+- Memory, beliefs, relationships, reputation, commitments, coalitions, gossip,
+  norms, sanctions, trust repair, betrayal, theory-of-mind attribution, and
+  mutation journals retain both message and `delivery_receipt` evidence.
+- Messages with an explicit receipt set but no exact observer receipt fail on
+  the staged social-state clone. A rejected actor transaction does not commit
+  that adaptation.
+- Legacy messages with no `deliveryReceipts` field remain readable as
+  message-only evidence. Recovery never fabricates historical receipts or
+  recomputes historical audiences.
+- Theory-of-mind records with `sourceDeliveryReceiptId` require the matching
+  receipt evidence ref. Dangling receipt refs are rejected.
+- Match-artifact integrity resolves receipt ids back to canonical messages,
+  checks observer ownership, sequence, and paired message evidence, and checks
+  theory-of-mind receipt/message/sender binding. Checkpoint boundary validation
+  rejects future receipt sequences.
+- Evaluator evidence preserves the `delivery_receipt` kind instead of
+  downgrading it to observation or agent-state evidence.
+- Public server projections remove receipt ids because their stable form
+  contains observer/audience identity; only the safe artifact kind and parent
+  message sequence remain.
+
+The React agent inspector now counts actual memory entries, reputation records,
+norm records, and goals instead of counting the outer store object fields.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/policy.test.ts tests/scaffold.test.ts \
+  tests/reasonerProposal.test.ts tests/werewolfAdapter.test.ts \
+  tests/harness.test.ts --maxWorkers=1 --no-file-parallelism \
+  --testTimeout=60000 --hookTimeout=60000 --teardownTimeout=60000 \
+  --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npx playwright test --config=playwright.config.ts
+npm run agent:probe -- --models=cohere/north-mini-code:free --timeout=90s
+npm run arena:match -- --models=cohere/north-mini-code:free \
+  --maxTransitions=2 --timeout=180s --json=summary
+npm run arena:tournament -- --models=cohere/north-mini-code:free \
+  --games=1 --maxTransitions=2 --timeout=180s --json=summary
+git diff --check
+```
+
+The production arbitration focused suite passed **5 files / 96 tests**, and the
+final receipt/arbitration integration group passed **5 files / 100 tests** after
+adding the dedicated sheriff-vote false-abstention regression. The complete
+deterministic suite passed **49 files / 518 tests** before that test-only
+addition. Production build passed with only the existing Vite chunk-size
+warning. The fixture cockpit passed **14/14**, and the Playwright-owned port had
+no listener after teardown.
+
+The real provider-neutral streaming probe passed **1/1** with
+`stream.enabled=true`, `stream.completed=true`, terminal
+`provider_stop_event`, an environment-validated `seer.inspect`, **423 prompt / 992
+completion tokens**, and **25,174 ms** model latency. The bounded real match
+returned `ok: true`, expected `status: truncated`, **2 native / 2 committed / 0
+rejected** steps, **0 harness errors**, one completed stream, **423 prompt / 553
+completion tokens**, and **12,523 ms** model latency.
+
+The bounded real tournament also returned `ok: true` with expected
+`status: truncated`: **1 requested / 1 truncated / 0 failed** games, **2 native
+/ 2 committed / 0 rejected** steps, **1 completed provider call**, **420 prompt
+/ 406 completion / 826 total tokens**, **16,490 ms** model latency, **0 provider
+failures / 0 timeouts / 0 stream aborts**, and **1 completed evaluation report**
+with **830 metrics** and **0 evaluator failures**. A bounded two-transition run
+is intentionally lifecycle-truncated and is not a provider or harness failure.
+
+Only `cohere/north-mini-code:free` was used for live validation. No
+model/provider-name adapter, parser, prompt branch, retry branch, fallback, or
+token-limit request field was added.

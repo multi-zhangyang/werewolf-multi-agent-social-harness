@@ -539,7 +539,14 @@ describe("Werewolf generic social adapter", () => {
     const legacy = await run("legacy");
     const scaffold = await run("scaffold");
 
-    expect(normalizeJson(scaffold.artifact)).toEqual(normalizeJson(legacy.artifact));
+    const scaffoldArbitration = scaffold.artifact.steps[1]?.action.metadata?.arbitration as Record<string, unknown> | undefined;
+    expect(scaffoldArbitration).toMatchObject({
+      version: "agent.action-arbitration.v1",
+      actorId: seer.id,
+      candidateCount: 1,
+      arbitratorId: "default-score-arbitrator"
+    });
+    expect(withoutActionArbitration(scaffold.artifact)).toEqual(normalizeJson(legacy.artifact));
     expect(normalizeJson(scaffold.agent)).toEqual(normalizeJson(legacy.agent));
     expect(scaffold.agent.socialStateHash).toBe(legacy.agent.socialStateHash);
     expect(scaffold.agent.social?.journal?.entries).toEqual(legacy.agent.social?.journal?.entries);
@@ -549,7 +556,7 @@ describe("Werewolf generic social adapter", () => {
       agents: [scaffold.agent],
       hash: hashStableState([scaffold.agent])
     });
-    expect(projectWerewolfSocialStepsToHarnessTrajectory(scaffold.artifact.steps)).toEqual(
+    expect(withoutTrajectoryActionArbitration(projectWerewolfSocialStepsToHarnessTrajectory(scaffold.artifact.steps))).toEqual(
       projectWerewolfSocialStepsToHarnessTrajectory(legacy.artifact.steps)
     );
   });
@@ -630,7 +637,11 @@ describe("Werewolf generic social adapter", () => {
     const legacyTrajectory = projectWerewolfSocialStepsToHarnessTrajectory(legacy.artifact.steps);
     const scaffoldTrajectory = projectWerewolfSocialStepsToHarnessTrajectory(scaffold.artifact.steps);
 
-    expect(normalizeJson(scaffold.artifact)).toEqual(normalizeJson(legacy.artifact));
+    expect(scaffold.artifact.steps.every((step) => {
+      const summary = step.action.metadata?.arbitration as { version?: string; candidateCount?: number } | undefined;
+      return summary?.version === "agent.action-arbitration.v1" && summary.candidateCount === 1;
+    })).toBe(true);
+    expect(withoutActionArbitration(scaffold.artifact)).toEqual(normalizeJson(legacy.artifact));
     expect(normalizeJson(scaffold.actors)).toEqual(normalizeJson(legacy.actors));
     expect(scaffold.snapshots).toEqual(legacy.snapshots);
     expect(scaffold.artifact.steps).toHaveLength(2);
@@ -645,7 +656,7 @@ describe("Werewolf generic social adapter", () => {
       expect(snapshot.agents.every((agent) => agent.turns === 1 && agent.observations === 1)).toBe(true);
       expect(snapshot.agents.every((agent) => typeof agent.socialStateHash === "string")).toBe(true);
     }
-    expect(scaffoldTrajectory).toEqual(legacyTrajectory);
+    expect(withoutTrajectoryActionArbitration(scaffoldTrajectory)).toEqual(legacyTrajectory);
     const replay = replayWerewolfSocialEpisode(scaffold.artifact, { stopOnMismatch: false });
     expect(replay.ok).toBe(true);
     expect(replay.mismatches).toEqual([]);
@@ -1698,7 +1709,10 @@ describe("Werewolf generic social adapter", () => {
         actorId: firstSpeaker.id,
         targetId: secondSpeaker.id,
         promisedAction: "在投票前公开复核证据",
-        evidenceRefs: [expect.objectContaining({ artifact: "message", id: publicSpeechMessages[0]?.id })]
+        evidenceRefs: expect.arrayContaining([
+          expect.objectContaining({ artifact: "message", id: publicSpeechMessages[0]?.id }),
+          expect.objectContaining({ artifact: "delivery_receipt", id: expect.stringContaining(`:${secondSpeaker.id}`) })
+        ])
       })
     ]);
     expect(Object.values(secondSpeakerSocial?.coalitions?.records ?? {})).toEqual([
@@ -1706,7 +1720,10 @@ describe("Werewolf generic social adapter", () => {
         memberIds: [firstSpeaker.id, secondSpeaker.id],
         targetId: secondSpeaker.id,
         sharedGoal: "共同核对票型",
-        formationEvidenceRefs: [expect.objectContaining({ artifact: "message", id: publicSpeechMessages[0]?.id })]
+        formationEvidenceRefs: expect.arrayContaining([
+          expect.objectContaining({ artifact: "message", id: publicSpeechMessages[0]?.id }),
+          expect.objectContaining({ artifact: "delivery_receipt", id: expect.stringContaining(`:${secondSpeaker.id}`) })
+        ])
       })
     ]);
     expect(Object.values(secondSpeakerSocial?.gossip?.records ?? {})).toEqual(expect.arrayContaining([
@@ -1714,7 +1731,10 @@ describe("Werewolf generic social adapter", () => {
         speakerId: firstSpeaker.id,
         subjectId: secondSpeaker.id,
         claim: "后置位需要回应当前票型证据",
-        evidenceRefs: [expect.objectContaining({ artifact: "message", id: publicSpeechMessages[0]?.id })]
+        evidenceRefs: expect.arrayContaining([
+          expect.objectContaining({ artifact: "message", id: publicSpeechMessages[0]?.id }),
+          expect.objectContaining({ artifact: "delivery_receipt", id: expect.stringContaining(`:${secondSpeaker.id}`) })
+        ])
       })
     ]));
     expect(privateMemoMessages[0]).toMatchObject({
@@ -1774,7 +1794,10 @@ describe("Werewolf generic social adapter", () => {
       source: firstSpeaker.id,
       visibility: "public",
       content: speechByActor[firstSpeaker.id],
-      evidenceRefs: [{ artifact: "message", id: "msg-1", seq: 1, description: "table" }],
+      evidenceRefs: expect.arrayContaining([
+        { artifact: "message", id: "msg-1", seq: 1, description: "table" },
+        expect.objectContaining({ artifact: "delivery_receipt", id: expect.stringContaining(`:${secondSpeaker.id}`), seq: 1 })
+      ]),
       metadata: {
         channelId: "table",
         senderId: firstSpeaker.id,
@@ -1790,7 +1813,10 @@ describe("Werewolf generic social adapter", () => {
       predicate: "claimedRole",
       value: "seer",
       confidence: 1,
-      evidenceRefs: [{ artifact: "message", id: "msg-1", seq: 1, description: "table" }],
+      evidenceRefs: expect.arrayContaining([
+        { artifact: "message", id: "msg-1", seq: 1, description: "table" },
+        expect.objectContaining({ artifact: "delivery_receipt", id: expect.stringContaining(`:${secondSpeaker.id}`), seq: 1 })
+      ]),
       metadata: {
         observerId: secondSpeaker.id,
         speakerId: firstSpeaker.id,
@@ -1808,7 +1834,10 @@ describe("Werewolf generic social adapter", () => {
       predicate: "pressuredTarget",
       value: observedPressureTargetId,
       confidence: 1,
-      evidenceRefs: [{ artifact: "message", id: "msg-1", seq: 1, description: "table" }],
+      evidenceRefs: expect.arrayContaining([
+        { artifact: "message", id: "msg-1", seq: 1, description: "table" },
+        expect.objectContaining({ artifact: "delivery_receipt", id: expect.stringContaining(`:${secondSpeaker.id}`), seq: 1 })
+      ]),
       metadata: {
         observerId: secondSpeaker.id,
         speakerId: firstSpeaker.id,
@@ -2774,6 +2803,13 @@ describe("Werewolf generic social adapter", () => {
     expect(result.status).toBe("truncated");
     expect(result.truncationReason).toContain("maxTransitions 7");
     expect(result.trajectory).toHaveLength(6);
+    expect(result.trajectory.every((step) => {
+      const arbitration = step.actionArbitration;
+      return arbitration?.version === "agent.action-arbitration.v1" &&
+        arbitration.candidateCount === 1 &&
+        arbitration.candidates[0]?.source === "policy" &&
+        arbitration.selectedCandidateId === arbitration.candidates[0]?.id;
+    })).toBe(true);
     expect(result.trajectory.every((step) => step.turnTrace.cognitionSource === "policy")).toBe(true);
     expect(result.trajectory.every((step) => step.reasonerOutput.cognitionSource === "policy")).toBe(true);
     expect(result.trajectory.every((step) => step.turnTrace.latencyMs === 0)).toBe(true);
@@ -2804,6 +2840,112 @@ describe("Werewolf generic social adapter", () => {
       "private-seer-inspect",
       "private-policy-memo"
     ]);
+  });
+
+  it("arbitrates one policy candidate against one distinct legal reasoner candidate in production", async () => {
+    const initialState = createGame({ id: "werewolf-production-action-arbitration", seed: "werewolf-production-action-arbitration" });
+    const agents = agentConfigsFor(initialState, "production-action-arbitration-profile");
+    let proposedTargetId: string | undefined;
+    const reasonerCalls: string[] = [];
+    const reasoner: HarnessReasoner = {
+      async think(input) {
+        reasonerCalls.push(input.traceId);
+        proposedTargetId = input.action.kind === "inspect"
+          ? input.action.legalTargetIds.find((targetId) => targetId !== input.policyPlan.targetId)
+          : undefined;
+        if (!proposedTargetId) throw new Error("Expected a distinct legal inspect target.");
+        const content = "private candidate memo that must not enter arbitration summary";
+        return {
+          content,
+          actionProposal: {
+            commandType: "seer.inspect",
+            targetId: proposedTargetId,
+            confidence: 0.99,
+            rationale: "private candidate rationale"
+          },
+          completion: {
+            content,
+            latencyMs: 1,
+            usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 },
+            providerRequestId: `production-action-arbitration-${input.traceId}`,
+            attempts: 1,
+            stream: { enabled: true, completed: true, completedBy: "provider_stop_event" }
+          }
+        };
+      }
+    };
+
+    const result = await runHarnessMatch({ initialState, agents, reasoner, maxTransitions: 2 });
+    const step = result.trajectory[0];
+    const nativeStep = result.socialEpisode.steps.find((candidate) => candidate.traceId === step?.traceId);
+    const arbitration = step?.actionArbitration;
+    const legalTargetIds = (nativeStep?.pendingAction as { legalTargetIds?: string[] } | undefined)?.legalTargetIds ?? [];
+
+    expect(result.status).toBe("truncated");
+    expect(reasonerCalls).toHaveLength(1);
+    expect(step?.command).toMatchObject({ type: "seer.inspect", targetId: proposedTargetId });
+    expect(arbitration).toMatchObject({
+      version: "agent.action-arbitration.v1",
+      actorId: step?.actorId,
+      arbitratorId: "default-score-arbitrator",
+      candidateCount: 2,
+      decisionRule: "highest_final_score_then_candidate_id"
+    });
+    expect(arbitration?.candidates.map((candidate) => candidate.source)).toEqual(["policy", "reasoner"]);
+    expect(arbitration?.selectedCandidateId).toBe(arbitration?.candidates.find((candidate) => candidate.source === "reasoner")?.id);
+    expect(arbitration?.candidates.every((candidate) =>
+      candidate.socialTargetIds?.every((targetId) =>
+        legalTargetIds.includes(targetId)
+      ) ?? true
+    )).toBe(true);
+    expect(nativeStep?.action.metadata?.arbitration).toEqual(arbitration);
+    expect(JSON.stringify(arbitration)).not.toContain("private candidate memo");
+    expect(JSON.stringify(arbitration)).not.toContain("private candidate rationale");
+    expect(replayHarnessTrajectory({ initialState, trajectory: result.trajectory })).toMatchObject({ ok: true, mismatches: [] });
+  });
+
+  it("deduplicates rejected or command-identical reasoner proposals to the legal policy candidate", async () => {
+    const run = async (id: string, targetId: string | undefined) => {
+      const initialState = createGame({ id, seed: id });
+      const agents = agentConfigsFor(initialState, `${id}-profile`);
+      let calls = 0;
+      const reasoner: HarnessReasoner = {
+        async think(input) {
+          calls += 1;
+          const content = "bounded advisory candidate";
+          return {
+            content,
+            actionProposal: {
+              commandType: "seer.inspect",
+              targetId: targetId ?? input.policyPlan.targetId,
+              confidence: 1
+            },
+            completion: {
+              content,
+              latencyMs: 1,
+              usage: {},
+              attempts: 1,
+              stream: { enabled: true, completed: true, completedBy: "provider_stop_event" }
+            }
+          };
+        }
+      };
+      const result = await runHarnessMatch({ initialState, agents, reasoner, maxTransitions: 2 });
+      return { result, calls };
+    };
+
+    for (const [id, targetId] of [
+      ["werewolf-rejected-action-candidate", "not-a-seat"],
+      ["werewolf-identical-action-candidate", undefined]
+    ] as const) {
+      const { result, calls } = await run(id, targetId);
+      const arbitration = result.trajectory[0]?.actionArbitration;
+      expect(result.status).toBe("truncated");
+      expect(calls).toBe(1);
+      expect(arbitration?.candidateCount).toBe(1);
+      expect(arbitration?.candidates).toEqual([expect.objectContaining({ source: "policy" })]);
+      expect(result.trajectory[0]?.command).toMatchObject({ type: "seer.inspect", targetId: expect.any(String) });
+    }
   });
 
   it("keeps provider-backed decision failures as failed full HarnessRunResult artifacts", async () => {
@@ -3697,6 +3839,22 @@ class InvalidKillSocialActor implements SocialActor<WerewolfSocialObservation, W
 
 function normalizeJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function withoutActionArbitration<T>(value: T): T {
+  const clone = normalizeJson(value) as T & {
+    steps?: Array<{ action?: { metadata?: Record<string, unknown> } }>;
+  };
+  for (const step of clone.steps ?? []) {
+    if (step.action?.metadata) delete step.action.metadata.arbitration;
+  }
+  return clone;
+}
+
+function withoutTrajectoryActionArbitration<T extends Array<{ actionArbitration?: unknown }>>(value: T): T {
+  const clone = normalizeJson(value);
+  for (const step of clone) delete step.actionArbitration;
+  return clone;
 }
 
 function visibleParentMessageIds(

@@ -41,6 +41,8 @@ import {
   createDeterministicReceiptReflectionPolicy,
   recordCommittedReceiptOutcome,
   recordCommittedReceiptReflection,
+  type AgentActionCandidate,
+  type AgentActionArbitrationSummary,
   type AgentDecisionInput,
   type AgentPolicy,
   type AgentReasoner,
@@ -629,6 +631,7 @@ function createScaffoldedWerewolfActor(input: {
       if (metadata.turnTrace.playerId !== state.playerId || metadata.policyPlan.command.type !== action.command.type) {
         throw new Error(`Scaffolded Werewolf action metadata does not match canonical actor ${state.playerId}.`);
       }
+      validateSelectedWerewolfArbitration(metadata.actionArbitration, action);
       const reasonerOutput = metadata.reasonerOutput;
       commitWerewolfAgentTurn({
         state,
@@ -665,7 +668,8 @@ function createScaffoldedWerewolfActor(input: {
     ReasonerOutput
   > = {
     id: `werewolf-policy:${input.initialState.policyName}`,
-    decide: (decision) => buildScaffoldedWerewolfAction({ decision, players: input.players })
+    decide: (decision) => buildScaffoldedWerewolfAction({ decision, players: input.players }),
+    generateCandidates: (decision) => generateScaffoldedWerewolfCandidates({ decision, players: input.players })
   };
   const harnessReasoner = input.reasoner;
   const reasoner: AgentReasoner<
@@ -716,6 +720,85 @@ function createScaffoldedWerewolfActor(input: {
   });
 }
 
+function generateScaffoldedWerewolfCandidates(input: {
+  decision: AgentDecisionInput<
+    WerewolfSocialObservation,
+    WerewolfSocialPendingAction,
+    GameCommand,
+    AgentHarnessState,
+    ReasonerOutput
+  >;
+  players: PlayerState[];
+}): Array<AgentActionCandidate<GameCommand>> {
+  const playerTurn = requireScaffoldedWerewolfPlayerTurn({
+    observation: input.decision.observation,
+    pending: input.decision.pendingAction,
+    context: input.decision.observationContext
+  });
+  let policyPlan = werewolfPolicyPlanForScaffoldDecision(input.decision, playerTurn);
+  const reasonerOutput = input.decision.reasoner?.advice;
+  if (requiresWerewolfSpeech(playerTurn.pending)) {
+    policyPlan = attachSpeech(policyPlan, deterministicPolicySpeech(playerTurn.pending, policyPlan));
+  }
+  const policyAction = buildScaffoldedWerewolfActionForPlan({
+    decision: input.decision,
+    players: input.players,
+    playerTurn,
+    plan: policyPlan,
+    selectedSource: "policy"
+  });
+  const candidates: Array<AgentActionCandidate<GameCommand>> = [
+    werewolfActionCandidate({
+      playerTurn,
+      plan: policyPlan,
+      action: policyAction,
+      source: "policy"
+    })
+  ];
+  if (!reasonerOutput) return candidates;
+
+  let reasonerPlan = applyWerewolfReasonerProposal(
+    werewolfPolicyPlanForScaffoldDecision(input.decision, playerTurn),
+    playerTurn.pending,
+    reasonerOutput.actionProposal
+  );
+  if (requiresWerewolfSpeech(playerTurn.pending)) {
+    let speech: string;
+    try {
+      speech = normalizeSpeech(reasonerOutput.content);
+    } catch {
+      return candidates;
+    }
+    reasonerPlan = attachSpeech(reasonerPlan, speech);
+  }
+  const reasonerAction = buildScaffoldedWerewolfActionForPlan({
+    decision: input.decision,
+    players: input.players,
+    playerTurn,
+    plan: reasonerPlan,
+    selectedSource: "reasoner"
+  });
+  if (
+    hashStableState({ command: reasonerAction.command, messages: reasonerAction.messages ?? [] }) ===
+    hashStableState({ command: policyAction.command, messages: policyAction.messages ?? [] })
+  ) {
+    return candidates;
+  }
+  candidates.push(
+    werewolfActionCandidate({
+      playerTurn,
+      plan: reasonerPlan,
+      action: reasonerAction,
+      source: "reasoner",
+      // On communicative turns the reasoner-authored language is the primary
+      // candidate and deterministic text is a fallback. Other action families
+      // require an explicit confidence advantage to displace policy authority.
+      scoreAdjustment: requiresWerewolfSpeech(playerTurn.pending) ? 0.001 : 0
+    })
+  );
+  return candidates;
+}
+
 function buildScaffoldedWerewolfAction(input: {
   decision: AgentDecisionInput<
     WerewolfSocialObservation,
@@ -726,24 +809,25 @@ function buildScaffoldedWerewolfAction(input: {
   >;
   players: PlayerState[];
 }): SocialAction<GameCommand> {
-  const playerTurn = requireScaffoldedWerewolfPlayerTurn({
-    observation: input.decision.observation,
-    pending: input.decision.pendingAction,
-    context: input.decision.observationContext
-  });
-  let plan = werewolfPolicyPlanForScaffoldDecision(input.decision, playerTurn);
+  const candidates = generateScaffoldedWerewolfCandidates(input);
+  return cloneJson(candidates[0].action);
+}
+
+function buildScaffoldedWerewolfActionForPlan(input: {
+  decision: AgentDecisionInput<
+    WerewolfSocialObservation,
+    WerewolfSocialPendingAction,
+    GameCommand,
+    AgentHarnessState,
+    ReasonerOutput
+  >;
+  players: PlayerState[];
+  playerTurn: ReturnType<typeof requireScaffoldedWerewolfPlayerTurn>;
+  plan: PolicyPlan;
+  selectedSource: "policy" | "reasoner";
+}): SocialAction<GameCommand> {
+  const { playerTurn, plan } = input;
   const reasonerOutput = input.decision.reasoner?.advice;
-  if (reasonerOutput) {
-    plan = applyWerewolfReasonerProposal(plan, playerTurn.pending, reasonerOutput.actionProposal);
-    if (requiresWerewolfSpeech(playerTurn.pending)) {
-      plan = attachSpeech(plan, normalizeSpeech(reasonerOutput.content));
-    }
-  } else if (requiresWerewolfSpeech(playerTurn.pending)) {
-    // No synthetic AgentReasoner is installed for policy-only operation. The
-    // policy remains the command authority and supplies bounded deterministic
-    // text only where the domain command requires text.
-    plan = attachSpeech(plan, deterministicPolicySpeech(playerTurn.pending, plan));
-  }
   const privateMemo = reasonerOutput?.content ?? deterministicPolicyMemo(playerTurn.pending, plan);
   const cognitionSource = reasonerOutput ? "reasoner" : "policy";
   const command = plan.command;
@@ -799,6 +883,9 @@ function buildScaffoldedWerewolfAction(input: {
         reasonerOutput.speechActDrafts
       )
     : summarizePolicyOnlyOutput(privateMemo);
+  const selectedReasonerSummary = input.selectedSource === "reasoner"
+    ? reasonerSummary
+    : { ...reasonerSummary, speechActDrafts: undefined };
   const metadata: WerewolfSocialActionMetadata = {
     kind: WEREWOLF_HARNESS_TURN_METADATA_KIND,
     turnIndex: playerTurn.actorTurnIndex,
@@ -822,9 +909,82 @@ function buildScaffoldedWerewolfAction(input: {
       command,
       policyPlan: plan,
       observation: playerTurn.view,
-      reasonerOutput: reasonerSummary
+      reasonerOutput: selectedReasonerSummary
     })
   };
+}
+
+function werewolfActionCandidate(input: {
+  playerTurn: ReturnType<typeof requireScaffoldedWerewolfPlayerTurn>;
+  plan: PolicyPlan;
+  action: SocialAction<GameCommand>;
+  source: "policy" | "reasoner";
+  scoreAdjustment?: number;
+}): AgentActionCandidate<GameCommand> {
+  const score = Math.max(0, Math.min(1.001, input.plan.confidence + (input.scoreAdjustment ?? 0)));
+  const command = input.plan.command;
+  const targetIds = Array.from(new Set([
+    input.plan.targetId,
+    input.plan.pressureTargetId,
+    "targetId" in command ? command.targetId : undefined,
+    command.type === "witch.act" ? command.saveTargetId : undefined,
+    command.type === "witch.act" ? command.poisonTargetId : undefined
+  ].filter((value): value is string => Boolean(value))));
+  return {
+    id: `werewolf:${input.action.actorId}:${input.playerTurn.pending.kind}:${input.source}:${werewolfCandidateVariant(input.plan)}`,
+    actorId: input.action.actorId,
+    kind: input.action.kind,
+    source: input.source,
+    socialTargetIds: targetIds.length ? targetIds : undefined,
+    action: cloneJson(input.action),
+    baseScore: input.plan.confidence,
+    utilityScore: input.plan.confidence,
+    legalityScore: 1,
+    finalScore: score,
+    reasons: [
+      input.source === "policy"
+        ? "domain policy produced a complete legal-intent candidate"
+        : "domain legality boundary accepted a distinct reasoner candidate"
+    ],
+    evidenceRefs: [
+      {
+        artifact: "observation",
+        traceId: input.playerTurn.traceId,
+        description: `scoped ${input.playerTurn.pending.kind} observation`
+      },
+      {
+        artifact: "trace",
+        traceId: input.playerTurn.traceId,
+        description: `${input.source} candidate generation`
+      }
+    ]
+  };
+}
+
+function werewolfCandidateVariant(plan: PolicyPlan): string {
+  const command = plan.command;
+  if ("targetId" in command && typeof command.targetId === "string") return `target-${command.targetId}`;
+  if (command.type === "witch.act") return `save-${command.saveTargetId ?? "none"}-poison-${command.poisonTargetId ?? "none"}`;
+  if ((command.type === "vote.cast" || command.type === "sheriff.vote") && command.abstain) return "abstain";
+  if (command.type === "speech.submit" || command.type === "lastWords.submit") return "speech";
+  return "default";
+}
+
+function validateSelectedWerewolfArbitration(
+  arbitration: AgentActionArbitrationSummary | undefined,
+  action: SocialAction<GameCommand>
+): void {
+  if (!arbitration) throw new Error(`Scaffolded Werewolf action ${action.traceId ?? action.kind} is missing candidate arbitration.`);
+  if (arbitration.version !== "agent.action-arbitration.v1" || arbitration.actorId !== action.actorId) {
+    throw new Error(`Scaffolded Werewolf action ${action.traceId ?? action.kind} has invalid candidate arbitration authority.`);
+  }
+  if (arbitration.candidateCount !== arbitration.candidates.length || arbitration.candidateCount < 1) {
+    throw new Error(`Scaffolded Werewolf action ${action.traceId ?? action.kind} has an inconsistent candidate count.`);
+  }
+  const selected = arbitration.candidates.find((candidate) => candidate.id === arbitration.selectedCandidateId);
+  if (!selected || selected.actorId !== action.actorId || selected.kind !== action.kind) {
+    throw new Error(`Scaffolded Werewolf action ${action.traceId ?? action.kind} does not match its selected candidate.`);
+  }
 }
 
 function werewolfPolicyPlanForScaffoldDecision(
@@ -1875,6 +2035,7 @@ export function projectWerewolfSocialStepToHarnessStep(
     reasonerOutput: cloneJson(metadata.reasonerOutput),
     command: cloneJson(step.action.command),
     turnTrace: cloneJson(metadata.turnTrace),
+    actionArbitration: cloneJson(metadata.actionArbitration),
     agentStateHash: metadata.agentStateHash ?? metadata.turnTrace.agentStateHash,
     agentSnapshotsAfterStep: cloneJson(stepAgentSnapshot?.agents),
     agentSnapshotsHashAfterStep: stepAgentSnapshot?.hash,

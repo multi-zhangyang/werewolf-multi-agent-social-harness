@@ -4632,12 +4632,21 @@ function redactAgentSocialStatePrivateEvidence(
 }
 
 function redactEvidenceRefs(refs: EvidenceRef[]): EvidenceRef[] {
-  return refs.map((ref) => ({
-    artifact: ref.artifact,
-    id: ref.id,
-    seq: ref.seq,
-    traceId: ref.traceId
-  }));
+  return refs.map((ref) =>
+    ref.artifact === "delivery_receipt"
+      ? {
+          artifact: ref.artifact,
+          // Receipt ids encode observer identity and audience ordering. Public
+          // projections retain only the parent message sequence.
+          seq: ref.seq
+        }
+      : {
+          artifact: ref.artifact,
+          id: ref.id,
+          seq: ref.seq,
+          traceId: ref.traceId
+        }
+  );
 }
 
 function cloneJson<T>(value: T): T {

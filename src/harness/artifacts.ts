@@ -638,6 +638,11 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
 
   const socialStepByTrace = new Map(artifact.socialEpisode.steps.map((step) => [step.traceId, step]));
   const messageSeqs = new Set(artifact.socialEpisode.messages.map((message) => message.seq));
+  const deliveryReceiptById = new Map(
+    artifact.socialEpisode.messages.flatMap((message) =>
+      (message.deliveryReceipts ?? []).map((receipt) => [receipt.id, { message, receipt }] as const)
+    )
+  );
   const playerIds = new Set(artifact.finalState.players.map((player) => player.id));
   validateAgentSnapshotFrames(artifact, playerIds, errors);
   const hasStepAgentSnapshots = artifact.trajectory.some(
@@ -749,6 +754,24 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
         if (evidenceRef.artifact === "event" && evidenceRef.seq !== undefined && !eventSeqs.has(evidenceRef.seq)) {
           errors.push(`agents[${index}].social.journal entry ${entry.journalSeq} evidence references missing event seq ${evidenceRef.seq}.`);
         }
+        if (evidenceRef.artifact === "delivery_receipt") {
+          const binding = evidenceRef.id ? deliveryReceiptById.get(evidenceRef.id) : undefined;
+          if (!binding) {
+            errors.push(`agents[${index}].social.journal entry ${entry.journalSeq} evidence references missing delivery receipt ${evidenceRef.id ?? "unknown"}.`);
+          } else {
+            if (binding.receipt.observerId !== agent.playerId) {
+              errors.push(`agents[${index}].social.journal entry ${entry.journalSeq} delivery receipt observer mismatch.`);
+            }
+            if (evidenceRef.seq !== binding.message.seq) {
+              errors.push(`agents[${index}].social.journal entry ${entry.journalSeq} delivery receipt message seq mismatch.`);
+            }
+            if (!evidenceRefs.some((ref) =>
+              ref.artifact === "message" && ref.id === binding.message.id && ref.seq === binding.message.seq
+            )) {
+              errors.push(`agents[${index}].social.journal entry ${entry.journalSeq} delivery receipt lacks matching message evidence.`);
+            }
+          }
+        }
         if (
           evidenceRef.artifact === "trace" &&
           evidenceRef.traceId &&
@@ -757,6 +780,20 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
         ) {
           errors.push(`agents[${index}].social.journal entry ${entry.journalSeq} evidence references missing trace ${evidenceRef.traceId}.`);
         }
+      }
+    }
+    for (const attribution of Object.values(agent.social?.theoryOfMind?.records ?? {})) {
+      if (!attribution.sourceDeliveryReceiptId) continue;
+      const binding = deliveryReceiptById.get(attribution.sourceDeliveryReceiptId);
+      if (
+        !binding ||
+        binding.receipt.observerId !== agent.playerId ||
+        binding.receipt.observerId !== attribution.observerId ||
+        binding.message.id !== attribution.sourceMessageId ||
+        binding.message.seq !== attribution.sourceMessageSeq ||
+        binding.message.senderId !== attribution.subjectId
+      ) {
+        errors.push(`agents[${index}].social.theoryOfMind ${attribution.id} has invalid delivery receipt binding.`);
       }
     }
   }
@@ -1719,7 +1756,11 @@ function validateAgentEvidenceNotBeyondBoundary(input: {
       if (evidenceRef.artifact === "trace" && evidenceRef.traceId && input.futureTraceIds.has(evidenceRef.traceId)) {
         input.errors.push(`${input.label}.social.journal entry ${entry.journalSeq} evidence references future trace ${evidenceRef.traceId}.`);
       }
-      if (evidenceRef.artifact === "message" && evidenceRef.seq !== undefined && evidenceRef.seq > input.maxMessageSeq) {
+      if (
+        (evidenceRef.artifact === "message" || evidenceRef.artifact === "delivery_receipt") &&
+        evidenceRef.seq !== undefined &&
+        evidenceRef.seq > input.maxMessageSeq
+      ) {
         input.errors.push(`${input.label}.social.journal entry ${entry.journalSeq} evidence references future message seq ${evidenceRef.seq}.`);
       }
       if (evidenceRef.artifact === "event" && evidenceRef.seq !== undefined && evidenceRef.seq > input.maxEventSeq) {

@@ -995,7 +995,14 @@ describe("scaffolded social actor", () => {
     ]);
     expect(social.commitments?.records["visible-bus-commitment"]).toMatchObject({
       actorId: "speaker",
-      evidenceRefs: [{ artifact: "message", id: visibleMessage.id, seq: visibleMessage.seq, description: "table" }]
+      evidenceRefs: expect.arrayContaining([
+        { artifact: "message", id: visibleMessage.id, seq: visibleMessage.seq, description: "table" },
+        expect.objectContaining({
+          artifact: "delivery_receipt",
+          id: expect.stringContaining(`:${actor.id}`),
+          seq: visibleMessage.seq
+        })
+      ])
     });
     expect(social.commitments?.records["hidden-bus-commitment"]).toBeUndefined();
     expect(
@@ -1004,6 +1011,36 @@ describe("scaffolded social actor", () => {
       )
     ).toHaveLength(1);
     expect(social.journal?.entries.some((entry) => entry.evidenceRefs.some((ref) => ref.id === hiddenMessage.id))).toBe(false);
+
+    const forgedObservation = structuredClone(wrappedObservation);
+    forgedObservation.view.social.messages[0].deliveryReceipts =
+      forgedObservation.view.social.messages[0].deliveryReceipts?.filter((receipt) => receipt.observerId !== "a");
+    const forgedActor = createScaffoldedActor<any, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      policy: policyFor<any>("a")
+    });
+    expect(() =>
+      forgedActor.observe(forgedObservation, observationContext({ actorId: "a", kind: "vote", phase: "day_vote", day: 2 }, 25))
+    ).toThrow(/exactly one matching delivery receipt for observer a/);
+    expect(forgedActor.state.social.memory.entries.map((entry) => entry.kind)).toEqual(["observation"]);
+    expect(forgedActor.state.social.memory.entries.some((entry) => entry.kind === "message")).toBe(false);
+    expect(forgedActor.state.social.commitments?.records["visible-bus-commitment"]).toBeUndefined();
+    expect(forgedActor.state.social.messageIngestion?.seenMessageIds).toEqual([]);
+
+    const legacyObservation = structuredClone(wrappedObservation);
+    delete legacyObservation.view.social.messages[0].deliveryReceipts;
+    const legacyActor = createScaffoldedActor<any, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      policy: policyFor<any>("a")
+    });
+    expect(() =>
+      legacyActor.observe(legacyObservation, observationContext({ actorId: "a", kind: "vote", phase: "day_vote", day: 2 }, 26))
+    ).not.toThrow();
+    expect(legacyActor.state.social.memory.entries.find((entry) => entry.kind === "message")?.evidenceRefs).toEqual([
+      expect.objectContaining({ artifact: "message", id: visibleMessage.id })
+    ]);
   });
 
   it("persists exact visible-message ingestion identities across bounded-memory snapshot restore", () => {

@@ -1,5 +1,6 @@
 import type { SocialEpisodeArtifact, SocialHarnessStep } from "./social";
 import type { HarnessTurnTrace, PolicyPlan, ReasonerOutputSummary } from "./types";
+import type { AgentActionArbitrationSummary } from "./scaffold";
 
 /**
  * Legacy Werewolf decision-envelope marker. It remains stable so existing
@@ -19,6 +20,7 @@ export interface WerewolfHarnessTurnActionMetadata {
   reasonerOutput: ReasonerOutputSummary;
   turnTrace: HarnessTurnTrace;
   agentStateHash?: string;
+  actionArbitration?: AgentActionArbitrationSummary;
 }
 
 export interface WerewolfHarnessTurnEvidence {
@@ -81,7 +83,10 @@ export function parseWerewolfHarnessTurnActionMetadata(metadata: unknown, traceI
     policyPlan: metadata.policyPlan as unknown as PolicyPlan,
     reasonerOutput: metadata.reasonerOutput as unknown as ReasonerOutputSummary,
     turnTrace: metadata.turnTrace as unknown as HarnessTurnTrace,
-    agentStateHash: typeof metadata.agentStateHash === "string" ? metadata.agentStateHash : undefined
+    agentStateHash: typeof metadata.agentStateHash === "string" ? metadata.agentStateHash : undefined,
+    actionArbitration: isRecord(metadata.arbitration)
+      ? (metadata.arbitration as unknown as AgentActionArbitrationSummary)
+      : undefined
   };
 }
 

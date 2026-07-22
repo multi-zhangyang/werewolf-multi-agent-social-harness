@@ -1356,6 +1356,10 @@ function metricEvidenceFromSocialRefs(agent: AgentHarnessState, refs: EvidenceRe
       mapped.push({ artifact: "message", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
       continue;
     }
+    if (ref.artifact === "delivery_receipt") {
+      mapped.push({ artifact: "delivery_receipt", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
+      continue;
+    }
     if (ref.artifact === "event") {
       mapped.push({ artifact: "event", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
       continue;
@@ -2351,6 +2355,10 @@ function falseRoleClaimExposureEvidence(
         refs.push({ artifact: "message", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
         continue;
       }
+      if (ref.artifact === "delivery_receipt") {
+        refs.push({ artifact: "delivery_receipt", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
+        continue;
+      }
       if (ref.artifact === "trace") {
         refs.push({ artifact: "trace", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
         continue;
@@ -2447,6 +2455,10 @@ function falseRoleClaimPressureVoteFollowEvidence(records: FalseRoleClaimPressur
     for (const ref of record.exposure.evidenceRefs) {
       if (ref.artifact === "message") {
         refs.push({ artifact: "message", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
+        continue;
+      }
+      if (ref.artifact === "delivery_receipt") {
+        refs.push({ artifact: "delivery_receipt", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
         continue;
       }
       if (ref.artifact === "trace") {
