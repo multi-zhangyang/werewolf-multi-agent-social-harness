@@ -7,7 +7,10 @@ import {
   validateGenericExperimentProvenance,
   type GenericExperimentProvenanceV1
 } from "./experimentSpec";
-import type { GenericTournamentRunSetArtifact } from "./genericTournamentArtifacts";
+import type {
+  GenericTournamentRunSetArtifact,
+  GenericTournamentRunSetEpisode
+} from "./genericTournamentArtifacts";
 import { validateGenericTournamentRunSetArtifact } from "./genericTournamentArtifacts";
 import { hashStableJsonValue } from "./hash";
 import { GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE } from "./tournamentRunner";
@@ -122,7 +125,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
   private readonly episodeStore: GenericExperimentEpisodeAuthority<TArtifact>;
   private readonly now: () => string;
   private readonly entries = new Map<string, HarnessExperimentRunStoreEntry>();
-  private readonly finalizing = new Set<string>();
+  private readonly mutating = new Set<string>();
 
   private constructor(options: HarnessExperimentRunStoreOptions<TArtifact>) {
     if (!options.baseDirectory.trim()) throw new Error("Experiment run store baseDirectory is required.");
@@ -192,23 +195,84 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     return structuredClone(entry);
   }
 
+  /**
+   * Append one terminal episode membership revision after its canonical
+   * artifact/sidecars have been published (or after a reviewed pre-artifact
+   * failure). The ordered prefix survives process restart independently of
+   * final run-set materialization.
+   */
+  async recordEpisode(input: {
+    runSetId: string;
+    episode: GenericTournamentRunSetEpisode<TArtifact>;
+  }): Promise<HarnessExperimentRunStoreEntry> {
+    if (this.mutating.has(input.runSetId)) throw new Error("Experiment run mutation is already in progress.");
+    this.mutating.add(input.runSetId);
+    try {
+      const loaded = await this.loadKnownRun(input.runSetId);
+      if (!loaded) throw new Error("Experiment run must begin before an episode can be recorded.");
+      const expectedIndex = loaded.record.episodes.length;
+      const existingRunIds = new Set(
+        loaded.record.episodes.flatMap((episode, index) =>
+          index === input.episode.index || !episode.runId ? [] : [episode.runId]
+        )
+      );
+      const reference = await this.referenceForEpisode(input.episode, loaded.record, existingRunIds);
+      if (input.episode.index < expectedIndex) {
+        const existing = loaded.record.episodes[input.episode.index];
+        if (!existing || hashStableJsonValue(existing) !== hashStableJsonValue(reference)) {
+          throw new Error("Experiment run episode retry does not match durable progress.");
+        }
+        return structuredClone(loaded.entry);
+      }
+      if (loaded.record.state !== "active") throw new Error("Finalized experiment run cannot record another episode.");
+      if (input.episode.index > expectedIndex) throw new Error("Experiment run episode progress must be contiguous and ordered.");
+      const episodes = [...loaded.record.episodes, reference];
+      const counts = lifecycleCountsForReferences(episodes);
+      const record: HarnessExperimentRunRecordV1 = {
+        ...structuredClone(loaded.record),
+        updatedAt: monotonicTimestamp(this.now(), loaded.record.updatedAt),
+        gamesCompleted: counts.completed,
+        gamesTruncated: counts.truncated,
+        gamesFailed: counts.failed,
+        gamesUnstarted: loaded.record.gamesRequested - episodes.length,
+        episodes
+      };
+      assertRunRecord(record);
+      const revisionsDirectory = path.join(this.runsDirectory, loaded.entry.directoryKey, REVISIONS_DIRECTORY);
+      await assertDirectoryInside(
+        path.join(this.runsDirectory, loaded.entry.directoryKey),
+        revisionsDirectory,
+        "Experiment run revisions directory is not safe."
+      );
+      await this.writeRevision(revisionsDirectory, loaded.entry.directoryKey, loaded.entry.revision + 1, record);
+      const entry = entryFromRecord(record, loaded.entry.directoryKey, loaded.entry.revision + 1);
+      this.entries.set(entry.runSetId, entry);
+      await this.writeIndex();
+      return structuredClone(entry);
+    } finally {
+      this.mutating.delete(input.runSetId);
+    }
+  }
+
   async finalize<TEmbeddedArtifact extends TArtifact>(
     runSet: GenericTournamentRunSetArtifact<TEmbeddedArtifact>
   ): Promise<HarnessExperimentRunStoreEntry> {
-    if (this.finalizing.has(runSet.runSetId)) throw new Error("Experiment run finalization is already in progress.");
-    this.finalizing.add(runSet.runSetId);
+    if (this.mutating.has(runSet.runSetId)) throw new Error("Experiment run mutation is already in progress.");
+    this.mutating.add(runSet.runSetId);
     try {
       const loaded = await this.loadKnownRun(runSet.runSetId);
       if (!loaded) throw new Error("Experiment run must begin before it can be finalized.");
-      if (loaded.record.state !== "active") throw new Error("Experiment run is already finalized.");
       const refs = await this.referencesForRunSet(runSet, loaded.record);
+      assertEpisodeReferencesEqual(loaded.record.episodes, refs);
+      assertFinalRunSetMatchesRecord(runSet, loaded.record);
+      if (loaded.record.state === "finalized") return structuredClone(loaded.entry);
       const record: HarnessExperimentRunRecordV1 = {
         schemaVersion: HARNESS_EXPERIMENT_RUN_RECORD_VERSION,
         kind: "experiment-run-record",
         state: "finalized",
         runSetId: loaded.record.runSetId,
         createdAt: loaded.record.createdAt,
-        updatedAt: this.now(),
+        updatedAt: monotonicTimestamp(this.now(), loaded.record.updatedAt),
         experiment: structuredClone(loaded.record.experiment),
         gamesRequested: runSet.gamesRequested,
         gamesCompleted: runSet.gamesCompleted,
@@ -230,7 +294,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       await this.writeIndex();
       return structuredClone(entry);
     } finally {
-      this.finalizing.delete(runSet.runSetId);
+      this.mutating.delete(runSet.runSetId);
     }
   }
 
@@ -285,57 +349,71 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     const runIds = new Set<string>();
     const refs: HarnessExperimentRunEpisodeReferenceV1[] = [];
     for (const episode of runSet.episodes) {
-      if (!episode.artifact) {
-        refs.push({
-          index: episode.index,
-          seed: episode.seed,
-          status: episode.status,
-          metricCount: 0,
-          failureCount: 0,
-          ...(episode.status === "failed" ? { error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE } : {})
-        });
-        continue;
-      }
-      if (!episode.runId || runIds.has(episode.runId)) {
-        throw new Error("Experiment run-set episode runId must be present and unique when an artifact exists.");
-      }
-      runIds.add(episode.runId);
-      const canonical = await this.episodeStore.get(episode.runId);
-      if (!canonical) throw new Error(`Canonical episode ${episode.runId} is missing from the episode store.`);
-      if (hashStableJsonValue(canonical) !== hashStableJsonValue(episode.artifact)) {
-        throw new Error(`Canonical episode ${episode.runId} does not match the run-set artifact.`);
-      }
-      if (canonical.status !== episode.status) throw new Error(`Canonical episode ${episode.runId} lifecycle does not match the run-set.`);
-      if (!canonical.experiment || hashStableJsonValue(canonical.experiment) !== hashStableJsonValue(header.experiment)) {
-        throw new Error(`Canonical episode ${episode.runId} experiment does not match the run header.`);
-      }
-      const metrics = await this.episodeStore.getMetrics(episode.runId);
-      const failures = await this.episodeStore.getFailures(episode.runId);
-      const evaluationReport = await this.episodeStore.getEvaluationReport(episode.runId);
-      if (!metrics || !failures) throw new Error(`Canonical episode ${episode.runId} sidecars are missing.`);
-      if (
-        (evaluationReport === undefined) !== (episode.evaluationReport === undefined) ||
-        (evaluationReport && episode.evaluationReport &&
-          hashStableJsonValue(evaluationReport) !== hashStableJsonValue(episode.evaluationReport))
-      ) {
-        throw new Error(`Canonical episode ${episode.runId} evaluation report does not match the run-set.`);
-      }
-      refs.push({
-        index: episode.index,
-        seed: episode.seed,
-        status: episode.status,
-        runId: episode.runId,
-        artifactSha256: hashStableJsonValue(canonical),
-        metricCount: metrics.length,
-        failureCount: failures.length,
-        ...(evaluationReport ? {
-          evaluationReportId: evaluationReport.id,
-          evaluationReportSha256: hashStableJsonValue(evaluationReport)
-        } : {}),
-        ...(episode.status === "failed" ? { error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE } : {})
-      });
+      refs.push(await this.referenceForEpisode(episode, header, runIds));
     }
     return refs;
+  }
+
+  private async referenceForEpisode<TEmbeddedArtifact extends TArtifact>(
+    episode: GenericTournamentRunSetEpisode<TEmbeddedArtifact>,
+    header: HarnessExperimentRunRecordV1,
+    runIds: Set<string>
+  ): Promise<HarnessExperimentRunEpisodeReferenceV1> {
+    const expectedSeed = `${header.experiment.spec.seed}:g${episode.index + 1}`;
+    if (episode.index < 0 || !Number.isInteger(episode.index) || episode.seed !== expectedSeed) {
+      throw new Error("Experiment run episode ordering or seed does not match its durable schedule.");
+    }
+    if (!episode.artifact) {
+      if (episode.status !== "failed" || episode.runId || episode.evaluationReport) {
+        throw new Error("Only a reviewed pre-artifact failure may omit canonical episode content.");
+      }
+      return {
+        index: episode.index,
+        seed: episode.seed,
+        status: "failed",
+        metricCount: 0,
+        failureCount: 0,
+        error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE
+      };
+    }
+    if (!episode.runId || runIds.has(episode.runId)) {
+      throw new Error("Experiment run-set episode runId must be present and unique when an artifact exists.");
+    }
+    runIds.add(episode.runId);
+    const canonical = await this.episodeStore.get(episode.runId);
+    if (!canonical) throw new Error(`Canonical episode ${episode.runId} is missing from the episode store.`);
+    if (hashStableJsonValue(canonical) !== hashStableJsonValue(episode.artifact)) {
+      throw new Error(`Canonical episode ${episode.runId} does not match the run-set artifact.`);
+    }
+    if (canonical.status !== episode.status) throw new Error(`Canonical episode ${episode.runId} lifecycle does not match the run-set.`);
+    if (!canonical.experiment || hashStableJsonValue(canonical.experiment) !== hashStableJsonValue(header.experiment)) {
+      throw new Error(`Canonical episode ${episode.runId} experiment does not match the run header.`);
+    }
+    const metrics = await this.episodeStore.getMetrics(episode.runId);
+    const failures = await this.episodeStore.getFailures(episode.runId);
+    const evaluationReport = await this.episodeStore.getEvaluationReport(episode.runId);
+    if (!metrics || !failures) throw new Error(`Canonical episode ${episode.runId} sidecars are missing.`);
+    if (
+      (evaluationReport === undefined) !== (episode.evaluationReport === undefined) ||
+      (evaluationReport && episode.evaluationReport &&
+        hashStableJsonValue(evaluationReport) !== hashStableJsonValue(episode.evaluationReport))
+    ) {
+      throw new Error(`Canonical episode ${episode.runId} evaluation report does not match the run-set.`);
+    }
+    return {
+      index: episode.index,
+      seed: episode.seed,
+      status: episode.status,
+      runId: episode.runId,
+      artifactSha256: hashStableJsonValue(canonical),
+      metricCount: metrics.length,
+      failureCount: failures.length,
+      ...(evaluationReport ? {
+        evaluationReportId: evaluationReport.id,
+        evaluationReportSha256: hashStableJsonValue(evaluationReport)
+      } : {}),
+      ...(episode.status === "failed" ? { error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE } : {})
+    };
   }
 
   private async loadKnownRun(runSetId: string): Promise<{ record: HarnessExperimentRunRecordV1; entry: HarnessExperimentRunStoreEntry } | undefined> {
@@ -366,9 +444,9 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       .filter((child) => child.isDirectory() && REVISION_DIRECTORY_PATTERN.test(child.name))
       .sort((a, b) => a.name.localeCompare(b.name));
     if (!children.length) throw new Error("Stored experiment run has no canonical revision.");
-    if (children.length > 2) throw new Error("Stored experiment run has an unsupported revision history.");
     let latest: { record: HarnessExperimentRunRecordV1; entry: HarnessExperimentRunStoreEntry } | undefined;
     let header: HarnessExperimentRunRecordV1 | undefined;
+    let previous: HarnessExperimentRunRecordV1 | undefined;
     for (const [position, child] of children.entries()) {
       const match = REVISION_DIRECTORY_PATTERN.exec(child.name)!;
       const revision = Number(match[1]);
@@ -382,24 +460,31 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       assertRunRecord(record);
       assertManifest(manifest, record, directoryKey, revision, recordText, child.name);
       if (revision === 1) {
-        if (record.state !== "active") throw new Error("First experiment run revision must be active.");
+        if (record.state !== "active" || record.episodes.length !== 0) {
+          throw new Error("First experiment run revision must be an empty active header.");
+        }
         header = record;
       } else {
-        if (!header || record.state !== "finalized") {
-          throw new Error("Second experiment run revision must finalize its active header.");
-        }
+        if (!header || !previous) throw new Error("Experiment run revision is missing its active header.");
         if (
           record.runSetId !== header.runSetId ||
           record.createdAt !== header.createdAt ||
           record.gamesRequested !== header.gamesRequested ||
           hashStableJsonValue(record.experiment) !== hashStableJsonValue(header.experiment)
         ) {
-          throw new Error("Final experiment run revision changed immutable header authority.");
+          throw new Error("Experiment run revision changed immutable header authority.");
         }
+        if (previous.state === "finalized") throw new Error("Finalized experiment run cannot have a later revision.");
+        if (Date.parse(record.updatedAt) < Date.parse(previous.updatedAt)) {
+          throw new Error("Experiment run revision updatedAt moved backwards.");
+        }
+        if (record.state === "active") assertActiveProgressTransition(previous, record);
+        else assertEpisodeReferencesEqual(previous.episodes, record.episodes);
       }
       if (expectedRunSetId && record.runSetId !== expectedRunSetId) throw new Error("Stored experiment run id does not match the registry.");
       await this.assertEpisodeReferences(record);
       latest = { record, entry: entryFromRecord(record, directoryKey, revision) };
+      previous = record;
     }
     if (!latest) throw new Error("Stored experiment run has no recoverable canonical revision.");
     if (directoryKeyForRunSetId(latest.record.runSetId) !== directoryKey) {
@@ -409,7 +494,6 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
   }
 
   private async assertEpisodeReferences(record: HarnessExperimentRunRecordV1): Promise<void> {
-    if (record.state === "active") return;
     for (const episode of record.episodes) {
       if (!episode.runId) continue;
       const canonical = await this.episodeStore.get(episode.runId);
@@ -504,16 +588,10 @@ function assertRunRecord(record: HarnessExperimentRunRecordV1): void {
   if (record.gamesRequested !== record.experiment.spec.episodeCount) throw new Error("Experiment run gamesRequested does not match provenance.");
   const counts = [record.gamesRequested, record.gamesCompleted, record.gamesTruncated, record.gamesFailed, record.gamesUnstarted];
   if (counts.some((count) => !Number.isInteger(count) || count < 0)) throw new Error("Experiment run lifecycle counts must be non-negative integers.");
-  if (record.state === "active") {
-    if (record.episodes.length || record.gamesCompleted || record.gamesTruncated || record.gamesFailed || record.gamesUnstarted !== record.gamesRequested) {
-      throw new Error("Active experiment run must retain its untouched requested schedule.");
-    }
-    return;
-  }
   if (record.gamesCompleted + record.gamesTruncated + record.gamesFailed + record.gamesUnstarted !== record.gamesRequested) {
-    throw new Error("Finalized experiment run lifecycle counts do not cover the requested schedule.");
+    throw new Error("Experiment run lifecycle counts do not cover the requested schedule.");
   }
-  if (record.episodes.length !== record.gamesRequested - record.gamesUnstarted) throw new Error("Finalized experiment episode count mismatch.");
+  if (record.episodes.length !== record.gamesRequested - record.gamesUnstarted) throw new Error("Experiment run episode count mismatch.");
   const lifecycleCounts = { completed: 0, truncated: 0, failed: 0 };
   const runIds = new Set<string>();
   for (const [position, episode] of record.episodes.entries()) {
@@ -522,10 +600,10 @@ function assertRunRecord(record: HarnessExperimentRunRecordV1): void {
       , "evaluationReportId", "evaluationReportSha256"
     ], `Experiment run episode ${position}`);
     if (episode.index !== position || episode.seed !== `${record.experiment.spec.seed}:g${position + 1}`) {
-      throw new Error("Finalized experiment episode ordering or seed is invalid.");
+      throw new Error("Experiment run episode ordering or seed is invalid.");
     }
     if (episode.status !== "completed" && episode.status !== "truncated" && episode.status !== "failed") {
-      throw new Error("Finalized experiment episode lifecycle is invalid.");
+      throw new Error("Experiment run episode lifecycle is invalid.");
     }
     if (
       !Number.isInteger(episode.metricCount) || episode.metricCount < 0 ||
@@ -572,7 +650,77 @@ function assertRunRecord(record: HarnessExperimentRunRecordV1): void {
     lifecycleCounts.truncated !== record.gamesTruncated ||
     lifecycleCounts.failed !== record.gamesFailed
   ) {
-    throw new Error("Finalized experiment lifecycle counts do not match episode references.");
+    throw new Error("Experiment run lifecycle counts do not match episode references.");
+  }
+}
+
+function lifecycleCountsForReferences(episodes: HarnessExperimentRunEpisodeReferenceV1[]): {
+  completed: number;
+  truncated: number;
+  failed: number;
+} {
+  return {
+    completed: episodes.filter((episode) => episode.status === "completed").length,
+    truncated: episodes.filter((episode) => episode.status === "truncated").length,
+    failed: episodes.filter((episode) => episode.status === "failed").length
+  };
+}
+
+function assertEpisodeReferencePrefix(
+  prefix: HarnessExperimentRunEpisodeReferenceV1[],
+  episodes: HarnessExperimentRunEpisodeReferenceV1[]
+): void {
+  if (prefix.length > episodes.length) throw new Error("Experiment run revision removed durable episode progress.");
+  for (const [index, episode] of prefix.entries()) {
+    if (hashStableJsonValue(episode) !== hashStableJsonValue(episodes[index])) {
+      throw new Error("Experiment run revision changed durable episode history.");
+    }
+  }
+}
+
+function assertEpisodeReferencesEqual(
+  expected: HarnessExperimentRunEpisodeReferenceV1[],
+  actual: HarnessExperimentRunEpisodeReferenceV1[]
+): void {
+  if (expected.length !== actual.length) {
+    throw new Error("Experiment run finalization does not match durable episode progress.");
+  }
+  for (const [index, episode] of expected.entries()) {
+    if (hashStableJsonValue(episode) !== hashStableJsonValue(actual[index])) {
+      throw new Error("Experiment run finalization changed durable episode history.");
+    }
+  }
+}
+
+function assertFinalRunSetMatchesRecord<TArtifact extends GenericEpisodeEnvelope>(
+  runSet: GenericTournamentRunSetArtifact<TArtifact>,
+  record: HarnessExperimentRunRecordV1
+): void {
+  const expectedUnstarted = runSet.gamesUnstarted ?? runSet.gamesRequested - runSet.episodes.length;
+  if (
+    runSet.createdAt !== record.createdAt ||
+    runSet.gamesRequested !== record.gamesRequested ||
+    runSet.gamesCompleted !== record.gamesCompleted ||
+    runSet.gamesTruncated !== record.gamesTruncated ||
+    runSet.gamesFailed !== record.gamesFailed ||
+    expectedUnstarted !== record.gamesUnstarted
+  ) {
+    throw new Error("Experiment run finalization lifecycle does not match durable progress.");
+  }
+}
+
+function monotonicTimestamp(candidate: string, previous: string): string {
+  assertTimestamp(candidate, "updatedAt");
+  return Date.parse(candidate) < Date.parse(previous) ? previous : candidate;
+}
+
+function assertActiveProgressTransition(
+  previous: HarnessExperimentRunRecordV1,
+  current: HarnessExperimentRunRecordV1
+): void {
+  assertEpisodeReferencePrefix(previous.episodes, current.episodes);
+  if (current.episodes.length !== previous.episodes.length + 1) {
+    throw new Error("Active experiment run revision must append exactly one terminal episode.");
   }
 }
 

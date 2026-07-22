@@ -54,6 +54,9 @@ export interface GenericTournamentRunnerOptions<TPrepared, TResult> {
   statusOf: (result: TResult) => TournamentEpisodeLifecycle;
   seedForEpisode?: (context: TournamentEpisodeContext) => string;
   describeError?: (error: unknown) => string;
+  /** Durable control-plane hook. It runs after the terminal episode record is
+   * appended and outside the domain error boundary; hook failures are fatal. */
+  onEpisodeSettled?: (episode: GenericTournamentEpisode<TPrepared, TResult>) => void | Promise<void>;
 }
 
 /**
@@ -81,6 +84,7 @@ export async function runTournamentEpisodes<TPrepared, TResult>(
       seed: options.seedForEpisode?.(baseContext) ?? `${options.seed}:g${index + 1}`
     };
     let prepared: TPrepared | undefined;
+    let settled: GenericTournamentEpisode<TPrepared, TResult>;
     try {
       prepared = await options.prepareEpisode(context);
       // Preparation may be asynchronous. The episode itself has not started
@@ -89,12 +93,18 @@ export async function runTournamentEpisodes<TPrepared, TResult>(
       if (options.abortSignal?.aborted) break;
       const result = await options.runEpisode(prepared, context);
       const status = options.statusOf(result);
-      episodes.push({ ...context, status, prepared, result });
-      if (status === "failed" && !options.continueOnError) break;
+      settled = { ...context, status, prepared, result };
     } catch (error) {
-      episodes.push({ ...context, status: "failed", ...(prepared === undefined ? {} : { prepared }), error: errorText(error) });
-      if (!options.continueOnError) break;
+      settled = {
+        ...context,
+        status: "failed",
+        ...(prepared === undefined ? {} : { prepared }),
+        error: errorText(error)
+      };
     }
+    episodes.push(settled);
+    await options.onEpisodeSettled?.(settled);
+    if (settled.status === "failed" && !options.continueOnError) break;
   }
 
   return {
