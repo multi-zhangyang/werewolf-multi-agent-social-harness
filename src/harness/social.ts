@@ -467,6 +467,14 @@ export interface SocialHarnessStep<TObservation = unknown, TPending = unknown, T
   resolutionPolicy?: string;
   pendingAction: TPending;
   observation: TObservation;
+  /**
+   * Exact actor-scoped observation delivered with a committed receipt. This
+   * remains private artifact evidence (like `observation`), not a public
+   * projection or an environment-state authority. It lets a model-free replay
+   * auditor distinguish decision-time evidence from receipt-time evidence
+   * without recreating an actor.
+   */
+  receiptObservation?: TObservation;
   action: SocialAction<TCommand>;
   commitStatus?: SocialStepCommitStatus;
   decisionStateHash?: string;
@@ -2421,6 +2429,7 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
         ...stepBase,
         action: cloneJson(input.decision.action),
         commitStatus: "committed",
+        receiptObservation: cloneJson(feedback.observationsByAgent[stepBase.actorId]),
         preStateHash,
         postStateHash,
         eventSeqRange: committedEventSeqRange,
@@ -2474,6 +2483,7 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
           ...stepBase,
           action: cloneJson(input.decision.action),
           commitStatus: "committed",
+          receiptObservation: cloneJson(committedFeedback.observationsByAgent[stepBase.actorId]),
           preStateHash,
           postStateHash: failureStateHash,
           eventSeqRange: committedEventSeqRange,
@@ -2679,6 +2689,7 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
           ...baseStep({ ...input, decision, turnIndex: input.turnIndex + index }),
           action: cloneJson(decision.action),
           commitStatus: "committed" as const,
+          receiptObservation: cloneJson(feedback!.observationsByAgent[decision.actorId]),
           atomic: true,
           resolutionPolicy: "parallel-stepBatch",
           preStateHash,
@@ -2739,6 +2750,7 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
           ...baseStep({ ...input, decision, turnIndex: input.turnIndex + index }),
           action: cloneJson(decision.action),
           commitStatus: "committed" as const,
+          receiptObservation: cloneJson(committedFeedback.observationsByAgent[decision.actorId]),
           atomic: true,
           resolutionPolicy: "parallel-stepBatch",
           preStateHash,

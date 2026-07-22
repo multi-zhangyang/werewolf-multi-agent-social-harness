@@ -10,7 +10,7 @@ import { replaySocialEpisode } from "../src/harness/generic";
 import { runHarnessEpisode } from "../src/harness/runner";
 import { ScaffoldedSocialActor } from "../src/harness/scaffold";
 import { createSocialStateEvaluator } from "../src/harness/socialEvaluator";
-import { appendSocialMemory, createAgentSocialState } from "../src/harness/socialState";
+import { appendSocialMemory, createAgentSocialState, type AgentSocialState } from "../src/harness/socialState";
 import {
   HarnessCheckpointSelectionError,
   buildHarnessCheckpointAtPrefix,
@@ -33,6 +33,7 @@ import {
   type SocialAgentProfile,
   type SocialChannel,
   type SocialEnvironment,
+  type SocialParallelEnvironment,
   type SocialMessage
 } from "../src/harness/social";
 
@@ -62,6 +63,11 @@ interface LedgerObservation {
 interface LedgerCommand {
   actorId: LedgerActorId;
   entry: string;
+}
+
+interface LedgerSocialSnapshot {
+  actorId: LedgerActorId;
+  social: AgentSocialState<LedgerObservation, LedgerPending, LedgerCommand>;
 }
 
 type LedgerMessageDraft = NonNullable<SocialAction<LedgerCommand>["messages"]>[number];
@@ -390,6 +396,195 @@ describe("generic social harness contract", () => {
     expect(replay.replayedSteps).toBe(3);
     expect(replay.finalHash).toBe(hashStableState(episode.finalState));
     expect(replay.messages).toEqual(episode.messages);
+  });
+
+  it("fails a rehashed non-Werewolf social snapshot when its new evidence was never scoped to that actor", async () => {
+    const snapshots: LedgerSocialSnapshot[] = (["a", "b", "c"] as const).map((actorId) => ({
+      actorId,
+      social: createAgentSocialState<LedgerObservation, LedgerPending, LedgerCommand>({
+        agentId: actorId,
+        profile: { id: `ledger-social-${actorId}`, model: `deterministic-${actorId}`, policyId: "ledger-social" }
+      })
+    }));
+    const episode = await runHarnessEpisode<LedgerState, LedgerObservation, LedgerPending, LedgerCommand, LedgerSocialSnapshot>({
+      id: "ledger-replay-social-state-semantics",
+      environment: new LedgerEnvironment(),
+      actors: [
+        new LedgerActor("a", () => ({
+          actorId: "a",
+          kind: "record",
+          command: { actorId: "a", entry: "opening" },
+          messages: [message("private-a-b", "a", ["b"], "private", "private ledger evidence")]
+        })),
+        new LedgerActor("b", () => ({
+          actorId: "b",
+          kind: "record",
+          command: { actorId: "b", entry: "reply" }
+        })),
+        new LedgerActor("c", () => ({
+          actorId: "c",
+          kind: "record",
+          command: { actorId: "c", entry: "close" }
+        }))
+      ],
+      channels: [publicChannel, privateABChannel],
+      schedulerMode: "aec",
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      captureAgentSnapshots: () => snapshots,
+      assembleObservation(context) {
+        return {
+          ...context.environmentObservation,
+          visibleMessages: context.visibleSocial.messages,
+          channels: context.visibleSocial.channels
+        };
+      }
+    });
+    const forged = clone(episode);
+    const privateMessage = forged.messages.find((candidate) => candidate.channelId === privateABChannel.id);
+    const forgedBoundary = forged.steps[1];
+    const forgedC = forgedBoundary?.actorSnapshotsAfterStep?.find(
+      (candidate): candidate is LedgerSocialSnapshot =>
+        Boolean(candidate && typeof candidate === "object" && (candidate as { actorId?: unknown }).actorId === "c")
+    );
+    expect(privateMessage).toBeDefined();
+    expect(forgedBoundary).toBeDefined();
+    expect(forgedC).toBeDefined();
+    appendSocialMemory(forgedC!.social, {
+      kind: "message",
+      source: "a",
+      visibility: "private",
+      content: "forged private-message memory",
+      evidenceRefs: [{ artifact: "message", id: privateMessage!.id, seq: privateMessage!.seq }],
+      tags: ["forged"]
+    }, {
+      traceId: forgedBoundary!.traceId,
+      turnIndex: forgedBoundary!.turnIndex,
+      messageSeqRange: { start: privateMessage!.seq, end: privateMessage!.seq }
+    });
+    forgedBoundary!.actorSnapshotsHashAfterStep = hashStableState(forgedBoundary!.actorSnapshotsAfterStep);
+
+    // The hash-only audit remains intentionally agnostic about a domain's
+    // social semantics. Once an attacker recomputes the snapshot hash, the
+    // normal environment/message replay still succeeds.
+    const structurallyConsistent = replaySocialEpisode({
+      episode: forged,
+      environment: new LedgerEnvironment(),
+      hashState: hashStableState,
+      hashMessages: hashStableState
+    });
+    expect(structurallyConsistent.ok).toBe(true);
+    expect(structurallyConsistent.agentStateAudit?.ok).toBe(true);
+
+    const validateScopedSocialState = (input: {
+      priorAgents?: readonly LedgerSocialSnapshot[];
+      recordedAgents: readonly LedgerSocialSnapshot[];
+      committedMessages: readonly SocialMessage[];
+      scopedExposureRecords: ReadonlyArray<{ observerId: string; messageId: string; messageSeq: number }>;
+    }): string[] => {
+      if (!input.priorAgents) return [];
+      const priorJournalSeqs = new Map(
+        input.priorAgents.map((agent) => [agent.actorId, new Set(agent.social.journal?.entries.map((entry) => entry.journalSeq) ?? [])])
+      );
+      const mismatches: string[] = [];
+      for (const agent of input.recordedAgents) {
+        const prior = priorJournalSeqs.get(agent.actorId) ?? new Set<number>();
+        for (const entry of agent.social.journal?.entries ?? []) {
+          if (prior.has(entry.journalSeq)) continue;
+          for (const evidence of entry.evidenceRefs.filter((ref) => ref.artifact === "message")) {
+            const message = input.committedMessages.find(
+              (candidate) =>
+                (evidence.id === undefined || candidate.id === evidence.id) &&
+                (evidence.seq === undefined || candidate.seq === evidence.seq)
+            );
+            if (!message) {
+              mismatches.push(`actor ${agent.actorId} cites a missing message evidence reference.`);
+              continue;
+            }
+            const selfAuthored = message.senderId === agent.actorId;
+            const scopedExposure = input.scopedExposureRecords.some(
+              (exposure) =>
+                exposure.observerId === agent.actorId &&
+                exposure.messageId === message.id &&
+                exposure.messageSeq === message.seq
+            );
+            if (!selfAuthored && !scopedExposure) {
+              mismatches.push(`actor ${agent.actorId} cites message evidence outside its scoped observation.`);
+            }
+          }
+        }
+      }
+      return mismatches;
+    };
+
+    const semanticReplay = replaySocialEpisode({
+      episode: forged,
+      environment: new LedgerEnvironment(),
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      validateRecordedAgentState: validateScopedSocialState
+    });
+    expect(semanticReplay.ok).toBe(false);
+    expect(semanticReplay.mismatches.join(" ")).toMatch(/Recorded agent state semantic audit.*actor c cites message evidence outside its scoped observation/i);
+
+    const compacted = compactRecordedSocialAgentSnapshots<LedgerState, LedgerObservation, LedgerPending, LedgerCommand, LedgerSocialSnapshot>({
+      episode: forged
+    });
+    const compactedSemanticReplay = replaySocialEpisode({
+      episode: compacted.episode,
+      environment: new LedgerEnvironment(),
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      agentSnapshotFrames: compacted.frames,
+      validateRecordedAgentState: validateScopedSocialState
+    });
+    expect(compactedSemanticReplay.ok).toBe(false);
+    expect(compactedSemanticReplay.mismatches.join(" ")).toMatch(/actor c cites message evidence outside its scoped observation/i);
+  });
+
+  it("audits one receipt-after snapshot boundary for a complete parallel batch", async () => {
+    const snapshots = [
+      { id: "a", durableMemoryVersion: 1 },
+      { id: "b", durableMemoryVersion: 1 }
+    ];
+    const episode = await runHarnessEpisode<LedgerState, LedgerObservation, LedgerPending, LedgerCommand, (typeof snapshots)[number]>({
+      id: "ledger-parallel-semantic-snapshot-boundary",
+      environment: new ParallelLedgerEnvironment(),
+      actors: [
+        new LedgerActor("a", () => ({ actorId: "a", kind: "record", command: { actorId: "a", entry: "a-parallel" } })),
+        new LedgerActor("b", () => ({ actorId: "b", kind: "record", command: { actorId: "b", entry: "b-parallel" } }))
+      ],
+      channels: [publicChannel],
+      schedulerMode: "parallel",
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      captureAgentSnapshots: () => snapshots
+    });
+    const boundaries: Array<{ batchSize: number; actorIds: string[]; beforeEntries: string[]; afterEntries: string[] }> = [];
+    const replay = replaySocialEpisode({
+      episode,
+      environment: new ParallelLedgerEnvironment(),
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      validateRecordedAgentState(input) {
+        boundaries.push({
+          batchSize: input.batch.length,
+          actorIds: input.batch.map((step) => step.actorId),
+          beforeEntries: input.stateBefore.entries,
+          afterEntries: input.stateAfter.entries
+        });
+        return [];
+      }
+    });
+    expect(replay.ok).toBe(true);
+    expect(boundaries).toEqual([
+      {
+        batchSize: 2,
+        actorIds: ["a", "b"],
+        beforeEntries: [],
+        afterEntries: ["a:a-parallel", "b:b-parallel"]
+      }
+    ]);
   });
 
   it("records typed statement attributions in a non-Werewolf actor snapshot without replay-time inference", async () => {
@@ -1415,6 +1610,56 @@ class CheckpointLedgerActor implements SocialActor<LedgerObservation, LedgerPend
 
   snapshot(): LedgerCheckpointActorState {
     return clone(this.state);
+  }
+}
+
+/** True joint-action fixture for the generic parallel replay boundary. */
+class ParallelLedgerEnvironment implements SocialParallelEnvironment<LedgerState, LedgerObservation, LedgerPending, LedgerCommand> {
+  private state: LedgerState = {
+    turn: 0,
+    done: false,
+    entries: [],
+    secrets: { a: "token-a", b: "token-b", c: "token-c" }
+  };
+
+  snapshot(): LedgerState {
+    return clone(this.state);
+  }
+
+  pendingActions(): LedgerPending[] {
+    return this.state.done
+      ? []
+      : [
+          { actorId: "a", kind: "record" },
+          { actorId: "b", kind: "record" }
+        ];
+  }
+
+  observe(agentId: string, pending: LedgerPending): LedgerObservation {
+    if (agentId !== pending.actorId) throw new Error(`pending actor mismatch ${agentId}`);
+    return {
+      agentId: pending.actorId,
+      pendingKind: pending.kind,
+      turn: this.state.turn,
+      privateToken: this.state.secrets[pending.actorId]
+    };
+  }
+
+  step(): LedgerState {
+    throw new Error("Parallel Ledger environment requires one atomic stepBatch().");
+  }
+
+  stepBatch(commandsByAgent: Record<string, LedgerCommand>): LedgerState {
+    const actorIds = Object.keys(commandsByAgent).sort();
+    if (JSON.stringify(actorIds) !== JSON.stringify(["a", "b"])) throw new Error("parallel ledger batch requires a and b commands.");
+    this.state.entries.push(`a:${commandsByAgent.a!.entry}`, `b:${commandsByAgent.b!.entry}`);
+    this.state.turn = 1;
+    this.state.done = true;
+    return this.snapshot();
+  }
+
+  done(): boolean {
+    return this.state.done;
   }
 }
 

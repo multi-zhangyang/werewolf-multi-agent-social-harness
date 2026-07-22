@@ -26565,3 +26565,67 @@ existing Vite main-chunk-size warning, and the fixture Cockpit suite passed
 **13/13**. No real provider call was run or claimed for this lock: provider
 streaming behavior did not change, and all live lifecycle proofs use the
 ordinary harness with deterministic fixture reasoners or local projections.
+
+## 13.277 Generic Recorded Agent-State Semantic Replay Lock
+
+Timestamp: `2026-07-22`
+
+Structural snapshot hashes alone cannot prove that a later private
+memory/belief/relationship mutation came from evidence visible to that actor:
+an attacker can change a snapshot and recompute its matching hash or compacted
+frame. The generic replay contract now exposes a model-free, domain-neutral
+semantic audit seam for that specific gap. It does not make the harness
+understand Werewolf roles, social-state prose, beliefs, hidden truth, or winner
+semantics.
+
+- `SocialHarnessStep.receiptObservation` records the same actor-scoped
+  receipt observation delivered after a committed environment transition. It is
+  private native artifact evidence like `observation`; it is never a public
+  projection or an environment authority.
+- `replaySocialEpisode()` accepts optional
+  `validateRecordedAgentState`. At each complete committed receipt boundary it
+  supplies a domain validator with: the recorded prefix only (never future
+  steps/messages), the preceding/current durable actor snapshots, replayed
+  environment pre/post state, committed messages, channel-authorized message
+  slices, and canonical scoped-observation exposure records.
+- The callback is pure audit code. Replay still creates no actor, policy,
+  reasoner, provider client, or model request, and it does not parse free text
+  or infer a belief. Any validator result is preserved as a replay mismatch
+  under `Recorded agent state semantic audit`.
+- A true `parallel` batch invokes the validator exactly once only after the
+  joint `stepBatch()` succeeds and the full receipt boundary is available. It
+  receives the entire batch and its single post-state, never an invented
+  per-member intermediate.
+- Inline snapshots and compacted
+  `harness.agent-snapshot-frame.v1` sidecars use the same resolver path. The
+  existing structural snapshot audit remains in force and source-compatible;
+  semantic validation is opt-in because a generic harness cannot invent a
+  domain's actor-state schema or causal rules.
+
+The non-Werewolf Ledger proof now records a private A→B message, tampers C's
+later durable social journal to cite it, then recomputes the snapshot hash. The
+ordinary structural replay intentionally remains valid, documenting its
+boundary. The domain-supplied semantic callback rejects C because the canonical
+recorded scoped observations never exposed that private message to C. The same
+rejection is proven after snapshot-frame compaction. A separate true-parallel
+Ledger proof asserts exactly one callback containing both actors and the atomic
+pre/post environment states.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/genericHarnessContract.test.ts tests/social.test.ts \
+  tests/scaffold.test.ts --maxWorkers=1 --no-file-parallelism \
+  --testTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+git diff --check
+```
+
+The focused deterministic suite passed **3 files / 93 tests**. The complete
+serial deterministic suite, typecheck, production build, and whitespace check
+all passed. No real provider call was run or claimed: this slice changes only
+recorded artifact/replay validation and has no reasoner, provider, model, or
+Werewolf-rule behavior change.
