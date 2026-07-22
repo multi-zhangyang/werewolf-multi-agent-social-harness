@@ -843,6 +843,9 @@ interface BranchTreeSummary {
   counts?: {
     checkpoints?: number;
     matches?: number;
+    attempts?: number;
+    failedAttempts?: number;
+    runningAttempts?: number;
     edges?: number;
     maxDepth?: number;
   };
@@ -851,6 +854,7 @@ interface BranchTreeSummary {
     reasons?: string[];
     omittedCheckpoints?: number;
     omittedMatches?: number;
+    omittedAttempts?: number;
     omittedEdges?: number;
   };
   checkpoints?: Array<{
@@ -858,6 +862,8 @@ interface BranchTreeSummary {
     checkpointId?: string;
     createdAt?: string;
     childForkCount?: number;
+    artifactChildCount?: number;
+    childAttemptCount?: number;
     summary?: CheckpointSummary;
   }>;
   matches?: Array<{
@@ -871,6 +877,25 @@ interface BranchTreeSummary {
     legacyProjectionSteps?: number;
     socialMessages?: number;
     lineage?: ForkLineageSummary;
+  }>;
+  attempts?: Array<{
+    depth?: number;
+    parentCheckpointId?: string;
+    runId?: string;
+    createdAt?: string;
+    updatedAt?: string;
+    status?: "running" | "failed";
+    hasArtifact?: false;
+    elapsedMs?: number | null;
+    timedOut?: boolean | null;
+    failureCode?: string | null;
+    failureReason?: string | null;
+    boundary?: {
+      status?: string;
+      ok?: boolean;
+      checkpointFound?: boolean;
+      checkpointSourceMatchesForkOf?: boolean | null;
+    };
   }>;
   edges?: Array<{
     id?: string;
@@ -4996,6 +5021,18 @@ function LineageWorkspace({
       render: (_, node) => <BoundaryTag status={node.lineage?.boundary?.status} ok={node.lineage?.ok} />
     }
   ];
+  const attemptNodeColumns: TableProps<NonNullable<BranchTreeSummary["attempts"]>[number]>["columns"] = [
+    { title: "depth", dataIndex: "depth", width: 72 },
+    { title: "run", dataIndex: "runId", render: (value?: string) => <Text code>{shortId(value)}</Text> },
+    { title: "status", dataIndex: "status", render: (value?: string) => (value ? <StatusTag status={value} /> : "n/a") },
+    { title: "updated", dataIndex: "updatedAt", render: (value?: string) => (value ? formatDate(value) : "n/a") },
+    { title: "timeout", dataIndex: "timedOut", render: (value?: boolean | null) => (value == null ? "n/a" : String(value)) },
+    { title: "failure", dataIndex: "failureCode", render: (value?: string | null) => value ?? "n/a" },
+    {
+      title: "boundary",
+      render: (_, node) => <BoundaryTag status={node.boundary?.status} ok={node.boundary?.ok} />
+    }
+  ];
   const edgeColumns: TableProps<NonNullable<BranchTreeSummary["edges"]>[number]>["columns"] = [
     { title: "kind", dataIndex: "kind", render: (value?: string) => <Tag>{value ?? "edge"}</Tag> },
     {
@@ -5030,7 +5067,7 @@ function LineageWorkspace({
         </Col>
         <Col xs={24} sm={12} xl={6}>
           <Card>
-            <Statistic title="branch tree" value={branchTree?.counts?.edges ?? 0} prefix={<BranchesOutlined />} suffix={<Text type="secondary">{branchTree?.counts?.matches ?? 0} matches</Text>} />
+            <Statistic title="branch tree" value={branchTree?.counts?.edges ?? 0} prefix={<BranchesOutlined />} suffix={<Text type="secondary">{branchTree?.counts?.matches ?? 0} matches / {branchTree?.counts?.attempts ?? 0} attempts</Text>} />
           </Card>
         </Col>
       </Row>
@@ -5168,6 +5205,8 @@ function LineageWorkspace({
                   ["ok scope", branchTree.okScope ?? "n/a"],
                   ["checkpoints", branchTree.counts?.checkpoints ?? 0],
                   ["matches", branchTree.counts?.matches ?? 0],
+                  ["attempts", branchTree.counts?.attempts ?? 0],
+                  ["failed attempts", branchTree.counts?.failedAttempts ?? 0],
                   ["edges", branchTree.counts?.edges ?? 0],
                   ["max depth", branchTree.counts?.maxDepth ?? 0],
                   ["truncated", String(Boolean(branchTree.truncation?.isTruncated))]
@@ -5210,6 +5249,21 @@ function LineageWorkspace({
                   dataSource={branchTree?.matches ?? []}
                   pagination={{ pageSize: 6 }}
                   locale={{ emptyText: <Empty description="branch tree 尚未返回 forked match nodes。" /> }}
+                />
+              )
+            },
+            {
+              key: "attempt-nodes",
+              label: `Attempts ${branchTree?.attempts?.length ?? 0}`,
+              children: (
+                <Table
+                  rowKey={(node) => node.runId ?? `${node.depth}-${node.createdAt}`}
+                  size="small"
+                  bordered
+                  columns={attemptNodeColumns}
+                  dataSource={branchTree?.attempts ?? []}
+                  pagination={{ pageSize: 6 }}
+                  locale={{ emptyText: <Empty description="branch tree 尚未返回未完成或失败的 fork attempts。" /> }}
                 />
               )
             },

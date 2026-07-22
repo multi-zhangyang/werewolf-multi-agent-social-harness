@@ -33,6 +33,7 @@ const fakeReasoner: HarnessReasoner = {
 
 const CHECKPOINT_INDEX_FILE = "checkpoints.index.json";
 const CHECKPOINT_DIR = "checkpoints";
+const CHECKPOINT_FORK_ATTEMPT_FILE = "checkpoint_fork_attempts.json";
 const RECOVERY_AUDIT_FILE = "artifact_recovery_audits.jsonl";
 const tempDirs: string[] = [];
 let server: Server | undefined;
@@ -476,7 +477,7 @@ describe("checkpoint and fork API", () => {
     expect(checkpointForks.status).toBe(200);
     expect(checkpointForks.body.summary).toMatchObject({
       kind: "checkpoint-forks",
-      schemaVersion: "server.checkpoint-forks-summary.v2",
+      schemaVersion: "server.checkpoint-forks-summary.v3",
       ok: true,
       checkpoint: {
         kind: "checkpoint",
@@ -555,7 +556,7 @@ describe("checkpoint and fork API", () => {
     expect(empty.status).toBe(200);
     expect(empty.body.summary).toMatchObject({
       kind: "checkpoint-forks",
-      schemaVersion: "server.checkpoint-forks-summary.v2",
+      schemaVersion: "server.checkpoint-forks-summary.v3",
       ok: true,
       childCount: 0,
       forks: []
@@ -570,7 +571,7 @@ describe("checkpoint and fork API", () => {
     expect(emptyTree.status).toBe(200);
     expect(emptyTree.body.summary).toMatchObject({
       kind: "checkpoint-branch-tree",
-      schemaVersion: "server.checkpoint-branch-tree-summary.v2",
+      schemaVersion: "server.checkpoint-branch-tree-summary.v3",
       ok: true,
       okScope: "returned",
       rootCheckpointId: checkpointId,
@@ -696,7 +697,7 @@ describe("checkpoint and fork API", () => {
     expect(tree.status).toBe(200);
     expect(tree.body.summary).toMatchObject({
       kind: "checkpoint-branch-tree",
-      schemaVersion: "server.checkpoint-branch-tree-summary.v2",
+      schemaVersion: "server.checkpoint-branch-tree-summary.v3",
       ok: true,
       okScope: "returned",
       rootCheckpointId,
@@ -1009,6 +1010,224 @@ describe("checkpoint and fork API", () => {
       }
     }
     expectNoCheckpointPathLeak(forkArtifact.body, checkpointBaseDir);
+    const successfulAttemptStore = JSON.parse(
+      await readFile(path.join(checkpointBaseDir, CHECKPOINT_FORK_ATTEMPT_FILE), "utf8")
+    );
+    expect(successfulAttemptStore).toMatchObject({
+      artifactVersion: "server.checkpoint-fork-attempt-store.v1",
+      kind: "checkpoint-fork-attempt-store",
+      attempts: []
+    });
+  });
+
+  it("persists failed pre-artifact fork attempts and restores their lineage after restart", async () => {
+    const checkpointBaseDir = await makeTempDir();
+    baseUrl = await startServer({ checkpointBaseDir });
+    const { record, checkpointId } = await createPersistedCheckpoint(
+      baseUrl,
+      "server-checkpoint-failed-fork-attempt"
+    );
+    const privateSentinel = "PRIVATE_MEMO_SHOULD_NEVER_BE_PERSISTED_OR_RETURNED";
+
+    clearServerStoreForTests();
+    baseUrl = await startServer({
+      checkpointBaseDir,
+      createReasoner: () => {
+        throw new Error(privateSentinel);
+      }
+    });
+    const failed = await requestJson(baseUrl, "POST", `/api/checkpoints/${checkpointId}/fork`, {
+      reason: " durable failure proof ",
+      maxTransitions: 2,
+      timeoutMs: 5_000
+    });
+    expect(failed.status).toBe(500);
+    expect(failed.body.id).toEqual(expect.any(String));
+    expect(failed.body.summary).toMatchObject({
+      kind: "fork",
+      ok: false,
+      checkpointId,
+      forkOf: {
+        checkpointId,
+        parentRunId: record.id,
+        parentMatchId: record.id,
+        reason: "durable failure proof"
+      },
+      limits: { maxTransitions: 2, timeoutMs: 5_000 },
+      timedOut: false,
+      failureReason: "Checkpoint fork execution failed before an artifact was recorded."
+    });
+    expect(JSON.stringify(failed.body)).not.toContain(privateSentinel);
+    const childRunId = failed.body.id as string;
+
+    const assertFailedAttemptViews = async (url: string) => {
+      const forks = await requestJson(url, "GET", `/api/checkpoints/${checkpointId}/forks`);
+      expect(forks.status).toBe(200);
+      expect(forks.body.summary).toMatchObject({
+        kind: "checkpoint-forks",
+        schemaVersion: "server.checkpoint-forks-summary.v3",
+        ok: false,
+        childCount: 1,
+        artifactChildCount: 0,
+        attemptCount: 1,
+        failedAttemptCount: 1,
+        runningAttemptCount: 0,
+        forks: [],
+        attempts: [
+          {
+            kind: "checkpoint-fork-attempt",
+            schemaVersion: "server.checkpoint-fork-attempt.v1",
+            runId: childRunId,
+            status: "failed",
+            hasArtifact: false,
+            forkOf: {
+              checkpointId,
+              parentRunId: record.id,
+              parentMatchId: record.id,
+              reason: "durable failure proof"
+            },
+            limits: { maxTransitions: 2, timeoutMs: 5_000 },
+            timedOut: false,
+            failureCode: "checkpoint_fork_execution_failed",
+            failureReason: "Checkpoint fork execution failed before an artifact was recorded.",
+            boundary: {
+              status: "fork_attempt_failed_before_artifact",
+              ok: false,
+              provenanceOk: true,
+              checkpointFound: true,
+              checkpointSourceMatchesForkOf: true
+            }
+          }
+        ]
+      });
+      expect(forks.body.summary.attempts[0].forkOf).not.toHaveProperty("parentBoundaryTraceId");
+
+      const tree = await requestJson(url, "GET", `/api/checkpoints/${checkpointId}/branch-tree`);
+      expect(tree.status).toBe(200);
+      expect(tree.body.summary).toMatchObject({
+        kind: "checkpoint-branch-tree",
+        schemaVersion: "server.checkpoint-branch-tree-summary.v3",
+        ok: false,
+        counts: {
+          checkpoints: 1,
+          matches: 0,
+          attempts: 1,
+          failedAttempts: 1,
+          runningAttempts: 0,
+          edges: 1,
+          maxDepth: 1
+        },
+        checkpoints: [
+          {
+            checkpointId,
+            childForkCount: 1,
+            artifactChildCount: 0,
+            childAttemptCount: 1
+          }
+        ],
+        matches: [],
+        attempts: [
+          {
+            parentCheckpointId: checkpointId,
+            runId: childRunId,
+            status: "failed",
+            hasArtifact: false
+          }
+        ],
+        edges: [
+          {
+            kind: "checkpoint-fork-attempt",
+            fromCheckpointId: checkpointId,
+            toRunId: childRunId,
+            ok: false,
+            boundaryStatus: "fork_attempt_failed_before_artifact"
+          }
+        ]
+      });
+      expectBranchTreeEdgesReferenceReturnedNodes(tree.body.summary);
+
+      const lineage = await requestJson(url, "GET", `/api/matches/${childRunId}/fork-lineage`);
+      expect(lineage.status).toBe(200);
+      expect(lineage.body.summary).toMatchObject({
+        kind: "fork-lineage",
+        schemaVersion: "server.fork-lineage-summary.v3",
+        ok: false,
+        isFork: true,
+        artifactAvailable: false,
+        runId: childRunId,
+        boundary: {
+          status: "fork_attempt_failed_before_artifact",
+          checkpointFound: true,
+          checkpointSourceMatchesForkOf: true
+        }
+      });
+      const publicJson = JSON.stringify({ forks: forks.body, tree: tree.body, lineage: lineage.body });
+      expect(publicJson).not.toContain(privateSentinel);
+      expect(publicJson).not.toContain("parentBoundaryTraceId");
+      expect(publicJson).not.toContain("privateMemos");
+      expect(publicJson).not.toContain(checkpointBaseDir);
+    };
+
+    await assertFailedAttemptViews(baseUrl);
+    const persisted = await readFile(path.join(checkpointBaseDir, CHECKPOINT_FORK_ATTEMPT_FILE), "utf8");
+    expect(persisted).toContain("server.checkpoint-fork-attempt-store.v1");
+    for (const forbidden of [privateSentinel, "Authorization", "privateMemos", "providerRequest", checkpointBaseDir]) {
+      expect(persisted).not.toContain(forbidden);
+    }
+
+    const restartedBaseUrl = await restartServerWithClearedStore(checkpointBaseDir);
+    await assertFailedAttemptViews(restartedBaseUrl);
+  });
+
+  it("marks a recovered orphan running fork attempt as interrupted", async () => {
+    const checkpointBaseDir = await makeTempDir();
+    baseUrl = await startServer({ checkpointBaseDir });
+    const { checkpointId } = await createPersistedCheckpoint(
+      baseUrl,
+      "server-checkpoint-interrupted-fork-attempt"
+    );
+    clearServerStoreForTests();
+    baseUrl = await startServer({
+      checkpointBaseDir,
+      createReasoner: () => {
+        throw new Error("controlled crash fixture");
+      }
+    });
+    const failed = await requestJson(baseUrl, "POST", `/api/checkpoints/${checkpointId}/fork`, { maxTransitions: 1 });
+    expect(failed.status).toBe(500);
+
+    const attemptPath = path.join(checkpointBaseDir, CHECKPOINT_FORK_ATTEMPT_FILE);
+    const store = JSON.parse(await readFile(attemptPath, "utf8"));
+    const running = { ...store.attempts[0], status: "running", updatedAt: store.attempts[0].createdAt };
+    for (const field of ["elapsedMs", "timedOut", "failureCode", "failureReason", "providerFailure"]) delete running[field];
+    store.attempts = [running];
+    await writeFile(attemptPath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+
+    const restartedBaseUrl = await restartServerWithClearedStore(checkpointBaseDir);
+    const forks = await requestJson(restartedBaseUrl, "GET", `/api/checkpoints/${checkpointId}/forks`);
+    expect(forks.status).toBe(200);
+    expect(forks.body.summary).toMatchObject({
+      ok: false,
+      childCount: 1,
+      attemptCount: 1,
+      failedAttemptCount: 1,
+      runningAttemptCount: 0,
+      attempts: [
+        {
+          runId: failed.body.id,
+          status: "failed",
+          failureCode: "checkpoint_fork_interrupted",
+          failureReason: "Checkpoint fork execution was interrupted before an artifact was recorded.",
+          boundary: { status: "fork_attempt_failed_before_artifact", ok: false }
+        }
+      ]
+    });
+    const repaired = JSON.parse(await readFile(attemptPath, "utf8"));
+    expect(repaired.attempts[0]).toMatchObject({
+      status: "failed",
+      failureCode: "checkpoint_fork_interrupted",
+      timedOut: false
+    });
   });
 
   it("ignores malformed checkpoint files during directory rehydrate", async () => {
@@ -1552,11 +1771,15 @@ function firstSafeNativePrefixLength(artifact: MatchArtifact): number {
 function expectBranchTreeEdgesReferenceReturnedNodes(summary: any): void {
   const checkpointIds = new Set((summary.checkpoints ?? []).map((node: any) => node.checkpointId));
   const runIds = new Set((summary.matches ?? []).map((node: any) => node.runId));
+  const attemptRunIds = new Set((summary.attempts ?? []).map((node: any) => node.runId));
   expect(summary.counts.edges).toBe((summary.edges ?? []).length);
   for (const edge of summary.edges ?? []) {
     if (edge.kind === "checkpoint-fork") {
       expect(checkpointIds.has(edge.fromCheckpointId)).toBe(true);
       expect(runIds.has(edge.toRunId)).toBe(true);
+    } else if (edge.kind === "checkpoint-fork-attempt") {
+      expect(checkpointIds.has(edge.fromCheckpointId)).toBe(true);
+      expect(attemptRunIds.has(edge.toRunId)).toBe(true);
     } else if (edge.kind === "match-checkpoint") {
       expect(runIds.has(edge.fromRunId)).toBe(true);
       expect(checkpointIds.has(edge.toCheckpointId)).toBe(true);
@@ -1564,14 +1787,21 @@ function expectBranchTreeEdgesReferenceReturnedNodes(summary: any): void {
   }
 }
 
-async function startServer(options: { checkpointBaseDir?: string } = {}): Promise<string> {
+async function startServer(
+  options: {
+    checkpointBaseDir?: string;
+    matchArtifactBaseDir?: string;
+    createReasoner?: (abortSignal: AbortSignal) => HarnessReasoner;
+  } = {}
+): Promise<string> {
   if (server) {
     await close(server);
     server = undefined;
   }
   const app = createServerApp({
-    createReasoner: () => fakeReasoner,
-    checkpointArtifactBaseDir: options.checkpointBaseDir
+    createReasoner: options.createReasoner ?? (() => fakeReasoner),
+    checkpointArtifactBaseDir: options.checkpointBaseDir,
+    matchArtifactBaseDir: options.matchArtifactBaseDir
   });
   server = await listen(app);
   const address = server.address() as AddressInfo;

@@ -2,7 +2,13 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createGame } from "../core/engine";
 import { DEFAULT_CONFIG } from "../core/roles";
 import type { GameConfig, GameState, MatchMetrics } from "../core/types";
-import type { AdversarialEvaluation, HarnessAgentProfile, HarnessEvaluationReport, HarnessStepRecord } from "../harness/types";
+import type {
+  AdversarialEvaluation,
+  HarnessAgentProfile,
+  HarnessEvaluationReport,
+  HarnessForkProvenance,
+  HarnessStepRecord
+} from "../harness/types";
 import type { HarnessAssignmentConfig, ResolvedAgentAssignment } from "../harness/profiles";
 import type { SocialEpisodeArtifact } from "../harness/social";
 import {
@@ -39,6 +45,33 @@ export interface StoredMatch {
   error?: string;
 }
 
+export interface StoredCheckpointForkAttempt {
+  schemaVersion: "server.checkpoint-fork-attempt.v1";
+  childRunId: string;
+  createdAt: string;
+  updatedAt: string;
+  status: "running" | "failed";
+  forkOf: HarnessForkProvenance;
+  limits: {
+    maxTransitions: number | null;
+    timeoutMs: number | null;
+  };
+  elapsedMs?: number;
+  timedOut?: boolean;
+  failureCode?: string;
+  failureReason?: string;
+  providerFailure?: {
+    failureKind: string;
+    providerStage?: string;
+    status?: number;
+    timeoutMs?: number;
+    aborted?: boolean;
+    retryable?: boolean;
+    attempts?: number;
+    maxAttempts?: number;
+  } | null;
+}
+
 type StoredMatchEntry =
   | {
       lifecycle: "pre-artifact";
@@ -50,6 +83,7 @@ type StoredMatchEntry =
     };
 
 const matches = new Map<string, StoredMatchEntry>();
+const checkpointForkAttempts = new Map<string, StoredCheckpointForkAttempt>();
 const checkpoints = new Map<string, HarnessCheckpoint>();
 const comparisons = new Map<string, MatchComparisonArtifact>();
 const tournamentArtifactSets = new Map<string, StoredTournamentArtifactSet>();
@@ -250,6 +284,24 @@ export function getMatch(id: string): StoredMatch | undefined {
 
 export function listMatches(): StoredMatch[] {
   return [...matches.values()].map(materializeStoredMatch).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function saveCheckpointForkAttempt(attempt: StoredCheckpointForkAttempt): void {
+  const existing = checkpointForkAttempts.get(attempt.childRunId);
+  if (existing && existing.updatedAt > attempt.updatedAt) return;
+  if (existing && existing.updatedAt === attempt.updatedAt && existing.status === "failed" && attempt.status === "running") return;
+  checkpointForkAttempts.set(attempt.childRunId, cloneJson(attempt));
+}
+
+export function deleteCheckpointForkAttempt(childRunId: string): boolean {
+  return checkpointForkAttempts.delete(childRunId);
+}
+
+export function listCheckpointForkAttempts(checkpointId?: string): StoredCheckpointForkAttempt[] {
+  return [...checkpointForkAttempts.values()]
+    .filter((attempt) => !checkpointId || attempt.forkOf.checkpointId === checkpointId)
+    .map((attempt) => cloneJson(attempt))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
 export function createMatchRecordFromState(options: {
@@ -582,6 +634,7 @@ export function listArtifactRecoveryAuditRecords(): StoredArtifactRecoveryAuditR
 
 export function clearServerStoreForTests(): void {
   matches.clear();
+  checkpointForkAttempts.clear();
   checkpoints.clear();
   comparisons.clear();
   tournamentArtifactSets.clear();

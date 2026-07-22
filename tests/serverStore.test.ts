@@ -12,18 +12,22 @@ import {
   clearServerStoreForTests,
   createMatchRecordFromState,
   createTournamentPublicShare,
+  deleteCheckpointForkAttempt,
   getComparison,
   getMatch,
   getTournamentPublicShare,
   listComparisons,
+  listCheckpointForkAttempts,
   pruneAllTournamentPublicShareEvents,
   recordTournamentPublicShareDetailView,
   recordTournamentPublicShareDownload,
   retainDownloadEvents,
   retainTimestampEvents,
   saveComparison,
+  saveCheckpointForkAttempt,
   saveMatch,
   saveTournamentPublicShare,
+  type StoredCheckpointForkAttempt,
   type StoredMatch
 } from "../src/server/store";
 
@@ -125,6 +129,86 @@ describe("server match store authority", () => {
     expect(getMatch(record.id)?.artifact).toBeUndefined();
   });
 });
+
+describe("server checkpoint fork-attempt store authority", () => {
+  beforeEach(() => {
+    clearServerStoreForTests();
+  });
+
+  it("stores detached attempts, filters and sorts them, and enforces monotonic terminal updates", () => {
+    const older = checkpointForkAttemptFixture({
+      childRunId: "00000000-0000-4000-8000-000000000101",
+      checkpointId: "00000000-0000-4000-8000-000000000201",
+      createdAt: "2026-07-22T01:00:00.000Z"
+    });
+    const newer = checkpointForkAttemptFixture({
+      childRunId: "00000000-0000-4000-8000-000000000102",
+      checkpointId: "00000000-0000-4000-8000-000000000201",
+      createdAt: "2026-07-22T02:00:00.000Z"
+    });
+    saveCheckpointForkAttempt(older);
+    saveCheckpointForkAttempt(newer);
+
+    older.forkOf.parentStateHash = "mutated-input";
+    const listed = listCheckpointForkAttempts("00000000-0000-4000-8000-000000000201");
+    expect(listed.map((attempt) => attempt.childRunId)).toEqual([newer.childRunId, older.childRunId]);
+    expect(listed[1]?.forkOf.parentStateHash).toBe("state-hash");
+    if (!listed[0]) throw new Error("Expected stored fork attempt.");
+    listed[0].forkOf.parentStateHash = "mutated-output";
+    expect(listCheckpointForkAttempts()[0]?.forkOf.parentStateHash).toBe("state-hash");
+
+    const failed: StoredCheckpointForkAttempt = {
+      ...newer,
+      updatedAt: "2026-07-22T03:00:00.000Z",
+      status: "failed",
+      elapsedMs: 1,
+      timedOut: false,
+      failureCode: "checkpoint_fork_execution_failed",
+      failureReason: "Checkpoint fork execution failed.",
+      providerFailure: null
+    };
+    saveCheckpointForkAttempt(failed);
+    saveCheckpointForkAttempt({ ...newer, updatedAt: "2026-07-22T02:30:00.000Z" });
+    saveCheckpointForkAttempt({ ...newer, updatedAt: failed.updatedAt });
+    expect(listCheckpointForkAttempts().find((attempt) => attempt.childRunId === newer.childRunId)?.status).toBe("failed");
+
+    expect(deleteCheckpointForkAttempt(older.childRunId)).toBe(true);
+    expect(deleteCheckpointForkAttempt(older.childRunId)).toBe(false);
+    clearServerStoreForTests();
+    expect(listCheckpointForkAttempts()).toEqual([]);
+  });
+});
+
+function checkpointForkAttemptFixture(options: {
+  childRunId: string;
+  checkpointId: string;
+  createdAt: string;
+}): StoredCheckpointForkAttempt {
+  return {
+    schemaVersion: "server.checkpoint-fork-attempt.v1",
+    childRunId: options.childRunId,
+    createdAt: options.createdAt,
+    updatedAt: options.createdAt,
+    status: "running",
+    forkOf: {
+      schemaVersion: "harness.fork-provenance.v2",
+      checkpointArtifactVersion: "harness.checkpoint.v2",
+      checkpointId: options.checkpointId,
+      parentRunId: "parent-run",
+      parentMatchId: "parent-match",
+      parentStateHash: "state-hash",
+      parentExecutionPrefixHash: "execution-hash",
+      parentAgentsHash: "agents-hash",
+      parentChannelsHash: "channels-hash",
+      parentMessagesHash: "messages-hash",
+      parentNativeStepCount: 0,
+      parentMessageCount: 0,
+      parentRulesetId: "werewolf.classic-9-seat.v1",
+      createdAt: options.createdAt
+    },
+    limits: { maxTransitions: 1, timeoutMs: null }
+  };
+}
 
 describe("tournament public share event retention", () => {
   beforeEach(() => {
@@ -632,4 +716,3 @@ describe("comparison registry packMatchIds filtering", () => {
 
 
 });
-

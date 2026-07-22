@@ -264,7 +264,7 @@ describe("server-owned match artifact persistence", () => {
     expect(checkpointForks.status).toBe(200);
     expect(checkpointForks.body.summary).toMatchObject({
       kind: "checkpoint-forks",
-      schemaVersion: "server.checkpoint-forks-summary.v2",
+      schemaVersion: "server.checkpoint-forks-summary.v3",
       ok: true,
       childCount: 1,
       checkpoint: {
@@ -312,7 +312,7 @@ describe("server-owned match artifact persistence", () => {
     expect(branchTree.status).toBe(200);
     expect(branchTree.body.summary).toMatchObject({
       kind: "checkpoint-branch-tree",
-      schemaVersion: "server.checkpoint-branch-tree-summary.v2",
+      schemaVersion: "server.checkpoint-branch-tree-summary.v3",
       ok: true,
       okScope: "returned",
       rootCheckpointId: checkpointId,

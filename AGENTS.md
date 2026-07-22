@@ -27520,3 +27520,85 @@ Remaining follow-up: a fork that throws before producing an artifact still
 needs a durable pre-artifact fork-attempt record so failed attempts cannot
 disappear from `/forks` and branch-tree lineage. This lock does not claim that
 separate persistence problem is solved.
+
+## 13.290 Durable Checkpoint Fork-Attempt And Failed-Lineage Lock
+
+Timestamp: `2026-07-22`
+
+The pre-artifact fork failure gap recorded by section 13.289 is now closed by a
+separate server control-plane record. A failed or interrupted attempt is not
+forged into a `MatchArtifact`: it remains explicitly non-replayable until a
+canonical artifact exists.
+
+- `server.checkpoint-fork-attempt.v1` binds the child run id, request limits,
+  lifecycle timestamps, safe failure classification, and full internal fork
+  provenance to the source checkpoint before reasoner construction or harness
+  execution begins.
+- The attempt and the eventual run reuse one `HarnessForkProvenance` builder,
+  including the same creation timestamp. Server execution fails closed if those
+  records diverge.
+- The configured checkpoint artifact root stores attempts in the independent
+  `server.checkpoint-fork-attempt-store.v1` sidecar. Writes are serialized and
+  replace the sidecar through a same-directory temporary file and rename. An
+  existing symlink, directory, or other non-regular target is rejected.
+- Recovery validates exact top-level fields, UUID identity, canonical times,
+  limits, lifecycle fields, provider summary allowlists, generic provenance,
+  and exact provenance continuity with the restored canonical checkpoint.
+- A recovered running attempt without an in-process execution or canonical
+  artifact becomes a fixed `checkpoint_fork_interrupted` failure. It is not
+  reported forever as active after a process restart.
+- Once a canonical child `MatchArtifact` is stored and indexed, its attempt is
+  deleted. Recovery and summaries also give the valid artifact precedence over
+  any stale same-run sidecar record, preventing duplicate branch nodes.
+- Unknown exceptions are not persisted or returned verbatim. The durable
+  record uses a fixed failure message; recognized provider failures retain only
+  the existing safe structured summary. Client `reason` is trimmed and bounded.
+
+Operator summaries are now additive v3 contracts:
+
+```text
+server.checkpoint-forks-summary.v3
+server.checkpoint-branch-tree-summary.v3
+server.fork-lineage-summary.v3 (pre-artifact attempt projection only)
+```
+
+Artifact-backed children remain in `forks[]` / `matches[]`. Non-artifact
+attempts are separately typed in `attempts[]`, count toward total children and
+node limits, and use terminal `checkpoint-fork-attempt` edges. Their boundary
+is explicitly not ok even when the checkpoint/provenance identity itself is
+valid. Failed child lineage therefore remains queryable after restart without
+claiming that trajectory, message-prefix, state-transition, replay, comparison,
+or evaluation evidence exists.
+
+The React lineage workspace consumes the server-owned v3 attempt counts,
+terminal attempt nodes, failure codes, timeout state, and boundary status in a
+separate table. It does not synthesize attempts from browser state and does not
+offer an artifact-backed match interpretation for them.
+
+Validation recorded:
+
+```bash
+npm run typecheck
+npx vitest run tests/serverCheckpointApi.test.ts tests/serverStore.test.ts \
+  tests/serverMatchArtifactsApi.test.ts tests/serverPublicViewApi.test.ts \
+  --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npx playwright test --config=playwright.config.ts
+git diff --check
+```
+
+The final focused checkpoint/store group passed **2 files / 32 tests**; the
+final broader related API group passed **4 files / 67 tests**. The complete
+deterministic suite passed **49 files / 523 tests**. Production build passed
+with only the existing Vite chunk-size warning, and the real fixture cockpit
+passed **15/15**. Tests cover safe failure projection, durable restart recovery,
+successful attempt cleanup, artifact/attempt de-duplication, orphan-running
+interruption repair, safe branch edges, and detached store semantics. Teardown
+left no project Playwright, Chromium, Vite, Vitest, or fixture-server process.
+
+This slice changes no model client, prompt, reasoner policy, streaming parser,
+provider selection, or domain action semantics, so it did not repeat an
+external provider call and added no provider/model-specific branch.
