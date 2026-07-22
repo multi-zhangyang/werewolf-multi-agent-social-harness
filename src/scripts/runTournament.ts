@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { modelClientFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
 import {
   mergeExperimentOverrides,
@@ -14,7 +15,8 @@ import {
 import type { HarnessAssignmentConfig } from "../harness/profiles";
 import { OpenAIHarnessReasoner } from "../harness/reasoner";
 import { safeProviderFailureMessage } from "../harness/providerFailure";
-import { runTournament } from "../harness/tournament";
+import { hashStableState } from "../harness/hash";
+import { openTournamentOrchestration, runTournament } from "../harness/tournament";
 import {
   summarizeTournamentMetricPromotionsFromMetrics,
   summarizeTournamentMetricPromotionsFromReports,
@@ -97,6 +99,10 @@ async function main(): Promise<void> {
   );
 
   try {
+    const orchestration = await openTournamentOrchestration({
+      baseDirectory: path.resolve(process.env.EXPERIMENT_RUN_BASE_DIR ?? ".artifacts/experiment-runs"),
+      runSetId: `${options.experiment.id}:${hashStableState(options.experiment).slice(0, 16)}`
+    });
     const result = await runTournament({
       models: options.models,
       profiles: options.profiles,
@@ -111,7 +117,8 @@ async function main(): Promise<void> {
       reasoner: new OpenAIHarnessReasoner(modelClientFromEnv(process.env, { abortSignal: abortController.signal })),
       executionLimits: { abortSignal: abortController.signal },
       continueOnError: options.continueOnError,
-      includeArtifacts: Boolean(options.outputDir)
+      includeArtifacts: Boolean(options.outputDir),
+      orchestration
     });
     const artifacts = options.outputDir
       ? await writeTournamentArtifactDirectory(result, {

@@ -39,6 +39,61 @@ const deterministicReasoner: HarnessReasoner = {
 };
 
 describe("experiment matrix harness", () => {
+  it("routes configured matrix cells through stable V2 tournament authority on restart", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "werewolf-matrix-v2-"));
+    tempDirs.push(root);
+    const experiment = normalizeMatrixExperimentSpec({
+      version: MATRIX_EXPERIMENT_VERSION,
+      id: "matrix-v2-restart",
+      kind: "matrix",
+      base: {
+        profiles: [{ id: "matrix-profile", model: "opaque/matrix-model", temperature: 0.3 }],
+        assignment: { strategy: "profile-rotation" },
+        games: 1,
+        seed: "matrix-v2-restart",
+        maxTransitions: 1,
+        continueOnError: true
+      },
+      cells: [{ id: "durable-cell" }]
+    });
+    const first = await runExperimentMatrix({
+      experiment,
+      reasoner: deterministicReasoner,
+      orchestrationBaseDirectory: root,
+      includeArtifacts: true
+    });
+    expect(first.cells).toHaveLength(1);
+    expect(
+      first.cells[0]?.tournament?.gamesTruncated,
+      JSON.stringify(first.cells.map((cell) => ({
+        status: cell.status,
+        error: cell.error,
+        tournament: cell.tournament && {
+          failed: cell.tournament.gamesFailed,
+          truncated: cell.tournament.gamesTruncated,
+          unstarted: cell.tournament.gamesUnstarted,
+          episodes: cell.tournament.episodes.map((episode) => ({ status: episode.status, error: episode.error }))
+        }
+      })))
+    ).toBe(1);
+    expect(first.cells[0]?.tournament?.episodes[0]?.artifact?.experiment?.specId).toBe("durable-cell");
+
+    const noRerunReasoner: HarnessReasoner = {
+      async think() {
+        throw new Error("finalized matrix cell must not rerun model work");
+      }
+    };
+    const restarted = await runExperimentMatrix({
+      experiment,
+      reasoner: noRerunReasoner,
+      orchestrationBaseDirectory: root,
+      includeArtifacts: true
+    });
+    expect(restarted.cells[0]?.tournament?.episodes.map((episode) => episode.runId))
+      .toEqual(first.cells[0]?.tournament?.episodes.map((episode) => episode.runId));
+    expect(restarted.statistics).toEqual(first.statistics);
+  });
+
   it("does not mark a single-cell matrix completed when its tournament deadline leaves games unstarted", async () => {
     const controller = new AbortController();
     const abortingReasoner: HarnessReasoner = {

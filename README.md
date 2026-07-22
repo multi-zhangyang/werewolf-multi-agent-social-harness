@@ -230,6 +230,21 @@ counts. Strict public/share packs intentionally omit those research inputs and
 are not leaderboard-rebuild authority. CSV files do not replace replay or JSONL
 evidence.
 
+Production tournament execution uses the domain-neutral V2 experiment
+orchestrator whenever `EXPERIMENT_RUN_BASE_DIR` is configured (the CLI defaults
+to `.artifacts/experiment-runs`). Before domain preparation it persists the
+episode attempt, then stages the immutable MatchArtifact identity, publishes the
+canonical episode/evaluation sidecar, commits terminal membership, and finally
+finalizes the run set. Repeating the same normalized tournament request adopts
+or hydrates that authority and does not rerun already committed model work.
+Matrix cells use stable child run-set ids over the same authority. Local
+operators can inspect safe lifecycle/membership projections through
+`GET /api/experiments/runs` and
+`GET /api/experiments/runs/:runSetId`; these endpoints do not expose provider
+credentials, private observations, or hidden role truth. The current guarantee
+is single-writer process-crash recovery, not cross-process exactly-once or
+power-loss durability.
+
 Tournament outcome aggregates and execution telemetry deliberately use
 different denominators. `modelStats` / `profileStats` remain completed-only so
 bounded or failed partial games cannot affect wins, rewards, roles, seats, or

@@ -12,7 +12,7 @@ import { safeProviderFailureMessage } from "./providerFailure";
 import type { HarnessAssignmentConfig } from "./profiles";
 import { redactSecrets } from "./redaction";
 import type { SocialExecutionLimits } from "./social";
-import { runTournament, type TournamentResult } from "./tournament";
+import { openTournamentOrchestration, runTournament, type TournamentResult } from "./tournament";
 import { writeTournamentArtifactDirectory } from "./tournamentArtifacts";
 import type { HarnessAgentProfile, HarnessReasoner, WerewolfJointPhaseScheduler } from "./types";
 
@@ -67,6 +67,9 @@ export interface ExperimentMatrixRunOptions {
   reasoner: HarnessReasoner;
   executionLimits?: SocialExecutionLimits;
   includeArtifacts?: boolean;
+  /** Shared server-owned V2 control-plane root. Each cell receives a stable
+   * runSetId while canonical episode content remains in the generic store. */
+  orchestrationBaseDirectory?: string;
 }
 
 export interface ExperimentMatrixCellResult {
@@ -273,6 +276,12 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
     runCell: async (tournament, context) => {
       const started = performance.now();
       try {
+        const orchestration = options.orchestrationBaseDirectory
+          ? await openTournamentOrchestration({
+              baseDirectory: options.orchestrationBaseDirectory,
+              runSetId: `${options.experiment.id}:${context.id}`
+            })
+          : undefined;
         return await runTournament({
           models: tournament.models,
           profiles: tournament.profiles,
@@ -287,7 +296,8 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
           experiment: tournament,
           includeArtifacts: options.includeArtifacts,
           reasoner: options.reasoner,
-          executionLimits: options.executionLimits
+          executionLimits: options.executionLimits,
+          orchestration
         });
       } finally {
         elapsedMsByExecutionId.set(context.executionId, Math.round(performance.now() - started));

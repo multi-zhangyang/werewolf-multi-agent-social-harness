@@ -27945,3 +27945,139 @@ Playwright's server and Chromium processes exited normally and port `4173`
 was not left listening. This slice changes no provider, model, reasoner,
 prompt, streaming parser, domain adapter, or UI behavior, so no live model call
 was required or performed.
+
+## 13.296 Provider-Neutral Model Identity, Production V2 Tournament, And Ruleset Authority Lock
+
+Timestamp: `2026-07-22`
+
+This lock records the latest user correction and implementation. Concrete model
+ids are opaque runtime configuration. The repository does not maintain a model
+allowlist or denylist and does not select a provider protocol, parser, prompt,
+fallback, retry mode, or action path from a model name. `LLM_PROVIDER_PROTOCOL`
+remains the explicit protocol authority. Tracked examples use placeholders or
+runtime defaults; the executable matrix smoke spec no longer contains a literal
+placeholder that could override `LLM_MODELS`.
+
+The CLI probe now rejects an empty model list before execution. A zero-call run
+cannot be summarized as a successful live probe.
+
+### 13.296.1 Production Werewolf Tournament V2 Integration
+
+Configured production tournament execution now enters the existing generic V2
+experiment orchestrator instead of directly owning an independent scheduler:
+
+```text
+normalized Werewolf tournament
+  -> portable GenericExperimentSpecV1
+  -> runGenericExperiment()
+  -> V2 begin/recover/start/stage/put/record/finalize
+  -> canonical MatchArtifact + evaluation sidecar
+  -> Werewolf TournamentResult projection
+  -> server/API/React consumers
+```
+
+- `runTournament()` accepts an explicit `TournamentOrchestrationOptions`. When
+  present, the generic orchestrator owns the durable lifecycle.
+- CLI tournament execution always opens the configured/default
+  `EXPERIMENT_RUN_BASE_DIR`.
+- Server tournament execution uses `EXPERIMENT_RUN_BASE_DIR`, or a server-owned
+  child under `TOURNAMENT_ARTIFACT_BASE_DIR` when that is configured.
+- Matrix cells use stable child run-set ids and the same canonical stores.
+- Durable run ids bind the experiment identity/spec hash and absolute episode
+  index. Different normalized requests do not collide merely because their
+  default experiment label is the same.
+- A finalized restart hydrates canonical artifacts and evaluation sidecars and
+  does not call preparation, policy, reasoner, provider, evaluator, or artifact
+  materialization again.
+- Existing Werewolf evaluation reports are accepted as precomputed canonical
+  domain-harness reports only after their complete evaluator registry matches
+  the normalized experiment evaluator set. The generic control plane does not
+  run the same evaluator registry a second time.
+- The Werewolf runtime profile binding records a versioned role-policy selector
+  identity. Concrete role-resolved policy names remain recorded in durable
+  agent state and decision traces; the generic profile contract no longer has
+  to pretend one profile has one fixed role policy across rotated assignments.
+
+Local operator status endpoints now expose safe durable control-plane truth:
+
+```text
+GET /api/experiments/runs
+GET /api/experiments/runs/:runSetId
+```
+
+They project lifecycle counts, current started/staged attempt, terminal episode
+membership, artifact/evaluation digests, and provenance identity. They do not
+expose endpoint/key material, raw provider diagnostics, private observations,
+reasoner content, or hidden role truth. Repeating the same normalized run
+request is the current automatic resume operation; there is no browser-authored
+state restore.
+
+The remaining durability boundary is unchanged and must be stated precisely:
+
+```text
+proved:
+  single-writer process-crash recovery
+
+not yet proved:
+  matrix-level independently staged cell membership
+  cross-process lease/CAS/fencing
+  cross-process exactly-once
+  file/directory fsync power-loss durability
+```
+
+### 13.296.2 Werewolf Ruleset Configuration Authority
+
+`normalizeWerewolfGameConfig()` is now the single runtime parser used by game
+creation and tournament experiment normalization. The current ruleset id can no
+longer silently accept unknown engine semantics. It rejects:
+
+- unknown config or timer fields;
+- unsupported ruleset ids and role ids;
+- invalid sheriff, wolf-discussion, or last-words enum values;
+- non-boolean death-reveal values;
+- non-positive/non-integral seat and max-day values;
+- non-finite/non-positive sheriff vote weights;
+- negative or fractional timer values;
+- role-count/seat-count mismatch.
+
+Special-role cardinality remains enforced by the existing engine authority.
+This change does not invent Hunter terminal timing, Witch dual-potion, wolf tie,
+or other unconfirmed business rules; those still require an explicit ruleset
+decision rather than an accidental code branch.
+
+### 13.296.3 Live And Deterministic Validation Recorded
+
+A real configured-provider streaming probe was executed through the ordinary
+provider-neutral harness path. One initial `stream_empty` was correctly treated
+as failure; a later bounded probe completed successfully. A bounded real match
+then completed three model calls, all with:
+
+```text
+stream.enabled=true
+stream.completed=true
+stream.completedBy=provider_stop_event
+```
+
+The match recorded four committed steps, zero rejected steps, and zero harness
+errors. No model-specific adapter, parser, fallback, prompt, or token-limit
+field was added. The validation process exited and did not leave a match,
+browser, or server process running.
+
+Final repository validation after integration:
+
+```text
+npm run typecheck
+  passed
+
+complete deterministic suite
+  51 files / 556 tests passed
+
+npm run build
+  passed (existing bundle-size warning only)
+
+npm run test:e2e
+  15 passed
+
+git diff --check
+  passed
+```

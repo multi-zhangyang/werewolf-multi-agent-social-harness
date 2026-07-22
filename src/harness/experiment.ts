@@ -1,4 +1,5 @@
 import type { GameConfig } from "../core/types";
+import { normalizeWerewolfGameConfig } from "../core/roles";
 import { assertRuntimeModelsAvailable } from "../agents/schema";
 import {
   assignmentFromUnknown,
@@ -85,6 +86,7 @@ export function normalizeTournamentExperimentSpec(
     parseOptionalJointPhaseScheduler(specRecord.jointPhaseScheduler ?? defaultRecord.jointPhaseScheduler) ??
     DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER;
   assertJointPhaseSchedulerBudget(jointPhaseScheduler, maxTransitions);
+  const configInput = specRecord.config ?? defaultRecord.config;
 
   return {
     version: TOURNAMENT_EXPERIMENT_VERSION,
@@ -106,7 +108,7 @@ export function normalizeTournamentExperimentSpec(
         : typeof defaultRecord.continueOnError === "boolean"
           ? defaultRecord.continueOnError
           : true,
-    config: isRecord(specRecord.config) ? cloneJson(specRecord.config) : isRecord(defaultRecord.config) ? cloneJson(defaultRecord.config) : undefined
+    config: configInput === undefined ? undefined : normalizeWerewolfGameConfig(configInput)
   };
 }
 

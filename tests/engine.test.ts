@@ -48,6 +48,21 @@ describe("game-core state machine", () => {
     expect(() => applyCommand(forgedState, { type: "system.advance", actorId: "system" })).toThrow(/Unsupported Werewolf ruleset/);
   });
 
+  it.each([
+    [{ sheriff: "invalid" }, /sheriff/i],
+    [{ wolfDiscussion: "invalid" }, /wolfDiscussion/i],
+    [{ lastWords: "invalid" }, /lastWords/i],
+    [{ revealOnDeath: "yes" }, /revealOnDeath/i],
+    [{ maxDays: 0 }, /maxDays/i],
+    [{ sheriffVoteWeight: Number.NaN }, /sheriffVoteWeight/i],
+    [{ timers: { speechSeconds: 1.5 } }, /speechSeconds/i],
+    [{ timers: { voteSeconds: -1 } }, /voteSeconds/i],
+    [{ roles: ["werewolf", "unsupported"] }, /roles/i],
+    [{ unknownRule: true }, /unknown field/i]
+  ])("rejects config values outside the versioned ruleset contract: %j", (config, message) => {
+    expect(() => createGame({ id: "invalid-config", seed: "invalid-config", config: config as never })).toThrow(message);
+  });
+
   it("runs a night cycle, resolves hunter shot, and resumes day speech", () => {
     let state = createGame({ id: "test-night-hunter", seed: "night-hunter", config: { lastWords: "none" } });
     state = advanceSystem(state);

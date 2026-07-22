@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { modelClientFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
 import type { TournamentExperimentSpecV1 } from "../harness/experiment";
 import {
@@ -72,7 +73,8 @@ async function main(): Promise<void> {
       experiment: options.experiment,
       reasoner: new OpenAIHarnessReasoner(modelClientFromEnv(process.env, { abortSignal: abortController.signal })),
       executionLimits: { abortSignal: abortController.signal },
-      includeArtifacts: Boolean(options.outputDir)
+      includeArtifacts: Boolean(options.outputDir),
+      orchestrationBaseDirectory: path.resolve(process.env.EXPERIMENT_RUN_BASE_DIR ?? ".artifacts/experiment-runs")
     });
     const artifacts = options.outputDir
       ? await writeExperimentMatrixArtifactDirectory(result, {

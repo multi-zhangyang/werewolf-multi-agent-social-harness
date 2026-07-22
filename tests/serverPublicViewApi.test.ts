@@ -1545,6 +1545,20 @@ describe("public match API redaction", () => {
     expect(matches.body).toHaveLength(0);
   });
 
+  it("rejects config values outside the versioned Werewolf ruleset before reasoner work or persistence", async () => {
+    const rejected = await requestJson(baseUrl, "POST", "/api/matches/run", {
+      models: ["opaque/model"],
+      seed: "server-invalid-ruleset-config",
+      maxTransitions: 1,
+      config: { sheriff: "invalid", maxDays: 0 }
+    });
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.error).toMatch(/sheriff|maxDays/i);
+    const matches = await requestJson(baseUrl, "GET", "/api/matches");
+    expect(matches.status).toBe(200);
+    expect(matches.body).toHaveLength(0);
+  });
+
   it("keeps model ids opaque across match and probe routes without model-specific runtime policy", async () => {
     const opaqueModel = "vendor/model.v2:free";
     const match = await requestJson(baseUrl, "POST", "/api/matches/run", {

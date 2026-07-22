@@ -169,6 +169,11 @@ export const WEREWOLF_SYSTEM_PROFILE: SocialAgentProfile = {
   metadata: { authority: "environment" }
 };
 
+/** Portable profile-policy identity recorded by the generic experiment plane.
+ * The concrete role-aware policy remains in AgentHarnessState and decision
+ * traces; this selector states that Werewolf resolves it after role assignment. */
+export const WEREWOLF_PROFILE_POLICY_SELECTOR_ID = "werewolf.role-policy-selector.v1";
+
 export type WerewolfSocialPendingAction = PendingAction;
 
 export type WerewolfSocialObservation = WerewolfHarnessObservation;
@@ -313,9 +318,10 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
     this.id = options.actor.state.playerId;
     this.profile = {
       id: options.actor.state.profileId ?? options.actor.state.playerId,
+      version: "1",
       model: options.actor.state.model,
       temperature: options.actor.state.temperature,
-      policyId: options.actor.state.policyName
+      policyId: WEREWOLF_PROFILE_POLICY_SELECTOR_ID
     };
     if (options.executionMode === "scaffold") {
       if (options.tracePrefix) {

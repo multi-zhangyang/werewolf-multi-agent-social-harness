@@ -89,6 +89,28 @@ describe("tournament artifact server API", () => {
     expect(exported.body.episodes).toEqual(
       expect.arrayContaining([expect.objectContaining({ index: 0, status: "truncated", harnessStatus: "truncated" })])
     );
+    const runIndex = await requestJson(baseUrl, "GET", "/api/experiments/runs");
+    expect(runIndex.status).toBe(200);
+    expect(runIndex.body.entries).toHaveLength(1);
+    expect(runIndex.body.entries[0]).toMatchObject({
+      artifactVersion: "server.experiment-run-status.v1",
+      domainId: "werewolf",
+      state: "finalized",
+      gamesRequested: 1,
+      gamesTruncated: 1,
+      gamesInFlight: 0
+    });
+    const durableRun = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/experiments/runs/${encodeURIComponent(runIndex.body.entries[0].runSetId)}`
+    );
+    expect(durableRun.status).toBe(200);
+    expect(durableRun.body).toMatchObject({
+      state: "finalized",
+      currentEpisode: null,
+      episodes: [{ index: 0, status: "truncated", runId: expect.any(String) }]
+    });
     const artifacts = exported.body.artifacts;
     const artifactSetId = artifacts.artifactSetId as string;
     expect(artifacts.files).toEqual({

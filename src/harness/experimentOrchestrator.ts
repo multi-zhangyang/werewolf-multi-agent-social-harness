@@ -89,14 +89,26 @@ export interface GenericExperimentEvaluationAdapter<
   TAgent,
   TTrajectory
 > {
-  evaluators: Array<
+  /** Evaluators owned by this harness runtime. Required unless a domain
+   * harness supplies its already-computed canonical report. */
+  evaluators?: Array<
     HarnessEvaluator<TState, TMetrics, TSocialEpisode, unknown, TAgent, TTrajectory>
   >;
-  contextForEpisode(
+  contextForEpisode?(
     result: TResult,
     artifact: TArtifact,
     context: GenericExperimentEpisodeContext
   ): HarnessEvaluationContext<TState, TMetrics, TSocialEpisode, TAgent, TTrajectory>;
+  /**
+   * Reuse an evaluation report already produced by the domain harness. This
+   * avoids running the same registry twice when a compatibility result (such
+   * as Werewolf's HarnessRunResult) already owns the canonical report.
+   */
+  reportForEpisode?(
+    result: TResult,
+    artifact: TArtifact,
+    context: GenericExperimentEpisodeContext
+  ): HarnessEvaluationReport | Promise<HarnessEvaluationReport>;
 }
 
 /**
@@ -255,8 +267,10 @@ export async function runGenericExperiment<
     initialEpisodes.length < normalizedSpec.episodeCount &&
     !stoppedByFailure &&
     !options.abortSignal?.aborted;
-  const selectedEvaluators = hasExecutableSuffix
-    ? resolveEvaluators(normalizedSpec, options.adapter.evaluation?.evaluators ?? [])
+  const evaluationAdapter = options.adapter.evaluation;
+  if (hasExecutableSuffix) assertEvaluationAdapter(evaluationAdapter, normalizedSpec);
+  const selectedEvaluators = hasExecutableSuffix && !evaluationAdapter?.reportForEpisode
+    ? resolveEvaluators(normalizedSpec, evaluationAdapter?.evaluators ?? [])
     : [];
   const runSetCreatedAt = durableRecord.createdAt;
   const deadline = hasExecutableSuffix
@@ -313,8 +327,18 @@ export async function runGenericExperiment<
         );
         assertArtifactBinding(artifact, normalizedSpec, status, context);
         let evaluationReport: HarnessEvaluationReport | undefined;
-        if (options.adapter.evaluation) {
-          const evaluationContext = options.adapter.evaluation.contextForEpisode(
+        if (evaluationAdapter?.reportForEpisode) {
+          evaluationReport = structuredClone(await awaitWithAbort(
+            () => evaluationAdapter.reportForEpisode!(
+              domainResult,
+              structuredClone(artifact),
+              createEpisodeContext(context, normalizedSpec, experiment, deadline.signal)
+            ),
+            deadline.signal
+          ));
+          assertEvaluationReportBinding(evaluationReport, normalizedSpec.evaluatorIds, context);
+        } else if (evaluationAdapter?.contextForEpisode) {
+          const evaluationContext = evaluationAdapter.contextForEpisode(
             domainResult,
             structuredClone(artifact),
             createEpisodeContext(context, normalizedSpec, experiment, deadline.signal)
@@ -326,7 +350,12 @@ export async function runGenericExperiment<
               context: structuredClone(evaluationContext),
               evaluators: selectedEvaluators
             });
-          assertEvaluationReportBinding(evaluationReport, selectedEvaluators, context);
+          assertEvaluationReportBinding(
+            evaluationReport,
+            normalizedSpec.evaluatorIds,
+            context,
+            selectedEvaluators
+          );
         }
         throwIfAborted(deadline.signal);
         assertArtifactBinding(artifact, normalizedSpec, status, context);
@@ -720,18 +749,47 @@ function assertEvaluationContextBinding(
 
 function assertEvaluationReportBinding(
   report: HarnessEvaluationReport,
-  evaluators: readonly { id: string; version: string }[],
-  episode: TournamentEpisodeContext
+  evaluatorIds: readonly string[],
+  episode: TournamentEpisodeContext,
+  evaluators?: readonly { id: string; version: string }[]
 ): void {
   const registry = report.evaluatorRegistry ?? [];
-  if (registry.length !== evaluators.length) {
+  if (registry.length !== evaluatorIds.length) {
     throw new Error(`Generic experiment episode ${episode.index} evaluator registry is incomplete.`);
   }
-  for (const [index, evaluator] of evaluators.entries()) {
-    const recorded = registry[index];
-    if (!recorded || recorded.id !== evaluator.id || recorded.version !== evaluator.version) {
+  const registryById = new Map(registry.map((recorded) => [recorded.id, recorded]));
+  if (registryById.size !== registry.length) {
+    throw new Error(`Generic experiment episode ${episode.index} evaluator registry contains duplicate ids.`);
+  }
+  const runtimeEvaluatorById = new Map((evaluators ?? []).map((evaluator) => [evaluator.id, evaluator]));
+  for (const evaluatorId of evaluatorIds) {
+    const recorded = registryById.get(evaluatorId);
+    const runtimeEvaluator = runtimeEvaluatorById.get(evaluatorId);
+    if (
+      !recorded ||
+      (runtimeEvaluator !== undefined && recorded.version !== runtimeEvaluator.version)
+    ) {
       throw new Error(`Generic experiment episode ${episode.index} evaluator identity does not match its registry.`);
     }
+  }
+}
+
+function assertEvaluationAdapter(
+  adapter: GenericExperimentExecutionAdapter<unknown, unknown, GenericEpisodeEnvelope>["evaluation"] | undefined,
+  spec: NormalizedGenericExperimentSpecV1
+): void {
+  if (!adapter) {
+    if (spec.evaluatorIds.length) {
+      throw new Error("Generic experiment evaluator registry is missing for the normalized evaluator set.");
+    }
+    return;
+  }
+  const hasPrecomputedReport = typeof adapter.reportForEpisode === "function";
+  const hasRuntimeRegistry = Array.isArray(adapter.evaluators) && typeof adapter.contextForEpisode === "function";
+  if (hasPrecomputedReport === hasRuntimeRegistry) {
+    throw new Error(
+      "Generic experiment evaluation adapter must provide exactly one of reportForEpisode or evaluators/contextForEpisode."
+    );
   }
 }
 

@@ -1,5 +1,10 @@
 import { shuffleDeterministic } from "./random";
-import { assertSupportedWerewolfRulesetId, DEFAULT_CONFIG, ROLE_DEFINITIONS, teamForRole } from "./roles";
+import {
+  assertSupportedWerewolfRulesetId,
+  normalizeWerewolfGameConfig,
+  ROLE_DEFINITIONS,
+  teamForRole
+} from "./roles";
 import type {
   CastSheriffVoteCommand,
   CastVoteCommand,
@@ -32,15 +37,7 @@ export function createGame(options: {
   config?: Partial<GameConfig> & { roles?: Role[] };
   playerNames?: string[];
 }): GameState {
-  const config: GameConfig = {
-    ...DEFAULT_CONFIG,
-    ...options.config,
-    timers: {
-      ...DEFAULT_CONFIG.timers,
-      ...options.config?.timers
-    },
-    roles: options.config?.roles ?? DEFAULT_CONFIG.roles
-  };
+  const config = normalizeWerewolfGameConfig(options.config);
   assertSupportedWerewolfRulesetId(config.rulesetId);
   if (config.roles.length !== config.seats) {
     throw new Error(`Role count (${config.roles.length}) must equal seat count (${config.seats}).`);

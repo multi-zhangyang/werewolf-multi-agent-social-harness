@@ -172,6 +172,10 @@ describe("tournament experiment spec", () => {
     expect(() => normalizeTournamentExperimentSpec({ version: "bad.version" })).toThrow(/version/);
     expect(() => normalizeTournamentExperimentSpec({ kind: "match" })).toThrow(/kind/);
     expect(() => normalizeTournamentExperimentSpec({ models: [], profiles: [], games: 0 })).toThrow(/model or profile|games/);
+    expect(() => normalizeTournamentExperimentSpec({ models: ["opaque/model"], config: { sheriff: "invalid" as never } }))
+      .toThrow(/sheriff/i);
+    expect(() => normalizeTournamentExperimentSpec({ models: ["opaque/model"], config: { maxDays: 0 } }))
+      .toThrow(/maxDays/i);
     expect(normalizeTournamentExperimentSpec({ models: ["vendor/model.v2:free"], games: 1 }).models)
       .toEqual(["vendor/model.v2:free"]);
   });
