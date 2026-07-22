@@ -148,26 +148,17 @@ export function normalizeModelList(value: string | undefined): string[] {
 }
 
 /**
- * Runtime availability is a control-plane policy, not a provider adapter or
- * prompt branch. Entries here have been explicitly withdrawn from local use
- * and must fail before a probe, match, tournament, or matrix can invoke a
- * provider. Re-enabling one requires an intentional policy change.
+ * Model ids are opaque runtime configuration. Provider protocol selection is
+ * explicit and separate; this layer must never infer behavior or availability
+ * from a concrete model name.
  */
-export const UNAVAILABLE_RUNTIME_MODEL_IDS = ["grok-4.5"] as const;
-
-const unavailableRuntimeModelIds = new Set<string>(UNAVAILABLE_RUNTIME_MODEL_IDS);
-
-/** Return only models that may be offered as configured runtime choices. */
 export function selectableRuntimeModels(models: readonly string[]): string[] {
-  return models.map((model) => model.trim()).filter((model) => model && !unavailableRuntimeModelIds.has(model));
+  return models.map((model) => model.trim()).filter(Boolean);
 }
 
-/** Fail closed before execution; this never makes a provider/model-specific request. */
+/** Validate only the generic identity shape; provider availability is learned from the configured provider response. */
 export function assertRuntimeModelsAvailable(models: readonly string[], context = "Runtime model selection"): void {
-  const unavailable = Array.from(
-    new Set(models.map((model) => model.trim()).filter((model) => unavailableRuntimeModelIds.has(model)))
-  );
-  if (unavailable.length) {
-    throw new Error(`${context} includes model(s) unavailable for runtime use: ${unavailable.join(", ")}.`);
+  if (models.some((model) => typeof model !== "string" || !model.trim())) {
+    throw new Error(`${context} model ids must be non-empty strings.`);
   }
 }

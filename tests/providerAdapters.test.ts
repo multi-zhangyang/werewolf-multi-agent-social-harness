@@ -24,10 +24,15 @@ describe("standard provider protocol adapters", () => {
     ]);
   });
 
-  it("does not offer or execute an explicitly withdrawn runtime model", () => {
-    expect(selectableRuntimeModels(["gpt-5.4/Kimi-K2.6", "grok-4.5"])).toEqual(["gpt-5.4/Kimi-K2.6"]);
-    expect(() => assertRuntimeModelsAvailable(["grok-4.5"], "unit selection")).toThrow(/unavailable for runtime use/i);
-    expect(() => assertRuntimeModelsAvailable(["gpt-5.4/Kimi-K2.6"])).not.toThrow();
+  it("treats concrete model ids as opaque runtime configuration without an allowlist or denylist", () => {
+    const configured = ["vendor/model-a.v2:free", "retired-looking-name", " local/model-b "];
+    expect(selectableRuntimeModels(configured)).toEqual([
+      "vendor/model-a.v2:free",
+      "retired-looking-name",
+      "local/model-b"
+    ]);
+    expect(() => assertRuntimeModelsAvailable(selectableRuntimeModels(configured), "unit selection")).not.toThrow();
+    expect(() => assertRuntimeModelsAvailable([""], "unit selection")).toThrow(/non-empty strings/i);
   });
 
   it("selects provider adapters only from explicit protocol configuration", async () => {

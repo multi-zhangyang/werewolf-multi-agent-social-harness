@@ -15,7 +15,7 @@
       "id": "openai-compatible-streaming-pilot",
       "label": "OpenAI-compatible streaming pilot",
       "group": "openai-compatible",
-      "models": ["gpt-5.4/Kimi-K2.6"],
+      "models": ["your-model-id"],
       "seed": "matrix-smoke-openai-compatible"
     }
   ]

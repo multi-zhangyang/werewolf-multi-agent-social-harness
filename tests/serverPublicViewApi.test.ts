@@ -1545,41 +1545,38 @@ describe("public match API redaction", () => {
     expect(matches.body).toHaveLength(0);
   });
 
-  it("rejects a withdrawn runtime model before a probe or match can invoke the reasoner or persist state", async () => {
-    const rejectedMatch = await requestJson(baseUrl, "POST", "/api/matches/run", {
-      models: ["grok-4.5"],
-      profiles: [{ id: "withdrawn-profile", model: "grok-4.5", temperature: 0.3 }],
+  it("keeps model ids opaque across match and probe routes without model-specific runtime policy", async () => {
+    const opaqueModel = "vendor/model.v2:free";
+    const match = await requestJson(baseUrl, "POST", "/api/matches/run", {
+      models: [opaqueModel],
+      profiles: [{ id: "opaque-profile", model: opaqueModel, temperature: 0.3 }],
       assignment: { strategy: "profile-rotation" },
-      seed: "server-run-withdrawn-model",
+      seed: "server-run-opaque-model",
       maxTransitions: 1
     });
 
-    expect(rejectedMatch.status).toBe(400);
-    expect(rejectedMatch.body).toMatchObject({
+    expect([200, 207]).toContain(match.status);
+    expect(match.body).toMatchObject({
       summary: {
         kind: "match",
-        ok: false,
-        models: ["grok-4.5"],
-        failureReason: expect.stringMatching(/unavailable for runtime use/i)
-      },
-      error: expect.stringMatching(/unavailable for runtime use/i)
+        models: [opaqueModel]
+      }
     });
 
-    const rejectedProbe = await requestJson(baseUrl, "POST", "/api/harness/probe", { model: "grok-4.5" });
-    expect(rejectedProbe.status).toBe(400);
-    expect(rejectedProbe.body).toMatchObject({
+    const probe = await requestJson(baseUrl, "POST", "/api/harness/probe", { model: opaqueModel });
+    expect(probe.status).toBe(200);
+    expect(probe.body).toMatchObject({
       summary: {
         kind: "probe",
-        ok: false,
-        model: "grok-4.5",
-        failureReason: expect.stringMatching(/unavailable for runtime use/i)
-      },
-      error: expect.stringMatching(/unavailable for runtime use/i)
+        ok: true,
+        model: opaqueModel
+      }
     });
 
     const matches = await requestJson(baseUrl, "GET", "/api/matches");
     expect(matches.status).toBe(200);
-    expect(matches.body).toHaveLength(0);
+    expect(matches.body).toHaveLength(1);
+    expect(matches.body[0].models).toEqual([opaqueModel]);
   });
 
   it("accepts jointPhaseScheduler parallel and rejects invalid scheduler values", async () => {
