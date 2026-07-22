@@ -325,7 +325,10 @@ native scheduler boundary, resolves the domain-owned durable actor snapshot at
 that boundary, replays the prefix without actors or model calls, and emits the
 existing generic `HarnessCheckpointEnvelope`. `runForkedHarnessEpisode()` then
 asks the domain only to restore its environment and actors from that recorded
-state; it does not deserialize policy closures or provider clients.
+state; it does not deserialize policy closures or provider clients. A domain
+can additionally supply a runtime-only actor snapshot serializer for the
+restored child roster, so every committed child boundary can remain
+checkpointable and seed a later verified fork.
 
 ```ts
 import { buildHarnessCheckpointAtPrefix } from "./src/harness/episodeArtifacts";
@@ -344,7 +347,13 @@ const checkpoint = buildHarnessCheckpointAtPrefix({
 
 const fork = await runForkedHarnessEpisode({
   checkpoint,
-  runtime: { createEnvironment, restoreActors },
+  runtime: {
+    createEnvironment,
+    restoreActors,
+    // Called only after a child commit and receipt delivery. It is not stored
+    // in the artifact and never runs during deterministic replay.
+    captureAgentSnapshots: (actors) => actors.map(snapshotLedgerActor)
+  },
   episode: { id: "ledger-fork-01", schedulerMode: "aec" }
 });
 ```
@@ -360,6 +369,10 @@ calling a model. Canonical compacted match artifacts use the generic
 binding, references, and final-agent hash are audited model-free during replay.
 Domain adapters may add stronger domain-specific snapshot schema checks, but
 they must not reconstruct durable agent state from commands or retry a model.
+The same post-receipt rule applies to a fork child through
+`SocialCheckpointRuntimeAdapter.captureAgentSnapshots`. Omitting that optional
+runtime callback preserves execution compatibility but intentionally leaves the
+child without a durable actor-state boundary for a subsequent generic fork.
 
 The generic tournament control plane can likewise persist a minimal research
 run set through `buildGenericTournamentRunSetArtifact()` and

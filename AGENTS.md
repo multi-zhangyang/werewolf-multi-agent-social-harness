@@ -26424,3 +26424,61 @@ memo, raw phase, trace, weight, and private-night fields into a mock live
 response and proved that the live render projection dropped them. This slice
 does not alter model/reasoner runtime behavior, so no live provider call was
 needed or claimed.
+
+## 13.275 Generic Recursive Fork Snapshot Continuity Lock
+
+Timestamp: `2026-07-22`
+
+The domain-neutral checkpoint/fork contract now preserves durable actor-state
+authority across more than one continuation generation. This is a generic
+harness capability; it neither imports Werewolf/core code nor changes provider,
+reasoner, prompt, parser, or model configuration behavior.
+
+- `SocialCheckpointRuntimeAdapter.captureAgentSnapshots` is an optional
+  runtime-only serializer over the exact actor roster restored for a fork
+  child. The callback is never persisted in a checkpoint or artifact.
+- `runForkedHarnessEpisode()` restores that roster once, gives the ordinary
+  generic runner the serializer only through its existing post-commit,
+  post-receipt capture hook, and continues to clone the resulting state before
+  it enters a native step artifact.
+- Consequently a committed child native boundary can carry the existing actor
+  snapshot/hash binding, be compacted into
+  `harness.agent-snapshot-frame.v1`, become a validated child checkpoint, and
+  seed a second fork. Replay remains environment/message/snapshot auditing and
+  does not construct an actor or call a model.
+- The callback remains optional for source compatibility. A domain which omits
+  it can still run a child episode, but intentionally has no durable child
+  actor-state restoration authority for another generic fork.
+- The non-Werewolf Ledger proof now executes:
+
+```text
+parent native checkpoint
+  -> restored fork child with receipt-after snapshots
+  -> compacted child frame + checkpoint after actor b
+  -> restored grandchild executes actor c
+```
+
+  It asserts the exact private committed-entry states at the child checkpoint
+  and grandchild boundary, with no transcript reconstruction, actor replay, or
+  provider/model call.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/genericHarnessContract.test.ts tests/social.test.ts \
+  tests/scaffold.test.ts --maxWorkers=1 --no-file-parallelism \
+  --testTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npm run test:e2e
+git diff --check
+```
+
+The focused suite passed **3 files / 91 tests**. The serial full deterministic
+suite completed before the build/browser stages, with the existing **45 files /
+479 tests** count. Build passed with only the pre-existing Vite main-chunk-size
+warning, and the independent Cockpit fixture run passed **12/12**. No real
+provider validation was needed or claimed: this lock changes only generic
+checkpoint runtime wiring and deterministic snapshot artifacts.

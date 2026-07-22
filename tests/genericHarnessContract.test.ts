@@ -844,6 +844,12 @@ describe("generic social harness contract", () => {
         },
         restoreActors(agentStates) {
           return agentStates.map((state) => new CheckpointLedgerActor(state.id, `fork-${state.id}`, state));
+        },
+        captureAgentSnapshots(actors) {
+          return actors.map((actor) => {
+            if (!(actor instanceof CheckpointLedgerActor)) throw new Error("ledger fork restored an unexpected actor type");
+            return actor.snapshot();
+          });
         }
       },
       verifyCheckpointReplay: verifyLedgerCheckpointReplay,
@@ -870,6 +876,102 @@ describe("generic social harness contract", () => {
     expect(forked.socialEpisode.finalState).toMatchObject({
       done: true,
       entries: ["a:parent-a", "b:fork-b", "c:fork-c"]
+    });
+    expect(forked.socialEpisode.steps).toHaveLength(2);
+    expect(forked.socialEpisode.steps.every((step) => Array.isArray(step.actorSnapshotsAfterStep))).toBe(true);
+
+    // A child continuation records its own receipt-after durable snapshots,
+    // so it can become a checkpoint authority and seed a second fork without
+    // reconstructing actor state from a transcript or calling a model.
+    const forkedCompacted = compactRecordedSocialAgentSnapshots<
+      LedgerState,
+      LedgerObservation,
+      LedgerPending,
+      LedgerCommand,
+      LedgerCheckpointActorState
+    >({ episode: forked.socialEpisode });
+    const childCheckpoint = buildHarnessCheckpointAtPrefix<
+      LedgerState,
+      LedgerObservation,
+      LedgerPending,
+      LedgerCommand,
+      LedgerCheckpointActorState
+    >({
+      artifactVersion: "ledger.checkpoint.v1",
+      kind: "ledger-checkpoint",
+      checkpointId: "ledger-prefix-after-fork-b",
+      createdAt: "2026-07-21T01:00:02.000Z",
+      sourceArtifactVersion: "ledger.episode.v1",
+      runId: forked.socialEpisode.id,
+      sourceStatus: forked.socialEpisode.status,
+      episode: forkedCompacted.episode,
+      selector: { nativeStepCount: 1 },
+      resolveAgentSnapshot: createHarnessAgentSnapshotFrameResolver(forkedCompacted.frames),
+      replayPrefix: (executionPrefix) =>
+        replaySocialEpisode({
+          episode: executionPrefix,
+          environment: new LedgerEnvironment({ initialState: executionPrefix.initialState }),
+          hashState: hashStableState,
+          hashMessages: hashStableState,
+          validateExpectedFinalState: false,
+          agentSnapshotFrames: forkedCompacted.frames
+        })
+    });
+    expect(validateHarnessCheckpointEnvelope(childCheckpoint)).toEqual([]);
+    expect(childCheckpoint.agents).toEqual([
+      { id: "a", committedEntries: ["a:parent-a"] },
+      { id: "b", committedEntries: ["b:fork-b"] },
+      { id: "c", committedEntries: [] }
+    ]);
+
+    const recursivelyForked = await runForkedHarnessEpisode({
+      checkpoint: childCheckpoint,
+      createdAt: "2026-07-21T01:00:03.000Z",
+      reason: "ledger recursive continuation proof",
+      runtime: {
+        createEnvironment(initialState) {
+          return new LedgerEnvironment({ initialState });
+        },
+        restoreActors(agentStates) {
+          return agentStates.map((state) => new CheckpointLedgerActor(state.id, `recursive-${state.id}`, state));
+        },
+        captureAgentSnapshots(actors) {
+          return actors.map((actor) => {
+            if (!(actor instanceof CheckpointLedgerActor)) throw new Error("recursive fork restored an unexpected actor type");
+            return actor.snapshot();
+          });
+        }
+      },
+      verifyCheckpointReplay: (candidate) =>
+        validateHarnessCheckpointReplay(candidate, (executionPrefix) =>
+          replaySocialEpisode({
+            episode: executionPrefix,
+            environment: new LedgerEnvironment({ initialState: executionPrefix.initialState }),
+            hashState: hashStableState,
+            hashMessages: hashStableState,
+            auditAgentSnapshots: false
+          })
+        ),
+      episode: {
+        id: "ledger-generic-prefix-recursive-fork",
+        schedulerMode: "aec",
+        hashState: hashStableState,
+        hashMessages: hashStableState
+      }
+    });
+    expect(recursivelyForked.seed.forkOf.parentRunId).toBe(forked.socialEpisode.id);
+    expect(recursivelyForked.socialEpisode.steps).toHaveLength(1);
+    expect(recursivelyForked.socialEpisode.steps[0]).toMatchObject({
+      actorId: "c",
+      actorSnapshotsAfterStep: [
+        { id: "a", committedEntries: ["a:parent-a"] },
+        { id: "b", committedEntries: ["b:fork-b"] },
+        { id: "c", committedEntries: ["c:recursive-c"] }
+      ]
+    });
+    expect(recursivelyForked.socialEpisode.finalState).toMatchObject({
+      done: true,
+      entries: ["a:parent-a", "b:fork-b", "c:recursive-c"]
     });
 
     const structurallySelfConsistentButUnreplayable = clone(checkpoint);

@@ -36,6 +36,21 @@ export interface SocialCheckpointRuntimeAdapter<TState, TAgentState, TObservatio
   domainAdapter?: SocialDomainAdapterManifest;
   createEnvironment(initialState: TState): SocialEnvironment<TState, TObservation, TPending, TCommand>;
   restoreActors(agentStates: TAgentState[]): SocialActor<TObservation, TPending, TCommand>[];
+  /**
+   * Optional durable-state capture for a fork child. The generic fork runtime
+   * owns when this runs: only after a child environment transition commits and
+   * all actor receipts for that native boundary have been delivered. The
+   * adapter supplies the domain-specific serialization because generic code
+   * must not assume that a restored actor exposes a particular snapshot API.
+   *
+   * Supplying this keeps a child episode checkpointable and therefore allows
+   * a verified recursive fork. Omitting it preserves the legacy behavior:
+   * the child can still execute, but it records no actor-state restoration
+   * authority for a subsequent fork.
+   */
+  captureAgentSnapshots?: (
+    actors: readonly SocialActor<TObservation, TPending, TCommand>[]
+  ) => TAgentState[] | undefined;
 }
 
 export interface RunForkedHarnessEpisodeOptions<TState, TAgentState, TObservation, TPending extends { actorId?: string }, TCommand>
@@ -126,13 +141,22 @@ export async function runForkedHarnessEpisode<TState, TAgentState, TObservation,
     throw new Error(`Checkpoint replay verification failed for ${options.checkpoint.checkpointId}: ${replayErrors.join(" ")}`);
   }
   const seed = buildSocialCheckpointForkSeed(options.checkpoint, options);
+  // Restore exactly one actor registry for the child run. The optional
+  // snapshot adapter receives this read-only roster only through the generic
+  // runner's post-receipt capture hook; neither checkpoint restoration nor
+  // replay verification is allowed to mutate child actor state.
+  const restoredActors = options.runtime.restoreActors(structuredClone(seed.initialAgentStates));
+  const childActors = Object.freeze([...restoredActors]);
   const socialEpisode = await runHarnessEpisode({
     ...options.episode,
     domainAdapter: effectiveChildAdapter,
     environment: options.runtime.createEnvironment(structuredClone(seed.initialState)),
-    actors: options.runtime.restoreActors(structuredClone(seed.initialAgentStates)),
+    actors: restoredActors,
     channels: structuredClone(seed.initialSocialChannels),
-    initialMessages: structuredClone(seed.initialSocialMessages)
+    initialMessages: structuredClone(seed.initialSocialMessages),
+    captureAgentSnapshots: options.runtime.captureAgentSnapshots
+      ? () => options.runtime.captureAgentSnapshots?.(childActors)
+      : undefined
   });
   return { seed, socialEpisode };
 }
