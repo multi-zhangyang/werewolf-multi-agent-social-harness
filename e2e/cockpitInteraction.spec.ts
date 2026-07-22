@@ -64,6 +64,19 @@ type E2EMatchRecord = {
   };
 };
 
+type E2ELiveMatchStart = {
+  artifactVersion: "server.match-live-start.v1";
+  kind: "match-live-start";
+  matchId: string;
+  lifecycle: "running";
+  artifactAvailable: false;
+  projection: {
+    view: "live-public";
+    privateEvidenceRedacted: true;
+    postgameTruthRedacted: true;
+  };
+};
+
 function expectSuccessfulHarnessRun(run: E2EMatchRecord): void {
   expect(run.status).toBe("completed");
   expect(["completed", "truncated"]).toContain(run.harnessStatus);
@@ -311,18 +324,24 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   }, { timeout: 180_000 });
   await page.getByRole("button", { name: "运行实验", exact: true }).click();
   const runResponse = await runRequest;
-  expect(runResponse.status()).toBe(200);
+  expect(runResponse.status()).toBe(202);
   expect(runResponse.ok()).toBeTruthy();
-  const uiRun = (await runResponse.json()) as E2EMatchRecord & { id: string };
-  expectSuccessfulHarnessRun(uiRun);
-  expect(uiRun.id).toBeTruthy();
-  expect(uiRun.hasArtifact).toBeTruthy();
-  expect((uiRun.nativeSteps ?? uiRun.summary?.nativeSteps ?? uiRun.trajectorySteps) ?? 0).toBeGreaterThan(0);
+  const liveStart = (await runResponse.json()) as E2ELiveMatchStart;
+  expect(liveStart).toMatchObject({
+    artifactVersion: "server.match-live-start.v1",
+    kind: "match-live-start",
+    matchId: expect.any(String),
+    lifecycle: "running",
+    artifactAvailable: false,
+    projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true }
+  });
+  expect(JSON.stringify(liveStart)).not.toContain("models");
+  const uiRunId = liveStart.matchId;
   const uiRunArtifactResponse = await runArtifact;
   expect(uiRunArtifactResponse.ok()).toBeTruthy();
   const uiRunArtifact = (await uiRunArtifactResponse.json()) as E2EMatchArtifactProjection;
-  expect([uiRunArtifact.matchId, uiRunArtifact.runId]).toContain(uiRun.id);
-  await expect(statusWith(page, /真实 harness run 完成/)).toBeVisible({ timeout: 20_000 });
+  expect([uiRunArtifact.matchId, uiRunArtifact.runId]).toContain(uiRunId);
+  await expect(statusWith(page, /已加载脱敏工件/)).toBeVisible({ timeout: 20_000 });
 
   await navigateWorkspace(page, "对比");
   await expect(statusWith(page, "工作区已切换：对比")).toBeVisible();
@@ -340,7 +359,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
     const url = new URL(response.url());
     return (
       response.request().method() === "GET" &&
-      url.pathname.startsWith(`/api/matches/${uiRun.id}/compare/`) &&
+      url.pathname.startsWith(`/api/matches/${uiRunId}/compare/`) &&
       url.searchParams.get("view") === "postgame-redacted"
     );
   }, { timeout: 30_000 });
@@ -359,10 +378,10 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
       privateEvidenceRedacted: true
     }
   });
-  expect([comparisonArtifact.baseline?.matchId, comparisonArtifact.baseline?.runId]).toContain(uiRun.id);
+  expect([comparisonArtifact.baseline?.matchId, comparisonArtifact.baseline?.runId]).toContain(uiRunId);
   const comparisonCandidateId = comparisonArtifact.candidate?.matchId ?? comparisonArtifact.candidate?.runId;
   expect(comparisonCandidateId).toBeTruthy();
-  expect(comparisonCandidateId).not.toBe(uiRun.id);
+  expect(comparisonCandidateId).not.toBe(uiRunId);
   expect(comparisonArtifact.rows ?? []).toEqual(
     expect.arrayContaining([
       expect.objectContaining({ id: "trajectory_steps" }),
@@ -378,7 +397,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   await expect(page.getByText("Legacy trajectory projection", { exact: true })).toBeVisible();
   await expect(page.getByText("migration/debug only", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "scheduler", exact: true }).first()).toBeVisible();
-  const replayResponse = page.waitForResponse((response) => isApiResponse(response, `/api/matches/${uiRun.id}/replay`, "POST"));
+  const replayResponse = page.waitForResponse((response) => isApiResponse(response, `/api/matches/${uiRunId}/replay`, "POST"));
   await page.getByRole("button", { name: "复现", exact: true }).click();
   const replay = await replayResponse;
   expect(replay.ok()).toBeTruthy();
@@ -387,7 +406,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   expect(replayJson.summary?.finalHashMatchesArtifact).toBe(true);
   await expect(statusWith(page, /复现通过/)).toBeVisible({ timeout: 15_000 });
 
-  const jsonlResponse = page.waitForResponse((response) => isApiResponse(response, `/api/matches/${uiRun.id}/trajectory.jsonl`));
+  const jsonlResponse = page.waitForResponse((response) => isApiResponse(response, `/api/matches/${uiRunId}/trajectory.jsonl`));
   await page.getByRole("button", { name: "JSONL", exact: true }).click();
   const jsonl = await jsonlResponse;
   expect(jsonl.ok()).toBeTruthy();
@@ -398,10 +417,10 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   await expect(page.getByText("Checkpoint Registry", { exact: true })).toBeVisible();
   await expect(page.getByText("只展示 summary，不读取 full checkpoint artifact")).toBeVisible();
 
-  const checkpointCreateResponse = page.waitForResponse((response) => isApiResponse(response, `/api/matches/${uiRun.id}/checkpoints`, "POST"));
+  const checkpointCreateResponse = page.waitForResponse((response) => isApiResponse(response, `/api/matches/${uiRunId}/checkpoints`, "POST"));
   const checkpointListResponse = page.waitForResponse((response) => {
     const url = new URL(response.url());
-    return response.request().method() === "GET" && url.pathname === "/api/checkpoints" && url.searchParams.get("matchId") === uiRun.id;
+    return response.request().method() === "GET" && url.pathname === "/api/checkpoints" && url.searchParams.get("matchId") === uiRunId;
   });
   await page.getByRole("button", { name: "创建 checkpoint", exact: true }).click();
   const checkpointCreate = await checkpointCreateResponse;
@@ -418,7 +437,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   expect(checkpointList.ok()).toBeTruthy();
   await expect(statusWith(page, /checkpoint 已创建/)).toBeVisible({ timeout: 15_000 });
 
-  const forkLineageResponse = page.waitForResponse((response) => isApiResponse(response, `/api/matches/${uiRun.id}/fork-lineage`));
+  const forkLineageResponse = page.waitForResponse((response) => isApiResponse(response, `/api/matches/${uiRunId}/fork-lineage`));
   await page.getByRole("button", { name: "加载 lineage", exact: true }).click();
   const forkLineage = await forkLineageResponse;
   expect(forkLineage.ok()).toBeTruthy();

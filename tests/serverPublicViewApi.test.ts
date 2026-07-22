@@ -134,6 +134,24 @@ describe("public match API redaction", () => {
     baseUrl = `http://127.0.0.1:${address.port}`;
     const record = await createSensitiveStoredMatch("server-public-full-view-local-only");
     const candidate = await createSensitiveStoredMatch("server-public-full-view-local-only-candidate");
+    const [operatorList, operatorDetail, strictLive] = await Promise.all([
+      requestJson(baseUrl, "GET", "/api/matches"),
+      requestJson(baseUrl, "GET", `/api/matches/${record.id}`),
+      requestJson(baseUrl, "GET", `/api/matches/${record.id}/live`)
+    ]);
+    for (const response of [operatorList, operatorDetail]) {
+      expect(response.status).toBe(403);
+      expect(response.body).toMatchObject({ code: "operator_match_registry_local_only" });
+      expect(JSON.stringify(response.body)).not.toContain("seerInspection");
+    }
+    expect(strictLive.status).toBe(200);
+    expect(strictLive.body).toEqual({
+      artifactVersion: "server.match-live-projection.v1",
+      kind: "match-live-projection",
+      matchId: record.id,
+      lifecycle: expect.stringMatching(/^(completed|truncated|failed)$/),
+      artifactAvailable: true
+    });
     const safeComparison = await requestJson(
       baseUrl,
       "GET",
@@ -1302,18 +1320,41 @@ describe("public match API redaction", () => {
         live: true
       });
       expect(started.status).toBe(202);
-      expect(started.body.status).toBe("running");
-      expect(started.body.hasArtifact).toBe(false);
+      expect(started.body).toEqual({
+        artifactVersion: "server.match-live-start.v1",
+        kind: "match-live-start",
+        matchId: expect.any(String),
+        lifecycle: "running",
+        artifactAvailable: false,
+        projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true }
+      });
+      const startJson = JSON.stringify(started.body);
+      for (const forbidden of [
+        "id\":",
+        "state",
+        "models",
+        "role_reveal",
+        "nativeSteps",
+        "committedSteps",
+        "rejectedSteps",
+        "trajectorySteps",
+        "checkpointCount",
+        "profileCount",
+        "alpha",
+        "beta"
+      ]) {
+        expect(startJson).not.toContain(forbidden);
+      }
 
       await secondDecisionEntered;
-      const live = await requestJson(baseUrl, "GET", `/api/matches/${started.body.id}/live`);
+      const live = await requestJson(baseUrl, "GET", `/api/matches/${started.body.matchId}/live`);
       expect(live.status).toBe(200);
       expect(live.headers.get("cache-control")).toContain("no-store");
       expect(live.headers.get("x-content-type-options")).toBe("nosniff");
       expect(live.body).toMatchObject({
         artifactVersion: "server.match-live-projection.v1",
         kind: "match-live-projection",
-        matchId: started.body.id,
+        matchId: started.body.matchId,
         lifecycle: "running",
         artifactAvailable: false,
         projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true },
@@ -1338,15 +1379,15 @@ describe("public match API redaction", () => {
       ]) {
         expect(liveJson).not.toContain(forbidden);
       }
-      const unavailableArtifact = await requestJson(baseUrl, "GET", `/api/matches/${started.body.id}/artifact?view=truth-redacted`);
+      const unavailableArtifact = await requestJson(baseUrl, "GET", `/api/matches/${started.body.matchId}/artifact?view=truth-redacted`);
       expect(unavailableArtifact.status).toBe(404);
 
       releaseSecondDecision();
       await waitFor(async () => {
-        const terminal = await requestJson(baseUrl, "GET", `/api/matches/${started.body.id}/live`);
+        const terminal = await requestJson(baseUrl, "GET", `/api/matches/${started.body.matchId}/live`);
         return terminal.body.artifactAvailable === true ? terminal : undefined;
       });
-      const artifact = await requestJson(baseUrl, "GET", `/api/matches/${started.body.id}/artifact?view=postgame-redacted`);
+      const artifact = await requestJson(baseUrl, "GET", `/api/matches/${started.body.matchId}/artifact?view=postgame-redacted`);
       expect(artifact.status).toBe(200);
     } finally {
       releaseSecondDecision?.();

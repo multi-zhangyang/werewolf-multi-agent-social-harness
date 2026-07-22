@@ -26482,3 +26482,86 @@ suite completed before the build/browser stages, with the existing **45 files /
 warning, and the independent Cockpit fixture run passed **12/12**. No real
 provider validation was needed or claimed: this lock changes only generic
 checkpoint runtime wiring and deterministic snapshot artifacts.
+
+## 13.276 Live Spectator And Operator Audience Containment Lock
+
+Timestamp: `2026-07-22`
+
+The running public table now has an end-to-end audience boundary rather than
+only a narrow board component. This lock changes server/API/presentation
+redaction and artifact handoff behavior; it does not change the harness
+environment, agent policy, reasoner/provider behavior, model configuration, or
+Werewolf rules.
+
+### 13.276.1 Narrow Live Start And Registry Boundary
+
+- Explicit `POST /api/matches/run { live: true }` returns only
+  `server.match-live-start.v1`: `matchId`, `lifecycle: running`,
+  `artifactAvailable: false`, and the fixed `live-public` redaction policy.
+  It is no longer a serialized `MatchRecord` and excludes state/raw phase,
+  models/profiles, execution counters, checkpoints, provider data, and
+  artifacts.
+- `GET /api/matches` and `GET /api/matches/:id` are named local operator
+  registry routes. Because their normal summaries intentionally contain
+  research metadata such as model assignments and execution counts, a
+  non-loopback server rejects them with
+  `operator_match_registry_local_only`.
+- A remote/live spectator continues to use the narrow
+  `GET /api/matches/:id/live` projection. The route is still `no-store`,
+  ephemeral, and honest about a process-restart `running` marker with no frame.
+
+### 13.276.2 Cockpit Lifecycle Boundary
+
+- The browser validates and copies only the live-start receipt. It does not
+  cast it to `MatchRecord`, select it as a current run, or refresh the operator
+  registry while the episode is running.
+- While a live projection exists, React mounts a separate spectator shell. The
+  normal Cockpit shell is unmounted, so no runs registry, Run Context,
+  model/profile/roster control, raw phase, scheduler, progress count, replay,
+  checkpoint, comparison, inspector, or retained artifact can appear beside
+  the public table.
+- A terminal projection with `artifactAvailable: true` directly fetches
+  `GET /api/matches/:id/artifact?view=postgame-redacted` using the terminal
+  `matchId`. It does not first read `/api/matches`, and the spectator shell
+  remains mounted until the redacted artifact has passed local validation.
+- A failed or artifact-less terminal stays a closed spectator state. It does
+  not fetch registry metadata, revive a previous artifact, or locally rebuild
+  a game state.
+
+### 13.276.3 Regression Evidence
+
+- API regression injects a delayed live run and proves the 202 body is only the
+  start receipt, excludes raw phase/models/counts, retains strict `/live`, and
+  persists the ordinary terminal artifact.
+- A non-loopback server test proves both operator registry routes are denied
+  while the strict terminal `/live` marker remains available.
+- Browser parser tests inject operator state/model/provider/progress fields
+  into a start acknowledgement and prove only the receipt whitelist survives;
+  invalid lifecycle or redaction policy fails closed.
+- Cockpit fixture regressions prove the running shell does not request or
+  render `/api/matches`, cannot show injected raw phase/model/count sentinels,
+  preserves the artifact-less failure closure, and performs a successful
+  terminal handoff directly to `postgame-redacted` without registry access.
+- The provider-backed live Cockpit interaction contract now expects a 202
+  start receipt and uses its `matchId` only after the terminal artifact route
+  responds; it no longer assumes live start is a completed `MatchRecord`.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/werewolfLiveProjection.test.ts \
+  tests/serverPublicViewApi.test.ts --maxWorkers=1 --no-file-parallelism \
+  --testTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run test:e2e
+git diff --check
+```
+
+The focused suite passed **2 files / 29 tests**. The complete deterministic
+suite passed **45 files / 481 tests**. Production build passed with only the
+existing Vite main-chunk-size warning, and the fixture Cockpit suite passed
+**13/13**. No real provider call was run or claimed for this lock: provider
+streaming behavior did not change, and all live lifecycle proofs use the
+ordinary harness with deterministic fixture reasoners or local projections.

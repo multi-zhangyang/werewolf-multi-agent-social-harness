@@ -1,7 +1,60 @@
 import { describe, expect, it } from "vitest";
-import { readLiveMatchProjection } from "../src/components/cockpit/werewolfLiveProjection";
+import { readLiveMatchProjection, readLiveMatchStart } from "../src/components/cockpit/werewolfLiveProjection";
 
 describe("Werewolf live-public Cockpit projection", () => {
+  it("copies only the narrow live-start acknowledgement needed to begin spectator polling", () => {
+    const start = readLiveMatchStart({
+      artifactVersion: "server.match-live-start.v1",
+      kind: "match-live-start",
+      matchId: "live-start-001",
+      lifecycle: "running",
+      artifactAvailable: false,
+      projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true, revision: 99 },
+      id: "operator-registry-id",
+      state: { phase: "night_wolves", role: "werewolf" },
+      models: ["provider/model"],
+      nativeSteps: 88,
+      checkpointCount: 4,
+      providerRequestId: "private-provider-request"
+    });
+
+    expect(start).toEqual({
+      artifactVersion: "server.match-live-start.v1",
+      kind: "match-live-start",
+      matchId: "live-start-001",
+      lifecycle: "running",
+      artifactAvailable: false,
+      projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true }
+    });
+    const serialized = JSON.stringify(start);
+    for (const forbidden of ["operator-registry-id", "night_wolves", "werewolf", "provider/model", "nativeSteps", "checkpointCount", "private-provider-request", "revision"]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it("rejects a live-start acknowledgement without the strict running policy", () => {
+    expect(() =>
+      readLiveMatchStart({
+        artifactVersion: "server.match-live-start.v1",
+        kind: "match-live-start",
+        matchId: "live-start-unsafe",
+        lifecycle: "completed",
+        artifactAvailable: true,
+        projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true }
+      })
+    ).toThrow(/running artifact-free/i);
+    expect(() =>
+      readLiveMatchStart({
+        artifactVersion: "server.match-live-start.v1",
+        kind: "match-live-start",
+        matchId: "live-start-unsafe-policy",
+        lifecycle: "running",
+        artifactAvailable: false,
+        projection: { view: "live-public", privateEvidenceRedacted: false, postgameTruthRedacted: true }
+      })
+    ).toThrow(/unsafe projection policy/i);
+  });
+
   it("copies only the strict server public table fields", () => {
     const projection = readLiveMatchProjection(
       {

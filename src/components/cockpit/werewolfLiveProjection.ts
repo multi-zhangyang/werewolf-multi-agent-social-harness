@@ -37,6 +37,27 @@ export interface WerewolfLivePublicStateView {
   currentSpeakerSeat?: number;
 }
 
+/**
+ * The browser receives this narrow acknowledgement when it explicitly starts
+ * a live spectator run. It is deliberately not a MatchRecord: operator
+ * registry metadata, raw public state, profiles, model ids, progress counts,
+ * checkpoints, and artifacts belong to different audiences and routes.
+ */
+export interface LiveMatchStart {
+  artifactVersion: "server.match-live-start.v1";
+  kind: "match-live-start";
+  matchId: string;
+  lifecycle: "running";
+  artifactAvailable: false;
+  projection: LivePublicProjectionPolicy;
+}
+
+export interface LivePublicProjectionPolicy {
+  view: "live-public";
+  privateEvidenceRedacted: true;
+  postgameTruthRedacted: true;
+}
+
 export type LiveMatchProjection =
   | {
       artifactVersion: "server.match-live-projection.v1";
@@ -45,11 +66,7 @@ export type LiveMatchProjection =
       lifecycle: "running";
       artifactAvailable: false;
       /** A process-restart fallback may still be running without a frame. */
-      projection?: {
-        view: "live-public";
-        privateEvidenceRedacted: true;
-        postgameTruthRedacted: true;
-      };
+      projection?: LivePublicProjectionPolicy;
       publicState?: WerewolfLivePublicStateView;
     }
   | {
@@ -103,7 +120,34 @@ export function readLiveMatchProjection(value: unknown, expectedMatchId?: string
   };
 }
 
-function readLiveProjectionPolicy(value: unknown): Extract<LiveMatchProjection, { lifecycle: "running" }> ["projection"] | undefined {
+/**
+ * Validate and narrow the live-start acknowledgement before it reaches React
+ * state. Its purpose is only to select the subsequent `/live` projection; it
+ * cannot become a substitute for an operator match record or an artifact.
+ */
+export function readLiveMatchStart(value: unknown): LiveMatchStart {
+  if (!isRecord(value)) throw new Error("Live match start response must be an object.");
+  if (value.artifactVersion !== "server.match-live-start.v1" || value.kind !== "match-live-start") {
+    throw new Error("Live match start response has an unsupported version.");
+  }
+  const matchId = readString(value.matchId);
+  if (!matchId) throw new Error("Live match start response is missing matchId.");
+  if (value.lifecycle !== "running" || value.artifactAvailable !== false) {
+    throw new Error("Live match start response must describe a running artifact-free match.");
+  }
+  const projection = readLiveProjectionPolicy(value.projection);
+  if (!projection) throw new Error("Live match start response is missing its redaction policy.");
+  return {
+    artifactVersion: "server.match-live-start.v1",
+    kind: "match-live-start",
+    matchId,
+    lifecycle: "running",
+    artifactAvailable: false,
+    projection
+  };
+}
+
+function readLiveProjectionPolicy(value: unknown): LivePublicProjectionPolicy | undefined {
   if (!isRecord(value)) return undefined;
   if (
     value.view !== "live-public" ||

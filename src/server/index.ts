@@ -256,6 +256,25 @@ interface RunningMatchLiveProjection {
   publicState: WerewolfLivePublicState;
 }
 
+/**
+ * Explicit acknowledgement for a browser that opts into the live spectator
+ * lifecycle. This must remain separate from `serializeStoredMatch()`: the
+ * latter is an operator registry summary and carries metadata that would be a
+ * live timing/model side channel when rendered beside the strict table.
+ */
+interface LiveMatchStartResponse {
+  artifactVersion: "server.match-live-start.v1";
+  kind: "match-live-start";
+  matchId: string;
+  lifecycle: "running";
+  artifactAvailable: false;
+  projection: {
+    view: "live-public";
+    privateEvidenceRedacted: true;
+    postgameTruthRedacted: true;
+  };
+}
+
 interface TerminalMatchLiveProjection {
   artifactVersion: "server.match-live-projection.v1";
   kind: "match-live-projection";
@@ -389,6 +408,7 @@ app.get("/api/artifact-recovery-audits", async (req, res, next) => {
 
 app.get("/api/matches", async (_req, res, next) => {
   try {
+    assertLocalOperatorRegistryAccess(_req, artifactAccessBindHost);
     await loadServerArtifactStores();
     res.json(listMatches().map(serializeStoredMatch));
   } catch (error) {
@@ -398,6 +418,7 @@ app.get("/api/matches", async (_req, res, next) => {
 
 app.get("/api/matches/:id", async (req, res, next) => {
   try {
+    assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
     await loadServerArtifactStores();
     const match = getMatch(req.params.id);
     if (!match) {
@@ -1146,7 +1167,7 @@ app.post("/api/matches/run", async (req, res, next) => {
     // Preserve the established synchronous /api/matches/run contract unless a
     // client explicitly asks for a server-owned running projection lifecycle.
     setLiveProjection(record.id, projectWerewolfLivePublicState(record.state));
-    res.status(202).json(serializeStoredMatch(record));
+    res.status(202).json(serializeLiveMatchStart(record.id));
     void (async () => {
       try {
         const agents: HarnessAgentConfig[] = resolveAgentConfigs(record.state.players, profiles, 0, temperature, assignment);
@@ -3297,6 +3318,21 @@ function serializeStoredMatch(match: StoredMatch): object {
   };
 }
 
+function serializeLiveMatchStart(matchId: string): LiveMatchStartResponse {
+  return {
+    artifactVersion: "server.match-live-start.v1",
+    kind: "match-live-start",
+    matchId,
+    lifecycle: "running",
+    artifactAvailable: false,
+    projection: {
+      view: "live-public",
+      privateEvidenceRedacted: true,
+      postgameTruthRedacted: true
+    }
+  };
+}
+
 /**
  * A finished artifact can retain raw failure evidence for deterministic audit
  * and explicit local debugging. Match list/detail responses are cockpit
@@ -3379,6 +3415,20 @@ function assertLocalResearchArtifactAccess(request: express.Request, artifactAcc
     403,
     "Tournament research artifacts are available only through a loopback-only local debug server.",
     "tournament_research_artifacts_local_only"
+  );
+}
+
+/**
+ * `/api/matches` is the local research operator registry. Its summaries
+ * intentionally include model/profile and execution-progress metadata, so a
+ * remotely reachable spectator must use the strict `/live` route instead.
+ */
+function assertLocalOperatorRegistryAccess(request: express.Request, artifactAccessBindHost: string): void {
+  if (hasLocalResearchArtifactAccess(request, artifactAccessBindHost)) return;
+  throw new HttpError(
+    403,
+    "Match registry access is available only through a loopback-only local operator server.",
+    "operator_match_registry_local_only"
   );
 }
 

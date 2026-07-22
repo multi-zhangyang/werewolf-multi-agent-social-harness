@@ -277,6 +277,42 @@ The client-side selector fails closed: even if an incorrectly shaped upstream
 review model. The authoritative server projection and its API tests remain the
 security boundary; the selector is a second containment boundary for the UI.
 
+### Running public spectator lifecycle
+
+An explicit live request is a different API audience from the local research
+operator registry:
+
+```text
+POST /api/matches/run { live: true }
+  -> 202 server.match-live-start.v1
+  -> browser polls GET /api/matches/:id/live
+  -> terminal artifactAvailable=true
+  -> browser reads GET /api/matches/:id/artifact?view=postgame-redacted
+```
+
+The `202` acknowledgement contains only `matchId`, `lifecycle: "running"`,
+`artifactAvailable: false`, and the fixed `live-public` redaction policy. It is
+not a `MatchRecord`: it never includes public game state, models/profiles,
+native/committed/rejected step counts, checkpoints, provider data, or an
+artifact. The running `/live` frame is likewise an ephemeral, `no-store`
+projection of committed public table facts only; it is not replay, checkpoint,
+artifact, or environment authority. A process restart may honestly return a
+`running` marker with no frame rather than fabricate a game state.
+
+During a live run the React application mounts a spectator-only shell. It does
+not render the runs registry, Run Context, model/roster controls, scheduler,
+trace, replay, checkpoint, comparison, inspector, or any retained postgame
+artifact. On a successful terminal marker it fetches the named redacted
+artifact directly; it does not first fetch the operator registry. A failed or
+artifact-less terminal stays a closed spectator state and is never rebuilt from
+old UI state.
+
+`GET /api/matches` and `GET /api/matches/:id` are intentionally local operator
+registry routes because their summaries contain research metadata such as model
+assignments and execution counts. They are available only through a loopback
+local operator server. A remote spectator must use the narrow `/live` endpoint
+and, where authorized, the appropriate redacted artifact/share route.
+
 Replay has CLI, server-owned API, and programmatic entries:
 
 ```bash
@@ -434,7 +470,7 @@ export TOURNAMENT_GAMES=3
 export TOURNAMENT_TIMEOUT_MS=600000
 ```
 
-The API route `POST /api/matches/run` accepts `models`, `profiles`, `assignment`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, and optional game `config`; completed responses include public state, summary, `hasArtifact`, and artifact counters. Ordinary UI reads the default `postgame-redacted` artifact projections with sanitized exposure records; `truth-redacted` is the public/share projection, while full private/postgame truth requires an explicit `view=full` artifact or JSONL request. `POST /api/harness/probe` accepts `model`, `timeoutMs`/`timeout`, and optional `seed`. `POST /api/tournaments/run` accepts `models`, `profiles`, `assignment`, `games`, `maxTransitions`, `jointPhaseScheduler`, `timeoutMs`/`timeout`, `temperature`, `seed`, `continueOnError`, and optional game `config`; it returns bounded, redaction-safe episode summaries plus `gamesCompleted`, `gamesTruncated`, and `gamesFailed`. The normalized scheduler is retained in the experiment artifact and API limits summary; it is never inferred from a model name. `gamesCompleted` means the domain reached a terminal outcome; `gamesTruncated` means an auditable run hit a configured bound; `gamesFailed` is an execution failure. `ok: true` means no failures, not that every game reached terminal state. Full trajectory/social evidence remains server-owned in match artifacts and tournament packs.
+The API route `POST /api/matches/run` accepts `models`, `profiles`, `assignment`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, and optional game `config`. Its default synchronous response includes the normal local-operator public summary, `hasArtifact`, and artifact counters. Adding `live: true` instead returns only the narrow live-start acknowledgement described above. Ordinary UI reads the default `postgame-redacted` artifact projections with sanitized exposure records; `truth-redacted` is the public/share projection, while full private/postgame truth requires an explicit `view=full` artifact or JSONL request. `POST /api/harness/probe` accepts `model`, `timeoutMs`/`timeout`, and optional `seed`. `POST /api/tournaments/run` accepts `models`, `profiles`, `assignment`, `games`, `maxTransitions`, `jointPhaseScheduler`, `timeoutMs`/`timeout`, `temperature`, `seed`, `continueOnError`, and optional game `config`; it returns bounded, redaction-safe episode summaries plus `gamesCompleted`, `gamesTruncated`, and `gamesFailed`. The normalized scheduler is retained in the experiment artifact and API limits summary; it is never inferred from a model name. `gamesCompleted` means the domain reached a terminal outcome; `gamesTruncated` means an auditable run hit a configured bound; `gamesFailed` is an execution failure. `ok: true` means no failures, not that every game reached terminal state. Full trajectory/social evidence remains server-owned in match artifacts and tournament packs.
 
 `POST /api/experiments/matrix/run` adds the reusable experiment-matrix control
 plane (`harness.experiment-matrix.v1`): it schedules normalized tournament cells
