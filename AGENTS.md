@@ -26305,8 +26305,13 @@ git diff --check
 
 The final deterministic suite passed **44 suites / 469 tests**. The production
 build passed with the existing Vite main-chunk-size warning. The 10-fixture
-Cockpit browser suite passed. The bounded real streaming probe for the current
-generic OpenAI-compatible candidate stopped at a controlled HTTP 503 before a
-stream completion; provider health therefore remains unproven. No
-model-specific adapter, prompt/parser branch, fallback, or token-limit field
-was added.
+Cockpit browser suite passed. Runtime model discovery must treat configured
+model ids as separate entries rather than joining them with a slash. After
+selecting the two discovered generic ids independently, bounded real streaming
+probes completed for both. Each completion was locally parsed, policy/arbitrated,
+and accepted by pure environment preflight. A one-game, four-native-step
+bounded real match and a one-game bounded tournament then completed their
+native commits with zero rejected steps, zero harness errors, and completed
+evaluation reports. These are intentionally truncated validation runs, not
+model-quality or terminal-tournament claims. No model-specific adapter,
+prompt/parser branch, fallback, or token-limit field was added.
