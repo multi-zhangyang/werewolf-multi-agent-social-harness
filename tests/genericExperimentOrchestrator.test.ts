@@ -10,7 +10,11 @@ import {
   type GenericExperimentArtifactStore,
   type GenericExperimentRunStore
 } from "../src/harness/experimentOrchestrator";
-import { HarnessExperimentRunStore } from "../src/harness/experimentRunStore";
+import {
+  HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2,
+  HarnessExperimentRunStore,
+  type HarnessExperimentRunRecordV2
+} from "../src/harness/experimentRunStore";
 import {
   createGenericExperimentProvenance,
   type GenericExperimentSpecV1
@@ -148,13 +152,24 @@ describe("generic normalized experiment orchestration", () => {
       async put(artifact, options) {
         lifecycle.push(`put:${artifact.runId.endsWith(":g1") ? 0 : 1}`);
         return store.put(artifact, options);
-      }
+      },
+      get: (runId) => store.get(runId),
+      getEvaluationReport: (runId) => store.getEvaluationReport(runId)
     };
     const runStore: GenericExperimentRunStore<Artifact> = {
-      async begin(input) {
+      async beginOrResume(input) {
         lifecycle.push("begin");
-        return persistedRunStore.begin(input);
+        return persistedRunStore.beginOrResume(input);
       },
+      async startEpisode(input) {
+        lifecycle.push(`start:${input.index}`);
+        return persistedRunStore.startEpisode(input);
+      },
+      async stageEpisode(input) {
+        lifecycle.push(`stage:${input.episode.index}`);
+        return persistedRunStore.stageEpisode(input);
+      },
+      recoverCurrentEpisode: (runSetId) => persistedRunStore.recoverCurrentEpisode(runSetId),
       async recordEpisode(input) {
         lifecycle.push(`record:${input.episode.index}`);
         return persistedRunStore.recordEpisode(input);
@@ -241,10 +256,14 @@ describe("generic normalized experiment orchestration", () => {
     expect(decisions).toBe(2);
     expect(lifecycle).toEqual([
       "begin",
+      "start:0",
       "prepare:0",
+      "stage:0",
       "put:0",
       "record:0",
+      "start:1",
       "prepare:1",
+      "stage:1",
       "put:1",
       "record:1",
       "finalize"
@@ -288,6 +307,128 @@ describe("generic normalized experiment orchestration", () => {
       ]
     });
     expect(decisions).toBe(2);
+
+    const resumed = await runGenericExperiment({
+      spec: experimentSpec(),
+      artifactStore: {
+        async put() {
+          throw new Error("finalized resume must not publish");
+        },
+        get: (runId) => restarted.get(runId),
+        getEvaluationReport: (runId) => restarted.getEvaluationReport(runId)
+      },
+      runStore: restartedRunStore,
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode() {
+          throw new Error("finalized resume must not prepare");
+        },
+        runEpisode() {
+          throw new Error("finalized resume must not execute");
+        },
+        lifecycleOf() {
+          throw new Error("finalized resume must not inspect domain lifecycle");
+        },
+        artifactForEpisode() {
+          throw new Error("finalized resume must not materialize");
+        }
+      }
+    });
+    expect(resumed.runSet).toEqual(result.runSet);
+    expect(decisions).toBe(2);
+
+    await expect(runGenericExperiment({
+      spec: experimentSpec(),
+      artifactStore: {
+        put: (artifact, options) => restarted.put(artifact, options),
+        async get(runId) {
+          const artifact = await restarted.get(runId);
+          if (artifact) artifact.createdAt = "2026-07-22T14:00:01.000Z";
+          return artifact;
+        },
+        getEvaluationReport: (runId) => restarted.getEvaluationReport(runId)
+      },
+      runStore: restartedRunStore,
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode() { throw new Error("tampered prefix must not prepare"); },
+        runEpisode() { throw new Error("tampered prefix must not execute"); },
+        lifecycleOf() { throw new Error("tampered prefix must not inspect lifecycle"); },
+        artifactForEpisode() { throw new Error("tampered prefix must not materialize"); }
+      }
+    })).rejects.toThrow(/drifted from durable experiment membership/i);
+    expect(decisions).toBe(2);
+  });
+
+  it("adopts a staged canonical episode after restart and executes only the remaining suffix", async () => {
+    const root = await temporaryRoot();
+    const episodeStore = await HarnessEpisodeArtifactStore.open<Artifact>({
+      baseDirectory: path.join(root, "episodes"),
+      verifyArtifact
+    });
+    const firstRunStore = await HarnessExperimentRunStore.open({
+      baseDirectory: path.join(root, "experiment-runs"),
+      episodeStore
+    });
+    let decisions = 0;
+    const adapter = {
+      domainId: "counter-orchestration",
+      prepareEpisode(context: Parameters<NonNullable<Parameters<typeof runGenericExperiment>[0]>["adapter"]["prepareEpisode"]>[0]) {
+        return { runId: `${context.spec.id}:${context.seed}` };
+      },
+      runEpisode(prepared: { runId: string }, context: Parameters<NonNullable<Parameters<typeof runGenericExperiment>[0]>["adapter"]["prepareEpisode"]>[0]) {
+        return counterEpisode(prepared.runId, () => { decisions += 1; }, {
+          maxTransitions: context.spec.maxTransitions,
+          decisionTimeoutMs: context.spec.timeoutPolicy.decisionTimeoutMs
+        });
+      },
+      lifecycleOf: (episode: SocialEpisodeArtifact<State, Observation, Pending, Command>) => episode.status,
+      artifactForEpisode: (episode: SocialEpisodeArtifact<State, Observation, Pending, Command>) => artifactFromEpisode(episode)
+    };
+    let interrupted = false;
+    await expect(runGenericExperiment({
+      spec: { ...experimentSpec(), evaluatorIds: [] },
+      artifactStore: episodeStore,
+      runStore: {
+        beginOrResume: (input) => firstRunStore.beginOrResume(input),
+        startEpisode: (input) => firstRunStore.startEpisode(input),
+        stageEpisode: (input) => firstRunStore.stageEpisode(input),
+        recoverCurrentEpisode: (runSetId) => firstRunStore.recoverCurrentEpisode(runSetId),
+        async recordEpisode(input) {
+          if (!interrupted && input.episode.index === 0) {
+            interrupted = true;
+            throw new Error("simulated process boundary after canonical publication");
+          }
+          return firstRunStore.recordEpisode(input);
+        },
+        finalize: (runSet) => firstRunStore.finalize(runSet)
+      },
+      adapter
+    })).rejects.toThrow(/simulated process boundary/i);
+    expect(decisions).toBe(1);
+    expect(await episodeStore.list()).toHaveLength(1);
+
+    const restartedEpisodeStore = await HarnessEpisodeArtifactStore.open<Artifact>({
+      baseDirectory: path.join(root, "episodes"),
+      verifyArtifact
+    });
+    const restartedRunStore = await HarnessExperimentRunStore.open({
+      baseDirectory: path.join(root, "experiment-runs"),
+      episodeStore: restartedEpisodeStore
+    });
+    const resumed = await runGenericExperiment({
+      spec: { ...experimentSpec(), evaluatorIds: [] },
+      artifactStore: restartedEpisodeStore,
+      runStore: restartedRunStore,
+      adapter
+    });
+    expect(decisions).toBe(2);
+    expect(resumed.tournament.episodes.map((episode) => episode.status)).toEqual(["completed", "completed"]);
+    expect(resumed.tournament.episodes.map((episode) => episode.seed)).toEqual([
+      "counter-orchestration-seed:g1",
+      "counter-orchestration-seed:g2"
+    ]);
+    expect(await restartedEpisodeStore.list()).toHaveLength(2);
   });
 
   it("binds control-plane provenance and refuses to overwrite a contradictory adapter claim", async () => {
@@ -309,6 +450,7 @@ describe("generic normalized experiment orchestration", () => {
         continueOnError: false
       },
       artifactStore: {
+        ...memoryArtifactStore<Artifact>(),
         async put() {
           puts += 1;
         }
@@ -340,14 +482,23 @@ describe("generic normalized experiment orchestration", () => {
     await expect(runGenericExperiment({
       spec: { ...experimentSpec(), evaluatorIds: [], continueOnError: true },
       artifactStore: {
+        ...memoryArtifactStore<Artifact>(),
         async put() {
           lifecycle.push("artifact-put");
           throw new Error("canonical artifact storage unavailable");
         }
       },
       runStore: {
-        async begin() {
+        ...memoryRunStore<Artifact>(),
+        async beginOrResume(input) {
           lifecycle.push("begin");
+          return memoryRunStore<Artifact>().beginOrResume(input);
+        },
+        async startEpisode() {
+          lifecycle.push("start");
+        },
+        async stageEpisode() {
+          lifecycle.push("stage");
         },
         async recordEpisode() {
           lifecycle.push("record");
@@ -368,7 +519,7 @@ describe("generic normalized experiment orchestration", () => {
       }
     })).rejects.toThrow(/canonical artifact storage unavailable/i);
 
-    expect(lifecycle).toEqual(["begin", "prepare:0", "artifact-put"]);
+    expect(lifecycle).toEqual(["begin", "start", "prepare:0", "stage", "artifact-put"]);
   });
 
   it("stops scheduling when durable episode membership cannot be recorded", async () => {
@@ -382,13 +533,22 @@ describe("generic normalized experiment orchestration", () => {
     await expect(runGenericExperiment({
       spec: { ...experimentSpec(), evaluatorIds: [], continueOnError: true },
       artifactStore: {
+        ...memoryArtifactStore<Artifact>(),
         async put() {
           lifecycle.push("artifact-put");
         }
       },
       runStore: {
-        async begin() {
+        ...memoryRunStore<Artifact>(),
+        async beginOrResume(input) {
           lifecycle.push("begin");
+          return memoryRunStore<Artifact>().beginOrResume(input);
+        },
+        async startEpisode() {
+          lifecycle.push("start");
+        },
+        async stageEpisode() {
+          lifecycle.push("stage");
         },
         async recordEpisode() {
           lifecycle.push("record");
@@ -410,14 +570,14 @@ describe("generic normalized experiment orchestration", () => {
       }
     })).rejects.toThrow(/durable episode membership unavailable/i);
 
-    expect(lifecycle).toEqual(["begin", "prepare:0", "artifact-put", "record"]);
+    expect(lifecycle).toEqual(["begin", "start", "prepare:0", "stage", "artifact-put", "record"]);
   });
 
   it("isolates callback mutations and enforces an in-flight experiment deadline", async () => {
     const socialEpisode = await counterEpisode("counter-experiment:counter-orchestration-seed:g1", () => undefined);
     const mutationResult = await runGenericExperiment({
       spec: { ...experimentSpec(), episodeCount: 1, evaluatorIds: [] },
-      artifactStore: { put: async () => undefined },
+      artifactStore: memoryArtifactStore<Artifact>(),
       runStore: memoryRunStore(),
       adapter: {
         domainId: "counter-orchestration",
@@ -445,7 +605,7 @@ describe("generic normalized experiment orchestration", () => {
         continueOnError: false,
         timeoutPolicy: { id: "counter.timeout", version: "1", runTimeoutMs: 25 }
       },
-      artifactStore: { put: async () => undefined },
+      artifactStore: memoryArtifactStore<Artifact>(),
       runStore: memoryRunStore(),
       adapter: {
         domainId: "counter-orchestration",
@@ -469,7 +629,10 @@ describe("generic normalized experiment orchestration", () => {
     let puts = 0;
     const result = await runGenericExperiment({
       spec: { ...experimentSpec(), episodeCount: 1, continueOnError: false },
-      artifactStore: { put: async () => { puts += 1; } },
+      artifactStore: {
+        ...memoryArtifactStore<Artifact>(),
+        put: async () => { puts += 1; }
+      },
       runStore: memoryRunStore(),
       adapter: {
         domainId: "counter-orchestration",
@@ -592,7 +755,10 @@ describe("generic normalized experiment orchestration", () => {
       let puts = 0;
       const result = await runGenericExperiment({
         spec: testCase.spec ?? baseSpec,
-        artifactStore: { async put() { puts += 1; } },
+        artifactStore: {
+          ...memoryArtifactStore<Artifact>(),
+          async put() { puts += 1; }
+        },
         runStore: memoryRunStore(),
         adapter: {
           domainId: "counter-orchestration",
@@ -622,7 +788,7 @@ describe("generic normalized experiment orchestration", () => {
     let preparations = 0;
     const base = {
       spec: experimentSpec(),
-      artifactStore: { put: async () => undefined },
+      artifactStore: memoryArtifactStore<Artifact>(),
       runStore: memoryRunStore(),
       adapter: {
         domainId: "counter-orchestration",
@@ -757,9 +923,55 @@ async function temporaryRoot(): Promise<string> {
   return root;
 }
 
-function memoryRunStore() {
+function memoryArtifactStore<TArtifact extends Artifact>(): GenericExperimentArtifactStore<TArtifact> {
+  const artifacts = new Map<string, TArtifact>();
+  const evaluations = new Map<string, Parameters<GenericExperimentArtifactStore<TArtifact>["put"]>[1]>();
   return {
-    async begin() {},
+    async put(artifact, options) {
+      artifacts.set(artifact.runId, structuredClone(artifact));
+      evaluations.set(artifact.runId, structuredClone(options));
+    },
+    async get(runId) {
+      const artifact = artifacts.get(runId);
+      return artifact ? structuredClone(artifact) : undefined;
+    },
+    async getEvaluationReport(runId) {
+      return structuredClone(evaluations.get(runId)?.evaluationReport);
+    }
+  };
+}
+
+function memoryRunStore<TArtifact extends Artifact>(): GenericExperimentRunStore<TArtifact> {
+  let record: HarnessExperimentRunRecordV2 | undefined;
+  return {
+    async beginOrResume(input) {
+      if (!record) {
+        const createdAt = input.createdAt ?? "2026-07-22T14:00:00.000Z";
+        record = {
+          schemaVersion: HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2,
+          kind: "experiment-run-record",
+          state: "active",
+          runSetId: input.runSetId,
+          createdAt,
+          updatedAt: createdAt,
+          experiment: structuredClone(input.experiment),
+          gamesRequested: input.experiment.spec.episodeCount,
+          gamesCompleted: 0,
+          gamesTruncated: 0,
+          gamesFailed: 0,
+          gamesInFlight: 0,
+          gamesUnstarted: input.experiment.spec.episodeCount,
+          episodes: []
+        };
+      }
+      return { disposition: "created", record: structuredClone(record), revision: 1 };
+    },
+    async startEpisode() {},
+    async stageEpisode() {},
+    async recoverCurrentEpisode() {
+      if (!record) throw new Error("memory run was not begun");
+      return { disposition: "none", record: structuredClone(record) };
+    },
     async recordEpisode() {},
     async finalize() {}
   };

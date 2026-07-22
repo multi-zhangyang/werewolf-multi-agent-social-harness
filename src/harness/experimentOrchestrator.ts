@@ -17,6 +17,12 @@ import {
   type GenericTournamentRunSetEpisode,
   type GenericTournamentRunSetArtifact
 } from "./genericTournamentArtifacts";
+import {
+  HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2,
+  type HarnessExperimentRunRecord,
+  type HarnessExperimentRunRecovery,
+  type HarnessExperimentRunResume
+} from "./experimentRunStore";
 import { hashStableJsonValue, hashStableState } from "./hash";
 import {
   runTournamentEpisodes,
@@ -38,6 +44,10 @@ export interface GenericExperimentEpisodeContext extends TournamentEpisodeContex
 
 export interface GenericExperimentArtifactStore<TArtifact extends GenericEpisodeEnvelope> {
   put(artifact: TArtifact, options?: { evaluationReport?: HarnessEvaluationReport }): Promise<unknown>;
+  /** Canonical, integrity-checking read path used to hydrate durable prefixes. */
+  get(runId: string): Promise<TArtifact | undefined>;
+  /** Canonical evaluation sidecar read path; absence is part of immutable identity. */
+  getEvaluationReport(runId: string): Promise<HarnessEvaluationReport | undefined>;
 }
 
 /**
@@ -46,11 +56,23 @@ export interface GenericExperimentArtifactStore<TArtifact extends GenericEpisode
  * owned by GenericExperimentArtifactStore.
  */
 export interface GenericExperimentRunStore<TArtifact extends GenericEpisodeEnvelope> {
-  begin(input: {
+  beginOrResume(input: {
     runSetId: string;
     experiment: GenericExperimentProvenanceV1;
     createdAt?: string;
+  }): Promise<HarnessExperimentRunResume>;
+  startEpisode(input: {
+    runSetId: string;
+    index: number;
+    seed: string;
+    startedAt?: string;
   }): Promise<unknown>;
+  stageEpisode(input: {
+    runSetId: string;
+    episode: GenericTournamentRunSetEpisode<TArtifact> & { runId: string; artifact: TArtifact };
+    stagedAt?: string;
+  }): Promise<unknown>;
+  recoverCurrentEpisode(runSetId: string): Promise<HarnessExperimentRunRecovery>;
   recordEpisode(input: {
     runSetId: string;
     episode: GenericTournamentRunSetEpisode<TArtifact>;
@@ -188,8 +210,17 @@ export async function runGenericExperiment<
     throw new Error("Generic experiment execution requires a canonical episode artifact store.");
   }
   if (
+    typeof options.artifactStore.get !== "function" ||
+    typeof options.artifactStore.getEvaluationReport !== "function"
+  ) {
+    throw new Error("Generic experiment execution requires canonical episode artifact read authority.");
+  }
+  if (
     !options.runStore ||
-    typeof options.runStore.begin !== "function" ||
+    typeof options.runStore.beginOrResume !== "function" ||
+    typeof options.runStore.startEpisode !== "function" ||
+    typeof options.runStore.stageEpisode !== "function" ||
+    typeof options.runStore.recoverCurrentEpisode !== "function" ||
     typeof options.runStore.recordEpisode !== "function" ||
     typeof options.runStore.finalize !== "function"
   ) {
@@ -198,23 +229,59 @@ export async function runGenericExperiment<
   if (options.runSetId !== undefined && !options.runSetId.trim()) {
     throw new Error("Generic experiment runSetId must be a nonempty string when present.");
   }
-  const selectedEvaluators = resolveEvaluators(normalizedSpec, options.adapter.evaluation?.evaluators ?? []);
   const experiment = createGenericExperimentProvenance(normalizedSpec);
   const specHash = experiment.specHash;
   const now = options.now ?? (() => new Date().toISOString());
   const runSetId = options.runSetId ?? normalizedSpec.id;
-  const runSetCreatedAt = now();
-  await options.runStore.begin({ runSetId, experiment, createdAt: runSetCreatedAt });
-  const deadline = createExperimentDeadline(options.abortSignal, normalizedSpec.timeoutPolicy.runTimeoutMs);
+  const resumed = await options.runStore.beginOrResume({ runSetId, experiment });
+  assertResumedExperiment(resumed.record, runSetId, experiment);
+  let durableRecord = resumed.record;
+  if (
+    durableRecord.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 &&
+    durableRecord.state === "active" &&
+    durableRecord.currentEpisode
+  ) {
+    durableRecord = (await options.runStore.recoverCurrentEpisode(runSetId)).record;
+  }
+  const initialEpisodes = await hydrateCommittedEpisodes(
+    durableRecord,
+    normalizedSpec,
+    options.artifactStore
+  );
+  const stoppedByFailure =
+    !normalizedSpec.continueOnError && initialEpisodes.at(-1)?.status === "failed";
+  const hasExecutableSuffix =
+    durableRecord.state === "active" &&
+    initialEpisodes.length < normalizedSpec.episodeCount &&
+    !stoppedByFailure &&
+    !options.abortSignal?.aborted;
+  const selectedEvaluators = hasExecutableSuffix
+    ? resolveEvaluators(normalizedSpec, options.adapter.evaluation?.evaluators ?? [])
+    : [];
+  const runSetCreatedAt = durableRecord.createdAt;
+  const deadline = hasExecutableSuffix
+    ? createExperimentDeadline(options.abortSignal, normalizedSpec.timeoutPolicy.runTimeoutMs)
+    : inertExperimentDeadline(options.abortSignal);
   try {
-    const tournament = await runTournamentEpisodes<
+    const tournament = durableRecord.state === "finalized"
+      ? tournamentFromDurableRecord(durableRecord, initialEpisodes)
+      : await runTournamentEpisodes<
       TPrepared,
       ExecutedGenericExperimentEpisode<TArtifact>
     >({
       games: normalizedSpec.episodeCount,
       seed: normalizedSpec.seed,
+      initialEpisodes,
       abortSignal: deadline.signal,
       continueOnError: normalizedSpec.continueOnError,
+      async onEpisodeStarting(context) {
+        await options.runStore.startEpisode({
+          runSetId,
+          index: context.index,
+          seed: context.seed,
+          startedAt: now()
+        });
+      },
       async prepareEpisode(context) {
         return awaitWithAbort(
           () => options.adapter.prepareEpisode(
@@ -273,6 +340,23 @@ export async function runGenericExperiment<
       async onEpisodeSettled(episode) {
         const result = episode.result;
         if (result) {
+          await options.runStore.stageEpisode({
+            runSetId,
+            episode: {
+              index: episode.index,
+              seed: episode.seed,
+              status: episode.status,
+              runId: result.artifact.runId,
+              artifact: structuredClone(result.artifact),
+              ...(result.evaluationReport
+                ? { evaluationReport: structuredClone(result.evaluationReport) }
+                : {}),
+              ...(episode.status === "failed"
+                ? { error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE }
+                : {})
+            },
+            stagedAt: now()
+          });
           // Canonical publication is a control-plane operation. Keeping it in
           // this terminal hook, outside the tournament's domain error boundary,
           // makes storage failure fatal even when continueOnError is enabled.
@@ -332,6 +416,130 @@ export async function runGenericExperiment<
   } finally {
     deadline.dispose();
   }
+}
+
+function tournamentFromDurableRecord<TArtifact>(
+  record: HarnessExperimentRunRecord,
+  episodes: Array<{
+    index: number;
+    seed: string;
+    status: TournamentEpisodeLifecycle;
+    result?: ExecutedGenericExperimentEpisode<TArtifact>;
+    error?: string;
+  }>
+): GenericTournamentResult<never, ExecutedGenericExperimentEpisode<TArtifact>> {
+  if (record.state !== "finalized" || episodes.length !== record.episodes.length) {
+    throw new Error("Only finalized durable experiment authority can materialize a terminal tournament projection.");
+  }
+  const completed = episodes.filter((episode) => episode.status === "completed").length;
+  const truncated = episodes.filter((episode) => episode.status === "truncated").length;
+  const failed = episodes.filter((episode) => episode.status === "failed").length;
+  if (
+    completed !== record.gamesCompleted ||
+    truncated !== record.gamesTruncated ||
+    failed !== record.gamesFailed ||
+    record.gamesRequested - episodes.length !== record.gamesUnstarted
+  ) {
+    throw new Error("Finalized durable experiment lifecycle counts do not match its episode prefix.");
+  }
+  return {
+    seed: record.experiment.spec.seed,
+    gamesRequested: record.gamesRequested,
+    gamesCompleted: completed,
+    gamesTruncated: truncated,
+    gamesFailed: failed,
+    gamesUnstarted: record.gamesUnstarted,
+    episodes: structuredClone(episodes)
+  };
+}
+
+function assertResumedExperiment(
+  record: HarnessExperimentRunRecord,
+  runSetId: string,
+  experiment: GenericExperimentProvenanceV1
+): void {
+  if (record.runSetId !== runSetId || hashStableJsonValue(record.experiment) !== hashStableJsonValue(experiment)) {
+    throw new Error("Durable experiment run authority does not match the requested experiment.");
+  }
+  if (record.state === "active" && record.schemaVersion !== HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2) {
+    throw new Error("Active legacy experiment authority cannot be resumed safely.");
+  }
+}
+
+async function hydrateCommittedEpisodes<TArtifact extends GenericEpisodeEnvelope>(
+  record: HarnessExperimentRunRecord,
+  spec: NormalizedGenericExperimentSpecV1,
+  artifactStore: GenericExperimentArtifactStore<TArtifact>
+): Promise<Array<{
+  index: number;
+  seed: string;
+  status: TournamentEpisodeLifecycle;
+  result?: ExecutedGenericExperimentEpisode<TArtifact>;
+  error?: string;
+}>> {
+  const hydrated: Array<{
+    index: number;
+    seed: string;
+    status: TournamentEpisodeLifecycle;
+    result?: ExecutedGenericExperimentEpisode<TArtifact>;
+    error?: string;
+  }> = [];
+  const runIds = new Set<string>();
+  for (const [index, reference] of record.episodes.entries()) {
+    const expectedSeed = `${record.experiment.spec.seed}:g${index + 1}`;
+    if (reference.index !== index || reference.seed !== expectedSeed) {
+      throw new Error("Durable experiment episode prefix is not contiguous or seed-bound.");
+    }
+    if (!reference.runId) {
+      hydrated.push({
+        index,
+        seed: reference.seed,
+        status: "failed",
+        error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE
+      });
+      continue;
+    }
+    if (runIds.has(reference.runId)) {
+      throw new Error("Durable experiment episode prefix contains a duplicate runId.");
+    }
+    runIds.add(reference.runId);
+    const artifact = await artifactStore.get(reference.runId);
+    if (!artifact) throw new Error(`Canonical episode ${reference.runId} is missing during experiment resume.`);
+    if (
+      artifact.runId !== reference.runId ||
+      artifact.status !== reference.status ||
+      hashStableJsonValue(artifact) !== reference.artifactSha256 ||
+      !artifact.experiment ||
+      hashStableJsonValue(artifact.experiment) !== hashStableJsonValue(record.experiment)
+    ) {
+      throw new Error(`Canonical episode ${reference.runId} drifted from durable experiment membership.`);
+    }
+    assertArtifactBinding(artifact, spec, reference.status, { index, seed: reference.seed });
+    const evaluationReport = await artifactStore.getEvaluationReport(reference.runId);
+    if (
+      (evaluationReport === undefined) !== (reference.evaluationReportId === undefined) ||
+      (evaluationReport !== undefined && (
+        evaluationReport.id !== reference.evaluationReportId ||
+        hashStableJsonValue(evaluationReport) !== reference.evaluationReportSha256
+      ))
+    ) {
+      throw new Error(`Canonical episode ${reference.runId} evaluation report drifted during experiment resume.`);
+    }
+    hydrated.push({
+      index,
+      seed: reference.seed,
+      status: reference.status,
+      result: {
+        status: reference.status,
+        artifact: structuredClone(artifact),
+        ...(evaluationReport ? { evaluationReport: structuredClone(evaluationReport) } : {})
+      },
+      ...(reference.status === "failed"
+        ? { error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE }
+        : {})
+    });
+  }
+  return hydrated;
 }
 
 function stripRuntimeTournamentState<TPrepared, TArtifact>(
@@ -574,5 +782,15 @@ function createExperimentDeadline(external: AbortSignal | undefined, timeoutMs: 
       if (timer !== undefined) clearTimeout(timer);
       external?.removeEventListener("abort", abortFromExternal);
     }
+  };
+}
+
+function inertExperimentDeadline(external: AbortSignal | undefined): {
+  signal: AbortSignal;
+  dispose(): void;
+} {
+  return {
+    signal: external ?? new AbortController().signal,
+    dispose() {}
   };
 }

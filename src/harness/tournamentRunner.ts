@@ -97,10 +97,13 @@ export async function runTournamentEpisodes<TPrepared, TResult>(
     let settled: GenericTournamentEpisode<TPrepared, TResult>;
     try {
       prepared = await options.prepareEpisode(context);
-      // Preparation may be asynchronous. The episode itself has not started
-      // until runEpisode() is invoked, so honor a deadline that fired while
-      // preparing and leave this requested slot explicitly unstarted.
-      if (options.abortSignal?.aborted) break;
+      // Once the durable start hook succeeds, this schedule slot is in flight.
+      // An abort observed after preparation must therefore settle a reviewed
+      // failure instead of silently leaving durable started state behind.
+      if (options.abortSignal?.aborted) {
+        if (!options.onEpisodeStarting) break;
+        throw new Error("Tournament episode aborted after its durable start boundary.");
+      }
       const result = await options.runEpisode(prepared, context);
       const status = options.statusOf(result);
       settled = { ...context, status, prepared, result };

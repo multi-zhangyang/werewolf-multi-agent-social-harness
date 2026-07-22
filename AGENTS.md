@@ -27861,3 +27861,87 @@ tests/genericExperimentOrchestrator.test.ts
 The v2 restart test proves started recovery, staged persistence, canonical
 artifact adoption, absolute index/seed continuity, terminal counts, and exact
 begin-or-resume revision stability. This slice changes no provider/model code.
+
+## 13.295 V2 Orchestration Resume And Process-Crash Recovery Lock
+
+Timestamp: `2026-07-22`
+
+`runGenericExperiment()` now requires the production V2 run lifecycle and the
+canonical episode read authority. Its control-plane order is:
+
+```text
+beginOrResume
+  -> recover an in-flight started/staged attempt without domain work
+  -> hydrate the committed canonical terminal prefix
+  -> start the next absolute schedule slot before preparation
+  -> stage the immutable result identity
+  -> publish the canonical artifact and evaluation sidecar
+  -> commit terminal run membership
+  -> finalize the full run set
+```
+
+Committed prefixes are rehydrated by run id, artifact digest, lifecycle,
+experiment provenance, execution binding, and evaluation-report
+presence/id/digest. A mismatch is fatal. Restored episodes never call adapter
+preparation, agent policy/reasoner/provider execution, lifecycle projection,
+artifact materialization, evaluation, publication, or terminal hooks.
+
+Finalized run authority, including a finalized partial run with unstarted
+episodes, is projected directly from durable counts and canonical episode
+references. It is never passed back into a scheduler that could execute a
+suffix. Active legacy V1 authority remains fail-closed. The durable run
+`createdAt` remains the run-set timestamp across resume.
+
+The tournament start hook now creates a durable in-flight boundary before
+domain preparation. If the shared execution signal aborts after that boundary,
+the slot is settled as a reviewed failure so restart cannot inherit an
+unexplained `started` record. Callers without a durable start hook retain the
+legacy behavior where abort during asynchronous preparation leaves the slot
+unstarted.
+
+Process-crash coverage uses a real parent-process `SIGKILL` and a fresh Node
+process for recovery. It exercises real `HarnessEpisodeArtifactStore`,
+`HarnessExperimentRunStore`, `runGenericExperiment()`, and a deterministic
+model-free harness actor at five awaited durable boundaries:
+
+```text
+after_start
+after_stage
+after_artifact_put
+after_terminal_membership
+after_finalize
+```
+
+The decision sentinel proves episode zero is never rerun. Started work and a
+staged candidate without a canonical artifact become reviewed failures; a
+staged candidate with an exact canonical artifact is adopted; committed and
+finalized prefixes are only rehydrated. These tests prove single-writer
+process-crash recovery. They do not claim power-loss durability or
+cross-process exactly-once writer safety because filesystem `fsync` and a
+cross-process lease/CAS are not yet part of this store.
+
+Validation recorded:
+
+```text
+npm run typecheck
+
+focused V2/store/orchestrator/runner/artifact suites:
+  5 files / 45 tests passed
+
+complete deterministic suite:
+  50 files / 543 tests passed
+
+npm run build
+  passed
+
+npx playwright test --config=playwright.config.ts
+  15 passed
+
+git diff --check
+  passed
+```
+
+Playwright's server and Chromium processes exited normally and port `4173`
+was not left listening. This slice changes no provider, model, reasoner,
+prompt, streaming parser, domain adapter, or UI behavior, so no live model call
+was required or performed.
