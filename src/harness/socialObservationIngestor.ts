@@ -1,4 +1,4 @@
-import type { SocialMessage, SocialSpeechAct } from "./social";
+import type { SocialDeliveryReceipt, SocialMessage, SocialSpeechAct } from "./social";
 import {
   addSocialBetrayal,
   addSocialCoalition,
@@ -43,7 +43,11 @@ export interface VisibleSocialMessageIngestedEvent<TObservation = unknown, TPend
   social: AgentSocialState<TObservation, TPending, TCommand>;
   observerId: string;
   message: SocialMessage;
+  /** Primary message evidence retained for compatibility with existing domain reducers. */
   evidence: EvidenceRef;
+  /** Observer-bound evidence used by all message-derived social mutations. */
+  evidenceRefs: EvidenceRef[];
+  deliveryReceipt?: SocialDeliveryReceipt;
   context: SocialStateMutationContext;
 }
 
@@ -80,6 +84,8 @@ export function ingestVisibleSocialMessages<TObservation = unknown, TPending = u
     const stagedSocial = cloneJson(options.social);
     const stagedSeenMessageIds = new Set(seenMessageIds);
     const evidence = messageEvidenceRef(message);
+    const deliveryBinding = observerDeliveryBinding(message, options.observerId);
+    const evidenceRefs = deliveryBinding ? [evidence, deliveryBinding.evidence] : [evidence];
     const context = messageMutationContext(options.context, message);
     appendSocialMemory(stagedSocial, {
       kind: "message",
@@ -88,7 +94,7 @@ export function ingestVisibleSocialMessages<TObservation = unknown, TPending = u
       content: message.content,
       salience: message.visibility === "public" ? 0.7 : 0.5,
       importance: message.visibility === "public" ? 0.6 : 0.5,
-      evidenceRefs: [evidence],
+      evidenceRefs,
       tags: uniqueStrings([...genericMessageTags(message), ...(options.additionalMessageTags?.(message) ?? [])]),
       metadata: {
         messageId: message.id,
@@ -105,10 +111,19 @@ export function ingestVisibleSocialMessages<TObservation = unknown, TPending = u
       observerId: options.observerId,
       message,
       evidence,
+      evidenceRefs: cloneJson(evidenceRefs),
+      deliveryReceipt: cloneJson(deliveryBinding?.receipt),
       context
     });
-    recordStructuredSocialFacts(stagedSocial, message, evidence, options.observerId, context);
-    recordSpeechActSocialFacts(stagedSocial, message, evidence, options.observerId, context);
+    recordStructuredSocialFacts(stagedSocial, message, evidenceRefs, options.observerId, context);
+    recordSpeechActSocialFacts(
+      stagedSocial,
+      message,
+      evidenceRefs,
+      deliveryBinding?.receipt,
+      options.observerId,
+      context
+    );
     rememberSeenSocialMessageId(stagedSocial, stagedSeenMessageIds, message.id);
     commitStagedSocialState(options.social, stagedSocial);
     seenMessageIds.add(message.id);
@@ -169,6 +184,36 @@ export function messageEvidenceRef(message: SocialMessage): EvidenceRef {
     id: message.id,
     seq: message.seq,
     description: message.channelId
+  };
+}
+
+function observerDeliveryBinding(
+  message: SocialMessage,
+  observerId: string
+): { receipt: SocialDeliveryReceipt; evidence: EvidenceRef } | undefined {
+  if (message.deliveryReceipts === undefined) return undefined;
+  const matches = message.deliveryReceipts.filter((receipt) =>
+    receipt.observerId === observerId &&
+    receipt.messageId === message.id &&
+    receipt.messageSeq === message.seq &&
+    receipt.channelId === message.channelId &&
+    receipt.senderId === message.senderId &&
+    receipt.visibility === message.visibility
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `Visible social message ${message.id} requires exactly one matching delivery receipt for observer ${observerId}; received ${matches.length}.`
+    );
+  }
+  const receipt = matches[0];
+  return {
+    receipt,
+    evidence: {
+      artifact: "delivery_receipt",
+      id: receipt.id,
+      seq: receipt.messageSeq,
+      description: receipt.channelId
+    }
   };
 }
 
@@ -248,23 +293,24 @@ function speechActMemoryMetadata(speechActs: SocialSpeechAct[] | undefined): Rec
 function recordSpeechActSocialFacts(
   social: AgentSocialState,
   message: SocialMessage,
-  evidence: EvidenceRef,
+  evidenceRefs: EvidenceRef[],
+  deliveryReceipt: SocialDeliveryReceipt | undefined,
   observerId: string,
   context?: SocialStateMutationContext
 ): void {
   for (const [actIndex, act] of (message.speechActs ?? []).entries()) {
     if (isMetadataDerivedSpeechAct(act)) continue;
-    recordSpeechActTheoryOfMindAttribution(social, message, act, actIndex, evidence, observerId, context);
+    recordSpeechActTheoryOfMindAttribution(social, message, act, actIndex, evidenceRefs, deliveryReceipt, observerId, context);
     if (act.kind === "claim") {
-      recordSpeechActClaim(social, message, act, actIndex, evidence, observerId, context);
+      recordSpeechActClaim(social, message, act, actIndex, evidenceRefs, observerId, context);
       continue;
     }
     if (act.kind === "commitment") {
-      recordSpeechActCommitment(social, message, act, actIndex, evidence, observerId, context);
+      recordSpeechActCommitment(social, message, act, actIndex, evidenceRefs, observerId, context);
       continue;
     }
     if (act.kind === "coalition_signal") {
-      recordSpeechActCoalitionRecord(social, message, act, actIndex, evidence, observerId, context);
+      recordSpeechActCoalitionRecord(social, message, act, actIndex, evidenceRefs, observerId, context);
     }
   }
 }
@@ -280,7 +326,8 @@ function recordSpeechActTheoryOfMindAttribution(
   message: SocialMessage,
   act: SocialSpeechAct,
   actIndex: number,
-  evidence: EvidenceRef,
+  evidenceRefs: EvidenceRef[],
+  deliveryReceipt: SocialDeliveryReceipt | undefined,
   observerId: string,
   context?: SocialStateMutationContext
 ): void {
@@ -291,12 +338,6 @@ function recordSpeechActTheoryOfMindAttribution(
   const id = `${message.id}:speech-act:${actId}:theory-of-mind`;
   if (social.theoryOfMind?.records[id]) return;
   const confidence = numberMetadata(act.confidence);
-  const deliveryReceiptId = message.deliveryReceipts?.find(
-    (receipt) =>
-      receipt.observerId === observerId &&
-      receipt.messageId === message.id &&
-      receipt.messageSeq === message.seq
-  )?.id;
   addSocialTheoryOfMindAttribution(social, {
     id,
     observerId,
@@ -313,10 +354,10 @@ function recordSpeechActTheoryOfMindAttribution(
     sourceMessageSeq: message.seq,
     sourceSpeechActId: actId,
     sourceSpeechActKind: String(act.kind),
-    sourceDeliveryReceiptId: deliveryReceiptId,
+    sourceDeliveryReceiptId: deliveryReceipt?.id,
     visibility: message.visibility,
     confidence: confidence !== undefined && confidence >= 0 && confidence <= 1 ? confidence : undefined,
-    evidenceRefs: [evidence],
+    evidenceRefs,
     observedAtTraceId: context?.traceId,
     observedAtTurnIndex: context?.turnIndex
   }, context);
@@ -357,7 +398,7 @@ function recordSpeechActClaim(
   message: SocialMessage,
   act: SocialSpeechAct,
   actIndex: number,
-  evidence: EvidenceRef,
+  evidenceRefs: EvidenceRef[],
   observerId: string,
   context?: SocialStateMutationContext
 ): void {
@@ -378,7 +419,7 @@ function recordSpeechActClaim(
     claim,
     valence: gossipValence(act.metadata?.valence),
     confidence: numberMetadata(act.confidence) ?? 1,
-    evidenceRefs: [evidence],
+    evidenceRefs,
     metadata: speechActFactMetadata(message, act, actIndex, observerId, {
       targetId: stringMetadata(act.targetId)
     })
@@ -390,7 +431,7 @@ function recordSpeechActCommitment(
   message: SocialMessage,
   act: SocialSpeechAct,
   actIndex: number,
-  evidence: EvidenceRef,
+  evidenceRefs: EvidenceRef[],
   observerId: string,
   context?: SocialStateMutationContext
 ): void {
@@ -412,7 +453,7 @@ function recordSpeechActCommitment(
     deadlineDay: numberMetadata(act.metadata?.deadlineDay),
     status: commitmentStatus(act.metadata?.status),
     confidence: numberMetadata(act.confidence) ?? 1,
-    evidenceRefs: [evidence],
+    evidenceRefs,
     metadata: speechActFactMetadata(message, act, actIndex, observerId, {
       factSemantic: "commitment",
       targetId
@@ -425,7 +466,7 @@ function recordSpeechActCoalitionRecord(
   message: SocialMessage,
   act: SocialSpeechAct,
   actIndex: number,
-  evidence: EvidenceRef,
+  evidenceRefs: EvidenceRef[],
   observerId: string,
   context?: SocialStateMutationContext
 ): void {
@@ -442,7 +483,7 @@ function recordSpeechActCoalitionRecord(
     targetId,
     status: coalitionStatus(act.metadata?.status),
     confidence: numberMetadata(act.confidence) ?? 1,
-    formationEvidenceRefs: [evidence],
+    formationEvidenceRefs: evidenceRefs,
     metadata: speechActFactMetadata(message, act, actIndex, observerId, {
       factSemantic: "coalition",
       targetId
@@ -453,7 +494,7 @@ function recordSpeechActCoalitionRecord(
 function recordStructuredSocialFacts(
   social: AgentSocialState,
   message: SocialMessage,
-  evidence: EvidenceRef,
+  evidenceRefs: EvidenceRef[],
   observerId: string,
   context?: SocialStateMutationContext
 ): void {
@@ -466,7 +507,7 @@ function recordStructuredSocialFacts(
       updateSocialRelationship(social, {
         targetId,
         deltas,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata: {
           ...metadata,
           reason: stringMetadata(fact.reason),
@@ -484,7 +525,7 @@ function recordStructuredSocialFacts(
       updateSocialReputation(social, {
         subjectId,
         deltas,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata: {
           ...metadata,
           subjectId,
@@ -514,7 +555,7 @@ function recordStructuredSocialFacts(
         deadlineDay: numberMetadata(fact.deadlineDay),
         status: commitmentStatus(fact.status),
         confidence: numberMetadata(fact.confidence) ?? 1,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -526,7 +567,7 @@ function recordStructuredSocialFacts(
       updateSocialCommitmentStatus(social, {
         id,
         status,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -544,7 +585,7 @@ function recordStructuredSocialFacts(
         targetId: stringMetadata(fact.targetId),
         status: coalitionStatus(fact.status),
         confidence: numberMetadata(fact.confidence) ?? 1,
-        formationEvidenceRefs: [evidence],
+        formationEvidenceRefs: evidenceRefs,
         metadata
       }, context);
       continue;
@@ -558,7 +599,7 @@ function recordStructuredSocialFacts(
         kind: evidenceKind,
         status: coalitionStatus(fact.status),
         confidence: numberMetadata(fact.confidence),
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -581,7 +622,7 @@ function recordStructuredSocialFacts(
         sourceId: stringMetadata(fact.sourceId),
         valence: gossipValence(fact.valence),
         confidence: numberMetadata(fact.confidence) ?? 1,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -601,7 +642,7 @@ function recordStructuredSocialFacts(
         source: stringMetadata(fact.source) ?? message.senderId,
         confidence: numberMetadata(fact.confidence) ?? 1,
         status: normStatus(fact.status) ?? "active",
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -613,7 +654,7 @@ function recordStructuredSocialFacts(
       updateSocialNormStatus(social, {
         id,
         status,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -637,7 +678,7 @@ function recordStructuredSocialFacts(
         reason: stringMetadata(fact.reason),
         requestedRepair: stringMetadata(fact.requestedRepair),
         confidence: numberMetadata(fact.confidence) ?? 1,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -649,7 +690,7 @@ function recordStructuredSocialFacts(
       updateSocialNormSanctionStatus(social, {
         id,
         status,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -679,7 +720,7 @@ function recordStructuredSocialFacts(
         requestedRepair: stringMetadata(fact.requestedRepair),
         offeredRepair: stringMetadata(fact.offeredRepair),
         confidence: numberMetadata(fact.confidence) ?? 1,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -691,7 +732,7 @@ function recordStructuredSocialFacts(
       updateSocialTrustRepairStatus(social, {
         id,
         status,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -720,7 +761,7 @@ function recordStructuredSocialFacts(
         claim: stringMetadata(fact.claim),
         impact: stringMetadata(fact.impact),
         confidence: numberMetadata(fact.confidence) ?? 1,
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
       continue;
@@ -734,7 +775,7 @@ function recordStructuredSocialFacts(
         kind,
         status: betrayalStatus(fact.status),
         confidence: numberMetadata(fact.confidence),
-        evidenceRefs: [evidence],
+        evidenceRefs,
         metadata
       }, context);
     }

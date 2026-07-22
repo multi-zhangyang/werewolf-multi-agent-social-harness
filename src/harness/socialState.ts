@@ -1,6 +1,15 @@
 import type { SocialAction, SocialAgentProfile } from "./social";
 
-export type EvidenceArtifactKind = "observation" | "message" | "event" | "trace" | "state" | "memory" | "action" | "outcome";
+export type EvidenceArtifactKind =
+  | "observation"
+  | "message"
+  | "delivery_receipt"
+  | "event"
+  | "trace"
+  | "state"
+  | "memory"
+  | "action"
+  | "outcome";
 
 export interface EvidenceRef {
   artifact: EvidenceArtifactKind;
@@ -2437,6 +2446,14 @@ function requireStableTheoryOfMindAttribution(
   requireEvidence(input.evidenceRefs, "theory-of-mind attribution");
   if (!input.evidenceRefs.some((ref) => ref.artifact === "message" && ref.id === input.sourceMessageId && ref.seq === input.sourceMessageSeq)) {
     throw new Error("theory-of-mind attribution requires matching message evidence.");
+  }
+  const receiptRefs = input.evidenceRefs.filter((ref) => ref.artifact === "delivery_receipt");
+  if (input.sourceDeliveryReceiptId) {
+    if (!receiptRefs.some((ref) => ref.id === input.sourceDeliveryReceiptId && ref.seq === input.sourceMessageSeq)) {
+      throw new Error("theory-of-mind attribution requires matching delivery receipt evidence.");
+    }
+  } else if (receiptRefs.length) {
+    throw new Error("theory-of-mind attribution delivery receipt evidence requires sourceDeliveryReceiptId.");
   }
 }
 

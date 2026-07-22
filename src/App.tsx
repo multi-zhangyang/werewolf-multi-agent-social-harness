@@ -8046,10 +8046,10 @@ function safeAgentInspectorJson(agent: AgentHarnessState): Record<string, unknow
     social: {
       relationshipCount: Object.keys(agent.social?.relationships?.edges ?? {}).length,
       journalEntryCount: agent.social?.journal?.entries.length ?? 0,
-      memoryCount: countRecordValues(agent.social?.memory),
-      reputationCount: countRecordValues(agent.social?.reputation),
-      normCount: countRecordValues(agent.social?.norms),
-      goalCount: countRecordValues(agent.social?.goals)
+      memoryCount: agent.social?.memory.entries.length ?? 0,
+      reputationCount: Object.keys(agent.social?.reputation.records ?? {}).length,
+      normCount: Object.keys(agent.social?.norms.norms ?? {}).length,
+      goalCount: agent.social?.goals.goals.length ?? 0
     }
   };
 }
@@ -8071,11 +8071,6 @@ function safeMessageInspectorJson(message: SocialMessage): Record<string, unknow
     receiptRedactionPolicies: uniqueStrings((message.deliveryReceipts ?? []).map((receipt) => receipt.redactionPolicy)),
     metadata: message.metadata
   };
-}
-
-function countRecordValues(value: unknown): number {
-  if (!isRecord(value)) return 0;
-  return Object.keys(value).length;
 }
 
 function summarizeSpeechActKinds(message: SocialMessage): string {

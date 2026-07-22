@@ -4036,6 +4036,10 @@ function evidenceFromExposureRecords(agent: SocialAgentSnapshot, records: Social
         refs.push({ artifact: "message", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
         continue;
       }
+      if (ref.artifact === "delivery_receipt") {
+        refs.push({ artifact: "delivery_receipt", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
+        continue;
+      }
       if (ref.artifact === "trace") {
         refs.push({ artifact: "trace", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
         continue;
@@ -4068,6 +4072,10 @@ function evidenceFromSocialRefs(agent: SocialAgentSnapshot, refs: EvidenceRef[])
   for (const ref of refs) {
     if (ref.artifact === "message") {
       mapped.push({ artifact: "message", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
+      continue;
+    }
+    if (ref.artifact === "delivery_receipt") {
+      mapped.push({ artifact: "delivery_receipt", id: ref.id, seq: ref.seq, traceId: ref.traceId, description: ref.description });
       continue;
     }
     if (ref.artifact === "event") {

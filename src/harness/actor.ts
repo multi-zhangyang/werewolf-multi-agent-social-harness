@@ -191,9 +191,9 @@ export class WerewolfAgentActor {
       seenMessageIds: this.seenMessageIds,
       context: socialMutationContext(view, context),
       additionalMessageTags: messageTags,
-      onMessageIngested: ({ social: stagedSocial, message, evidence, context: mutationContext }) => {
+      onMessageIngested: ({ social: stagedSocial, message, evidenceRefs, context: mutationContext }) => {
         if (message.senderId !== this.state.playerId) {
-          recordSocialMessageBeliefs(stagedSocial, message, evidence, this.state.playerId, mutationContext);
+          recordSocialMessageBeliefs(stagedSocial, message, evidenceRefs, this.state.playerId, mutationContext);
         }
       }
     });
@@ -271,7 +271,10 @@ export function applyWerewolfReasonerProposal(
   } else if (pending.kind === "witch") {
     if (next.command.type !== "witch.act") return plan;
     if (proposal.saveTargetId && (!pending.canSave || proposal.saveTargetId !== pending.nightVictimId)) return plan;
-    if (proposal.poisonTargetId && !pending.legalPoisonTargetIds.includes(proposal.poisonTargetId)) return plan;
+    if (
+      proposal.poisonTargetId &&
+      (!pending.canPoison || !pending.legalPoisonTargetIds.includes(proposal.poisonTargetId))
+    ) return plan;
     next.command = {
       type: "witch.act",
       actorId: pending.actorId,
@@ -280,13 +283,13 @@ export function applyWerewolfReasonerProposal(
     };
     next.targetId = proposal.saveTargetId ?? proposal.poisonTargetId;
   } else if (pending.kind === "vote" && next.command.type === "vote.cast") {
-    if (!targetId && proposal.abstain === undefined && !next.command.abstain) return plan;
+    if (!targetId && proposal.abstain !== true) return plan;
     next.command = targetId
       ? { type: "vote.cast", actorId: pending.actorId, targetId }
       : { type: "vote.cast", actorId: pending.actorId, abstain: proposal.abstain ?? next.command.abstain };
     next.targetId = targetId;
   } else if (pending.kind === "sheriff_vote" && next.command.type === "sheriff.vote") {
-    if (!targetId && proposal.abstain === undefined && !next.command.abstain) return plan;
+    if (!targetId && proposal.abstain !== true) return plan;
     next.command = targetId
       ? { type: "sheriff.vote", actorId: pending.actorId, targetId }
       : { type: "sheriff.vote", actorId: pending.actorId, abstain: proposal.abstain ?? next.command.abstain };
@@ -468,24 +471,24 @@ function messageTags(message: SocialMessage): string[] {
 function recordSocialMessageBeliefs(
   social: AgentSocialState<PlayerView, AgentPendingAction, GameCommand>,
   message: ReturnType<typeof getVisibleSocialMessages>[number],
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context?: SocialStateMutationContext
 ): void {
   const recordedKeys = new Set<string>();
-  recordSpeechActBeliefs(social, message, evidence, observerId, context, recordedKeys, { explicitOnly: true });
-  recordRoleClaimBelief(social, message, evidence, observerId, context, recordedKeys);
-  recordPressureTargetBelief(social, message, evidence, observerId, context, recordedKeys);
-  recordPublicVoteBelief(social, message, evidence, observerId, context, recordedKeys);
-  recordHunterShotBelief(social, message, evidence, observerId, context, recordedKeys);
-  recordWolfKillPreferenceBelief(social, message, evidence, observerId, context, recordedKeys);
-  recordSpeechActBeliefs(social, message, evidence, observerId, context, recordedKeys, { explicitOnly: false });
+  recordSpeechActBeliefs(social, message, evidenceRefs, observerId, context, recordedKeys, { explicitOnly: true });
+  recordRoleClaimBelief(social, message, evidenceRefs, observerId, context, recordedKeys);
+  recordPressureTargetBelief(social, message, evidenceRefs, observerId, context, recordedKeys);
+  recordPublicVoteBelief(social, message, evidenceRefs, observerId, context, recordedKeys);
+  recordHunterShotBelief(social, message, evidenceRefs, observerId, context, recordedKeys);
+  recordWolfKillPreferenceBelief(social, message, evidenceRefs, observerId, context, recordedKeys);
+  recordSpeechActBeliefs(social, message, evidenceRefs, observerId, context, recordedKeys, { explicitOnly: false });
 }
 
 function recordSpeechActBeliefs(
   social: AgentSocialState<PlayerView, AgentPendingAction, GameCommand>,
   message: ReturnType<typeof getVisibleSocialMessages>[number],
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context: SocialStateMutationContext | undefined,
   recordedKeys: Set<string>,
@@ -497,23 +500,23 @@ function recordSpeechActBeliefs(
     if (!options.explicitOnly && !metadataDerived) continue;
 
     if (act.kind === "role_claim") {
-      recordSpeechActRoleClaim(social, message, act, actIndex, evidence, observerId, context, recordedKeys);
+      recordSpeechActRoleClaim(social, message, act, actIndex, evidenceRefs, observerId, context, recordedKeys);
       continue;
     }
     if (act.kind === "accusation") {
-      recordSpeechActAccusation(social, message, act, actIndex, evidence, observerId, context, recordedKeys);
+      recordSpeechActAccusation(social, message, act, actIndex, evidenceRefs, observerId, context, recordedKeys);
       continue;
     }
     if (act.kind === "vote_intent") {
-      recordSpeechActVoteIntent(social, message, act, actIndex, evidence, observerId, context, recordedKeys);
+      recordSpeechActVoteIntent(social, message, act, actIndex, evidenceRefs, observerId, context, recordedKeys);
       continue;
     }
     if (act.kind === "role_action") {
-      recordSpeechActRoleAction(social, message, act, actIndex, evidence, observerId, context, recordedKeys);
+      recordSpeechActRoleAction(social, message, act, actIndex, evidenceRefs, observerId, context, recordedKeys);
       continue;
     }
     if (act.kind === "coalition_signal") {
-      recordSpeechActCoalitionSignal(social, message, act, actIndex, evidence, observerId, context, recordedKeys);
+      recordSpeechActCoalitionSignal(social, message, act, actIndex, evidenceRefs, observerId, context, recordedKeys);
       continue;
     }
   }
@@ -524,7 +527,7 @@ function recordSpeechActRoleClaim(
   message: ReturnType<typeof getVisibleSocialMessages>[number],
   act: SocialSpeechAct,
   actIndex: number,
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context: SocialStateMutationContext | undefined,
   recordedKeys: Set<string>
@@ -537,7 +540,7 @@ function recordSpeechActRoleClaim(
     predicate: "claimedRole",
     value: claimedRole,
     confidence: numberMetadata(act.confidence) ?? 1,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: speechActClaimMetadata(message, act, actIndex, observerId, {
       targetId: stringMetadata(act.targetId),
       assertedClaimOnly: true
@@ -550,7 +553,7 @@ function recordSpeechActAccusation(
   message: ReturnType<typeof getVisibleSocialMessages>[number],
   act: SocialSpeechAct,
   actIndex: number,
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context: SocialStateMutationContext | undefined,
   recordedKeys: Set<string>
@@ -563,7 +566,7 @@ function recordSpeechActAccusation(
     predicate: "pressuredTarget",
     value: targetId,
     confidence,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: speechActClaimMetadata(message, act, actIndex, observerId, {
       targetId,
       assertedClaimOnly: true
@@ -581,7 +584,7 @@ function recordSpeechActAccusation(
     claim: stringMetadata(act.value) ?? `accusation against ${targetId}`,
     valence: "negative",
     confidence,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: speechActFactMetadata(message, act, actIndex, observerId, {
       targetId
     })
@@ -593,7 +596,7 @@ function recordSpeechActVoteIntent(
   message: ReturnType<typeof getVisibleSocialMessages>[number],
   act: SocialSpeechAct,
   actIndex: number,
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context: SocialStateMutationContext | undefined,
   recordedKeys: Set<string>
@@ -609,7 +612,7 @@ function recordSpeechActVoteIntent(
     predicate,
     value: targetId ?? "abstain",
     confidence: numberMetadata(act.confidence) ?? 1,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: speechActClaimMetadata(message, act, actIndex, observerId, {
       targetId,
       abstain: abstain || !targetId,
@@ -624,7 +627,7 @@ function recordSpeechActRoleAction(
   message: ReturnType<typeof getVisibleSocialMessages>[number],
   act: SocialSpeechAct,
   actIndex: number,
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context: SocialStateMutationContext | undefined,
   recordedKeys: Set<string>
@@ -637,7 +640,7 @@ function recordSpeechActRoleAction(
     predicate: "hunterShotTarget",
     value: targetId,
     confidence: numberMetadata(act.confidence) ?? 1,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: speechActClaimMetadata(message, act, actIndex, observerId, {
       targetId,
       observedActionOnly: true
@@ -650,7 +653,7 @@ function recordSpeechActCoalitionSignal(
   message: ReturnType<typeof getVisibleSocialMessages>[number],
   act: SocialSpeechAct,
   actIndex: number,
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context: SocialStateMutationContext | undefined,
   recordedKeys: Set<string>
@@ -663,7 +666,7 @@ function recordSpeechActCoalitionSignal(
     predicate: "wolfKillPreference",
     value: targetId,
     confidence: numberMetadata(act.confidence) ?? 1,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: speechActClaimMetadata(message, act, actIndex, observerId, {
       targetId,
       observedActionOnly: true
@@ -674,7 +677,7 @@ function recordSpeechActCoalitionSignal(
 function recordRoleClaimBelief(
   social: AgentSocialState<PlayerView, AgentPendingAction, GameCommand>,
   message: ReturnType<typeof getVisibleSocialMessages>[number],
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context?: SocialStateMutationContext,
   recordedKeys?: Set<string>
@@ -687,7 +690,7 @@ function recordRoleClaimBelief(
     predicate: "claimedRole",
     value: claimedRole,
     confidence: 1,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: {
       observerId,
       speakerId: message.senderId,
@@ -705,7 +708,7 @@ function recordRoleClaimBelief(
 function recordPressureTargetBelief(
   social: AgentSocialState<PlayerView, AgentPendingAction, GameCommand>,
   message: ReturnType<typeof getVisibleSocialMessages>[number],
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context?: SocialStateMutationContext,
   recordedKeys?: Set<string>
@@ -719,7 +722,7 @@ function recordPressureTargetBelief(
     predicate: "pressuredTarget",
     value: pressureTargetId,
     confidence: 1,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: socialClaimMetadata(message, observerId, {
       claimKind: "public-speech",
       targetId: pressureTargetId,
@@ -731,7 +734,7 @@ function recordPressureTargetBelief(
 function recordPublicVoteBelief(
   social: AgentSocialState<PlayerView, AgentPendingAction, GameCommand>,
   message: ReturnType<typeof getVisibleSocialMessages>[number],
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context?: SocialStateMutationContext,
   recordedKeys?: Set<string>
@@ -745,7 +748,7 @@ function recordPublicVoteBelief(
     predicate: "publicVoteTarget",
     value: targetId ?? "abstain",
     confidence: 1,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: socialClaimMetadata(message, observerId, {
       claimKind: "public-vote",
       targetId,
@@ -758,7 +761,7 @@ function recordPublicVoteBelief(
 function recordHunterShotBelief(
   social: AgentSocialState<PlayerView, AgentPendingAction, GameCommand>,
   message: ReturnType<typeof getVisibleSocialMessages>[number],
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context?: SocialStateMutationContext,
   recordedKeys?: Set<string>
@@ -771,7 +774,7 @@ function recordHunterShotBelief(
     predicate: "hunterShotTarget",
     value: targetId ?? "declined",
     confidence: 1,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: socialClaimMetadata(message, observerId, {
       claimKind: "public-hunter-shot",
       targetId,
@@ -783,7 +786,7 @@ function recordHunterShotBelief(
 function recordWolfKillPreferenceBelief(
   social: AgentSocialState<PlayerView, AgentPendingAction, GameCommand>,
   message: ReturnType<typeof getVisibleSocialMessages>[number],
-  evidence: EvidenceRef,
+  evidenceRefs: readonly EvidenceRef[],
   observerId: string,
   context?: SocialStateMutationContext,
   recordedKeys?: Set<string>
@@ -797,7 +800,7 @@ function recordWolfKillPreferenceBelief(
     predicate: "wolfKillPreference",
     value: targetId,
     confidence: 1,
-    evidenceRefs: [evidence],
+    evidenceRefs: [...evidenceRefs],
     metadata: socialClaimMetadata(message, observerId, {
       claimKind: "werewolf-kill-vote",
       targetId,
