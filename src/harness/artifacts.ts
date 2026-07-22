@@ -87,7 +87,7 @@ export interface MatchArtifact
 
 export type TrajectoryJsonlStepSource = Omit<
   HarnessStepRecord,
-  "pendingAction" | "observation" | "policyPlan" | "reasonerOutput" | "command"
+  "pendingAction" | "observation" | "policyPlan" | "reasonerOutput" | "command" | "actionArbitration"
 > & {
   pendingAction: unknown;
   observation: unknown;

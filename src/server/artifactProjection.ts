@@ -17,6 +17,7 @@ import type {
   PolicyPlan,
   ReasonerOutputSummary
 } from "../harness/types";
+import type { AgentActionArbitrationSummary } from "../harness/scaffold";
 
 export type MatchArtifactView = "full" | "postgame-redacted" | "truth-redacted";
 
@@ -66,9 +67,53 @@ export type RedactedTurnTraceDto = Omit<
   stream?: never;
 };
 
+/**
+ * Content-free postgame projection of one action candidate. Candidate ids,
+ * target ids, reasons, evidence refs, score-contribution details, metadata,
+ * and action hashes are intentionally absent: each can encode actor-private
+ * state or make a small legal target set brute-forceable.
+ */
+export interface RedactedAgentActionCandidateSummaryDto {
+  ordinal: number;
+  source: string;
+  kind: string;
+  selected: boolean;
+  baseScore?: number;
+  utilityScore?: number;
+  socialScore?: number;
+  riskPenalty?: number;
+  legalityScore?: number;
+  finalScore?: number;
+  scoreContributionCount: number;
+  evidenceCount: number;
+  messageCount: number;
+}
+
+/**
+ * Safe UI/audit summary derived by the server from canonical arbitration.
+ * It proves that candidate arbitration happened without exposing raw candidate
+ * identity or the private evidence that produced a score.
+ */
+export interface RedactedAgentActionArbitrationSummaryDto {
+  version: AgentActionArbitrationSummary["version"];
+  arbitrator: "default-score-arbitrator" | "custom";
+  candidateCount: number;
+  decisionRule: "highest_final_score_then_candidate_id" | "custom";
+  selectedCandidateOrdinal?: number;
+  selectedCandidateSource?: string;
+  candidates: RedactedAgentActionCandidateSummaryDto[];
+}
+
 export type RedactedHarnessStepDto = Omit<
   HarnessStepRecord,
-  "pendingAction" | "observation" | "policyPlan" | "reasonerOutput" | "command" | "turnTrace" | "agentSnapshotsAfterStep"
+  | "pendingAction"
+  | "observation"
+  | "policyPlan"
+  | "reasonerOutput"
+  | "command"
+  | "turnTrace"
+  | "actionArbitration"
+  | "agentSnapshotsAfterStep"
 > & {
   pendingAction: RedactedPendingActionDto;
   observation: typeof REDACTED_PRIVATE_OBSERVATION;
@@ -76,6 +121,7 @@ export type RedactedHarnessStepDto = Omit<
   reasonerOutput: RedactedReasonerOutputDto;
   command: RedactedCommandDto;
   turnTrace: RedactedTurnTraceDto;
+  actionArbitration?: RedactedAgentActionArbitrationSummaryDto;
   agentSnapshotsAfterStep?: never;
 };
 

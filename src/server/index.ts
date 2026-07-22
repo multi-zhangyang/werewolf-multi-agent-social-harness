@@ -162,6 +162,7 @@ import {
   type PostgameMatchProjectionDto,
   type PostgameReplayFrameDto,
   type RedactedAgentStateDto,
+  type RedactedAgentActionArbitrationSummaryDto,
   type RedactedCommandDto,
   type RedactedHarnessStepDto,
   type RedactedPendingActionDto,
@@ -4259,8 +4260,62 @@ function redactHarnessStepPrivateEvidence(step: MatchArtifact["trajectory"][numb
       attempts: step.turnTrace.attempts,
       agentStateHash: step.turnTrace.agentStateHash
     },
+    actionArbitration: redactActionArbitrationPrivateEvidence(step.actionArbitration),
     agentSnapshotsAfterStep: undefined
   };
+}
+
+function redactActionArbitrationPrivateEvidence(
+  arbitration: MatchArtifact["trajectory"][number]["actionArbitration"]
+): RedactedAgentActionArbitrationSummaryDto | undefined {
+  if (!arbitration) return undefined;
+  const selectedCandidateOrdinal = arbitration.candidates.findIndex(
+    (candidate) => candidate.id === arbitration.selectedCandidateId
+  );
+  const candidates = arbitration.candidates.map((candidate, ordinal) => ({
+    ordinal,
+    source: safeArbitrationCandidateSource(candidate.source),
+    kind: safeMetadataString(candidate.kind) ?? "unknown",
+    selected: ordinal === selectedCandidateOrdinal,
+    baseScore: safeMetadataNumber(candidate.baseScore),
+    utilityScore: safeMetadataNumber(candidate.utilityScore),
+    socialScore: safeMetadataNumber(candidate.socialScore),
+    riskPenalty: safeMetadataNumber(candidate.riskPenalty),
+    legalityScore: safeMetadataNumber(candidate.legalityScore),
+    finalScore: safeMetadataNumber(candidate.finalScore),
+    scoreContributionCount: candidate.scoreContributions?.length ?? 0,
+    evidenceCount: candidate.evidenceRefs.length,
+    messageCount: candidate.messageCount
+  }));
+  return {
+    version: arbitration.version,
+    arbitrator: arbitration.arbitratorId === "default-score-arbitrator" ? "default-score-arbitrator" : "custom",
+    candidateCount: candidates.length,
+    decisionRule:
+      arbitration.decisionRule === "highest_final_score_then_candidate_id"
+        ? "highest_final_score_then_candidate_id"
+        : "custom",
+    selectedCandidateOrdinal: selectedCandidateOrdinal >= 0 ? selectedCandidateOrdinal : undefined,
+    selectedCandidateSource:
+      selectedCandidateOrdinal >= 0 ? candidates[selectedCandidateOrdinal]?.source : undefined,
+    candidates
+  };
+}
+
+function safeArbitrationCandidateSource(value: string): string {
+  return [
+    "policy",
+    "reasoner",
+    "memory",
+    "belief",
+    "relationship",
+    "reputation",
+    "norm",
+    "goal",
+    "social_state"
+  ].includes(value)
+    ? value
+    : "other";
 }
 
 function redactReasonerOutput(value: MatchArtifact["trajectory"][number]["reasonerOutput"]): RedactedHarnessStepDto["reasonerOutput"] {

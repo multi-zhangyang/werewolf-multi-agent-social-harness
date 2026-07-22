@@ -33,6 +33,29 @@ export interface AgentDecisionEvidenceView {
     confidence: number;
     strategyTags: string[];
   };
+  arbitration?: {
+    version: string;
+    arbitrator: "default-score-arbitrator" | "custom";
+    candidateCount: number;
+    decisionRule: "highest_final_score_then_candidate_id" | "custom";
+    selectedCandidateOrdinal?: number;
+    selectedCandidateSource?: string;
+    candidates: Array<{
+      ordinal: number;
+      source: string;
+      kind: string;
+      selected: boolean;
+      baseScore?: number;
+      utilityScore?: number;
+      socialScore?: number;
+      riskPenalty?: number;
+      legalityScore?: number;
+      finalScore?: number;
+      scoreContributionCount: number;
+      evidenceCount: number;
+      messageCount: number;
+    }>;
+  };
   cognition?:
     | { source: "policy" }
     | {
@@ -126,6 +149,7 @@ export function buildAgentDecisionEvidenceView(
           strategyTags: [...linkedLegacyStep.policyPlan.strategyTags]
         }
       : undefined,
+    arbitration: arbitrationEvidence(linkedLegacyStep?.actionArbitration),
     cognition: cognitionEvidence(linkedLegacyStep),
     proposal: {
       commandType: nativeStep.action.command.type,
@@ -245,20 +269,63 @@ export function AgentDecisionEvidencePanel({
             },
             {
               title: "4. Policy & arbitration boundary",
-              description: evidence.policy ? (
+              description: evidence.policy || evidence.arbitration ? (
                 <Flex vertical gap="small">
-                  <Descriptions
-                    size="small"
-                    column={1}
-                    items={descriptionItems([
-                      ["policy", evidence.policy.name],
-                      ["confidence", evidence.policy.confidence]
-                    ])}
-                  />
-                  <Flex wrap="wrap" gap={4}>
-                    {evidence.policy.strategyTags.length ? evidence.policy.strategyTags.map((tag) => <Tag key={tag}>{tag}</Tag>) : <Tag>no strategy tags</Tag>}
-                    <Tag color="warning">candidate targets / arbitration reasons redacted</Tag>
-                  </Flex>
+                  {evidence.policy ? (
+                    <>
+                      <Descriptions
+                        size="small"
+                        column={1}
+                        items={descriptionItems([
+                          ["policy", evidence.policy.name],
+                          ["confidence", evidence.policy.confidence]
+                        ])}
+                      />
+                      <Flex wrap="wrap" gap={4}>
+                        {evidence.policy.strategyTags.length ? evidence.policy.strategyTags.map((tag) => <Tag key={tag}>{tag}</Tag>) : <Tag>no strategy tags</Tag>}
+                      </Flex>
+                    </>
+                  ) : (
+                    <Text type="secondary">没有可链接的 policy record。</Text>
+                  )}
+                  {evidence.arbitration ? (
+                    <div className="agent-decision-evidence-panel__arbitration" data-testid="agent-action-arbitration">
+                      <Flex wrap="wrap" gap={4} className="agent-decision-evidence-panel__arbitration-summary">
+                        <Tag color="processing">{evidence.arbitration.candidateCount} candidates</Tag>
+                        <Tag color="purple">selected · {evidence.arbitration.selectedCandidateSource ?? "unknown"}</Tag>
+                        <Tag>{evidence.arbitration.arbitrator}</Tag>
+                        <Tag>{evidence.arbitration.decisionRule}</Tag>
+                        <Tag color="warning">targets · reasons · evidence ids redacted</Tag>
+                      </Flex>
+                      <div className="agent-decision-evidence-panel__candidate-grid">
+                        {evidence.arbitration.candidates.map((candidate) => (
+                          <div
+                            key={candidate.ordinal}
+                            className={`agent-decision-evidence-panel__candidate${candidate.selected ? " is-selected" : ""}`}
+                            data-testid="agent-action-candidate"
+                          >
+                            <Flex justify="space-between" align="center" gap={8} wrap="wrap">
+                              <Flex gap={4} wrap="wrap">
+                                <Tag>#{candidate.ordinal + 1}</Tag>
+                                <Tag color={candidate.source === "reasoner" ? "geekblue" : "default"}>{candidate.source}</Tag>
+                                <Tag>{candidate.kind}</Tag>
+                                {candidate.selected ? <Tag color="success">selected</Tag> : null}
+                              </Flex>
+                              <Text strong>final {formatCandidateScore(candidate.finalScore)}</Text>
+                            </Flex>
+                            <Text type="secondary" className="agent-decision-evidence-panel__candidate-metrics">
+                              base {formatCandidateScore(candidate.baseScore)} · utility {formatCandidateScore(candidate.utilityScore)} · social {formatCandidateScore(candidate.socialScore)} · legality {formatCandidateScore(candidate.legalityScore)} · risk {formatCandidateScore(candidate.riskPenalty)}
+                            </Text>
+                            <Text type="secondary">
+                              {candidate.messageCount} message drafts · {candidate.evidenceCount} evidence refs · {candidate.scoreContributionCount} score contributions
+                            </Text>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <Text type="secondary">该兼容记录没有 action-candidate arbitration；不从最终命令反推候选集合。</Text>
+                  )}
                 </Flex>
               ) : (
                 <Text type="secondary">没有可链接的 policy record；不把 native action 当成 policy 内部状态。</Text>
@@ -361,12 +428,74 @@ function cognitionEvidence(legacyStep: RedactedHarnessStepDto | undefined): Agen
   };
 }
 
+function arbitrationEvidence(value: unknown): AgentDecisionEvidenceView["arbitration"] {
+  if (!isRecord(value) || !Array.isArray(value.candidates)) return undefined;
+  const candidateCount = nonNegativeInteger(value.candidateCount);
+  const version = boundedString(value.version);
+  if (candidateCount === undefined || !version) return undefined;
+  const candidates = value.candidates.flatMap((candidate) => {
+    if (!isRecord(candidate)) return [];
+    const ordinal = nonNegativeInteger(candidate.ordinal);
+    const source = boundedString(candidate.source);
+    const kind = boundedString(candidate.kind);
+    const scoreContributionCount = nonNegativeInteger(candidate.scoreContributionCount);
+    const evidenceCount = nonNegativeInteger(candidate.evidenceCount);
+    const messageCount = nonNegativeInteger(candidate.messageCount);
+    if (
+      ordinal === undefined ||
+      !source ||
+      !kind ||
+      scoreContributionCount === undefined ||
+      evidenceCount === undefined ||
+      messageCount === undefined
+    ) return [];
+    return [{
+      ordinal,
+      source,
+      kind,
+      selected: candidate.selected === true,
+      baseScore: finiteNumber(candidate.baseScore),
+      utilityScore: finiteNumber(candidate.utilityScore),
+      socialScore: finiteNumber(candidate.socialScore),
+      riskPenalty: finiteNumber(candidate.riskPenalty),
+      legalityScore: finiteNumber(candidate.legalityScore),
+      finalScore: finiteNumber(candidate.finalScore),
+      scoreContributionCount,
+      evidenceCount,
+      messageCount
+    }];
+  });
+  if (candidates.length !== candidateCount) return undefined;
+  const arbitrator = value.arbitrator === "default-score-arbitrator" ? value.arbitrator : "custom";
+  const decisionRule = value.decisionRule === "highest_final_score_then_candidate_id"
+    ? value.decisionRule
+    : "custom";
+  return {
+    version,
+    arbitrator,
+    candidateCount,
+    decisionRule,
+    selectedCandidateOrdinal: nonNegativeInteger(value.selectedCandidateOrdinal),
+    selectedCandidateSource: boundedString(value.selectedCandidateSource),
+    candidates
+  };
+}
+
+function formatCandidateScore(value: number | undefined): string {
+  return value === undefined ? "n/a" : String(value);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  const number = finiteNumber(value);
+  return number !== undefined && Number.isInteger(number) && number >= 0 ? number : undefined;
 }
 
 function boundedString(value: unknown): string | undefined {
