@@ -183,22 +183,42 @@ test("renders only a server-owned live public table and does not reconstruct a f
   const artifactViewsBeforeLiveRun = artifactViews.length;
 
   const liveMatchId = "fixture-live-public-ui";
+  const registryReadsDuringLive: string[] = [];
+  let liveStartAcknowledged = false;
+  await page.route("**/api/matches", async (route) => {
+    if (route.request().method() === "GET" && liveStartAcknowledged) {
+      registryReadsDuringLive.push(route.request().url());
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "operator registry is forbidden while spectating" })
+      });
+      return;
+    }
+    await route.continue();
+  });
   let liveReads = 0;
   await page.route("**/api/matches/run", async (route) => {
     if (route.request().method() !== "POST") {
       await route.continue();
       return;
     }
+    liveStartAcknowledged = true;
     await route.fulfill({
       status: 202,
       contentType: "application/json",
       body: JSON.stringify({
-        id: liveMatchId,
-        createdAt: "2026-07-22T00:00:00.000Z",
-        state: { phase: "role_reveal", day: 1, players: [] },
-        models: ["fixture-model"],
-        status: "running",
-        hasArtifact: false
+        artifactVersion: "server.match-live-start.v1",
+        kind: "match-live-start",
+        matchId: liveMatchId,
+        lifecycle: "running",
+        artifactAvailable: false,
+        projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true },
+        id: "fixture-operator-registry-id",
+        state: { phase: "night_wolves", privateMemo: "fixture-start-private-state" },
+        models: ["fixture-start-model"],
+        nativeSteps: 99,
+        checkpointCount: 7
       })
     });
   });
@@ -271,6 +291,7 @@ test("renders only a server-owned live public table and does not reconstruct a f
   expect((await runResponse).status()).toBe(202);
 
   const board = page.getByTestId("werewolf-live-board");
+  await expect(page.getByTestId("live-spectator-shell")).toBeVisible();
   await expect(board.getByText("实时公开局面 · 服务端权威")).toBeVisible();
   await expect(board.getByRole("region", { name: "狼人杀实时公开座位" }).getByRole("listitem")).toHaveCount(2);
   await expect(board).toContainText("夜晚");
@@ -289,11 +310,95 @@ test("renders only a server-owned live public table and does not reconstruct a f
   }
   await expect(board.locator('[data-testid^="werewolf-seat-role-"]')).toHaveCount(0);
   await expect(board.getByRole("button")).toHaveCount(0);
+  await expect(page.getByText("运行注册表")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "运行实验", exact: true })).toHaveCount(0);
+  const spectatorText = await page.getByTestId("live-spectator-shell").textContent();
+  for (const forbidden of ["fixture-operator-registry-id", "night_wolves", "fixture-start-private-state", "fixture-start-model", "nativeSteps", "checkpointCount"]) {
+    expect(spectatorText).not.toContain(forbidden);
+  }
 
   await expect(page.locator(".ant-alert-error").filter({ hasText: "服务端没有可加载的赛后工件" })).toBeVisible({ timeout: 5_000 });
   expect(liveReads).toBeGreaterThanOrEqual(2);
+  expect(registryReadsDuringLive).toEqual([]);
   expect(artifactViews.slice(artifactViewsBeforeLiveRun)).not.toContain("full");
   expect(artifactViews.slice(artifactViewsBeforeLiveRun)).not.toContain("postgame-redacted");
+});
+
+test("hands a successful live spectator directly to its postgame-redacted artifact without reading the operator registry", async ({ page }) => {
+  test.setTimeout(15_000);
+  const artifactViews: string[] = [];
+  const registryReadsDuringLive: string[] = [];
+  let liveStartAcknowledged = false;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.endsWith("/artifact")) artifactViews.push(url.searchParams.get("view") ?? "default");
+  });
+
+  await page.goto("/?workspace=domain", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+  const artifactViewsBeforeLiveRun = artifactViews.length;
+
+  await page.route("**/api/matches", async (route) => {
+    if (route.request().method() === "GET" && liveStartAcknowledged) {
+      registryReadsDuringLive.push(route.request().url());
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "registry not available to spectator" }) });
+      return;
+    }
+    await route.continue();
+  });
+  await page.route("**/api/matches/run", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    liveStartAcknowledged = true;
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        artifactVersion: "server.match-live-start.v1",
+        kind: "match-live-start",
+        matchId: fixtureMatchId,
+        lifecycle: "running",
+        artifactAvailable: false,
+        projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true }
+      })
+    });
+  });
+  let liveReads = 0;
+  await page.route(`**/api/matches/${fixtureMatchId}/live`, async (route) => {
+    liveReads += 1;
+    const body =
+      liveReads === 1
+        ? {
+            artifactVersion: "server.match-live-projection.v1",
+            kind: "match-live-projection",
+            matchId: fixtureMatchId,
+            lifecycle: "running",
+            artifactAvailable: false,
+            projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true },
+            publicState: { phase: "day", day: 1, players: [], speeches: [], votes: [], deaths: [] }
+          }
+        : {
+            artifactVersion: "server.match-live-projection.v1",
+            kind: "match-live-projection",
+            matchId: fixtureMatchId,
+            lifecycle: "completed",
+            artifactAvailable: true
+          };
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+
+  await page.getByRole("button", { name: "运行实验", exact: true }).click();
+  await expect(page.getByTestId("live-spectator-shell")).toBeVisible();
+  await expect(page.getByTestId("werewolf-live-board")).toContainText("实时公开局面 · 服务端权威");
+  await expect(page.getByTestId("werewolf-live-board")).toHaveCount(0, { timeout: 5_000 });
+  await expect(page.getByTestId("werewolf-review-board")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+  expect(liveReads).toBeGreaterThanOrEqual(2);
+  expect(registryReadsDuringLive).toEqual([]);
+  expect(artifactViews.slice(artifactViewsBeforeLiveRun)).toContain("postgame-redacted");
+  expect(artifactViews.slice(artifactViewsBeforeLiveRun)).not.toContain("full");
 });
 
 test("loads a server-authoritative native replay frame without a browser-side game transition", async ({ page }) => {
@@ -549,12 +654,21 @@ test("submits a heterogeneous Agent roster through the existing harness control 
   const response = await runResponse;
   expect(response.status()).toBe(202);
   expect(response.ok()).toBeTruthy();
-  const record = await response.json();
-  expect(record).toMatchObject({ status: "running", hasArtifact: false });
+  const start = await response.json();
+  expect(start).toMatchObject({
+    artifactVersion: "server.match-live-start.v1",
+    kind: "match-live-start",
+    matchId: expect.any(String),
+    lifecycle: "running",
+    artifactAvailable: false,
+    projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true }
+  });
   // The immediate response only acknowledges the server-owned run. Its
   // terminal artifact remains server-owned and is fetched later through the
   // ordinary redacted route after the live projection reaches a terminal state.
-  expect(record).not.toHaveProperty("artifact");
+  expect(start).not.toHaveProperty("artifact");
+  expect(start).not.toHaveProperty("state");
+  expect(start).not.toHaveProperty("models");
 });
 
 test("submits the selected parallel scheduler when exporting a tournament public pack", async ({ page }) => {

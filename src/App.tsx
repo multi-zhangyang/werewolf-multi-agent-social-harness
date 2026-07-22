@@ -38,6 +38,7 @@ import {
   CloudDownloadOutlined,
   CodeOutlined,
   DatabaseOutlined,
+  EyeInvisibleOutlined,
   EyeOutlined,
   ExperimentOutlined,
   FileSearchOutlined,
@@ -100,7 +101,7 @@ import { AgentDecisionEvidencePanel, buildDecisionJournalEvidence } from "./comp
 import { SocialEvidenceGraph } from "./components/cockpit/SocialEvidenceGraph";
 import { WerewolfLiveBoard } from "./components/cockpit/WerewolfLiveBoard";
 import { WerewolfReviewBoard } from "./components/cockpit/WerewolfReviewBoard";
-import { readLiveMatchProjection, type LiveMatchProjection } from "./components/cockpit/werewolfLiveProjection";
+import { readLiveMatchProjection, readLiveMatchStart, type LiveMatchProjection } from "./components/cockpit/werewolfLiveProjection";
 import { buildWerewolfReviewModel } from "./components/cockpit/werewolfReviewProjection";
 
 type Workspace = "runs" | "timeline" | "domain" | "society" | "lineage" | "evaluation" | "experiments" | "compare" | "packs";
@@ -939,7 +940,7 @@ export function App() {
     [experimentDraft, models]
   );
   const artifactBackedMatches = useMemo(() => matches.filter((match) => match.hasArtifact), [matches]);
-  const currentMatchId = selectedMatch?.id ?? artifact?.matchId ?? artifact?.runId ?? "";
+  const currentMatchId = liveMatchId ?? artifact?.matchId ?? artifact?.runId ?? selectedMatch?.id ?? "";
   const selectedStep = artifact?.socialEpisode?.steps?.[selectedStepIndex] ?? null;
   const agents = artifact?.agents ?? [];
   const selectedAgent = selectedAgentId ? agents.find((agent) => agent.playerId === selectedAgentId) ?? null : agents[0] ?? null;
@@ -1091,22 +1092,36 @@ export function App() {
   );
 
   const loadArtifact = useCallback(
-    async (match: MatchRecord, view: ArtifactView, comparisonCandidateId?: string) => {
+    async (
+      match: MatchRecord | string,
+      view: ArtifactView,
+      comparisonCandidateId?: string,
+      options: { preserveLiveUntilLoaded?: boolean } = {}
+    ) => {
+      const matchId = typeof match === "string" ? match : match.id;
+      const selectedSummary = typeof match === "string" ? matches.find((candidate) => candidate.id === matchId) ?? null : match;
       const requestSeq = artifactLoadSeqRef.current + 1;
       artifactLoadSeqRef.current = requestSeq;
       // A terminal artifact is the next authority boundary. It supersedes any
-      // ephemeral live table and also cancels an in-flight poll response.
+      // ephemeral live table and also cancels an in-flight poll response. A
+      // live terminal handoff can retain the narrow spectator shell until the
+      // server artifact has actually passed local projection validation.
       livePollSeqRef.current += 1;
-      setLiveMatchId(null);
-      setLiveProjection(null);
-      setLivePollError(null);
-      setBusy(`artifact:${match.id}`);
+      if (!options.preserveLiveUntilLoaded) {
+        setLiveMatchId(null);
+        setLiveProjection(null);
+        setLivePollError(null);
+      }
+      setBusy(`artifact:${matchId}`);
       try {
-        const nextArtifact = await apiJson<ProjectedMatchArtifact>(`/api/matches/${encodeURIComponent(match.id)}/artifact?view=${view}`);
+        const nextArtifact = await apiJson<ProjectedMatchArtifact>(`/api/matches/${encodeURIComponent(matchId)}/artifact?view=${view}`);
         if (requestSeq !== artifactLoadSeqRef.current) return;
         assertServerProjectedArtifact(nextArtifact, "match artifact");
-        assertArtifactMatchesId(nextArtifact, match.id, "match artifact");
-        setSelectedMatch(match);
+        assertArtifactMatchesId(nextArtifact, matchId, "match artifact");
+        setLiveMatchId(null);
+        setLiveProjection(null);
+        setLivePollError(null);
+        setSelectedMatch(selectedSummary);
         setArtifact(nextArtifact);
         setArtifactView(view);
         setReplay(null);
@@ -1127,11 +1142,11 @@ export function App() {
         setSelectedAgentId(nextArtifact.agents[0]?.playerId ?? "");
         setInspector(inspectorFromArtifact(nextArtifact));
         setActionStatus(
-          `已加载脱敏工件：${shortId(match.id)} · view=${view} · native=${loadedStepCounts.nativeSteps} · committed=${loadedStepCounts.committedSteps} · rejected=${loadedStepCounts.rejectedSteps} · legacy projection=${nextArtifact.trajectory.length}`
+          `已加载脱敏工件：${shortId(matchId)} · view=${view} · native=${loadedStepCounts.nativeSteps} · committed=${loadedStepCounts.committedSteps} · rejected=${loadedStepCounts.rejectedSteps} · legacy projection=${nextArtifact.trajectory.length}`
         );
-        if (comparisonCandidateId && comparisonCandidateId !== match.id) {
+        if (comparisonCandidateId && comparisonCandidateId !== matchId) {
           await loadComparisonPair({
-            baselineId: match.id,
+            baselineId: matchId,
             candidateId: comparisonCandidateId,
             view,
             statusPrefix: "基准切换后对比已重载"
@@ -1147,7 +1162,7 @@ export function App() {
         }
       }
     },
-    [loadComparisonPair, setActionStatus]
+    [loadComparisonPair, matches, setActionStatus]
   );
 
   const handleArtifactViewChange = useCallback(
@@ -1246,7 +1261,7 @@ export function App() {
       const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
       const transitions = parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS);
       assertJointPhaseSchedulerTransitionBudget(jointPhaseScheduler, transitions);
-      const record = await apiJson<MatchRecord>("/api/matches/run", {
+      const rawStart = await apiJson<unknown>("/api/matches/run", {
         method: "POST",
         body: JSON.stringify({
           ...experimentRequest,
@@ -1259,10 +1274,13 @@ export function App() {
           live: true
         })
       });
-      await refreshMatches();
+      const start = readLiveMatchStart(rawStart);
       artifactLoadSeqRef.current += 1;
       livePollSeqRef.current += 1;
-      setSelectedMatch(record);
+      // A live spectator must not receive or display operator registry truth
+      // while the episode is running. The narrow start DTO owns only this id;
+      // the registry is read only after a terminal artifact is advertised.
+      setSelectedMatch(null);
       setArtifact(null);
       setCandidateArtifact(null);
       setComparison(null);
@@ -1279,17 +1297,17 @@ export function App() {
       setBranchTree(null);
       setLiveProjection(null);
       setLivePollError(null);
-      setLiveMatchId(record.id);
+      setLiveMatchId(start.matchId);
       setWorkspace("domain");
       setActionStatus(
-        `真实 harness run 已启动：${shortId(record.id)} · 正在显示服务端公开实时局面 · joint=${jointPhaseScheduler}`
+        `真实 harness run 已启动：${shortId(start.matchId)} · 正在显示服务端公开实时局面 · joint=${jointPhaseScheduler}`
       );
     } catch (nextError) {
       setActionStatus("真实 harness run 失败", errorMessage(nextError));
     } finally {
       setBusy(null);
     }
-  }, [experimentDraftError, experimentRequest, jointPhaseScheduler, maxTransitions, refreshMatches, setActionStatus, timeoutSeconds]);
+  }, [experimentDraftError, experimentRequest, jointPhaseScheduler, maxTransitions, setActionStatus, timeoutSeconds]);
 
   useEffect(() => {
     if (!liveMatchId) return;
@@ -1300,28 +1318,22 @@ export function App() {
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const finishTerminalProjection = async (projection: Extract<LiveMatchProjection, { lifecycle: "completed" | "truncated" | "failed" }>) => {
-      try {
-        const records = await refreshMatches();
-        if (disposed || pollSequence !== livePollSeqRef.current) return;
-        const terminalMatch = records.find((match) => match.id === projection.matchId);
-        if (projection.artifactAvailable && terminalMatch?.hasArtifact) {
-          // loadArtifact owns the final switch and invalidates this polling
-          // sequence before it fetches the postgame-redacted artifact.
-          void loadArtifact(terminalMatch, "postgame-redacted", candidateId);
-          return;
-        }
-        setLiveMatchId(null);
+      if (!projection.artifactAvailable) {
+        // Keep the closed spectator shell mounted. There is no artifact
+        // authority to load and no reason to fetch/render operator registry
+        // metadata after an artifact-less terminal outcome.
         setActionStatus(
           projection.lifecycle === "failed"
             ? "实时局已失败，服务端未提供可加载的赛后工件。"
             : "实时局已结束，但服务端没有可加载的赛后工件。"
         );
-      } catch (nextError) {
-        if (disposed || pollSequence !== livePollSeqRef.current) return;
-        setLivePollError(errorMessage(nextError));
-        setLiveMatchId(null);
-        setActionStatus("实时局已结束，但运行注册表刷新失败。", errorMessage(nextError));
+        return;
       }
+      // The terminal DTO's id is enough to fetch its postgame projection.
+      // Do not consult `/api/matches` first: that is an operator registry and
+      // must not be a spectator prerequisite or a live metadata side channel.
+      if (disposed || pollSequence !== livePollSeqRef.current) return;
+      void loadArtifact(projection.matchId, "postgame-redacted", candidateId, { preserveLiveUntilLoaded: true });
     };
 
     const poll = async () => {
@@ -1351,7 +1363,7 @@ export function App() {
       abortController.abort();
       if (timer) clearTimeout(timer);
     };
-  }, [candidateId, liveMatchId, loadArtifact, refreshMatches, setActionStatus]);
+  }, [candidateId, liveMatchId, loadArtifact, setActionStatus]);
 
   const handleReplay = useCallback(async () => {
     if (!currentMatchId) {
@@ -2896,6 +2908,12 @@ export function App() {
   ];
 
   const busyAny = Boolean(busy);
+  // A live spectator is a distinct audience from the local research
+  // operator. While this is true, no registry, model/profile, phase-detail,
+  // scheduler, replay, checkpoint, comparison, or inspector UI is mounted.
+  // The only current-match truth rendered by the browser is the narrow
+  // `/api/matches/:id/live` DTO parsed above.
+  const liveSpectatorPresentationActive = Boolean(liveMatchId || liveProjection);
 
   return (
     <ConfigProvider
@@ -2943,6 +2961,10 @@ export function App() {
         }
       }}
     >
+      {liveSpectatorPresentationActive ? (
+        <LiveSpectatorShell projection={liveProjection} pollError={livePollError} />
+      ) : (
+        <>
       <a
         className="skip-to-workspace"
         href="#workspace-main"
@@ -3210,7 +3232,66 @@ export function App() {
           <Input.TextArea readOnly value={JSON.stringify(inspector?.json ?? inspector ?? null, null, 2)} autoSize={{ minRows: 24, maxRows: 40 }} />
         </Drawer>
       </Layout>
+        </>
+      )}
     </ConfigProvider>
+  );
+}
+
+/**
+ * Separate running-match presentation for a public spectator. It intentionally
+ * receives neither MatchRecord nor artifact/operator controls: an ephemeral
+ * live table is not a replay, checkpoint, config, model roster, or execution
+ * progress authority.
+ */
+function LiveSpectatorShell({ projection, pollError }: { projection: LiveMatchProjection | null; pollError: string | null }) {
+  return (
+    <>
+      <a
+        className="skip-to-workspace"
+        href="#workspace-main"
+        onClick={() => {
+          window.requestAnimationFrame(() => document.getElementById("workspace-main")?.focus());
+        }}
+      >
+        跳至实时观战内容
+      </a>
+      <Layout style={{ minWidth: 0, minHeight: "100vh" }} data-testid="live-spectator-shell">
+        <Header style={{ height: "auto", padding: "16px 20px", borderBlockEnd: "1px solid #e4e8f0" }}>
+          <Flex align="center" justify="space-between" gap="middle" wrap="wrap">
+            <Flex vertical gap={4}>
+              <Space size={8}>
+                <EyeInvisibleOutlined style={{ color: "#1455d9" }} />
+                <Title level={1} style={{ margin: 0, fontSize: 20 }}>
+                  狼人杀 · 实时公开观战
+                </Title>
+              </Space>
+              <Text type="secondary">只消费服务端已提交边界的严格公开投影；终局后才切换到记录工件。</Text>
+            </Flex>
+            <Space size={6} wrap>
+              <Tag color="blue">spectator view</Tag>
+              <Tag color={projection?.lifecycle === "running" ? "processing" : projection?.lifecycle === "failed" ? "error" : "default"}>
+                {projection?.lifecycle === "running" ? "live" : projection?.lifecycle ?? "connecting"}
+              </Tag>
+            </Space>
+          </Flex>
+        </Header>
+        <Content id="workspace-main" tabIndex={-1} aria-label="狼人杀实时公开观战" style={{ minWidth: 0, maxWidth: 1500, width: "100%", margin: "0 auto", padding: "20px" }}>
+          {projection ? (
+            <WerewolfLiveBoard projection={projection} pollError={pollError} />
+          ) : (
+            <Card bordered={false} data-testid="werewolf-live-board">
+              <Alert
+                type="info"
+                showIcon
+                message="实时公开局正在连接"
+                description="等待服务端第一个已提交边界的公开投影；浏览器不会从旧工件、注册表或本地状态构造实时局面。"
+              />
+            </Card>
+          )}
+        </Content>
+      </Layout>
+    </>
   );
 }
 
