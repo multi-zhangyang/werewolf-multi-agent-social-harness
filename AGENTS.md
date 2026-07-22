@@ -28081,3 +28081,197 @@ npm run test:e2e
 git diff --check
   passed
 ```
+
+## 13.297 Cross-Process Writer Fencing, Verified Environment Rollback, And Matrix Prefix Resume Lock
+
+Timestamp: `2026-07-22`
+
+This lock records the next harness-first durability and replay hardening pass.
+It does not change provider/model selection, prompt behavior, reasoner policy,
+Werewolf business rules, or the existing streaming-only live-call contract.
+
+### 13.297.1 Single-Host Experiment Writer Authority
+
+`HarnessExperimentRunStore` no longer relies on its instance-local `mutating`
+set as the only writer guard.
+
+New revisions use one deterministic numeric directory slot:
+
+```text
+000000000001
+000000000002
+...
+```
+
+The slot is the filesystem compare-and-swap boundary. Two processes deriving
+different candidates for revision `N + 1` can no longer publish two different
+content-hash directories with the same sequence number. The winner publishes
+atomically; the loser re-reads canonical authority and either converges on an
+exact idempotent transition or fails closed on drift. Historical
+content-addressed revision directory names remain readable for migration.
+
+Production `runGenericExperiment()` now uses the durable store's optional
+run-scoped lease around the entire lifecycle:
+
+```text
+lease acquire
+  -> begin/resume
+  -> recover
+  -> prepare/run/evaluate
+  -> stage
+  -> artifact put
+  -> terminal membership
+  -> finalize
+lease release
+```
+
+The local implementation uses the host kernel's `flock` authority. A second
+live process fails closed instead of marking a slow provider/domain execution
+as an interrupted attempt. `SIGKILL` closes the parent's lock pipe and releases
+the kernel lock, after which the existing V2 recovery path may adopt or fail the
+interrupted attempt. The revision CAS remains a lower-level fence even if a
+caller bypasses the high-level orchestration lease.
+
+`entries` is now only a cache/projection. `loadKnownRun()` derives the canonical
+directory from `runSetId` and reads it directly, so a store instance opened
+before another process creates a run can still discover that run. `index.json`
+publication is globally locked. Its write path validates each canonical run
+head rather than re-verifying every historical revision and episode sidecar on
+every mutation; complete history/sidecar verification remains mandatory on
+`open`, `get`, and `list`. This avoids quadratic long-lived-server behavior
+without promoting the derived index to authority.
+
+Proved by tests:
+
+- two independent store instances converge on one start attempt;
+- two real Node processes concurrently creating/starting one run publish only
+  revision slots 1 and 2 and retain one `attemptId`;
+- two real Node processes creating different runs preserve both entries in the
+  globally locked derived index;
+- a second live run lease is rejected;
+- the lease can be reacquired after release;
+- all five existing real `SIGKILL` V2 crash points still recover.
+
+Capability boundary:
+
+```text
+proved:
+  single-host/local-filesystem cross-process exclusive run execution
+  immutable numeric revision-slot CAS
+  SIGKILL writer handoff
+
+not claimed:
+  distributed or network-filesystem exactly-once
+  consensus-backed fencing
+  power-loss durability
+  file/directory fsync publication
+```
+
+### 13.297.2 Verified Defensive Environment Rollback
+
+`SocialEnvironment` now has an optional `restore(snapshot)` capability. This
+does not weaken the primary contract: `validateAction`, `step`, and `stepBatch`
+must still be atomic. Restore is a defensive harness recovery path for a buggy
+or legacy in-memory adapter that mutates canonical state and then throws before
+the environment return/commit boundary.
+
+The runner now:
+
+1. captures the point-of-failure snapshot;
+2. detects mutation with a canonical snapshot fingerprint even when no
+   `hashState` function exists;
+3. invokes restore at most once per failed transition/joint batch;
+4. re-snapshots and verifies fingerprint, optional state hash, and optional
+   event sequence against the pre-transition authority;
+5. records a successful recovery as a real rejected no-op with equal pre/post
+   hashes and no event/message range;
+6. preserves `environment_non_atomic_failure` when restore is absent, throws,
+   returns the wrong state, produces a hash mismatch, or produces an event
+   sequence mismatch.
+
+The same contract is wired into sequential actor transitions, true parallel
+`stepBatch`, runner-owned system transitions, and mutating `validateAction`
+preflight. Failure hooks retain the point-of-failure state and also receive the
+effective restored state plus redacted rollback classification. A returned
+environment transition remains the commit boundary: feedback, message bus,
+receipt, snapshot, or post-step hook errors after return never invoke restore
+and never rewrite a committed transition as rejected.
+
+Tests prove successful sequential/preflight/parallel/system recovery, model-free
+replay of the rejected no-op, fingerprint-only detection, restore-throw and
+restore-mismatch fail-closed behavior, one restore for a joint batch, message
+non-publication, and the post-commit no-rollback invariant. Werewolf's existing
+copy-then-publish transitions remain the preferred atomic implementation and do
+not depend on rollback.
+
+### 13.297.3 Durable Matrix Prefix And Control-Plane Failure Boundary
+
+The generic matrix runner now accepts a strictly validated contiguous
+`initialCells` prefix plus `onCellStarting` and `onCellSettled` control-plane
+hooks. Restored identity must match absolute index, matrix id, cell id, label,
+group, execution id, and closed lifecycle vocabulary. A stop-on-error matrix
+cannot restore cells after its first failed terminal cell.
+
+Production Werewolf matrix execution opens one shared orchestration authority
+before entering the cell runner. It reads a contiguous prefix of finalized
+child V2 run-sets, rehydrates their canonical `TournamentResult` without model
+calls, and passes that prefix to the generic runner. Missing or active child
+authority stops prefix hydration and resumes at that absolute cell; the child
+V2 orchestrator then applies its normal started/staged/artifact/membership
+recovery rules.
+
+In durable mode, exceptions escaping child tournament orchestration are now
+control-plane fatal. Store-open errors, provenance conflicts, canonical drift,
+artifact/evaluation integrity failures, revision failures, and invalid lifecycle
+projection can no longer be converted into an ordinary failed matrix cell by
+`continueOnError`. Legitimate domain/provider failures remain reviewed child
+tournament lifecycle results.
+
+The exact remaining matrix boundary is:
+
+```text
+proved:
+  canonical finalized-child prefix hydration
+  no model/reasoner rerun for finalized child cells
+  deterministic absolute cell identity validation
+  control-plane failures abort durable matrix execution
+
+not yet claimed:
+  independent parent matrix revision store/currentCell record
+  stable persisted matrix createdAt or elapsedMs
+  atomic/idempotent matrix artifact-directory export
+  power-loss-safe matrix publication
+```
+
+### 13.297.4 Validation Recorded
+
+Focused validation covered experiment-store concurrency/crash recovery,
+orchestrator resume, generic social replay/rollback, generic matrix control,
+and production Werewolf matrix projection.
+
+Final repository validation after all changes:
+
+```text
+npm run typecheck
+  passed
+
+complete deterministic suite
+  52 files / 569 tests passed
+
+npm run build
+  passed (existing bundle-size warning only)
+
+npm run test:e2e
+  15 passed
+
+git diff --check
+  passed
+```
+
+One first full E2E pass exposed a write-path performance regression: fourteen
+scenarios passed, while the final public-pack request exceeded its 90-second
+budget because every revision publication revalidated all historical revisions
+and episode sidecars. The canonical-head index projection fix was then applied;
+the failed scenario passed alone in 33.5 seconds and the complete E2E suite
+passed in 2.8 minutes, with the final scenario completing in 31.0 seconds. This
+failure was not ignored or reclassified as success.
