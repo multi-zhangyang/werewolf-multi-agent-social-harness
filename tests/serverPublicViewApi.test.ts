@@ -401,6 +401,18 @@ describe("public match API redaction", () => {
     expect(unsupported.status).toBe(400);
   });
 
+  it("preserves closed policy-only provenance without exposing or inventing model telemetry", async () => {
+    const record = await createSensitiveStoredMatch("server-postgame-policy-only-provenance", null);
+    const projected = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=postgame-redacted`);
+
+    expect(projected.status).toBe(200);
+    expect(projected.body.trajectory.length).toBeGreaterThan(0);
+    expect(projected.body.trajectory.every((step: any) => step.reasonerOutput.cognitionSource === "policy")).toBe(true);
+    expect(projected.body.trajectory.every((step: any) => step.turnTrace.cognitionSource === "policy")).toBe(true);
+    expect(projected.body.trajectory.every((step: any) => step.reasonerOutput.content === "[REDACTED deterministic policy memo]")).toBe(true);
+    expect(JSON.stringify(projected.body.trajectory)).not.toContain("[REDACTED model reasoning output]");
+  });
+
   it("serves a truth-redacted artifact projection without postgame role team night or winner truth", async () => {
     const record = await createSensitiveStoredMatch("server-truth-redacted-artifact-projection");
 
@@ -1490,6 +1502,7 @@ describe("public match API redaction", () => {
 	      actionRecorded: expect.any(Boolean),
 	      policyRecorded: expect.any(Boolean),
 	      commandRecorded: expect.any(Boolean),
+	      environmentValidated: true,
 	      confidence: expect.any(Number)
 	    });
 	    expect(probe.body.summary.harnessTurn).not.toHaveProperty("actorId");
@@ -1742,14 +1755,14 @@ describe("public match API redaction", () => {
   });
 });
 
-async function createSensitiveStoredMatch(seed: string) {
+async function createSensitiveStoredMatch(seed: string, reasoner: HarnessReasoner | null = fakeReasoner) {
   const record = createMatchRecord({ seed, models: ["alpha", "beta"] });
   const profiles = profilesFromModels(record.models, 0.3);
   const agents = resolveAgentConfigs(record.state.players, profiles, 0, 0.3);
   const result = await runHarnessMatch({
     initialState: record.state,
     agents,
-    reasoner: fakeReasoner,
+    reasoner: reasoner ?? undefined,
     maxTransitions: 3,
     recordAgentSnapshots: true
   });

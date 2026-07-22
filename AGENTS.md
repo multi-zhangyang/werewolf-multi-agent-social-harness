@@ -26227,3 +26227,86 @@ git diff --check
 Live validation remains the normal bounded streaming ladder and must use only
 current allowed runtime candidates. A controlled provider error is not a
 successful model proof; never invoke the withdrawn `grok-4.5` for comparison.
+
+## 13.272 Production-Equivalent Probe And Policy-Truth Cockpit Lock
+
+Timestamp: `2026-07-22`
+
+The harness probe is a bounded live-provider diagnostic, not a lightweight
+alternative runtime and not an unrecorded match. It must exercise the same
+production agent boundary before it may claim that a candidate is locally
+acceptable:
+
+```text
+streaming provider completion
+  -> production scaffolded actor cognition
+  -> policy/arbitration candidate
+  -> pure deterministic environment validateAction()
+  -> closed probe summary only
+
+never environment step
+never receipt commit
+never agent durable-state commit
+never artifact write
+```
+
+- `probeWerewolfSocialHarnessTurn()` creates the `scaffold` execution mode,
+  exactly as production match/tournament/matrix runs do. It calls the domain
+  environment's pure `validateAction()` boundary and verifies that its
+  snapshot hash does not change. Its only public success fact is the closed
+  boolean `environmentValidated: true`; it never returns the raw command,
+  private memo, target, actor identity, provider id, or response body through
+  the API diagnostic projection.
+- A probe that fails before a stream completion has not proved parsing,
+  policy/arbitration, environment validation, commit, replay, or artifact
+  behavior. It must be reported as a provider/control failure, not as a
+  completed model-backed match.
+- CLI match artifacts now pass the same
+  `assertValidMatchArtifactIntegrity()` gate used by server persistence before
+  an export, JSONL write, or `--json=full` print can occur.
+
+Postgame Cockpit projections preserve one additional closed provenance field:
+
+```text
+cognitionSource = reasoner | policy
+```
+
+- A policy-only turn is displayed as `Deterministic policy narration · no
+  model call`. The browser must omit model name, latency, token count,
+  attempts, and `Reasoner telemetry` for that turn, even when its experiment
+  profile retains an assigned model label.
+- The field is content-free and is allowed only in local
+  `postgame-redacted` research review. Private memo text remains redacted. Old
+  artifacts lacking the field conservatively retain their historical
+  reasoner-backed interpretation.
+- The server redacts policy memo content with a distinct fixed sentinel rather
+  than falsely labelling it model reasoning. Native/social action metadata
+  follows the same closed projection.
+- The social evidence graph is an interactive SVG group with an accessible
+  title/description and keyboard-operable recorded nodes/edges. On compact
+  screens its canvas scrolls locally at a legible minimum graph width; the
+  page itself must not gain horizontal overflow. The Cockpit has a skip link
+  to its named main workspace, and repeated society-table actions name their
+  target agent.
+
+Validation completed for this lock:
+
+```bash
+npm run typecheck
+npx vitest run tests/agentDecisionEvidencePanel.test.ts tests/harness.test.ts \
+  tests/serverPublicViewApi.test.ts --testTimeout=60000 --maxWorkers=1 \
+  --no-file-parallelism
+npx vitest run tests --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=json
+npm run build
+npm run test:e2e
+git diff --check
+```
+
+The final deterministic suite passed **44 suites / 469 tests**. The production
+build passed with the existing Vite main-chunk-size warning. The 10-fixture
+Cockpit browser suite passed. The bounded real streaming probe for the current
+generic OpenAI-compatible candidate stopped at a controlled HTTP 503 before a
+stream completion; provider health therefore remains unproven. No
+model-specific adapter, prompt/parser branch, fallback, or token-limit field
+was added.

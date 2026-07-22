@@ -435,6 +435,7 @@ describe("harness agent-environment cycle", () => {
       }
     });
     expect(probe.trace).not.toHaveProperty("providerRequestId");
+    expect(probe.environmentValidated).toBe(true);
     expect(probe.command).toMatchObject({
       type: "seer.inspect",
       actorId: action.actorId

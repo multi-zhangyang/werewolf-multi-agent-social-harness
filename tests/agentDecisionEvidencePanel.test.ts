@@ -50,7 +50,7 @@ describe("agent decision evidence projection", () => {
       pendingKind: "seer.inspect",
       proposal: { commandType: "seer.inspect", messageDraftCount: 2 },
       policy: { name: "balanced", confidence: 0.8, strategyTags: ["evidence-led"] },
-      reasoner: { model: "model-a", latencyMs: 123, promptTokens: 10, completionTokens: 20 },
+      cognition: { source: "reasoner", model: "model-a", latencyMs: 123, promptTokens: 10, completionTokens: 20 },
       receipt: { status: "committed", decisionStateHash: "decision-hash" }
     });
     const serialized = JSON.stringify(view);
@@ -74,9 +74,28 @@ describe("agent decision evidence projection", () => {
     expect(view).toMatchObject({
       availability: "native-only",
       policy: undefined,
-      reasoner: undefined,
+      cognition: undefined,
       receipt: { status: "rejected", failureStage: "environment" }
     });
+  });
+
+  it("keeps policy-only cognition as provenance without inventing a model call", () => {
+    const native = {
+      traceId: "policy-trace",
+      actorId: "p1",
+      pendingAction: { kind: "speech.submit", redacted: true },
+      action: { kind: "speak", command: { type: "speech.submit", redacted: true } },
+      schedulerMode: "aec"
+    } as unknown as RedactedSocialStepDto;
+    const legacy = {
+      traceId: "policy-trace",
+      model: "assigned-but-not-called",
+      policyPlan: { policyName: "balanced", confidence: 0.8, strategyTags: [] },
+      reasonerOutput: { content: "[REDACTED deterministic policy memo]", cognitionSource: "policy", latencyMs: 0, attempts: 99 },
+      turnTrace: { cognitionSource: "policy" }
+    } as unknown as RedactedHarnessStepDto;
+
+    expect(buildAgentDecisionEvidenceView(native, legacy).cognition).toEqual({ source: "policy" });
   });
 
   it("keeps only content-free journal identity fields for the exact actor and trace", () => {

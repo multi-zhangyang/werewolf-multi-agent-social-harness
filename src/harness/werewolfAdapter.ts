@@ -1077,7 +1077,17 @@ export async function runWerewolfSocialHarnessPrefixAsHarnessResult(
   });
 }
 
-export async function probeWerewolfSocialHarnessTurn(options: WerewolfHarnessTurnProbeOptions): Promise<{ trace: HarnessTurnTrace; command: GameCommand }> {
+/**
+ * Executes production actor cognition and a pure environment preflight, but
+ * deliberately neither steps the environment nor emits an artifact. A probe
+ * is therefore useful live-provider evidence without becoming an unrecorded
+ * match transition or a side channel for private command details.
+ */
+export async function probeWerewolfSocialHarnessTurn(options: WerewolfHarnessTurnProbeOptions): Promise<{
+  trace: HarnessTurnTrace;
+  command: GameCommand;
+  environmentValidated: true;
+}> {
   const probeConfigs = options.state.players.map((player) => ({
     playerId: player.id,
     profileId: player.id === options.agent.playerId ? options.agent.profileId : undefined,
@@ -1103,7 +1113,8 @@ export async function probeWerewolfSocialHarnessTurn(options: WerewolfHarnessTur
   const socialActor = new WerewolfSocialActorAdapter({
     actor,
     reasoner: options.reasoner,
-    players: options.state.players
+    players: options.state.players,
+    executionMode: "scaffold"
   });
   socialActor.observe(observation, {
     traceId,
@@ -1118,9 +1129,19 @@ export async function probeWerewolfSocialHarnessTurn(options: WerewolfHarnessTur
   const action = await socialActor.decide(options.action);
   const trace = socialActor.turnTraceFor(action.traceId);
   if (!trace) throw new Error(`Probe did not record a harness turn trace for ${action.traceId ?? options.action.actorId}.`);
+  const beforeValidationHash = hashStableState(environment.snapshot());
+  const validation = environment.validateAction(action.command, cloneJson(options.action));
+  const afterValidationHash = hashStableState(environment.snapshot());
+  if (beforeValidationHash !== afterValidationHash) {
+    throw new Error("Harness probe environment validation mutated canonical state.");
+  }
+  if (!validation.valid) {
+    throw new Error(`Harness probe command failed environment validation (${validation.code ?? "invalid"}).`);
+  }
   return {
     trace,
-    command: action.command
+    command: action.command,
+    environmentValidated: true
   };
 }
 
