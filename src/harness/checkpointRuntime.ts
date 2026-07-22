@@ -100,10 +100,17 @@ export async function runForkedHarnessEpisode<TState, TAgentState, TObservation,
   if (adapterErrors.length) {
     throw new Error(`Checkpoint adapter compatibility failed for ${options.checkpoint.checkpointId}: ${adapterErrors.join(" ")}`);
   }
-  if (options.episode.domainAdapter) {
+  // A manifest-bearing checkpoint cannot silently fork into a new legacy
+  // episode merely because a caller omitted the child field. The runtime
+  // manifest is already proven compatible with the parent above, so it is the
+  // truthful provenance to inherit for this continuation.
+  const effectiveChildAdapter =
+    options.episode.domainAdapter ??
+    (options.checkpoint.executionPrefix.domainAdapter ? options.runtime.domainAdapter : undefined);
+  if (effectiveChildAdapter) {
     const childAdapterErrors = compareSocialDomainAdapterManifests(
       options.runtime.domainAdapter,
-      options.episode.domainAdapter,
+      effectiveChildAdapter,
       { recordedPath: "checkpoint runtime adapter", runtimePath: "fork episode adapter" }
     );
     if (childAdapterErrors.length) {
@@ -121,6 +128,7 @@ export async function runForkedHarnessEpisode<TState, TAgentState, TObservation,
   const seed = buildSocialCheckpointForkSeed(options.checkpoint, options);
   const socialEpisode = await runHarnessEpisode({
     ...options.episode,
+    domainAdapter: effectiveChildAdapter,
     environment: options.runtime.createEnvironment(structuredClone(seed.initialState)),
     actors: options.runtime.restoreActors(structuredClone(seed.initialAgentStates)),
     channels: structuredClone(seed.initialSocialChannels),

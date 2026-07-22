@@ -1276,7 +1276,8 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     failureReason = "Parallel scheduler requires environment.stepBatch().";
     return {
       id: options.id,
-      domainId: options.domainId,
+      domainId: options.domainAdapter?.domainId ?? options.domainId,
+      domainAdapter: options.domainAdapter ? cloneSocialDomainAdapterManifest(options.domainAdapter) : undefined,
       status: "failed",
       execution,
       schedulerMode: defaultSchedulerMode,
