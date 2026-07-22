@@ -776,7 +776,9 @@ test("submits the selected parallel scheduler when exporting a tournament public
   );
   await expect(page.getByTestId("tournament-execution-attempts")).toContainText("attempts");
   await expect(page.getByTestId("tournament-execution-errors")).toContainText("harness errors");
-  await expect(telemetry).toContainText("fixture-model");
+  const executionModels = Object.keys(responseBody.summary.executionTelemetry.byModel ?? {});
+  expect(executionModels.length).toBeGreaterThan(0);
+  await expect(telemetry).toContainText(executionModels[0]!);
 });
 
 function isArtifactResponse(response: Response, view: "postgame-redacted" | "truth-redacted"): boolean {

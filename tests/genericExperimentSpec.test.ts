@@ -1,8 +1,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  createGenericExperimentForkLineage,
+  createGenericExperimentProvenance,
   GENERIC_EXPERIMENT_SPEC_VERSION,
   normalizeGenericExperimentSpec,
+  validateGenericExperimentForkLineage,
+  validateGenericExperimentProvenance,
   validateGenericExperimentSpec,
   type GenericExperimentSpecV1
 } from "../src/harness/generic";
@@ -114,6 +118,75 @@ describe("generic normalized experiment spec", () => {
     expect(normalized.kind).toBe("episode");
   });
 
+  it("binds normalized specs to stable hashes and caller-declared fork changes", () => {
+    const parent = createGenericExperimentProvenance(tournamentSpec());
+    expect(validateGenericExperimentProvenance(parent)).toEqual([]);
+    expect(createGenericExperimentProvenance(JSON.parse(JSON.stringify(parent.spec)))).toEqual(parent);
+
+    const child = createGenericExperimentProvenance({
+      ...tournamentSpec(),
+      id: "ledger-screen-fork",
+      seed: "ledger-child-seed",
+      schedulerMode: "parallel",
+      profiles: [
+        { id: "analyst", version: "2", policyId: "ledger.policy.analyst.v2", reasonerId: "reasoner.standard", temperature: 0.2 },
+        { id: "deterministic", version: "1", policyId: "ledger.policy.rule" }
+      ],
+      modelAssignments: [{ profileId: "analyst", modelId: "provider/model:counterfactual" }],
+      domainConfig: { alphabet: ["c", "b", "a"], rules: { allowOverwrite: true, requiredEntries: 3 } }
+    });
+    const lineage = createGenericExperimentForkLineage({
+      parent,
+      child,
+      // Deliberately unsorted: the caller names semantics and the builder
+      // canonicalizes the resulting audit record.
+      changedFields: [
+        { field: "seed", reason: "counterfactual seed" },
+        { field: "profiles" },
+        { field: "modelAssignments" },
+        { field: "schedulerMode" },
+        { field: "domainConfig" },
+        { field: "id" }
+      ]
+    });
+
+    expect(lineage.changedFields.map(({ field }) => field)).toEqual([
+      "domainConfig",
+      "id",
+      "modelAssignments",
+      "profiles",
+      "schedulerMode",
+      "seed"
+    ]);
+    expect(validateGenericExperimentForkLineage(lineage)).toEqual([]);
+    expect(() =>
+      createGenericExperimentForkLineage({ parent, child, changedFields: [{ field: "seed" }] })
+    ).toThrow(/explicitly and exactly declare/i);
+
+    const forged = JSON.parse(JSON.stringify(lineage)) as typeof lineage;
+    forged.changedFields[0]!.childValueHash = "forged-domain-config-hash";
+    expect(validateGenericExperimentForkLineage(forged).join(" ")).toMatch(/childValueHash does not match/i);
+    const noncanonicalReason = JSON.parse(JSON.stringify(lineage)) as typeof lineage;
+    const reasoned = noncanonicalReason.changedFields.find(({ field }) => field === "seed");
+    if (!reasoned) throw new Error("seed lineage fixture is missing");
+    reasoned.reason = " counterfactual seed ";
+    expect(validateGenericExperimentForkLineage(noncanonicalReason).join(" ")).toMatch(/reason must be canonical/i);
+
+    const forgedSpec = JSON.parse(JSON.stringify(parent)) as typeof parent;
+    forgedSpec.spec.seed = "tampered-without-rehash";
+    expect(validateGenericExperimentProvenance(forgedSpec).join(" ")).toMatch(/specHash does not match/i);
+
+    const timestampA = createGenericExperimentProvenance({
+      ...tournamentSpec(),
+      domainConfig: { createdAt: "2026-07-22T01:00:00.000Z" }
+    });
+    const timestampB = createGenericExperimentProvenance({
+      ...tournamentSpec(),
+      domainConfig: { createdAt: "2026-07-22T02:00:00.000Z" }
+    });
+    expect(timestampA.specHash).not.toBe(timestampB.specHash);
+  });
+
   it("applies explicit fields over safe defaults without retaining runtime objects", () => {
     const defaults = tournamentSpec();
     const normalized = normalizeGenericExperimentSpec(
@@ -169,6 +242,9 @@ describe("generic normalized experiment spec", () => {
       })
     ).toThrow(/unknown field/);
     expect(() => normalizeGenericExperimentSpec({ ...base, domainConfig: { apiKey: "must-not-persist" } })).toThrow(/not allowed/);
+    expect(() => normalizeGenericExperimentSpec({ ...base, domainConfig: { api_key_value: "fake-placeholder" } })).toThrow(/not allowed/);
+    expect(() => normalizeGenericExperimentSpec({ ...base, domainConfig: { serviceAuthorizationHeader: "fake" } })).toThrow(/not allowed/);
+    expect(() => normalizeGenericExperimentSpec({ ...base, domainConfig: { provider_endpoint_url: "local-name" } })).toThrow(/not allowed/);
     expect(() => normalizeGenericExperimentSpec({ ...base, domainConfig: { nested: { max_completion_tokens: 10 } } })).toThrow(
       /not allowed/
     );
@@ -183,6 +259,9 @@ describe("generic normalized experiment spec", () => {
       })
     ).toThrow(/not allowed/);
     expect(() => normalizeGenericExperimentSpec({ ...base, domainConfig: { innocuous: "https://provider.invalid/v1" } })).toThrow(
+      /endpoint URL/
+    );
+    expect(() => normalizeGenericExperimentSpec({ ...base, domainConfig: { innocuous: "endpoint is https://provider.invalid/v1" } })).toThrow(
       /endpoint URL/
     );
     expect(() => normalizeGenericExperimentSpec({ ...base, domainConfig: { factory: () => ({}) } })).toThrow(/portable JSON/);

@@ -43,7 +43,7 @@ they are never smuggled into `GameState.events`.
 | Reasoner | `HarnessReasoner`, model client adapters | May produce speech or a private tactical memo and telemetry; owns no environment or agent-state mutation authority. |
 | Communication | `SocialCommunicationBus`, `SocialChannel`, `SocialMessage` | Validates message envelopes before the environment transition and publishes them after a successful transition. |
 | Native artifact | `SocialEpisodeArtifact`, `SocialHarnessStep`, `SocialDomainAdapterManifest` | Records system/player steps, commit status, hashes, message/event ranges, traces, structured failures, and safe versioned domain-adapter provenance. |
-| Generic control plane | `experimentSpec.ts`, `NormalizedGenericExperimentSpecV1` | Owns portable experiment identity, adapter/profile/model assignment, scheduler, limits, evaluator ids, and safe versioned policy refs; never persists factories, endpoints, credentials, or raw provider options. |
+| Generic control plane | `experimentSpec.ts`, `experimentOrchestrator.ts`, `NormalizedGenericExperimentSpecV1` | Owns portable experiment identity, adapter/profile/model assignment, scheduler, limits, evaluator ids, deterministic episode scheduling, provenance binding, canonical persistence handoff, and generic run-set materialization; never persists factories, endpoints, credentials, or raw provider options. |
 | Generic artifact/checkpoint core | `episodeArtifacts.ts`, `socialReplay.ts`, `episodeArtifactStore.ts`, `HarnessEpisodeArtifactEnvelope`, `HarnessCheckpointEnvelope` | Owns domain-neutral structural checks, strong semantic replay acceptance, snapshot/hash/batch/adapter/lineage invariants, and safe single-episode persistence. It receives domain validators and a deterministic environment factory and never calls a model. |
 | Domain artifact | `GameState.events`, `MatchArtifact.events` | Records domain events only. |
 | Evaluation | evaluator registry, `MatchMetrics`, evidence refs | Derives results from domain truth and native execution evidence, never model self-report alone. |
@@ -66,12 +66,43 @@ HarnessEpisodeArtifactEnvelope<TState, TObservation, TPending, TCommand, TAgent>
   = artifact identity + run identity + status
   + initial/final TState
   + SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>
-  + durable TAgent[] + optional fork provenance
+  + durable TAgent[]
+  + optional normalized experiment provenance + optional fork provenance
 
 HarnessCheckpointEnvelope<TState, TAgent, TObservation, TPending, TCommand>
   = checkpoint identity + source hashes and batch boundary
+  + optional parent experiment provenance
   + TState + durable TAgent[] + committed execution prefix
 ```
+
+`GenericExperimentProvenanceV1` retains the complete canonical normalized spec,
+its id/version, and a stable spec hash. Checkpoint selection carries that
+authority without deriving it from commands or environment state. A bound fork
+adds `GenericExperimentForkLineageV1`: independently verifiable parent/child
+specs and hashes plus stable before/after hashes for caller-declared top-level
+changes. The generic layer checks that the declaration exactly covers the
+actual changed fields, but the caller—not the harness—chooses the semantic
+counterfactual fields and reasons. The fields are optional only for legacy
+artifact compatibility.
+
+`runGenericExperiment()` composes the existing generic tournament scheduler,
+domain execution seam, evaluator registry, canonical episode store, and generic
+run-set writer. The control plane creates provenance once and injects it into an
+otherwise unbound domain artifact; if an adapter already supplied provenance,
+it must match exactly. New executions also require recorded scheduler and
+runtime actor count to match the normalized spec. Domain-owned strong artifact
+verification remains responsible for proving that domain configuration and
+profile/model assignments were actually consumed; the generic layer does not
+guess those semantics.
+
+Adapter callbacks receive cloned spec/provenance contexts, not the hidden
+control-plane authority object. In-flight prepare/run/artifact promises are
+raced against the shared experiment deadline; a late result cannot become a
+completed stored episode. Evaluation identity, state, durable agents, and the
+optional social episode are hash-bound to the artifact before evaluators run.
+The public tournament projection strips preparation objects and raw domain
+results so an API cannot accidentally serialize runtime clients or provider
+objects.
 
 For new adapter-bound executions, `SocialDomainAdapterManifest` serializes a
 safe domain id, adapter id/version, semantic digest, and canonical provenance
@@ -94,11 +125,20 @@ never constructs an actor, policy, reasoner, model client, or provider request.
 
 `HarnessEpisodeArtifactStore` is the domain-neutral, single-episode disk
 authority. It hashes run ids into fixed child directories, writes canonical
-artifact/trajectory/manifest files atomically, rebuilds its index by recovery
-scan after restart, and invokes the supplied strong verifier before put and
-after every read. Manifest digests, regenerated JSONL equality, regular-file
-checks, realpath containment, and symlink rejection prevent a persisted record
-from gaining authority through path or content tampering.
+artifact/trajectory/metrics/failures/checkpoint records atomically, rebuilds
+episode and checkpoint registries by recovery scan after restart, and invokes
+the supplied strong verifiers before put and after every read. Evaluation
+reports remain normalized evidence: arbitrary evaluator exception text is not
+copied into `failures.jsonl`. Checkpoint ids are independently hashed and every
+checkpoint operation requires a domain-owned verifier. Manifest digests,
+regenerated JSONL equality, regular-file checks, realpath containment, and
+symlink rejection prevent a persisted record from gaining authority through
+path or content tampering.
+The expanded layout uses manifest/index v2, while restart recovery retains a
+strict v1 reader for the earlier artifact/trajectory-only layout. Legacy
+recovery invents no metric or failure evidence. New checkpoint acceptance also
+requires steps/messages to be an exact recorded prefix and static
+domain/adapter/roster/channel/experiment identity to match the parent episode.
 
 `validateHarnessCheckpointReplay()` receives a domain-owned deterministic
 replay function. Checkpoint creation and restoration additionally require an

@@ -249,15 +249,50 @@ represent provider endpoints, credentials, raw request options, runtime
 factories, or abort signals. The existing `werewolf.experiment.v1` contract
 remains the Werewolf adapter's compatibility specialization.
 
+`createGenericExperimentProvenance()` binds the complete normalized spec to a
+stable `harness.experiment-provenance.v1` identity inside a generic episode or
+checkpoint. Experiment-bound forks retain both parent and child spec/hash
+authority and a canonical list of explicitly caller-declared changed fields
+(for example seed, profiles, model assignments, scheduler, or domain config).
+The generic harness verifies exact field coverage and before/after hashes; it
+does not invent a domain meaning for a counterfactual. Legacy envelopes without
+experiment provenance remain readable, but cannot claim this stronger binding.
+
+`runGenericExperiment()` is the domain-neutral control-plane composition root:
+it normalizes the spec once, derives deterministic episode seeds, resolves the
+requested evaluator registry before starting work, delegates only domain-owned
+prepare/run/artifact projections, binds every produced episode to that exact
+experiment provenance, persists the canonical episode plus reviewed
+metric/failure projections from the evaluation report, and materializes a
+lifecycle-complete tournament run-set. A contradictory
+adapter-supplied provenance is rejected rather than overwritten. The runner
+passes every adapter callback an isolated control-plane snapshot, validates
+the evaluation context against the canonical artifact, races in-flight work
+against the experiment deadline, and exposes no preparation object or raw
+domain result in its public result. It contains no provider, model, prompt, or
+Werewolf-specific behavior.
+
 `verifyHarnessEpisodeArtifact()` is the canonical model-free acceptance gate:
 it combines structural envelope checks, exact adapter binding, deterministic
 environment replay, recorded pending/action validation, and explicit durable
 agent-state semantic validation. `HarnessEpisodeArtifactStore` accepts a
 domain-owned instance of that strong verifier and writes only server-owned,
-content-hashed directories containing `artifact.json`, `trajectory.jsonl`, and
-a manifest. Every put, get, list, and restart recovery re-verifies canonical
-truth; run ids never become host paths, and symlinked or tampered files are
-rejected. This generic store does not call an actor, policy, reasoner, or model.
+content-hashed directories containing `artifact.json`, `trajectory.jsonl`,
+`metrics.jsonl`, `failures.jsonl`, a checkpoint registry, and manifests.
+Evaluator exceptions are reduced to reviewed failure codes/messages instead of
+copying arbitrary provider text. Checkpoints require a separate explicit
+domain-owned strong verifier and are stored below hashed checkpoint ids. Every
+put, get, list, checkpoint read, and restart recovery re-verifies canonical
+truth; run/checkpoint ids never become host paths, and symlinked or tampered
+files are rejected. This generic store does not call an actor, policy,
+reasoner, or model.
+
+The current layout is `harness.episode-store-manifest.v2`. Restart recovery
+strictly dual-reads the earlier v1 artifact/trajectory-only layout as a legacy
+record with empty evaluation/checkpoint projections; a valid v1 episode is not
+silently dropped just because newer sidecars are absent. New v2 recovery also
+re-derives directory hashes from run/checkpoint ids and binds every checkpoint
+to a real prefix of its canonical parent episode.
 
 The API also stores a `MatchArtifact` for completed `/api/matches/run` records:
 

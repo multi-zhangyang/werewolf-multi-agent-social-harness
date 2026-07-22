@@ -1,12 +1,18 @@
-import { mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SocialDomainAdapterManifest } from "../src/harness/domainAdapter";
-import type { HarnessEpisodeArtifactEnvelope } from "../src/harness/episodeArtifacts";
+import type { HarnessCheckpointEnvelope, HarnessEpisodeArtifactEnvelope } from "../src/harness/episodeArtifacts";
+import { runEvaluationRegistry } from "../src/harness/evaluation";
 import {
   HarnessEpisodeArtifactStore,
+  buildHarnessCheckpointFromEpisode,
   deriveHarnessEpisodeTrajectoryJsonl,
+  replaySocialEpisode,
+  validateHarnessCheckpointEnvelope,
+  validateHarnessCheckpointReplay,
   verifyHarnessEpisodeArtifact
 } from "../src/harness/generic";
 import { hashStableState } from "../src/harness/hash";
@@ -44,6 +50,14 @@ type CounterArtifact = HarnessEpisodeArtifactEnvelope<
   CounterPending,
   CounterCommand,
   CounterAgentState
+>;
+
+type CounterCheckpoint = HarnessCheckpointEnvelope<
+  CounterState,
+  CounterAgentState,
+  CounterObservation,
+  CounterPending,
+  CounterCommand
 >;
 
 const counterAdapter: SocialDomainAdapterManifest = {
@@ -132,6 +146,214 @@ describe("generic single-episode artifact store", () => {
     const trajectory = await readFile(path.join(root, "episodes", entry.directoryKey, "trajectory.jsonl"), "utf8");
     expect(trajectory).toBe(deriveHarnessEpisodeTrajectoryJsonl(artifact));
     expect(trajectory.trim().split("\n")).toHaveLength(2);
+    expect(await restarted.getMetrics(artifact.runId)).toEqual([]);
+    expect(await restarted.getFailures(artifact.runId)).toEqual([]);
+  });
+
+  it("recovers the prior v1 artifact/trajectory layout without inventing evaluation evidence", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const store = await HarnessEpisodeArtifactStore.open({ baseDirectory: root, verifyArtifact: counterVerifier() });
+    const entry = await store.put(artifact);
+    const directory = path.join(root, "episodes", entry.directoryKey);
+    const artifactText = await readFile(path.join(directory, "artifact.json"), "utf8");
+    const trajectoryText = await readFile(path.join(directory, "trajectory.jsonl"), "utf8");
+    await rm(path.join(directory, "metrics.jsonl"));
+    await rm(path.join(directory, "failures.jsonl"));
+    await rm(path.join(directory, "checkpoints.index.json"));
+    await rm(path.join(directory, "checkpoints"), { recursive: true });
+    await writeFile(path.join(directory, "manifest.json"), `${JSON.stringify({
+      schemaVersion: "harness.episode-store-manifest.v1",
+      manifestKind: "episode-store-manifest",
+      runId: artifact.runId,
+      artifactVersion: artifact.artifactVersion,
+      kind: artifact.kind,
+      createdAt: artifact.createdAt,
+      status: artifact.status,
+      directoryKey: entry.directoryKey,
+      nativeStepCount: artifact.socialEpisode.steps.length,
+      messageCount: artifact.socialEpisode.messages.length,
+      artifactSha256: rawSha256(artifactText),
+      trajectorySha256: rawSha256(trajectoryText),
+      files: { artifact: "artifact.json", trajectory: "trajectory.jsonl", manifest: "manifest.json" }
+    }, null, 2)}\n`, "utf8");
+
+    const restarted = await HarnessEpisodeArtifactStore.open({ baseDirectory: root, verifyArtifact: counterVerifier() });
+    expect(await restarted.get(artifact.runId)).toEqual(artifact);
+    expect(await restarted.getMetrics(artifact.runId)).toEqual([]);
+    expect(await restarted.getFailures(artifact.runId)).toEqual([]);
+    expect(await restarted.listCheckpoints(artifact.runId)).toEqual([]);
+  });
+
+  it("persists normalized metrics and reviewed failure rows without serializing evaluator exception text", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const rawFailure = "raw-evaluator-secret-sentinel";
+    const evaluationReport = runEvaluationRegistry({
+      id: "counter-evaluation",
+      createdAt: "2026-07-22T13:01:00.000Z",
+      context: {
+        id: artifact.runId,
+        status: artifact.status,
+        initialState: artifact.initialState,
+        finalState: artifact.finalState,
+        agents: artifact.agents,
+        trajectory: artifact.socialEpisode.steps,
+        socialEpisode: artifact.socialEpisode
+      },
+      evaluators: [
+        {
+          id: "counter.value",
+          label: "Counter value",
+          version: "1",
+          evaluate: () => ({
+            evaluatorId: "counter.value",
+            label: "Counter value",
+            version: "1",
+            metrics: [{
+              id: "counter.final-value",
+              label: "Final value",
+              scope: "episode",
+              value: artifact.finalState.value,
+              source: "counter.value",
+              evidenceRefs: [{ artifact: "state", description: "Canonical final counter state." }]
+            }]
+          })
+        },
+        {
+          id: "counter.failing",
+          label: "Failing evaluator",
+          version: "1",
+          evaluate: () => {
+            throw new Error(rawFailure);
+          }
+        }
+      ]
+    });
+    if (!evaluationReport.failures?.[0]) throw new Error("counter fixture did not record evaluator failure");
+    evaluationReport.failures[0].message = rawFailure;
+    const store = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+
+    const entry = await store.put(artifact, { evaluationReport });
+    expect(entry).toMatchObject({ metricCount: 1, failureCount: 1, checkpointCount: 0 });
+    expect(await store.getMetrics(artifact.runId)).toEqual(evaluationReport.metrics);
+    expect(await store.getFailures(artifact.runId)).toEqual([
+      expect.objectContaining({
+        source: "evaluator",
+        stage: "evaluate",
+        code: "evaluator_exception",
+        evaluatorId: "counter.failing",
+        message: "Evaluator execution failed; no metrics or output were recorded."
+      })
+    ]);
+
+    const episodeDirectory = path.join(root, "episodes", entry.directoryKey);
+    const metricsText = await readFile(path.join(episodeDirectory, "metrics.jsonl"), "utf8");
+    const failuresText = await readFile(path.join(episodeDirectory, "failures.jsonl"), "utf8");
+    expect(metricsText).toContain("counter.final-value");
+    expect(failuresText).not.toContain(rawFailure);
+
+    const restarted = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    expect(await restarted.getMetrics(artifact.runId)).toEqual(evaluationReport.metrics);
+    expect(await restarted.getFailures(artifact.runId)).toHaveLength(1);
+
+    await writeFile(path.join(episodeDirectory, "metrics.jsonl"), `${metricsText.trim()} ${rawFailure}\n`, "utf8");
+    await expect(restarted.get(artifact.runId)).rejects.toThrow(/canonical recovery validation/i);
+  });
+
+  it("strongly verifies, persists, rehydrates, and recovers the checkpoint registry", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const checkpointVerifier = counterCheckpointVerifier();
+    const store = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier(),
+      verifyCheckpoint: checkpointVerifier
+    });
+    const episodeEntry = await store.put(artifact);
+    const checkpointOne = buildCounterCheckpoint(artifact, "../../checkpoint-one", "2026-07-22T13:02:00.000Z");
+    const checkpointTwo = buildCounterCheckpoint(artifact, "checkpoint-two", "2026-07-22T13:03:00.000Z");
+
+    const firstEntry = await store.putCheckpoint(artifact.runId, checkpointOne);
+    const secondEntry = await store.putCheckpoint(artifact.runId, checkpointTwo);
+    expect(firstEntry.directoryKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(firstEntry.directoryKey).not.toContain("..");
+    expect(await store.listCheckpoints(artifact.runId)).toEqual([firstEntry, secondEntry]);
+    expect(await store.getCheckpoint(artifact.runId, checkpointOne.checkpointId)).toEqual(checkpointOne);
+    expect((await store.list())[0]).toMatchObject({ checkpointCount: 2 });
+
+    const restarted = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier(),
+      verifyCheckpoint: checkpointVerifier
+    });
+    expect(await restarted.listCheckpoints(artifact.runId)).toEqual([firstEntry, secondEntry]);
+    expect(await restarted.getCheckpoint(artifact.runId, checkpointTwo.checkpointId)).toEqual(checkpointTwo);
+
+    const checkpointsDirectory = path.join(root, "episodes", episodeEntry.directoryKey, "checkpoints");
+    const firstPath = path.join(checkpointsDirectory, firstEntry.directoryKey, "checkpoint.json");
+    const tampered = JSON.parse(await readFile(firstPath, "utf8")) as CounterCheckpoint;
+    tampered.state.value = 999;
+    await writeFile(firstPath, `${JSON.stringify(tampered, null, 2)}\n`, "utf8");
+    const secondPath = path.join(checkpointsDirectory, secondEntry.directoryKey, "checkpoint.json");
+    const outsideFile = path.join(root, "outside-checkpoint.json");
+    await writeFile(outsideFile, JSON.stringify(checkpointTwo), "utf8");
+    await unlink(secondPath);
+    await symlink(outsideFile, secondPath);
+
+    await expect(restarted.getCheckpoint(artifact.runId, checkpointOne.checkpointId)).rejects.toThrow(/canonical recovery validation/i);
+    await expect(restarted.getCheckpoint(artifact.runId, checkpointTwo.checkpointId)).rejects.toThrow(/canonical recovery validation/i);
+    const recovered = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier(),
+      verifyCheckpoint: checkpointVerifier
+    });
+    expect(await recovered.listCheckpoints(artifact.runId)).toEqual([]);
+    expect((await recovered.list())[0]).toMatchObject({ checkpointCount: 0 });
+  });
+
+  it("requires an explicit checkpoint verifier and rejects forged checkpoints before publication", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const store = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    await store.put(artifact);
+    const checkpoint = buildCounterCheckpoint(artifact, "counter-checkpoint", "2026-07-22T13:04:00.000Z");
+    await expect(store.putCheckpoint(artifact.runId, checkpoint)).rejects.toThrow(/explicit canonical checkpoint verifier/i);
+    expect(await store.listCheckpoints(artifact.runId)).toEqual([]);
+
+    const rejecting = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier(),
+      verifyCheckpoint: () => ({ ok: true, mismatches: ["forged durable state"] })
+    });
+    await expect(rejecting.putCheckpoint(artifact.runId, checkpoint)).rejects.toThrow(/verification rejected/i);
+    expect(await rejecting.listCheckpoints(artifact.runId)).toEqual([]);
+  });
+
+  it("rejects a self-consistent checkpoint that is not the canonical parent episode prefix", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const store = await HarnessEpisodeArtifactStore.open<CounterArtifact, CounterCheckpoint>({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier(),
+      verifyCheckpoint: counterCheckpointVerifier()
+    });
+    await store.put(artifact);
+    const checkpoint = buildCounterCheckpoint(artifact, "foreign-prefix", "2026-07-22T13:04:30.000Z");
+    checkpoint.executionPrefix.steps[0]!.traceId = "foreign-trace";
+    checkpoint.source.executionPrefixHash = hashStableState(checkpoint.executionPrefix);
+
+    await expect(store.putCheckpoint(artifact.runId, checkpoint)).rejects.toThrow(/not a canonical prefix/i);
+    expect(await store.listCheckpoints(artifact.runId)).toEqual([]);
   });
 
   it("rejects verifier failures before publishing a directory or index entry", async () => {
@@ -160,6 +382,59 @@ describe("generic single-episode artifact store", () => {
     await expect(store.get(artifact.runId)).rejects.toThrow(/canonical recovery validation/i);
     const restarted = await HarnessEpisodeArtifactStore.open({ baseDirectory: root, verifyArtifact: verifier });
     expect(await restarted.list()).toEqual([]);
+  });
+
+  it("binds recovery directories to identity hashes and rejects unknown failure fields", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const store = await HarnessEpisodeArtifactStore.open({ baseDirectory: root, verifyArtifact: counterVerifier() });
+    const report = runEvaluationRegistry({
+      id: "failure-row-audit",
+      context: {
+        id: artifact.runId,
+        status: artifact.status,
+        initialState: artifact.initialState,
+        finalState: artifact.finalState,
+        agents: artifact.agents,
+        trajectory: artifact.socialEpisode.steps
+      },
+      evaluators: [{
+        id: "failing-audit",
+        label: "Failing audit",
+        version: "1",
+        evaluate: () => { throw new Error("unpersisted sentinel"); }
+      }]
+    });
+    const entry = await store.put(artifact, { evaluationReport: report });
+    const directory = path.join(root, "episodes", entry.directoryKey);
+    const failuresPath = path.join(directory, "failures.jsonl");
+    const [failure] = (await readFile(failuresPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    failure.rawProviderError = "must-never-recover";
+    const failuresText = `${JSON.stringify(failure)}\n`;
+    await writeFile(failuresPath, failuresText, "utf8");
+    const manifestPath = path.join(directory, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.failuresSha256 = rawSha256(failuresText);
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    const rejected = await HarnessEpisodeArtifactStore.open({ baseDirectory: root, verifyArtifact: counterVerifier() });
+    expect(await rejected.list()).toEqual([]);
+
+    const secondRoot = await temporaryStoreRoot();
+    const secondStore = await HarnessEpisodeArtifactStore.open({ baseDirectory: secondRoot, verifyArtifact: counterVerifier() });
+    const secondEntry = await secondStore.put(artifact);
+    const wrongKey = "f".repeat(64) === secondEntry.directoryKey ? "e".repeat(64) : "f".repeat(64);
+    const oldDirectory = path.join(secondRoot, "episodes", secondEntry.directoryKey);
+    const movedDirectory = path.join(secondRoot, "episodes", wrongKey);
+    await rename(oldDirectory, movedDirectory);
+    const movedManifestPath = path.join(movedDirectory, "manifest.json");
+    const movedManifest = JSON.parse(await readFile(movedManifestPath, "utf8"));
+    movedManifest.directoryKey = wrongKey;
+    await writeFile(movedManifestPath, `${JSON.stringify(movedManifest, null, 2)}\n`, "utf8");
+    const wrongKeyRecovery = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: secondRoot,
+      verifyArtifact: counterVerifier()
+    });
+    expect(await wrongKeyRecovery.list()).toEqual([]);
   });
 
   it("rejects symlinked canonical files and never interprets a run id as a host path", async () => {
@@ -258,4 +533,63 @@ function counterVerifier() {
         }
       }
     });
+}
+
+function buildCounterCheckpoint(
+  artifact: CounterArtifact,
+  checkpointId: string,
+  createdAt: string
+): CounterCheckpoint {
+  return buildHarnessCheckpointFromEpisode({
+    artifactVersion: "counter-ledger.checkpoint.v1",
+    kind: "counter-ledger-checkpoint",
+    checkpointId,
+    createdAt,
+    sourceArtifactVersion: artifact.artifactVersion,
+    runId: artifact.runId,
+    sourceStatus: artifact.status,
+    episode: artifact.socialEpisode,
+    agents: artifact.agents
+  });
+}
+
+function counterCheckpointVerifier() {
+  return (checkpoint: CounterCheckpoint) => {
+    const mismatches = [...validateHarnessCheckpointEnvelope(checkpoint)];
+    const replay = replaySocialEpisode<CounterState, CounterObservation, CounterPending, CounterCommand, CounterAgentState>({
+      episode: checkpoint.executionPrefix,
+      environment: new CounterEnvironment(checkpoint.executionPrefix.initialState),
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      domainAdapter: counterAdapter,
+      validateRecordedStep(step, context) {
+        const pending = context.pendingActions[0];
+        return pending?.actorId === step.actorId && step.pendingAction.actorId === pending.actorId
+          ? []
+          : ["recorded pending action does not match replay authority"];
+      },
+      validateRecordedAgentState(input) {
+        const actor = input.recordedAgents.find((candidate) => candidate.actorId === "counter-a");
+        return actor?.committedValue === input.stateAfter.value
+          ? []
+          : ["durable counter state does not match committed environment state"];
+      }
+    });
+    mismatches.push(
+      ...validateHarnessCheckpointReplay(checkpoint, () => ({
+        mismatches: replay.mismatches,
+        finalHash: replay.finalHash,
+        messagesHash: replay.messagesHash
+      }))
+    );
+    const actor = checkpoint.agents.find((candidate) => candidate.actorId === "counter-a");
+    if (actor?.committedValue !== checkpoint.state.value) {
+      mismatches.push("checkpoint durable actor state does not match checkpoint state");
+    }
+    return { ok: mismatches.length === 0, mismatches };
+  };
+}
+
+function rawSha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }

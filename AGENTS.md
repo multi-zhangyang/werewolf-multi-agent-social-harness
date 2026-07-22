@@ -26858,3 +26858,119 @@ rejected** steps, **0 harness errors**, and lifecycle-inclusive telemetry of
 `count=1,sum=1,max=1,missing=0`. Only the user-selected
 `poolside/laguna-s-2.1:free` model was used, and no model-specific adapter,
 parser, prompt, fallback, or provider branch was introduced.
+
+## 13.281 Generic Experiment Orchestration, Evaluation Persistence, And Store Recovery Lock
+
+Timestamp: `2026-07-22`
+
+The generic control plane now composes a complete normalized experiment slice
+without turning a model request into an agent or importing Werewolf rules:
+
+- `runGenericExperiment()` normalizes once, resolves evaluator ids before
+  preparation, schedules deterministic `${seed}:gN` episodes, delegates only
+  domain prepare/run/artifact/evaluation projections, binds canonical
+  experiment provenance, persists each strongly verified episode, and builds a
+  lifecycle-complete generic tournament run-set.
+- Adapter callbacks receive independent cloned spec/provenance contexts. They
+  cannot mutate the hidden authority or another episode. Existing contradictory
+  artifact provenance is rejected rather than overwritten.
+- Prepare, run, and artifact promises are raced against the shared run deadline.
+  An adapter that ignores the cooperative signal can no longer block the
+  composition root forever or return a late completed artifact after expiry.
+- Evaluation context id/status/initial state/final state/durable agents and
+  optional social episode are hash-bound to the canonical artifact before the
+  evaluator registry runs. Registered evaluator id/version authority is checked
+  before persistence.
+- The public execution result contains the safe lifecycle/artifact projection;
+  raw `TPrepared` values and raw domain results are stripped so callers cannot
+  accidentally serialize runtime clients, factories, private state, or provider
+  objects.
+
+Experiment provenance and fork authority are now independently auditable:
+
+- `harness.experiment-provenance.v1` retains the complete canonical normalized
+  spec, id/version, and a stable JSON hash that does not mask a domain field
+  named `createdAt`.
+- `harness.experiment-fork-lineage.v1` records parent/child authority and exact
+  caller-declared changed top-level fields with before/after hashes. Missing,
+  invented, duplicate, reordered, non-canonical, or tampered declarations are
+  rejected; generic code still does not invent counterfactual meaning.
+- Experiment-bound episode/checkpoint validation requires adapter, scheduler,
+  runtime roster, and actor-count consistency. Explicit `null` does not masquerade
+  as legacy absence. Fork parent experiment adapter authority must match the
+  recorded parent domain adapter.
+- Portable experiment JSON rejects disguised credential, authorization,
+  endpoint, header, provider-option, max-token, secret, and embedded URL fields.
+  No actual credential appears in specs or tests.
+
+`HarnessEpisodeArtifactStore` is now layout v2 with strict v1 compatibility:
+
+- v2 persists `artifact.json`, canonical `trajectory.jsonl`, normalized
+  `metrics.jsonl`, reviewed `failures.jsonl`, checkpoint index/records, and
+  content-hashed manifests.
+- Restart recovery dual-reads the previous v1 artifact/trajectory-only layout
+  as legacy empty evaluation/checkpoint projections. A valid v1 episode is not
+  silently dropped because newer sidecars are absent.
+- Episode and checkpoint directory keys are re-derived from SHA-256 of recorded
+  identities. Manifests cannot legitimize an arbitrary 64-hex relocation.
+- Every checkpoint requires an explicit strong domain verifier and must also be
+  an exact step/message prefix of its canonical parent, with matching initial
+  state, channels, domain, adapter, scheduler, roster, and experiment authority.
+- Failure rows use reviewed text, reject unknown fields, and never copy raw
+  evaluator/provider exceptions. Static and intermediate symlink/path
+  containment and content tampering checks fail closed.
+
+Current primary documentation was rechecked for PettingZoo AEC/Parallel,
+LangGraph persistence/time travel, OpenAI Agents SDK orchestration/tracing,
+Google DeepMind Concordia engines/components, and AIWolf protocol boundaries.
+The local harness already captures the applicable semantics; importing those
+runtimes would weaken or duplicate deterministic environment/replay authority.
+They remain design references, not replacement agent definitions.
+
+One browser regression was found during full validation: a tournament E2E test
+assumed that `fixture-model` must be the model that executed the bounded turn.
+The real server DTO correctly reported `fixture-rival` for that seeded seat.
+The test now checks the actual server-owned `executionTelemetry.byModel` key
+instead of asserting a false client-side model identity.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/artifacts.test.ts tests/episodeArtifactStore.test.ts \
+  tests/genericExperimentSpec.test.ts tests/genericExperimentOrchestrator.test.ts \
+  tests/genericHarnessContract.test.ts tests/replay.test.ts \
+  --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npm run test:e2e
+npm run agent:probe -- --models=poolside/laguna-s-2.1:free --timeout=90s
+npm run arena:match -- --models=poolside/laguna-s-2.1:free \
+  --maxTransitions=2 --timeout=180s --json=summary
+npm run arena:tournament -- --models=poolside/laguna-s-2.1:free \
+  --games=1 --maxTransitions=2 --timeout=180s --json=summary
+git diff --check
+```
+
+The final focused suite passed **6 files / 62 tests**. The complete serial
+deterministic suite passed **48 files / 508 tests**. Production build passed
+with only the existing Vite main-chunk-size warning. The complete Playwright
+fixture cockpit passed **14/14**.
+
+The real streaming probe passed **1/1** with provider terminal
+`provider_stop_event`, environment-validated `seer.inspect`, **507 prompt / 308
+completion tokens**, and **12,264 ms** model latency. The bounded real match
+returned `ok: true`, expected `status: truncated`, **2 native / 2 committed / 0
+rejected**, **0 harness errors**, **511 prompt / 320 completion tokens**, and
+**12,633 ms** model latency. The bounded real tournament also returned
+`ok: true`, expected `status: truncated`, **2 native / 2 committed / 0
+rejected**, **0 harness errors**, and lifecycle telemetry of **1 call / 500
+prompt / 270 completion tokens / 10,017 ms**, attempts
+`count=1,sum=1,max=1,missing=0`, with **0 provider failures, 0 timeouts, and 0
+stream aborts**.
+
+Only `poolside/laguna-s-2.1:free` was used for live validation. No model- or
+provider-specific adapter, parser, prompt, branch, fallback, or token-limit
+request field was added.

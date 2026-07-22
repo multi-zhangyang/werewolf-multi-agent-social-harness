@@ -31,9 +31,11 @@ export {
 } from "./episodeArtifacts";
 export type {
   BuildReplayableSocialPrefixOptions,
+  CreateGenericForkProvenanceOptions,
   GenericForkProvenance,
   HarnessAgentSnapshotFrame,
   HarnessCheckpointEnvelope,
+  HarnessCheckpointSource,
   HarnessEpisodeArtifactEnvelope,
   ReplayableSocialPrefix
 } from "./episodeArtifacts";
@@ -72,19 +74,30 @@ export type {
   SocialMessage
 } from "./social";
 export {
+  GENERIC_EXPERIMENT_FORK_LINEAGE_VERSION,
+  GENERIC_EXPERIMENT_PROVENANCE_VERSION,
   GENERIC_EXPERIMENT_SPEC_VERSION,
+  createGenericExperimentForkLineage,
+  createGenericExperimentProvenance,
   normalizeGenericExperimentSpec,
+  validateGenericExperimentForkLineage,
+  validateGenericExperimentProvenance,
   validateGenericExperimentSpec
 } from "./experimentSpec";
 export type {
   GenericExperimentArtifactPolicyV1,
   GenericExperimentAssignmentPolicyV1,
   GenericExperimentCheckpointPolicyV1,
+  GenericExperimentForkChangeDeclarationV1,
+  GenericExperimentForkChangedFieldV1,
+  GenericExperimentForkChangeFieldV1,
+  GenericExperimentForkLineageV1,
   GenericExperimentKind,
   GenericExperimentModelAssignmentV1,
   GenericExperimentPolicyRefV1,
   GenericExperimentProfileSpecV1,
   GenericExperimentProviderPolicyV1,
+  GenericExperimentProvenanceV1,
   GenericExperimentRetryPolicyV1,
   GenericExperimentSpecV1,
   GenericExperimentTimeoutPolicyV1,
@@ -94,6 +107,10 @@ export type {
   NormalizedGenericExperimentSpecV1
 } from "./experimentSpec";
 export {
+  HARNESS_EPISODE_CHECKPOINT_INDEX_VERSION,
+  HARNESS_EPISODE_CHECKPOINT_MANIFEST_VERSION,
+  HARNESS_EPISODE_FAILURE_ROW_VERSION,
+  HARNESS_EPISODE_METRIC_ROW_VERSION,
   HARNESS_EPISODE_STORE_INDEX_VERSION,
   HARNESS_EPISODE_STORE_MANIFEST_VERSION,
   HARNESS_EPISODE_TRAJECTORY_HEADER_VERSION,
@@ -106,8 +123,49 @@ export {
 export type {
   CanonicalEpisodeArtifactVerification,
   CanonicalEpisodeArtifactVerifier,
+  CanonicalHarnessCheckpointVerifier,
   HarnessEpisodeArtifactStoreOptions,
+  HarnessEpisodeCheckpointStoreEntry,
+  HarnessEpisodeCheckpointStoreIndex,
+  HarnessEpisodeCheckpointStoreManifest,
+  HarnessEpisodeFailureRow,
+  HarnessEpisodeMetricRow,
   HarnessEpisodeStoreEntry,
   HarnessEpisodeStoreIndex,
-  HarnessEpisodeStoreManifest
+  HarnessEpisodeStoreManifest,
+  HarnessEpisodeStorePutOptions
 } from "./episodeArtifactStore";
+export { runGenericExperiment } from "./experimentOrchestrator";
+export type {
+  ExecutedGenericExperimentEpisode,
+  GenericExperimentArtifactStore,
+  GenericExperimentEpisodeContext,
+  GenericExperimentEvaluationAdapter,
+  GenericExperimentExecutionAdapter,
+  GenericExperimentExecutionResult,
+  RunGenericExperimentOptions
+} from "./experimentOrchestrator";
+export {
+  GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE,
+  runTournamentEpisodes
+} from "./tournamentRunner";
+export type {
+  GenericTournamentEpisode,
+  GenericTournamentResult,
+  GenericTournamentRunnerOptions,
+  TournamentEpisodeContext,
+  TournamentEpisodeLifecycle
+} from "./tournamentRunner";
+export {
+  GENERIC_TOURNAMENT_RUN_SET_ARTIFACT_VERSION,
+  buildGenericTournamentRunSetArtifact,
+  validateGenericTournamentRunSetArtifact,
+  writeGenericTournamentRunSetArtifact
+} from "./genericTournamentArtifacts";
+export type {
+  BuildGenericTournamentRunSetOptions,
+  GenericTournamentArtifactAdapter,
+  GenericTournamentArtifactDirectory,
+  GenericTournamentRunSetArtifact,
+  GenericTournamentRunSetEpisode
+} from "./genericTournamentArtifacts";

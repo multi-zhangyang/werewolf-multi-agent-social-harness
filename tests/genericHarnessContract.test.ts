@@ -6,7 +6,12 @@ import {
   validateSocialDomainAdapterManifest,
   type SocialDomainAdapterManifest
 } from "../src/harness/domainAdapter";
-import { replaySocialEpisode, verifyHarnessEpisodeArtifact } from "../src/harness/generic";
+import {
+  createGenericExperimentProvenance,
+  replaySocialEpisode,
+  verifyHarnessEpisodeArtifact,
+  type GenericExperimentSpecV1
+} from "../src/harness/generic";
 import { runHarnessEpisode } from "../src/harness/runner";
 import { ScaffoldedSocialActor } from "../src/harness/scaffold";
 import { createSocialStateEvaluator } from "../src/harness/socialEvaluator";
@@ -15,6 +20,7 @@ import {
   HarnessCheckpointSelectionError,
   buildHarnessCheckpointAtPrefix,
   compactRecordedSocialAgentSnapshots,
+  createGenericForkProvenance,
   createHarnessAgentSnapshotFrameResolver,
   validateHarnessAgentSnapshotFrameRegistry,
   validateHarnessCheckpointEnvelope,
@@ -126,6 +132,31 @@ const ledgerDomainAdapter: SocialDomainAdapterManifest = {
   ]
 };
 
+function ledgerEpisodeExperiment(id: string, overrides: Partial<GenericExperimentSpecV1> = {}): GenericExperimentSpecV1 {
+  return {
+    id,
+    kind: "episode",
+    domainId: "ledger",
+    domainAdapter: ledgerDomainAdapter,
+    seed: `${id}:seed`,
+    episodeCount: 1,
+    actorCount: 1,
+    schedulerMode: "aec",
+    profiles: [{ id: "ledger-local", version: "1", policyId: "ledger.policy.local" }],
+    modelAssignments: [],
+    assignmentPolicy: { id: "ledger.assignment.fixed", version: "1", configuration: { actors: ["a"] } },
+    maxTransitions: 1,
+    timeoutPolicy: { id: "harness.timeout.local", version: "1", runTimeoutMs: 1_000 },
+    retryPolicy: { id: "harness.retry.none", version: "1", maxAttempts: 1 },
+    evaluatorIds: ["ledger.consistency.v1"],
+    artifactPolicy: { id: "harness.artifact.research", version: "1", visibility: "research-full" },
+    checkpointPolicy: { id: "harness.checkpoint.native", version: "1", mode: "native-boundaries" },
+    continueOnError: false,
+    domainConfig: { ledgerMode: "append-only" },
+    ...overrides
+  };
+}
+
 describe("generic social harness contract", () => {
   it("keeps the reusable runner, replay, checkpoint, and public barrel free of Werewolf/core imports", () => {
     const genericModulePaths = [
@@ -205,6 +236,39 @@ describe("generic social harness contract", () => {
     expect(checkpoint.source.domainAdapter).toEqual(ledgerDomainAdapter);
     expect(validateHarnessCheckpointEnvelope(checkpoint)).toEqual([]);
     expect(buildSocialCheckpointForkSeed(checkpoint).forkOf.parentDomainAdapter).toEqual(ledgerDomainAdapter);
+
+    const parentExperiment = createGenericExperimentProvenance(ledgerEpisodeExperiment("ledger-parent-experiment"));
+    const childExperiment = createGenericExperimentProvenance(
+      ledgerEpisodeExperiment("ledger-child-experiment", {
+        seed: "ledger-counterfactual-seed",
+        profiles: [{ id: "ledger-local", version: "2", policyId: "ledger.policy.counterfactual" }],
+        domainConfig: { ledgerMode: "replace-only" }
+      })
+    );
+    const experimentBoundCheckpoint = clone(checkpoint);
+    experimentBoundCheckpoint.source.experiment = parentExperiment;
+    expect(validateHarnessCheckpointEnvelope(experimentBoundCheckpoint)).toEqual([]);
+    const experimentBoundFork = createGenericForkProvenance(experimentBoundCheckpoint, {
+      createdAt: "2026-07-22T00:00:00.000Z",
+      childExperiment,
+      changedExperimentFields: [
+        { field: "seed" },
+        { field: "profiles" },
+        { field: "domainConfig" },
+        { field: "id" }
+      ]
+    });
+    expect(experimentBoundFork.experimentLineage).toMatchObject({
+      parent: { specHash: parentExperiment.specHash },
+      child: { specHash: childExperiment.specHash },
+      changedFields: [
+        { field: "domainConfig" },
+        { field: "id" },
+        { field: "profiles" },
+        { field: "seed" }
+      ]
+    });
+    expect(() => buildSocialCheckpointForkSeed(experimentBoundCheckpoint)).toThrow(/requires both .* childExperiment/i);
 
     let verifierCalls = 0;
     let environmentRestores = 0;
@@ -315,6 +379,83 @@ describe("generic social harness contract", () => {
       forkOf: inherited.seed.forkOf
     } satisfies HarnessEpisodeArtifactEnvelope<LedgerState, LedgerObservation, LedgerPending, LedgerCommand, (typeof agents)[number]>;
     expect(validateHarnessEpisodeArtifactEnvelope(inheritedEnvelope)).toEqual([]);
+    const experimentBoundEnvelope = {
+      ...inheritedEnvelope,
+      experiment: childExperiment,
+      forkOf: experimentBoundFork
+    } satisfies HarnessEpisodeArtifactEnvelope<
+      LedgerState,
+      LedgerObservation,
+      LedgerPending,
+      LedgerCommand,
+      (typeof agents)[number]
+    >;
+    expect(validateHarnessEpisodeArtifactEnvelope(experimentBoundEnvelope)).toEqual([]);
+    const nullExperimentEnvelope = clone(experimentBoundEnvelope) as unknown as Record<string, unknown>;
+    nullExperimentEnvelope.experiment = null;
+    expect(
+      validateHarnessEpisodeArtifactEnvelope(nullExperimentEnvelope as unknown as typeof experimentBoundEnvelope).join(" ")
+    ).toMatch(/experiment must be an object/i);
+    const missingRosterEnvelope = clone(experimentBoundEnvelope);
+    delete missingRosterEnvelope.socialEpisode.runtimeActorIds;
+    expect(validateHarnessEpisodeArtifactEnvelope(missingRosterEnvelope).join(" ")).toMatch(/runtimeActorIds is required/i);
+    const splitIdentityEnvelope = clone(experimentBoundEnvelope);
+    splitIdentityEnvelope.runId = "different-outer-run";
+    expect(validateHarnessEpisodeArtifactEnvelope(splitIdentityEnvelope).join(" ")).toMatch(/runId must match socialEpisode.id/i);
+    const conflictingParentAdapterEnvelope = clone(experimentBoundEnvelope);
+    conflictingParentAdapterEnvelope.forkOf.parentDomainAdapter = incompatibleAdapter;
+    expect(validateHarnessEpisodeArtifactEnvelope(conflictingParentAdapterEnvelope).join(" ")).toMatch(
+      /parentDomainAdapter.*does not exactly match.*experimentLineage\.parent\.spec\.domainAdapter/i
+    );
+    const nullCheckpointExperiment = clone(experimentBoundCheckpoint) as unknown as Record<string, unknown>;
+    (nullCheckpointExperiment.source as Record<string, unknown>).experiment = null;
+    expect(
+      validateHarnessCheckpointEnvelope(nullCheckpointExperiment as unknown as typeof experimentBoundCheckpoint).join(" ")
+    ).toMatch(/source\.experiment must be an object/i);
+    let experimentVerificationFactories = 0;
+    expect(
+      verifyHarnessEpisodeArtifact({
+        artifact: experimentBoundEnvelope,
+        runtime: {
+          domainAdapter: ledgerDomainAdapter,
+          createEnvironment(initialState) {
+            experimentVerificationFactories += 1;
+            return new LedgerEnvironment({ initialState, actorIds: ["a"] });
+          },
+          hashState: hashStableState,
+          hashMessages: hashStableState,
+          validateRecordedStep: () => [],
+          recordedAgentState: { mode: "validate", validator: () => [] }
+        }
+      }).ok
+    ).toBe(true);
+    expect(experimentVerificationFactories).toBe(1);
+
+    const forgedExperimentEnvelope = clone(experimentBoundEnvelope);
+    forgedExperimentEnvelope.experiment.spec.seed = "forged-without-rehash";
+    experimentVerificationFactories = 0;
+    const forgedExperimentResult = verifyHarnessEpisodeArtifact({
+      artifact: forgedExperimentEnvelope,
+      runtime: {
+        domainAdapter: ledgerDomainAdapter,
+        createEnvironment(initialState) {
+          experimentVerificationFactories += 1;
+          return new LedgerEnvironment({ initialState, actorIds: ["a"] });
+        },
+        hashState: hashStableState,
+        hashMessages: hashStableState,
+        validateRecordedStep: () => [],
+        recordedAgentState: { mode: "validate", validator: () => [] }
+      }
+    });
+    expect(forgedExperimentResult.ok).toBe(false);
+    expect(forgedExperimentResult.structureErrors.join(" ")).toMatch(/experiment\.specHash does not match/i);
+    expect(experimentVerificationFactories).toBe(0);
+    const forgedSchedulerEnvelope = clone(experimentBoundEnvelope);
+    forgedSchedulerEnvelope.socialEpisode.schedulerMode = "parallel";
+    expect(validateHarnessEpisodeArtifactEnvelope(forgedSchedulerEnvelope).join(" ")).toMatch(
+      /experiment\.spec\.schedulerMode must match socialEpisode\.schedulerMode/i
+    );
     const forgedLegacyFork = clone(inheritedEnvelope);
     delete forgedLegacyFork.socialEpisode.domainAdapter;
     delete forgedLegacyFork.socialEpisode.domainId;
