@@ -1678,11 +1678,12 @@ describe("match artifact JSONL export", () => {
       traceId: artifact.trajectory[0].traceId,
       observation: expect.objectContaining({ pendingAction: expect.objectContaining({ kind: "inspect" }) }),
       policyPlan: expect.objectContaining({ policyName: "seer-information" }),
-      reasonerOutput: expect.objectContaining({ providerRequestId: expect.stringContaining("jsonl-") }),
+      reasonerOutput: expect.objectContaining({ attempts: 1 }),
       decisionStateHash: artifact.trajectory[0].decisionStateHash,
       eventSeqRange: artifact.trajectory[0].eventSeqRange,
       messageSeqRange: artifact.trajectory[0].messageSeqRange
     });
+    expect(step.reasonerOutput).not.toHaveProperty("providerRequestId");
     expect(trace).toMatchObject({
       traceId: artifact.trajectory[0].traceId,
       turnTrace: expect.objectContaining({ traceId: artifact.trajectory[0].traceId }),
@@ -1691,7 +1692,7 @@ describe("match artifact JSONL export", () => {
     expect(event).toBeUndefined();
     expect(error).toMatchObject({
       actorId: expect.any(String),
-      failureReason: expect.stringContaining("jsonl planned reasoner failure")
+      failureReason: "Harness actor decision failed before a command could be committed."
     });
     expect(channelRecords).toHaveLength(artifact.socialEpisode.channels.length);
     expect(channelRecords).toEqual(

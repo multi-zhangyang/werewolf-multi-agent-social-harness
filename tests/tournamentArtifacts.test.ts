@@ -1577,11 +1577,19 @@ describe("tournament artifact directory writer", () => {
       expect(matchArtifact.socialEpisode.status).toBe("failed");
 
       const trajectory = await readJsonl<Record<string, any>>(path.join(outputDir, "trajectory.jsonl"));
-      expect(trajectory.some((record) => record.type === "error" && String(record.failureReason).includes("planned tournament writer failure"))).toBe(true);
+      expect(
+        trajectory.some(
+          (record) => record.type === "error" && record.failureReason === "Harness actor decision failed before a command could be committed."
+        )
+      ).toBe(true);
       expect(trajectory.some((record) => record.type === "step" && record.traceId && record.preStateHash && record.postStateHash)).toBe(true);
 
       const matchJsonl = await readJsonl<Record<string, any>>(path.join(outputDir, failures[0].partialArtifact.replace(/\.json$/, ".jsonl")));
-      expect(matchJsonl.some((record) => record.type === "error" && String(record.failureReason).includes("planned tournament writer failure"))).toBe(true);
+      expect(
+        matchJsonl.some(
+          (record) => record.type === "error" && record.failureReason === "Harness actor decision failed before a command could be committed."
+        )
+      ).toBe(true);
       expect(JSON.stringify(matchJsonl)).not.toContain("test-provider-token-should-not-appear");
       expect(JSON.stringify(matchJsonl)).not.toMatch(/Bearer\s+[A-Za-z0-9._~+/=-]{12,}/);
 
@@ -1627,7 +1635,7 @@ describe("tournament artifact directory writer", () => {
           })
         ]
       });
-      expect(costLatency.totals.providerRequestIds).toEqual(["Bearer [REDACTED]"]);
+      expect(costLatency.totals).not.toHaveProperty("providerRequestIds");
       expect(costLatency.totals.providerFailures).toMatchObject({
         count: 0,
         byKind: {},
@@ -1636,8 +1644,7 @@ describe("tournament artifact directory writer", () => {
         retryable: 0,
         aborted: 0,
         timeouts: 0,
-        streamAborts: 0,
-        providerRequestIds: []
+        streamAborts: 0
       });
       expect(Object.values(costLatency.byModel)).toEqual(
         expect.arrayContaining([
@@ -1648,11 +1655,13 @@ describe("tournament artifact directory writer", () => {
             nativeSteps: expect.any(Number),
             committedSteps: expect.any(Number),
             rejectedSteps: expect.any(Number),
-            providerRequestIds: ["Bearer [REDACTED]"],
             providerFailures: expect.objectContaining({ count: 0 })
           })
         ])
       );
+      for (const aggregate of Object.values(costLatency.byModel) as Array<Record<string, unknown>>) {
+        expect(aggregate).not.toHaveProperty("providerRequestIds");
+      }
 
       const allText = await readTreeText(outputDir);
       expect(allText).not.toContain("test-provider-key-should-not-appear");
@@ -1706,7 +1715,6 @@ describe("tournament artifact directory writer", () => {
       retryable: true,
       attempts: 2,
       maxAttempts: 3,
-      providerRequestId: "Bearer [REDACTED]",
       providerFailure: {
         failureKind: "timeout",
         providerStage: "during_request",
@@ -1714,12 +1722,13 @@ describe("tournament artifact directory writer", () => {
         retryable: true,
         aborted: false,
         attempts: 2,
-        maxAttempts: 3,
-        providerRequestId: "Bearer [REDACTED]",
-        retryCause: "LLM API request exceeded 42ms."
+        maxAttempts: 3
       },
       source: "social_step_failure"
     });
+    expect(failures[0].primaryFailure).not.toHaveProperty("providerRequestId");
+    expect(failures[0].primaryFailure.providerFailure).not.toHaveProperty("providerRequestId");
+    expect(failures[0].primaryFailure.providerFailure).not.toHaveProperty("retryCause");
     expect(failures[0].failureAttributions).toEqual([failures[0].primaryFailure]);
 
     const matchArtifact = await readJson<Record<string, any>>(path.join(outputDir, failures[0].partialArtifact));
@@ -1729,9 +1738,9 @@ describe("tournament artifact directory writer", () => {
       providerStage: "during_request",
       timeoutMs: 42,
       attempts: 2,
-      maxAttempts: 3,
-      providerRequestId: "Bearer [REDACTED]"
+      maxAttempts: 3
     });
+    expect(nativeFailure.failure.metadata.providerFailure).not.toHaveProperty("providerRequestId");
     expect(JSON.stringify(nativeFailure.failure.metadata)).not.toContain("raw-provider-token-should-not-appear");
     expect(JSON.stringify(nativeFailure.failure.metadata)).not.toContain("provider raw body should not appear");
 
@@ -1745,7 +1754,6 @@ describe("tournament artifact directory writer", () => {
       aborted: 0,
       timeouts: 1,
       streamAborts: 0,
-      providerRequestIds: ["Bearer [REDACTED]"],
       attempts: expect.objectContaining({
         count: 1,
         sum: 2,
@@ -1764,8 +1772,7 @@ describe("tournament artifact directory writer", () => {
         expect.objectContaining({
           providerFailures: expect.objectContaining({
             count: 1,
-            byKind: { timeout: 1 },
-            providerRequestIds: ["Bearer [REDACTED]"]
+            byKind: { timeout: 1 }
           })
         })
       ])

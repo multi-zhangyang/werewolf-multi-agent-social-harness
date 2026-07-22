@@ -348,8 +348,7 @@ describe("policy social action arbitration", () => {
     actor.commitTurn(plan, "reasoner memo says to vote p4, but policy arbitration must remain authoritative", {
       traceId: "policy-arbitration:turn",
       turnIndex: 1,
-      pendingAction: action,
-      providerRequestId: "policy-arbitration-request"
+      pendingAction: action
     });
     const command = actor.act(plan);
     const decisionMemory = actor.state.social?.memory.entries.find((entry) => entry.kind === "decision");

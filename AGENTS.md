@@ -25953,3 +25953,93 @@ npx vitest run tests/socialGraph.test.ts tests/serverPublicViewApi.test.ts \
 npm run test:e2e
 git diff --check
 ```
+
+## 13.267 Runtime Model Availability Correction
+
+Timestamp: `2026-07-22`
+
+The user has withdrawn `grok-4.5` from local runtime use because it is not
+currently available. It must not be selected for probes, matches, tournaments,
+or future default configuration until the user explicitly reverses that
+direction.
+
+```text
+LLM_MODELS=gpt-5.4/Kimi-K2.6
+```
+
+This is only a generic runtime configuration change. `gpt-5.4/Kimi-K2.6` continues to
+use the existing OpenAI-compatible Chat Completions client with `stream: true`;
+do not add a model-name branch, provider-specific prompt/parser, fallback, or
+token-limit field. The model is still an optional reasoner inside the durable
+actor and cannot bypass policy, arbitration, deterministic environment
+legality, artifact recording, replay, fork, or evaluation.
+
+Before claiming the replacement runtime healthy, run the ordinary deterministic
+test/build ladder and then a bounded streaming probe using
+`--models=gpt-5.4/Kimi-K2.6`.
+Do not invoke `grok-4.5` merely to compare or retry it, and do not expose local
+endpoint, credential, prompt, request-id, or raw provider diagnostics.
+
+## 13.268 Durable Provider-Diagnostic Boundary Lock
+
+Timestamp: `2026-07-22`
+
+Provider runtime diagnostics are transient client data, not replay, agent, or
+research-artifact evidence. This is a generic harness artifact/control-plane
+boundary and applies uniformly to all OpenAI-compatible model selections.
+
+```text
+runtime ModelCompletionResult / ModelCallError
+  -> closed durable telemetry only
+  -> agent receipt / trace / artifact / checkpoint / JSONL / tournament / API
+```
+
+- A live client may temporarily hold an opaque request id, raw body/header, or
+  error/cause string to classify/retry the active request. None of those may
+  enter durable agent state, reasoner summaries, turn traces, action metadata,
+  social-step metadata, match/checkpoint artifacts, JSONL, tournament packs,
+  matrix output, or server `full` responses.
+- Durable provider evidence is closed: failure kind/stage/status/timeout,
+  abort/retryability flags, attempts/max-attempts, latency/usage, and bounded
+  stream-completion state. Safe retry-history rows retain only the same closed
+  fields and never an arbitrary `message`.
+- `sanitizePersistedProviderDiagnostics()` is the central structural boundary.
+  It removes request-id collections and provider/cause/retry/abort diagnostics
+  recursively without mutating its input. Artifact construction/export, server
+  full-view/persistence, and tournament JSON/JSONL writers must pass through
+  it. A legacy in-memory artifact with such extras is sanitized on read/export
+  for backward compatibility; newly generated typed artifacts must not create
+  them.
+- Generic social failure output detects provider-shaped errors and records a
+  safe static/closed description. The generic runner does not import a
+  provider client; the Werewolf adapter supplies the provider-aware boundary.
+  Ordinary domain failure evidence remains separately meaningful where it is
+  not provider-derived.
+- Matrix CLI output uses the existing diagnostics-safe provider summary and
+  safe error rendering. It never exposes endpoint fields or raw cell/provider
+  errors, including in `--json=full` output.
+
+Validation completed for this lock:
+
+```bash
+npm run typecheck
+npx vitest run tests/openaiClient.test.ts tests/providerAdapters.test.ts \
+  tests/reasonerProposal.test.ts tests/cliDiagnosticSafety.test.ts \
+  tests/harness.test.ts --testTimeout=60000 --maxWorkers=1 \
+  --no-file-parallelism --reporter=dot
+npx vitest run tests/artifacts.test.ts tests/werewolfAdapter.test.ts \
+  tests/tournamentArtifacts.test.ts tests/serverPublicViewApi.test.ts \
+  tests/experimentMatrix.test.ts tests/serverExperimentMatrixApi.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+git diff --check
+```
+
+The full deterministic run passed 43 files / 451 tests. The production build
+passed with the pre-existing main-chunk-size warning. Bounded streaming probes
+for the currently configured generic candidates returned controlled HTTP 503
+responses before any completion/parse/arbitration/environment commit; this is
+not evidence that a live provider path is healthy and must not be reported as
+such.

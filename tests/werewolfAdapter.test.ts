@@ -222,10 +222,11 @@ describe("Werewolf generic social adapter", () => {
         latencyMs: 1,
         promptTokens: 2,
         completionTokens: 3,
-        providerRequestId: expect.stringContaining("adapter-"),
         attempts: 1
       }
     });
+    if (!memoMessage) throw new Error("Expected private reasoner memo message.");
+    expect(memoMessage.metadata).not.toHaveProperty("providerRequestId");
     expect(artifact.steps[1].messageSeqRange).toEqual([1, 2]);
     for (const message of artifact.messages) {
       expect(message.metadata?.role).toBeUndefined();
@@ -289,8 +290,7 @@ describe("Werewolf generic social adapter", () => {
         policyName: "seer-information"
       },
       reasonerOutput: {
-        content: expect.stringContaining("adapter memo:deterministic-inspect:inspect"),
-        providerRequestId: expect.stringContaining("adapter-")
+        content: expect.stringContaining("adapter memo:deterministic-inspect:inspect")
       },
       turnTrace: {
         traceId: artifact.steps[1].traceId,
@@ -301,6 +301,7 @@ describe("Werewolf generic social adapter", () => {
       eventSeqRange: artifact.steps[1].eventSeqRange,
       messageSeqRange: artifact.steps[1].messageSeqRange
     });
+    expect(projectedTrajectory[0].reasonerOutput).not.toHaveProperty("providerRequestId");
     expect(projectedTrajectory[0].observation).toMatchObject({
       phase: "night_seer",
       you: { id: seer.id, role: "seer" },
@@ -903,7 +904,7 @@ describe("Werewolf generic social adapter", () => {
     expect(projectedTrajectory[0].traceId).toBe(expectedTraceId);
     expect(projectedTrajectory[0].turnIndex).toBe(2);
     expect(projectedTrajectory[0].turnTrace.traceId).toBe(expectedTraceId);
-    expect(projectedTrajectory[0].reasonerOutput.providerRequestId).toBe(`legacy-trace-${expectedTraceId}`);
+    expect(projectedTrajectory[0].reasonerOutput).not.toHaveProperty("providerRequestId");
     const replay = replayHarnessTrajectory({
       initialState,
       trajectory: projectedTrajectory
@@ -1329,7 +1330,7 @@ describe("Werewolf generic social adapter", () => {
     ]);
     expect(projectedTrajectory.every((step) => step.command.type === "werewolf.killVote")).toBe(true);
     expect(projectedTrajectory.every((step) => step.turnTrace.traceId === step.traceId)).toBe(true);
-    expect(projectedTrajectory.every((step) => step.reasonerOutput.providerRequestId === `batched-legacy-${step.traceId}`)).toBe(true);
+    expect(projectedTrajectory.every((step) => !Object.hasOwn(step.reasonerOutput, "providerRequestId"))).toBe(true);
 
     const replay = replayHarnessTrajectory({
       initialState: nightWolves,
@@ -1658,8 +1659,7 @@ describe("Werewolf generic social adapter", () => {
       model: "controlled-prefix-profile",
       pendingAction: { kind: "inspect", actorId: seer.id, phase: "night_seer" },
       reasonerOutput: {
-        content: expect.stringContaining("controlled prefix memo"),
-        providerRequestId: `controlled-prefix-${expectedTraceId}`
+        content: expect.stringContaining("controlled prefix memo")
       },
       turnTrace: {
         traceId: expectedTraceId,
@@ -1668,6 +1668,7 @@ describe("Werewolf generic social adapter", () => {
         privateMemo: expect.stringContaining("controlled prefix memo")
       }
     });
+    expect(result.trajectory[0].reasonerOutput).not.toHaveProperty("providerRequestId");
     expect(result.trajectory[0].messageSeqRange).toEqual([1, 2]);
     expect(result.socialSteps).toHaveLength(1);
     expect(result.socialSteps[0]).toMatchObject({
@@ -1791,8 +1792,9 @@ describe("Werewolf generic social adapter", () => {
     const projectedTrajectory = projectWerewolfSocialStepsToHarnessTrajectory(result.artifact.steps);
 
     expect(result.artifact.status).toBe("failed");
-    expect(result.artifact.failureReason).toContain("Harness turn failed");
-    expect(result.artifact.failureReason).toContain("LLM API request failed after 2/3 attempt");
+    expect(result.artifact.failureReason).toBe(
+      "Model provider failure (kind=timeout, stage=during_request, timeoutMs=42, attempts=2/3)."
+    );
     expect(result.trajectory).toHaveLength(1);
     expect(projectedTrajectory).toEqual(result.trajectory);
     expect(result.socialSteps).toHaveLength(1);
@@ -1801,7 +1803,7 @@ describe("Werewolf generic social adapter", () => {
       model: "provider-failure-bridge-profile",
       actionKind: "kill",
       traceId: expect.stringContaining(`${initialState.id}:harness:2:`),
-      message: expect.stringContaining("Harness turn failed"),
+      message: "Model provider failure (kind=timeout, stage=during_request, timeoutMs=42, attempts=2/3).",
       providerFailure: {
         failureKind: "timeout",
         providerStage: "during_request",
@@ -1809,11 +1811,11 @@ describe("Werewolf generic social adapter", () => {
         retryable: true,
         aborted: false,
         attempts: 2,
-        maxAttempts: 3,
-        providerRequestId: "generic-provider-failure-request-id",
-        retryCause: "LLM API request exceeded 42ms."
+        maxAttempts: 3
       }
     });
+    expect(payload.providerFailure).not.toHaveProperty("providerRequestId");
+    expect(payload.providerFailure).not.toHaveProperty("retryCause");
     expect(JSON.stringify(payload)).not.toContain("raw-provider-token-should-not-appear");
     expect(JSON.stringify(result.artifact)).not.toContain("raw-provider-token-should-not-appear");
     expect(result.artifact.messages.map((message) => message.metadata?.kind)).toEqual(["private-seer-inspect", "private-reasoner-memo"]);
@@ -1880,7 +1882,7 @@ describe("Werewolf generic social adapter", () => {
       model: "invalid-step-model",
       actionKind: "inspect",
       traceId: `${initialState.id}:harness:1:${seer.id}:night_seer`,
-      message: expect.stringContaining("not legal for this pending action")
+      message: "Harness environment transition failed."
     });
     expect(JSON.stringify(artifact)).not.toContain("raw-provider-token-should-not-appear");
   });
@@ -1924,7 +1926,7 @@ describe("Werewolf generic social adapter", () => {
       model: "invalid-message-model",
       actionKind: "inspect",
       traceId: `${initialState.id}:harness:1:${seer.id}:night_seer`,
-      message: expect.stringContaining("Unknown social channel missing-channel")
+      message: "Harness environment transition failed."
     });
     expect(artifact.steps).toHaveLength(2);
     expect(artifact.steps[0]).toMatchObject({
@@ -2134,7 +2136,7 @@ describe("Werewolf generic social adapter", () => {
       model: "invalid-kill-model",
       actionKind: "kill",
       traceId: expectedTraceIds[1],
-      message: expect.stringContaining("not legal for this pending action")
+      message: "Harness environment transition failed."
     });
     expect(projectedTrajectory).toHaveLength(1);
     expect(projectedTrajectory[0]).toMatchObject({
@@ -2219,10 +2221,10 @@ describe("Werewolf generic social adapter", () => {
           playerId: seer.id,
           actionKind: "inspect",
           policyName: "seer-information",
-          commandType: "seer.inspect",
-          providerRequestId: `legacy-parity-${expectedTraceId}`
+          commandType: "seer.inspect"
         }
       });
+      expect(generic.trajectory[0].turnTrace).not.toHaveProperty("providerRequestId");
       expect(generic.socialSteps.map((step) => step.traceId)).toEqual(generic.trajectory.map((step) => step.traceId));
       expect(generic.socialSteps[0]).toMatchObject({
         traceId: expectedTraceId,
@@ -2583,8 +2585,9 @@ describe("Werewolf generic social adapter", () => {
       const payload = harnessErrors[0]?.payload as Record<string, any>;
 
       expect(result.status).toBe("failed");
-      expect(result.failureReason).toContain("LLM API request failed after 2/3 attempt(s)");
-      expect(result.failureReason).toContain("exceeded 42ms");
+      expect(result.failureReason).toBe(
+        "Model provider failure (kind=timeout, stage=during_request, timeoutMs=42, attempts=2/3)."
+      );
       expect(result.failureStateHash).toBe(hashStableState(result.state));
       expect(result.forkOf).toBeUndefined();
       expect(result.metrics).toMatchObject({ harnessTurnCount: 1, harnessErrorCount: 1 });
@@ -2624,11 +2627,11 @@ describe("Werewolf generic social adapter", () => {
           retryable: true,
           aborted: false,
           attempts: 2,
-          maxAttempts: 3,
-          providerRequestId: "failed-result-parity-request-id",
-          retryCause: "LLM API request exceeded 42ms."
+          maxAttempts: 3
         }
       });
+      expect(payload.providerFailure).not.toHaveProperty("providerRequestId");
+      expect(payload.providerFailure).not.toHaveProperty("retryCause");
       expect(JSON.stringify(result)).not.toContain("raw-provider-token-should-not-appear");
       expect(result.agents).toHaveLength(initialState.players.length);
       expect(result.evaluation.agentRewards).toHaveLength(initialState.players.length);
@@ -2730,9 +2733,8 @@ describe("Werewolf generic social adapter", () => {
       expect(errorPayload).toMatchObject({
         model: "env-rejection-parity-profile",
         actionKind: "inspect",
-        message: result.failureReason,
+        message: "Harness environment transition failed.",
         traceId: turnPayload.traceId,
-        providerRequestId: turnPayload.providerRequestId,
         attempts: turnPayload.attempts
       });
       expect(errorPayload.providerFailure).toBeUndefined();

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { modelClientFromEnv, providerConfigSummaryFromEnv } from "../agents/providerRegistry";
+import { modelClientFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
 import type { TournamentExperimentSpecV1 } from "../harness/experiment";
 import {
   mergeMatrixExperimentOverrides,
@@ -10,6 +10,7 @@ import {
   type ExperimentMatrixResult,
   type NormalizedMatrixExperiment
 } from "../harness/experimentMatrix";
+import { safeProviderFailureMessage } from "../harness/providerFailure";
 import { OpenAIHarnessReasoner } from "../harness/reasoner";
 
 interface MatrixCliOptions {
@@ -30,9 +31,8 @@ if (hasFlag("help")) {
           summary: {
             kind: "experiment-matrix",
             ok: false,
-            provider: providerConfigSummaryFromEnv(),
-            endpoint: providerConfigSummaryFromEnv().endpoint,
-            failureReason: describeError(error)
+            provider: providerDiagnosticSummaryFromEnv(),
+            failureReason: safeProviderFailureMessage(error, "Experiment matrix failed before the harness run could start.")
           }
         },
         null,
@@ -60,10 +60,11 @@ async function main(): Promise<void> {
   heartbeat.unref();
   timeout?.unref();
 
+  const provider = providerDiagnosticSummaryFromEnv();
   console.error(
-    `[matrix] provider=${providerConfigSummaryFromEnv().protocol} endpoint=${providerConfigSummaryFromEnv().endpoint ?? "none"} matrix=${
-      options.experiment.id
-    } cells=${options.experiment.cells.length} timeoutMs=${options.timeoutMs ?? "none"}`
+    `[matrix] protocol=${provider.protocol ?? "invalid"} configured=${provider.configured} matrix=${options.experiment.id} cells=${
+      options.experiment.cells.length
+    } timeoutMs=${options.timeoutMs ?? "none"}`
   );
 
   try {
@@ -140,8 +141,7 @@ function buildMatrixSummary(
   return {
     kind: "experiment-matrix",
     ok: result.status === "completed",
-    provider: providerConfigSummaryFromEnv(),
-    endpoint: providerConfigSummaryFromEnv().endpoint,
+    provider: providerDiagnosticSummaryFromEnv(),
     matrixId: result.experiment.id,
     status: result.status,
     cellsRequested: result.cellsRequested,
@@ -232,10 +232,6 @@ function parseJsonMode(value: string | undefined): "summary" | "full" {
 
 function removeUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as Partial<T>;
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function printUsage(): void {

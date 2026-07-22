@@ -16,6 +16,13 @@ describe("CLI provider diagnostic safety", () => {
         "--maxTransitions=1",
         "--timeout=1s",
         "--json=summary"
+      ]),
+      runFailingCli("arena:matrix", [
+        "--models=placeholder-model",
+        "--games=1",
+        "--maxTransitions=1",
+        "--timeout=1s",
+        "--json=summary"
       ])
     ]);
 

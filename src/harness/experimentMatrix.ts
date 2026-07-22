@@ -8,6 +8,7 @@ import {
 } from "./experiment";
 import { runGenericExperimentMatrix } from "./experimentMatrixRunner";
 import { hashStableState } from "./hash";
+import { safeProviderFailureMessage } from "./providerFailure";
 import type { HarnessAssignmentConfig } from "./profiles";
 import { redactSecrets } from "./redaction";
 import type { SocialExecutionLimits } from "./social";
@@ -301,6 +302,7 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
       // status, so it is a control-plane failure at this boundary.
       return tournament.gamesFailed || gamesUnstarted > 0 ? "failed" : gamesTruncated > 0 ? "truncated" : "completed";
     },
+    describeError: (error) => safeProviderFailureMessage(error, "Experiment matrix cell failed before its tournament result was recorded.")
   });
   const cells: ExperimentMatrixCellResult[] = generic.cells.map((cell) => ({
     index: cell.index,

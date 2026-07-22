@@ -44,7 +44,7 @@ import {
   type ScaffoldedSocialActor
 } from "./scaffold";
 import { createAgentSocialState } from "./socialState";
-import { describeError, providerFailureFromError } from "./providerFailure";
+import { describeError, providerFailureFromError, safeProviderFailureMessage } from "./providerFailure";
 import {
   WEREWOLF_HARNESS_TURN_METADATA_KIND,
   parseWerewolfHarnessTurnActionMetadata,
@@ -203,7 +203,6 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       plan: PolicyPlan;
       privateMemo: string;
       pendingAction: AgentPendingAction;
-      providerRequestId?: string;
       expectedAgentStateHash: string;
     }
   >();
@@ -323,8 +322,7 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       const commitContext = {
         traceId: this.latest.traceId,
         turnIndex: this.latest.receiptTurnIndex,
-        pendingAction: cloneJson(pending),
-        providerRequestId: reasonerOutput.completion.providerRequestId
+        pendingAction: cloneJson(pending)
       };
       const expectedAgentStateHash = stagedActor.previewCommittedStateHash(plan, reasonerOutput.content, commitContext);
       const trace: HarnessTurnTrace = {
@@ -347,7 +345,6 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         latencyMs: reasonerOutput.completion.latencyMs,
         promptTokens: reasonerOutput.completion.usage.promptTokens,
         completionTokens: reasonerOutput.completion.usage.completionTokens,
-        providerRequestId: reasonerOutput.completion.providerRequestId,
         attempts: reasonerOutput.completion.attempts,
         retryHistory: cloneJson(reasonerOutput.completion.retryHistory),
         stream: cloneJson(reasonerOutput.completion.stream),
@@ -375,7 +372,6 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         plan: cloneJson(plan),
         privateMemo: reasonerOutput.content,
         pendingAction: cloneJson(pending),
-        providerRequestId: reasonerOutput.completion.providerRequestId,
         expectedAgentStateHash
       });
       return {
@@ -434,8 +430,7 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
     stagedActor.commitTurn(proposal.plan, proposal.privateMemo, {
       traceId: proposal.traceId,
       turnIndex: receipt.turnIndex,
-      pendingAction: proposal.pendingAction,
-      providerRequestId: proposal.providerRequestId
+      pendingAction: proposal.pendingAction
     });
     const agentStateHash = stagedActor.state.socialStateHash;
     if (agentStateHash !== proposal.expectedAgentStateHash) {
@@ -507,8 +502,7 @@ function createScaffoldedWerewolfActor(input: {
         context: {
           traceId: metadata.turnTrace.traceId,
           turnIndex: playerTurn.receiptTurnIndex,
-          pendingAction: cloneJson(playerTurn.pending),
-          providerRequestId: reasonerOutput.providerRequestId
+          pendingAction: cloneJson(playerTurn.pending)
         }
       });
       if (state.socialStateHash !== metadata.agentStateHash) {
@@ -596,8 +590,7 @@ function buildScaffoldedWerewolfAction(input: {
   const commitContext = {
     traceId: playerTurn.traceId,
     turnIndex: playerTurn.receiptTurnIndex,
-    pendingAction: cloneJson(playerTurn.pending),
-    providerRequestId: reasonerOutput.completion.providerRequestId
+    pendingAction: cloneJson(playerTurn.pending)
   };
   const preview = cloneJson(input.decision.agent);
   commitWerewolfAgentTurn({
@@ -631,7 +624,6 @@ function buildScaffoldedWerewolfAction(input: {
     latencyMs: reasonerOutput.completion.latencyMs,
     promptTokens: reasonerOutput.completion.usage.promptTokens,
     completionTokens: reasonerOutput.completion.usage.completionTokens,
-    providerRequestId: reasonerOutput.completion.providerRequestId,
     attempts: reasonerOutput.completion.attempts,
     retryHistory: cloneJson(reasonerOutput.completion.retryHistory),
     stream: cloneJson(reasonerOutput.completion.stream),
@@ -1300,7 +1292,6 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
         latencyMs: input.reasonerOutput.latencyMs,
         promptTokens: input.reasonerOutput.promptTokens,
         completionTokens: input.reasonerOutput.completionTokens,
-        providerRequestId: input.reasonerOutput.providerRequestId,
         attempts: input.reasonerOutput.attempts
       }
     });
@@ -1593,7 +1584,7 @@ export const recordWerewolfDecisionFailure: SocialDecisionFailureHook<
   const payload: HarnessErrorPayload = {
     model,
     actionKind: context.pendingAction.kind,
-    message: describeError(context.error),
+    message: safeProviderFailureMessage(context.error, "Harness actor decision failed before a command could be committed."),
     traceId,
     ...(providerFailure ? { providerFailure } : {})
   };
@@ -1625,11 +1616,9 @@ export const recordWerewolfEnvironmentStepFailure: SocialEnvironmentStepFailureH
   const payload: HarnessErrorPayload = {
     model,
     actionKind,
-    message: describeError(context.error),
+    message: safeProviderFailureMessage(context.error, "Harness environment transition failed."),
     traceId
   };
-  const providerRequestId = metadata?.reasonerOutput.providerRequestId;
-  if (providerRequestId) payload.providerRequestId = providerRequestId;
   const attempts = metadata?.reasonerOutput.attempts;
   if (attempts !== undefined) payload.attempts = attempts;
   if (providerFailure) payload.providerFailure = providerFailure;
@@ -1799,7 +1788,6 @@ function summarizeReasonerOutput(
   completion: {
     latencyMs: number;
     usage?: { promptTokens?: number; completionTokens?: number };
-    providerRequestId?: string;
     attempts?: number;
     retryHistory?: ReasonerOutputSummary["retryHistory"];
     stream?: ReasonerOutputSummary["stream"];
@@ -1811,7 +1799,6 @@ function summarizeReasonerOutput(
     latencyMs: completion.latencyMs,
     promptTokens: completion.usage?.promptTokens,
     completionTokens: completion.usage?.completionTokens,
-    providerRequestId: completion.providerRequestId,
     attempts: completion.attempts,
     retryHistory: cloneJson(completion.retryHistory),
     stream: cloneJson(completion.stream),

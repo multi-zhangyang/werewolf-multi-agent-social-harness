@@ -428,13 +428,13 @@ describe("harness agent-environment cycle", () => {
       commandType: "seer.inspect",
       promptTokens: 5,
       completionTokens: 7,
-      providerRequestId: `probe-${state.id}:harness:1:${action.actorId}:${state.phase}`,
       stream: {
         enabled: true,
         completed: true,
         completedBy: "done_sentinel"
       }
     });
+    expect(probe.trace).not.toHaveProperty("providerRequestId");
     expect(probe.command).toMatchObject({
       type: "seer.inspect",
       actorId: action.actorId
@@ -838,7 +838,7 @@ describe("harness agent-environment cycle", () => {
     );
     expect(result.socialEpisode.steps.at(-1)).toMatchObject({ commitStatus: "rejected", failure: expect.any(Object) });
     expect(harnessErrors).toHaveLength(1);
-    expect(firstError.message).toContain("planned reasoner failure");
+    expect(firstError.message).toBe("Harness actor decision failed before a command could be committed.");
     expect(firstError.actionKind).toBe("kill");
     expect(firstError.traceId).toContain(":harness:");
     expect(artifact).toMatchObject({
@@ -937,7 +937,6 @@ describe("harness agent-environment cycle", () => {
     expect(result.status).toBe("failed");
     expect(result.failureReason).toContain("Command seer.inspect target undefined is not legal");
     expect(result.failureReason).toContain("not legal for this pending action");
-    expect(result.failureReason).not.toContain("Harness turn failed");
     expect(result.failureStateHash).toBe(hashStableState(result.state));
     expect(result.state.phase).toBe("night_seer");
     expect(result.state.night.seerInspection).toBeUndefined();
@@ -967,9 +966,8 @@ describe("harness agent-environment cycle", () => {
     expect(payload).toMatchObject({
       model: turnPayload.model,
       actionKind: "inspect",
-      message: result.failureReason,
+      message: "Harness environment transition failed.",
       traceId: turnPayload.traceId,
-      providerRequestId: turnPayload.providerRequestId,
       attempts: turnPayload.attempts
     });
     expect(payload.providerFailure).toBeUndefined();
@@ -1209,7 +1207,9 @@ describe("harness agent-environment cycle", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(result.failureReason).toContain("LLM API request failed after 2/3 attempt");
+    expect(result.failureReason).toBe(
+      "Model provider failure (kind=timeout, stage=during_request, timeoutMs=42, attempts=2/3)."
+    );
     expect(result.failureStateHash).toBe(hashStableState(result.state));
     expect(result.trajectory).toHaveLength(1);
     expect(result.trajectory[0].reasonerOutput).toMatchObject({
@@ -1256,13 +1256,13 @@ describe("harness agent-environment cycle", () => {
         retryable: true,
         aborted: false,
         attempts: 2,
-        maxAttempts: 3,
-        providerRequestId: "Bearer [REDACTED]",
-        retryCause: "LLM API request exceeded 42ms with Bearer [REDACTED]",
-        abortReason: "manual abort Bearer [REDACTED]",
-        causeName: "Error Bearer [REDACTED]"
+        maxAttempts: 3
       }
     });
+    expect(payload.providerFailure).not.toHaveProperty("providerRequestId");
+    expect(payload.providerFailure).not.toHaveProperty("retryCause");
+    expect(payload.providerFailure).not.toHaveProperty("abortReason");
+    expect(payload.providerFailure).not.toHaveProperty("causeName");
     expect(JSON.stringify(payload)).not.toContain("raw-provider-token-should-not-appear");
     expect(JSON.stringify(payload)).not.toContain("provider-failure-request-id-should-not-appear");
     expect(JSON.stringify(payload)).not.toContain("retry-cause-token-should-not-appear");
@@ -1272,6 +1272,7 @@ describe("harness agent-environment cycle", () => {
     expect(JSON.stringify(artifact)).not.toContain("raw-provider-token-should-not-appear");
     expect(JSON.stringify(artifact)).not.toContain("provider-failure-request-id-should-not-appear");
     expect(JSON.stringify(artifact)).not.toContain("retry-cause-token-should-not-appear");
+    expect(JSON.stringify(artifact)).not.toContain("LLM API HTTP 429: rate limited");
     expect(toTrajectoryJsonl(artifact)).not.toContain("provider-failure-request-id-should-not-appear");
     expect(toTrajectoryJsonl(artifact)).not.toContain("retry-cause-token-should-not-appear");
     expect(replay.ok).toBe(true);

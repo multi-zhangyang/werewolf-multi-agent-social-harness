@@ -1008,24 +1008,30 @@ describe("public match API redaction", () => {
     record.artifact.failureReason = `provider failed with ${rawToken}`;
     const firstStep = record.artifact.trajectory[0];
     if (!firstStep) throw new Error("Expected a committed player step in the real artifact fixture.");
-    firstStep.reasonerOutput.providerRequestId = "private-provider-request-id";
-    firstStep.reasonerOutput.retryHistory = [
+    // Legacy persisted artifacts can contain fields which the current durable
+    // schema forbids. Inject them through an unsafe seam to prove that every
+    // read/export view strips them rather than relying on current TypeScript
+    // shapes to hide a historical leak.
+    const unsafeReasonerOutput = firstStep.reasonerOutput as unknown as Record<string, unknown>;
+    unsafeReasonerOutput.providerRequestId = "req-opaque-nonsecret-12345";
+    unsafeReasonerOutput.retryHistory = [
       {
         attempt: 1,
         retryable: false,
-        message: "private provider retry diagnostic"
+        message: "provider diagnostic: internal routing cluster x17"
       }
     ];
-    firstStep.reasonerOutput.stream = { enabled: true, completed: true, completedBy: "reader_done" };
-    firstStep.turnTrace.providerRequestId = "private-provider-request-id";
-    firstStep.turnTrace.retryHistory = [
+    unsafeReasonerOutput.stream = { enabled: true, completed: true, completedBy: "reader_done" };
+    const unsafeTurnTrace = firstStep.turnTrace as unknown as Record<string, unknown>;
+    unsafeTurnTrace.providerRequestId = "req-opaque-nonsecret-12345";
+    unsafeTurnTrace.retryHistory = [
       {
         attempt: 1,
         retryable: false,
-        message: "private provider retry diagnostic"
+        message: "provider diagnostic: internal routing cluster x17"
       }
     ];
-    firstStep.turnTrace.stream = { enabled: true, completed: true, completedBy: "reader_done" };
+    unsafeTurnTrace.stream = { enabled: true, completed: true, completedBy: "reader_done" };
     saveMatch(record);
 
     const artifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=full`);
@@ -1034,17 +1040,25 @@ describe("public match API redaction", () => {
     expect(artifactJson).not.toContain("artifact-route-token-should-not-appear");
     expect(artifactJson).toContain("Bearer [REDACTED]");
     expect(artifactJson).toContain("privateMemo");
+    expect(artifactJson).not.toContain("req-opaque-nonsecret-12345");
+    expect(artifactJson).not.toContain("provider diagnostic: internal routing cluster x17");
+    expect(artifactJson).not.toContain('"providerRequestId"');
+    expect(artifactJson).toContain('"retryHistory"');
 
     const trajectory = await requestText(baseUrl, "GET", `/api/matches/${record.id}/trajectory.jsonl?view=full`);
     expect(trajectory.status).toBe(200);
     expect(trajectory.text).not.toContain("artifact-route-token-should-not-appear");
     expect(trajectory.text).toContain("Bearer [REDACTED]");
+    expect(trajectory.text).not.toContain("req-opaque-nonsecret-12345");
+    expect(trajectory.text).not.toContain("provider diagnostic: internal routing cluster x17");
+    expect(trajectory.text).not.toContain('"providerRequestId"');
+    expect(trajectory.text).toContain('"retryHistory"');
 
     const projectedArtifact = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=postgame-redacted`);
     expect(projectedArtifact.status).toBe(200);
     const projectedArtifactJson = JSON.stringify(projectedArtifact.body);
-    expect(projectedArtifactJson).not.toContain("private-provider-request-id");
-    expect(projectedArtifactJson).not.toContain("private provider retry diagnostic");
+    expect(projectedArtifactJson).not.toContain("req-opaque-nonsecret-12345");
+    expect(projectedArtifactJson).not.toContain("provider diagnostic: internal routing cluster x17");
     expect(projectedArtifactJson).not.toContain('"providerRequestId"');
     expect(projectedArtifactJson).not.toContain('"retryHistory"');
     expect(projectedArtifactJson).not.toContain('"stream"');
@@ -1055,8 +1069,8 @@ describe("public match API redaction", () => {
       `/api/matches/${record.id}/trajectory.jsonl?view=postgame-redacted`
     );
     expect(projectedTrajectory.status).toBe(200);
-    expect(projectedTrajectory.text).not.toContain("private-provider-request-id");
-    expect(projectedTrajectory.text).not.toContain("private provider retry diagnostic");
+    expect(projectedTrajectory.text).not.toContain("req-opaque-nonsecret-12345");
+    expect(projectedTrajectory.text).not.toContain("provider diagnostic: internal routing cluster x17");
     expect(projectedTrajectory.text).not.toContain('"providerRequestId"');
     expect(projectedTrajectory.text).not.toContain('"retryHistory"');
     expect(projectedTrajectory.text).not.toContain('"stream"');
