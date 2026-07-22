@@ -135,6 +135,7 @@ export interface WerewolfSocialHarnessPrefixOptions
     | "initialSocialMessages"
     | "reasoner"
     | "maxTransitions"
+    | "executionLimits"
     | "jointPhaseScheduler"
     | "recordAgentSnapshots"
   > {
@@ -974,6 +975,7 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
     initialMessages: cloneJson(options.initialSocialMessages ?? []),
     schedulerMode: options.schedulerMode ?? "aec",
     maxTransitions: options.maxTransitions,
+    executionLimits: options.executionLimits,
     hashState: hashStableState,
     hashMessages: hashStableState,
     eventSeq: werewolfEventSeq,

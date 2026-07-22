@@ -10,6 +10,7 @@ import { runGenericExperimentMatrix } from "./experimentMatrixRunner";
 import { hashStableState } from "./hash";
 import type { HarnessAssignmentConfig } from "./profiles";
 import { redactSecrets } from "./redaction";
+import type { SocialExecutionLimits } from "./social";
 import { runTournament, type TournamentResult } from "./tournament";
 import { writeTournamentArtifactDirectory } from "./tournamentArtifacts";
 import type { HarnessAgentProfile, HarnessReasoner, WerewolfJointPhaseScheduler } from "./types";
@@ -63,6 +64,7 @@ export interface NormalizedMatrixExperiment {
 export interface ExperimentMatrixRunOptions {
   experiment: NormalizedMatrixExperiment;
   reasoner: HarnessReasoner;
+  executionLimits?: SocialExecutionLimits;
   includeArtifacts?: boolean;
 }
 
@@ -86,6 +88,7 @@ export interface ExperimentMatrixResult {
   completedAt: string;
   status: "completed" | "partial" | "failed";
   cellsRequested: number;
+  cellsUnstarted: number;
   cellsCompleted: number;
   cellsTruncated: number;
   cellsFailed: number;
@@ -93,6 +96,7 @@ export interface ExperimentMatrixResult {
   gamesCompleted: number;
   gamesTruncated: number;
   gamesFailed: number;
+  gamesUnstarted: number;
   cells: ExperimentMatrixCellResult[];
   statistics: ExperimentMatrixStatistics;
 }
@@ -112,6 +116,7 @@ export interface ExperimentMatrixStatistics {
   };
   status: {
     cellsRequested: number;
+    cellsUnstarted: number;
     cellsCompleted: number;
     cellsTruncated: number;
     cellsFailed: number;
@@ -119,6 +124,7 @@ export interface ExperimentMatrixStatistics {
     gamesCompleted: number;
     gamesTruncated: number;
     gamesFailed: number;
+    gamesUnstarted: number;
     completedSeatRows: number;
   };
   modelStats: MatrixSubjectStats[];
@@ -262,6 +268,7 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
         input: cell.tournament
       }))
     },
+    abortSignal: options.executionLimits?.abortSignal,
     runCell: async (tournament, context) => {
       const started = performance.now();
       try {
@@ -278,7 +285,8 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
           continueOnError: tournament.continueOnError,
           experiment: tournament,
           includeArtifacts: options.includeArtifacts,
-          reasoner: options.reasoner
+          reasoner: options.reasoner,
+          executionLimits: options.executionLimits
         });
       } finally {
         elapsedMsByExecutionId.set(context.executionId, Math.round(performance.now() - started));
@@ -286,7 +294,12 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
     },
     statusOf: (tournament) => {
       const gamesTruncated = tournament.gamesTruncated ?? tournament.episodes.filter((episode) => episode.status === "truncated").length;
-      return tournament.gamesFailed ? "failed" : gamesTruncated > 0 ? "truncated" : "completed";
+      const gamesUnstarted = tournament.gamesUnstarted ?? Math.max(0, tournament.gamesRequested - tournament.episodes.length);
+      // A cell with an externally aborted, partially scheduled tournament is
+      // not a completed experiment. The exact unstarted-game count remains on
+      // the result; generic matrix lifecycle has no separate partial-cell
+      // status, so it is a control-plane failure at this boundary.
+      return tournament.gamesFailed || gamesUnstarted > 0 ? "failed" : gamesTruncated > 0 ? "truncated" : "completed";
     },
   });
   const cells: ExperimentMatrixCellResult[] = generic.cells.map((cell) => ({
@@ -308,6 +321,7 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
     completedAt: generic.completedAt,
     status: generic.status,
     cellsRequested: generic.cellsRequested,
+    cellsUnstarted: generic.cellsUnstarted,
     cellsCompleted: generic.cellsCompleted,
     cellsTruncated: generic.cellsTruncated,
     cellsFailed: generic.cellsFailed,
@@ -315,6 +329,7 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
     gamesCompleted: sumCells(cells, (cell) => cell.tournament?.gamesCompleted ?? 0),
     gamesTruncated: sumCells(cells, gamesTruncatedForCell),
     gamesFailed: sumCells(cells, (cell) => cell.tournament?.gamesFailed ?? 0),
+    gamesUnstarted: sumCells(cells, gamesUnstartedForCell),
     cells,
     statistics
   };
@@ -345,6 +360,7 @@ export function buildExperimentMatrixStatistics(
     },
     status: {
       cellsRequested: experiment.cells.length,
+      cellsUnstarted: Math.max(0, experiment.cells.length - cells.length),
       cellsCompleted: cells.filter((cell) => cell.status === "completed").length,
       cellsTruncated: cells.filter((cell) => cell.status === "truncated").length,
       cellsFailed: cells.filter((cell) => cell.status === "failed").length,
@@ -352,6 +368,7 @@ export function buildExperimentMatrixStatistics(
       gamesCompleted: sumCells(cells, (cell) => cell.tournament?.gamesCompleted ?? 0),
       gamesTruncated: sumCells(cells, gamesTruncatedForCell),
       gamesFailed: sumCells(cells, (cell) => cell.tournament?.gamesFailed ?? 0),
+      gamesUnstarted: sumCells(cells, gamesUnstartedForCell),
       completedSeatRows: rows.length
     },
     modelStats,
@@ -406,6 +423,7 @@ export async function writeExperimentMatrixArtifactDirectory(
     matrixId: result.experiment.id,
     status: result.status,
     cellsRequested: result.cellsRequested,
+    cellsUnstarted: result.cellsUnstarted,
     cellsCompleted: result.cellsCompleted,
     cellsTruncated: result.cellsTruncated,
     cellsFailed: result.cellsFailed,
@@ -413,6 +431,7 @@ export async function writeExperimentMatrixArtifactDirectory(
     gamesCompleted: result.gamesCompleted,
     gamesTruncated: result.gamesTruncated,
     gamesFailed: result.gamesFailed,
+    gamesUnstarted: result.gamesUnstarted,
     experimentHash: result.statistics.experimentHash,
     files: {
       manifest: "manifest.json",
@@ -642,6 +661,7 @@ function matrixCellRecord(cell: ExperimentMatrixCellResult): object {
     gamesCompleted: cell.tournament?.gamesCompleted ?? null,
     gamesTruncated: cell.tournament ? gamesTruncatedForCell(cell) : null,
     gamesFailed: cell.tournament?.gamesFailed ?? null,
+    gamesUnstarted: cell.tournament ? gamesUnstartedForCell(cell) : null,
     jointPhaseScheduler: cell.tournament?.experiment.jointPhaseScheduler ?? null,
     models: cell.tournament?.models ?? [],
     error: cell.error ?? null
@@ -652,6 +672,11 @@ function gamesTruncatedForCell(cell: ExperimentMatrixCellResult): number {
   return cell.tournament?.gamesTruncated ?? cell.tournament?.episodes.filter((episode) => episode.status === "truncated").length ?? 0;
 }
 
+function gamesUnstartedForCell(cell: ExperimentMatrixCellResult): number {
+  if (!cell.tournament) return 0;
+  return cell.tournament.gamesUnstarted ?? Math.max(0, cell.tournament.gamesRequested - cell.tournament.episodes.length);
+}
+
 function matrixSummaryMarkdown(result: ExperimentMatrixResult): string {
   return `${[
     `# Experiment Matrix Summary: ${markdownText(result.experiment.id)}`,
@@ -660,6 +685,7 @@ function matrixSummaryMarkdown(result: ExperimentMatrixResult): string {
     "",
     `- Status: ${result.status}`,
     `- Cells requested: ${result.cellsRequested}`,
+    `- Cells unstarted: ${result.cellsUnstarted}`,
     `- Cells completed: ${result.cellsCompleted}`,
     `- Cells truncated: ${result.cellsTruncated}`,
     `- Cells failed: ${result.cellsFailed}`,
@@ -667,6 +693,7 @@ function matrixSummaryMarkdown(result: ExperimentMatrixResult): string {
     `- Games completed: ${result.gamesCompleted}`,
     `- Games truncated: ${result.gamesTruncated}`,
     `- Games failed: ${result.gamesFailed}`,
+    `- Games unstarted: ${result.gamesUnstarted}`,
     `- Completed seat rows: ${result.statistics.status.completedSeatRows}`,
     "",
     "## Model Statistics",

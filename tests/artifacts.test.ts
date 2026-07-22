@@ -1158,6 +1158,11 @@ describe("match artifact JSONL export", () => {
     expect(deriveSocialExposureRecords(artifact.socialEpisode).length).toBeGreaterThan(0);
     expect(artifact.agents.some((agent) => (agent.social?.journal?.entries.length ?? 0) > 0)).toBe(true);
 
+    const executionBudgetTamper = cloneJson(artifact);
+    if (!executionBudgetTamper.socialEpisode.execution) throw new Error("Expected native social execution metadata.");
+    executionBudgetTamper.socialEpisode.execution.decisionTimeoutMs = 0;
+    expect(validateMatchArtifactIntegrity(executionBudgetTamper).join("\n")).toMatch(/decisionTimeoutMs must be a positive integer/);
+
     const retrievalTamper = cloneJson(artifact);
     const retrievalStep = retrievalTamper.trajectory.find((step) => step.policyPlan.memoryRetrieval);
     if (!retrievalStep?.policyPlan.memoryRetrieval?.selected[0] || !retrievalStep.turnTrace.memoryRetrieval?.selected[0]) {

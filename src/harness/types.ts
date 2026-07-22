@@ -12,7 +12,7 @@ import type {
 import type { AgentPendingAction } from "../core/pending";
 import type { ModelCompletionResult } from "../agents/modelClient";
 import type { ProviderFailureKind, ProviderFailureStage, ProviderRetryHistoryEntry, ProviderStreamTelemetry } from "../agents/schema";
-import type { SocialChannel, SocialEpisodeArtifact, SocialMessage } from "./social";
+import type { SocialChannel, SocialEpisodeArtifact, SocialExecutionLimits, SocialMessage } from "./social";
 import type { AgentSocialState, EvidenceRef, MemoryRetrievalRecord, MemoryVisibility } from "./socialState";
 import type { GenericForkProvenance } from "./episodeArtifacts";
 
@@ -72,6 +72,9 @@ export interface HarnessRunOptions {
   initialSocialMessages?: SocialMessage[];
   reasoner: HarnessReasoner;
   maxTransitions?: number;
+  /** Generic runner-owned deadline/cancellation boundary. It applies even to
+   * non-provider actors, unlike a model-client timeout alone. */
+  executionLimits?: SocialExecutionLimits;
   /**
    * Scheduler used for simultaneous Werewolf phases (night kill votes and day
    * votes). Defaults to {@link DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER}.

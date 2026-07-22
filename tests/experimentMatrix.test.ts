@@ -39,6 +39,55 @@ const deterministicReasoner: HarnessReasoner = {
 };
 
 describe("experiment matrix harness", () => {
+  it("does not mark a single-cell matrix completed when its tournament deadline leaves games unstarted", async () => {
+    const controller = new AbortController();
+    const abortingReasoner: HarnessReasoner = {
+      async think(input) {
+        controller.abort();
+        const content = `abort control ${input.traceId}`;
+        return {
+          content,
+          completion: {
+            content,
+            latencyMs: 1,
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+            attempts: 1
+          }
+        };
+      }
+    };
+    const experiment = normalizeMatrixExperimentSpec({
+      version: MATRIX_EXPERIMENT_VERSION,
+      id: "matrix-inner-tournament-abort",
+      kind: "matrix",
+      base: {
+        models: ["alpha"],
+        games: 3,
+        seed: "matrix-inner-tournament-abort",
+        maxTransitions: 4,
+        continueOnError: true
+      },
+      cells: [{ id: "only-cell" }]
+    });
+
+    const result = await runExperimentMatrix({
+      experiment,
+      reasoner: abortingReasoner,
+      executionLimits: { abortSignal: controller.signal }
+    });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      cellsRequested: 1,
+      cellsUnstarted: 0,
+      cellsFailed: 1,
+      gamesRequested: 3,
+      gamesFailed: 1,
+      gamesUnstarted: 2
+    });
+    expect(result.cells[0]).toMatchObject({ status: "failed" });
+  });
+
   it("normalizes explicit cells with inherited tournament defaults", () => {
     const matrix = normalizeMatrixExperimentSpec({
       version: MATRIX_EXPERIMENT_VERSION,

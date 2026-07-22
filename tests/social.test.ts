@@ -507,6 +507,157 @@ describe("generic social harness scheduler contract", () => {
     expect(validateSocialEpisodeArtifact(tampered).join("\n")).toMatch(/parallel step must be atomic/);
   });
 
+  it("enforces a generic per-decision timeout without an environment transition", async () => {
+    const environment = new TestEnvironment({ pending: [{ actorId: "a", kind: "act" }] });
+    const actor = new HangingActor("a");
+
+    const artifact = await runSocialEpisode({
+      id: "social-decision-timeout",
+      environment,
+      actors: [actor],
+      schedulerMode: "aec",
+      executionLimits: { decisionTimeoutMs: 5 },
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(artifact.execution).toMatchObject({ decisionTimeoutMs: 5 });
+    expect(environment.stepCalls).toBe(0);
+    expect(artifact.steps).toMatchObject([
+      {
+        actorId: "a",
+        commitStatus: "rejected",
+        failure: { stage: "decision_timeout" }
+      }
+    ]);
+    expect(actor.receipts).toMatchObject([{ status: "rejected", failure: { stage: "decision_timeout" } }]);
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+
+    const tamperedBudget = clone(artifact);
+    if (!tamperedBudget.execution) throw new Error("Expected execution metadata.");
+    tamperedBudget.execution.decisionTimeoutMs = 0;
+    expect(validateSocialEpisodeArtifact(tamperedBudget).join("\n")).toMatch(/decisionTimeoutMs must be a positive integer/);
+
+    const replay = replaySocialEpisode({
+      episode: artifact,
+      environment: new TestEnvironment({ pending: [{ actorId: "a", kind: "act" }] }),
+      hashState,
+      eventSeq
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.replayedSteps).toBe(0);
+    expect(replay.rejectedSteps).toBe(1);
+  });
+
+  it("records one root timeout and rejects its parallel peers without calling stepBatch", async () => {
+    const environment = new TestParallelEnvironment();
+    const actorA = new HangingActor("a");
+    const actorB = new HangingActor("b");
+
+    const artifact = await runSocialEpisode({
+      id: "social-parallel-decision-timeout",
+      environment,
+      actors: [actorA, actorB],
+      schedulerMode: "parallel",
+      executionLimits: { decisionTimeoutMs: 5 },
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(environment.batchCalls).toBe(0);
+    expect(artifact.steps).toHaveLength(2);
+    expect(artifact.steps.every((step) => step.atomic === true && step.commitStatus === "rejected")).toBe(true);
+    expect(artifact.steps.map((step) => step.failure?.stage)).toEqual(["decision_timeout", "batch_aborted"]);
+    expect(actorA.receipts).toMatchObject([{ status: "rejected", failure: { stage: "decision_timeout" } }]);
+    expect(actorB.receipts).toMatchObject([{ status: "rejected", failure: { stage: "batch_aborted" } }]);
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+
+    const replay = replaySocialEpisode({
+      episode: artifact,
+      environment: new TestParallelEnvironment(),
+      hashState,
+      eventSeq
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.replayedSteps).toBe(0);
+    expect(replay.rejectedSteps).toBe(2);
+  });
+
+  it("records a system control failure when execution is already aborted before actor collection", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("do not persist external abort detail"));
+    const environment = new TestEnvironment({ pending: [{ actorId: "a", kind: "act" }] });
+    const actor = new TestActor("a");
+
+    const artifact = await runSocialEpisode({
+      id: "social-prestart-abort",
+      environment,
+      actors: [actor],
+      schedulerMode: "aec",
+      executionLimits: { abortSignal: controller.signal },
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(environment.stepCalls).toBe(0);
+    expect(actor.observations).toEqual([]);
+    expect(artifact.steps).toMatchObject([
+      {
+        actorId: "system",
+        commitStatus: "rejected",
+        resolutionPolicy: "scheduler-validation",
+        failure: { stage: "execution_abort" }
+      }
+    ]);
+    expect(JSON.stringify(artifact)).not.toContain("do not persist external abort detail");
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+  });
+
+  it("records a system control failure when execution aborts after a committed transition", async () => {
+    const controller = new AbortController();
+    const environment = new TestEnvironment();
+    const actorA = new TestActor("a");
+    const actorB = new TestActor("b");
+
+    const artifact = await runSocialEpisode({
+      id: "social-post-commit-abort",
+      environment,
+      actors: [actorA, actorB],
+      schedulerMode: "aec",
+      executionLimits: { abortSignal: controller.signal },
+      hashState,
+      eventSeq,
+      afterEnvironmentStep: () => controller.abort(new Error("do not persist post-commit abort detail"))
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(environment.stepCalls).toBe(1);
+    expect(actorA.receipts).toMatchObject([{ status: "committed" }]);
+    expect(actorB.observations).toEqual([]);
+    expect(artifact.steps).toMatchObject([
+      { actorId: "a", commitStatus: "committed" },
+      {
+        actorId: "system",
+        commitStatus: "rejected",
+        resolutionPolicy: "scheduler-validation",
+        failure: { stage: "execution_abort" }
+      }
+    ]);
+    expect(JSON.stringify(artifact)).not.toContain("do not persist post-commit abort detail");
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+
+    const replay = replaySocialEpisode({
+      episode: artifact,
+      environment: new TestEnvironment(),
+      hashState,
+      eventSeq
+    });
+    expect(replay).toMatchObject({ ok: true, replayedSteps: 1, rejectedSteps: 1 });
+  });
+
   it("rejects duplicate pending actor ids before concurrent decision collection", async () => {
     const actorA = new TestActor("a");
     const batchedEnvironment = new TestEnvironment({
@@ -611,6 +762,31 @@ describe("generic social harness scheduler contract", () => {
     expect(replay.ok).toBe(true);
     expect(replay.replayedSteps).toBe(0);
     expect(replay.rejectedSteps).toBe(2);
+  });
+
+  it("preserves each independent aec-batched decision failure instead of mislabeling it as batch-aborted", async () => {
+    const environment = new TestEnvironment();
+    const actorA = new TestActor("a", { decideFailure: "batched a exploded" });
+    const actorB = new TestActor("b", { decideFailure: "batched b exploded" });
+
+    const artifact = await runSocialEpisode({
+      id: "social-batched-independent-decision-failures",
+      environment,
+      actors: [actorA, actorB],
+      schedulerMode: "aec-batched-decision",
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("failed");
+    expect(environment.stepCalls).toBe(0);
+    expect(artifact.steps.map((step) => step.failure?.stage)).toEqual(["actor_decide", "actor_decide"]);
+    expect(artifact.steps.map((step) => step.failure?.message)).toEqual(
+      expect.arrayContaining([expect.stringContaining("batched a exploded"), expect.stringContaining("batched b exploded")])
+    );
+    expect(actorA.receipts[0]).toMatchObject({ status: "rejected", failure: { stage: "actor_decide" } });
+    expect(actorB.receipts[0]).toMatchObject({ status: "rejected", failure: { stage: "actor_decide" } });
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
   });
 
   it("records abandoned aec-batched proposals after an earlier transition terminates the episode", async () => {
@@ -2045,7 +2221,7 @@ class TestActor implements SocialActor<TestObservation, TestPending, TestCommand
     if (this.options.observeFailure) throw new Error(this.options.observeFailure);
   }
 
-  decide(pending: TestPending): SocialAction<TestCommand> {
+  decide(pending: TestPending): SocialAction<TestCommand> | Promise<SocialAction<TestCommand>> {
     this.decisions.push(pending);
     if (this.options.decideFailure) throw new Error(this.options.decideFailure);
     const actionActorId = this.options.actionActorId ?? this.id;
@@ -2064,6 +2240,12 @@ class TestActor implements SocialActor<TestObservation, TestPending, TestCommand
 
   onStepResult(receipt: SocialActorStepReceipt<TestObservation, TestPending, TestCommand>): void {
     this.receipts.push(receipt);
+  }
+}
+
+class HangingActor extends TestActor {
+  override decide(_pending: TestPending): Promise<SocialAction<TestCommand>> {
+    return new Promise(() => undefined);
   }
 }
 

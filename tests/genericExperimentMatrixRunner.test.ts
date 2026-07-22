@@ -84,6 +84,38 @@ describe("generic experiment matrix control plane", () => {
     ]);
   });
 
+  it("does not report completed when a shared control-plane abort leaves cells unstarted", async () => {
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const result = await runGenericExperimentMatrix({
+      experiment: {
+        id: "abort-matrix",
+        continueOnError: true,
+        cells: [
+          { id: "first", input: "completed" as const },
+          { id: "unstarted", input: "completed" as const }
+        ]
+      },
+      abortSignal: controller.signal,
+      runCell: (input, context) => {
+        calls.push(context.id);
+        controller.abort();
+        return input;
+      },
+      statusOf: (result) => result
+    });
+
+    expect(calls).toEqual(["first"]);
+    expect(result).toMatchObject({
+      status: "partial",
+      cellsRequested: 2,
+      cellsAttempted: 1,
+      cellsUnstarted: 1,
+      cellsCompleted: 1,
+      cellsFailed: 0
+    });
+  });
+
   it("rejects malformed cell identity before it runs", () => {
     expect(() =>
       validateGenericExperimentMatrixSpec({

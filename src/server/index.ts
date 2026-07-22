@@ -885,12 +885,15 @@ app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
   let artifactFinalized = false;
 
   try {
-    const forkOptions = forkHarnessRunOptions({
-      checkpoint,
-      reasoner: createReasoner(abortController.signal),
-      maxTransitions,
-      reason
-    });
+    const forkOptions = {
+      ...forkHarnessRunOptions({
+        checkpoint,
+        reasoner: createReasoner(abortController.signal),
+        maxTransitions,
+        reason
+      }),
+      executionLimits: { abortSignal: abortController.signal }
+    };
     const resolvedAssignments = describeResolvedAssignments(forkOptions.initialState.players, forkOptions.agents);
     const result = await runHarnessMatch(forkOptions);
     const artifact = buildMatchArtifact({
@@ -1058,6 +1061,7 @@ app.post("/api/matches/run", async (req, res, next) => {
       agents,
       reasoner: createReasoner(abortController.signal),
       maxTransitions,
+      executionLimits: { abortSignal: abortController.signal },
       jointPhaseScheduler
     });
     const artifact = buildMatchArtifact({
@@ -1253,7 +1257,8 @@ app.post("/api/tournaments/run", async (req, res) => {
       continueOnError: experiment.continueOnError,
       experiment,
       includeArtifacts: exportArtifacts,
-      reasoner: createReasoner(abortController.signal)
+      reasoner: createReasoner(abortController.signal),
+      executionLimits: { abortSignal: abortController.signal }
     });
     const artifactSet = exportArtifacts
       ? await persistTournamentArtifactSet({
@@ -1263,7 +1268,7 @@ app.post("/api/tournaments/run", async (req, res) => {
           baseDir: tournamentArtifactBaseDir
         })
       : null;
-    res.status(result.gamesFailed ? 207 : 200).json({
+    res.status(result.gamesFailed || (result.gamesUnstarted ?? 0) > 0 ? 207 : 200).json({
       summary: {
         ...buildTournamentSummary(result, {
           experimentId: experiment.id,
@@ -1361,13 +1366,14 @@ app.post("/api/experiments/matrix/run", async (req, res) => {
     const result = await runExperimentMatrix({
       experiment,
       includeArtifacts: exportArtifacts,
-      reasoner: createReasoner(abortController.signal)
+      reasoner: createReasoner(abortController.signal),
+      executionLimits: { abortSignal: abortController.signal }
     });
     const artifactSet = exportArtifacts
       ? await persistExperimentMatrixArtifactSet({ result, baseDir: matrixArtifactBaseDir })
       : null;
     const serializedArtifacts = artifactSet ? serializeExperimentMatrixArtifactSet(artifactSet) : null;
-    res.status(result.cellsFailed || result.gamesFailed ? 207 : 200).json({
+    res.status(result.cellsFailed || result.cellsUnstarted > 0 || result.gamesFailed || result.gamesUnstarted > 0 ? 207 : 200).json({
       summary: {
         ...buildExperimentMatrixSummary(result, {
           timeoutMs,
@@ -5038,11 +5044,12 @@ function buildTournamentSummary(
     { nativeSteps: 0, committedSteps: 0, rejectedSteps: 0 }
   );
   const gamesTruncated = result.gamesTruncated ?? result.episodes.filter((episode) => episode.status === "truncated").length;
-  const status = result.gamesFailed > 0 ? "failed" : gamesTruncated > 0 ? "truncated" : "completed";
+  const gamesUnstarted = result.gamesUnstarted ?? Math.max(0, result.gamesRequested - result.episodes.length);
+  const status = result.gamesFailed > 0 ? "failed" : gamesUnstarted > 0 ? "partial" : gamesTruncated > 0 ? "truncated" : "completed";
   return {
     kind: "tournament",
     status,
-    ok: result.gamesFailed === 0,
+    ok: status === "completed" || status === "truncated",
     provider: providerDiagnosticSummaryFromEnv(),
     experimentId: options.experimentId ?? null,
     seed: options.seed,
@@ -5054,6 +5061,7 @@ function buildTournamentSummary(
     gamesCompleted: result.gamesCompleted,
     gamesFailed: result.gamesFailed,
     gamesTruncated,
+    gamesUnstarted,
     nativeSteps: stepTotals.nativeSteps,
     committedSteps: stepTotals.committedSteps,
     rejectedSteps: stepTotals.rejectedSteps,
@@ -5095,6 +5103,7 @@ function buildExperimentMatrixSummary(
     matrixId: result.experiment.id,
     status: result.status,
     cellsRequested: result.cellsRequested,
+    cellsUnstarted: result.cellsUnstarted,
     cellsCompleted: result.cellsCompleted,
     cellsTruncated: result.cellsTruncated,
     cellsFailed: result.cellsFailed,
@@ -5102,6 +5111,7 @@ function buildExperimentMatrixSummary(
     gamesCompleted: result.gamesCompleted,
     gamesTruncated: result.gamesTruncated,
     gamesFailed: result.gamesFailed,
+    gamesUnstarted: result.gamesUnstarted,
     limits: { timeoutMs: options.timeoutMs ?? null },
     elapsedMs: options.elapsedMs,
     timedOut: options.timedOut,

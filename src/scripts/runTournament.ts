@@ -108,6 +108,7 @@ async function main(): Promise<void> {
       temperature: options.temperature,
       experiment: options.experiment,
       reasoner: new OpenAIHarnessReasoner(modelClientFromEnv(process.env, { abortSignal: abortController.signal })),
+      executionLimits: { abortSignal: abortController.signal },
       continueOnError: options.continueOnError,
       includeArtifacts: Boolean(options.outputDir)
     });
@@ -130,8 +131,15 @@ async function main(): Promise<void> {
     );
     const summary = {
       kind: "tournament",
-      ok: result.gamesFailed === 0,
-      status: result.gamesFailed > 0 ? "failed" : (result.gamesTruncated ?? 0) > 0 ? "truncated" : "completed",
+      ok: result.gamesFailed === 0 && (result.gamesUnstarted ?? 0) === 0,
+      status:
+        result.gamesFailed > 0
+          ? "failed"
+          : (result.gamesUnstarted ?? Math.max(0, result.gamesRequested - result.episodes.length)) > 0
+            ? "partial"
+            : (result.gamesTruncated ?? 0) > 0
+              ? "truncated"
+              : "completed",
       provider: providerDiagnosticSummaryFromEnv(),
       experimentId: options.experimentId,
       seed: options.seed,
@@ -142,6 +150,7 @@ async function main(): Promise<void> {
       gamesCompleted: result.gamesCompleted,
       gamesFailed: result.gamesFailed,
       gamesTruncated: result.gamesTruncated ?? result.episodes.filter((episode) => episode.status === "truncated").length,
+      gamesUnstarted: result.gamesUnstarted ?? Math.max(0, result.gamesRequested - result.episodes.length),
       maxTransitions: options.maxTransitions ?? null,
       jointPhaseScheduler: options.jointPhaseScheduler ?? "aec-batched-decision",
       timeoutMs: options.timeoutMs ?? null,
@@ -162,7 +171,7 @@ async function main(): Promise<void> {
         }))
     };
     console.log(JSON.stringify(options.json === "full" ? { summary, episodes: result.episodes } : { summary }, null, 2));
-    if (result.gamesFailed > 0) process.exitCode = 1;
+    if (result.gamesFailed > 0 || (result.gamesUnstarted ?? 0) > 0) process.exitCode = 1;
   } finally {
     clearInterval(heartbeat);
     if (timeout) clearTimeout(timeout);

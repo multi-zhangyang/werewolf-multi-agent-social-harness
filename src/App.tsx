@@ -452,12 +452,13 @@ interface TournamentPublicShareInventory {
 interface TournamentRunResponse {
   summary?: {
     ok?: boolean;
-    status?: "completed" | "truncated" | "failed";
+    status?: "completed" | "truncated" | "partial" | "failed";
     seed?: string;
     gamesRequested?: number;
     gamesCompleted?: number;
     gamesFailed?: number;
     gamesTruncated?: number;
+    gamesUnstarted?: number;
     nativeSteps?: number;
     committedSteps?: number;
     rejectedSteps?: number;
@@ -572,6 +573,7 @@ interface ExperimentMatrixStatisticsView {
   };
   status?: {
     cellsRequested?: number;
+    cellsUnstarted?: number;
     cellsCompleted?: number;
     cellsTruncated?: number;
     cellsFailed?: number;
@@ -579,6 +581,7 @@ interface ExperimentMatrixStatisticsView {
     gamesCompleted?: number;
     gamesTruncated?: number;
     gamesFailed?: number;
+    gamesUnstarted?: number;
     completedSeatRows?: number;
   };
   modelStats?: ExperimentMatrixSubjectStat[];
@@ -597,6 +600,7 @@ interface ExperimentMatrixCellSummary {
   gamesCompleted: number;
   gamesTruncated: number;
   gamesFailed: number;
+  gamesUnstarted?: number;
   models: string[];
   profileCount?: number;
   hasArtifacts?: boolean;
@@ -618,6 +622,7 @@ interface ExperimentMatrixRunResponse {
     matrixId?: string;
     status?: "completed" | "partial" | "failed";
     cellsRequested?: number;
+    cellsUnstarted?: number;
     cellsCompleted?: number;
     cellsTruncated?: number;
     cellsFailed?: number;
@@ -625,6 +630,7 @@ interface ExperimentMatrixRunResponse {
     gamesCompleted?: number;
     gamesTruncated?: number;
     gamesFailed?: number;
+    gamesUnstarted?: number;
     failureReason?: string | null;
     artifacts?: ExperimentMatrixArtifactSetSummary | null;
   };
@@ -5319,6 +5325,7 @@ function ExperimentsWorkspace({
     { title: "completed", dataIndex: "gamesCompleted", align: "right" },
     { title: "truncated", dataIndex: "gamesTruncated", align: "right" },
     { title: "failed", dataIndex: "gamesFailed", align: "right" },
+    { title: "unstarted", dataIndex: "gamesUnstarted", align: "right" },
     { title: "elapsed", dataIndex: "elapsedMs", render: (value: number) => `${value}ms`, responsive: ["lg"] },
     { title: "error", dataIndex: "error", render: (value?: string | null) => value ?? "—", responsive: ["lg"] }
   ];
@@ -5386,7 +5393,7 @@ function ExperimentsWorkspace({
             、games={games}、maxTransitions={maxTransitions || "n/a"}、timeout={timeoutSeconds || "n/a"}s。
           </Text>
           <Text type="secondary">
-            completed、truncated、failed 是不同的生命周期。截断仍保留在状态分母中，但不进入胜率、奖励或 scorecard 分母。
+            completed、truncated、partial、failed 是不同的生命周期；unstarted 表示控制面在 deadline 后未启动的局。截断与未启动记录仍保留在状态分母中，但不进入胜率、奖励或 scorecard 分母。
             {exportAvailable ? " 导出的内容为仅本地可读的 research artifact，不会进入公开分享路径。" : " 当前未配置研究工件目录，因此只能运行并查看服务端摘要。"}
           </Text>
           <Alert
@@ -5406,7 +5413,8 @@ function ExperimentsWorkspace({
           ["requested", summary?.gamesRequested ?? statistics?.status?.gamesRequested ?? 0],
           ["completed", summary?.gamesCompleted ?? statistics?.status?.gamesCompleted ?? 0],
           ["truncated", summary?.gamesTruncated ?? statistics?.status?.gamesTruncated ?? 0],
-          ["failed", summary?.gamesFailed ?? statistics?.status?.gamesFailed ?? 0]
+          ["failed", summary?.gamesFailed ?? statistics?.status?.gamesFailed ?? 0],
+          ["unstarted", summary?.gamesUnstarted ?? statistics?.status?.gamesUnstarted ?? 0]
         ].map(([label, value]) => (
           <Col xs={12} md={6} key={String(label)}>
             <Card size="small">

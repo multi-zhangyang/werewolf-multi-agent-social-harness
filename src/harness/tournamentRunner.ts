@@ -28,12 +28,17 @@ export interface GenericTournamentResult<TPrepared, TResult> {
   gamesCompleted: number;
   gamesTruncated: number;
   gamesFailed: number;
+  /** Requested episodes that the control plane intentionally never started. */
+  gamesUnstarted: number;
   episodes: Array<GenericTournamentEpisode<TPrepared, TResult>>;
 }
 
 export interface GenericTournamentRunnerOptions<TPrepared, TResult> {
   games: number;
   seed: string;
+  /** Stop scheduling new episodes after a shared control-plane deadline. The
+   * already-started episode owns its own rejected-step evidence. */
+  abortSignal?: AbortSignal;
   /** Continue after failed execution records. Truncated episodes always continue. */
   continueOnError?: boolean;
   prepareEpisode: (context: TournamentEpisodeContext) => TPrepared | Promise<TPrepared>;
@@ -58,6 +63,7 @@ export async function runTournamentEpisodes<TPrepared, TResult>(
   const errorText = options.describeError ?? defaultErrorText;
 
   for (let index = 0; index < options.games; index += 1) {
+    if (options.abortSignal?.aborted) break;
     const baseContext: TournamentEpisodeContext = {
       index,
       seed: ""
@@ -69,6 +75,10 @@ export async function runTournamentEpisodes<TPrepared, TResult>(
     let prepared: TPrepared | undefined;
     try {
       prepared = await options.prepareEpisode(context);
+      // Preparation may be asynchronous. The episode itself has not started
+      // until runEpisode() is invoked, so honor a deadline that fired while
+      // preparing and leave this requested slot explicitly unstarted.
+      if (options.abortSignal?.aborted) break;
       const result = await options.runEpisode(prepared, context);
       const status = options.statusOf(result);
       episodes.push({ ...context, status, prepared, result });
@@ -85,6 +95,7 @@ export async function runTournamentEpisodes<TPrepared, TResult>(
     gamesCompleted: episodes.filter((episode) => episode.status === "completed").length,
     gamesTruncated: episodes.filter((episode) => episode.status === "truncated").length,
     gamesFailed: episodes.filter((episode) => episode.status === "failed").length,
+    gamesUnstarted: options.games - episodes.length,
     episodes
   };
 }

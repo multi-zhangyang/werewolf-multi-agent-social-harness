@@ -41,6 +41,62 @@ describe("generic tournament control plane", () => {
 
     expect(result.episodes.map((episode) => episode.index)).toEqual([0, 1]);
     expect(result.episodes.map((episode) => episode.status)).toEqual(["truncated", "failed"]);
-    expect(result).toMatchObject({ gamesCompleted: 0, gamesTruncated: 1, gamesFailed: 1 });
+    expect(result).toMatchObject({ gamesCompleted: 0, gamesTruncated: 1, gamesFailed: 1, gamesUnstarted: 2 });
+  });
+
+  it("does not schedule unstarted episodes after a shared control-plane abort", async () => {
+    const controller = new AbortController();
+    const prepared: number[] = [];
+    const result = await runTournamentEpisodes({
+      games: 3,
+      seed: "abort-control",
+      continueOnError: true,
+      abortSignal: controller.signal,
+      prepareEpisode: ({ index }) => {
+        prepared.push(index);
+        return index;
+      },
+      runEpisode: (index): { status: TournamentEpisodeLifecycle } => {
+        controller.abort();
+        return { status: index === 0 ? "failed" : "completed" };
+      },
+      statusOf: (episode) => episode.status
+    });
+
+    expect(prepared).toEqual([0]);
+    expect(result.episodes).toMatchObject([{ index: 0, status: "failed" }]);
+    expect(result).toMatchObject({ gamesRequested: 3, gamesCompleted: 0, gamesTruncated: 0, gamesFailed: 1, gamesUnstarted: 2 });
+  });
+
+  it("does not start an asynchronously prepared episode after the shared control plane aborts", async () => {
+    const controller = new AbortController();
+    const prepared: number[] = [];
+    const started: number[] = [];
+    const result = await runTournamentEpisodes({
+      games: 2,
+      seed: "abort-during-prepare",
+      abortSignal: controller.signal,
+      prepareEpisode: async ({ index }) => {
+        prepared.push(index);
+        controller.abort();
+        return index;
+      },
+      runEpisode: (index): { status: TournamentEpisodeLifecycle } => {
+        started.push(index);
+        return { status: "completed" };
+      },
+      statusOf: (episode) => episode.status
+    });
+
+    expect(prepared).toEqual([0]);
+    expect(started).toEqual([]);
+    expect(result).toMatchObject({
+      gamesRequested: 2,
+      gamesCompleted: 0,
+      gamesTruncated: 0,
+      gamesFailed: 0,
+      gamesUnstarted: 2,
+      episodes: []
+    });
   });
 });

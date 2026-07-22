@@ -26,6 +26,7 @@ describe("generic tournament research artifacts", () => {
       gamesCompleted: 1,
       gamesTruncated: 1,
       gamesFailed: 1,
+      gamesUnstarted: 0,
       episodes: [
         {
           index: 0,
@@ -129,6 +130,7 @@ describe("generic tournament research artifacts", () => {
           gamesCompleted: 1,
           gamesTruncated: 0,
           gamesFailed: 0,
+          gamesUnstarted: 0,
           episodes: [{ index: 0, seed: "seed:g1", status: "completed" as const, result: { runId: "r", entries: [] } }]
         },
         adapter: {

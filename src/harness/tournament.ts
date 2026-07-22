@@ -25,6 +25,7 @@ import type {
 } from "./types";
 import { DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER, WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS } from "./types";
 import { countSocialStepCommitsByActor, isSocialStepCommitted, type SocialEpisodeArtifact } from "./social";
+import type { SocialExecutionLimits } from "./social";
 import { runTournamentEpisodes } from "./tournamentRunner";
 
 export interface TournamentOptions {
@@ -35,6 +36,7 @@ export interface TournamentOptions {
   reasoner: HarnessReasoner;
   config?: Partial<GameConfig> & { roles?: Role[] };
   maxTransitions?: number;
+  executionLimits?: SocialExecutionLimits;
   jointPhaseScheduler?: WerewolfJointPhaseScheduler;
   temperature?: number;
   assignment?: HarnessAssignmentConfig;
@@ -125,6 +127,8 @@ export interface TournamentResult {
   gamesFailed: number;
   /** Present on new results; optional for legacy artifact inputs. */
   gamesTruncated?: number;
+  /** Present on new results; optional for legacy artifact inputs. */
+  gamesUnstarted?: number;
   maxTransitions?: number;
   assignment?: HarnessAssignmentConfig;
   episodes: TournamentEpisode[];
@@ -167,6 +171,7 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
   const control = await runTournamentEpisodes<WerewolfTournamentPreparedEpisode, WerewolfTournamentExecution>({
     games: options.games,
     seed: options.seed,
+    abortSignal: options.executionLimits?.abortSignal,
     continueOnError: options.continueOnError,
     prepareEpisode: ({ index, seed }) => {
       const initialState = createGame({
@@ -188,6 +193,7 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
         agents: prepared.agents,
         reasoner: options.reasoner,
         maxTransitions: options.maxTransitions,
+        executionLimits: options.executionLimits,
         jointPhaseScheduler
       });
       let artifactRecord: TournamentMatchArtifactRecord | undefined;
@@ -273,6 +279,7 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
     gamesCompleted: control.gamesCompleted,
     gamesFailed: control.gamesFailed,
     gamesTruncated: control.gamesTruncated,
+    gamesUnstarted: control.gamesUnstarted,
     maxTransitions: options.maxTransitions,
     assignment,
     episodes,

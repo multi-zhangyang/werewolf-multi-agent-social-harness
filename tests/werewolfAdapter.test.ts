@@ -812,6 +812,33 @@ describe("Werewolf generic social adapter", () => {
     ).toBe(true);
   });
 
+  it("threads generic execution limits through the production Werewolf scaffold path", async () => {
+    const initialState = createGame({ id: "werewolf-generic-execution-limit", seed: "werewolf-generic-execution-limit" });
+    const agents = resolveAgentConfigs(initialState.players, profilesFromModels(["hanging-reasoner"], 0), 0, 0);
+    const reasoner: HarnessReasoner = {
+      think: () => new Promise(() => undefined)
+    };
+
+    const result = await runHarnessMatch({
+      initialState,
+      agents,
+      reasoner,
+      maxTransitions: 4,
+      executionLimits: { decisionTimeoutMs: 5 }
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.socialEpisode.execution).toMatchObject({ decisionTimeoutMs: 5 });
+    expect(result.socialEpisode.steps).toHaveLength(2);
+    expect(result.socialEpisode.steps[0]).toMatchObject({ actorId: "system", commitStatus: "committed" });
+    expect(result.socialEpisode.steps[1]).toMatchObject({
+      actorId: expect.any(String),
+      commitStatus: "rejected",
+      failure: { stage: "decision_timeout" }
+    });
+    expect(replayWerewolfSocialEpisode(result.socialEpisode).ok).toBe(true);
+  });
+
   it("can project generic Werewolf steps with legacy harness trace ids", async () => {
     const initialState = createGame({ id: "werewolf-social-legacy-trace", seed: "werewolf-social-legacy-trace" });
     const seer = initialState.players.find((player) => player.role === "seer");

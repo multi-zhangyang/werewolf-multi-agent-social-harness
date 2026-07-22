@@ -25240,6 +25240,101 @@ npm run test:e2e
 git diff --check
 ```
 
+## 13.264 Generic Execution Limits And Deadline-Control Lifecycle Lock
+
+Timestamp: `2026-07-21`
+
+The generic harness control plane now owns a cancellation boundary for every
+`SocialActor`, including actors that are neither model-backed nor cooperative.
+This is not a Grok/provider/Werewolf special case; the active `grok-4.5`
+runtime continues to use the existing generic OpenAI-compatible streaming
+reasoner path.
+
+```text
+SocialExecutionLimits
+  + runtime-only abortSignal
+  + optional positive-integer decisionTimeoutMs
+  -> generic social scheduler
+  -> rejected receipt / native rejection evidence
+  -> no draft message publication or environment transition
+  -> model-free replay of committed history only
+```
+
+- `SocialExecutionLimits` is declared in `src/harness/social.ts` and is
+  threaded through generic harness runs, the Werewolf adapter, tournament,
+  experiment matrix, server routes, and CLI entry points. An outer server/CLI
+  controller therefore cancels both a provider stream and a generic custom
+  actor decision.
+- `decisionTimeoutMs` is a per-actor-decision runner budget. It is distinct
+  from the existing whole-run server/CLI `timeoutMs`; do not silently convert
+  one into the other. A live-provider request still must use streaming and
+  must not gain a maximum-token field from this control-plane contract.
+- An execution abort or decision timeout before environment commit produces
+  static, redaction-safe failure evidence (`execution_abort` or
+  `decision_timeout`), rejected actor receipts, and zero uncommitted state or
+  message effects. If a signal arrives after a committed nonterminal
+  transition, a separate system control rejection records that boundary and
+  replay retains only the already committed history. `AbortSignal.reason` is
+  never persisted or returned.
+- A parallel joint decision batch retains exactly one root failure; its other
+  rows are `batch_aborted`, and any system control record uses a separate batch
+  id so it cannot corrupt atomic batch layout. A batched AEC collection still
+  preserves each independently failed actor's own evidence.
+- The decision timeout timer intentionally remains referenced until the race
+  resolves. A lone hanging Promise must not let a standalone Node process exit
+  before the runner writes its rejected artifact.
+- The generic social artifact validator rejects a persisted
+  `execution.decisionTimeoutMs` unless it is a positive integer. Runtime
+  abort signals and external reasons are never serialized.
+
+Deadline control also has an explicit experiment lifecycle meaning:
+
+```text
+global abort
+  -> do not start a not-yet-run episode/cell
+  -> gamesUnstarted / cellsUnstarted remain explicit denominators
+  -> never summarize an incomplete tournament as completed or ok
+```
+
+- `runTournamentEpisodes()` checks the abort signal both before preparation and
+  after asynchronous preparation but before `runEpisode()`. Prepared but
+  unstarted slots remain unstarted, not failed or completed.
+- New tournament results record `gamesUnstarted`; generic run-set artifacts
+  preserve and validate it when present. Server and CLI summaries expose it,
+  classify it as `partial`, return a non-success outcome, and do not start
+  more work merely because `continueOnError` is true.
+- A matrix preserves both `cellsUnstarted` and `gamesUnstarted`. A matrix cell
+  whose nested tournament has unstarted games is a failed control-plane cell
+  (the generic cell vocabulary has no partial value), never a completed one.
+  React presents recorded unstarted counts; it does not infer them from local
+  timers or replay.
+
+This contract bounds unresolved asynchronous `decide()` calls with
+`Promise.race`; it is not process or CPU isolation. A synchronous infinite
+loop in actor/environment code still blocks the Node event loop, and a
+non-cooperative underlying async task may continue after the runner has
+produced its rejected artifact. Hard CPU, memory, or network isolation requires
+a future worker/process sandbox rather than claiming that an abort signal can
+preempt arbitrary JavaScript.
+
+Required regression after changing execution limits, runner cancellation, or
+control-plane lifecycle aggregation:
+
+```bash
+npm run typecheck
+npx vitest run tests/social.test.ts tests/genericTournamentRunner.test.ts \
+  tests/genericExperimentMatrixRunner.test.ts tests/experimentMatrix.test.ts \
+  tests/werewolfAdapter.test.ts tests/artifacts.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism
+npx vitest run tests/serverPublicViewApi.test.ts \
+  tests/serverTournamentArtifactsApi.test.ts tests/serverExperimentMatrixApi.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism
+npm test -- --maxWorkers=1 --no-file-parallelism
+npm run build
+npm run test:e2e
+git diff --check
+```
+
 The full deterministic suite completed with 39 test files and 417 tests
 passing. The production build retains the existing large-JavaScript-chunk
 warning; it is performance follow-up work, not a semantic-binding failure.
