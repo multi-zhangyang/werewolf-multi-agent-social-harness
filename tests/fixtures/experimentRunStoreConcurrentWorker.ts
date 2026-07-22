@@ -6,6 +6,7 @@ type Artifact = HarnessEpisodeArtifactEnvelope<unknown, unknown, unknown, unknow
 
 const root = process.argv[2];
 if (!root) throw new Error("Concurrent run-store worker requires a root path.");
+const runSetId = process.argv[3] ?? "cross-process-cas";
 
 const authority = {
   async get(): Promise<Artifact | undefined> { return undefined; },
@@ -57,12 +58,12 @@ process.once("message", async (message) => {
   try {
     const experiment = createGenericExperimentProvenance(spec);
     const begun = await store.beginOrResume({
-      runSetId: "cross-process-cas",
+      runSetId,
       experiment,
       createdAt: "2026-07-22T15:00:00.000Z"
     });
     const started = await store.startEpisode({
-      runSetId: "cross-process-cas",
+      runSetId,
       index: 0,
       seed: `${experiment.spec.seed}:g1`
     });

@@ -1,6 +1,6 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,10 +44,28 @@ describe("experiment run cross-process revision CAS", () => {
       "000000000002"
     ]);
   }, 30_000);
+
+  it("preserves different concurrently published runs in the globally locked derived index", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "experiment-run-index-process-"));
+    roots.push(root);
+    const workers = [spawnWorker(root, "concurrent-run-a"), spawnWorker(root, "concurrent-run-b")];
+    await Promise.all(workers.map((child) => waitForMessage(child, "READY")));
+    workers.forEach((child) => child.send("GO"));
+    await Promise.all(workers.map((child) => waitForMessage(child, "DONE")));
+    await Promise.all(workers.map(waitForExit));
+
+    const index = JSON.parse(await readFile(path.join(root, "index.json"), "utf8")) as {
+      entries: Array<{ runSetId: string }>;
+    };
+    expect(index.entries.map((entry) => entry.runSetId).sort()).toEqual([
+      "concurrent-run-a",
+      "concurrent-run-b"
+    ]);
+  }, 30_000);
 });
 
-function spawnWorker(root: string): ChildProcess {
-  const child = fork(workerPath, [root], {
+function spawnWorker(root: string, runSetId?: string): ChildProcess {
+  const child = fork(workerPath, runSetId ? [root, runSetId] : [root], {
     cwd: process.cwd(),
     execArgv: ["--import", "tsx"],
     stdio: ["ignore", "ignore", "pipe", "ipc"],
