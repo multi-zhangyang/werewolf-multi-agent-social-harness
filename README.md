@@ -33,7 +33,7 @@ The runtime does not use a local scripted substitute when the API key is missing
 export LLM_CHAT_COMPLETIONS_URL="https://your-openai-compatible-provider.example/v1/chat/completions"
 export LLM_PROVIDER_PROTOCOL="openai-chat-completions"
 export LLM_API_KEY="..."
-export LLM_MODELS="poolside/laguna-s-2.1:free"
+export LLM_MODELS="your-model-id"
 export LLM_STREAM=true
 export LLM_TIMEOUT_MS=120000
 export LLM_RETRY_COUNT=2
@@ -47,9 +47,9 @@ Provider integration policy:
 - OpenAI-compatible Chat Completions adapters must follow the OpenAI-compatible `/chat/completions` request and SSE streaming shapes.
 - OpenAI Responses support is implemented as a separate `openai-responses` protocol adapter with `/responses`, `input`/`instructions`, and `response.output_text.delta` stream events.
 - Anthropic support is implemented as a separate `anthropic-messages` protocol adapter with Messages/SDK-shaped `system`, `messages`, `stream`, and `content_block_delta` events. Anthropic Messages requires explicit `ANTHROPIC_MAX_TOKENS`; this is not sent by the default Chat Completions adapter.
-- Concrete model ids remain runtime configuration. The checked-in local template
-  currently selects `gpt-5.4/yourmodel-K2.6`; changing it must not create a provider- or
-  model-specific adapter branch.
+- Concrete model ids remain opaque runtime configuration. The repository does
+  not maintain a model allowlist or denylist, and changing `LLM_MODELS` must not
+  create a provider- or model-specific adapter branch.
 - Select the adapter explicitly with `LLM_PROVIDER_PROTOCOL`; never infer protocol from a model string.
 - Default `agent:probe`, `arena:match`, and `arena:tournament` CLI summaries expose only provider protocol/configuration state, bounded metrics, safe failure classification, and stream-completion status. They deliberately omit provider endpoints, provider request ids, and raw provider errors. `--json=full` is explicit local/debug output and must not be published without applying the artifact redaction policy.
 
