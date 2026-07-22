@@ -299,6 +299,86 @@ test.describe("compact cockpit", () => {
   });
 });
 
+// This test intentionally runs last: unlike the projection/replay fixtures
+// above, it creates a real artifact-backed run in the fixture server store.
+// Keeping that write after every read-only fixture assertion avoids changing
+// the recorded match selected by their bootstrap path.
+test("submits a heterogeneous Agent roster through the existing harness control plane", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+
+  await page.getByRole("button", { name: "实验编排" }).click();
+  const composer = page.getByRole("dialog", { name: "实验编排 · Agent Roster" });
+  await expect(composer).toBeVisible();
+
+  // The fixture config exposes two generic OpenAI-compatible model names.
+  // We only edit durable profile ids and control-plane conditions; neither
+  // browser code nor this request resolves seats, roles, or game truth.
+  await composer.getByRole("textbox", { name: "profile 1 id" }).fill("wolves");
+  await composer.getByRole("textbox", { name: "profile 2 id" }).fill("village");
+  await composer.getByRole("textbox", { name: "profile 1 temperature" }).fill("0.2");
+  await composer.getByRole("textbox", { name: "profile 2 temperature" }).fill("0.8");
+
+  const strategy = composer.getByRole("combobox", { name: "Agent assignment strategy" });
+  await strategy.click();
+  await strategy.press("ArrowDown");
+  await strategy.press("ArrowDown");
+  await strategy.press("ArrowDown");
+  await strategy.press("Enter");
+  await expect(composer.getByRole("combobox", { name: "Agent assignment team werewolves" })).toBeVisible();
+
+  const wolvesTeam = composer.getByRole("combobox", { name: "Agent assignment team werewolves" });
+  await wolvesTeam.click();
+  await wolvesTeam.press("ArrowDown");
+  await wolvesTeam.press("Enter");
+  await composer.getByRole("button", { name: "完成编排" }).click();
+
+  const submittedRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST" && url.pathname === "/api/matches/run";
+  });
+  const runResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "POST" && url.pathname === "/api/matches/run";
+  });
+  await page.getByRole("button", { name: "运行实验" }).click();
+
+  const request = await submittedRequest;
+  const body = request.postDataJSON() as {
+    models?: unknown;
+    profiles?: Array<{ id?: unknown; model?: unknown; temperature?: unknown }>;
+    assignment?: { strategy?: unknown; fallback?: unknown; teams?: Record<string, unknown> };
+    [key: string]: unknown;
+  };
+  expect(body.models).toEqual(["fixture-model", "fixture-rival"]);
+  expect(body.profiles).toEqual([
+    { id: "wolves", model: "fixture-model", temperature: 0.2 },
+    { id: "village", model: "fixture-rival", temperature: 0.8 }
+  ]);
+  expect(body.assignment).toMatchObject({
+    strategy: "team",
+    fallback: "profile-rotation",
+    // Ant Design's keyboard navigation starts at an implementation-dependent
+    // option offset for an empty Select. The contract under test is that the
+    // selected profile id is carried to the server, not visual option order.
+    teams: { werewolves: expect.stringMatching(/^(wolves|village)$/) }
+  });
+  expect(body).not.toHaveProperty("resolvedAssignments");
+  expect(body).not.toHaveProperty("artifact");
+  expect(body).not.toHaveProperty("winner");
+
+  const response = await runResponse;
+  expect(response.ok()).toBeTruthy();
+  const record = await response.json();
+  expect(record).toMatchObject({ profileCount: 2, hasArtifact: true });
+  // The response is the existing summary projection; the full persisted
+  // artifact remains server-owned and is fetched only through its redacted
+  // projection route.
+  expect(record).not.toHaveProperty("artifact");
+  await expect(page.getByRole("status")).toContainText("真实 harness run 完成");
+});
+
 function isArtifactResponse(response: Response, view: "postgame-redacted" | "truth-redacted"): boolean {
   const url = new URL(response.url());
   return (

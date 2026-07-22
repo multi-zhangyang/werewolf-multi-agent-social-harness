@@ -6,13 +6,14 @@ import {
   type HarnessCheckpointEnvelope
 } from "./episodeArtifacts";
 import { runHarnessEpisode } from "./runner";
-import type {
-  SocialActor,
-  SocialChannel,
-  SocialEnvironment,
-  SocialEpisodeArtifact,
-  SocialEpisodeOptions,
-  SocialMessage
+import {
+  isSocialStepCommitted,
+  type SocialActor,
+  type SocialChannel,
+  type SocialEnvironment,
+  type SocialEpisodeArtifact,
+  type SocialEpisodeOptions,
+  type SocialMessage
 } from "./social";
 
 /**
@@ -124,7 +125,15 @@ function assertForkableRecordedActorBoundary<TState, TAgentState, TObservation, 
   checkpoint: HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand>
 ): void {
   const boundary = checkpoint.executionPrefix.steps.at(-1);
-  if (!boundary?.actorSnapshotsHashAfterStep) {
+  if (!boundary) {
+    throw new Error(`Checkpoint ${checkpoint.checkpointId} is not forkable: final native boundary is missing.`);
+  }
+  if (!isSocialStepCommitted(boundary)) {
+    throw new Error(
+      `Checkpoint ${checkpoint.checkpointId} is not forkable: final native boundary was rejected and cannot restore durable actor state.`
+    );
+  }
+  if (!boundary.actorSnapshotsHashAfterStep) {
     throw new Error(
       `Checkpoint ${checkpoint.checkpointId} is not forkable: final native boundary has no recorded durable actor snapshot.`
     );
