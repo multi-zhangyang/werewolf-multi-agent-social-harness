@@ -438,6 +438,30 @@ describe("generic social harness scheduler contract", () => {
     expect(artifact.steps[0].terminationReason).toBe("parallel terminal test");
   });
 
+  it("rolls back a failed parallel batch exactly once for every rejected peer", async () => {
+    const environment = new RestorableParallelFailureEnvironment();
+    const actors = [new TestActor("a"), new TestActor("b")];
+    const artifact = await runSocialEpisode({
+      id: "social-parallel-restored-failure",
+      environment,
+      actors,
+      schedulerMode: "parallel",
+      maxTransitions: 2,
+      hashState,
+      eventSeq
+    });
+
+    expect(environment.batchCalls).toBe(1);
+    expect(environment.restoreCalls).toBe(1);
+    expect(environment.snapshot()).toEqual({ tick: 0, done: false, log: [] });
+    expect(artifact.steps).toHaveLength(2);
+    expect(artifact.steps.every((step) => step.commitStatus === "rejected")).toBe(true);
+    expect(artifact.steps.every((step) => step.preStateHash === step.postStateHash)).toBe(true);
+    expect(artifact.steps.every((step) => step.eventSeqRange === undefined)).toBe(true);
+    expect(actors.flatMap((actor) => actor.receipts).every((receipt) => receipt.status === "rejected")).toBe(true);
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+  });
+
   it("rejects duplicate policy trace IDs in a parallel batch before stepBatch", async () => {
     const environment = new TestParallelEnvironment();
     const actorA = new TestActor("a", { traceId: "duplicate-policy-trace" });
@@ -1972,6 +1996,98 @@ describe("generic social harness feedback and failure contract", () => {
     expect(replay.mismatches.join("\n")).toMatch(/non-atomic failure|rejected step changed domain state|rejected step changed event range/);
   });
 
+  it("verifies an opt-in rollback and records mutate-then-throw as a replayable rejected no-op", async () => {
+    const environment = new RestorableNonAtomicFailureEnvironment();
+    const actor = new TestActor("a", {
+      messages: [{
+        channelId: "table",
+        senderId: "a",
+        recipientIds: ["b"],
+        visibility: "public",
+        content: "this draft must remain uncommitted"
+      }]
+    });
+    let hookRollback: unknown;
+    const artifact = await runSocialEpisode({
+      id: "social-restored-environment",
+      environment,
+      actors: [actor, new TestActor("b")],
+      channels: [tableChannel],
+      schedulerMode: "aec",
+      hashState,
+      eventSeq,
+      onEnvironmentStepFailure(context) {
+        hookRollback = context.rollback;
+      }
+    });
+
+    expect(environment.restoreCalls).toBe(1);
+    expect(environment.snapshot()).toEqual({ tick: 0, done: false, log: [] });
+    expect(artifact.messages).toEqual([]);
+    expect(hookRollback).toEqual({ mutationDetected: true, attempted: true, succeeded: true });
+    expect(artifact.steps[0]).toMatchObject({
+      commitStatus: "rejected",
+      preStateHash: hashState({ tick: 0, done: false, log: [] }),
+      postStateHash: hashState({ tick: 0, done: false, log: [] }),
+      failure: {
+        stage: "environment_step",
+        metadata: { rollbackAttempted: true, rollbackSucceeded: true }
+      }
+    });
+    expect(artifact.steps[0]?.eventSeqRange).toBeUndefined();
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+    expect(replaySocialEpisode({
+      episode: artifact,
+      environment: new RestorableNonAtomicFailureEnvironment(),
+      hashState,
+      eventSeq
+    })).toMatchObject({ ok: true, mismatches: [] });
+  });
+
+  it("detects and restores mutation by snapshot fingerprint even without a domain hash function", async () => {
+    const environment = new RestorableNonAtomicFailureEnvironment();
+    const artifact = await runSocialEpisode({
+      id: "social-restored-without-hash",
+      environment,
+      actors: [new TestActor("a"), new TestActor("b")],
+      schedulerMode: "aec"
+    });
+
+    expect(environment.restoreCalls).toBe(1);
+    expect(environment.snapshot()).toEqual({ tick: 0, done: false, log: [] });
+    expect(artifact.steps[0]).toMatchObject({
+      commitStatus: "rejected",
+      failure: { metadata: { rollbackAttempted: true, rollbackSucceeded: true } }
+    });
+    expect(artifact.steps[0]?.failure?.stage).not.toBe("environment_non_atomic_failure");
+  });
+
+  it.each(["throw", "mismatch"] as const)("fails closed when environment restore returns %s", async (mode) => {
+    const environment = new BrokenRestoreEnvironment(mode);
+    const artifact = await runSocialEpisode({
+      id: `social-broken-restore-${mode}`,
+      environment,
+      actors: [new TestActor("a"), new TestActor("b")],
+      schedulerMode: "aec",
+      hashState,
+      eventSeq
+    });
+
+    expect(environment.restoreCalls).toBe(1);
+    expect(artifact.steps[0]).toMatchObject({
+      commitStatus: "rejected",
+      failure: {
+        stage: "environment_non_atomic_failure",
+        metadata: {
+          rollbackAttempted: true,
+          rollbackSucceeded: false,
+          rollbackFailureCode: mode === "throw" ? "restore_threw" : "state_mismatch"
+        }
+      }
+    });
+    expect(validateSocialEpisodeArtifact(artifact).join("\n")).toMatch(/environment_non_atomic_failure/);
+  });
+
   it("treats a state-mutating validateAction preflight as a non-replayable environment failure", async () => {
     const environment = new PreflightMutationEnvironment();
     const actor = new TestActor("a");
@@ -2010,8 +2126,32 @@ describe("generic social harness feedback and failure contract", () => {
     expect(replay.mismatches.join("\n")).toMatch(/non-atomic failure|rejected step changed domain state/);
   });
 
+  it("restores a mutating validateAction preflight without calling the environment step", async () => {
+    const environment = new RestorablePreflightMutationEnvironment();
+    const artifact = await runSocialEpisode({
+      id: "social-restored-mutating-preflight",
+      environment,
+      actors: [new TestActor("a"), new TestActor("b")],
+      schedulerMode: "aec",
+      hashState,
+      eventSeq
+    });
+
+    expect(environment.stepCalls).toBe(0);
+    expect(environment.restoreCalls).toBe(1);
+    expect(environment.snapshot()).toEqual({ tick: 0, done: false, log: [] });
+    expect(artifact.steps[0]).toMatchObject({
+      commitStatus: "rejected",
+      preStateHash: hashState({ tick: 0, done: false, log: [] }),
+      postStateHash: hashState({ tick: 0, done: false, log: [] }),
+      failure: { metadata: { rollbackAttempted: true, rollbackSucceeded: true } }
+    });
+    expect(artifact.steps[0]?.eventSeqRange).toBeUndefined();
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+  });
+
   it("keeps a committed transition committed when a post-step observer fails", async () => {
-    const environment = new TestEnvironment({ doneAfterSteps: 1 });
+    const environment = new RestorableTestEnvironment({ doneAfterSteps: 1 });
     const actor = new TestActor("a");
     const artifact = await runSocialEpisode({
       id: "social-post-commit-hook-failure",
@@ -2026,6 +2166,7 @@ describe("generic social harness feedback and failure contract", () => {
 
     expect(artifact.status).toBe("failed");
     expect(environment.stepCalls).toBe(1);
+    expect(environment.restoreCalls).toBe(0);
     expect(environment.snapshot()).toEqual({ tick: 1, done: true, log: ["a"] });
     expect(actor.receipts).toMatchObject([{ status: "committed", actorId: "a" }]);
     expect(artifact.steps[0]).toMatchObject({
@@ -2083,6 +2224,42 @@ describe("generic social harness feedback and failure contract", () => {
     });
     expect(artifact.steps[0].messageSeqRange).toBeUndefined();
     expect(artifact.messages).toEqual([]);
+  });
+
+  it("restores an uncommitted mutating system transition as a rejected no-op", async () => {
+    const environment = new RestorableSystemFailureEnvironment();
+    const artifact = await runSocialEpisode<TestState, TestObservation, TestPending, TestCommand>({
+      id: "social-system-restored-failure",
+      environment,
+      actors: [new TestActor("a")],
+      schedulerMode: "aec",
+      hashState,
+      eventSeq,
+      systemTransition(context) {
+        return {
+          actorId: "system",
+          pendingAction: { kind: "advance" },
+          observation: { agentId: "system", tick: context.state.tick, pendingKind: "advance" },
+          action: {
+            actorId: "system",
+            kind: "system.advance",
+            command: { actorId: "system", value: "advance" }
+          }
+        };
+      }
+    });
+
+    expect(environment.restoreCalls).toBe(1);
+    expect(environment.snapshot()).toEqual({ tick: 0, done: false, log: [] });
+    expect(artifact.steps[0]).toMatchObject({
+      actorId: "system",
+      commitStatus: "rejected",
+      preStateHash: hashState({ tick: 0, done: false, log: [] }),
+      postStateHash: hashState({ tick: 0, done: false, log: [] }),
+      failure: { metadata: { rollbackAttempted: true, rollbackSucceeded: true } }
+    });
+    expect(artifact.steps[0]?.eventSeqRange).toBeUndefined();
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
   });
 });
 
@@ -2485,6 +2662,18 @@ class RecordingEnvironment extends TestEnvironment {
   }
 }
 
+class RestorableTestEnvironment extends TestEnvironment {
+  restoreCalls = 0;
+
+  restore(snapshot: TestState): void {
+    this.restoreCalls += 1;
+    this.state.tick = snapshot.tick;
+    this.state.done = snapshot.done;
+    this.state.log.splice(0, this.state.log.length, ...snapshot.log);
+    this.stepCalls = snapshot.tick;
+  }
+}
+
 class NonAtomicFailureEnvironment extends TestEnvironment {
   override step(command: TestCommand): TestState {
     this.stepCalls += 1;
@@ -2494,7 +2683,39 @@ class NonAtomicFailureEnvironment extends TestEnvironment {
   }
 }
 
+class RestorableNonAtomicFailureEnvironment extends RestorableTestEnvironment {
+  override step(command: TestCommand): TestState {
+    this.stepCalls += 1;
+    this.state.tick += 1;
+    this.state.log.push(command.actorId);
+    throw new Error("mutated before throwing");
+  }
+}
+
+class BrokenRestoreEnvironment extends NonAtomicFailureEnvironment {
+  restoreCalls = 0;
+
+  constructor(private readonly mode: "throw" | "mismatch") {
+    super();
+  }
+
+  restore(_snapshot: TestState): void {
+    this.restoreCalls += 1;
+    if (this.mode === "throw") throw new Error("restore failed");
+    this.state.tick = 99;
+    this.state.log.push("restore-mismatch");
+  }
+}
+
 class PreflightMutationEnvironment extends TestEnvironment {
+  validateAction(command: TestCommand) {
+    this.state.tick += 1;
+    this.state.log.push(`preflight:${command.actorId}`);
+    return { valid: false, code: "preflight-mutated", message: "preflight mutated state" };
+  }
+}
+
+class RestorablePreflightMutationEnvironment extends RestorableTestEnvironment {
   validateAction(command: TestCommand) {
     this.state.tick += 1;
     this.state.log.push(`preflight:${command.actorId}`);
@@ -2531,6 +2752,24 @@ class TestParallelEnvironment extends TestEnvironment implements SocialParallelE
       episodeTruncated: false,
       terminationReason: "parallel terminal test"
     };
+  }
+}
+
+class RestorableParallelFailureEnvironment extends TestParallelEnvironment {
+  restoreCalls = 0;
+
+  override stepBatch(commandsByAgent: Record<string, TestCommand>): SocialStepFeedback<TestState, TestObservation> {
+    this.batchCalls += 1;
+    this.state.tick += 1;
+    this.state.log.push(`batch:${Object.keys(commandsByAgent).sort().join(",")}`);
+    throw new Error("parallel batch mutated before throwing");
+  }
+
+  restore(snapshot: TestState): void {
+    this.restoreCalls += 1;
+    this.state.tick = snapshot.tick;
+    this.state.done = snapshot.done;
+    this.state.log.splice(0, this.state.log.length, ...snapshot.log);
   }
 }
 
@@ -2604,6 +2843,26 @@ class SystemThenAgentEnvironment implements SocialEnvironment<TestState, TestObs
 
   done(): boolean {
     return this.state.done;
+  }
+}
+
+class RestorableSystemFailureEnvironment extends SystemThenAgentEnvironment {
+  restoreCalls = 0;
+
+  override step(command: TestCommand): TestState {
+    if (command.actorId !== "system") return super.step(command);
+    this.stepCalls += 1;
+    this.state.tick += 1;
+    this.state.log.push(command.actorId);
+    throw new Error("system mutated before throwing");
+  }
+
+  restore(snapshot: TestState): void {
+    this.restoreCalls += 1;
+    this.state.tick = snapshot.tick;
+    this.state.done = snapshot.done;
+    this.state.log.splice(0, this.state.log.length, ...snapshot.log);
+    this.stepCalls = snapshot.tick;
   }
 }
 
