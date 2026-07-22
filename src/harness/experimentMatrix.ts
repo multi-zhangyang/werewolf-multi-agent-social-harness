@@ -261,6 +261,66 @@ export function mergeMatrixExperimentOverrides(
 
 export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): Promise<ExperimentMatrixResult> {
   const elapsedMsByExecutionId = new Map<string, number>();
+  // Open durable authority before entering the generic cell error boundary.
+  // Store/provenance/integrity failures must abort the matrix, never become a
+  // misleading ordinary failed cell under continueOnError.
+  const sharedOrchestration = options.orchestrationBaseDirectory
+    ? await openTournamentOrchestration({ baseDirectory: options.orchestrationBaseDirectory })
+    : undefined;
+  const executeTournamentCell = (
+    tournament: NormalizedTournamentExperiment,
+    cellId: string
+  ) => runTournament({
+    models: tournament.models,
+    profiles: tournament.profiles,
+    assignment: tournament.assignment,
+    games: tournament.games,
+    seed: tournament.seed,
+    maxTransitions: tournament.maxTransitions,
+    jointPhaseScheduler: tournament.jointPhaseScheduler,
+    config: tournament.config,
+    temperature: tournament.temperature,
+    continueOnError: tournament.continueOnError,
+    experiment: tournament,
+    includeArtifacts: options.includeArtifacts,
+    reasoner: options.reasoner,
+    executionLimits: options.executionLimits,
+    orchestration: sharedOrchestration
+      ? { ...sharedOrchestration, runSetId: `${options.experiment.id}:${cellId}` }
+      : undefined
+  });
+  const statusOfTournament = (tournament: TournamentResult): "completed" | "truncated" | "failed" => {
+    const gamesTruncated = tournament.gamesTruncated ?? tournament.episodes.filter((episode) => episode.status === "truncated").length;
+    const gamesUnstarted = tournament.gamesUnstarted ?? Math.max(0, tournament.gamesRequested - tournament.episodes.length);
+    return tournament.gamesFailed || gamesUnstarted > 0 ? "failed" : gamesTruncated > 0 ? "truncated" : "completed";
+  };
+  const initialCells = [] as Array<{
+    index: number;
+    id: string;
+    label: string;
+    group: string;
+    executionId: string;
+    status: "completed" | "truncated" | "failed";
+    result: TournamentResult;
+  }>;
+  if (sharedOrchestration) {
+    for (const [index, cell] of options.experiment.cells.entries()) {
+      const durable = await sharedOrchestration.runStore.get(`${options.experiment.id}:${cell.id}`);
+      if (!durable || durable.state !== "finalized") break;
+      const tournament = await executeTournamentCell(cell.tournament, cell.id);
+      const status = statusOfTournament(tournament);
+      initialCells.push({
+        index,
+        id: cell.id,
+        label: cell.label,
+        group: cell.group,
+        executionId: `${options.experiment.id}:cell:${cell.id}:${index}`,
+        status,
+        result: tournament
+      });
+      if (status === "failed" && !options.experiment.continueOnError) break;
+    }
+  }
   const generic = await runGenericExperimentMatrix({
     experiment: {
       id: options.experiment.id,
@@ -273,44 +333,22 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
       }))
     },
     abortSignal: options.executionLimits?.abortSignal,
+    initialCells,
+    captureCellErrors: sharedOrchestration ? false : true,
     runCell: async (tournament, context) => {
       const started = performance.now();
       try {
-        const orchestration = options.orchestrationBaseDirectory
-          ? await openTournamentOrchestration({
-              baseDirectory: options.orchestrationBaseDirectory,
-              runSetId: `${options.experiment.id}:${context.id}`
-            })
-          : undefined;
-        return await runTournament({
-          models: tournament.models,
-          profiles: tournament.profiles,
-          assignment: tournament.assignment,
-          games: tournament.games,
-          seed: tournament.seed,
-          maxTransitions: tournament.maxTransitions,
-          jointPhaseScheduler: tournament.jointPhaseScheduler,
-          config: tournament.config,
-          temperature: tournament.temperature,
-          continueOnError: tournament.continueOnError,
-          experiment: tournament,
-          includeArtifacts: options.includeArtifacts,
-          reasoner: options.reasoner,
-          executionLimits: options.executionLimits,
-          orchestration
-        });
+        return await executeTournamentCell(tournament, context.id);
       } finally {
         elapsedMsByExecutionId.set(context.executionId, Math.round(performance.now() - started));
       }
     },
     statusOf: (tournament) => {
-      const gamesTruncated = tournament.gamesTruncated ?? tournament.episodes.filter((episode) => episode.status === "truncated").length;
-      const gamesUnstarted = tournament.gamesUnstarted ?? Math.max(0, tournament.gamesRequested - tournament.episodes.length);
       // A cell with an externally aborted, partially scheduled tournament is
       // not a completed experiment. The exact unstarted-game count remains on
       // the result; generic matrix lifecycle has no separate partial-cell
       // status, so it is a control-plane failure at this boundary.
-      return tournament.gamesFailed || gamesUnstarted > 0 ? "failed" : gamesTruncated > 0 ? "truncated" : "completed";
+      return statusOfTournament(tournament);
     },
     describeError: (error) => safeProviderFailureMessage(error, "Experiment matrix cell failed before its tournament result was recorded.")
   });

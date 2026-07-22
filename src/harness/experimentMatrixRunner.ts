@@ -66,6 +66,16 @@ export interface RunGenericExperimentMatrixOptions<TInput, TResult> {
     context: { matrixId: string; index: number; id: string; label: string; group: string; executionId: string }
   ) => TResult | Promise<TResult>;
   statusOf: (result: TResult) => GenericExperimentMatrixCellLifecycle;
+  /** Canonical, already-settled contiguous prefix used for model-free resume. */
+  initialCells?: Array<GenericExperimentMatrixCellResult<TResult>>;
+  /** Control-plane hooks are intentionally outside cell error capture. */
+  onCellStarting?: (context: {
+    matrixId: string; index: number; id: string; label: string; group: string; executionId: string;
+  }) => void | Promise<void>;
+  onCellSettled?: (cell: GenericExperimentMatrixCellResult<TResult>) => void | Promise<void>;
+  /** In durable mode a thrown runCell/statusOf error means authority failure,
+   * because the child orchestrator has already materialized domain failures. */
+  captureCellErrors?: boolean;
   describeError?: (error: unknown) => string;
   createdAt?: string;
 }
@@ -82,37 +92,44 @@ export async function runGenericExperimentMatrix<TInput, TResult>(
   validateGenericExperimentMatrixSpec(options.experiment);
   const createdAt = options.createdAt ?? new Date().toISOString();
   const describeError = options.describeError ?? defaultErrorText;
-  const cells: Array<GenericExperimentMatrixCellResult<TResult>> = [];
-  for (const [index, cell] of options.experiment.cells.entries()) {
+  const cells = validateInitialMatrixCells(options.experiment, options.initialCells ?? []);
+  for (let index = cells.length; index < options.experiment.cells.length; index += 1) {
     if (options.abortSignal?.aborted) break;
+    const cell = options.experiment.cells[index]!;
     const label = cell.label ?? cell.id;
     const group = cell.group ?? "default";
     const executionId = `${options.experiment.id}:cell:${cell.id}:${index}`;
-    try {
+    const context = { matrixId: options.experiment.id, index, id: cell.id, label, group, executionId };
+    await options.onCellStarting?.(context);
+    let settled: GenericExperimentMatrixCellResult<TResult>;
+    if (options.captureCellErrors === false) {
       const result = await options.runCell(cell.input, {
-        matrixId: options.experiment.id,
-        index,
-        id: cell.id,
-        label,
-        group,
-        executionId
+        ...context
       });
       const status = options.statusOf(result);
       assertMatrixCellStatus(status);
-      cells.push({ index, id: cell.id, label, group, executionId, status, result });
-      if (status === "failed" && !options.experiment.continueOnError) break;
-    } catch (error) {
-      cells.push({
-        index,
-        id: cell.id,
-        label,
-        group,
-        executionId,
-        status: "failed",
-        error: describeError(error)
-      });
-      if (!options.experiment.continueOnError) break;
+      settled = { index, id: cell.id, label, group, executionId, status, result };
+    } else {
+      try {
+        const result = await options.runCell(cell.input, context);
+        const status = options.statusOf(result);
+        assertMatrixCellStatus(status);
+        settled = { index, id: cell.id, label, group, executionId, status, result };
+      } catch (error) {
+        settled = {
+          index,
+          id: cell.id,
+          label,
+          group,
+          executionId,
+          status: "failed",
+          error: describeError(error)
+        };
+      }
     }
+    cells.push(settled);
+    await options.onCellSettled?.({ ...settled });
+    if (settled.status === "failed" && !options.experiment.continueOnError) break;
   }
   const cellsCompleted = cells.filter((cell) => cell.status === "completed").length;
   const cellsTruncated = cells.filter((cell) => cell.status === "truncated").length;
@@ -143,6 +160,37 @@ export async function runGenericExperimentMatrix<TInput, TResult>(
     cellsFailed,
     cells
   };
+}
+
+function validateInitialMatrixCells<TInput, TResult>(
+  experiment: GenericExperimentMatrixSpec<TInput>,
+  initialCells: Array<GenericExperimentMatrixCellResult<TResult>>
+): Array<GenericExperimentMatrixCellResult<TResult>> {
+  if (!Array.isArray(initialCells)) throw new Error("Generic experiment matrix initialCells must be an array.");
+  if (initialCells.length > experiment.cells.length) {
+    throw new Error("Generic experiment matrix initialCells exceed the requested schedule.");
+  }
+  const restored: Array<GenericExperimentMatrixCellResult<TResult>> = [];
+  for (const [index, candidate] of initialCells.entries()) {
+    const expected = experiment.cells[index]!;
+    const label = expected.label ?? expected.id;
+    const group = expected.group ?? "default";
+    const executionId = `${experiment.id}:cell:${expected.id}:${index}`;
+    if (
+      !isRecord(candidate) ||
+      candidate.index !== index ||
+      candidate.id !== expected.id ||
+      candidate.label !== label ||
+      candidate.group !== group ||
+      candidate.executionId !== executionId
+    ) throw new Error(`Generic experiment matrix initial cell ${index} conflicts with the deterministic schedule.`);
+    assertMatrixCellStatus(candidate.status);
+    if (candidate.status === "failed" && !experiment.continueOnError && index !== initialCells.length - 1) {
+      throw new Error("Generic experiment matrix initialCells continue after a terminal stop-on-error failure.");
+    }
+    restored.push({ ...candidate });
+  }
+  return restored;
 }
 
 export function validateGenericExperimentMatrixSpec<TInput>(spec: GenericExperimentMatrixSpec<TInput>): void {
