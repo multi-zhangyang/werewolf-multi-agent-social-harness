@@ -126,4 +126,79 @@ describe("generic tournament control plane", () => {
       "settle:1:failed"
     ]);
   });
+
+  it("resumes after a canonical terminal prefix without preparing or executing it again", async () => {
+    const lifecycle: string[] = [];
+    const result = await runTournamentEpisodes({
+      games: 3,
+      seed: "resume-prefix",
+      continueOnError: true,
+      initialEpisodes: [{
+        index: 0,
+        seed: "resume-prefix:g1",
+        status: "completed",
+        result: { status: "completed" as TournamentEpisodeLifecycle, durable: true }
+      }],
+      async onEpisodeStarting({ index, seed }) {
+        lifecycle.push(`start:${index}:${seed}`);
+      },
+      prepareEpisode: ({ index }) => {
+        lifecycle.push(`prepare:${index}`);
+        return index;
+      },
+      runEpisode: (index) => {
+        lifecycle.push(`run:${index}`);
+        return { status: "completed" as TournamentEpisodeLifecycle, durable: false };
+      },
+      statusOf: (episode) => episode.status
+    });
+
+    expect(lifecycle).toEqual([
+      "start:1:resume-prefix:g2",
+      "prepare:1",
+      "run:1",
+      "start:2:resume-prefix:g3",
+      "prepare:2",
+      "run:2"
+    ]);
+    expect(result.episodes.map((episode) => episode.index)).toEqual([0, 1, 2]);
+    expect(result).toMatchObject({ gamesCompleted: 3, gamesUnstarted: 0 });
+  });
+
+  it("fails before domain preparation when the durable start boundary is unavailable", async () => {
+    const lifecycle: string[] = [];
+    await expect(runTournamentEpisodes({
+      games: 2,
+      seed: "start-boundary",
+      continueOnError: true,
+      async onEpisodeStarting({ index }) {
+        lifecycle.push(`start:${index}`);
+        throw new Error("episode start authority unavailable");
+      },
+      prepareEpisode: ({ index }) => {
+        lifecycle.push(`prepare:${index}`);
+        return index;
+      },
+      runEpisode: () => ({ status: "completed" as TournamentEpisodeLifecycle }),
+      statusOf: (episode) => episode.status
+    })).rejects.toThrow(/episode start authority unavailable/i);
+
+    expect(lifecycle).toEqual(["start:0"]);
+  });
+
+  it("rejects a malformed restored prefix before scheduling new work", async () => {
+    let preparations = 0;
+    await expect(runTournamentEpisodes({
+      games: 2,
+      seed: "bad-prefix",
+      initialEpisodes: [{ index: 0, seed: "wrong:g1", status: "completed", result: 1 }],
+      prepareEpisode: () => {
+        preparations += 1;
+        return undefined;
+      },
+      runEpisode: () => 1,
+      statusOf: () => "completed"
+    })).rejects.toThrow(/valid contiguous terminal prefix/i);
+    expect(preparations).toBe(0);
+  });
 });

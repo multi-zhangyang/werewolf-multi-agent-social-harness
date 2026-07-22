@@ -27703,3 +27703,57 @@ existing Vite chunk-size warning, and the fixture cockpit passed **15/15**.
 This slice changed no provider/model selection, model client, prompt, reasoner,
 stream parser, or domain action behavior, so no external model call was
 repeated and no provider- or model-specific branch was added.
+
+## 13.292 Canonical Tournament Prefix And Pre-Domain Start Boundary Lock
+
+Timestamp: `2026-07-22`
+
+The domain-neutral tournament runner now has the two generic scheduling seams
+required by a future typed experiment-resume protocol, without pretending that
+the existing v1 experiment record can already recover an ambiguous in-flight
+episode:
+
+- `initialEpisodes` accepts only a contiguous canonical terminal prefix with
+  the original absolute index and seed for every slot.
+- Restored episodes participate in lifecycle counts and final ordered results,
+  but the runner never prepares, executes, or invokes start/settled hooks for
+  them again.
+- Runtime `prepared` state is forbidden in the restored prefix. Durable resume
+  must reconstruct only canonical result/artifact authority, never an adapter's
+  transient object.
+- A malformed seed, index, lifecycle, oversized prefix, or continuation beyond
+  a stopping failure is rejected before new domain work begins.
+- `onEpisodeStarting` is awaited outside the domain execution catch and before
+  `prepareEpisode`. A failure at this boundary is control-plane fatal and
+  proves that no adapter, actor, reasoner, provider, or environment work for
+  that slot was started.
+- New scheduling resumes at `initialEpisodes.length`, preserving absolute
+  episode numbering and `${baseSeed}:gN` derivation rather than renumbering a
+  remaining suffix from zero.
+
+This is a runner capability, not a claim that v1 experiment runs now resume.
+The v1 record does not contain a `started`/`staged` slot identity and existing
+generic episode artifacts do not bind `runSetId + index + seed`. Consequently,
+an active v1 run cannot distinguish never-started, in-flight, artifact-published,
+and membership-committed crash positions without guessing. Do not feed an
+active v1 prefix into automatic provider execution. Full resume requires a
+versioned staged slot record, control-plane episode binding, canonical artifact
+reconciliation, and an explicit safe rule for a started slot with no artifact.
+
+Validation recorded:
+
+```bash
+npm run typecheck
+npx vitest run tests/genericTournamentRunner.test.ts --maxWorkers=1 \
+  --no-file-parallelism --testTimeout=60000 --hookTimeout=60000 \
+  --teardownTimeout=60000 --reporter=verbose
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+git diff --check
+```
+
+The focused runner suite passed **1 file / 8 tests**. The change is
+provider-neutral and makes no model call, provider selection, artifact schema,
+or domain transition change. The complete deterministic suite passed **49
+files / 534 tests**.

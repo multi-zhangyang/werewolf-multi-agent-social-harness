@@ -44,6 +44,10 @@ export interface GenericTournamentResult<TPrepared, TResult> {
 export interface GenericTournamentRunnerOptions<TPrepared, TResult> {
   games: number;
   seed: string;
+  /** Canonical terminal prefix restored by the control plane. Restored
+   * episodes are included in lifecycle accounting but are never prepared or
+   * executed again. Runtime preparation objects are forbidden in the prefix. */
+  initialEpisodes?: ReadonlyArray<GenericTournamentEpisode<never, TResult>>;
   /** Stop scheduling new episodes after a shared control-plane deadline. The
    * already-started episode owns its own rejected-step evidence. */
   abortSignal?: AbortSignal;
@@ -54,6 +58,9 @@ export interface GenericTournamentRunnerOptions<TPrepared, TResult> {
   statusOf: (result: TResult) => TournamentEpisodeLifecycle;
   seedForEpisode?: (context: TournamentEpisodeContext) => string;
   describeError?: (error: unknown) => string;
+  /** Durable start boundary. It is awaited before domain preparation and
+   * outside the domain error boundary; hook failures are fatal. */
+  onEpisodeStarting?: (context: TournamentEpisodeContext) => void | Promise<void>;
   /** Durable control-plane hook. It runs after the terminal episode record is
    * appended and outside the domain error boundary; hook failures are fatal. */
   onEpisodeSettled?: (episode: GenericTournamentEpisode<TPrepared, TResult>) => void | Promise<void>;
@@ -70,10 +77,12 @@ export async function runTournamentEpisodes<TPrepared, TResult>(
   if (!Number.isInteger(options.games) || options.games <= 0) {
     throw new Error("Tournament games must be a positive integer.");
   }
-  const episodes: Array<GenericTournamentEpisode<TPrepared, TResult>> = [];
+  const restored = validateInitialEpisodes(options);
+  const episodes: Array<GenericTournamentEpisode<TPrepared, TResult>> = restored.map((episode) => ({ ...episode }));
   const errorText = options.describeError ?? defaultErrorText;
+  const restoredStop = !options.continueOnError && episodes.at(-1)?.status === "failed";
 
-  for (let index = 0; index < options.games; index += 1) {
+  for (let index = restoredStop ? options.games : episodes.length; index < options.games; index += 1) {
     if (options.abortSignal?.aborted) break;
     const baseContext: TournamentEpisodeContext = {
       index,
@@ -83,6 +92,7 @@ export async function runTournamentEpisodes<TPrepared, TResult>(
       ...baseContext,
       seed: options.seedForEpisode?.(baseContext) ?? `${options.seed}:g${index + 1}`
     };
+    await options.onEpisodeStarting?.(context);
     let prepared: TPrepared | undefined;
     let settled: GenericTournamentEpisode<TPrepared, TResult>;
     try {
@@ -116,6 +126,33 @@ export async function runTournamentEpisodes<TPrepared, TResult>(
     gamesUnstarted: options.games - episodes.length,
     episodes
   };
+}
+
+function validateInitialEpisodes<TPrepared, TResult>(
+  options: GenericTournamentRunnerOptions<TPrepared, TResult>
+): Array<GenericTournamentEpisode<never, TResult>> {
+  const restored = options.initialEpisodes ?? [];
+  if (restored.length > options.games) {
+    throw new Error("Tournament restored episode prefix exceeds the requested schedule.");
+  }
+  return restored.map((episode, index) => {
+    const baseContext: TournamentEpisodeContext = { index, seed: "" };
+    const expectedSeed = options.seedForEpisode?.(baseContext) ?? `${options.seed}:g${index + 1}`;
+    if (
+      episode.index !== index ||
+      episode.seed !== expectedSeed ||
+      (episode.status !== "completed" && episode.status !== "truncated" && episode.status !== "failed")
+    ) {
+      throw new Error("Tournament restored episodes must be a valid contiguous terminal prefix.");
+    }
+    if ("prepared" in episode && episode.prepared !== undefined) {
+      throw new Error("Tournament restored episodes cannot contain runtime preparation state.");
+    }
+    if (!options.continueOnError && episode.status === "failed" && index !== restored.length - 1) {
+      throw new Error("Tournament restored prefix cannot continue beyond a stopping failure.");
+    }
+    return { ...episode };
+  });
 }
 
 function defaultErrorText(_error: unknown): string {
