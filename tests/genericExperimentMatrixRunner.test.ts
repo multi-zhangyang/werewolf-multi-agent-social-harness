@@ -196,4 +196,102 @@ describe("generic experiment matrix control plane", () => {
     expect(JSON.stringify(result.cells[0])).not.toContain("provider.example");
     expect(result.cells[0]).not.toHaveProperty("result");
   });
+
+  it("resumes a validated contiguous settled prefix without rerunning its cells or hooks", async () => {
+    const calls: string[] = [];
+    const result = await runGenericExperimentMatrix({
+      experiment: {
+        id: "resume-matrix",
+        continueOnError: true,
+        cells: [
+          { id: "settled", label: "Settled", group: "g", input: "must-not-run" },
+          { id: "suffix", input: "completed" as const }
+        ]
+      },
+      initialCells: [{
+        index: 0,
+        id: "settled",
+        label: "Settled",
+        group: "g",
+        executionId: "resume-matrix:cell:settled:0",
+        status: "truncated",
+        result: "canonical-prefix"
+      }],
+      onCellStarting: (context) => { calls.push(`start:${context.id}`); },
+      runCell: (input, context) => { calls.push(`run:${context.id}`); return input; },
+      statusOf: () => "completed",
+      onCellSettled: (cell) => { calls.push(`settled:${cell.id}`); }
+    });
+
+    expect(calls).toEqual(["start:suffix", "run:suffix", "settled:suffix"]);
+    expect(result.cells.map((cell) => [cell.id, cell.status])).toEqual([
+      ["settled", "truncated"],
+      ["suffix", "completed"]
+    ]);
+  });
+
+  it("keeps control-plane hooks and durable cell exceptions outside ordinary failure capture", async () => {
+    const experiment = {
+      id: "fatal-control-plane",
+      continueOnError: true,
+      cells: [{ id: "first", input: "completed" as const }, { id: "second", input: "completed" as const }]
+    };
+    await expect(runGenericExperimentMatrix({
+      experiment,
+      runCell: (input) => input,
+      statusOf: (result) => result,
+      onCellStarting() { throw new Error("durable start failed"); }
+    })).rejects.toThrow(/durable start failed/);
+
+    await expect(runGenericExperimentMatrix({
+      experiment,
+      captureCellErrors: false,
+      runCell() { throw new Error("canonical store drift"); },
+      statusOf: (result) => result
+    })).rejects.toThrow(/canonical store drift/);
+
+    await expect(runGenericExperimentMatrix({
+      experiment,
+      runCell: (input) => input,
+      statusOf: (result) => result,
+      onCellSettled() { throw new Error("durable membership failed"); }
+    })).rejects.toThrow(/durable membership failed/);
+  });
+
+  it("rejects a restored prefix whose identity or stop-on-error order conflicts with the schedule", async () => {
+    const experiment = {
+      id: "invalid-prefix",
+      continueOnError: false,
+      cells: [{ id: "first", input: 1 }, { id: "second", input: 2 }]
+    };
+    await expect(runGenericExperimentMatrix({
+      experiment,
+      initialCells: [{
+        index: 0,
+        id: "wrong",
+        label: "wrong",
+        group: "default",
+        executionId: "invalid-prefix:cell:wrong:0",
+        status: "completed"
+      }],
+      runCell: (input) => input,
+      statusOf: () => "completed"
+    })).rejects.toThrow(/conflicts with the deterministic schedule/i);
+
+    await expect(runGenericExperimentMatrix({
+      experiment,
+      initialCells: [
+        {
+          index: 0, id: "first", label: "first", group: "default",
+          executionId: "invalid-prefix:cell:first:0", status: "failed"
+        },
+        {
+          index: 1, id: "second", label: "second", group: "default",
+          executionId: "invalid-prefix:cell:second:1", status: "completed"
+        }
+      ],
+      runCell: (input) => input,
+      statusOf: () => "completed"
+    })).rejects.toThrow(/continue after a terminal stop-on-error failure/i);
+  });
 });

@@ -91,7 +91,17 @@ describe("experiment matrix harness", () => {
     });
     expect(restarted.cells[0]?.tournament?.episodes.map((episode) => episode.runId))
       .toEqual(first.cells[0]?.tournament?.episodes.map((episode) => episode.runId));
+    expect(restarted.cells[0]?.elapsedMs).toBe(0);
     expect(restarted.statistics).toEqual(first.statistics);
+
+    const conflicting = structuredClone(experiment);
+    conflicting.cells[0]!.tournament.seed = "conflicting-durable-seed";
+    await expect(runExperimentMatrix({
+      experiment: conflicting,
+      reasoner: noRerunReasoner,
+      orchestrationBaseDirectory: root,
+      includeArtifacts: true
+    })).rejects.toThrow(/provenance conflicts with durable authority/i);
   });
 
   it("does not mark a single-cell matrix completed when its tournament deadline leaves games unstarted", async () => {
