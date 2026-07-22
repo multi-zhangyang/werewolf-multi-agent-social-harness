@@ -72,6 +72,12 @@ test("renders recorded server truth without a provider and never requests a full
   await expect(page.getByRole("status")).toContainText("view=truth-redacted");
   await expect(page.getByTestId("agent-decision-evidence-panel")).toHaveCount(0);
 
+  await page.getByRole("menuitem", { name: /谱系/ }).click();
+  const truthLineagePanel = page.getByRole("tabpanel", { name: "谱系" });
+  await expect(truthLineagePanel.getByText("Checkpoint operator controls are local-only")).toBeVisible();
+  await expect(truthLineagePanel.getByRole("button", { name: "刷新 checkpoint" })).toBeDisabled();
+  await expect(truthLineagePanel.getByRole("button", { name: "创建最终边界 checkpoint" })).toBeDisabled();
+
   // The public comparison DTO intentionally contains neither run ids nor
   // seeds. Its route context must still make the actual matrix current.
   // The tab strip can overflow after every cockpit workspace is registered.
@@ -179,6 +185,101 @@ test("renders a projection-safe Werewolf postgame review board", async ({ page }
   await expect(board.locator('[data-testid^="werewolf-seat-role-"]')).toHaveCount(0);
   await expect(board.getByRole("button", { name: /定位事件 \d+ 的服务端回放边界/ })).toHaveCount(0);
   expect(await seatBoard.textContent()).not.toMatch(/狼人|预言家|女巫|猎人|村民/);
+});
+
+test("creates a replay-prefix checkpoint and opens its real fork comparison", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.goto(`/?workspace=timeline&compareBaseline=${fixtureMatchId}`, { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+
+  const timelinePanel = page.getByRole("tabpanel", { name: "时间线" });
+  const replayCursor = timelinePanel.getByRole("combobox", { name: "跳转服务端回放帧" });
+  const frameResponsePromise = page.waitForResponse((response) => isReplayFrameResponse(response));
+  await replayCursor.click();
+  await replayCursor.press("ArrowDown");
+  await replayCursor.press("Enter");
+  const frameResponse = await frameResponsePromise;
+  expect(frameResponse.ok()).toBeTruthy();
+  const frame = await frameResponse.json();
+  const nativeStepCount = frame.frame.cursor.nativeStepCount as number;
+  expect(nativeStepCount).toBeGreaterThan(0);
+
+  await page.getByRole("menuitem", { name: /谱系/ }).click();
+  const lineagePanel = page.getByRole("tabpanel", { name: "谱系" });
+  await expect(lineagePanel).toBeVisible();
+  await expect(lineagePanel.getByText(new RegExp(`当前 selector：服务端 replay native #${nativeStepCount}`))).toBeVisible();
+
+  const checkpointResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "POST" && url.pathname === `/api/matches/${fixtureMatchId}/checkpoints`;
+  });
+  await lineagePanel.getByRole("button", { name: `创建 replay native ${nativeStepCount} checkpoint` }).click();
+  const checkpointResponse = await checkpointResponsePromise;
+  expect(checkpointResponse.status()).toBe(201);
+  expect(checkpointResponse.request().postDataJSON()).toMatchObject({ nativeStepCount });
+  const checkpointBody = await checkpointResponse.json();
+  const checkpointId = checkpointBody.summary.checkpointId as string;
+  expect(checkpointBody.summary.source.nativeStepCount).toBe(nativeStepCount);
+  await expect(page.getByRole("status")).toContainText("checkpoint 已创建");
+
+  await page.getByLabel("最大 transitions").fill("1");
+  const forkResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "POST" && url.pathname === `/api/checkpoints/${checkpointId}/fork`;
+  });
+  const childArtifactPromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET" &&
+      url.pathname.startsWith("/api/matches/") &&
+      url.pathname.endsWith("/artifact") &&
+      !url.pathname.includes(fixtureMatchId) &&
+      url.searchParams.get("view") === "postgame-redacted";
+  });
+  const comparisonPromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET" &&
+      url.pathname.startsWith(`/api/matches/${fixtureMatchId}/compare/`) &&
+      url.searchParams.get("view") === "postgame-redacted";
+  });
+  const lineagePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET" && url.pathname.endsWith("/fork-lineage");
+  });
+  const branchTreePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET" && url.pathname === `/api/checkpoints/${checkpointId}/branch-tree`;
+  });
+
+  await lineagePanel.getByRole("button", { name: `从 checkpoint ${checkpointId.slice(0, 8)} 创建 fork` }).click();
+  const forkResponse = await forkResponsePromise;
+  expect(forkResponse.ok()).toBeTruthy();
+  expect(forkResponse.request().postDataJSON()).toMatchObject({ maxTransitions: 1 });
+  const forkBody = await forkResponse.json();
+  const childId = forkBody.id as string;
+  expect(forkBody.summary).toMatchObject({ kind: "fork", checkpointId });
+
+  const [childArtifactResponse, comparisonResponse, lineageResponse, branchTreeResponse] = await Promise.all([
+    childArtifactPromise,
+    comparisonPromise,
+    lineagePromise,
+    branchTreePromise
+  ]);
+  expect(childArtifactResponse.ok()).toBeTruthy();
+  expect((await childArtifactResponse.json()).runId).toBe(childId);
+  expect(comparisonResponse.ok()).toBeTruthy();
+  const comparison = await comparisonResponse.json();
+  expect(comparison.baseline.runId ?? comparison.baseline.matchId).toBe(fixtureMatchId);
+  expect(comparison.candidate.runId ?? comparison.candidate.matchId).toBe(childId);
+  expect(lineageResponse.ok()).toBeTruthy();
+  expect((await lineageResponse.json()).summary).toMatchObject({ isFork: true, runId: childId });
+  expect(branchTreeResponse.ok()).toBeTruthy();
+  expect((await branchTreeResponse.json()).summary.counts.matches).toBeGreaterThan(0);
+
+  await expect(page.getByRole("tabpanel", { name: "对比" })).toBeVisible();
+  await expect(page.getByText("对比已就绪")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("checkpoint fork 已完成");
+  expect(pageErrors).toEqual([]);
 });
 
 test("renders only a server-owned live public table and does not reconstruct a failed match", async ({ page }) => {
@@ -421,7 +522,7 @@ test("loads a server-authoritative native replay frame without a browser-side ga
     if (url.pathname.endsWith("/artifact")) artifactViews.push(url.searchParams.get("view") ?? "default");
   });
 
-  await page.goto("/?workspace=timeline", { waitUntil: "domcontentloaded" });
+  await page.goto(`/?workspace=timeline&compareBaseline=${fixtureMatchId}`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
   const controls = page.getByTestId("server-replay-cursor-controls");
   await expect(controls).toBeVisible();

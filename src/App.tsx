@@ -782,6 +782,19 @@ interface CheckpointCreateResponse {
   artifactUrl?: string;
 }
 
+interface CheckpointForkResponse {
+  id: string;
+  hasArtifact?: boolean;
+  harnessStatus?: string | null;
+  summary?: {
+    kind?: "fork";
+    ok?: boolean;
+    failureReason?: string | null;
+    checkpointId?: string;
+    forkOf?: Record<string, unknown>;
+  };
+}
+
 interface ForkLineageSummary {
   kind?: "fork-lineage";
   schemaVersion?: string;
@@ -2579,7 +2592,12 @@ export function App() {
     try {
       const created = await apiJson<CheckpointCreateResponse>(`/api/matches/${encodeURIComponent(currentMatchId)}/checkpoints`, {
         method: "POST",
-        body: JSON.stringify({ reason: `ui checkpoint ${new Date().toISOString()}` })
+        body: JSON.stringify({
+          reason: `ui checkpoint ${new Date().toISOString()}`,
+          ...(replayFrame?.cursor.nativeStepCount === undefined
+            ? {}
+            : { nativeStepCount: replayFrame.cursor.nativeStepCount })
+        })
       });
       const response = await apiJson<CheckpointsResponse>(`/api/checkpoints?matchId=${encodeURIComponent(currentMatchId)}`);
       const ordered = orderCheckpoints(response.checkpoints);
@@ -2587,13 +2605,86 @@ export function App() {
       setSelectedCheckpointId(created.summary.checkpointId);
       setBranchTree(null);
       setInspector(inspectorFromCheckpoint(created.summary));
-      setActionStatus(`checkpoint 已创建：${shortId(created.summary.checkpointId)} · artifact=${created.artifactUrl ? "summary-only" : "n/a"}`);
+      setActionStatus(
+        `checkpoint 已创建：${shortId(created.summary.checkpointId)} · boundary=native #${created.summary.source.nativeStepCount} · artifact=${created.artifactUrl ? "summary-only" : "n/a"}`
+      );
     } catch (nextError) {
       setActionStatus("checkpoint 创建失败", errorMessage(nextError));
     } finally {
       setBusy(null);
     }
-  }, [currentMatchId, setActionStatus]);
+  }, [currentMatchId, replayFrame?.cursor.nativeStepCount, setActionStatus]);
+
+  const handleForkCheckpoint = useCallback(
+    async (checkpoint: CheckpointSummary) => {
+      if (!currentMatchId) {
+        setActionStatus("无法 fork checkpoint：尚未选择 parent run。");
+        return;
+      }
+      if (artifactView !== "postgame-redacted") {
+        setActionStatus("checkpoint fork 仅在 postgame-redacted 本地研究视图可用。");
+        return;
+      }
+      const parentMatchId = currentMatchId;
+      if (checkpoint.source.runId !== parentMatchId && checkpoint.source.matchId !== parentMatchId) {
+        setActionStatus("无法 fork checkpoint：所选 checkpoint 不属于当前 parent run。");
+        return;
+      }
+      const forkBusyId = `checkpoint:fork:${checkpoint.checkpointId}`;
+      setBusy(forkBusyId);
+      try {
+        const forked = await apiJson<CheckpointForkResponse>(
+          `/api/checkpoints/${encodeURIComponent(checkpoint.checkpointId)}/fork`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              reason: `ui fork ${shortId(checkpoint.checkpointId)}`,
+              maxTransitions: parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS),
+              timeoutMs: parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000
+            })
+          }
+        );
+        if (
+          !forked.id ||
+          forked.hasArtifact !== true ||
+          forked.summary?.kind !== "fork" ||
+          forked.summary.checkpointId !== checkpoint.checkpointId
+        ) {
+          throw new Error("checkpoint fork response identity mismatch");
+        }
+        await refreshMatches();
+        setCandidateId(forked.id);
+        const comparisonLoaded = await loadComparisonPair({
+          baselineId: parentMatchId,
+          candidateId: forked.id,
+          view: "postgame-redacted",
+          statusPrefix: "checkpoint fork 对比已加载"
+        });
+        if (!comparisonLoaded) throw new Error("fork child artifact or parent/child comparison failed validation");
+        setBusy(forkBusyId);
+        const [lineageResponse, branchResponse] = await Promise.all([
+          apiJson<ForkLineageResponse>(`/api/matches/${encodeURIComponent(forked.id)}/fork-lineage`),
+          apiJson<BranchTreeResponse>(`/api/checkpoints/${encodeURIComponent(checkpoint.checkpointId)}/branch-tree`)
+        ]);
+        setForkLineage(lineageResponse.summary);
+        setBranchTree(branchResponse.summary);
+        setSelectedCheckpointId(checkpoint.checkpointId);
+        setWorkspace("compare");
+        const childFailed = forked.summary.ok === false || forked.harnessStatus === "failed";
+        setActionStatus(
+          childFailed
+            ? `checkpoint fork 已记录失败 child：parent=${shortId(parentMatchId)} · child=${shortId(forked.id)} · comparison 已打开`
+            : `checkpoint fork 已完成：parent=${shortId(parentMatchId)} · child=${shortId(forked.id)} · boundary=native #${checkpoint.source.nativeStepCount} · comparison 已打开`,
+          childFailed ? forked.summary.failureReason ?? "fork child harness reported failure" : null
+        );
+      } catch (nextError) {
+        setActionStatus("checkpoint fork 失败", errorMessage(nextError));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [artifactView, currentMatchId, loadComparisonPair, maxTransitions, refreshMatches, setActionStatus, timeoutSeconds]
+  );
 
   const handleLoadForkLineage = useCallback(async () => {
     if (!currentMatchId) {
@@ -2811,9 +2902,12 @@ export function App() {
           selectedCheckpointId={selectedCheckpointId}
           forkLineage={forkLineage}
           branchTree={branchTree}
+          replayBoundaryNativeStepCount={replayFrame?.cursor.nativeStepCount ?? null}
+          operatorEnabled={artifactView === "postgame-redacted"}
           busy={busy}
           onRefreshCheckpoints={handleRefreshCheckpoints}
           onCreateCheckpoint={handleCreateCheckpoint}
+          onForkCheckpoint={handleForkCheckpoint}
           onLoadForkLineage={handleLoadForkLineage}
           onSelectCheckpoint={handleSelectCheckpoint}
           onLoadBranchTree={handleLoadBranchTree}
@@ -4763,9 +4857,12 @@ function LineageWorkspace({
   selectedCheckpointId,
   forkLineage,
   branchTree,
+  replayBoundaryNativeStepCount,
+  operatorEnabled,
   busy,
   onRefreshCheckpoints,
   onCreateCheckpoint,
+  onForkCheckpoint,
   onLoadForkLineage,
   onSelectCheckpoint,
   onLoadBranchTree,
@@ -4778,9 +4875,12 @@ function LineageWorkspace({
   selectedCheckpointId: string;
   forkLineage: ForkLineageSummary | null;
   branchTree: BranchTreeSummary | null;
+  replayBoundaryNativeStepCount: number | null;
+  operatorEnabled: boolean;
   busy: string | null;
   onRefreshCheckpoints: () => void;
   onCreateCheckpoint: () => void;
+  onForkCheckpoint: (checkpoint: CheckpointSummary) => void;
   onLoadForkLineage: () => void;
   onSelectCheckpoint: (checkpoint: CheckpointSummary) => void;
   onLoadBranchTree: (checkpointId?: string) => void;
@@ -4826,6 +4926,7 @@ function LineageWorkspace({
           <Button
             size="small"
             type={selectedCheckpointId === checkpoint.checkpointId ? "primary" : "default"}
+            disabled={!operatorEnabled}
             aria-label={`选择 checkpoint ${shortId(checkpoint.checkpointId)}`}
             onClick={() => onSelectCheckpoint(checkpoint)}
           >
@@ -4835,10 +4936,24 @@ function LineageWorkspace({
             size="small"
             icon={decorativeIcon(<BranchesOutlined />)}
             loading={busy === "branch-tree" && selectedCheckpointId === checkpoint.checkpointId}
+            disabled={!operatorEnabled || Boolean(busy)}
             aria-label={`加载 checkpoint ${shortId(checkpoint.checkpointId)} 的 branch tree`}
             onClick={() => onLoadBranchTree(checkpoint.checkpointId)}
           >
             Tree
+          </Button>
+          <Button
+            size="small"
+            icon={decorativeIcon(<BranchesOutlined />)}
+            loading={busy === `checkpoint:fork:${checkpoint.checkpointId}`}
+            disabled={!operatorEnabled || (Boolean(busy) && busy !== `checkpoint:fork:${checkpoint.checkpointId}`)}
+            aria-label={`从 checkpoint ${shortId(checkpoint.checkpointId)} 创建 fork`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onForkCheckpoint(checkpoint);
+            }}
+          >
+            Fork
           </Button>
         </Space>
       )
@@ -4851,6 +4966,7 @@ function LineageWorkspace({
         <Button
           size="small"
           icon={decorativeIcon(<CodeOutlined />)}
+          disabled={!operatorEnabled}
           aria-label={`查看 checkpoint ${shortId(checkpoint.checkpointId)} 证据`}
           onClick={() => onInspectCheckpoint(checkpoint)}
         >
@@ -4923,16 +5039,42 @@ function LineageWorkspace({
         title="Checkpoint Registry"
         extra={
           <Space wrap>
-            <Button icon={decorativeIcon(<ReloadOutlined />)} loading={busy === "checkpoints"} disabled={!currentMatchId || Boolean(busy)} onClick={onRefreshCheckpoints}>
+            <Button icon={decorativeIcon(<ReloadOutlined />)} loading={busy === "checkpoints"} disabled={!operatorEnabled || !currentMatchId || Boolean(busy)} onClick={onRefreshCheckpoints}>
               刷新 checkpoint
             </Button>
-            <Button type="primary" icon={decorativeIcon(<DatabaseOutlined />)} loading={busy === "checkpoint:create"} disabled={!currentMatchId || Boolean(busy)} onClick={onCreateCheckpoint}>
-              创建 checkpoint
+            <Button
+              type="primary"
+              icon={decorativeIcon(<DatabaseOutlined />)}
+              loading={busy === "checkpoint:create"}
+              disabled={!operatorEnabled || !currentMatchId || Boolean(busy)}
+              aria-label={
+                replayBoundaryNativeStepCount === null
+                  ? "创建最终边界 checkpoint"
+                  : `创建 replay native ${replayBoundaryNativeStepCount} checkpoint`
+              }
+              onClick={onCreateCheckpoint}
+            >
+              {replayBoundaryNativeStepCount === null
+                ? "创建最终 checkpoint"
+                : `创建 replay #${replayBoundaryNativeStepCount} checkpoint`}
             </Button>
           </Space>
         }
       >
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          {!operatorEnabled ? (
+            <Alert
+              type="info"
+              showIcon
+              message="Checkpoint operator controls are local-only"
+              description="切换到 postgame-redacted 本地研究视图后，才可列出、创建、fork 或检查 checkpoint 谱系。truth-redacted 只保留安全 artifact 展示面。"
+            />
+          ) : null}
+          <Text type="secondary">
+            {replayBoundaryNativeStepCount === null
+              ? "当前 selector：artifact 最终边界。先在回放或狼人杀事件账本定位服务端帧，可创建 prefix checkpoint。"
+              : `当前 selector：服务端 replay native #${replayBoundaryNativeStepCount}；创建时会提交该 nativeStepCount。`}
+          </Text>
           <Text type="secondary">列表来自 `/api/checkpoints?matchId=...`，只展示 summary，不读取 full checkpoint artifact。</Text>
           <Table
             rowKey="checkpointId"
@@ -4959,10 +5101,10 @@ function LineageWorkspace({
             extra={
               <Space wrap>
                 {forkLineage ? <BoundaryTag status={forkLineage.boundary?.status} ok={forkLineage.ok} /> : <Tag>未加载</Tag>}
-                <Button icon={decorativeIcon(<ApiOutlined />)} loading={busy === "fork-lineage"} disabled={!currentMatchId || Boolean(busy)} onClick={onLoadForkLineage}>
+                <Button icon={decorativeIcon(<ApiOutlined />)} loading={busy === "fork-lineage"} disabled={!operatorEnabled || !currentMatchId || Boolean(busy)} onClick={onLoadForkLineage}>
                   加载 lineage
                 </Button>
-                <Button icon={decorativeIcon(<CodeOutlined />)} disabled={!forkLineage} onClick={onInspectForkLineage}>
+                <Button icon={decorativeIcon(<CodeOutlined />)} disabled={!operatorEnabled || !forkLineage} onClick={onInspectForkLineage}>
                   证据
                 </Button>
               </Space>
@@ -5004,12 +5146,12 @@ function LineageWorkspace({
                 <Button
                   icon={decorativeIcon(<BranchesOutlined />)}
                   loading={busy === "branch-tree"}
-                  disabled={!selectedCheckpointId || Boolean(busy)}
+                  disabled={!operatorEnabled || !selectedCheckpointId || Boolean(busy)}
                   onClick={() => onLoadBranchTree(selectedCheckpointId)}
                 >
                   加载 branch tree
                 </Button>
-                <Button icon={decorativeIcon(<CodeOutlined />)} disabled={!branchTree} onClick={onInspectBranchTree}>
+                <Button icon={decorativeIcon(<CodeOutlined />)} disabled={!operatorEnabled || !branchTree} onClick={onInspectBranchTree}>
                   证据
                 </Button>
               </Space>

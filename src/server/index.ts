@@ -812,6 +812,7 @@ app.post("/api/matches/:id/replay", async (req, res, next) => {
 
 app.post("/api/matches/:id/checkpoints", async (req, res, next) => {
   try {
+    assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
     const body = requestBodyObject(req.body);
     assertForbiddenBodyFields(body, FORBIDDEN_CHECKPOINT_BODY_FIELDS, "checkpoint creation");
     assertAllowedBodyFields(body, ["reason", "nativeStepCount", "traceId", "nativeTurnIndex"], "checkpoint creation");
@@ -851,6 +852,7 @@ app.post("/api/matches/:id/checkpoints", async (req, res, next) => {
 
 app.get("/api/matches/:id/fork-lineage", async (req, res, next) => {
   try {
+    assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
     await loadServerArtifactStores();
     const match = getMatch(req.params.id);
     if (!match) {
@@ -872,6 +874,7 @@ app.get("/api/matches/:id/fork-lineage", async (req, res, next) => {
 
 app.get("/api/checkpoints", async (req, res, next) => {
   try {
+    assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
     await loadCheckpointArtifactIndex(checkpointArtifactBaseDir);
     const matchId = typeof req.query.matchId === "string" ? req.query.matchId : undefined;
     res.json({
@@ -884,6 +887,7 @@ app.get("/api/checkpoints", async (req, res, next) => {
 
 app.get("/api/checkpoints/:id", async (req, res, next) => {
   try {
+    assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
     await loadCheckpointArtifactIndex(checkpointArtifactBaseDir);
     const checkpoint = getCheckpoint(req.params.id);
     if (!checkpoint) {
@@ -898,6 +902,7 @@ app.get("/api/checkpoints/:id", async (req, res, next) => {
 
 app.get("/api/checkpoints/:id/forks", async (req, res, next) => {
   try {
+    assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
     await loadServerArtifactStores();
     const checkpoint = getCheckpoint(req.params.id);
     if (!checkpoint) {
@@ -917,6 +922,7 @@ app.get("/api/checkpoints/:id/forks", async (req, res, next) => {
 
 app.get("/api/checkpoints/:id/branch-tree", async (req, res, next) => {
   try {
+    assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
     await loadServerArtifactStores();
     const checkpoint = getCheckpoint(req.params.id);
     if (!checkpoint) {
@@ -951,6 +957,12 @@ app.get("/api/checkpoints/:id/artifact", async (req, res, next) => {
 });
 
 app.post("/api/checkpoints/:id/fork", async (req, res, next) => {
+  try {
+    assertLocalOperatorRegistryAccess(req, artifactAccessBindHost);
+  } catch (error) {
+    next(error);
+    return;
+  }
   try {
     await loadServerArtifactStores();
   } catch (error) {

@@ -422,7 +422,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
     const url = new URL(response.url());
     return response.request().method() === "GET" && url.pathname === "/api/checkpoints" && url.searchParams.get("matchId") === uiRunId;
   });
-  await page.getByRole("button", { name: "创建 checkpoint", exact: true }).click();
+  await page.getByRole("button", { name: "创建最终边界 checkpoint", exact: true }).click();
   const checkpointCreate = await checkpointCreateResponse;
   expect(checkpointCreate.ok()).toBeTruthy();
   const checkpointJson = (await checkpointCreate.json()) as E2ECheckpointCreateResponse;
