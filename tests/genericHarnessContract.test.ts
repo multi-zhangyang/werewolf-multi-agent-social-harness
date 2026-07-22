@@ -7,6 +7,7 @@ import {
   type SocialDomainAdapterManifest
 } from "../src/harness/domainAdapter";
 import {
+  createGenericExperimentExecutionAttestation,
   createGenericExperimentProvenance,
   replaySocialEpisode,
   verifyHarnessEpisodeArtifact,
@@ -142,7 +143,7 @@ function ledgerEpisodeExperiment(id: string, overrides: Partial<GenericExperimen
     episodeCount: 1,
     actorCount: 1,
     schedulerMode: "aec",
-    profiles: [{ id: "ledger-local", version: "1", policyId: "ledger.policy.local" }],
+    profiles: [{ id: "a", version: "1", policyId: "ledger.policy.local" }],
     modelAssignments: [],
     assignmentPolicy: { id: "ledger.assignment.fixed", version: "1", configuration: { actors: ["a"] } },
     maxTransitions: 1,
@@ -188,6 +189,7 @@ describe("generic social harness contract", () => {
       ],
       channels: [publicChannel],
       schedulerMode: "aec",
+      maxTransitions: 1,
       hashState: hashStableState,
       hashMessages: hashStableState,
       captureAgentSnapshots: () => agents
@@ -241,7 +243,10 @@ describe("generic social harness contract", () => {
     const childExperiment = createGenericExperimentProvenance(
       ledgerEpisodeExperiment("ledger-child-experiment", {
         seed: "ledger-counterfactual-seed",
-        profiles: [{ id: "ledger-local", version: "2", policyId: "ledger.policy.counterfactual" }],
+        profiles: [
+          { id: "a", version: "1", policyId: "ledger.policy.local" },
+          { id: "ledger-counterfactual", version: "2", policyId: "ledger.policy.counterfactual" }
+        ],
         domainConfig: { ledgerMode: "replace-only" }
       })
     );
@@ -348,6 +353,7 @@ describe("generic social harness contract", () => {
       // already verified runtime manifest instead of producing legacy truth.
       episode: {
         id: "ledger-adapter-bound-inherited-fork",
+        maxTransitions: 1,
         hashState: hashStableState,
         hashMessages: hashStableState
       }
@@ -382,6 +388,10 @@ describe("generic social harness contract", () => {
     const experimentBoundEnvelope = {
       ...inheritedEnvelope,
       experiment: childExperiment,
+      executionAttestation: createGenericExperimentExecutionAttestation(
+        childExperiment.spec,
+        inherited.socialEpisode
+      ),
       forkOf: experimentBoundFork
     } satisfies HarnessEpisodeArtifactEnvelope<
       LedgerState,
@@ -391,6 +401,70 @@ describe("generic social harness contract", () => {
       (typeof agents)[number]
     >;
     expect(validateHarnessEpisodeArtifactEnvelope(experimentBoundEnvelope)).toEqual([]);
+    const missingExecutionAttestation = clone(experimentBoundEnvelope) as HarnessEpisodeArtifactEnvelope<
+      LedgerState,
+      LedgerObservation,
+      LedgerPending,
+      LedgerCommand,
+      (typeof agents)[number]
+    >;
+    delete missingExecutionAttestation.executionAttestation;
+    expect(validateHarnessEpisodeArtifactEnvelope(missingExecutionAttestation).join(" ")).toMatch(
+      /executionAttestation is required/i
+    );
+    const downgradedMissingExecutionAttestation = clone(missingExecutionAttestation);
+    downgradedMissingExecutionAttestation.experiment!.schemaVersion = "harness.experiment-provenance.v1";
+    delete downgradedMissingExecutionAttestation.experiment!.executionAttestationRequired;
+    expect(validateHarnessEpisodeArtifactEnvelope(downgradedMissingExecutionAttestation).join(" ")).toMatch(
+      /executionAttestation is required/i
+    );
+    const forgedExecutionBudget = clone(experimentBoundEnvelope);
+    forgedExecutionBudget.socialEpisode.execution!.maxTransitions = 2;
+    forgedExecutionBudget.executionAttestation.maxTransitions = 2;
+    expect(validateHarnessEpisodeArtifactEnvelope(forgedExecutionBudget).join(" ")).toMatch(
+      /execution\.maxTransitions must match experiment\.spec\.maxTransitions/i
+    );
+    const forgedDecisionBudget = clone(experimentBoundEnvelope);
+    forgedDecisionBudget.socialEpisode.execution!.decisionTimeoutMs = 5_000;
+    expect(validateHarnessEpisodeArtifactEnvelope(forgedDecisionBudget).join(" ")).toMatch(
+      /execution\.decisionTimeoutMs must match experiment\.spec\.timeoutPolicy\.decisionTimeoutMs/i
+    );
+    const forgedRuntimeProfile = clone(experimentBoundEnvelope);
+    forgedRuntimeProfile.socialEpisode.runtimeActors![0]!.profileVersion = "forged";
+    forgedRuntimeProfile.socialEpisode.profiles[0]!.version = "forged";
+    forgedRuntimeProfile.executionAttestation.actors[0]!.profile.version = "forged";
+    expect(validateHarnessEpisodeArtifactEnvelope(forgedRuntimeProfile).join(" ")).toMatch(
+      /profileVersion must match the selected experiment profile version/i
+    );
+    const forgedRuntimePolicy = clone(experimentBoundEnvelope);
+    forgedRuntimePolicy.socialEpisode.runtimeActors![0]!.policyId = "forged.policy";
+    forgedRuntimePolicy.socialEpisode.profiles[0]!.policyId = "forged.policy";
+    forgedRuntimePolicy.executionAttestation.actors[0]!.profile.policyId = "forged.policy";
+    expect(validateHarnessEpisodeArtifactEnvelope(forgedRuntimePolicy).join(" ")).toMatch(
+      /policyId must match the selected experiment profile policyId/i
+    );
+    const forgedAttestation = clone(experimentBoundEnvelope);
+    forgedAttestation.executionAttestation.specHash = "forged-spec-hash";
+    expect(validateHarnessEpisodeArtifactEnvelope(forgedAttestation).join(" ")).toMatch(
+      /executionAttestation must exactly match/i
+    );
+    const malformedRuntimeActors = clone(experimentBoundEnvelope) as unknown as Record<string, any>;
+    malformedRuntimeActors.socialEpisode.runtimeActors = [null];
+    expect(() => validateHarnessEpisodeArtifactEnvelope(malformedRuntimeActors as any)).not.toThrow();
+    expect(validateHarnessEpisodeArtifactEnvelope(malformedRuntimeActors as any).join(" ")).toMatch(
+      /runtimeActors\[0\] must be an object/i
+    );
+    const malformedRuntimeActorFields = clone(experimentBoundEnvelope) as unknown as Record<string, any>;
+    malformedRuntimeActorFields.socialEpisode.runtimeActors = [{ actorId: 7, profileId: "a", model: {}, profileVersion: 1 }];
+    expect(() => validateHarnessEpisodeArtifactEnvelope(malformedRuntimeActorFields as any)).not.toThrow();
+    expect(validateHarnessEpisodeArtifactEnvelope(malformedRuntimeActorFields as any).join(" ")).toMatch(
+      /runtimeActors\[0\].*(actorId|model|profileVersion)/i
+    );
+    const runtimeActorWithUnknownField = clone(experimentBoundEnvelope) as unknown as Record<string, any>;
+    runtimeActorWithUnknownField.socialEpisode.runtimeActors[0].provider = "forged-provider";
+    expect(validateHarnessEpisodeArtifactEnvelope(runtimeActorWithUnknownField as any).join(" ")).toMatch(
+      /runtimeActors\[0\] contains unknown field.*provider/i
+    );
     const nullExperimentEnvelope = clone(experimentBoundEnvelope) as unknown as Record<string, unknown>;
     nullExperimentEnvelope.experiment = null;
     expect(
@@ -412,6 +486,64 @@ describe("generic social harness contract", () => {
     expect(
       validateHarnessCheckpointEnvelope(nullCheckpointExperiment as unknown as typeof experimentBoundCheckpoint).join(" ")
     ).toMatch(/source\.experiment must be an object/i);
+    const forgedCheckpointBudget = clone(experimentBoundCheckpoint);
+    forgedCheckpointBudget.executionPrefix.execution!.maxTransitions = 2;
+    forgedCheckpointBudget.source.executionPrefixHash = hashStableState(forgedCheckpointBudget.executionPrefix);
+    expect(validateHarnessCheckpointEnvelope(forgedCheckpointBudget).join(" ")).toMatch(
+      /executionPrefix\.execution\.maxTransitions must match experiment\.spec\.maxTransitions/i
+    );
+    const downgradedForgedCheckpoint = clone(forgedCheckpointBudget);
+    downgradedForgedCheckpoint.source.experiment!.schemaVersion = "harness.experiment-provenance.v1";
+    delete downgradedForgedCheckpoint.source.experiment!.executionAttestationRequired;
+    expect(validateHarnessCheckpointEnvelope(downgradedForgedCheckpoint).join(" ")).toMatch(
+      /executionPrefix\.execution\.maxTransitions must match experiment\.spec\.maxTransitions/i
+    );
+    const forgedCheckpointTimeout = clone(experimentBoundCheckpoint);
+    forgedCheckpointTimeout.executionPrefix.execution!.decisionTimeoutMs = 123;
+    forgedCheckpointTimeout.source.executionPrefixHash = hashStableState(forgedCheckpointTimeout.executionPrefix);
+    expect(validateHarnessCheckpointEnvelope(forgedCheckpointTimeout).join(" ")).toMatch(
+      /executionPrefix\.execution\.decisionTimeoutMs must match experiment\.spec\.timeoutPolicy\.decisionTimeoutMs/i
+    );
+    const forgedCheckpointProfile = clone(experimentBoundCheckpoint);
+    forgedCheckpointProfile.executionPrefix.runtimeActors![0]!.profileVersion = "forged";
+    forgedCheckpointProfile.executionPrefix.profiles[0]!.version = "forged";
+    forgedCheckpointProfile.source.executionPrefixHash = hashStableState(forgedCheckpointProfile.executionPrefix);
+    expect(validateHarnessCheckpointEnvelope(forgedCheckpointProfile).join(" ")).toMatch(
+      /profileVersion must match the selected experiment profile version/i
+    );
+    let forgedCheckpointVerifierCalls = 0;
+    let forgedCheckpointEnvironmentRestores = 0;
+    let forgedCheckpointActorRestores = 0;
+    await expect(
+      runForkedHarnessEpisode({
+        checkpoint: downgradedForgedCheckpoint,
+        runtime: {
+          recordedAgentState: { mode: "validate", validator: () => [] },
+          domainAdapter: ledgerDomainAdapter,
+          createEnvironment(initialState) {
+            forgedCheckpointEnvironmentRestores += 1;
+            return new LedgerEnvironment({ initialState, actorIds: ["a"] });
+          },
+          restoreActors() {
+            forgedCheckpointActorRestores += 1;
+            return [];
+          }
+        },
+        verifyCheckpointReplay: () => {
+          forgedCheckpointVerifierCalls += 1;
+          return [];
+        },
+        episode: {
+          id: "forged-experiment-checkpoint",
+          maxTransitions: 1,
+          hashState: hashStableState,
+          hashMessages: hashStableState
+        }
+      })
+    ).rejects.toThrow(/Invalid harness checkpoint.*maxTransitions/i);
+    expect(forgedCheckpointVerifierCalls).toBe(0);
+    expect(forgedCheckpointEnvironmentRestores).toBe(0);
+    expect(forgedCheckpointActorRestores).toBe(0);
     let experimentVerificationFactories = 0;
     expect(
       verifyHarnessEpisodeArtifact({
@@ -1961,7 +2093,12 @@ class LedgerActor implements SocialActor<LedgerObservation, LedgerPending, Ledge
     readonly id: LedgerActorId,
     private readonly actionForPending: (pending: LedgerPending) => SocialAction<LedgerCommand>
   ) {
-    this.profile = { id, model: `deterministic-${id}` };
+    this.profile = {
+      id,
+      version: "1",
+      model: `deterministic-${id}`,
+      policyId: "ledger.policy.local"
+    };
   }
 
   observe(observation: LedgerObservation): void {

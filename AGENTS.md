@@ -26888,9 +26888,10 @@ without turning a model request into an agent or importing Werewolf rules:
 
 Experiment provenance and fork authority are now independently auditable:
 
-- `harness.experiment-provenance.v1` retains the complete canonical normalized
-  spec, id/version, and a stable JSON hash that does not mask a domain field
-  named `createdAt`.
+- The legacy `harness.experiment-provenance.v1` and current v2 provenance retain
+  the complete canonical normalized spec, id/version, and a stable JSON hash
+  that does not mask a domain field named `createdAt`. Section 13.288 defines
+  the stricter v2 execution-attestation boundary.
 - `harness.experiment-fork-lineage.v1` records parent/child authority and exact
   caller-declared changed top-level fields with before/after hashes. Missing,
   invented, duplicate, reordered, non-canonical, or tampered declarations are
@@ -27346,3 +27347,86 @@ The focused projection/UI group passed **2 files / 28 tests**. Production build
 passed with only the existing Vite chunk-size warning. The fixture cockpit
 passed **14/14**. This slice did not change model/reasoner behavior, so it did
 not repeat an external provider call.
+
+## 13.288 Generic Experiment Execution Attestation Lock
+
+Timestamp: `2026-07-22`
+
+Recording a normalized `ExperimentSpec` and its hash is no longer accepted as
+proof that an adapter actually executed the declared control policy. New
+generic experiment runs now bind runner-authored facts to the normalized spec
+before evaluation or persistence:
+
+- The generic social runner records the resolved `maxTransitions` budget and a
+  canonical actor roster containing actor id, profile identity/version,
+  policy, reasoner, persona id, temperature, and runtime model label.
+- Runtime actor bindings are generated from the actual actor objects, sorted by
+  actor id, checked against `runtimeActorIds`, and checked as a multiset against
+  the recorded per-actor profiles. Unknown fields and malformed untrusted JSON
+  rows are rejected without throwing from the validator.
+- The experiment orchestrator centrally verifies scheduler, exact actor count
+  and roster, reviewed profile identity, explicit model assignments,
+  transition budget, and decision timeout. An adapter cannot satisfy the
+  contract by returning a self-authored attestation.
+- Only after those checks pass does the orchestrator derive
+  `harness.experiment-execution-attestation.v1`, bind it to the normalized spec
+  hash, and persist it in the canonical episode envelope. A contradictory
+  adapter-supplied record fails closed instead of being overwritten.
+- Experiment provenance created by new code is
+  `harness.experiment-provenance.v2`; its execution-attestation marker is
+  required. The v1 schema remains parseable as legacy metadata, but every
+  canonical experiment-bound episode envelope still requires execution
+  attestation and every experiment-bound checkpoint still validates its
+  runner-authored execution prefix. Consequently, deleting the marker or
+  changing the version string to v1 cannot downgrade a new artifact past the
+  execution boundary.
+- Artifact and checkpoint validation re-run the same spec-to-execution checks
+  before environment construction, replay verification, or actor restoration.
+  Tamper tests recompute the ordinary checkpoint prefix hash after mutation so
+  they prove the execution binding itself rejects the forgery.
+- The public `truth-redacted` projection continues to omit runtime actor ids,
+  runtime actor bindings, experiment provenance, and execution attestation.
+  The projection is covered by explicit regression assertions rather than
+  relying only on the current object shape.
+
+This slice deliberately closes only the facts that the generic runner can
+currently attest without inventing policy semantics:
+
+```text
+scheduler
+exact actor roster
+profile identity and version
+explicit model-assignment identity
+maxTransitions
+decisionTimeoutMs
+```
+
+It does not yet claim execution authority for opaque `assignmentPolicy`
+semantics, retry granularity, automatic checkpoint policy, artifact visibility
+policy, or live provider-stream telemetry. Those require separate lifecycle
+evidence and must not be inferred from a recorded configuration value.
+
+Validation recorded:
+
+```bash
+npm run typecheck
+npx vitest run tests/genericExperimentSpec.test.ts \
+  tests/genericExperimentOrchestrator.test.ts \
+  tests/genericHarnessContract.test.ts tests/social.test.ts \
+  tests/serverPublicViewApi.test.ts --maxWorkers=1 --no-file-parallelism \
+  --testTimeout=60000 --hookTimeout=60000 --teardownTimeout=60000 \
+  --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npx playwright test --config=playwright.config.ts
+git diff --check
+```
+
+The focused group passed **5 files / 103 tests**. The complete deterministic
+suite passed **49 files / 520 tests**. Production build passed with only the
+existing Vite chunk-size warning, and the fixture cockpit passed **14/14**.
+Playwright left no project Chromium, Vite, or server listener running after
+teardown. This slice did not change provider/reasoner behavior, so it did not
+repeat an external model call and did not add any provider- or model-specific
+branch.

@@ -478,6 +478,8 @@ describe("public match API redaction", () => {
     expect(fullArtifact.status).toBe(200);
     expect(fullArtifact.body.finalState.players.some((player: { role?: string }) => Boolean(player.role))).toBe(true);
     expect(fullArtifact.body.finalState.night).toBeTruthy();
+    expect(fullArtifact.body.socialEpisode.runtimeActorIds.length).toBeGreaterThan(0);
+    expect(fullArtifact.body.socialEpisode.runtimeActors.length).toBeGreaterThan(0);
 
     const projected = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact?view=truth-redacted`);
     expect(projected.status).toBe(200);
@@ -504,11 +506,15 @@ describe("public match API redaction", () => {
     expect(projected.body.models).toEqual([]);
     expect(projected.body.profiles).toEqual([]);
     expect(projected.body).not.toHaveProperty("assignment");
+    expect(projected.body).not.toHaveProperty("experiment");
+    expect(projected.body).not.toHaveProperty("executionAttestation");
     expect(projected.body.trajectory).toEqual([]);
     expect(projected.body.agents).toEqual([]);
     expect(projected.body).not.toHaveProperty("agentSnapshotFrames");
     for (const assignment of projected.body.resolvedAssignments) expect(Object.keys(assignment).sort()).toEqual(["playerId", "seat"]);
     expect(projected.body.socialEpisode.profiles).toEqual([]);
+    expect(projected.body.socialEpisode).not.toHaveProperty("runtimeActorIds");
+    expect(projected.body.socialEpisode).not.toHaveProperty("runtimeActors");
     expect(projected.body.socialEpisode.steps).toEqual([]);
     expect(projected.body.socialEpisode.exposureRecords).toEqual([]);
     expect(projected.body.evaluationReport).toEqual({});

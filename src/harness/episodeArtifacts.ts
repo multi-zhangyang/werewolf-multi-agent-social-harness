@@ -1,8 +1,11 @@
 import { hashStableState } from "./hash";
 import {
   createGenericExperimentForkLineage,
+  validateGenericExperimentExecutionAttestation,
+  validateGenericExperimentExecutionEvidence,
   validateGenericExperimentForkLineage,
   validateGenericExperimentProvenance,
+  type GenericExperimentExecutionAttestationV1,
   type GenericExperimentForkChangeDeclarationV1,
   type GenericExperimentForkLineageV1,
   type GenericExperimentProvenanceV1
@@ -85,6 +88,8 @@ export interface HarnessEpisodeArtifactEnvelope<
   agentSnapshotFrames?: HarnessAgentSnapshotFrame<TAgentState>[];
   /** Stable normalized control-plane authority for this episode. */
   experiment?: GenericExperimentProvenanceV1;
+  /** Central binding from the normalized spec to runner-authored execution facts. */
+  executionAttestation?: GenericExperimentExecutionAttestationV1;
   forkOf?: TForkProvenance;
 }
 
@@ -1174,7 +1179,23 @@ export function validateHarnessEpisodeArtifactEnvelope<
       } else if (artifact.experiment.spec.actorCount !== artifact.socialEpisode.runtimeActorIds.length) {
         errors.push("experiment.spec.actorCount must match socialEpisode.runtimeActorIds length.");
       }
+      if (artifact.executionAttestation === undefined) {
+        // No unauthenticated schema-version flag can safely distinguish a
+        // genuinely old envelope from a downgraded new one. Any canonical
+        // experiment-bound envelope therefore fails closed without the
+        // runner-bound attestation; legacy bare social artifacts remain valid.
+        errors.push("executionAttestation is required by experiment provenance.");
+      } else {
+        errors.push(...validateGenericExperimentExecutionAttestation(
+          artifact.executionAttestation,
+          artifact.experiment.spec,
+          artifact.socialEpisode,
+          "executionAttestation"
+        ));
+      }
     }
+  } else if (artifact.executionAttestation !== undefined) {
+    errors.push("experiment is required when executionAttestation is present.");
   }
   if (artifact.forkOf !== undefined) {
     if (!isRecord(artifact.forkOf)) {
@@ -1330,6 +1351,15 @@ export function validateHarnessCheckpointEnvelope<
       } else if (checkpoint.source.experiment.spec.actorCount !== checkpoint.executionPrefix.runtimeActorIds.length) {
         errors.push("source.experiment.spec.actorCount must match executionPrefix.runtimeActorIds length.");
       }
+      // Checkpoints do not duplicate the envelope attestation, but their
+      // immutable execution prefix must always prove the same runner facts.
+      // Requiring this for every experiment-bound checkpoint prevents a v2
+      // record from being downgraded to a marker-free v1 record.
+      errors.push(...validateGenericExperimentExecutionEvidence(
+        checkpoint.source.experiment.spec,
+        checkpoint.executionPrefix,
+        "executionPrefix"
+      ));
     }
   }
 

@@ -71,21 +71,29 @@ export type {
   SocialEnvironment,
   SocialEpisodeArtifact,
   SocialEpisodeOptions,
-  SocialMessage
+  SocialMessage,
+  SocialRuntimeActorBinding
 } from "./social";
 export {
+  GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION,
   GENERIC_EXPERIMENT_FORK_LINEAGE_VERSION,
   GENERIC_EXPERIMENT_PROVENANCE_VERSION,
+  LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION,
   GENERIC_EXPERIMENT_SPEC_VERSION,
+  createGenericExperimentExecutionAttestation,
   createGenericExperimentForkLineage,
   createGenericExperimentProvenance,
   normalizeGenericExperimentSpec,
+  validateGenericExperimentExecutionAttestation,
+  validateGenericExperimentExecutionEvidence,
   validateGenericExperimentForkLineage,
   validateGenericExperimentProvenance,
   validateGenericExperimentSpec
 } from "./experimentSpec";
 export type {
   GenericExperimentArtifactPolicyV1,
+  GenericExperimentExecutionActorAttestationV1,
+  GenericExperimentExecutionAttestationV1,
   GenericExperimentAssignmentPolicyV1,
   GenericExperimentCheckpointPolicyV1,
   GenericExperimentForkChangeDeclarationV1,

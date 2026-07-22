@@ -121,6 +121,19 @@ describe("generic normalized experiment spec", () => {
   it("binds normalized specs to stable hashes and caller-declared fork changes", () => {
     const parent = createGenericExperimentProvenance(tournamentSpec());
     expect(validateGenericExperimentProvenance(parent)).toEqual([]);
+    expect(parent).toMatchObject({
+      schemaVersion: "harness.experiment-provenance.v2",
+      executionAttestationRequired: true
+    });
+    const missingV2AttestationMarker = structuredClone(parent);
+    delete missingV2AttestationMarker.executionAttestationRequired;
+    expect(validateGenericExperimentProvenance(missingV2AttestationMarker).join(" ")).toMatch(
+      /executionAttestationRequired is required by harness\.experiment-provenance\.v2/i
+    );
+    const legacyMetadata = structuredClone(parent);
+    legacyMetadata.schemaVersion = "harness.experiment-provenance.v1";
+    delete legacyMetadata.executionAttestationRequired;
+    expect(validateGenericExperimentProvenance(legacyMetadata)).toEqual([]);
     expect(createGenericExperimentProvenance(JSON.parse(JSON.stringify(parent.spec)))).toEqual(parent);
 
     const child = createGenericExperimentProvenance({

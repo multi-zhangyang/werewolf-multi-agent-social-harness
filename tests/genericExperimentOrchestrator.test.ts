@@ -14,7 +14,7 @@ import {
 import type { HarnessEvaluator } from "../src/harness/evaluation";
 import { hashStableState } from "../src/harness/hash";
 import { runHarnessEpisode } from "../src/harness/runner";
-import type { SocialActor, SocialEnvironment, SocialEpisodeArtifact } from "../src/harness/social";
+import type { SocialActor, SocialAgentProfile, SocialEnvironment, SocialEpisodeArtifact } from "../src/harness/social";
 import { verifyHarnessEpisodeArtifact } from "../src/harness/socialReplay";
 
 interface State {
@@ -161,9 +161,12 @@ describe("generic normalized experiment orchestration", () => {
           preparations += 1;
           return { runId: `${context.spec.id}:${context.seed}`, context };
         },
-        async runEpisode(prepared) {
+        async runEpisode(prepared, context) {
           return counterEpisode(prepared.runId, () => {
             decisions += 1;
+          }, {
+            maxTransitions: context.spec.maxTransitions,
+            decisionTimeoutMs: context.spec.timeoutPolicy.decisionTimeoutMs
           });
         },
         lifecycleOf: (episode) => episode.status,
@@ -208,6 +211,13 @@ describe("generic normalized experiment orchestration", () => {
     expect(result.runSet.episodes.map((episode) => episode.evaluationReport?.metrics[0]?.value)).toEqual([1, 1]);
     expect(result.runSet.episodes.every((episode) => episode.artifact !== undefined)).toBe(true);
     expect(result.runSet.episodes.every((episode) => episode.artifact?.experiment?.specHash === result.specHash)).toBe(true);
+    expect(result.runSet.episodes.every((episode) =>
+      episode.artifact?.executionAttestation?.schemaVersion === "harness.experiment-execution-attestation.v1" &&
+      episode.artifact.executionAttestation.maxTransitions === 2 &&
+      episode.artifact.executionAttestation.decisionTimeoutMs === 5_000 &&
+      episode.artifact.executionAttestation.actors[0]?.actorId === "a" &&
+      episode.artifact.executionAttestation.actors[0]?.profile.id === "counter-profile"
+    )).toBe(true);
     expect((await store.list()).map((entry) => entry.runId)).toEqual([
       "counter-experiment:counter-orchestration-seed:g1",
       "counter-experiment:counter-orchestration-seed:g2"
@@ -379,6 +389,127 @@ describe("generic normalized experiment orchestration", () => {
     expect(puts).toBe(0);
   });
 
+  it("fails closed before persistence when an adapter ignores spec-owned execution composition", async () => {
+    const baseSpec: GenericExperimentSpecV1 = {
+      ...experimentSpec(),
+      episodeCount: 1,
+      evaluatorIds: [],
+      continueOnError: false
+    };
+    const cases: Array<{
+      name: string;
+      spec?: GenericExperimentSpecV1;
+      episode: SocialEpisodeArtifact<State, Observation, Pending, Command>;
+      mutateArtifact?: (artifact: Artifact) => void;
+    }> = [
+      {
+        name: "ignored maxTransitions",
+        episode: await counterEpisode("ignored-max-transitions", () => undefined, {
+          maxTransitions: undefined,
+          decisionTimeoutMs: 5_000
+        })
+      },
+      {
+        name: "ignored decisionTimeoutMs",
+        episode: await counterEpisode("ignored-decision-timeout", () => undefined, {
+          maxTransitions: 2,
+          decisionTimeoutMs: undefined
+        })
+      },
+      {
+        name: "unknown runtime profile",
+        episode: await counterEpisode("unknown-runtime-profile", () => undefined, undefined, {
+          id: "shadow-profile",
+          version: "1",
+          model: "deterministic",
+          policyId: "counter.policy"
+        })
+      },
+      {
+        name: "profile version drift",
+        episode: await counterEpisode("profile-version-drift", () => undefined, undefined, {
+          id: "counter-profile",
+          version: "2",
+          model: "deterministic",
+          policyId: "counter.policy"
+        })
+      },
+      {
+        name: "policy drift",
+        episode: await counterEpisode("policy-drift", () => undefined, undefined, {
+          id: "counter-profile",
+          version: "1",
+          model: "deterministic",
+          policyId: "counter.other-policy"
+        })
+      },
+      {
+        name: "explicit model assignment drift",
+        spec: {
+          ...baseSpec,
+          modelAssignments: [{ profileId: "counter-profile", modelId: "expected-model" }],
+          providerPolicy: { id: "counter.provider", version: "1", stream: true }
+        },
+        episode: await counterEpisode("model-assignment-drift", () => undefined, undefined, {
+          id: "counter-profile",
+          version: "1",
+          model: "wrong-model",
+          policyId: "counter.policy"
+        })
+      },
+      {
+        name: "runtime actor roster split",
+        episode: await counterEpisode("runtime-actor-roster-split", () => undefined),
+        mutateArtifact(artifact) {
+          artifact.socialEpisode.runtimeActors![0]!.actorId = "different-actor";
+        }
+      },
+      {
+        name: "contradictory pre-bound attestation",
+        episode: await counterEpisode("contradictory-pre-bound-attestation", () => undefined),
+        mutateArtifact(artifact) {
+          artifact.executionAttestation = {
+            schemaVersion: "harness.experiment-execution-attestation.v1",
+            specHash: "forged-spec-hash",
+            schedulerMode: "aec",
+            maxTransitions: 2,
+            decisionTimeoutMs: 5_000,
+            actors: []
+          };
+        }
+      }
+    ];
+
+    for (const testCase of cases) {
+      let puts = 0;
+      const result = await runGenericExperiment({
+        spec: testCase.spec ?? baseSpec,
+        artifactStore: { async put() { puts += 1; } },
+        runStore: memoryRunStore(),
+        adapter: {
+          domainId: "counter-orchestration",
+          prepareEpisode: () => ({}),
+          runEpisode: () => testCase.episode,
+          lifecycleOf: (episode) => episode.status,
+          artifactForEpisode(episode) {
+            const artifact = artifactFromEpisode(episode);
+            testCase.mutateArtifact?.(artifact);
+            return artifact;
+          }
+        }
+      });
+
+      expect(result.tournament, testCase.name).toMatchObject({
+        gamesCompleted: 0,
+        gamesFailed: 1,
+        gamesUnstarted: 0
+      });
+      expect(result.runSet.episodes[0], testCase.name).toMatchObject({ status: "failed" });
+      expect(result.runSet.episodes[0]?.artifact, testCase.name).toBeUndefined();
+      expect(puts, testCase.name).toBe(0);
+    }
+  });
+
   it("fails missing evaluator and adapter identity preflight before preparing an episode", async () => {
     let preparations = 0;
     const base = {
@@ -459,11 +590,21 @@ function artifactFromEpisode(
 
 function counterEpisode(
   runId: string,
-  onDecision: () => void
+  onDecision: () => void,
+  control: { maxTransitions?: number; decisionTimeoutMs?: number } = {
+    maxTransitions: 2,
+    decisionTimeoutMs: 5_000
+  },
+  profile: SocialAgentProfile = {
+    id: "counter-profile",
+    version: "1",
+    model: "deterministic",
+    policyId: "counter.policy"
+  }
 ): Promise<SocialEpisodeArtifact<State, Observation, Pending, Command>> {
   const actor: SocialActor<Observation, Pending, Command> = {
     id: "a",
-    profile: { id: "counter-profile", model: "deterministic", policyId: "counter.policy" },
+    profile,
     observe() {},
     decide(pending) {
       onDecision();
@@ -477,6 +618,10 @@ function counterEpisode(
     actors: [actor],
     channels: [],
     schedulerMode: "aec",
+    ...(control.maxTransitions === undefined ? {} : { maxTransitions: control.maxTransitions }),
+    ...(control.decisionTimeoutMs === undefined
+      ? {}
+      : { executionLimits: { decisionTimeoutMs: control.decisionTimeoutMs } }),
     hashState: hashStableState,
     hashMessages: hashStableState
   });

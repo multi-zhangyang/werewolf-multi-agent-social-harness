@@ -44,13 +44,33 @@ interface NormalizedSocialExecutionLimits {
 
 export interface SocialAgentProfile {
   id: string;
+  /** Reviewed profile contract identity. Required by experiment-bound runs. */
+  version?: string;
   model: string;
   temperature?: number;
   role?: string;
   team?: string;
   policyId?: string;
+  reasonerId?: string;
+  personaId?: string;
   persona?: string;
   metadata?: Record<string, unknown>;
+}
+
+/**
+ * Content-safe actor/profile composition recorded by the generic runner. It
+ * binds a durable actor id to the reviewed profile identities actually used at
+ * runtime without persisting persona text, provider configuration, or secrets.
+ */
+export interface SocialRuntimeActorBinding {
+  actorId: string;
+  profileId: string;
+  profileVersion?: string;
+  model: string;
+  temperature?: number;
+  policyId?: string;
+  reasonerId?: string;
+  personaId?: string;
 }
 
 export interface SocialChannel {
@@ -514,6 +534,8 @@ export interface SocialEpisodeArtifact<TState = unknown, TObservation = unknown,
     notStartedStage?: string;
     initialMessageCount: number;
     initialMessagesHash?: string;
+    /** Configured transition budget, including zero. */
+    maxTransitions?: number;
     /** Configured generic runner budget; runtime AbortSignal itself is never serialized. */
     decisionTimeoutMs?: number;
   };
@@ -522,6 +544,8 @@ export interface SocialEpisodeArtifact<TState = unknown, TObservation = unknown,
    * "all"` and makes delivery receipts auditable. Absent only on legacy
    * artifacts, where visibility deliberately falls back to channel members. */
   runtimeActorIds?: string[];
+  /** Exact actor/profile/model composition for this run; absent only on legacy artifacts. */
+  runtimeActors?: SocialRuntimeActorBinding[];
   profiles: SocialAgentProfile[];
   channels: SocialChannel[];
   initialState: TState;
@@ -759,6 +783,8 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
     | "steps"
     | "messages"
     | "runtimeActorIds"
+    | "runtimeActors"
+    | "profiles"
     | "execution"
     | "exposureRecords"
     | "exposureSummary"
@@ -775,8 +801,26 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
   if (decisionTimeoutMs !== undefined && (!Number.isInteger(decisionTimeoutMs) || decisionTimeoutMs <= 0)) {
     errors.push("execution.decisionTimeoutMs must be a positive integer when recorded.");
   }
+  const maxTransitions = episode.execution?.maxTransitions;
+  if (maxTransitions !== undefined && (!Number.isInteger(maxTransitions) || maxTransitions < 0)) {
+    errors.push("execution.maxTransitions must be a nonnegative integer when recorded.");
+  }
   const runtimeActorIds = normalizeRuntimeActorIds(episode.runtimeActorIds, errors, "runtimeActorIds");
   const runtimeActorIdSet = runtimeActorIds ? new Set(runtimeActorIds) : undefined;
+  const runtimeActors = normalizeRuntimeActorBindings(episode.runtimeActors, errors, "runtimeActors");
+  if (runtimeActors && runtimeActorIds) {
+    const boundActorIds = runtimeActors.map(({ actorId }) => actorId);
+    if (hashStableState(boundActorIds) !== hashStableState(runtimeActorIds)) {
+      errors.push("runtimeActors actor ids must exactly match runtimeActorIds.");
+    }
+  }
+  if (runtimeActors) {
+    const boundProfiles = runtimeActors.map(runtimeActorProfileIdentityHash).sort();
+    const recordedProfiles = episode.profiles.map(socialProfileIdentityHash).sort();
+    if (hashStableState(boundProfiles) !== hashStableState(recordedProfiles)) {
+      errors.push("runtimeActors profile identities must exactly match profiles.");
+    }
+  }
   const channelsById = new Map<string, SocialChannel>();
   for (const [index, channel] of episode.channels.entries()) {
     if (!channel.id.trim()) {
@@ -1251,15 +1295,29 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     }
   }
   const runtimeActorIds = assertUniqueSocialActorRegistry(options.actors);
+  const runtimeActors: SocialRuntimeActorBinding[] = options.actors
+    .map((actor) => ({
+      actorId: actor.id,
+      profileId: actor.profile.id,
+      ...(actor.profile.version === undefined ? {} : { profileVersion: actor.profile.version }),
+      model: actor.profile.model,
+      ...(actor.profile.temperature === undefined ? {} : { temperature: actor.profile.temperature }),
+      ...(actor.profile.policyId === undefined ? {} : { policyId: actor.profile.policyId }),
+      ...(actor.profile.reasonerId === undefined ? {} : { reasonerId: actor.profile.reasonerId }),
+      ...(actor.profile.personaId === undefined ? {} : { personaId: actor.profile.personaId })
+    }))
+    .sort((left, right) => left.actorId.localeCompare(right.actorId));
   const defaultSchedulerMode = normalizeSchedulerMode(options.schedulerMode ?? "aec");
   const bus = new SocialCommunicationBus(options.channels ?? [], options.initialMessages ?? [], { runtimeActorIds });
   const initialMessages = bus.listMessages();
   const executionLimits = normalizeSocialExecutionLimits(options.executionLimits);
+  const maxTransitions = options.maxTransitions ?? 320;
   const execution = {
     schemaVersion: "harness.social-execution.v1" as const,
     started: true,
     initialMessageCount: initialMessages.length,
     initialMessagesHash: options.hashMessages?.(initialMessages),
+    maxTransitions,
     ...(executionLimits.decisionTimeoutMs === undefined
       ? {}
       : { decisionTimeoutMs: executionLimits.decisionTimeoutMs })
@@ -1272,8 +1330,6 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     steps.push(...records);
     for (const record of records) usedNativeTraceIds.add(record.traceId);
   };
-  const maxTransitions = options.maxTransitions ?? 320;
-
   let status: SocialEpisodeStatus = "completed";
   let terminationReason: string | undefined;
   let truncationReason: string | undefined;
@@ -1290,6 +1346,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
       execution,
       schedulerMode: defaultSchedulerMode,
       runtimeActorIds,
+      runtimeActors,
       profiles: options.actors.map((actor) => cloneJson(actor.profile)),
       channels: bus.listChannels(),
       initialState,
@@ -1807,6 +1864,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     execution,
     schedulerMode: defaultSchedulerMode,
     runtimeActorIds,
+    runtimeActors,
     profiles: options.actors.map((actor) => cloneJson(actor.profile)),
     channels: bus.listChannels(),
     initialState,
@@ -3734,17 +3792,109 @@ function normalizeRuntimeActorIds(
   label: string
 ): string[] | undefined {
   if (runtimeActorIds === undefined) return undefined;
+  if (!Array.isArray(runtimeActorIds)) {
+    errors.push(`${label} must be an array.`);
+    return undefined;
+  }
   const seen = new Set<string>();
   for (const [index, actorId] of runtimeActorIds.entries()) {
-    if (!actorId?.trim()) errors.push(`${label}[${index}] is missing actor id.`);
+    if (typeof actorId !== "string" || !actorId.trim()) errors.push(`${label}[${index}] is missing actor id.`);
     else if (seen.has(actorId)) errors.push(`${label}[${index}] duplicates actor ${actorId}.`);
-    seen.add(actorId);
+    if (typeof actorId === "string") seen.add(actorId);
   }
   const sorted = [...runtimeActorIds].sort();
   if (sorted.some((actorId, index) => actorId !== runtimeActorIds[index])) {
     errors.push(`${label} must be sorted for canonical artifact identity.`);
   }
   return [...runtimeActorIds];
+}
+
+function normalizeRuntimeActorBindings(
+  runtimeActors: readonly SocialRuntimeActorBinding[] | undefined,
+  errors: string[],
+  label: string
+): SocialRuntimeActorBinding[] | undefined {
+  if (runtimeActors === undefined) return undefined;
+  if (!Array.isArray(runtimeActors)) {
+    errors.push(`${label} must be an array.`);
+    return undefined;
+  }
+  const seen = new Set<string>();
+  let invalidShape = false;
+  const allowedFields = new Set([
+    "actorId",
+    "profileId",
+    "profileVersion",
+    "model",
+    "temperature",
+    "policyId",
+    "reasonerId",
+    "personaId"
+  ]);
+  for (const [index, binding] of runtimeActors.entries()) {
+    const itemLabel = `${label}[${index}]`;
+    if (!binding || typeof binding !== "object") {
+      errors.push(`${itemLabel} must be an object.`);
+      invalidShape = true;
+      continue;
+    }
+    const unknownFields = Object.keys(binding).filter((key) => !allowedFields.has(key));
+    if (unknownFields.length) {
+      errors.push(`${itemLabel} contains unknown field(s): ${unknownFields.sort().join(", ")}.`);
+    }
+    if (typeof binding.actorId !== "string" || !binding.actorId.trim()) errors.push(`${itemLabel}.actorId is missing.`);
+    else if (seen.has(binding.actorId)) errors.push(`${itemLabel}.actorId duplicates ${binding.actorId}.`);
+    if (typeof binding.actorId === "string") seen.add(binding.actorId);
+    if (typeof binding.profileId !== "string" || !binding.profileId.trim()) errors.push(`${itemLabel}.profileId is missing.`);
+    if (typeof binding.model !== "string" || !binding.model.trim()) errors.push(`${itemLabel}.model is missing.`);
+    for (const [field, value] of [
+      ["profileVersion", binding.profileVersion],
+      ["policyId", binding.policyId],
+      ["reasonerId", binding.reasonerId],
+      ["personaId", binding.personaId]
+    ] as const) {
+      if (value !== undefined && (typeof value !== "string" || !value.trim())) {
+        errors.push(`${itemLabel}.${field} must be nonempty when present.`);
+      }
+    }
+    if (
+      binding.temperature !== undefined &&
+      (!Number.isFinite(binding.temperature) || binding.temperature < 0 || binding.temperature > 2)
+    ) {
+      errors.push(`${itemLabel}.temperature must be between 0 and 2 when present.`);
+    }
+  }
+  if (invalidShape) return undefined;
+  const actorIds = runtimeActors.map(({ actorId }) => actorId);
+  const sortedActorIds = [...actorIds].sort();
+  if (sortedActorIds.some((actorId, index) => actorId !== actorIds[index])) {
+    errors.push(`${label} must be sorted by actorId for canonical artifact identity.`);
+  }
+  return runtimeActors.map(cloneJson);
+}
+
+function runtimeActorProfileIdentityHash(binding: SocialRuntimeActorBinding): string {
+  return hashStableState({
+    id: binding.profileId,
+    ...(binding.profileVersion === undefined ? {} : { version: binding.profileVersion }),
+    model: binding.model,
+    ...(binding.temperature === undefined ? {} : { temperature: binding.temperature }),
+    ...(binding.policyId === undefined ? {} : { policyId: binding.policyId }),
+    ...(binding.reasonerId === undefined ? {} : { reasonerId: binding.reasonerId }),
+    ...(binding.personaId === undefined ? {} : { personaId: binding.personaId })
+  });
+}
+
+function socialProfileIdentityHash(profile: SocialAgentProfile): string {
+  return hashStableState({
+    id: profile.id,
+    ...(profile.version === undefined ? {} : { version: profile.version }),
+    model: profile.model,
+    ...(profile.temperature === undefined ? {} : { temperature: profile.temperature }),
+    ...(profile.policyId === undefined ? {} : { policyId: profile.policyId }),
+    ...(profile.reasonerId === undefined ? {} : { reasonerId: profile.reasonerId }),
+    ...(profile.personaId === undefined ? {} : { personaId: profile.personaId })
+  });
 }
 
 function messageVisibleToObserver(
