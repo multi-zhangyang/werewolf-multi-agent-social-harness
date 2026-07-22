@@ -274,13 +274,25 @@ export interface BuildHarnessCheckpointAtPrefixOptions<TState, TObservation, TPe
   replayPrefix: (
     episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>
   ) => HarnessCheckpointPrefixReplayResult<TState>;
-  /** Optional domain-owned semantic validation; generic code checks only hashes and batch safety. */
-  validateAgentSnapshot?: (input: {
-    agents: readonly TAgentState[];
-    step: SocialHarnessStep<TObservation, TPending, TCommand>;
-    stepIndex: number;
-    maxMessageSeq: number;
-  }) => readonly string[];
+  /**
+   * Explicit domain-owned semantic policy for the durable actor snapshot that
+   * will become fork authority. A state-bearing checkpoint may not silently
+   * skip this validation.
+   */
+  recordedAgentState:
+    | {
+        mode: "validate";
+        validator: (input: {
+          agents: readonly TAgentState[];
+          step: SocialHarnessStep<TObservation, TPending, TCommand>;
+          stepIndex: number;
+          maxMessageSeq: number;
+        }) => readonly string[];
+      }
+    | {
+        mode: "none";
+        reason: string;
+      };
 }
 
 /**
@@ -790,12 +802,26 @@ export function buildHarnessCheckpointAtPrefix<TState, TObservation, TPending, T
   const steps = cloneArtifact(options.episode.steps.slice(0, selected.index + 1));
   const maxMessageSeq = latestMessageSeqForHarnessPrefix(options.episode, steps);
   const messages = cloneArtifact(options.episode.messages.filter((message) => message.seq <= maxMessageSeq));
-  const agentValidationErrors = options.validateAgentSnapshot?.({
-    agents: snapshot.agents,
-    step: selected.step,
-    stepIndex: selected.index,
-    maxMessageSeq
-  }) ?? [];
+  const agentValidationErrors: string[] = [];
+  if (options.recordedAgentState.mode === "none") {
+    if (!options.recordedAgentState.reason.trim()) {
+      agentValidationErrors.push("recordedAgentState.mode=none requires a nonempty reason.");
+    }
+    if (snapshot.agents.length > 0) {
+      agentValidationErrors.push(
+        "recordedAgentState.mode=none is not allowed because the checkpoint records durable actor state."
+      );
+    }
+  } else {
+    agentValidationErrors.push(
+      ...options.recordedAgentState.validator({
+        agents: snapshot.agents,
+        step: selected.step,
+        stepIndex: selected.index,
+        maxMessageSeq
+      })
+    );
+  }
   if (agentValidationErrors.length) {
     throw new HarnessCheckpointSelectionError(
       "missing_agent_snapshots",

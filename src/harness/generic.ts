@@ -8,8 +8,15 @@
  */
 export { runHarnessEpisode } from "./runner";
 export type { HarnessAgentSnapshotProvider, HarnessEpisodeOptions } from "./runner";
-export { replaySocialEpisode } from "./socialReplay";
-export type { SocialEpisodeReplayResult, SocialRecordedAgentStateValidator, SocialRecordedStepValidator } from "./socialReplay";
+export { replaySocialEpisode, verifyHarnessEpisodeArtifact } from "./socialReplay";
+export type {
+  HarnessEpisodeArtifactVerificationResult,
+  SocialArtifactVerificationRuntime,
+  SocialEpisodeReplayResult,
+  SocialRecordedAgentStateValidationPolicy,
+  SocialRecordedAgentStateValidator,
+  SocialRecordedStepValidator
+} from "./socialReplay";
 export {
   buildReplayableSocialPrefix,
   buildHarnessCheckpointAtPrefix,
@@ -64,3 +71,43 @@ export type {
   SocialEpisodeOptions,
   SocialMessage
 } from "./social";
+export {
+  GENERIC_EXPERIMENT_SPEC_VERSION,
+  normalizeGenericExperimentSpec,
+  validateGenericExperimentSpec
+} from "./experimentSpec";
+export type {
+  GenericExperimentArtifactPolicyV1,
+  GenericExperimentAssignmentPolicyV1,
+  GenericExperimentCheckpointPolicyV1,
+  GenericExperimentKind,
+  GenericExperimentModelAssignmentV1,
+  GenericExperimentPolicyRefV1,
+  GenericExperimentProfileSpecV1,
+  GenericExperimentProviderPolicyV1,
+  GenericExperimentRetryPolicyV1,
+  GenericExperimentSpecV1,
+  GenericExperimentTimeoutPolicyV1,
+  GenericJsonObject,
+  GenericJsonPrimitive,
+  GenericJsonValue,
+  NormalizedGenericExperimentSpecV1
+} from "./experimentSpec";
+export {
+  HARNESS_EPISODE_STORE_INDEX_VERSION,
+  HARNESS_EPISODE_STORE_MANIFEST_VERSION,
+  HARNESS_EPISODE_TRAJECTORY_HEADER_VERSION,
+  HARNESS_EPISODE_TRAJECTORY_MESSAGE_VERSION,
+  HARNESS_EPISODE_TRAJECTORY_STEP_VERSION,
+  HarnessEpisodeArtifactStore,
+  deriveHarnessEpisodeTrajectoryJsonl,
+  openHarnessEpisodeArtifactStore
+} from "./episodeArtifactStore";
+export type {
+  CanonicalEpisodeArtifactVerification,
+  CanonicalEpisodeArtifactVerifier,
+  HarnessEpisodeArtifactStoreOptions,
+  HarnessEpisodeStoreEntry,
+  HarnessEpisodeStoreIndex,
+  HarnessEpisodeStoreManifest
+} from "./episodeArtifactStore";

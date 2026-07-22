@@ -6,7 +6,7 @@ import {
   validateSocialDomainAdapterManifest,
   type SocialDomainAdapterManifest
 } from "../src/harness/domainAdapter";
-import { replaySocialEpisode } from "../src/harness/generic";
+import { replaySocialEpisode, verifyHarnessEpisodeArtifact } from "../src/harness/generic";
 import { runHarnessEpisode } from "../src/harness/runner";
 import { ScaffoldedSocialActor } from "../src/harness/scaffold";
 import { createSocialStateEvaluator } from "../src/harness/socialEvaluator";
@@ -187,6 +187,11 @@ describe("generic social harness contract", () => {
       sourceArtifactVersion: "ledger.episode.v1",
       episode,
       selector: { nativeStepCount: 1 },
+      recordedAgentState: {
+        mode: "validate",
+        validator: ({ agents: recordedAgents }) =>
+          recordedAgents.some((agent) => !agent.id) ? ["ledger actor id is missing"] : []
+      },
       replayPrefix: (executionPrefix) =>
         replaySocialEpisode({
           episode: executionPrefix,
@@ -208,6 +213,7 @@ describe("generic social harness contract", () => {
       runForkedHarnessEpisode({
         checkpoint,
         runtime: {
+          recordedAgentState: { mode: "validate", validator: () => [] },
           domainAdapter: incompatibleAdapter,
           createEnvironment(initialState) {
             environmentRestores += 1;
@@ -240,6 +246,10 @@ describe("generic social harness contract", () => {
     const inherited = await runForkedHarnessEpisode({
       checkpoint,
       runtime: {
+        recordedAgentState: {
+          mode: "validate",
+          validator: (candidate) => candidate.agents.some((agent) => !agent.id) ? ["ledger actor id is missing"] : []
+        },
         domainAdapter: ledgerDomainAdapter,
         createEnvironment(initialState) {
           inheritedEnvironmentRestores += 1;
@@ -408,6 +418,7 @@ describe("generic social harness contract", () => {
     }));
     const episode = await runHarnessEpisode<LedgerState, LedgerObservation, LedgerPending, LedgerCommand, LedgerSocialSnapshot>({
       id: "ledger-replay-social-state-semantics",
+      domainAdapter: ledgerDomainAdapter,
       environment: new LedgerEnvironment(),
       actors: [
         new LedgerActor("a", () => ({
@@ -471,7 +482,8 @@ describe("generic social harness contract", () => {
       episode: forged,
       environment: new LedgerEnvironment(),
       hashState: hashStableState,
-      hashMessages: hashStableState
+      hashMessages: hashStableState,
+      domainAdapter: ledgerDomainAdapter
     });
     expect(structurallyConsistent.ok).toBe(true);
     expect(structurallyConsistent.agentStateAudit?.ok).toBe(true);
@@ -522,6 +534,7 @@ describe("generic social harness contract", () => {
       environment: new LedgerEnvironment(),
       hashState: hashStableState,
       hashMessages: hashStableState,
+      domainAdapter: ledgerDomainAdapter,
       validateRecordedAgentState: validateScopedSocialState
     });
     expect(semanticReplay.ok).toBe(false);
@@ -536,10 +549,206 @@ describe("generic social harness contract", () => {
       hashState: hashStableState,
       hashMessages: hashStableState,
       agentSnapshotFrames: compacted.frames,
+      domainAdapter: ledgerDomainAdapter,
       validateRecordedAgentState: validateScopedSocialState
     });
     expect(compactedSemanticReplay.ok).toBe(false);
     expect(compactedSemanticReplay.mismatches.join(" ")).toMatch(/actor c cites message evidence outside its scoped observation/i);
+
+    const finalForgedAgents = forged.steps.at(-1)?.actorSnapshotsAfterStep as LedgerSocialSnapshot[] | undefined;
+    if (!finalForgedAgents) throw new Error("Expected final forged ledger snapshots.");
+    const forgedEnvelope = {
+      artifactVersion: "ledger.episode.v1",
+      kind: "ledger-episode",
+      runId: forged.id,
+      createdAt: "2026-07-22T12:00:00.000Z",
+      status: forged.status,
+      initialState: forged.initialState,
+      finalState: forged.finalState,
+      socialEpisode: forged,
+      agents: finalForgedAgents
+    } satisfies HarnessEpisodeArtifactEnvelope<
+      LedgerState,
+      LedgerObservation,
+      LedgerPending,
+      LedgerCommand,
+      LedgerSocialSnapshot
+    >;
+    expect(validateHarnessEpisodeArtifactEnvelope(forgedEnvelope)).toEqual([]);
+
+    let rejectedVerificationEnvironmentFactories = 0;
+    const implicitSemanticOptOut = verifyHarnessEpisodeArtifact({
+      artifact: forgedEnvelope,
+      runtime: {
+        domainAdapter: ledgerDomainAdapter,
+        createEnvironment() {
+          rejectedVerificationEnvironmentFactories += 1;
+          return new LedgerEnvironment();
+        },
+        hashState: hashStableState,
+        hashMessages: hashStableState,
+        validateRecordedStep: () => [],
+        recordedAgentState: { mode: "none", reason: "forged opt-out must fail" }
+      }
+    });
+    expect(implicitSemanticOptOut.ok).toBe(false);
+    expect(implicitSemanticOptOut.mismatches.join(" ")).toMatch(
+      /mode=none is not allowed because the artifact records durable actor state/i
+    );
+    expect(rejectedVerificationEnvironmentFactories).toBe(0);
+
+    const mismatchedVerificationAdapter = clone(ledgerDomainAdapter);
+    mismatchedVerificationAdapter.components[0]!.semanticHash = hashStableState({ incompatible: true });
+    let mismatchedVerificationEnvironmentFactories = 0;
+    const adapterMismatch = verifyHarnessEpisodeArtifact({
+      artifact: forgedEnvelope,
+      runtime: {
+        domainAdapter: mismatchedVerificationAdapter,
+        createEnvironment() {
+          mismatchedVerificationEnvironmentFactories += 1;
+          return new LedgerEnvironment();
+        },
+        hashState: hashStableState,
+        hashMessages: hashStableState,
+        validateRecordedStep: () => [],
+        recordedAgentState: { mode: "validate", validator: validateScopedSocialState }
+      }
+    });
+    expect(adapterMismatch.ok).toBe(false);
+    expect(adapterMismatch.mismatches.join(" ")).toMatch(/domain adapter binding/i);
+    expect(mismatchedVerificationEnvironmentFactories).toBe(0);
+
+    const verifiedForgedArtifact = verifyHarnessEpisodeArtifact({
+      artifact: forgedEnvelope,
+      runtime: {
+        domainAdapter: ledgerDomainAdapter,
+        createEnvironment: () => new LedgerEnvironment(),
+        hashState: hashStableState,
+        hashMessages: hashStableState,
+        validateRecordedStep: () => [],
+        recordedAgentState: { mode: "validate", validator: validateScopedSocialState }
+      }
+    });
+    expect(verifiedForgedArtifact.ok).toBe(false);
+    expect(verifiedForgedArtifact.validationMode).toBe("validate");
+    expect(verifiedForgedArtifact.mismatches.join(" ")).toMatch(
+      /Recorded agent state semantic audit.*actor c cites message evidence outside its scoped observation/i
+    );
+
+    const cleanFinalAgents = episode.steps.at(-1)?.actorSnapshotsAfterStep as LedgerSocialSnapshot[] | undefined;
+    if (!cleanFinalAgents) throw new Error("Expected final clean ledger snapshots.");
+    const cleanEnvelope = {
+      ...forgedEnvelope,
+      runId: episode.id,
+      socialEpisode: episode,
+      initialState: episode.initialState,
+      finalState: episode.finalState,
+      status: episode.status,
+      agents: cleanFinalAgents
+    };
+    const cleanFirstCommand = clone(cleanEnvelope.socialEpisode.steps[0]!.action.command);
+    const verifiedCleanArtifact = verifyHarnessEpisodeArtifact({
+      artifact: cleanEnvelope,
+      runtime: {
+        domainAdapter: ledgerDomainAdapter,
+        createEnvironment: () => new LedgerEnvironment(),
+        hashState: hashStableState,
+        hashMessages: hashStableState,
+        validateRecordedStep(step) {
+          step.action.command = { actorId: "a", entry: "validator-mutation-must-not-escape" };
+          return [];
+        },
+        recordedAgentState: { mode: "validate", validator: validateScopedSocialState }
+      }
+    });
+    expect(verifiedCleanArtifact).toMatchObject({
+      ok: true,
+      validationMode: "validate",
+      structureErrors: [],
+      configurationErrors: [],
+      mismatches: []
+    });
+    expect(cleanEnvelope.socialEpisode.steps[0]!.action.command).toEqual(cleanFirstCommand);
+
+    for (const [label, incompleteRuntime] of [
+      ["validateRecordedStep", {
+        domainAdapter: ledgerDomainAdapter,
+        hashState: hashStableState,
+        hashMessages: hashStableState,
+        recordedAgentState: { mode: "validate", validator: validateScopedSocialState }
+      }],
+      ["recordedAgentState", {
+        domainAdapter: ledgerDomainAdapter,
+        createEnvironment: () => new LedgerEnvironment(),
+        hashState: hashStableState,
+        hashMessages: hashStableState,
+        validateRecordedStep: () => []
+      }],
+      ["recordedAgentState.validator", {
+        domainAdapter: ledgerDomainAdapter,
+        createEnvironment: () => new LedgerEnvironment(),
+        hashState: hashStableState,
+        hashMessages: hashStableState,
+        validateRecordedStep: () => [],
+        recordedAgentState: { mode: "validate" }
+      }]
+    ] as const) {
+      let incompleteFactoryCalls = 0;
+      const runtime = {
+        createEnvironment: () => {
+          incompleteFactoryCalls += 1;
+          return new LedgerEnvironment();
+        },
+        ...incompleteRuntime
+      };
+      const result = verifyHarnessEpisodeArtifact({
+        artifact: cleanEnvelope,
+        runtime
+      } as unknown as Parameters<typeof verifyHarnessEpisodeArtifact>[0]);
+      expect(result.ok, label).toBe(false);
+      expect(result.configurationErrors.join(" "), label).toMatch(new RegExp(label.replace(".", "\\."), "i"));
+      expect(incompleteFactoryCalls, label).toBe(0);
+    }
+
+    const missingBoundarySnapshot = clone(cleanEnvelope);
+    delete missingBoundarySnapshot.socialEpisode.steps[1]!.actorSnapshotsAfterStep;
+    delete missingBoundarySnapshot.socialEpisode.steps[1]!.actorSnapshotsHashAfterStep;
+    expect(validateHarnessEpisodeArtifactEnvelope(missingBoundarySnapshot)).toEqual([]);
+    let missingBoundaryFactoryCalls = 0;
+    const missingBoundaryResult = verifyHarnessEpisodeArtifact({
+      artifact: missingBoundarySnapshot,
+      runtime: {
+        domainAdapter: ledgerDomainAdapter,
+        createEnvironment: () => {
+          missingBoundaryFactoryCalls += 1;
+          return new LedgerEnvironment();
+        },
+        hashState: hashStableState,
+        hashMessages: hashStableState,
+        validateRecordedStep: () => [],
+        recordedAgentState: { mode: "validate", validator: validateScopedSocialState }
+      }
+    });
+    expect(missingBoundaryResult.ok).toBe(false);
+    expect(missingBoundaryResult.mismatches.join(" ")).toMatch(/committed actor receipt boundary is missing/i);
+    expect(missingBoundaryFactoryCalls).toBe(0);
+
+    const throwingValidator = verifyHarnessEpisodeArtifact({
+      artifact: cleanEnvelope,
+      runtime: {
+        domainAdapter: ledgerDomainAdapter,
+        createEnvironment: () => new LedgerEnvironment(),
+        hashState: hashStableState,
+        hashMessages: hashStableState,
+        validateRecordedStep() {
+          throw new Error("private validator implementation detail");
+        },
+        recordedAgentState: { mode: "validate", validator: validateScopedSocialState }
+      }
+    });
+    expect(throwingValidator.ok).toBe(false);
+    expect(throwingValidator.mismatches.join(" ")).toMatch(/recorded pending\/action validator failed/i);
+    expect(throwingValidator.mismatches.join(" ")).not.toContain("private validator implementation detail");
   });
 
   it("audits one receipt-after snapshot boundary for a complete parallel batch", async () => {
@@ -767,6 +976,7 @@ describe("generic social harness contract", () => {
       runForkedHarnessEpisode({
         checkpoint: forgedActorState,
         runtime: {
+          recordedAgentState: { mode: "validate", validator: () => [] },
           createEnvironment(initialState) {
             environmentRestores += 1;
             return new LedgerEnvironment({ initialState, actorIds: ["a"] });
@@ -825,6 +1035,10 @@ describe("generic social harness contract", () => {
         sourceArtifactVersion: "ledger.episode.v1",
         episode: rejectedBoundarySnapshot.executionPrefix,
         selector: { nativeStepCount: 1 },
+        recordedAgentState: {
+          mode: "validate",
+          validator: () => []
+        },
         resolveAgentSnapshot: () => {
           rejectedSnapshotResolutions += 1;
           return {
@@ -851,6 +1065,7 @@ describe("generic social harness contract", () => {
       runForkedHarnessEpisode({
         checkpoint: rejectedBoundarySnapshot,
         runtime: {
+          recordedAgentState: { mode: "validate", validator: () => [] },
           createEnvironment(initialState) {
             rejectedEnvironmentRestores += 1;
             return new LedgerEnvironment({ initialState, actorIds: ["a"] });
@@ -992,8 +1207,11 @@ describe("generic social harness contract", () => {
           validateExpectedFinalState: false,
           agentSnapshotFrames: compacted.frames
         }),
-      validateAgentSnapshot({ agents, step }) {
-        return agents.some((agent) => !agent.id) || !step.traceId ? ["ledger actor state is malformed"] : [];
+      recordedAgentState: {
+        mode: "validate",
+        validator({ agents, step }) {
+          return agents.some((agent) => !agent.id) || !step.traceId ? ["ledger actor state is malformed"] : [];
+        }
       }
     });
 
@@ -1029,11 +1247,43 @@ describe("generic social harness contract", () => {
         })
       );
 
+    let semanticOptOutEnvironmentRestores = 0;
+    let semanticOptOutActorRestores = 0;
+    await expect(
+      runForkedHarnessEpisode({
+        checkpoint,
+        runtime: {
+          recordedAgentState: { mode: "none", reason: "state-bearing checkpoint must reject this opt-out" },
+          createEnvironment(initialState) {
+            semanticOptOutEnvironmentRestores += 1;
+            return new LedgerEnvironment({ initialState });
+          },
+          restoreActors() {
+            semanticOptOutActorRestores += 1;
+            return [];
+          }
+        },
+        verifyCheckpointReplay: verifyLedgerCheckpointReplay,
+        episode: {
+          id: "ledger-semantic-opt-out-forbidden",
+          schedulerMode: "aec",
+          hashState: hashStableState,
+          hashMessages: hashStableState
+        }
+      })
+    ).rejects.toThrow(/mode=none is not allowed because the checkpoint records durable actor state/i);
+    expect(semanticOptOutEnvironmentRestores).toBe(0);
+    expect(semanticOptOutActorRestores).toBe(0);
+
     const forked = await runForkedHarnessEpisode({
       checkpoint,
       createdAt: "2026-07-21T01:00:01.000Z",
       reason: "ledger continuation proof",
       runtime: {
+        recordedAgentState: {
+          mode: "validate",
+          validator: (candidate) => candidate.agents.some((agent) => !agent.id) ? ["ledger actor id is missing"] : []
+        },
         createEnvironment(initialState) {
           return new LedgerEnvironment({ initialState });
         },
@@ -1101,6 +1351,11 @@ describe("generic social harness contract", () => {
       sourceStatus: forked.socialEpisode.status,
       episode: forkedCompacted.episode,
       selector: { nativeStepCount: 1 },
+      recordedAgentState: {
+        mode: "validate",
+        validator: ({ agents }) =>
+          agents.some((agent) => !agent.id) ? ["ledger child actor state is malformed"] : []
+      },
       resolveAgentSnapshot: createHarnessAgentSnapshotFrameResolver(forkedCompacted.frames),
       replayPrefix: (executionPrefix) =>
         replaySocialEpisode({
@@ -1124,6 +1379,10 @@ describe("generic social harness contract", () => {
       createdAt: "2026-07-21T01:00:03.000Z",
       reason: "ledger recursive continuation proof",
       runtime: {
+        recordedAgentState: {
+          mode: "validate",
+          validator: (candidate) => candidate.agents.some((agent) => !agent.id) ? ["ledger actor id is missing"] : []
+        },
         createEnvironment(initialState) {
           return new LedgerEnvironment({ initialState });
         },
@@ -1181,6 +1440,10 @@ describe("generic social harness contract", () => {
       runForkedHarnessEpisode({
         checkpoint: structurallySelfConsistentButUnreplayable,
         runtime: {
+          recordedAgentState: {
+            mode: "validate",
+            validator: (candidate) => candidate.agents.some((agent) => !agent.id) ? ["ledger actor id is missing"] : []
+          },
           createEnvironment(initialState) {
             environmentRestores += 1;
             return new LedgerEnvironment({ initialState });
@@ -1212,6 +1475,7 @@ describe("generic social harness contract", () => {
         sourceArtifactVersion: "ledger.episode.v1",
         episode: withoutSnapshot,
         selector: { nativeStepCount: 1 },
+        recordedAgentState: { mode: "validate", validator: () => [] },
         resolveAgentSnapshot: createHarnessAgentSnapshotFrameResolver(compacted.frames),
         replayPrefix: () => {
           throw new Error("replay must not run when durable snapshots are absent");

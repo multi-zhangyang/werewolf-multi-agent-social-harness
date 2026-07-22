@@ -1,7 +1,9 @@
 import {
   auditRecordedSocialAgentSnapshots,
   resolveHarnessAgentSnapshotFrame,
+  validateHarnessEpisodeArtifactEnvelope,
   type HarnessAgentSnapshotFrame,
+  type HarnessEpisodeArtifactEnvelope,
   type RecordedSocialAgentStateAuditResult
 } from "./episodeArtifacts";
 import {
@@ -18,7 +20,11 @@ import {
   type SocialMessage,
   type SocialParallelEnvironment
 } from "./social";
-import { compareSocialDomainAdapterManifests, type SocialDomainAdapterManifest } from "./domainAdapter";
+import {
+  compareSocialDomainAdapterManifests,
+  validateSocialDomainAdapterManifest,
+  type SocialDomainAdapterManifest
+} from "./domainAdapter";
 
 /**
  * Domain-neutral replay result. Replay consumes recorded commands and a
@@ -101,6 +107,181 @@ export type SocialRecordedAgentStateValidator<TState, TObservation, TPending, TC
    */
   visibleMessagesByActor: Readonly<Record<string, readonly SocialMessage[]>>;
 }) => readonly string[];
+
+/**
+ * Canonical artifact acceptance must make the private-state semantic policy
+ * explicit. A domain may opt out only when it records no durable actor state;
+ * callers can no longer silently omit a validator while still claiming that a
+ * state-bearing artifact received semantic verification.
+ */
+export type SocialRecordedAgentStateValidationPolicy<
+  TState,
+  TObservation,
+  TPending,
+  TCommand,
+  TAgentState
+> =
+  | {
+      mode: "validate";
+      validator: SocialRecordedAgentStateValidator<TState, TObservation, TPending, TCommand, TAgentState>;
+    }
+  | {
+      mode: "none";
+      reason: string;
+    };
+
+export interface SocialArtifactVerificationRuntime<
+  TState,
+  TObservation,
+  TPending,
+  TCommand,
+  TAgentState
+> {
+  domainAdapter: SocialDomainAdapterManifest;
+  createEnvironment(initialState: TState): SocialEnvironment<TState, TObservation, TPending, TCommand>;
+  hashState: (state: TState) => string;
+  hashMessages: (messages: SocialMessage[]) => string;
+  eventSeq?: (state: TState) => number;
+  validateRecordedStep: SocialRecordedStepValidator<TState, TObservation, TPending, TCommand>;
+  recordedAgentState: SocialRecordedAgentStateValidationPolicy<TState, TObservation, TPending, TCommand, TAgentState>;
+}
+
+export interface HarnessEpisodeArtifactVerificationResult<TState> {
+  ok: boolean;
+  validationMode: "validate" | "none" | "invalid";
+  structureErrors: string[];
+  configurationErrors: string[];
+  replay?: SocialEpisodeReplayResult<TState>;
+  mismatches: string[];
+}
+
+/**
+ * Strong, model-free acceptance boundary for a canonical generic episode
+ * artifact. Structural validation remains separately available for parsers and
+ * migrations, but persistence/fork/evaluation authorities should use this
+ * verifier before accepting a domain artifact as replayable truth.
+ */
+export function verifyHarnessEpisodeArtifact<
+  TState,
+  TObservation,
+  TPending,
+  TCommand,
+  TAgentState,
+  TForkProvenance extends import("./episodeArtifacts").GenericForkProvenance | undefined
+>(options: {
+  artifact: HarnessEpisodeArtifactEnvelope<TState, TObservation, TPending, TCommand, TAgentState, TForkProvenance>;
+  runtime: SocialArtifactVerificationRuntime<TState, TObservation, TPending, TCommand, TAgentState>;
+}): HarnessEpisodeArtifactVerificationResult<TState> {
+  const structureErrors = validateHarnessEpisodeArtifactEnvelope(options.artifact);
+  const configurationErrors: string[] = [];
+  const runtimeRecord = options.runtime && typeof options.runtime === "object"
+    ? options.runtime as unknown as Record<string, unknown>
+    : {};
+  const policyRecord = runtimeRecord.recordedAgentState && typeof runtimeRecord.recordedAgentState === "object"
+    ? runtimeRecord.recordedAgentState as Record<string, unknown>
+    : undefined;
+  const validationMode = policyRecord?.mode === "validate" || policyRecord?.mode === "none"
+    ? policyRecord.mode
+    : "invalid";
+  for (const field of ["createEnvironment", "hashState", "hashMessages", "validateRecordedStep"] as const) {
+    if (typeof runtimeRecord[field] !== "function") {
+      configurationErrors.push(`${field} must be a function.`);
+    }
+  }
+  if (runtimeRecord.eventSeq !== undefined && typeof runtimeRecord.eventSeq !== "function") {
+    configurationErrors.push("eventSeq must be a function when provided.");
+  }
+  if (!policyRecord || validationMode === "invalid") {
+    configurationErrors.push("recordedAgentState must declare mode=validate or mode=none.");
+  } else if (validationMode === "validate" && typeof policyRecord.validator !== "function") {
+    configurationErrors.push("recordedAgentState.validator must be a function in validate mode.");
+  }
+  if (!options.artifact.socialEpisode.domainAdapter) {
+    configurationErrors.push("artifact socialEpisode.domainAdapter is required for canonical verification.");
+  }
+  configurationErrors.push(
+    ...validateSocialDomainAdapterManifest(runtimeRecord.domainAdapter, "verification runtime adapter")
+  );
+  for (const mismatch of compareSocialDomainAdapterManifests(
+    options.artifact.socialEpisode.domainAdapter,
+    runtimeRecord.domainAdapter as SocialDomainAdapterManifest | undefined,
+    { recordedPath: "artifact domain adapter", runtimePath: "verification runtime adapter" }
+  )) {
+    configurationErrors.push(`domain adapter binding: ${mismatch}`);
+  }
+  const hasRecordedAgentState =
+    options.artifact.agents.length > 0 ||
+    Boolean(options.artifact.agentSnapshotFrames?.length) ||
+    options.artifact.socialEpisode.steps.some(
+      (step) =>
+        step.actorSnapshotsAfterStep !== undefined ||
+        step.actorSnapshotsHashAfterStep !== undefined ||
+        step.actorSnapshotFrameIdAfterStep !== undefined
+    );
+  if (validationMode === "none" && policyRecord) {
+    if (typeof policyRecord.reason !== "string" || !policyRecord.reason.trim()) {
+      configurationErrors.push("recordedAgentState.mode=none requires a nonempty reason.");
+    }
+    if (hasRecordedAgentState) {
+      configurationErrors.push(
+        "recordedAgentState.mode=none is not allowed because the artifact records durable actor state."
+      );
+    }
+  }
+  if (validationMode === "validate") {
+    structureErrors.push(...committedActorSnapshotBoundaryErrors(options.artifact));
+  }
+  if (structureErrors.length || configurationErrors.length) {
+    return {
+      ok: false,
+      validationMode,
+      structureErrors,
+      configurationErrors,
+      mismatches: [
+        ...structureErrors.map((error) => `Artifact structure: ${error}`),
+        ...configurationErrors.map((error) => `Artifact verification configuration: ${error}`)
+      ]
+    };
+  }
+
+  let environment: SocialEnvironment<TState, TObservation, TPending, TCommand>;
+  try {
+    environment = options.runtime.createEnvironment(structuredClone(options.artifact.initialState));
+  } catch {
+    const message = "Artifact verification environment factory failed.";
+    return {
+      ok: false,
+      validationMode,
+      structureErrors,
+      configurationErrors: [message],
+      mismatches: [`Artifact verification configuration: ${message}`]
+    };
+  }
+  const replay = replaySocialEpisode<TState, TObservation, TPending, TCommand, TAgentState>({
+    episode: structuredClone(options.artifact.socialEpisode),
+    environment,
+    hashState: options.runtime.hashState,
+    hashMessages: options.runtime.hashMessages,
+    eventSeq: options.runtime.eventSeq,
+    agentSnapshotFrames: options.artifact.agentSnapshotFrames
+      ? structuredClone(options.artifact.agentSnapshotFrames)
+      : undefined,
+    validateRecordedStep: options.runtime.validateRecordedStep,
+    validateRecordedAgentState:
+      validationMode === "validate"
+        ? (policyRecord!.validator as SocialRecordedAgentStateValidator<TState, TObservation, TPending, TCommand, TAgentState>)
+        : undefined,
+    domainAdapter: options.runtime.domainAdapter
+  });
+  return {
+    ok: replay.ok,
+    validationMode,
+    structureErrors,
+    configurationErrors,
+    replay,
+    mismatches: [...replay.mismatches]
+  };
+}
 
 export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TAgentState = unknown>(options: {
   episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>;
@@ -332,14 +513,24 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
     batch: readonly SocialHarnessStep<TObservation, TPending, TCommand>[]
   ): void {
     if (!options.validateRecordedStep) return;
-    const state = options.environment.snapshot();
-    const errors = options.validateRecordedStep(step, {
-      index,
-      state,
-      pendingActions: options.environment.pendingActions(),
-      schedulerMode: step.schedulerMode,
-      batch
-    });
+    let errors: readonly string[];
+    try {
+      const result = options.validateRecordedStep(structuredClone(step), {
+        index,
+        state: structuredClone(options.environment.snapshot()),
+        pendingActions: structuredClone(options.environment.pendingActions()),
+        schedulerMode: step.schedulerMode,
+        batch: structuredClone(batch)
+      });
+      if (!Array.isArray(result) || result.some((error) => typeof error !== "string")) {
+        addMismatch(`Native step ${index} ${step.traceId}: recorded pending/action validator returned an invalid result.`);
+        return;
+      }
+      errors = result;
+    } catch {
+      addMismatch(`Native step ${index} ${step.traceId}: recorded pending/action validator failed.`);
+      return;
+    }
     for (const error of errors) addMismatch(`Native step ${index} ${step.traceId}: recorded pending/action evidence mismatch: ${error}`);
   }
 
@@ -378,19 +569,30 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
         .map((actorId) => [actorId, bus.observe(actorId).messages])
     ) as Record<string, readonly SocialMessage[]>;
     const scopedExposureRecords = deriveSocialExposureRecords(episodePrefix, { includeSelf: true });
-    const errors = options.validateRecordedAgentState({
-      episodePrefix,
-      step,
-      stepIndex,
-      batch: recordedBatch,
-      priorAgents: previousAgentSnapshots ? structuredClone(previousAgentSnapshots) : undefined,
-      recordedAgents,
-      stateBefore: structuredClone(stateBefore),
-      stateAfter: structuredClone(stateAfter),
-      committedMessages,
-      scopedExposureRecords,
-      visibleMessagesByActor
-    });
+    let errors: readonly string[];
+    try {
+      const result = options.validateRecordedAgentState({
+        episodePrefix: structuredClone(episodePrefix),
+        step: structuredClone(step),
+        stepIndex,
+        batch: structuredClone(recordedBatch),
+        priorAgents: previousAgentSnapshots ? structuredClone(previousAgentSnapshots) : undefined,
+        recordedAgents: structuredClone(recordedAgents),
+        stateBefore: structuredClone(stateBefore),
+        stateAfter: structuredClone(stateAfter),
+        committedMessages: structuredClone(committedMessages),
+        scopedExposureRecords: structuredClone(scopedExposureRecords),
+        visibleMessagesByActor: structuredClone(visibleMessagesByActor)
+      });
+      if (!Array.isArray(result) || result.some((error) => typeof error !== "string")) {
+        addMismatch(`Recorded agent state semantic audit at native step ${stepIndex} ${step.traceId}: validator returned an invalid result.`);
+        return;
+      }
+      errors = result;
+    } catch {
+      addMismatch(`Recorded agent state semantic audit at native step ${stepIndex} ${step.traceId}: validator failed.`);
+      return;
+    }
     for (const error of errors) {
       addMismatch(`Recorded agent state semantic audit at native step ${stepIndex} ${step.traceId}: ${error}`);
     }
@@ -444,6 +646,51 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
       mismatches
     };
   }
+}
+
+/**
+ * Canonical state-bearing artifacts must provide one resolvable durable actor
+ * snapshot for every completed receipt boundary. A joint parallel transition
+ * is one boundary, while environment-owned system transitions are not actor
+ * receipts and therefore do not manufacture actor-state evidence.
+ */
+function committedActorSnapshotBoundaryErrors<
+  TState,
+  TObservation,
+  TPending,
+  TCommand,
+  TAgentState,
+  TForkProvenance extends import("./episodeArtifacts").GenericForkProvenance | undefined
+>(
+  artifact: HarnessEpisodeArtifactEnvelope<TState, TObservation, TPending, TCommand, TAgentState, TForkProvenance>
+): string[] {
+  const errors: string[] = [];
+  const steps = artifact.socialEpisode.steps;
+  for (let index = 0; index < steps.length; ) {
+    const first = steps[index];
+    if (!first) break;
+    const batch = isSocialParallelJointStep(first) ? contiguousParallelBatch(steps, index) : [first];
+    const boundary = batch.at(-1)!;
+    const isCommittedActorReceipt =
+      batch.every((step) => isSocialStepCommitted(step)) &&
+      batch.some((step) => step.actorId !== "system" && step.resolutionPolicy !== "system-transition");
+    if (isCommittedActorReceipt) {
+      const hasInlineSnapshot =
+        Array.isArray(boundary.actorSnapshotsAfterStep) &&
+        typeof boundary.actorSnapshotsHashAfterStep === "string";
+      const hasResolvedFrame = Boolean(
+        artifact.agentSnapshotFrames &&
+        resolveHarnessAgentSnapshotFrame({ frames: artifact.agentSnapshotFrames, step: boundary })
+      );
+      if (!hasInlineSnapshot && !hasResolvedFrame) {
+        errors.push(
+          `Native step ${index + batch.length - 1} ${boundary.traceId}: committed actor receipt boundary is missing a resolvable durable actor snapshot.`
+        );
+      }
+    }
+    index += batch.length;
+  }
+  return errors;
 }
 
 function contiguousParallelBatch<TObservation, TPending, TCommand>(

@@ -303,6 +303,20 @@ curl -X POST http://localhost:8787/api/tournaments/run \
 
 ## Experiment Specs
 
+The reusable control plane is `GenericExperimentSpecV1`, normalized to the
+pure-JSON `harness.experiment.v1` contract by
+`normalizeGenericExperimentSpec()`. It records domain/adapter identity, seed,
+episode and actor counts, generic scheduler mode, profiles/model assignments,
+execution bounds, evaluator ids, assignment/artifact/checkpoint/retry/provider
+policy references, and domain-owned portable configuration. Provider policy is
+an identity plus `stream: true`; endpoints, keys, headers, max-token controls,
+raw request bodies, runtime clients/factories, and abort signals are rejected.
+This is the contract a second domain can import from `src/harness/generic.ts`
+without importing Werewolf core types.
+
+The older contract below remains the Werewolf adapter specialization and CLI /
+API compatibility surface; it is not the definition of the generic harness.
+
 `TournamentExperimentSpecV1` is the supported JSON contract for reproducible batch runs. The version string is:
 
 ```json

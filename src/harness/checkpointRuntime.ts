@@ -51,6 +51,22 @@ export interface SocialCheckpointRuntimeAdapter<TState, TAgentState, TObservatio
   captureAgentSnapshots?: (
     actors: readonly SocialActor<TObservation, TPending, TCommand>[]
   ) => TAgentState[] | undefined;
+  /**
+   * Explicit semantic validation of the recorded actor state before any
+   * environment or actor restore factory is invoked. A state-bearing
+   * checkpoint cannot silently opt out.
+   */
+  recordedAgentState:
+    | {
+        mode: "validate";
+        validator: (
+          checkpoint: HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand>
+        ) => readonly string[];
+      }
+    | {
+        mode: "none";
+        reason: string;
+      };
 }
 
 export interface RunForkedHarnessEpisodeOptions<TState, TAgentState, TObservation, TPending extends { actorId?: string }, TCommand>
@@ -131,6 +147,24 @@ export async function runForkedHarnessEpisode<TState, TAgentState, TObservation,
     if (childAdapterErrors.length) {
       throw new Error(`Fork episode adapter compatibility failed for ${options.checkpoint.checkpointId}: ${childAdapterErrors.join(" ")}`);
     }
+  }
+  const recordedAgentStateErrors: string[] = [];
+  if (options.runtime.recordedAgentState.mode === "none") {
+    if (!options.runtime.recordedAgentState.reason.trim()) {
+      recordedAgentStateErrors.push("recordedAgentState.mode=none requires a nonempty reason.");
+    }
+    if (options.checkpoint.agents.length > 0) {
+      recordedAgentStateErrors.push(
+        "recordedAgentState.mode=none is not allowed because the checkpoint records durable actor state."
+      );
+    }
+  } else {
+    recordedAgentStateErrors.push(...options.runtime.recordedAgentState.validator(structuredClone(options.checkpoint)));
+  }
+  if (recordedAgentStateErrors.length) {
+    throw new Error(
+      `Checkpoint recorded agent-state verification failed for ${options.checkpoint.checkpointId}: ${recordedAgentStateErrors.join(" ")}`
+    );
   }
   const domainErrors = options.validateCheckpoint?.(options.checkpoint) ?? [];
   if (domainErrors.length) {

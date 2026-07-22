@@ -461,6 +461,62 @@ interface TournamentPublicShareInventory {
   shares: TournamentPublicShareSummary[];
 }
 
+interface TournamentExecutionAttempts {
+  count: number;
+  sum: number;
+  max: number;
+  missing: number;
+  average: number;
+}
+
+interface TournamentExecutionProviderFailures {
+  count: number;
+  byKind: Record<string, number>;
+  byStage: Record<string, number>;
+  byStatus: Record<string, number>;
+  retryable: number;
+  aborted: number;
+  timeouts: number;
+  streamAborts: number;
+  attempts: TournamentExecutionAttempts;
+}
+
+interface TournamentExecutionStats {
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  latencyMs: number;
+  averageLatencyMs: number;
+  harnessTurns: number;
+  harnessErrors: number;
+  nativeSteps: number;
+  committedSteps: number;
+  rejectedSteps: number;
+  attempts: TournamentExecutionAttempts;
+  providerFailures: TournamentExecutionProviderFailures;
+}
+
+interface TournamentExecutionTelemetry {
+  schemaVersion: "harness.tournament-execution-telemetry.v1";
+  denominatorPolicy: {
+    outcomeAggregates: string;
+    executionAggregates: string;
+    preparationFailures: string;
+    unstartedEpisodes: string;
+  };
+  lifecycle: {
+    episodesWithHarnessResult: number;
+    completed: number;
+    truncated: number;
+    failed: number;
+    preparationFailed: number;
+    unstarted: number;
+  };
+  totals: TournamentExecutionStats;
+  byModel: Record<string, TournamentExecutionStats>;
+}
+
 interface TournamentRunResponse {
   summary?: {
     ok?: boolean;
@@ -475,6 +531,7 @@ interface TournamentRunResponse {
     committedSteps?: number;
     rejectedSteps?: number;
     failureReason?: string;
+    executionTelemetry?: TournamentExecutionTelemetry;
     evaluation?: {
       gamesEvaluated?: number;
       gamesWithoutEvaluation?: number;
@@ -921,6 +978,8 @@ export function App() {
   const [mobileContextOpen, setMobileContextOpen] = useState(false);
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [tournamentPacks, setTournamentPacks] = useState<TournamentArtifactSetSummary[]>([]);
+  const [tournamentExecutionTelemetry, setTournamentExecutionTelemetry] =
+    useState<TournamentExecutionTelemetry | null>(null);
   const [matrixResult, setMatrixResult] = useState<ExperimentMatrixRunResponse | null>(null);
   const [matrixArtifactSets, setMatrixArtifactSets] = useState<ExperimentMatrixArtifactSetSummary[]>([]);
   const [matrixGames, setMatrixGames] = useState("2");
@@ -961,8 +1020,19 @@ export function App() {
   );
   const werewolfReview = useMemo(() => buildWerewolfReviewModel(werewolfReviewSource), [werewolfReviewSource]);
   const activeWorkspace = workspaceItems.find((item) => item.id === workspace) ?? workspaceItems[0];
-  const isCompactLayout = !screens.lg;
+  // Keep only one fixed side rail on ordinary desktop widths. Mounting both
+  // the 292px run-context rail and 384px evidence inspector at Ant's 1200px
+  // `xl` breakpoint left the actual workspace only 524px wide. The existing
+  // bounded evidence Drawer remains the inspector surface until `xxl`.
+  const isCompactLayout = !screens.xxl;
   const isNarrowLayout = !screens.xl;
+  const revealInspector = useCallback(
+    (nextInspector: InspectorItem) => {
+      setInspector(nextInspector);
+      if (isCompactLayout) setMobileInspectorOpen(true);
+    },
+    [isCompactLayout]
+  );
 
   const filteredMatches = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -1917,6 +1987,7 @@ export function App() {
       return;
     }
     setBusy("pack-export");
+    setTournamentExecutionTelemetry(null);
     setActionStatus("正在运行锦标赛并导出 truth-redacted 公开包...");
     try {
       const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
@@ -1935,6 +2006,10 @@ export function App() {
           exportArtifacts: true
         })
       });
+      // This is a direct rendering DTO from the server's canonical
+      // cost_latency reducer. React must not recompute lifecycle denominators
+      // or promote partial outcomes into completed-only leaderboard rows.
+      setTournamentExecutionTelemetry(response.summary?.executionTelemetry ?? null);
       const pack = response.artifacts ?? response.summary?.artifacts ?? null;
       if (!pack?.artifactSetId) {
         throw new Error(response.error ?? response.summary?.failureReason ?? "tournament export returned no artifact set");
@@ -2575,30 +2650,30 @@ export function App() {
       const step = artifact?.socialEpisode.steps[index];
       setSelectedStepIndex(index);
       if (step) {
-        setInspector(inspectorFromSocialStep(step, index));
+        revealInspector(inspectorFromSocialStep(step, index));
         setActionStatus(
           `已选择 native step：#${index + 1} · ${step.actorId} · ${readSocialCommitStatus(step)}`
         );
       }
     },
-    [artifact?.socialEpisode.steps, setActionStatus]
+    [artifact?.socialEpisode.steps, revealInspector, setActionStatus]
   );
 
   const handleSelectAgent = useCallback(
     (agent: AgentHarnessState) => {
       setSelectedAgentId(agent.playerId);
-      setInspector(inspectorFromAgent(agent));
+      revealInspector(inspectorFromAgent(agent));
       setActionStatus(`已选择 agent：${agent.playerId}`);
     },
-    [setActionStatus]
+    [revealInspector, setActionStatus]
   );
 
   const handleSelectMessage = useCallback(
     (message: SocialMessage) => {
-      setInspector(inspectorFromMessage(message));
+      revealInspector(inspectorFromMessage(message));
       setActionStatus(`已选择社会消息：#${message.seq} · ${message.senderId}`);
     },
-    [setActionStatus]
+    [revealInspector, setActionStatus]
   );
 
   const handleWorkspaceChange = useCallback(
@@ -2649,7 +2724,7 @@ export function App() {
           query={query}
           onQueryChange={setQuery}
           onLoadArtifact={(match) => void loadArtifact(match, artifactView, candidateId)}
-          onInspect={(match) => setInspector(inspectorFromMatch(match))}
+          onInspect={(match) => revealInspector(inspectorFromMatch(match))}
           busy={busy}
         />
       )
@@ -2722,7 +2797,7 @@ export function App() {
           channels={channels}
           onSelectAgent={handleSelectAgent}
           onSelectMessage={handleSelectMessage}
-          onInspectExposure={(edge) => setInspector(inspectorFromSocialExposure(edge))}
+          onInspectExposure={(edge) => revealInspector(inspectorFromSocialExposure(edge))}
         />
       )
     },
@@ -2742,9 +2817,9 @@ export function App() {
           onLoadForkLineage={handleLoadForkLineage}
           onSelectCheckpoint={handleSelectCheckpoint}
           onLoadBranchTree={handleLoadBranchTree}
-          onInspectCheckpoint={(checkpoint) => setInspector(inspectorFromCheckpoint(checkpoint))}
-          onInspectForkLineage={() => forkLineage && setInspector(inspectorFromForkLineage(forkLineage))}
-          onInspectBranchTree={() => branchTree && setInspector(inspectorFromBranchTree(branchTree))}
+          onInspectCheckpoint={(checkpoint) => revealInspector(inspectorFromCheckpoint(checkpoint))}
+          onInspectForkLineage={() => forkLineage && revealInspector(inspectorFromForkLineage(forkLineage))}
+          onInspectBranchTree={() => branchTree && revealInspector(inspectorFromBranchTree(branchTree))}
         />
       )
     },
@@ -2756,8 +2831,8 @@ export function App() {
           artifact={artifact}
           metrics={metrics}
           warnings={warnings}
-          onInspectMetric={(metric, decision) => setInspector(inspectorFromMetric(metric, decision))}
-          onInspectWarning={(warning) => setInspector(inspectorFromWarning(warning))}
+          onInspectMetric={(metric, decision) => revealInspector(inspectorFromMetric(metric, decision))}
+          onInspectWarning={(warning) => revealInspector(inspectorFromWarning(warning))}
         />
       )
     },
@@ -2806,9 +2881,9 @@ export function App() {
           onDownloadComparison={handleDownloadComparison}
           onDownloadFilteredComparison={handleDownloadFilteredComparison}
           busy={busy}
-          onInspectRow={(row) => setInspector(inspectorFromComparisonRow(row))}
+          onInspectRow={(row) => revealInspector(inspectorFromComparisonRow(row))}
           onInspectFilteredProjection={(projection) =>
-            setInspector(inspectorFromFilteredComparison(projection))
+            revealInspector(inspectorFromFilteredComparison(projection))
           }
         />
       )
@@ -2819,6 +2894,7 @@ export function App() {
       children: (
         <PacksWorkspace
           packs={tournamentPacks}
+          executionTelemetry={tournamentExecutionTelemetry}
           selectedPackId={selectedPackId}
           shares={packShares}
           shareInventory={shareInventory}
@@ -2846,7 +2922,7 @@ export function App() {
           onRevokeShare={(share) => void handleRevokeTournamentShare(share)}
           onRevokeAllActiveShares={() => void handleRevokeAllActiveShares()}
           onInspectShare={(share) =>
-            setInspector({
+            revealInspector({
               kind: "tournament-public-share",
               title: `Share ${shortId(share.shareId)}`,
               subtitle: share.label ?? share.artifactSetId,
@@ -6094,8 +6170,119 @@ function ExperimentsWorkspace({
   );
 }
 
+function TournamentExecutionTelemetryPanel({ telemetry }: { telemetry: TournamentExecutionTelemetry | null }) {
+  if (!telemetry) {
+    return (
+      <Card title="生命周期执行遥测" data-testid="tournament-execution-telemetry">
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="运行一次锦标赛公开包后，这里会直接显示服务端 lifecycle-inclusive executionTelemetry。"
+        />
+      </Card>
+    );
+  }
+
+  const { lifecycle, totals } = telemetry;
+  const modelRows = Object.entries(telemetry.byModel).map(([model, stats]) => ({ model, ...stats }));
+  const modelColumns: TableProps<TournamentExecutionStats & { model: string }>["columns"] = [
+    { title: "model", dataIndex: "model", fixed: "left", render: (value: string) => <Text code>{value}</Text> },
+    { title: "calls", dataIndex: "calls", align: "right" },
+    { title: "tokens", dataIndex: "totalTokens", align: "right" },
+    { title: "avg latency", dataIndex: "averageLatencyMs", align: "right", render: (value: number) => `${value}ms` },
+    {
+      title: "attempts",
+      align: "right",
+      render: (_, row) => `${row.attempts.sum}/${row.attempts.count} · max ${row.attempts.max} · missing ${row.attempts.missing}`
+    },
+    { title: "harness errors", dataIndex: "harnessErrors", align: "right" },
+    { title: "provider failures", align: "right", render: (_, row) => row.providerFailures.count },
+    { title: "stream aborts", align: "right", render: (_, row) => row.providerFailures.streamAborts }
+  ];
+
+  return (
+    <Card
+      title="生命周期执行遥测"
+      extra={<Tag color="processing">{telemetry.schemaVersion}</Tag>}
+      data-testid="tournament-execution-telemetry"
+    >
+      <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+        <Alert
+          type="info"
+          showIcon
+          message="执行分母与结果分母严格分离"
+          description={`${telemetry.denominatorPolicy.executionAggregates}；${telemetry.denominatorPolicy.outcomeAggregates}。本面板直接显示服务端 DTO，不在 React 重算或把截断结果提升进排行榜。`}
+        />
+
+        <Space wrap>
+          <Tag color="processing">harness result {lifecycle.episodesWithHarnessResult}</Tag>
+          <Tag color="success">completed {lifecycle.completed}</Tag>
+          <Tag color="warning">truncated {lifecycle.truncated}</Tag>
+          <Tag color="error">failed {lifecycle.failed}</Tag>
+          <Tag>preparation failed {lifecycle.preparationFailed}</Tag>
+          <Tag>unstarted {lifecycle.unstarted}</Tag>
+        </Space>
+
+        <Row gutter={[12, 12]}>
+          <Col xs={12} md={8} xl={4} data-testid="tournament-execution-calls">
+            <Card size="small"><Statistic title="calls" value={totals.calls} /></Card>
+          </Col>
+          <Col xs={12} md={8} xl={4} data-testid="tournament-execution-tokens">
+            <Card size="small"><Statistic title="tokens" value={totals.totalTokens} /></Card>
+          </Col>
+          <Col xs={12} md={8} xl={4} data-testid="tournament-execution-latency">
+            <Card size="small"><Statistic title="avg latency" value={totals.averageLatencyMs} suffix="ms" /></Card>
+          </Col>
+          <Col xs={12} md={8} xl={4} data-testid="tournament-execution-attempts">
+            <Card size="small"><Statistic title="attempts" value={totals.attempts.sum} suffix={`/ ${totals.attempts.count}`} /></Card>
+          </Col>
+          <Col xs={12} md={8} xl={4} data-testid="tournament-execution-errors">
+            <Card size="small"><Statistic title="harness errors" value={totals.harnessErrors} /></Card>
+          </Col>
+          <Col xs={12} md={8} xl={4} data-testid="tournament-execution-stream-aborts">
+            <Card size="small"><Statistic title="stream aborts" value={totals.providerFailures.streamAborts} /></Card>
+          </Col>
+        </Row>
+
+        <Descriptions
+          size="small"
+          bordered
+          column={{ xs: 1, sm: 2, lg: 4 }}
+          items={descriptionItems([
+            ["prompt tokens", totals.promptTokens],
+            ["completion tokens", totals.completionTokens],
+            ["latency total", `${totals.latencyMs}ms`],
+            ["attempt max", totals.attempts.max],
+            ["attempt missing", totals.attempts.missing],
+            ["provider failures", totals.providerFailures.count],
+            ["timeouts", totals.providerFailures.timeouts],
+            ["aborted", totals.providerFailures.aborted],
+            ["native steps", totals.nativeSteps],
+            ["committed steps", totals.committedSteps],
+            ["rejected steps", totals.rejectedSteps],
+            ["harness turns", totals.harnessTurns]
+          ])}
+        />
+
+        <Card size="small" title="按模型执行遥测" extra={<Tag>{modelRows.length} models</Tag>}>
+          <Table
+            rowKey="model"
+            size="small"
+            bordered
+            pagination={false}
+            scroll={{ x: "max-content" }}
+            columns={modelColumns}
+            dataSource={modelRows}
+            locale={{ emptyText: <Empty description="服务端没有记录按模型执行遥测。" /> }}
+          />
+        </Card>
+      </Space>
+    </Card>
+  );
+}
+
 function PacksWorkspace({
   packs,
+  executionTelemetry,
   selectedPackId,
   shares,
   shareInventory,
@@ -6125,6 +6312,7 @@ function PacksWorkspace({
   onInspectShare
 }: {
   packs: TournamentArtifactSetSummary[];
+  executionTelemetry: TournamentExecutionTelemetry | null;
   selectedPackId: string;
   shares: TournamentPublicShareSummary[];
   shareInventory: TournamentPublicShareInventory | null;
@@ -6265,6 +6453,7 @@ function PacksWorkspace({
         extra={
           <Space wrap>
             <Select
+              aria-label="锦标赛游戏局数"
               style={{ width: 120 }}
               value={packGames}
               options={[
@@ -6319,6 +6508,8 @@ function PacksWorkspace({
           locale={{ emptyText: <Empty description="暂无锦标赛公开包。点击“导出公开包”运行真实锦标赛导出。" /> }}
         />
       </Card>
+
+      <TournamentExecutionTelemetryPanel telemetry={executionTelemetry} />
 
       <Card
         title="公开包聚合工件"

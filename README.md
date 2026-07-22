@@ -240,6 +240,25 @@ harness errors, and committed/rejected/native steps from every completed,
 truncated, or failed episode that actually produced a harness result. Preparation
 failures and unstarted episodes never invent provider or step usage.
 
+The domain-neutral package surface in `src/harness/generic.ts` now also owns a
+portable `harness.experiment.v1` control-plane contract and a single-episode
+artifact store. `normalizeGenericExperimentSpec()` records adapter identity,
+actors, profiles/model assignments, scheduler, execution limits, evaluator
+ids, and versioned policy references as stable JSON; it deliberately cannot
+represent provider endpoints, credentials, raw request options, runtime
+factories, or abort signals. The existing `werewolf.experiment.v1` contract
+remains the Werewolf adapter's compatibility specialization.
+
+`verifyHarnessEpisodeArtifact()` is the canonical model-free acceptance gate:
+it combines structural envelope checks, exact adapter binding, deterministic
+environment replay, recorded pending/action validation, and explicit durable
+agent-state semantic validation. `HarnessEpisodeArtifactStore` accepts a
+domain-owned instance of that strong verifier and writes only server-owned,
+content-hashed directories containing `artifact.json`, `trajectory.jsonl`, and
+a manifest. Every put, get, list, and restart recovery re-verifies canonical
+truth; run ids never become host paths, and symlinked or tampered files are
+rejected. This generic store does not call an actor, policy, reasoner, or model.
+
 The API also stores a `MatchArtifact` for completed `/api/matches/run` records:
 
 ```bash

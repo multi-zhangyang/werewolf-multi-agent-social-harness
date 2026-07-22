@@ -749,6 +749,7 @@ describe("harness trajectory replay", () => {
         sourceArtifactVersion: "counter.episode.v1",
         episode: truncated,
         selector: { nativeStepCount: 1 },
+        recordedAgentState: { mode: "validate", validator: () => [] },
         resolveAgentSnapshot: () => {
           snapshotResolvers += 1;
           return {

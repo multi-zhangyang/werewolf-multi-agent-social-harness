@@ -26771,3 +26771,90 @@ completion tokens**, **7,860 ms provider latency**, and attempts
 `count=1,sum=1,max=1,missing=0`. The completed-only `modelStats` correctly
 remained zero, proving that execution observability was restored without
 promoting a partial outcome into leaderboard statistics.
+
+## 13.280 Generic Control, Canonical Artifact Authority, Persistence, And Cockpit Completion Lock
+
+Timestamp: `2026-07-22`
+
+The next harness-first slice closed four previously independent gaps without
+adding a provider/model-specific implementation:
+
+- `harness.experiment.v1` is now a pure-JSON, domain-neutral normalized
+  experiment contract. It records adapter identity, seed, actor/episode counts,
+  scheduler, profiles/model assignments, execution bounds, evaluator ids, and
+  safe versioned policy references. Endpoint URLs, credentials, headers, raw
+  provider options, max-token controls, runtime factories, functions, and abort
+  signals are deliberately unrepresentable or rejected.
+- `verifyHarnessEpisodeArtifact()` is the strong canonical acceptance gate
+  above the structural-only envelope validator. It requires exact adapter
+  binding, deterministic environment replay, state/message hashing, recorded
+  pending/action semantic validation, and an explicit durable-agent-state
+  policy. A state-bearing artifact cannot use `mode: none`; committed actor
+  receipt boundaries require resolvable durable snapshots; pure system
+  transitions do not manufacture actor receipts. Domain callbacks receive
+  clones, malformed/throwing callbacks fail closed, and factories are not
+  invoked after preflight rejection.
+- Checkpoint prefix construction and fork restoration now also require an
+  explicit recorded-agent-state policy before restore factories run. A bare
+  compacted checkpoint still cannot honestly claim full historical snapshot
+  validation without the parent frame sidecar; the canonical parent artifact
+  remains the full semantic authority before checkpoint selection.
+- `HarnessEpisodeArtifactStore` is a generic, single-episode disk authority.
+  It strongly verifies before put and after every get/list/restart recovery,
+  hashes run ids into fixed server-owned directories, writes canonical
+  artifact/trajectory/manifest records, rebuilds its index by recovery scan,
+  and rejects digest mismatches, regenerated-trajectory mismatches, symlinks,
+  non-regular files, and realpath escapes. Persistence/recovery never creates
+  an actor, policy, reasoner, or provider call.
+- The React public-pack workspace now renders the server-owned
+  `executionTelemetry` DTO directly, including lifecycle, calls, tokens,
+  latency, attempts, steps, provider failures, stream aborts, and by-model
+  rows. It does not recompute denominators or promote truncated/failed outcomes
+  into completed-only leaderboards.
+- The Evidence Inspector fixed rail now begins at Ant Design `xxl`. At
+  1200–1599 px, the existing bounded Drawer is used and explicit inspect
+  actions open it automatically. This removes the former 1200 px center-column
+  collapse while preserving keyboard-accessible evidence inspection.
+
+Non-Werewolf proof uses the Ledger/counter fixtures, not Werewolf types. The
+generic ExperimentSpec and ArtifactStore modules remain free of imports from
+`core`, Werewolf adapters, server modules, or React.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npx vitest run tests/episodeArtifactStore.test.ts \
+  tests/genericExperimentSpec.test.ts tests/genericHarnessContract.test.ts \
+  tests/replay.test.ts --maxWorkers=1 --no-file-parallelism \
+  --testTimeout=60000 --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npx playwright test --config=playwright.config.ts
+npm run agent:probe -- --models=poolside/laguna-s-2.1:free --timeout=90s
+npm run arena:match -- --models=poolside/laguna-s-2.1:free \
+  --maxTransitions=2 --timeout=120s --json=summary
+npm run arena:tournament -- --models=poolside/laguna-s-2.1:free \
+  --games=1 --maxTransitions=2 --timeout=180s --json=summary
+git diff --check
+```
+
+The focused generic suites passed **4 files / 38 tests**. The complete
+deterministic suite passed **47 files / 496 tests**. Production build passed
+with only the existing Vite chunk-size warning. The final Playwright fixture
+cockpit passed **14/14**, including the new lifecycle telemetry and 1200/1280
+responsive Inspector regressions.
+
+The real streaming probe completed through the ordinary OpenAI-compatible
+path with `stream.enabled=true`, `stream.completed=true`, terminal
+`provider_stop_event`, a parsed `seer.inspect` candidate, and environment
+validation. The bounded real match returned `ok: true`, expected
+`status: truncated`, **2 native / 2 committed / 0 rejected** steps, **0 harness
+errors**, and one completed stream. The bounded real tournament likewise
+returned `ok: true`, expected `status: truncated`, **2 native / 2 committed / 0
+rejected** steps, **0 harness errors**, and lifecycle-inclusive telemetry of
+**1 call / 500 prompt / 240 completion tokens / 27,561 ms**, attempts
+`count=1,sum=1,max=1,missing=0`. Only the user-selected
+`poolside/laguna-s-2.1:free` model was used, and no model-specific adapter,
+parser, prompt, fallback, or provider branch was introduced.
