@@ -1060,6 +1060,12 @@ function validateNativeSocialExecution(artifact: MatchArtifact, errors: string[]
     if (execution.execution.schemaVersion !== "harness.social-execution.v1") {
       errors.push(`socialEpisode.execution.schemaVersion must be harness.social-execution.v1.`);
     }
+    if (
+      execution.execution.decisionTimeoutMs !== undefined &&
+      (!Number.isInteger(execution.execution.decisionTimeoutMs) || execution.execution.decisionTimeoutMs <= 0)
+    ) {
+      errors.push("socialEpisode.execution.decisionTimeoutMs must be a positive integer when recorded.");
+    }
     const initialMessageCount = execution.execution.initialMessageCount;
     if (!Number.isInteger(initialMessageCount) || initialMessageCount < 0 || initialMessageCount > execution.messages.length) {
       errors.push(`socialEpisode.execution.initialMessageCount is invalid: ${initialMessageCount}.`);

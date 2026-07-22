@@ -70,6 +70,7 @@ async function main(): Promise<void> {
     const result = await runExperimentMatrix({
       experiment: options.experiment,
       reasoner: new OpenAIHarnessReasoner(modelClientFromEnv(process.env, { abortSignal: abortController.signal })),
+      executionLimits: { abortSignal: abortController.signal },
       includeArtifacts: Boolean(options.outputDir)
     });
     const artifacts = options.outputDir
@@ -144,6 +145,7 @@ function buildMatrixSummary(
     matrixId: result.experiment.id,
     status: result.status,
     cellsRequested: result.cellsRequested,
+    cellsUnstarted: result.cellsUnstarted,
     cellsCompleted: result.cellsCompleted,
     cellsTruncated: result.cellsTruncated,
     cellsFailed: result.cellsFailed,
@@ -151,6 +153,7 @@ function buildMatrixSummary(
     gamesCompleted: result.gamesCompleted,
     gamesTruncated: result.gamesTruncated,
     gamesFailed: result.gamesFailed,
+    gamesUnstarted: result.gamesUnstarted,
     timeoutMs: options.timeoutMs ?? null,
     elapsedMs: options.elapsedMs,
     timedOut: options.timedOut,
@@ -169,6 +172,7 @@ function buildMatrixSummary(
       gamesCompleted: cell.tournament?.gamesCompleted ?? 0,
       gamesTruncated: cell.tournament?.gamesTruncated ?? cell.tournament?.episodes.filter((episode) => episode.status === "truncated").length ?? 0,
       gamesFailed: cell.tournament?.gamesFailed ?? 0,
+      gamesUnstarted: cell.tournament?.gamesUnstarted ?? Math.max(0, (cell.tournament?.gamesRequested ?? 0) - (cell.tournament?.episodes.length ?? 0)),
       models: cell.tournament?.models ?? [],
       error: cell.error ?? null
     })),

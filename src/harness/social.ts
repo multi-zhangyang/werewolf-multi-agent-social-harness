@@ -9,7 +9,30 @@ export type SocialDecisionFailureStage =
   | "environment_observe"
   | "observation_assembly"
   | "actor_observe"
-  | "actor_decide";
+  | "actor_decide"
+  /** The caller's control-plane abort signal ended a pending decision. */
+  | "execution_abort"
+  /** The generic runner's per-decision budget expired before a proposal. */
+  | "decision_timeout";
+
+/**
+ * Optional execution limits owned by the generic runner, rather than by a
+ * specific provider implementation. They are intentionally independent from
+ * model-client retry or HTTP timeout settings: any SocialActor may be slow or
+ * never settle.
+ *
+ * `abortSignal` is runtime-only and never serialized into an episode artifact.
+ * The artifact records the resulting rejected step/failure stage instead.
+ */
+export interface SocialExecutionLimits {
+  abortSignal?: AbortSignal;
+  decisionTimeoutMs?: number;
+}
+
+interface NormalizedSocialExecutionLimits {
+  abortSignal?: AbortSignal;
+  decisionTimeoutMs?: number;
+}
 
 export interface SocialAgentProfile {
   id: string;
@@ -458,6 +481,8 @@ export interface SocialEpisodeArtifact<TState = unknown, TObservation = unknown,
     notStartedStage?: string;
     initialMessageCount: number;
     initialMessagesHash?: string;
+    /** Configured generic runner budget; runtime AbortSignal itself is never serialized. */
+    decisionTimeoutMs?: number;
   };
   schedulerMode: SocialResolvedSchedulerMode;
   /** Immutable actor registry for this live execution. It bounds `readableBy:
@@ -656,9 +681,16 @@ export function deriveSocialExposureRecords<TState, TObservation, TPending, TCom
 }
 
 export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TCommand>(
-  episode: Pick<SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>, "channels" | "steps" | "messages" | "runtimeActorIds">
+  episode: Pick<
+    SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>,
+    "channels" | "steps" | "messages" | "runtimeActorIds" | "execution"
+  >
 ): string[] {
   const errors: string[] = [];
+  const decisionTimeoutMs = episode.execution?.decisionTimeoutMs;
+  if (decisionTimeoutMs !== undefined && (!Number.isInteger(decisionTimeoutMs) || decisionTimeoutMs <= 0)) {
+    errors.push("execution.decisionTimeoutMs must be a positive integer when recorded.");
+  }
   const runtimeActorIds = normalizeRuntimeActorIds(episode.runtimeActorIds, errors, "runtimeActorIds");
   const runtimeActorIdSet = runtimeActorIds ? new Set(runtimeActorIds) : undefined;
   const channelsById = new Map<string, SocialChannel>();
@@ -1058,6 +1090,9 @@ export interface SocialEpisodeOptions<TState, TObservation, TPending extends { a
   initialMessages?: SocialMessage[];
   schedulerMode?: SocialSchedulerMode;
   maxTransitions?: number;
+  /** Optional generic decision-cancellation boundary. Defaults preserve the
+   * historical unlimited decision behavior. */
+  executionLimits?: SocialExecutionLimits;
   hashState?: (state: TState) => string;
   hashMessages?: (messages: SocialMessage[]) => string;
   eventSeq?: (state: TState) => number;
@@ -1078,11 +1113,15 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
   const defaultSchedulerMode = normalizeSchedulerMode(options.schedulerMode ?? "aec");
   const bus = new SocialCommunicationBus(options.channels ?? [], options.initialMessages ?? [], { runtimeActorIds });
   const initialMessages = bus.listMessages();
+  const executionLimits = normalizeSocialExecutionLimits(options.executionLimits);
   const execution = {
     schemaVersion: "harness.social-execution.v1" as const,
     started: true,
     initialMessageCount: initialMessages.length,
-    initialMessagesHash: options.hashMessages?.(initialMessages)
+    initialMessagesHash: options.hashMessages?.(initialMessages),
+    ...(executionLimits.decisionTimeoutMs === undefined
+      ? {}
+      : { decisionTimeoutMs: executionLimits.decisionTimeoutMs })
   };
   const actorById = new Map(options.actors.map((actor) => [actor.id, actor]));
   const initialState = cloneJson(options.environment.snapshot());
@@ -1120,7 +1159,30 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     };
   }
 
-  while (!options.environment.done() && turnIndex <= maxTransitions) {
+  if (executionLimits.abortSignal?.aborted) {
+    const stateHash = options.hashState?.(options.environment.snapshot());
+    const failure = defaultFailureEvidence("execution_abort", new SocialExecutionLimitError("execution_abort"));
+    failureReason = "Social episode aborted by the harness execution control plane before decision collection.";
+    status = "failed";
+    recordNativeSteps(
+      schedulerFailureStep<TObservation, TPending, TCommand>({
+        optionsId: options.id,
+        traceId: allocateRunnerTraceId(usedNativeTraceIds, `${options.id}:execution-control:prestart`),
+        turnIndex,
+        batchId: `${options.id}:execution-control:prestart`,
+        batchIndex,
+        batchSize: 1,
+        schedulerMode: defaultSchedulerMode,
+        pendingAction: undefined as unknown as TPending,
+        decisionStateHash: stateHash,
+        preStateHash: stateHash,
+        postStateHash: stateHash,
+        failure
+      })
+    );
+  }
+
+  while (!options.environment.done() && turnIndex <= maxTransitions && !executionLimits.abortSignal?.aborted) {
     const pendingActions = options.environment.pendingActions();
     const stateForScheduler = options.environment.snapshot();
     const schedulerMode = resolveSchedulerMode({
@@ -1222,7 +1284,8 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
 	          schedulerMode,
 	          assembleObservation: options.assembleObservation,
 	          traceIdForDecision: options.traceIdForDecision,
-	          actorTurnIndexForDecision: options.actorTurnIndexForDecision
+	          actorTurnIndexForDecision: options.actorTurnIndexForDecision,
+            executionLimits
 	        })
       )
     );
@@ -1251,6 +1314,76 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
       recordNativeSteps(rejectionStep);
       status = "failed";
       failureReason = traceIdentityFailure.message;
+      break;
+    }
+
+    // A signal can fire immediately after concurrent decision collection has
+    // settled. Check again before preflight/message publication/environment
+    // mutation so the generic control plane, not a provider race, owns the
+    // cancellation boundary.
+    if (executionLimits.abortSignal?.aborted) {
+      const abortReason = "Social episode aborted by the harness execution control plane before an environment transition.";
+      const abortFailure = defaultFailureEvidence("execution_abort", new SocialExecutionLimitError("execution_abort"));
+      const batchAbortFailure: SocialStepFailureEvidence = {
+        stage: "batch_aborted",
+        message: `Batch ${batchId} was abandoned before an environment transition because the harness execution control plane aborted.`
+      };
+      const failureForDecision = (): SocialStepFailureEvidence => batchAbortFailure;
+      rejectUncommittedDecisions(decisions, failureForDecision);
+      const abortedState = options.environment.snapshot();
+      const abortedStateHash = options.hashState?.(abortedState);
+      const abortedEventSeqRange = eventSeqRange(options.eventSeq?.(decisionState), options.eventSeq?.(abortedState));
+      const controlStep = schedulerFailureStep<TObservation, TPending, TCommand>({
+        optionsId: options.id,
+        traceId: allocateRunnerTraceId(usedNativeTraceIds, `${options.id}:scheduler:${batchIndex}:execution_abort`),
+        turnIndex,
+        // Keep the system control record outside the joint action batch so a
+        // parallel batch still contains exactly its scheduled actor rows.
+        batchId: `${batchId}:execution-control`,
+        batchIndex,
+        batchSize: 1,
+        schedulerMode,
+        pendingAction: pendingBatch[0],
+        decisionStateHash,
+        preStateHash: decisionStateHash,
+        postStateHash: abortedStateHash,
+        failure: abortFailure
+      });
+      if (schedulerMode === "parallel") {
+        recordNativeSteps(
+          controlStep,
+          ...rejectedParallelDecisionBatchSteps({
+            optionsId: options.id,
+            decisions,
+            batchId,
+            batchIndex,
+            batchSize: pendingBatch.length,
+            decisionStateHash,
+            preStateHash: decisionStateHash,
+            postStateHash: abortedStateHash,
+            eventSeqRange: abortedEventSeqRange,
+            failureForDecision
+          })
+        );
+      } else {
+        recordNativeSteps(
+          controlStep,
+          ...rejectedSequentialDecisionBatchSteps({
+            optionsId: options.id,
+            decisions,
+            batchId,
+            batchIndex,
+            batchSize: pendingBatch.length,
+            schedulerMode,
+            decisionStateHash,
+            preStateHash: decisionStateHash,
+            postStateHash: abortedStateHash,
+            failureForDecision
+          })
+        );
+      }
+      status = "failed";
+      failureReason = abortReason;
       break;
     }
 
@@ -1283,14 +1416,16 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
       const failedEventSeqRange = eventSeqRange(options.eventSeq?.(decisionState), options.eventSeq?.(failedPostState));
       const decisionFailure = adapterFailure ?? defaultFailureEvidence(failedDecision.failureStage, failedDecision.rawError);
       const failureForDecision = (decision: SocialDecision<TObservation, TPending, TCommand>): SocialStepFailureEvidence => {
-        if (!decision.ok) {
-          return decision === failedDecision
-            ? decisionFailure
-            : defaultFailureEvidence(decision.failureStage, decision.rawError);
+        if (decision === failedDecision) return decisionFailure;
+        // Unlike an atomic parallel batch, a batched AEC collection retains
+        // independent decision failures for diagnostic and retry evidence.
+        // Only the uncommitted successful peers are abandoned by the batch.
+        if (schedulerMode !== "parallel" && !decision.ok) {
+          return defaultFailureEvidence(decision.failureStage, decision.rawError);
         }
         return {
           stage: "batch_aborted",
-          message: `Parallel batch ${batchId} was abandoned before stepBatch() because ${failedDecision.actorId} failed during ${failedDecision.failureStage}.`
+          message: `Batch ${batchId} was abandoned before an environment transition because ${failedDecision.actorId} failed during ${failedDecision.failureStage}.`
         };
       };
       rejectUncommittedDecisions(decisions, failureForDecision);
@@ -1495,8 +1630,31 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
   }
 
   if (!options.environment.done() && status !== "failed" && status !== "truncated") {
-    status = "truncated";
-    truncationReason = `maxTransitions ${maxTransitions} reached before terminal state`;
+    if (executionLimits.abortSignal?.aborted) {
+      const abortedState = options.environment.snapshot();
+      const abortedStateHash = options.hashState?.(abortedState);
+      recordNativeSteps(
+        schedulerFailureStep<TObservation, TPending, TCommand>({
+          optionsId: options.id,
+          traceId: allocateRunnerTraceId(usedNativeTraceIds, `${options.id}:execution-control:after-transition`),
+          turnIndex,
+          batchId: `${options.id}:execution-control:after-transition`,
+          batchIndex,
+          batchSize: 1,
+          schedulerMode: defaultSchedulerMode,
+          pendingAction: undefined as unknown as TPending,
+          decisionStateHash: abortedStateHash,
+          preStateHash: abortedStateHash,
+          postStateHash: abortedStateHash,
+          failure: defaultFailureEvidence("execution_abort", new SocialExecutionLimitError("execution_abort"))
+        })
+      );
+      status = "failed";
+      failureReason = "Social episode aborted by the harness execution control plane after a committed environment transition.";
+    } else {
+      status = "truncated";
+      truncationReason = `maxTransitions ${maxTransitions} reached before terminal state`;
+    }
   }
   return {
     id: options.id,
@@ -1657,6 +1815,7 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
   assembleObservation?: SocialObservationAssembler<TObservation, TPending>;
   traceIdForDecision?: SocialTraceIdProvider<TState, TPending>;
   actorTurnIndexForDecision?: SocialActorTurnIndexProvider<TState, TPending>;
+  executionLimits: NormalizedSocialExecutionLimits;
 }): Promise<SocialDecision<TObservation, TPending, TCommand>> {
   const actorId = input.pending.actorId;
   if (!actorId) {
@@ -1735,7 +1894,10 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       pendingAction: cloneJson(input.pending)
     });
     failureStage = "actor_decide";
-    const action = await actor.decide(input.pending);
+    const action = await awaitActorDecisionWithinExecutionLimits(
+      () => actor.decide(input.pending),
+      input.executionLimits
+    );
     const actionWithTraceId = action.traceId ? action : { ...action, traceId };
     return {
       ok: true,
@@ -1749,6 +1911,7 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       transactionId
     };
   } catch (error) {
+    if (error instanceof SocialExecutionLimitError) failureStage = error.failureStage;
     return {
       ok: false,
       actor,
@@ -1764,6 +1927,79 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       error: error instanceof Error ? error.message : String(error),
       rawError: error
     };
+  }
+}
+
+/** A controlled runner failure which deliberately never incorporates an
+ * external abort reason into persisted execution evidence. */
+class SocialExecutionLimitError extends Error {
+  constructor(
+    readonly failureStage: Extract<SocialDecisionFailureStage, "execution_abort" | "decision_timeout">,
+    timeoutMs?: number
+  ) {
+    super(
+      failureStage === "decision_timeout"
+        ? `Social actor decision exceeded the configured ${timeoutMs}ms execution budget.`
+        : "Social actor decision was aborted by the harness execution control plane."
+    );
+    this.name = "SocialExecutionLimitError";
+  }
+}
+
+function normalizeSocialExecutionLimits(limits: SocialExecutionLimits | undefined): NormalizedSocialExecutionLimits {
+  if (!limits) return {};
+  if (
+    limits.decisionTimeoutMs !== undefined &&
+    (!Number.isInteger(limits.decisionTimeoutMs) || limits.decisionTimeoutMs <= 0)
+  ) {
+    throw new Error("Social execution decisionTimeoutMs must be a positive integer when provided.");
+  }
+  return {
+    ...(limits.abortSignal ? { abortSignal: limits.abortSignal } : {}),
+    ...(limits.decisionTimeoutMs === undefined ? {} : { decisionTimeoutMs: limits.decisionTimeoutMs })
+  };
+}
+
+/**
+ * Bound arbitrary actor decisions without making a provider client the
+ * scheduler authority. The underlying actor promise is still observed by the
+ * race, so a late rejection cannot become an unhandled rejection; it simply
+ * has no path back to the already-rejected scheduler transaction.
+ */
+async function awaitActorDecisionWithinExecutionLimits<T>(
+  decide: () => Promise<T> | T,
+  limits: NormalizedSocialExecutionLimits
+): Promise<T> {
+  if (limits.abortSignal?.aborted) throw new SocialExecutionLimitError("execution_abort");
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const contenders: Array<Promise<T>> = [Promise.resolve().then(decide)];
+
+  if (limits.abortSignal) {
+    contenders.push(
+      new Promise<T>((_resolve, reject) => {
+        onAbort = () => reject(new SocialExecutionLimitError("execution_abort"));
+        limits.abortSignal?.addEventListener("abort", onAbort, { once: true });
+      })
+    );
+  }
+  if (limits.decisionTimeoutMs !== undefined) {
+    contenders.push(
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new SocialExecutionLimitError("decision_timeout", limits.decisionTimeoutMs)),
+          limits.decisionTimeoutMs
+        );
+      })
+    );
+  }
+
+  try {
+    return await Promise.race(contenders);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (onAbort) limits.abortSignal?.removeEventListener("abort", onAbort);
   }
 }
 

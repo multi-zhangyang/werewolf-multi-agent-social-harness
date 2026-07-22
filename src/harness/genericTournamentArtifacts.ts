@@ -37,6 +37,8 @@ export interface GenericTournamentRunSetArtifact<TArtifact = unknown> {
   gamesCompleted: number;
   gamesTruncated: number;
   gamesFailed: number;
+  /** Present on new run sets; optional only for legacy v1 artifacts. */
+  gamesUnstarted?: number;
   episodes: GenericTournamentRunSetEpisode<TArtifact>[];
 }
 
@@ -91,6 +93,7 @@ export async function buildGenericTournamentRunSetArtifact<TPrepared, TResult, T
     gamesCompleted: result.gamesCompleted,
     gamesTruncated: result.gamesTruncated,
     gamesFailed: result.gamesFailed,
+    gamesUnstarted: result.gamesUnstarted,
     episodes
   };
   const errors = validateGenericTournamentRunSetArtifact(artifact);
@@ -176,6 +179,12 @@ export function validateGenericTournamentRunSetArtifact<TArtifact>(artifact: Gen
   }
   if (!Number.isInteger(artifact.gamesRequested) || artifact.gamesRequested < artifact.episodes.length) {
     errors.push("gamesRequested must be an integer at least as large as the recorded episode count.");
+  }
+  if (artifact.gamesUnstarted !== undefined) {
+    const expectedUnstarted = artifact.gamesRequested - artifact.episodes.length;
+    if (!Number.isInteger(artifact.gamesUnstarted) || artifact.gamesUnstarted < 0 || artifact.gamesUnstarted !== expectedUnstarted) {
+      errors.push(`gamesUnstarted mismatch: expected ${expectedUnstarted}, received ${artifact.gamesUnstarted}.`);
+    }
   }
   const indices = new Set<number>();
   for (const [position, episode] of artifact.episodes.entries()) {

@@ -52,6 +52,9 @@ export interface GenericExperimentMatrixResult<TResult> {
 
 export interface RunGenericExperimentMatrixOptions<TInput, TResult> {
   experiment: GenericExperimentMatrixSpec<TInput>;
+  /** A global matrix deadline prevents scheduling further cells after the
+   * current domain execution has returned its own lifecycle evidence. */
+  abortSignal?: AbortSignal;
   runCell: (
     input: TInput,
     context: { matrixId: string; index: number; id: string; label: string; group: string; executionId: string }
@@ -75,6 +78,7 @@ export async function runGenericExperimentMatrix<TInput, TResult>(
   const describeError = options.describeError ?? defaultErrorText;
   const cells: Array<GenericExperimentMatrixCellResult<TResult>> = [];
   for (const [index, cell] of options.experiment.cells.entries()) {
+    if (options.abortSignal?.aborted) break;
     const label = cell.label ?? cell.id;
     const group = cell.group ?? "default";
     const executionId = `${options.experiment.id}:cell:${cell.id}:${index}`;
@@ -107,16 +111,27 @@ export async function runGenericExperimentMatrix<TInput, TResult>(
   const cellsCompleted = cells.filter((cell) => cell.status === "completed").length;
   const cellsTruncated = cells.filter((cell) => cell.status === "truncated").length;
   const cellsFailed = cells.filter((cell) => cell.status === "failed").length;
+  const cellsUnstarted = options.experiment.cells.length - cells.length;
+  const hasStartedCell = cellsCompleted + cellsTruncated + cellsFailed > 0;
   return {
     artifactVersion: GENERIC_EXPERIMENT_MATRIX_VERSION,
     kind: "experiment-matrix",
     matrixId: options.experiment.id,
     createdAt,
     completedAt: new Date().toISOString(),
-    status: cellsFailed === 0 ? "completed" : cellsCompleted + cellsTruncated > 0 ? "partial" : "failed",
+    status:
+      cellsUnstarted > 0
+        ? hasStartedCell
+          ? "partial"
+          : "failed"
+        : cellsFailed === 0
+          ? "completed"
+          : cellsCompleted + cellsTruncated > 0
+            ? "partial"
+            : "failed",
     cellsRequested: options.experiment.cells.length,
     cellsAttempted: cells.length,
-    cellsUnstarted: options.experiment.cells.length - cells.length,
+    cellsUnstarted,
     cellsCompleted,
     cellsTruncated,
     cellsFailed,

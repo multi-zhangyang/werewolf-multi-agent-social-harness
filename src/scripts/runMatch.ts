@@ -99,7 +99,8 @@ async function main(): Promise<void> {
           abortSignal: timeoutController.signal
         })
       ),
-      maxTransitions: options.maxTransitions
+      maxTransitions: options.maxTransitions,
+      executionLimits: { abortSignal: timeoutController.signal }
     });
     const harnessTurns = werewolfHarnessTurnEvidenceFromEpisode(result.socialEpisode);
     const harnessErrors = harnessFailureEvidenceFromEpisode(result.socialEpisode);
