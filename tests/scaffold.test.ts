@@ -237,6 +237,74 @@ describe("scaffolded social actor", () => {
     });
   });
 
+  it("receipt-gates typed statement attributions with the rest of durable actor state", async () => {
+    const typedMessage = socialMessage({
+      id: "msg-receipt-gated-tom",
+      seq: 52,
+      senderId: "speaker",
+      visibility: "public",
+      content: "opaque typed intent",
+      speechActs: [
+        {
+          id: "act-receipt-gated-vote",
+          kind: "vote_intent",
+          targetId: "target-b",
+          evidenceRefs: []
+        }
+      ]
+    });
+    const actor = createScaffoldedActor<SocialObservation<{ turn: number }, TestPending>, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      policy: policyFor<SocialObservation<{ turn: number }, TestPending>>("a")
+    });
+    const pending: TestPending = { actorId: "a", kind: "vote" };
+    const context = (traceId: string, transactionId: string) => ({
+      traceId,
+      transactionId,
+      transactional: true as const,
+      turnIndex: 52,
+      batchId: "tom-receipt-batch",
+      batchIndex: 1,
+      batchSize: 1,
+      schedulerMode: "aec" as const,
+      pendingAction: structuredClone(pending)
+    });
+
+    actor.observe(socialObservationFor("a", [typedMessage]), context("trace-tom-rejected", "tom-rejected"));
+    await actor.decide(pending);
+    expect(actor.state.social.theoryOfMind).toBeUndefined();
+    actor.onStepResult({
+      id: "tom-rejected:receipt",
+      status: "rejected",
+      traceId: "trace-tom-rejected",
+      transactionId: "tom-rejected",
+      turnIndex: 52,
+      actorId: "a",
+      pendingAction: pending
+    });
+    expect(actor.state.social.theoryOfMind).toBeUndefined();
+
+    actor.observe(socialObservationFor("a", [typedMessage]), context("trace-tom-committed", "tom-committed"));
+    const action = await actor.decide(pending);
+    actor.onStepResult({
+      id: "tom-committed:receipt",
+      status: "committed",
+      traceId: "trace-tom-committed",
+      transactionId: "tom-committed",
+      turnIndex: 52,
+      actorId: "a",
+      pendingAction: pending,
+      action
+    });
+    expect(actor.state.social.theoryOfMind?.records["msg-receipt-gated-tom:speech-act:act-receipt-gated-vote:theory-of-mind"]).toMatchObject({
+      observerId: "a",
+      subjectId: "speaker",
+      kind: "stated_intent",
+      observedAtTraceId: "trace-tom-committed"
+    });
+  });
+
   it("provides deterministic cloned recall to scaffold policy and reasoner without granting store mutation", async () => {
     let reasonerRecallSeqs: number[] = [];
     let policyRecallSeqs: number[] = [];
@@ -458,6 +526,21 @@ describe("scaffolded social actor", () => {
     expect(social.commitments?.records["hidden-commitment"]).toBeUndefined();
     expect(Object.values(social.commitments?.records ?? {}).some((record) => record.actorId === "natural")).toBe(false);
     expect(Object.values(social.coalitions?.records ?? {}).some((record) => record.memberIds.includes("natural"))).toBe(false);
+    expect(social.theoryOfMind?.records["msg-visible-commitment:speech-act:act-commitment:theory-of-mind"]).toMatchObject({
+      observerId: "a",
+      subjectId: "speaker",
+      kind: "stated_commitment",
+      proposition: {
+        predicate: "commitment",
+        subjectId: "speaker",
+        targetId: "target-a",
+        value: "vote with observer"
+      },
+      sourceMessageId: "msg-visible-commitment",
+      sourceSpeechActId: "act-commitment",
+      evidenceRefs: [{ artifact: "message", id: "msg-visible-commitment", seq: 11, description: "table" }]
+    });
+    expect(social.theoryOfMind?.records["msg-visible-coalition:speech-act:act-coalition:theory-of-mind"]).toBeUndefined();
 
     const journal = social.journal?.entries ?? [];
     expect(journal.every((entry) => entry.hiddenTruthUsed === false)).toBe(true);
@@ -469,6 +552,12 @@ describe("scaffolded social actor", () => {
         evidenceRefs: entry.evidenceRefs
       }))
     ).toEqual([
+      {
+        store: "theoryOfMind",
+        kind: "theory_of_mind.attribution.recorded",
+        range: { start: 11, end: 11 },
+        evidenceRefs: [{ artifact: "message", id: "msg-visible-commitment", seq: 11, description: "table" }]
+      },
       {
         store: "commitments",
         kind: "commitment.added",
@@ -533,7 +622,116 @@ describe("scaffolded social actor", () => {
     expect(social.normSanctions?.records ?? {}).toEqual({});
     expect(social.trustRepairs?.records ?? {}).toEqual({});
     expect(social.betrayals?.records ?? {}).toEqual({});
+    expect(social.theoryOfMind?.records ?? {}).toEqual({});
     expect(social.journal?.entries.filter((entry) => entry.store !== "memory")).toEqual([]);
+  });
+
+  it("records only explicit visible typed declarations as scoped statement attributions", () => {
+    const typed = socialMessage({
+      id: "msg-typed-mental-state",
+      seq: 44,
+      senderId: "speaker",
+      visibility: "public",
+      content: "opaque transport text",
+      speechActs: [
+        {
+          id: "act-claim",
+          kind: "claim",
+          subjectId: "target-b",
+          value: "suspected-wolf",
+          confidence: 0.7,
+          evidenceRefs: []
+        },
+        {
+          id: "act-vote",
+          kind: "vote_intent",
+          targetId: "target-c",
+          value: "vote-target-c",
+          confidence: 0.8,
+          evidenceRefs: []
+        },
+        {
+          id: "act-agreement",
+          kind: "agreement",
+          targetId: "ally-d",
+          value: "shared-plan",
+          evidenceRefs: []
+        }
+      ]
+    });
+    const naturalOnly = socialMessage({
+      id: "msg-natural-mental-state",
+      seq: 45,
+      senderId: "natural",
+      visibility: "public",
+      content: "I truly know target-b is dangerous and will vote target-c.",
+      metadata: { kind: "public-speech" }
+    });
+    const postgameTyped = socialMessage({
+      id: "msg-postgame-mental-state",
+      seq: 46,
+      senderId: "postgame-speaker",
+      visibility: "postgame",
+      content: "postgame only typed statement",
+      speechActs: [
+        {
+          id: "act-postgame",
+          kind: "vote_intent",
+          targetId: "target-z",
+          evidenceRefs: []
+        }
+      ]
+    });
+    const hiddenTyped = socialMessage({
+      id: "msg-hidden-mental-state",
+      seq: 47,
+      senderId: "hidden",
+      visibility: "private",
+      content: "not scoped to observer",
+      recipientIds: ["hidden"],
+      speechActs: [
+        {
+          id: "act-hidden",
+          kind: "vote_intent",
+          targetId: "target-hidden",
+          evidenceRefs: []
+        }
+      ]
+    });
+    const actor = createScaffoldedActor<SocialObservation<{ turn: number }, TestPending>, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      policy: policyFor<SocialObservation<{ turn: number }, TestPending>>("a")
+    });
+
+    actor.observe(
+      socialObservationFor("a", [typed, naturalOnly, postgameTyped]),
+      observationContext({ actorId: "a", kind: "speech" }, 46)
+    );
+    // Re-observing cannot duplicate attributions, and a hidden message that is
+    // present elsewhere in the domain is never handed to this actor's scope.
+    actor.observe(
+      socialObservationFor("a", [typed, naturalOnly, postgameTyped], { visibleState: { turn: 2 } }),
+      observationContext({ actorId: "a", kind: "speech" }, 47)
+    );
+
+    const social = actor.state.social;
+    const records = Object.values(social.theoryOfMind?.records ?? {});
+    expect(records).toHaveLength(3);
+    expect(records.map((record) => ({ kind: record.kind, predicate: record.proposition.predicate, targetId: record.proposition.targetId }))).toEqual([
+      { kind: "stated_assertion", predicate: "claim", targetId: undefined },
+      { kind: "stated_intent", predicate: "vote_intent", targetId: "target-c" },
+      { kind: "stated_agreement", predicate: "agreement", targetId: "ally-d" }
+    ]);
+    expect(records.every((record) => record.observerId === "a" && record.subjectId === "speaker")).toBe(true);
+    expect(records.every((record) => record.sourceMessageId === typed.id && record.sourceMessageSeq === typed.seq)).toBe(true);
+    expect(records.every((record) => record.observedAtTraceId === "trace-scaffold-46")).toBe(true);
+    expect(records.some((record) => record.sourceMessageId === naturalOnly.id)).toBe(false);
+    expect(records.some((record) => record.sourceMessageId === postgameTyped.id)).toBe(false);
+    expect(records.some((record) => record.sourceMessageId === hiddenTyped.id)).toBe(false);
+    expect(social.beliefs.claims).toEqual({});
+    expect(social.journal?.entries.filter((entry) => entry.store === "theoryOfMind")).toHaveLength(3);
+    expect(social.journal?.entries.every((entry) => entry.hiddenTruthUsed === false)).toBe(true);
   });
 
   it("supports wrapped view.social.messages, dedupes repeated observations, and ignores bus-hidden messages", () => {

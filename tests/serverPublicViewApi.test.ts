@@ -255,6 +255,7 @@ describe("public match API redaction", () => {
     ).toBe(true);
     expect(projected.body.agents.every((agent: any) => agent.privateMemos.every((memo: string) => memo === "[REDACTED private memo]"))).toBe(true);
     expect(projected.body.agents.every((agent: any) => agent.social.messageIngestion.seenMessageIds.length === 0)).toBe(true);
+    expect(projected.body.agents.every((agent: any) => !("theoryOfMind" in agent.social))).toBe(true);
     expect(
       projected.body.agents.every((agent: any) =>
         agent.social.memory.entries.every((entry: any) => !entry.content || entry.content === "[REDACTED private memory]")
@@ -347,6 +348,7 @@ describe("public match API redaction", () => {
     expect(projectedJson).not.toContain('"providerRequestId"');
     expect(projectedJson).not.toContain('"retryHistory"');
     expect(projectedJson).not.toContain('"stream"');
+    expect(projectedJson).not.toContain('"theoryOfMind"');
     for (const step of record.artifact!.trajectory) expect(projectedJson).not.toContain(step.reasonerOutput.content);
     for (const message of record.artifact!.socialEpisode.messages.filter((message) => message.visibility !== "public")) {
       expect(projectedJson).not.toContain(message.content);

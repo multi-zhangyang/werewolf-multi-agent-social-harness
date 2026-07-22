@@ -17,6 +17,8 @@ import {
   addSocialBetrayal,
   appendMemory,
   appendSocialMemory,
+  addTheoryOfMindAttribution,
+  addSocialTheoryOfMindAttribution,
   createAgentSocialState,
   createBetrayalLedger,
   createBeliefStore,
@@ -24,6 +26,7 @@ import {
   createCommitmentLedger,
   createGoalStack,
   createGossipLedger,
+  createTheoryOfMindStore,
   createMemoryStore,
   createNormState,
   createNormSanctionLedger,
@@ -87,6 +90,97 @@ describe("agent social state stores", () => {
       goals: createGoalStack()
     });
     expect(JSON.parse(JSON.stringify(state))).toEqual(state);
+  });
+
+  it("keeps evidence-backed statement attributions distinct from first-order beliefs", () => {
+    const state = createAgentSocialState({
+      agentId: "a",
+      profile: { id: "profile-a", model: "stub-model" }
+    });
+    const typedValue = { target: "c", privateNarrative: "do not duplicate this payload into the journal" };
+    const attribution = addSocialTheoryOfMindAttribution(state, {
+      id: "msg-mental:act-vote:theory-of-mind",
+      observerId: "a",
+      subjectId: "b",
+      kind: "stated_intent",
+      proposition: {
+        predicate: "vote_intent",
+        targetId: "c",
+        value: typedValue
+      },
+      source: "speech_act",
+      sourceMessageId: "msg-mental",
+      sourceMessageSeq: 9,
+      sourceSpeechActId: "act-vote",
+      sourceSpeechActKind: "vote_intent",
+      visibility: "public",
+      confidence: 0.8,
+      evidenceRefs: [{ artifact: "message", id: "msg-mental", seq: 9, description: "table" }],
+      observedAtTraceId: "trace-mental",
+      observedAtTurnIndex: 4
+    }, { traceId: "trace-mental", turnIndex: 4, messageSeqRange: { start: 9, end: 9 } });
+
+    expect(attribution).toMatchObject({
+      observerId: "a",
+      subjectId: "b",
+      kind: "stated_intent",
+      proposition: { predicate: "vote_intent", targetId: "c", value: typedValue },
+      sourceMessageId: "msg-mental",
+      sourceSpeechActId: "act-vote",
+      observedAtTraceId: "trace-mental"
+    });
+    typedValue.target = "mutated-outside";
+    expect(state.theoryOfMind?.records[attribution.id].proposition.value).toEqual({
+      target: "c",
+      privateNarrative: "do not duplicate this payload into the journal"
+    });
+    expect(state.beliefs.claims).toEqual({});
+    expect(state.journal?.entries).toMatchObject([
+      {
+        store: "theoryOfMind",
+        mutationKind: "theory_of_mind.attribution.recorded",
+        subjectId: "b",
+        traceId: "trace-mental",
+        turnIndex: 4,
+        messageSeqRange: { start: 9, end: 9 },
+        afterSummary: {
+          kind: "stated_intent",
+          predicate: "vote_intent",
+          hasValue: true,
+          sourceMessageId: "msg-mental",
+          sourceSpeechActId: "act-vote"
+        }
+      }
+    ]);
+    expect(JSON.stringify(state.journal)).not.toContain("do not duplicate this payload into the journal");
+    expect(JSON.parse(JSON.stringify(state))).toEqual(state);
+  });
+
+  it("rejects unsupported theory-of-mind sources rather than accepting postgame or outcome-derived state", () => {
+    const store = createTheoryOfMindStore();
+    const base = {
+      id: "tom-boundary",
+      observerId: "a",
+      subjectId: "b",
+      kind: "stated_assertion" as const,
+      proposition: { predicate: "claim" },
+      source: "speech_act" as const,
+      sourceMessageId: "msg-boundary",
+      sourceMessageSeq: 1,
+      sourceSpeechActId: "act-boundary",
+      sourceSpeechActKind: "claim",
+      visibility: "public" as const,
+      evidenceRefs: [{ artifact: "message" as const, id: "msg-boundary", seq: 1 }]
+    };
+
+    expect(addTheoryOfMindAttribution(store, base)).toMatchObject({ id: "tom-boundary" });
+    expect(() => addTheoryOfMindAttribution(createTheoryOfMindStore(), { ...base, visibility: "postgame" })).toThrow(/postgame-only evidence/);
+    expect(() =>
+      addTheoryOfMindAttribution(createTheoryOfMindStore(), {
+        ...base,
+        evidenceRefs: [{ artifact: "action", id: "later-action", seq: 2 }]
+      })
+    ).toThrow(/matching message evidence/);
   });
 
   it("records ordered redacted mutation journal entries through root social-state wrappers", () => {

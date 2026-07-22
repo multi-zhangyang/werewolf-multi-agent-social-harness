@@ -25240,6 +25240,68 @@ npm run test:e2e
 git diff --check
 ```
 
+## 13.265 Scoped Statement Attribution (Theory-of-Mind Baseline) Lock
+
+Timestamp: `2026-07-22`
+
+`AgentSocialState.theoryOfMind` is now an optional, actor-private, append-only
+store for the **narrowest safe Theory-of-Mind baseline**. It records only that
+observer A saw speaker B make an explicit, typed speech act. It is not a
+first-order `BeliefStore` claim, a free-text classifier, an assertion of
+truthfulness, a prediction of future behaviour, or a channel for hidden domain
+truth.
+
+```text
+scoped visible SocialMessage + explicit non-derived speech act
+  -> staged AgentSocialState mutation
+  -> stated_* attribution with exact message / act evidence
+  -> committed actor receipt
+  -> durable snapshot, checkpoint/fork hash, model-free replay audit
+```
+
+- The only implemented record kinds are `stated_assertion`, `stated_intent`,
+  `stated_commitment`, `stated_request`, `stated_agreement`, and
+  `stated_disagreement`. Their wording is deliberate: `stated_intent` means
+  “A observed B explicitly state an intent”, never “B will do it”.
+- `src/harness/socialObservationIngestor.ts` is the sole automatic ingestion
+  seam. It consumes only the actor-scoped visible-message projection already
+  supplied to the actor, ignores `metadata.socialFacts`-derived acts to avoid
+  conflating domain facts with speaker assertions, ignores the observer’s own
+  messages, and rejects postgame-only material. It never reads raw global
+  transcript/state, role/team truth, later commands/outcomes, evaluator output,
+  or `message.content` to derive a mental state.
+- Each record requires matching message id/sequence evidence plus an explicit
+  speech-act id and kind. A runtime message delivery receipt id is retained
+  when present. The mutation journal is redaction-safe: it records source
+  coordinates and proposition shape, never the raw typed value or narrative.
+- The update is part of the scaffold’s existing staged turn. Rejected or
+  timed-out receipts do not retain it; only committed receipts replace durable
+  actor state. Replay/checkpoint/fork use recorded snapshots and hashes only;
+  they do not reconstruct theory of mind, instantiate an actor, or call a
+  reasoner/provider.
+- `theoryOfMind` is explicitly omitted from `RedactedAgentSocialStateDto`.
+  It must never appear in postgame-redacted or truth-redacted server/browser
+  projections. A future reviewed, aggregate projection would need a separate
+  product contract and redaction policy.
+- It has no default candidate-scoring or evaluator weight. Adding expiry,
+  retractions, contradiction handling, inferred knowledge/belief/goal state,
+  or action-arbitration semantics requires an explicit domain/product contract;
+  do not infer those rules from free text or a later Werewolf action.
+
+Required regression after changing this store, social ingestion, actor-state
+snapshots, replay/fork, or public artifact projection:
+
+```bash
+npm run typecheck
+npx vitest run tests/socialState.test.ts tests/scaffold.test.ts \
+  tests/genericHarnessContract.test.ts tests/serverPublicViewApi.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism
+npm test -- --maxWorkers=1 --no-file-parallelism
+npm run build
+npm run test:e2e
+git diff --check
+```
+
 ## 13.264 Generic Execution Limits And Deadline-Control Lifecycle Lock
 
 Timestamp: `2026-07-21`

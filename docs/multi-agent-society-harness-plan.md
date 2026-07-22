@@ -184,7 +184,7 @@ backlog below tracks remaining execution glue and broader coverage.
 | `ObservationIngestor` | Implemented deterministic baseline for scoped visible social messages. It converts `SocialObservation.visibleMessages` and wrapped `view.social.messages` into evidence-backed message memory plus explicit typed speech-act / structured `metadata.socialFacts` social-state updates. Natural-language-only content is stored as ordinary message memory and is not parsed into social facts. Exact consumed message ids are persisted in the actor-private, versioned `AgentSocialState.messageIngestion` tracker so bounded-memory trimming and checkpoint/fork restoration cannot reapply an already consumed message. | Observation trace id, exact actor-scoped message ids, exact message sequence range, actor-scoped visibility, redaction policy. |
 | `MemoryRetriever` | Retrieves relevant memories by recency, salience, importance, social target, and current pending action. | Memory entry ids, retrieval scores, reason for retrieval. |
 | `BeliefUpdater` | Updates probabilistic claims about roles, teams, statements, contradictions, and action history. | Prior claim id, new evidence refs, confidence delta, contradiction records. |
-| `TheoryOfMindStore` | Tracks what agent A thinks agent B knows, believes, wants, or intends. | Scoped message/action evidence only; no hidden truth. |
+| `TheoryOfMindStore` | Implemented deterministic baseline: records that agent A observed agent B make an explicit, typed statement (`stated_assertion`, `stated_intent`, `stated_commitment`, `stated_request`, `stated_agreement`, or `stated_disagreement`). This is an attribution ledger, not a claim that B is truthful, privately knows a fact, actually believes it, or will act on it. | Exact visible source message/speech-act id and sequence, observer-scoped delivery, evidence refs, receipt-gated durable state, redacted public projection. Free text, hidden/postgame messages, later actions, role/team truth, and evaluator hindsight are not inputs. Future belief/knowledge/goal inference, expiry, retraction, contradiction resolution, and arbitration weighting require an explicit domain contract. |
 | `RelationshipUpdater` | Updates trust, suspicion, affinity, influence, debt, respect, and threat edges. | Message/action/outcome refs and before/after scores. |
 | `ReputationUpdater` | Updates public/private reputation for honesty, competence, cooperation, threat, and norm compliance. | Scope, audience, evidence, confidence, source. |
 | `NormLifecycle` | Creates, reinforces, violates, sanctions, and repairs norms. | Norm id, expected behavior, violation evidence, sanction/repair evidence. |
@@ -207,7 +207,10 @@ Implementation order:
 2. Treat explicit actor-scoped speech-act and structured-fact ingestion as the
    current deterministic baseline. Relationship and reputation consequences
    require explicit structured numeric deltas; ordinary visible speech is not a
-   default relationship/reputation mutation source.
+   default relationship/reputation mutation source. The same scoped ingestion
+   now records only explicit statement-level Theory-of-Mind attributions; it
+   never parses natural language into a mental state or treats an eventual
+   action/outcome as evidence of a prior private intent.
 3. Treat generic scaffold visible social-message observation ingestion as the
    current deterministic baseline. It reuses scoped `SocialObservation` /
    wrapped `view.social.messages` contracts, preserves hidden-truth exclusion,

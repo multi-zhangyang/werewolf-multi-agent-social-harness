@@ -172,6 +172,90 @@ describe("generic social harness contract", () => {
     expect(replay.messages).toEqual(episode.messages);
   });
 
+  it("records typed statement attributions in a non-Werewolf actor snapshot without replay-time inference", async () => {
+    const speaker = new LedgerActor("a", () => ({
+      actorId: "a",
+      kind: "record",
+      command: { actorId: "a", entry: "typed-statement" },
+      messages: [
+        message("public-ledger", "a", ["a", "b", "c"], "public", "opaque typed vote intent", [
+          {
+            id: "ledger-vote-intent",
+            kind: "vote_intent",
+            targetId: "c",
+            value: "ledger-target-c",
+            confidence: 0.9,
+            evidenceRefs: []
+          }
+        ])
+      ]
+    }));
+    const observer = new ScaffoldedSocialActor<LedgerObservation, LedgerPending, LedgerCommand>({
+      id: "b",
+      profile: { id: "ledger-observer-b", model: "deterministic-b", policyId: "ledger-policy" },
+      policy: {
+        id: "ledger-policy",
+        decide(input) {
+          return {
+            actorId: input.agent.id as LedgerActorId,
+            kind: "record",
+            command: { actorId: input.agent.id as LedgerActorId, entry: "observer-commit" }
+          };
+        }
+      }
+    });
+    const episode = await runHarnessEpisode<LedgerState, LedgerObservation, LedgerPending, LedgerCommand>({
+      id: "ledger-theory-of-mind",
+      environment: new LedgerEnvironment({ actorIds: ["a", "b"] }),
+      actors: [speaker, observer],
+      channels: [publicChannel],
+      schedulerMode: "aec",
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      assembleObservation(context) {
+        return {
+          ...context.environmentObservation,
+          visibleMessages: context.visibleSocial.messages,
+          channels: context.visibleSocial.channels
+        };
+      }
+    });
+
+    const attribution = observer.state.social.theoryOfMind?.records[
+      "msg-1:speech-act:ledger-vote-intent:theory-of-mind"
+    ];
+    expect(attribution).toMatchObject({
+      observerId: "b",
+      subjectId: "a",
+      kind: "stated_intent",
+      proposition: { predicate: "vote_intent", targetId: "c", value: "ledger-target-c" },
+      sourceMessageId: "msg-1",
+      sourceMessageSeq: 1,
+      sourceSpeechActId: "ledger-vote-intent",
+      sourceDeliveryReceiptId: "msg-1:delivery:2:b",
+      visibility: "public"
+    });
+    expect(observer.state.social.beliefs.claims).toEqual({});
+    expect(observer.state.social.journal?.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          store: "theoryOfMind",
+          mutationKind: "theory_of_mind.attribution.recorded",
+          hiddenTruthUsed: false
+        })
+      ])
+    );
+
+    const replay = replaySocialEpisode({
+      episode,
+      environment: new LedgerEnvironment({ actorIds: ["a", "b"] }),
+      hashState: hashStableState,
+      hashMessages: hashStableState
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.mismatches).toEqual([]);
+  });
+
   it("records a non-Werewolf episode and checkpoint through the generic artifact envelope", async () => {
     const agents = [{ id: "a", durableMemoryVersion: 1 }];
     const episode = await runHarnessEpisode<LedgerState, LedgerObservation, LedgerPending, LedgerCommand>({
@@ -992,9 +1076,10 @@ function message(
   senderId: LedgerActorId,
   recipientIds: LedgerActorId[],
   visibility: "public" | "private",
-  content: string
+  content: string,
+  speechActs?: SocialMessage["speechActs"]
 ): LedgerMessageDraft {
-  return { channelId, senderId, recipientIds, visibility, content };
+  return { channelId, senderId, recipientIds, visibility, content, speechActs };
 }
 
 function clone<T>(value: T): T {

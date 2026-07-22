@@ -6,6 +6,7 @@ import {
   addSocialGossip,
   addSocialNorm,
   addSocialNormSanction,
+  addSocialTheoryOfMindAttribution,
   addSocialTrustRepair,
   appendSocialMemory,
   ensureSocialMessageIngestionState,
@@ -253,6 +254,7 @@ function recordSpeechActSocialFacts(
 ): void {
   for (const [actIndex, act] of (message.speechActs ?? []).entries()) {
     if (isMetadataDerivedSpeechAct(act)) continue;
+    recordSpeechActTheoryOfMindAttribution(social, message, act, actIndex, evidence, observerId, context);
     if (act.kind === "claim") {
       recordSpeechActClaim(social, message, act, actIndex, evidence, observerId, context);
       continue;
@@ -264,6 +266,89 @@ function recordSpeechActSocialFacts(
     if (act.kind === "coalition_signal") {
       recordSpeechActCoalitionRecord(social, message, act, actIndex, evidence, observerId, context);
     }
+  }
+}
+
+/**
+ * Record only the narrow statement-level form of theory of mind: the observer
+ * saw this speaker make this typed act.  The record does not assert that the
+ * speaker is truthful, privately knows the proposition, will honour it, or
+ * that the observer accepts it as a first-order belief.
+ */
+function recordSpeechActTheoryOfMindAttribution(
+  social: AgentSocialState,
+  message: SocialMessage,
+  act: SocialSpeechAct,
+  actIndex: number,
+  evidence: EvidenceRef,
+  observerId: string,
+  context?: SocialStateMutationContext
+): void {
+  if (message.senderId === observerId || message.visibility === "postgame") return;
+  const kind = theoryOfMindKindForSpeechAct(act.kind);
+  if (!kind) return;
+  const actId = speechActId(act, actIndex);
+  const id = `${message.id}:speech-act:${actId}:theory-of-mind`;
+  if (social.theoryOfMind?.records[id]) return;
+  const confidence = numberMetadata(act.confidence);
+  const deliveryReceiptId = message.deliveryReceipts?.find(
+    (receipt) =>
+      receipt.observerId === observerId &&
+      receipt.messageId === message.id &&
+      receipt.messageSeq === message.seq
+  )?.id;
+  addSocialTheoryOfMindAttribution(social, {
+    id,
+    observerId,
+    subjectId: message.senderId,
+    kind,
+    proposition: {
+      predicate: String(act.kind),
+      subjectId: stringMetadata(act.subjectId),
+      targetId: stringMetadata(act.targetId),
+      value: cloneJson(act.value)
+    },
+    source: "speech_act",
+    sourceMessageId: message.id,
+    sourceMessageSeq: message.seq,
+    sourceSpeechActId: actId,
+    sourceSpeechActKind: String(act.kind),
+    sourceDeliveryReceiptId: deliveryReceiptId,
+    visibility: message.visibility,
+    confidence: confidence !== undefined && confidence >= 0 && confidence <= 1 ? confidence : undefined,
+    evidenceRefs: [evidence],
+    observedAtTraceId: context?.traceId,
+    observedAtTurnIndex: context?.turnIndex
+  }, context);
+}
+
+function theoryOfMindKindForSpeechAct(kind: SocialSpeechAct["kind"]):
+  | "stated_assertion"
+  | "stated_intent"
+  | "stated_commitment"
+  | "stated_request"
+  | "stated_agreement"
+  | "stated_disagreement"
+  | undefined {
+  switch (kind) {
+    case "claim":
+    case "role_claim":
+    case "accusation":
+    case "defense":
+    case "role_action":
+      return "stated_assertion";
+    case "vote_intent":
+      return "stated_intent";
+    case "commitment":
+      return "stated_commitment";
+    case "request":
+      return "stated_request";
+    case "agreement":
+      return "stated_agreement";
+    case "disagreement":
+      return "stated_disagreement";
+    default:
+      return undefined;
   }
 }
 
