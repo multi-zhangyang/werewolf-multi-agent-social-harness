@@ -264,7 +264,10 @@ requested evaluator registry before starting work, delegates only domain-owned
 prepare/run/artifact projections, binds every produced episode to that exact
 experiment provenance, persists the canonical episode plus reviewed
 metric/failure projections from the evaluation report, and materializes a
-lifecycle-complete tournament run-set. A contradictory
+lifecycle-complete tournament run-set. A required `HarnessExperimentRunStore`
+persists the active schedule before the first prepare and finalizes an ordered,
+reference-only run record against canonical episode-store reads. It does not
+copy episode truth or invoke actors/models during recovery. A contradictory
 adapter-supplied provenance is rejected rather than overwritten. The runner
 passes every adapter callback an isolated control-plane snapshot, validates
 the evaluation context against the canonical artifact, races in-flight work

@@ -99,7 +99,7 @@ Additional user preferences:
 - The user wants multi-agent adversarial society design first; Werewolf is the presentation/domain.
 - Real model calls must use streaming to reduce timeout risk.
 - The env file is configured for the OpenAI-compatible endpoint and the sole
-  live validation model `poolside/laguna-s-2.1:free`; do not ask the
+  live validation model `cohere/north-mini-code:free`; do not ask the
   user for the key again unless calls fail due to authentication or
   connectivity.
 - For large research or implementation tasks, use parallel subagents when allowed by the current tool policy and when the work can be split cleanly.
@@ -210,7 +210,7 @@ otherwise:
 
 ```text
 LLM_CHAT_COMPLETIONS_URL=https://api.2go.live/v1/chat/completions
-LLM_MODELS=poolside/laguna-s-2.1:free
+LLM_MODELS=cohere/north-mini-code:free
 LLM_STREAM=true
 ```
 
@@ -485,7 +485,7 @@ Live API detail:
 
 - Configured endpoint variable: `LLM_CHAT_COMPLETIONS_URL`.
 - Configured model variable: `LLM_MODELS`, currently restricted to
-  `poolside/laguna-s-2.1:free` for live validation.
+  `cohere/north-mini-code:free` for live validation.
 - Configured stream flag: `LLM_STREAM=true`.
 - The API key belongs only in local env files and must never be copied into
   docs, test fixtures, final answers, issue text, screenshots, frontend payloads,
@@ -706,7 +706,7 @@ Repository policy:
   `stream: true`.
 - The configured endpoint is represented by `LLM_CHAT_COMPLETIONS_URL`.
 - The configured model list is represented by `LLM_MODELS`; the current
-  user-selected live validation model is `poolside/laguna-s-2.1:free`.
+  user-selected live validation model is `cohere/north-mini-code:free`.
 - The stream flag is represented by `LLM_STREAM=true`.
 - Do not send `max_tokens`, `max_completion_tokens`, or equivalent max-token
   fields on live provider requests unless a later explicit user instruction
@@ -1081,7 +1081,7 @@ Persistent non-secret values:
 
 ```text
 LLM_CHAT_COMPLETIONS_URL=https://api.2go.live/v1/chat/completions
-LLM_MODELS=poolside/laguna-s-2.1:free
+LLM_MODELS=cohere/north-mini-code:free
 LLM_STREAM=true
 ```
 
@@ -4671,7 +4671,7 @@ When using LLM APIs:
 - do not use fake fallback for real harness validation
 - record latency, usage, provider request id, attempts, and errors
 - read provider config from `.env` / `.env.local`
-- the sole default live validation model is `poolside/laguna-s-2.1:free`
+- the sole default live validation model is `cohere/north-mini-code:free`
   unless the user explicitly changes it later
 - call the OpenAI-compatible chat completions endpoint with `stream: true` for
   real model decisions
@@ -27054,3 +27054,85 @@ Known completion gaps remain active rather than being hidden by this slice:
   stricter evidence/denominator contracts;
 - full canonical evaluation reports and generic run sets need restart-safe
   persistence and evidence-ref resolution.
+
+## 13.283 Restart-Safe Generic Experiment Run Authority Lock
+
+Timestamp: `2026-07-22`
+
+The generic experiment composition root now requires a durable run authority
+in addition to the canonical episode store:
+
+- `runGenericExperiment()` resolves all static preflight contracts, creates one
+  canonical provenance record, and calls `runStore.begin()` before the first
+  domain `prepareEpisode`. The same run-set id and creation timestamp are used
+  for the durable header and final run-set.
+- Normal prepare/run/artifact/evaluation failures still flow through the
+  tournament lifecycle and finalize as reviewed failed/unstarted membership.
+  If finalization itself fails, already published episode artifacts remain
+  valid orphans and actors/models are never rerun to hide the failure.
+- `HarnessExperimentRunStore` writes immutable active and finalized revisions.
+  It owns complete experiment provenance, expected count, ordered lifecycle
+  membership, reviewed pre-artifact failures, and references to canonical
+  episodes. `HarnessEpisodeArtifactStore` remains the only owner of episode
+  artifacts, metrics, evaluator failures, trajectories, and checkpoints.
+- Finalize and every finalized get/list/restart recovery re-read the canonical
+  episode artifact and sidecars, compare artifact/provenance/lifecycle hashes,
+  and reject missing or drifting references. Recovery does not construct an
+  actor, policy, reasoner, provider client, or model request.
+- Run-set ids are SHA-256 host directory identities. Revision records and
+  manifests are content-bound; `O_NOFOLLOW` reads, ordinary-file checks,
+  realpath containment, canonical revision ordering, immutable header checks,
+  and formal-path symlink rejection fail closed. `index.json` is only a
+  rebuildable cache.
+- The run-set validator now binds optional canonical experiment provenance to
+  domain, seed, episode count, canonical episode position/seed, embedded
+  artifact provenance, and run id.
+
+Validation for this slice includes focused restart, pre-artifact failure,
+tamper, symlink rollback, orchestrator ordering, canonical episode reference,
+typecheck, full deterministic tests, production build, and Playwright. No live
+provider path changed; after the user selected a new validation model, the
+ordinary generic streaming probe was nevertheless rerun successfully without a
+model-specific implementation.
+
+Known boundaries remain explicit: the current store records active/finalized
+revisions rather than every intermediate preparing/running stage; cross-process
+writes require a single server writer; complete evaluation reports are not yet
+stored as canonical sidecars; and malicious deletion of a whole finalized
+revision requires an external trusted HEAD/WORM log to prove rollback.
+
+## 13.284 North Mini Code Runtime Selection And Live Validation Lock
+
+Timestamp: `2026-07-22`
+
+The latest explicit user selection replaces the prior live validation default:
+
+```text
+LLM_MODELS=cohere/north-mini-code:free
+```
+
+`.env` and `.env.local` now carry that non-secret model selection while the
+existing endpoint/key variables remain untouched and undisclosed. This is a
+configuration change only: the model uses the same provider-neutral
+OpenAI-compatible Chat Completions streaming client, reasoner, policy,
+arbitration, environment validation, and trace path. No Cohere/model-name
+adapter, parser, prompt, fallback, token-limit field, or execution branch was
+added.
+
+The real bounded probe completed successfully:
+
+```text
+model=cohere/north-mini-code:free
+protocol=openai-chat-completions
+stream.enabled=true
+stream.completed=true
+stream.completedBy=provider_stop_event
+command=seer.inspect
+environmentValidated=true
+promptTokens=423
+completionTokens=1105
+modelLatencyMs=59949
+```
+
+The earlier historical Grok/Laguna execution locks remain historical evidence;
+this newest lock is the current runtime selection authority.

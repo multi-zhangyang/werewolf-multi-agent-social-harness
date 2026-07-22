@@ -35,6 +35,20 @@ export interface GenericExperimentArtifactStore<TArtifact extends GenericEpisode
   put(artifact: TArtifact, options?: { evaluationReport?: HarnessEvaluationReport }): Promise<unknown>;
 }
 
+/**
+ * Durable experiment lifecycle authority. Implementations persist only
+ * provenance and ordered canonical-episode references; episode content remains
+ * owned by GenericExperimentArtifactStore.
+ */
+export interface GenericExperimentRunStore<TArtifact extends GenericEpisodeEnvelope> {
+  begin(input: {
+    runSetId: string;
+    experiment: GenericExperimentProvenanceV1;
+    createdAt?: string;
+  }): Promise<unknown>;
+  finalize(runSet: GenericTournamentRunSetArtifact<TArtifact>): Promise<unknown>;
+}
+
 export interface GenericExperimentEvaluationAdapter<
   TResult,
   TArtifact,
@@ -114,6 +128,7 @@ export interface RunGenericExperimentOptions<
     TTrajectory
   >;
   artifactStore: GenericExperimentArtifactStore<TArtifact>;
+  runStore: GenericExperimentRunStore<TArtifact>;
   abortSignal?: AbortSignal;
   now?: () => string;
   runSetId?: string;
@@ -163,14 +178,24 @@ export async function runGenericExperiment<
   if (!options.artifactStore || typeof options.artifactStore.put !== "function") {
     throw new Error("Generic experiment execution requires a canonical episode artifact store.");
   }
+  if (
+    !options.runStore ||
+    typeof options.runStore.begin !== "function" ||
+    typeof options.runStore.finalize !== "function"
+  ) {
+    throw new Error("Generic experiment execution requires a durable experiment run store.");
+  }
   if (options.runSetId !== undefined && !options.runSetId.trim()) {
     throw new Error("Generic experiment runSetId must be a nonempty string when present.");
   }
   const selectedEvaluators = resolveEvaluators(normalizedSpec, options.adapter.evaluation?.evaluators ?? []);
   const experiment = createGenericExperimentProvenance(normalizedSpec);
   const specHash = experiment.specHash;
-  const deadline = createExperimentDeadline(options.abortSignal, normalizedSpec.timeoutPolicy.runTimeoutMs);
   const now = options.now ?? (() => new Date().toISOString());
+  const runSetId = options.runSetId ?? normalizedSpec.id;
+  const runSetCreatedAt = now();
+  await options.runStore.begin({ runSetId, experiment, createdAt: runSetCreatedAt });
+  const deadline = createExperimentDeadline(options.abortSignal, normalizedSpec.timeoutPolicy.runTimeoutMs);
   try {
     const tournament = await runTournamentEpisodes<
       TPrepared,
@@ -241,9 +266,10 @@ export async function runGenericExperiment<
       statusOf: (episode) => episode.status
     });
     const runSet = await buildGenericTournamentRunSetArtifact({
-      runSetId: options.runSetId ?? normalizedSpec.id,
-      createdAt: now(),
+      runSetId,
+      createdAt: runSetCreatedAt,
       result: tournament,
+      experiment,
       adapter: {
         domainId: normalizedSpec.domainId,
         artifactForEpisode: (episode) => episode.artifact,
@@ -255,6 +281,7 @@ export async function runGenericExperiment<
         evaluationReportOf: (episode) => episode.evaluationReport
       }
     });
+    await options.runStore.finalize(runSet);
     return {
       normalizedSpec,
       experiment: structuredClone(experiment),

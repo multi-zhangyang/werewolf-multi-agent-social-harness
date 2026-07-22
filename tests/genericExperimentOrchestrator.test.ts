@@ -6,6 +6,7 @@ import type { SocialDomainAdapterManifest } from "../src/harness/domainAdapter";
 import type { HarnessEpisodeArtifactEnvelope } from "../src/harness/episodeArtifacts";
 import { HarnessEpisodeArtifactStore } from "../src/harness/episodeArtifactStore";
 import { runGenericExperiment } from "../src/harness/experimentOrchestrator";
+import { HarnessExperimentRunStore } from "../src/harness/experimentRunStore";
 import {
   createGenericExperimentProvenance,
   type GenericExperimentSpecV1
@@ -130,16 +131,33 @@ describe("generic normalized experiment orchestration", () => {
     let decisions = 0;
     let preparations = 0;
     const store = await HarnessEpisodeArtifactStore.open<Artifact>({
-      baseDirectory: root,
+      baseDirectory: path.join(root, "episodes"),
       verifyArtifact: verifyArtifact
     });
+    const persistedRunStore = await HarnessExperimentRunStore.open({
+      baseDirectory: path.join(root, "experiment-runs"),
+      episodeStore: store,
+      now: () => "2026-07-22T14:00:00.000Z"
+    });
+    const lifecycle: string[] = [];
     const result = await runGenericExperiment({
       spec: experimentSpec(),
       artifactStore: store,
+      runStore: {
+        async begin(input) {
+          lifecycle.push("begin");
+          return persistedRunStore.begin(input);
+        },
+        async finalize(runSet) {
+          lifecycle.push("finalize");
+          return persistedRunStore.finalize(runSet);
+        }
+      },
       now: () => "2026-07-22T14:00:00.000Z",
       adapter: {
         domainId: "counter-orchestration",
         prepareEpisode(context) {
+          lifecycle.push(`prepare:${context.index}`);
           preparations += 1;
           return { runId: `${context.spec.id}:${context.seed}`, context };
         },
@@ -196,13 +214,31 @@ describe("generic normalized experiment orchestration", () => {
     ]);
     expect(preparations).toBe(2);
     expect(decisions).toBe(2);
+    expect(lifecycle).toEqual(["begin", "prepare:0", "prepare:1", "finalize"]);
 
-    const restarted = await HarnessEpisodeArtifactStore.open<Artifact>({ baseDirectory: root, verifyArtifact });
+    const restarted = await HarnessEpisodeArtifactStore.open<Artifact>({
+      baseDirectory: path.join(root, "episodes"),
+      verifyArtifact
+    });
     expect(await restarted.list()).toHaveLength(2);
     expect(await restarted.getMetrics("counter-experiment:counter-orchestration-seed:g1")).toMatchObject([
       { id: "episode.counter_value", value: 1 }
     ]);
     expect(await restarted.getFailures("counter-experiment:counter-orchestration-seed:g1")).toEqual([]);
+    const restartedRunStore = await HarnessExperimentRunStore.open({
+      baseDirectory: path.join(root, "experiment-runs"),
+      episodeStore: restarted
+    });
+    expect(await restartedRunStore.get("counter-experiment")).toMatchObject({
+      state: "finalized",
+      gamesRequested: 2,
+      gamesCompleted: 2,
+      gamesUnstarted: 0,
+      episodes: [
+        { index: 0, runId: "counter-experiment:counter-orchestration-seed:g1", metricCount: 1 },
+        { index: 1, runId: "counter-experiment:counter-orchestration-seed:g2", metricCount: 1 }
+      ]
+    });
     expect(decisions).toBe(2);
   });
 
@@ -229,6 +265,7 @@ describe("generic normalized experiment orchestration", () => {
           puts += 1;
         }
       },
+      runStore: memoryRunStore(),
       adapter: {
         domainId: "counter-orchestration",
         prepareEpisode: () => ({}),
@@ -249,6 +286,7 @@ describe("generic normalized experiment orchestration", () => {
     const mutationResult = await runGenericExperiment({
       spec: { ...experimentSpec(), episodeCount: 1, evaluatorIds: [] },
       artifactStore: { put: async () => undefined },
+      runStore: memoryRunStore(),
       adapter: {
         domainId: "counter-orchestration",
         prepareEpisode(context) {
@@ -276,6 +314,7 @@ describe("generic normalized experiment orchestration", () => {
         timeoutPolicy: { id: "counter.timeout", version: "1", runTimeoutMs: 25 }
       },
       artifactStore: { put: async () => undefined },
+      runStore: memoryRunStore(),
       adapter: {
         domainId: "counter-orchestration",
         prepareEpisode: () => ({}),
@@ -299,6 +338,7 @@ describe("generic normalized experiment orchestration", () => {
     const result = await runGenericExperiment({
       spec: { ...experimentSpec(), episodeCount: 1, continueOnError: false },
       artifactStore: { put: async () => { puts += 1; } },
+      runStore: memoryRunStore(),
       adapter: {
         domainId: "counter-orchestration",
         prepareEpisode: () => ({}),
@@ -330,6 +370,7 @@ describe("generic normalized experiment orchestration", () => {
     const base = {
       spec: experimentSpec(),
       artifactStore: { put: async () => undefined },
+      runStore: memoryRunStore(),
       adapter: {
         domainId: "counter-orchestration",
         prepareEpisode() {
@@ -447,4 +488,11 @@ async function temporaryRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "generic-experiment-orchestrator-"));
   roots.push(root);
   return root;
+}
+
+function memoryRunStore() {
+  return {
+    async begin() {},
+    async finalize() {}
+  };
 }

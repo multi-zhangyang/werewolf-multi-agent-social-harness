@@ -143,8 +143,24 @@ export type {
   GenericExperimentEvaluationAdapter,
   GenericExperimentExecutionAdapter,
   GenericExperimentExecutionResult,
+  GenericExperimentRunStore,
   RunGenericExperimentOptions
 } from "./experimentOrchestrator";
+export {
+  HARNESS_EXPERIMENT_RUN_INDEX_VERSION,
+  HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION,
+  HARNESS_EXPERIMENT_RUN_RECORD_VERSION,
+  HarnessExperimentRunStore
+} from "./experimentRunStore";
+export type {
+  GenericExperimentEpisodeAuthority,
+  HarnessExperimentRunEpisodeReferenceV1,
+  HarnessExperimentRunManifestV1,
+  HarnessExperimentRunRecordV1,
+  HarnessExperimentRunStoreEntry,
+  HarnessExperimentRunStoreIndexV1,
+  HarnessExperimentRunStoreOptions
+} from "./experimentRunStore";
 export {
   GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE,
   runTournamentEpisodes

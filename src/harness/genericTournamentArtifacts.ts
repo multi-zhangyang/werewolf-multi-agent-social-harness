@@ -8,6 +8,11 @@ import type {
   TournamentEpisodeLifecycle
 } from "./tournamentRunner";
 import { GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE } from "./tournamentRunner";
+import {
+  validateGenericExperimentProvenance,
+  type GenericExperimentProvenanceV1
+} from "./experimentSpec";
+import { hashStableJsonValue } from "./hash";
 
 /**
  * A small, domain-neutral research artifact set.  This intentionally stops at
@@ -38,6 +43,8 @@ export interface GenericTournamentRunSetArtifact<TArtifact = unknown> {
   gamesCompleted: number;
   gamesTruncated: number;
   gamesFailed: number;
+  /** Full normalized control-plane authority; absent only for legacy/direct run sets. */
+  experiment?: GenericExperimentProvenanceV1;
   /** Present on new run sets; optional only for legacy v1 artifacts. */
   gamesUnstarted?: number;
   episodes: GenericTournamentRunSetEpisode<TArtifact>[];
@@ -57,6 +64,7 @@ export interface BuildGenericTournamentRunSetOptions<TPrepared, TResult, TArtifa
   createdAt?: string;
   result: GenericTournamentResult<TPrepared, TResult>;
   adapter: GenericTournamentArtifactAdapter<TResult, TArtifact>;
+  experiment?: GenericExperimentProvenanceV1;
 }
 
 export interface GenericTournamentArtifactDirectory {
@@ -94,6 +102,7 @@ export async function buildGenericTournamentRunSetArtifact<TPrepared, TResult, T
     gamesCompleted: result.gamesCompleted,
     gamesTruncated: result.gamesTruncated,
     gamesFailed: result.gamesFailed,
+    ...(options.experiment ? { experiment: structuredClone(options.experiment) } : {}),
     gamesUnstarted: result.gamesUnstarted,
     episodes
   };
@@ -165,6 +174,18 @@ export function validateGenericTournamentRunSetArtifact<TArtifact>(artifact: Gen
     errors.push(`artifactVersion must be ${GENERIC_TOURNAMENT_RUN_SET_ARTIFACT_VERSION}.`);
   }
   if (artifact.kind !== "tournament-run-set") errors.push("kind must be tournament-run-set.");
+  if (artifact.experiment !== undefined) {
+    errors.push(...validateGenericExperimentProvenance(artifact.experiment, "experiment"));
+    if (artifact.experiment.spec.domainId !== artifact.domainId) {
+      errors.push("experiment domainId must match the run-set domainId.");
+    }
+    if (artifact.experiment.spec.seed !== artifact.seed) {
+      errors.push("experiment seed must match the run-set seed.");
+    }
+    if (artifact.experiment.spec.episodeCount !== artifact.gamesRequested) {
+      errors.push("experiment episodeCount must match gamesRequested.");
+    }
+  }
   for (const [field, value] of [
     ["domainId", artifact.domainId],
     ["runSetId", artifact.runSetId],
@@ -193,13 +214,29 @@ export function validateGenericTournamentRunSetArtifact<TArtifact>(artifact: Gen
   const indices = new Set<number>();
   for (const [position, episode] of artifact.episodes.entries()) {
     if (!Number.isInteger(episode.index) || episode.index < 0) errors.push(`episodes[${position}].index must be a non-negative integer.`);
+    if (episode.index !== position) errors.push(`episodes[${position}].index must equal its canonical position ${position}.`);
     if (indices.has(episode.index)) errors.push(`episodes[${position}] duplicates index ${episode.index}.`);
     indices.add(episode.index);
     if (typeof episode.seed !== "string" || !episode.seed) errors.push(`episodes[${position}].seed is required.`);
+    const expectedSeed = `${artifact.seed}:g${position + 1}`;
+    if (episode.seed !== expectedSeed) errors.push(`episodes[${position}].seed must be ${expectedSeed}.`);
     if (episode.status !== "completed" && episode.status !== "truncated" && episode.status !== "failed") {
       errors.push(`episodes[${position}].status is invalid.`);
     }
     if (episode.error !== undefined && typeof episode.error !== "string") errors.push(`episodes[${position}].error must be a string when present.`);
+    if (episode.artifact && artifact.experiment) {
+      const candidate = episode.artifact as Record<string, unknown>;
+      const episodeExperiment = candidate.experiment;
+      if (
+        !episodeExperiment ||
+        hashStableJsonValue(episodeExperiment) !== hashStableJsonValue(artifact.experiment)
+      ) {
+        errors.push(`episodes[${position}].artifact experiment must match the run-set experiment.`);
+      }
+      if (typeof candidate.runId !== "string" || candidate.runId !== episode.runId) {
+        errors.push(`episodes[${position}].artifact runId must match the run-set episode runId.`);
+      }
+    }
   }
   return errors;
 }
