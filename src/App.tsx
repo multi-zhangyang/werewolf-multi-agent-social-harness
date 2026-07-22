@@ -2519,12 +2519,6 @@ export function App() {
     window.history.replaceState(window.history.state, "", nextUrl);
   }, [workspace]);
 
-  useEffect(() => {
-    if (inspector && isCompactLayout) {
-      setMobileInspectorOpen(true);
-    }
-  }, [inspector, isCompactLayout]);
-
   const menuItems: MenuProps["items"] = workspaceItems.map((item) => ({
     key: item.id,
     icon: item.icon,
@@ -2852,7 +2846,7 @@ export function App() {
             <Space align="start">
               <ExperimentOutlined style={{ fontSize: 28, color: "#1455d9" }} />
               <Flex vertical gap={4}>
-                <Title level={4} style={{ margin: 0 }}>
+                <Title level={1} style={{ margin: 0 }}>
                   多 Agent 社会 Harness Cockpit
                 </Title>
                 <Space size={4} wrap>
@@ -2869,12 +2863,14 @@ export function App() {
               </Flex>
             </Space>
 
-            <Menu
-              mode="inline"
-              selectedKeys={[workspace]}
-              items={menuItems}
-              onClick={({ key }) => handleWorkspaceChange(key as Workspace)}
-            />
+            <nav aria-label="工作区导航">
+              <Menu
+                mode="inline"
+                selectedKeys={[workspace]}
+                items={menuItems}
+                onClick={({ key }) => handleWorkspaceChange(key as Workspace)}
+              />
+            </nav>
             <RunContextPanel
               artifactView={artifactView}
               onArtifactViewChange={(value) => void handleArtifactViewChange(value)}
@@ -2915,7 +2911,7 @@ export function App() {
                   ]}
                 />
                 <Space size={8} wrap>
-                  <Title level={isCompactLayout ? 4 : 3} style={{ margin: 0 }}>
+                  <Title level={2} style={{ margin: 0 }}>
                     {activeWorkspace.label}
                   </Title>
                   <Tag color={artifact ? "processing" : "default"}>{artifact ? "artifact loaded" : "artifact not loaded"}</Tag>
@@ -2968,7 +2964,7 @@ export function App() {
           </Header>
 
           <Layout style={{ minWidth: 0 }}>
-            <Content style={{ minWidth: 0, padding: isCompactLayout ? 12 : 20 }}>
+            <main aria-label={`${activeWorkspace.label} 工作区`} style={{ minWidth: 0, padding: isCompactLayout ? 12 : 20 }}>
               <div role="status" aria-live="polite">
                 <StatusBanner status={status} error={error} busy={busy} />
               </div>
@@ -2976,9 +2972,9 @@ export function App() {
               <KpiGrid matches={matches} artifact={artifact} comparison={comparison} replay={replay} />
 
               <Card style={{ marginTop: 16 }}>
-                <Tabs destroyOnHidden activeKey={workspace} items={tabItems} onChange={(key) => handleWorkspaceChange(key as Workspace)} />
+                <Tabs aria-label="工作区标签" destroyOnHidden activeKey={workspace} items={tabItems} onChange={(key) => handleWorkspaceChange(key as Workspace)} />
               </Card>
-            </Content>
+            </main>
 
             <Sider
               width={384}

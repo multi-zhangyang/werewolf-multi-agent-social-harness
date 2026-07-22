@@ -44,7 +44,7 @@ import {
 
 export interface ScaffoldMemoryEntry<TObservation = unknown, TPending = unknown, TCommand = unknown> {
   seq: number;
-  kind: "observation" | "decision" | "memo";
+  kind: "observation" | "decision" | "memo" | "outcome";
   observation?: TObservation;
   pendingAction?: TPending;
   action?: SocialAction<TCommand>;
@@ -343,6 +343,16 @@ export interface ScaffoldCanonicalStateAdapter<
     arbitration?: AgentActionArbitrationSummary;
     context?: SocialActorObservationContext<TPending>;
   }): void;
+  /**
+   * Receipt-gated outcome feedback. It runs only after the environment has
+   * committed the selected command and the generic social memory recorded its
+   * closed receipt summary. Domain adapters may update only derived private
+   * state here; environment truth remains outside the actor.
+   */
+  afterStepResult?(input: {
+    state: TAgentState;
+    receipt: SocialActorStepReceipt<TObservation, TPending, TCommand>;
+  }): void;
 }
 
 export interface ScaffoldedActorOptions<
@@ -576,11 +586,22 @@ export class ScaffoldedSocialActor<
     if (this.latestStagedTraceId === transactionId) this.latestStagedTraceId = undefined;
     if (receipt.status !== "committed") return;
 
-    this.mutableState = this.cloneState(stagedTurn.state);
+    const committedState = this.cloneState(stagedTurn.state);
+    recordCommittedReceiptOutcome(
+      this.socialStateForState(committedState),
+      receipt,
+      receiptMutationContext(receipt)
+    );
+    this.canonicalStateAdapter?.afterStepResult?.({
+      state: committedState,
+      receipt: cloneJson(receipt)
+    });
+    this.mutableState = committedState;
     this.latestObservation = cloneJson(stagedTurn.observation);
     if (!this.canonicalStateAdapter) {
       this.seenMessageIds.clear();
       for (const messageId of stagedTurn.seenMessageIds) this.seenMessageIds.add(messageId);
+      this.syncCompatibilityMemory();
     }
   }
 
@@ -688,7 +709,13 @@ export class ScaffoldedSocialActor<
     const state = this.defaultState();
     state.memory = state.social.memory.entries.map((memoryEntry) => ({
       seq: memoryEntry.seq,
-      kind: memoryEntry.kind === "observation" || memoryEntry.kind === "decision" || memoryEntry.kind === "memo" ? memoryEntry.kind : "memo",
+      kind:
+        memoryEntry.kind === "observation" ||
+        memoryEntry.kind === "decision" ||
+        memoryEntry.kind === "memo" ||
+        memoryEntry.kind === "outcome"
+          ? memoryEntry.kind
+          : "memo",
       observation: cloneJson(memoryEntry.observation),
       pendingAction: cloneJson(memoryEntry.pendingAction),
       action: cloneJson(memoryEntry.action),
@@ -737,9 +764,13 @@ export class ScaffoldedSocialActor<
   }
 
   private workingSocialState(): AgentSocialState<TObservation, TPending, TCommand> {
+    return this.socialStateForState(this.workingState());
+  }
+
+  private socialStateForState(state: TAgentState): AgentSocialState<TObservation, TPending, TCommand> {
     return this.canonicalStateAdapter
-      ? this.canonicalStateAdapter.socialState(this.workingState())
-      : this.defaultState().social;
+      ? this.canonicalStateAdapter.socialState(state)
+      : (state as unknown as AgentScaffoldState<TObservation, TPending, TCommand>).social;
   }
 
   private workingObservation(): TObservation | undefined {
@@ -1475,6 +1506,92 @@ function round3(value: number): number {
 function cloneJson<T>(value: T): T {
   if (value === undefined) return value;
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/**
+ * Environment outcome feedback is actor-private state, but never a second
+ * source of domain truth. Keep only receipt facts and coarse info shape here:
+ * the environment owns the original `info` object and the recorded step.
+ */
+/**
+ * Record only closed, committed environment feedback in an actor's private
+ * social state. Compatibility adapters use this same reducer so legacy and
+ * scaffold execution retain one agent-lifecycle contract.
+ */
+export function recordCommittedReceiptOutcome<TSocialObservation, TReceiptObservation, TPending, TCommand>(
+  social: AgentSocialState<TSocialObservation, TPending, TCommand>,
+  receipt: SocialActorStepReceipt<TReceiptObservation, TPending, TCommand>,
+  context?: SocialStateMutationContext
+): void {
+  const infoValues = Object.values(receipt.info ?? {});
+  appendSocialMemory(
+    social,
+    {
+      kind: "outcome",
+      source: "environment",
+      visibility: "private",
+      pendingAction: cloneJson(receipt.pendingAction),
+      content: "Committed environment receipt.",
+      salience: receipt.terminated || receipt.truncated ? 0.9 : 0.65,
+      importance: receipt.terminated || receipt.truncated ? 0.9 : 0.65,
+      evidenceRefs: [
+        {
+          artifact: "outcome",
+          id: receipt.id,
+          traceId: receipt.traceId,
+          description: "committed-receipt"
+        }
+      ],
+      tags: [
+        "receipt-feedback",
+        "environment-committed",
+        ...(receipt.terminated ? ["terminated"] : []),
+        ...(receipt.truncated ? ["truncated"] : [])
+      ],
+      metadata: {
+        version: "harness.committed-receipt.v1",
+        status: "committed",
+        transactionId: receipt.transactionId,
+        turnIndex: receipt.turnIndex,
+        reward: finiteNumber(receipt.reward),
+        terminated: Boolean(receipt.terminated),
+        truncated: Boolean(receipt.truncated),
+        hasInfo: receipt.info !== undefined,
+        infoFieldCount: infoValues.length,
+        infoValueKinds: summarizeValueKinds(infoValues),
+        postStateHash: receipt.postStateHash,
+        eventSeqRange: cloneJson(receipt.eventSeqRange),
+        messageSeqRange: cloneJson(receipt.messageSeqRange)
+      }
+    },
+    context ?? receiptMutationContext(receipt)
+  );
+}
+
+function receiptMutationContext<TObservation, TPending, TCommand>(
+  receipt: SocialActorStepReceipt<TObservation, TPending, TCommand>
+): SocialStateMutationContext {
+  return {
+    traceId: receipt.traceId,
+    turnIndex: receipt.turnIndex,
+    phase: stringField(receipt.pendingAction, "phase"),
+    day: numberField(receipt.pendingAction, "day"),
+    eventSeqRange: socialMutationRange(receipt.eventSeqRange),
+    messageSeqRange: socialMutationRange(receipt.messageSeqRange)
+  };
+}
+
+function socialMutationRange(range: [number, number] | undefined): { start: number; end: number } | undefined {
+  return range ? { start: range[0], end: range[1] } : undefined;
+}
+
+function summarizeValueKinds(values: unknown[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const value of values) {
+    const kind = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+    counts[kind] = (counts[kind] ?? 0) + 1;
+  }
+  return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
 }
 
 function scaffoldMutationContext<TPending>(context?: SocialActorObservationContext<TPending>): SocialStateMutationContext | undefined {

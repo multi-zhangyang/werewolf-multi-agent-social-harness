@@ -70,7 +70,12 @@ export interface HarnessRunOptions {
   initialAgentStates?: AgentHarnessState[];
   initialSocialChannels?: SocialChannel[];
   initialSocialMessages?: SocialMessage[];
-  reasoner: HarnessReasoner;
+  /**
+   * Optional advisory cognition component. When omitted, the domain policy
+   * still produces a legal command plus deterministic, explicitly labelled
+   * speech/memo templates through the ordinary scaffold and receipt path.
+   */
+  reasoner?: HarnessReasoner;
   maxTransitions?: number;
   /** Generic runner-owned deadline/cancellation boundary. It applies even to
    * non-provider actors, unlike a model-client timeout alone. */
@@ -282,6 +287,12 @@ export interface HarnessTurnTrace {
   memoryRetrieval?: MemoryRetrievalRecord;
   beliefs: Record<string, AgentBelief>;
   privateMemo: string;
+  /**
+   * Distinguishes a model/local reasoner result from a deterministic policy
+   * narration. This prevents policy-only matches from being counted or
+   * displayed as model calls while retaining one replayable turn envelope.
+   */
+  cognitionSource?: "reasoner" | "policy";
   publicSpeech?: string;
   latencyMs: number;
   promptTokens?: number;
@@ -289,11 +300,19 @@ export interface HarnessTurnTrace {
   attempts?: number;
   retryHistory?: ProviderRetryHistoryEntry[];
   stream?: ProviderStreamTelemetry;
+  /**
+   * Private state at action selection, before the environment returns its
+   * receipt. The after-step actor snapshot may differ because a committed
+   * receipt is durable outcome-learning input.
+   */
   agentStateHash?: string;
 }
 
 export interface ReasonerOutputSummary {
   content: string;
+  /** See {@link HarnessTurnTrace.cognitionSource}. Omitted in legacy artifacts
+   * means the historical reasoner-backed interpretation. */
+  cognitionSource?: "reasoner" | "policy";
   latencyMs: number;
   promptTokens?: number;
   completionTokens?: number;
@@ -318,6 +337,7 @@ export interface HarnessStepRecord {
   reasonerOutput: ReasonerOutputSummary;
   command: GameCommand;
   turnTrace: HarnessTurnTrace;
+  /** See {@link HarnessTurnTrace.agentStateHash}. */
   agentStateHash?: string;
   agentSnapshotsAfterStep?: AgentHarnessState[];
   agentSnapshotsHashAfterStep?: string;

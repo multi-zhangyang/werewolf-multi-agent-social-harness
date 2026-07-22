@@ -11,6 +11,7 @@ import type {
   ResponseUsage
 } from "openai/resources/responses/responses";
 import type { ModelClient, ModelCompletionRequest, ModelCompletionResult } from "./modelClient";
+import { completeWithBoundedModelRetries } from "./openaiClient";
 import { ModelCallError, type ChatMessage, type ChatCompletionUsage, type ProviderStreamCompletionMode, looksLikeHtmlGatewayPayload } from "./schema";
 import { normalizeSdkBaseUrl } from "./providerUrls";
 
@@ -18,6 +19,7 @@ export interface OpenAIResponsesClientOptions {
   baseURL: string;
   apiKey: string;
   timeoutMs?: number;
+  maxRetries?: number;
   abortSignal?: AbortSignal;
   stream?: boolean;
   fetch?: typeof fetch;
@@ -26,6 +28,7 @@ export interface OpenAIResponsesClientOptions {
 export class OpenAIResponsesClient implements ModelClient {
   private readonly client: OpenAI;
   private readonly timeoutMs: number;
+  private readonly maxRetries: number;
   private readonly abortSignal?: AbortSignal;
   private readonly stream: boolean;
 
@@ -34,6 +37,7 @@ export class OpenAIResponsesClient implements ModelClient {
     const baseURL = normalizeSdkBaseUrl(options.baseURL, "OpenAI Responses SDK baseURL");
     if (!options.apiKey.trim()) throw new Error("LLM_API_KEY is required for OpenAI Responses model calls.");
     this.timeoutMs = validatePositiveInteger(options.timeoutMs ?? 120_000, "OpenAI Responses timeout");
+    this.maxRetries = validateNonNegativeInteger(options.maxRetries ?? 2, "LLM retry count");
     this.abortSignal = options.abortSignal;
     this.stream = options.stream ?? true;
     this.client = new OpenAI({
@@ -46,6 +50,14 @@ export class OpenAIResponsesClient implements ModelClient {
   }
 
   async complete(request: ModelCompletionRequest): Promise<ModelCompletionResult> {
+    return completeWithBoundedModelRetries(() => this.completeOnce(request), {
+      maxRetries: this.maxRetries,
+      abortSignal: this.abortSignal,
+      retryDelayAbortError: (reason) => abortedModelCallError(reason, "during_retry_delay")
+    });
+  }
+
+  private async completeOnce(request: ModelCompletionRequest): Promise<ModelCompletionResult> {
     const started = performance.now();
     if (this.abortSignal?.aborted) throw abortedModelCallError(this.abortSignal.reason, "before_start");
     const controller = new AbortController();
@@ -312,6 +324,11 @@ function openAISdkModelCallError(error: unknown, stage: string, timeoutMs: numbe
 
 function validatePositiveInteger(value: number, name: string): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer.`);
+  return value;
+}
+
+function validateNonNegativeInteger(value: number, name: string): number {
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer.`);
   return value;
 }
 

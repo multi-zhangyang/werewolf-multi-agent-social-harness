@@ -277,9 +277,9 @@ test.describe("compact cockpit", () => {
     await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
 
     const initialInspector = page.getByRole("dialog", { name: "Evidence Inspector" });
-    await expect(initialInspector).toBeVisible();
-    await expectDrawerWithinViewport(page, initialInspector);
-    await page.keyboard.press("Escape");
+    // Bootstrap can select a recorded artifact for the desktop side panel, but
+    // on a 390px viewport the full-width evidence drawer must never cover the
+    // Cockpit before the researcher explicitly asks to see it.
     await expect(initialInspector).toBeHidden();
 
     await page.getByRole("button", { name: "打开运行上下文" }).click();

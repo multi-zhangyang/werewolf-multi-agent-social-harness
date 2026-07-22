@@ -136,6 +136,11 @@ export function collectWerewolfHarnessMetrics(state: GameState, socialEpisode?: 
   let totalLatency = 0;
   for (const event of allTurns) {
     const payload = event.trace;
+    // A policy-only actor may still retain a profile model label for
+    // experiment assignment, but it did not make a provider/model call.
+    // Historical traces without a source predate this distinction and retain
+    // their reasoner-backed interpretation.
+    if (payload.cognitionSource === "policy") continue;
     usage[payload.model] ??= { calls: 0, promptTokens: 0, completionTokens: 0, latencyMs: 0 };
     usage[payload.model].calls += 1;
     usage[payload.model].promptTokens += payload.promptTokens ?? 0;

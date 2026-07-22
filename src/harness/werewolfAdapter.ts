@@ -37,6 +37,7 @@ import { SocialCommunicationBus } from "./social";
 import { runHarnessEpisode } from "./runner";
 import {
   createScaffoldedActor,
+  recordCommittedReceiptOutcome,
   type AgentDecisionInput,
   type AgentPolicy,
   type AgentReasoner,
@@ -87,7 +88,9 @@ export type WerewolfSocialObservation = WerewolfHarnessObservation;
 
 export interface WerewolfSocialActorAdapterOptions {
   actor: WerewolfAgentActor;
-  reasoner: HarnessReasoner;
+  /** Optional advisory component; policy-only execution must not manufacture
+   * a synthetic reasoner merely to enter the production scaffold. */
+  reasoner?: HarnessReasoner;
   players: PlayerState[];
   tracePrefix?: string;
   /**
@@ -166,7 +169,7 @@ export interface WerewolfHarnessTurnProbeOptions {
   state: GameState;
   action: AgentPendingAction;
   agent: HarnessAgentConfig;
-  reasoner: HarnessReasoner;
+  reasoner?: HarnessReasoner;
 }
 
 class WerewolfSocialTurnError extends Error {
@@ -202,6 +205,7 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       traceId: string;
       plan: PolicyPlan;
       privateMemo: string;
+      cognitionSource: "reasoner" | "policy";
       pendingAction: AgentPendingAction;
       expectedAgentStateHash: string;
     }
@@ -302,21 +306,28 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
     const stagedActor = this.latest.actor;
     let plan = stagedActor.plan(pending);
     try {
-      const reasonerInput = {
-        traceId: this.latest.traceId,
-        view: cloneJson(this.latest.observation.view),
-        action: cloneJson(pending),
-        agent: toReasonerAgentContext(stagedActor.state),
-        policyPlan: cloneJson(plan),
-        memoryRetrieval: cloneJson(plan.memoryRetrieval),
-        recalledMemory: stagedActor.reasonerMemoryEntries(plan.memoryRetrieval)
-      };
-      const reasonerOutput = await this.options.reasoner.think(reasonerInput);
-      const actionProposal = reasonerOutput.actionProposal;
-      plan = stagedActor.applyReasonerProposal(plan, pending, actionProposal);
-      if (pending.kind === "speech" || pending.kind === "last_words" || pending.kind === "whisper") {
-        plan = attachSpeech(plan, normalizeSpeech(reasonerOutput.content));
+      const reasonerOutput = this.options.reasoner
+        ? await this.options.reasoner.think({
+            traceId: this.latest.traceId,
+            view: cloneJson(this.latest.observation.view),
+            action: cloneJson(pending),
+            agent: toReasonerAgentContext(stagedActor.state),
+            policyPlan: cloneJson(plan),
+            memoryRetrieval: cloneJson(plan.memoryRetrieval),
+            recalledMemory: stagedActor.reasonerMemoryEntries(plan.memoryRetrieval)
+          })
+        : undefined;
+      const actionProposal = reasonerOutput?.actionProposal;
+      if (reasonerOutput) {
+        plan = stagedActor.applyReasonerProposal(plan, pending, actionProposal);
+        if (requiresWerewolfSpeech(pending)) {
+          plan = attachSpeech(plan, normalizeSpeech(reasonerOutput.content));
+        }
+      } else if (requiresWerewolfSpeech(pending)) {
+        plan = attachSpeech(plan, deterministicPolicySpeech(pending, plan));
       }
+      const privateMemo = reasonerOutput?.content ?? deterministicPolicyMemo(pending, plan);
+      const cognitionSource = reasonerOutput ? "reasoner" : "policy";
       const command = stagedActor.act(plan);
       const publicSpeech = command.type === "speech.submit" || command.type === "lastWords.submit" ? command.text : undefined;
       const commitContext = {
@@ -324,7 +335,18 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         turnIndex: this.latest.receiptTurnIndex,
         pendingAction: cloneJson(pending)
       };
-      const expectedAgentStateHash = stagedActor.previewCommittedStateHash(plan, reasonerOutput.content, commitContext);
+      const preview = cloneJson(stagedActor.state);
+      commitWerewolfAgentTurn({
+        state: preview,
+        view: this.latest.observation.view,
+        observeContext: { traceId: this.latest.traceId, turnIndex: this.latest.turnIndex },
+        plan: cloneJson(plan),
+        privateMemo,
+        context: commitContext
+      });
+      if (cognitionSource === "policy") normalizePolicyOnlyMemoState(preview, { cognitionSource, privateMemo });
+      const expectedAgentStateHash = preview.socialStateHash;
+      if (!expectedAgentStateHash) throw new Error(`Werewolf social actor ${this.id} did not produce an agent state hash.`);
       const trace: HarnessTurnTrace = {
         traceId: this.latest.traceId,
         playerId: this.id,
@@ -340,21 +362,20 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         arbitration: cloneJson(plan.arbitration),
         memoryRetrieval: cloneJson(plan.memoryRetrieval),
         beliefs: cloneJson(stagedActor.state.beliefs),
-        privateMemo: reasonerOutput.content,
+        privateMemo,
+        cognitionSource,
         publicSpeech,
-        latencyMs: reasonerOutput.completion.latencyMs,
-        promptTokens: reasonerOutput.completion.usage.promptTokens,
-        completionTokens: reasonerOutput.completion.usage.completionTokens,
-        attempts: reasonerOutput.completion.attempts,
-        retryHistory: cloneJson(reasonerOutput.completion.retryHistory),
-        stream: cloneJson(reasonerOutput.completion.stream),
+        latencyMs: reasonerOutput?.completion.latencyMs ?? 0,
+        promptTokens: reasonerOutput?.completion.usage.promptTokens,
+        completionTokens: reasonerOutput?.completion.usage.completionTokens,
+        attempts: reasonerOutput?.completion.attempts,
+        retryHistory: cloneJson(reasonerOutput?.completion.retryHistory),
+        stream: cloneJson(reasonerOutput?.completion.stream),
         agentStateHash: expectedAgentStateHash
       };
-      const reasonerSummary = summarizeReasonerOutput(
-        reasonerOutput.content,
-        reasonerOutput.completion,
-        actionProposal
-      );
+      const reasonerSummary = reasonerOutput
+        ? summarizeReasonerOutput(reasonerOutput.content, reasonerOutput.completion, actionProposal)
+        : summarizePolicyOnlyOutput(privateMemo);
       const metadata: WerewolfSocialActionMetadata = {
         kind: WEREWOLF_HARNESS_TURN_METADATA_KIND,
         turnIndex: this.latest.turnIndex,
@@ -370,7 +391,8 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       this.pendingProposals.set(this.latest.transactionId, {
         traceId: this.latest.traceId,
         plan: cloneJson(plan),
-        privateMemo: reasonerOutput.content,
+        privateMemo,
+        cognitionSource,
         pendingAction: cloneJson(pending),
         expectedAgentStateHash
       });
@@ -432,12 +454,23 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       turnIndex: receipt.turnIndex,
       pendingAction: proposal.pendingAction
     });
+    normalizePolicyOnlyMemoState(stagedActor.state, {
+      cognitionSource: proposal.cognitionSource,
+      privateMemo: proposal.privateMemo
+    });
     const agentStateHash = stagedActor.state.socialStateHash;
     if (agentStateHash !== proposal.expectedAgentStateHash) {
       throw new Error(
         `Committed agent state hash mismatch for ${this.id}: expected ${proposal.expectedAgentStateHash}, received ${agentStateHash}.`
       );
     }
+    // Keep the legacy compatibility actor aligned with the production
+    // scaffold: only after validating the planned pre-receipt state do we
+    // append the generic, closed environment-outcome memory and publish the
+    // final durable actor snapshot.
+    if (!stagedActor.state.social) throw new Error(`Werewolf social actor ${this.id} is missing social state after commit.`);
+    recordCommittedReceiptOutcome(stagedActor.state.social, receipt);
+    stagedActor.state.socialStateHash = hashStableState(stagedActor.state.social);
     replaceAgentHarnessState(this.options.actor.state, stagedActor.state);
   }
 
@@ -457,7 +490,7 @@ function createScaffoldedWerewolfActor(input: {
   id: string;
   profile: SocialAgentProfile;
   initialState: AgentHarnessState;
-  reasoner: HarnessReasoner;
+  reasoner?: HarnessReasoner;
   players: PlayerState[];
 }): ScaffoldedSocialActor<
   WerewolfSocialObservation,
@@ -505,11 +538,19 @@ function createScaffoldedWerewolfActor(input: {
           pendingAction: cloneJson(playerTurn.pending)
         }
       });
+      normalizePolicyOnlyMemoState(state, metadata.turnTrace);
       if (state.socialStateHash !== metadata.agentStateHash) {
         throw new Error(
           `Scaffolded Werewolf committed agent state hash mismatch for ${state.playerId}: expected ${metadata.agentStateHash}, received ${state.socialStateHash}.`
         );
       }
+    },
+    // The generic scaffold writes receipt-gated environment outcome memory
+    // immediately before this hook. The domain state owns the compatibility
+    // hash, so refresh it after that committed private-state reduction.
+    afterStepResult: ({ state }) => {
+      if (!state.social) throw new Error(`Scaffolded Werewolf actor ${state.playerId} is missing social state after receipt.`);
+      state.socialStateHash = hashStableState(state.social);
     }
   };
   const policy: AgentPolicy<
@@ -522,36 +563,39 @@ function createScaffoldedWerewolfActor(input: {
     id: `werewolf-policy:${input.initialState.policyName}`,
     decide: (decision) => buildScaffoldedWerewolfAction({ decision, players: input.players })
   };
+  const harnessReasoner = input.reasoner;
   const reasoner: AgentReasoner<
     WerewolfSocialObservation,
     WerewolfSocialPendingAction,
     GameCommand,
     AgentHarnessState,
     ReasonerOutput
-  > = {
-    id: "werewolf-harness-reasoner",
-    async reflect(decision) {
-      const playerTurn = requireScaffoldedWerewolfPlayerTurn({
-        observation: decision.observation,
-        pending: decision.pendingAction,
-        context: decision.observationContext
-      });
-      const policyPlan = werewolfPolicyPlanForScaffoldDecision(decision, playerTurn);
-      const output = await input.reasoner.think({
-        traceId: playerTurn.traceId,
-        view: cloneJson(playerTurn.view),
-        action: cloneJson(playerTurn.pending),
-        agent: toReasonerAgentContext(decision.agent),
-        policyPlan: cloneJson(policyPlan),
-        memoryRetrieval: cloneJson(decision.memoryRetrieval),
-        recalledMemory: scaffoldReasonerMemoryEntries(decision)
-      });
-      return {
-        memo: output.content,
-        advice: cloneJson(output)
-      };
-    }
-  };
+  > | undefined = harnessReasoner
+    ? {
+        id: "werewolf-harness-reasoner",
+        async reflect(decision) {
+          const playerTurn = requireScaffoldedWerewolfPlayerTurn({
+            observation: decision.observation,
+            pending: decision.pendingAction,
+            context: decision.observationContext
+          });
+          const policyPlan = werewolfPolicyPlanForScaffoldDecision(decision, playerTurn);
+          const output = await harnessReasoner.think({
+            traceId: playerTurn.traceId,
+            view: cloneJson(playerTurn.view),
+            action: cloneJson(playerTurn.pending),
+            agent: toReasonerAgentContext(decision.agent),
+            policyPlan: cloneJson(policyPlan),
+            memoryRetrieval: cloneJson(decision.memoryRetrieval),
+            recalledMemory: scaffoldReasonerMemoryEntries(decision)
+          });
+          return {
+            memo: output.content,
+            advice: cloneJson(output)
+          };
+        }
+      }
+    : undefined;
   return createScaffoldedActor({
     id: input.id,
     profile: input.profile,
@@ -577,15 +621,21 @@ function buildScaffoldedWerewolfAction(input: {
     pending: input.decision.pendingAction,
     context: input.decision.observationContext
   });
-  const reasonerOutput = input.decision.reasoner?.advice;
-  if (!reasonerOutput) {
-    throw new Error(`Scaffolded Werewolf actor ${input.decision.agent.playerId} requires reasoner output before policy action selection.`);
-  }
   let plan = werewolfPolicyPlanForScaffoldDecision(input.decision, playerTurn);
-  plan = applyWerewolfReasonerProposal(plan, playerTurn.pending, reasonerOutput.actionProposal);
-  if (playerTurn.pending.kind === "speech" || playerTurn.pending.kind === "last_words" || playerTurn.pending.kind === "whisper") {
-    plan = attachSpeech(plan, normalizeSpeech(reasonerOutput.content));
+  const reasonerOutput = input.decision.reasoner?.advice;
+  if (reasonerOutput) {
+    plan = applyWerewolfReasonerProposal(plan, playerTurn.pending, reasonerOutput.actionProposal);
+    if (requiresWerewolfSpeech(playerTurn.pending)) {
+      plan = attachSpeech(plan, normalizeSpeech(reasonerOutput.content));
+    }
+  } else if (requiresWerewolfSpeech(playerTurn.pending)) {
+    // No synthetic AgentReasoner is installed for policy-only operation. The
+    // policy remains the command authority and supplies bounded deterministic
+    // text only where the domain command requires text.
+    plan = attachSpeech(plan, deterministicPolicySpeech(playerTurn.pending, plan));
   }
+  const privateMemo = reasonerOutput?.content ?? deterministicPolicyMemo(playerTurn.pending, plan);
+  const cognitionSource = reasonerOutput ? "reasoner" : "policy";
   const command = plan.command;
   const commitContext = {
     traceId: playerTurn.traceId,
@@ -598,9 +648,10 @@ function buildScaffoldedWerewolfAction(input: {
     view: playerTurn.view,
     observeContext: playerTurn.observeContext,
     plan: cloneJson(plan),
-    privateMemo: reasonerOutput.content,
+    privateMemo,
     context: commitContext
   });
+  if (cognitionSource === "policy") normalizePolicyOnlyMemoState(preview, { cognitionSource, privateMemo });
   const expectedAgentStateHash = preview.socialStateHash;
   if (!expectedAgentStateHash) throw new Error(`Scaffolded Werewolf actor ${preview.playerId} did not produce an agent state hash.`);
   const publicSpeech = command.type === "speech.submit" || command.type === "lastWords.submit" ? command.text : undefined;
@@ -619,17 +670,20 @@ function buildScaffoldedWerewolfAction(input: {
     arbitration: cloneJson(plan.arbitration),
     memoryRetrieval: cloneJson(plan.memoryRetrieval),
     beliefs: cloneJson(preview.beliefs),
-    privateMemo: reasonerOutput.content,
+    privateMemo,
+    cognitionSource,
     publicSpeech,
-    latencyMs: reasonerOutput.completion.latencyMs,
-    promptTokens: reasonerOutput.completion.usage.promptTokens,
-    completionTokens: reasonerOutput.completion.usage.completionTokens,
-    attempts: reasonerOutput.completion.attempts,
-    retryHistory: cloneJson(reasonerOutput.completion.retryHistory),
-    stream: cloneJson(reasonerOutput.completion.stream),
+    latencyMs: reasonerOutput?.completion.latencyMs ?? 0,
+    promptTokens: reasonerOutput?.completion.usage.promptTokens,
+    completionTokens: reasonerOutput?.completion.usage.completionTokens,
+    attempts: reasonerOutput?.completion.attempts,
+    retryHistory: cloneJson(reasonerOutput?.completion.retryHistory),
+    stream: cloneJson(reasonerOutput?.completion.stream),
     agentStateHash: expectedAgentStateHash
   };
-  const reasonerSummary = summarizeReasonerOutput(reasonerOutput.content, reasonerOutput.completion, reasonerOutput.actionProposal);
+  const reasonerSummary = reasonerOutput
+    ? summarizeReasonerOutput(reasonerOutput.content, reasonerOutput.completion, reasonerOutput.actionProposal)
+    : summarizePolicyOnlyOutput(privateMemo);
   const metadata: WerewolfSocialActionMetadata = {
     kind: WEREWOLF_HARNESS_TURN_METADATA_KIND,
     turnIndex: playerTurn.actorTurnIndex,
@@ -1293,6 +1347,7 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
   }
 
   if (input.reasonerOutput.content) {
+    const cognitionSource = input.reasonerOutput.cognitionSource ?? "reasoner";
     messages.push({
       channelId: `private-${input.actorId}`,
       senderId: input.actorId,
@@ -1301,7 +1356,8 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
       content: input.reasonerOutput.content,
       metadata: {
         ...baseMetadata,
-        kind: "private-reasoner-memo",
+        kind: cognitionSource === "policy" ? "private-policy-memo" : "private-reasoner-memo",
+        cognitionSource,
         latencyMs: input.reasonerOutput.latencyMs,
         promptTokens: input.reasonerOutput.promptTokens,
         completionTokens: input.reasonerOutput.completionTokens,
@@ -1796,6 +1852,72 @@ function normalizeSpeech(content: string): string {
   return text.slice(0, 500);
 }
 
+function requiresWerewolfSpeech(pending: AgentPendingAction): boolean {
+  return pending.kind === "speech" || pending.kind === "last_words" || pending.kind === "whisper";
+}
+
+/**
+ * Deterministic, public-safe policy language for operation without an
+ * optional reasoner. It relies only on the already selected policy plan and
+ * never claims a model completion or introduces a new action candidate.
+ */
+function deterministicPolicySpeech(pending: AgentPendingAction, plan: PolicyPlan): string {
+  if (pending.kind === "whisper") {
+    return plan.targetId
+      ? `建议优先关注 ${plan.targetId}，夜间行动和白天发言保持一致，并继续观察公开票型。`
+      : "请同步当前夜间风险判断，白天发言保持一致，并继续观察公开票型。";
+  }
+  if (pending.kind === "last_words") {
+    return "请复核公开发言、投票与行动顺序；不要只凭单点指控，优先保留可复查的判断依据。";
+  }
+  return plan.pressureTargetId
+    ? `我会优先核对 ${plan.pressureTargetId} 的公开发言与票型。请大家给出可复查的依据，避免只凭情绪跟票。`
+    : "我会结合公开发言、投票与行动顺序继续判断。请大家给出可复查的依据，避免只凭情绪跟票。";
+}
+
+function deterministicPolicyMemo(pending: AgentPendingAction, plan: PolicyPlan): string {
+  return `确定性策略已选择 ${plan.command.type}（${pending.kind}）；${plan.intent}。`;
+}
+
+function summarizePolicyOnlyOutput(content: string): ReasonerOutputSummary {
+  return {
+    content,
+    cognitionSource: "policy",
+    latencyMs: 0
+  };
+}
+
+/**
+ * `commitWerewolfAgentTurn` predates policy-only execution and records every
+ * private memo as `reasoner` memory. Keep its legacy API stable while making
+ * the adapter's committed canonical state truthful: a deterministic template
+ * is a policy memo, not hidden model cognition.
+ */
+function normalizePolicyOnlyMemoState(
+  state: AgentHarnessState,
+  trace: Pick<HarnessTurnTrace, "cognitionSource" | "privateMemo">
+): void {
+  if (trace.cognitionSource !== "policy") return;
+  const social = state.social;
+  if (!social) throw new Error(`Policy-only Werewolf actor ${state.playerId} is missing social state after commit.`);
+  const memo = [...social.memory.entries]
+    .reverse()
+    .find((entry) => entry.kind === "memo" && entry.content === trace.privateMemo);
+  if (!memo) throw new Error(`Policy-only Werewolf actor ${state.playerId} is missing its committed policy memo.`);
+  memo.source = "policy";
+  memo.tags = [...new Set([...memo.tags.filter((tag) => tag !== "reasoner-memo"), "policy-memo"])];
+  memo.evidenceRefs = memo.evidenceRefs.map((ref) =>
+    ref.description?.startsWith("reasoner memo")
+      ? { ...ref, description: `policy memo for ${state.playerId}` }
+      : ref
+  );
+  memo.metadata = {
+    ...memo.metadata,
+    cognitionSource: "policy"
+  };
+  state.socialStateHash = hashStableState(social);
+}
+
 function summarizeReasonerOutput(
   content: string,
   completion: {
@@ -1809,6 +1931,7 @@ function summarizeReasonerOutput(
 ): ReasonerOutputSummary {
   return {
     content,
+    cognitionSource: "reasoner",
     latencyMs: completion.latencyMs,
     promptTokens: completion.usage?.promptTokens,
     completionTokens: completion.usage?.completionTokens,

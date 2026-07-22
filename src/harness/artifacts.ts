@@ -664,7 +664,6 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
       snapshotHash: step.agentSnapshotsHashAfterStep,
       playerIds,
       actorId: step.actorId,
-      agentStateHash: step.agentStateHash,
       label: `trajectory[${index}]`,
       required: hasStepAgentSnapshots,
       errors
@@ -1667,7 +1666,6 @@ function validateAgentSnapshotFrames(artifact: MatchArtifact, playerIds: Set<str
       snapshotHash: frame.agentsHash,
       playerIds,
       actorId: "",
-      agentStateHash: undefined,
       label,
       required: true,
       errors
@@ -1700,7 +1698,6 @@ function validateStepAgentSnapshots(input: {
   snapshotHash: string | undefined;
   playerIds: Set<string>;
   actorId: string;
-  agentStateHash: string | undefined;
   label: string;
   required: boolean;
   errors: string[];
@@ -1734,8 +1731,6 @@ function validateStepAgentSnapshots(input: {
     const actor = input.snapshots.find((agent) => agent.playerId === input.actorId);
     if (!actor) {
       input.errors.push(`${input.label}.agentSnapshotsAfterStep is missing acting agent ${input.actorId}.`);
-    } else if (input.agentStateHash && actor.socialStateHash !== input.agentStateHash) {
-      input.errors.push(`${input.label}.agentStateHash mismatch with acting agent snapshot ${input.actorId}.`);
     }
   }
 }

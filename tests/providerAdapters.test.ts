@@ -73,6 +73,74 @@ describe("standard provider protocol adapters", () => {
     ).toThrow(/ANTHROPIC_MAX_TOKENS/);
   });
 
+  it("threads configured and explicit bounded retry policy through non-Chat provider registry clients", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429, headers: { "retry-after": "0" } }))
+      .mockResolvedValueOnce(
+        streamResponse([
+          sse("response.output_text.delta", { type: "response.output_text.delta", delta: "recovered" }),
+          sse("response.completed", { type: "response.completed", response: { id: "resp-retry" } })
+        ])
+      )
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429, headers: { "retry-after": "0" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const configuredRetries = await modelClientFromEnv({
+      LLM_PROVIDER_PROTOCOL: "openai-responses",
+      LLM_RESPONSES_URL: "https://provider.test/v1/responses",
+      LLM_API_KEY: "unit-test-key",
+      LLM_RETRY_COUNT: "1"
+    } as NodeJS.ProcessEnv).complete({
+      model: "responses-model",
+      messages: [{ role: "user", content: "hello" }]
+    });
+
+    expect(configuredRetries).toMatchObject({
+      content: "recovered",
+      attempts: 2,
+      retryHistory: [
+        {
+          attempt: 1,
+          failureKind: "http",
+          providerStage: "http_response",
+          status: 429,
+          retryable: true,
+          delayMs: 0
+        }
+      ]
+    });
+
+    const explicitOverrideError = await captureModelCallError(() =>
+      modelClientFromEnv(
+        {
+          LLM_PROVIDER_PROTOCOL: "anthropic-messages",
+          ANTHROPIC_MESSAGES_URL: "https://api.anthropic.test/v1/messages",
+          ANTHROPIC_API_KEY: "unit-test-key",
+          ANTHROPIC_MAX_TOKENS: "64",
+          LLM_RETRY_COUNT: "1"
+        } as NodeJS.ProcessEnv,
+        { maxRetries: 0 }
+      ).complete({
+        model: "anthropic-messages-model",
+        messages: [{ role: "user", content: "hello" }]
+      })
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(explicitOverrideError.raw).toMatchObject({
+      failureKind: "http",
+      providerStage: "http_response",
+      status: 429,
+      retryable: true,
+      attempts: 1,
+      maxAttempts: 1,
+      retryHistory: [
+        expect.objectContaining({ attempt: 1, retryable: true, status: 429 })
+      ]
+    });
+  });
+
   it("derives SDK base URLs only by stripping standard protocol resource suffixes", () => {
     expect(
       optionalResponsesBaseUrlFromEnv({
@@ -158,7 +226,8 @@ describe("standard provider protocol adapters", () => {
       new OpenAIResponsesClient({
         baseURL: "https://api.openai.test/v1",
         apiKey: "unit-test-key",
-        timeoutMs: 1_000
+        timeoutMs: 1_000,
+        maxRetries: 0
       }).complete({
         model: "responses-model",
         messages: [{ role: "user", content: "hello" }]
@@ -170,6 +239,46 @@ describe("standard provider protocol adapters", () => {
       failureKind: "stream_incomplete",
       providerStage: "stream_finish",
       retryable: true
+    });
+  });
+
+  it("retries a retryable OpenAI Responses stream failure before returning a provider-completed stream", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429, headers: { "retry-after": "0" } }))
+      .mockResolvedValueOnce(
+        streamResponse([
+          sse("response.output_text.delta", { type: "response.output_text.delta", delta: "hello again" }),
+          sse("response.completed", { type: "response.completed", response: { id: "resp-recovered" } })
+        ])
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new OpenAIResponsesClient({
+      baseURL: "https://api.openai.test/v1",
+      apiKey: "unit-test-key",
+      timeoutMs: 1_000,
+      maxRetries: 1
+    }).complete({
+      model: "responses-model",
+      messages: [{ role: "user", content: "hello" }]
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      content: "hello again",
+      attempts: 2,
+      retryHistory: [
+        {
+          attempt: 1,
+          failureKind: "http",
+          providerStage: "http_response",
+          status: 429,
+          retryable: true,
+          delayMs: 0
+        }
+      ],
+      stream: { enabled: true, completed: true, completedBy: "provider_stop_event" }
     });
   });
 
@@ -238,7 +347,8 @@ describe("standard provider protocol adapters", () => {
         baseURL: "https://api.anthropic.test",
         apiKey: "unit-test-key",
         maxTokens: 512,
-        timeoutMs: 1_000
+        timeoutMs: 1_000,
+        maxRetries: 0
       }).complete({
         model: "anthropic-messages-model",
         messages: [{ role: "user", content: "hello" }]
@@ -250,6 +360,48 @@ describe("standard provider protocol adapters", () => {
       failureKind: "stream_incomplete",
       providerStage: "stream_finish",
       retryable: true
+    });
+  });
+
+  it("retries a retryable Anthropic Messages stream failure before returning a provider-completed stream", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429, headers: { "retry-after": "0" } }))
+      .mockResolvedValueOnce(
+        streamResponse([
+          sse("message_start", { type: "message_start", message: { id: "msg-recovered", usage: { input_tokens: 1, output_tokens: 0 } } }),
+          sse("content_block_delta", { type: "content_block_delta", delta: { type: "text_delta", text: "hello again" } }),
+          sse("message_stop", { type: "message_stop" })
+        ])
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new AnthropicMessagesClient({
+      baseURL: "https://api.anthropic.test",
+      apiKey: "unit-test-key",
+      maxTokens: 512,
+      timeoutMs: 1_000,
+      maxRetries: 1
+    }).complete({
+      model: "anthropic-messages-model",
+      messages: [{ role: "user", content: "hello" }]
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      content: "hello again",
+      attempts: 2,
+      retryHistory: [
+        {
+          attempt: 1,
+          failureKind: "http",
+          providerStage: "http_response",
+          status: 429,
+          retryable: true,
+          delayMs: 0
+        }
+      ],
+      stream: { enabled: true, completed: true, completedBy: "provider_stop_event" }
     });
   });
 

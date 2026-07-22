@@ -50,6 +50,7 @@ export function modelClientFromEnv(env: NodeJS.ProcessEnv = process.env, overrid
       baseURL: requiredValue(optionalResponsesBaseUrlFromEnv(env), "LLM_RESPONSES_URL or LLM_BASE_URL is required for OpenAI Responses."),
       apiKey: env.LLM_API_KEY ?? "",
       timeoutMs: overrides.timeoutMs ?? parseOptionalIntegerEnv(env.LLM_TIMEOUT_MS, "LLM_TIMEOUT_MS"),
+      maxRetries: overrides.maxRetries ?? parseOptionalNonNegativeIntegerEnv(env.LLM_RETRY_COUNT, "LLM_RETRY_COUNT"),
       abortSignal: overrides.abortSignal,
       stream: env.LLM_STREAM === undefined ? true : env.LLM_STREAM !== "false"
     });
@@ -60,6 +61,7 @@ export function modelClientFromEnv(env: NodeJS.ProcessEnv = process.env, overrid
     maxTokens: parseRequiredIntegerEnv(env.ANTHROPIC_MAX_TOKENS, "ANTHROPIC_MAX_TOKENS"),
     anthropicVersion: env.ANTHROPIC_VERSION,
     timeoutMs: overrides.timeoutMs ?? parseOptionalIntegerEnv(env.LLM_TIMEOUT_MS, "LLM_TIMEOUT_MS"),
+    maxRetries: overrides.maxRetries ?? parseOptionalNonNegativeIntegerEnv(env.LLM_RETRY_COUNT, "LLM_RETRY_COUNT"),
     abortSignal: overrides.abortSignal,
     stream: env.LLM_STREAM === undefined ? true : env.LLM_STREAM !== "false"
   });

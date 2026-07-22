@@ -39,6 +39,56 @@ export interface OpenAICompatibleClientOptions {
 
 export type CompletionResult = ModelCompletionResult;
 
+/**
+ * Run a model request with the harness-owned retry semantics shared by every
+ * streaming provider adapter. SDK retries stay disabled so attempt counts and
+ * retry history remain locally observable and can be reduced to the closed
+ * durable telemetry contract at the artifact boundary.
+ */
+export interface BoundedModelRetryOptions {
+  maxRetries: number;
+  abortSignal?: AbortSignal;
+  retryDelayAbortError?: (reason: unknown) => ModelCallError;
+}
+
+export async function completeWithBoundedModelRetries<T extends ModelCompletionResult>(
+  completeOnce: () => Promise<T>,
+  options: BoundedModelRetryOptions
+): Promise<T> {
+  const totalStarted = performance.now();
+  let lastError: unknown;
+  const maxAttempts = validateNonNegativeInteger(options.maxRetries, "LLM retry count") + 1;
+  const retryHistory: ProviderRetryHistoryEntry[] = [];
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const result = await completeOnce();
+      return {
+        ...result,
+        attempts: attempt,
+        latencyMs: Math.round(performance.now() - totalStarted),
+        retryHistory: retryHistory.length ? [...retryHistory] : undefined
+      };
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableModelCall(error);
+      if (!retryable || attempt >= maxAttempts) {
+        throw withAttemptContext(error, attempt, maxAttempts, [...retryHistory, retryHistoryEntry(error, attempt, retryable)]);
+      }
+      const delayMs = retryDelayMs(error, attempt);
+      retryHistory.push(retryHistoryEntry(error, attempt, retryable, delayMs));
+      try {
+        await delay(delayMs, options.abortSignal, options.retryDelayAbortError);
+      } catch (delayError) {
+        throw withAttemptContext(delayError, attempt, maxAttempts, [
+          ...retryHistory,
+          retryHistoryEntry(delayError, attempt, false)
+        ]);
+      }
+    }
+  }
+  throw withAttemptContext(lastError, maxAttempts, maxAttempts, retryHistory);
+}
+
 export class OpenAICompatibleClient implements ModelClient {
   private readonly client: OpenAI;
   private readonly timeoutMs: number;
@@ -64,35 +114,11 @@ export class OpenAICompatibleClient implements ModelClient {
   }
 
   async complete(request: ChatCompletionRequest): Promise<CompletionResult> {
-    const totalStarted = performance.now();
-    let lastError: unknown;
-    const maxAttempts = this.maxRetries + 1;
-    const retryHistory: ProviderRetryHistoryEntry[] = [];
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      try {
-        const result = await this.completeOnce(request);
-        return {
-          ...result,
-          attempts: attempt,
-          latencyMs: Math.round(performance.now() - totalStarted),
-          retryHistory: retryHistory.length ? [...retryHistory] : undefined
-        };
-      } catch (error) {
-        lastError = error;
-        const retryable = isRetryableModelCall(error);
-        if (!retryable || attempt >= maxAttempts) {
-          throw withAttemptContext(error, attempt, maxAttempts, [...retryHistory, retryHistoryEntry(error, attempt, retryable)]);
-        }
-        const delayMs = retryDelayMs(error, attempt);
-        retryHistory.push(retryHistoryEntry(error, attempt, retryable, delayMs));
-        try {
-          await delay(delayMs, this.abortSignal);
-        } catch (delayError) {
-          throw withAttemptContext(delayError, attempt, maxAttempts, [...retryHistory, retryHistoryEntry(delayError, attempt, false)]);
-        }
-      }
-    }
-    throw withAttemptContext(lastError, maxAttempts, maxAttempts, retryHistory);
+    return completeWithBoundedModelRetries(() => this.completeOnce(request), {
+      maxRetries: this.maxRetries,
+      abortSignal: this.abortSignal,
+      retryDelayAbortError: (reason) => abortedModelCallError(reason, "during_retry_delay")
+    });
   }
 
   private async completeOnce(request: ChatCompletionRequest): Promise<CompletionResult> {
@@ -402,10 +428,14 @@ function retryAfterHeaderMs(error: unknown): number | undefined {
   return undefined;
 }
 
-function delay(ms: number, abortSignal?: AbortSignal): Promise<void> {
+function delay(
+  ms: number,
+  abortSignal?: AbortSignal,
+  retryDelayAbortError: (reason: unknown) => ModelCallError = (reason) => abortedModelCallError(reason, "during_retry_delay")
+): Promise<void> {
   return new Promise((resolve, reject) => {
     if (abortSignal?.aborted) {
-      reject(abortedModelCallError(abortSignal.reason, "during_retry_delay"));
+      reject(retryDelayAbortError(abortSignal.reason));
       return;
     }
     const timeout = setTimeout(() => {
@@ -414,7 +444,7 @@ function delay(ms: number, abortSignal?: AbortSignal): Promise<void> {
     }, ms);
     const onAbort = () => {
       clearTimeout(timeout);
-      reject(abortedModelCallError(abortSignal?.reason, "during_retry_delay"));
+      reject(retryDelayAbortError(abortSignal?.reason));
     };
     abortSignal?.addEventListener("abort", onAbort, { once: true });
   });

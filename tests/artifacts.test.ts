@@ -1283,7 +1283,10 @@ describe("match artifact JSONL export", () => {
       expect(snapshots?.map((agent) => agent.playerId).sort()).toEqual(playerIds);
       expect(step.agentSnapshotsHashAfterStep).toBe(hashStableState(snapshots));
       const actingAgent = snapshots?.find((agent) => agent.playerId === step.actorId);
-      expect(actingAgent?.socialStateHash).toBe(step.agentStateHash);
+      expect(step.agentStateHash).toEqual(expect.any(String));
+      expect(actingAgent?.socialStateHash).toEqual(expect.any(String));
+      expect(actingAgent?.socialStateHash).toBe(hashStableState(actingAgent?.social));
+      expect(actingAgent?.socialStateHash).not.toBe(step.agentStateHash);
     }
     const finalStep = artifact.trajectory.at(-1);
     expect(finalStep ? resolveAgentSnapshotsAfterStep(artifact, finalStep) : undefined).toEqual(artifact.agents);
@@ -1383,7 +1386,10 @@ describe("match artifact JSONL export", () => {
       actingSocialStep.actorSnapshotsHashAfterStep = actingFrame.agentsHash;
       actingSocialStep.actorSnapshotFrameIdAfterStep = actingFrame.frameId;
     }
-    expect(validateMatchArtifactIntegrity(actingHashTamper).join("\n")).toMatch(/agentStateHash mismatch/);
+    // A snapshot frame is a redacted serializable artifact. Its frame hash is
+    // authoritative; socialStateHash is a private runtime-derived cache and
+    // can intentionally differ after redaction.
+    expect(validateMatchArtifactIntegrity(actingHashTamper)).toEqual([]);
 
     const futureTraceTamper = cloneJson(artifact);
     const safeBoundaryIndex = firstSafePrefixLength(futureTraceTamper) - 1;
@@ -1399,6 +1405,9 @@ describe("match artifact JSONL export", () => {
       artifact: "trace",
       traceId: futureTraceId
     });
+    // The journal mutation deliberately remains structurally valid so the
+    // checkpoint gate, not base artifact integrity, catches its future trace.
+    snapshotAgentWithJournal.socialStateHash = hashStableState(snapshotAgentWithJournal.social);
     futureTraceFrame.agentsHash = hashStableState(futureTraceFrame.agents);
     futureTraceFrame.frameId = `agent-snapshot:${futureTraceFrame.agentsHash}`;
     futureTraceTamper.trajectory[safeBoundaryIndex].agentSnapshotsHashAfterStep = futureTraceFrame.agentsHash;

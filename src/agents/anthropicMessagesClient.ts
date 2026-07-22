@@ -6,6 +6,7 @@ import Anthropic, {
 } from "@anthropic-ai/sdk";
 import type { Message, MessageParam, MessageStreamEvent, Usage, MessageDeltaUsage } from "@anthropic-ai/sdk/resources/messages/messages";
 import type { ModelClient, ModelCompletionRequest, ModelCompletionResult } from "./modelClient";
+import { completeWithBoundedModelRetries } from "./openaiClient";
 import { ModelCallError, type ChatCompletionUsage, type ChatMessage, type ProviderStreamCompletionMode, looksLikeHtmlGatewayPayload } from "./schema";
 import { normalizeSdkBaseUrl } from "./providerUrls";
 
@@ -15,6 +16,7 @@ export interface AnthropicMessagesClientOptions {
   maxTokens: number;
   anthropicVersion?: string;
   timeoutMs?: number;
+  maxRetries?: number;
   abortSignal?: AbortSignal;
   stream?: boolean;
   fetch?: typeof fetch;
@@ -24,6 +26,7 @@ export class AnthropicMessagesClient implements ModelClient {
   private readonly client: Anthropic;
   private readonly maxTokens: number;
   private readonly timeoutMs: number;
+  private readonly maxRetries: number;
   private readonly abortSignal?: AbortSignal;
   private readonly stream: boolean;
 
@@ -33,6 +36,7 @@ export class AnthropicMessagesClient implements ModelClient {
     if (!options.apiKey.trim()) throw new Error("ANTHROPIC_API_KEY is required for Anthropic Messages model calls.");
     this.maxTokens = validatePositiveInteger(options.maxTokens, "Anthropic max_tokens");
     this.timeoutMs = validatePositiveInteger(options.timeoutMs ?? 120_000, "Anthropic Messages timeout");
+    this.maxRetries = validateNonNegativeInteger(options.maxRetries ?? 2, "LLM retry count");
     this.abortSignal = options.abortSignal;
     this.stream = options.stream ?? true;
     this.client = new Anthropic({
@@ -46,6 +50,14 @@ export class AnthropicMessagesClient implements ModelClient {
   }
 
   async complete(request: ModelCompletionRequest): Promise<ModelCompletionResult> {
+    return completeWithBoundedModelRetries(() => this.completeOnce(request), {
+      maxRetries: this.maxRetries,
+      abortSignal: this.abortSignal,
+      retryDelayAbortError: (reason) => abortedModelCallError(reason, "during_retry_delay")
+    });
+  }
+
+  private async completeOnce(request: ModelCompletionRequest): Promise<ModelCompletionResult> {
     const started = performance.now();
     if (this.abortSignal?.aborted) throw abortedModelCallError(this.abortSignal.reason, "before_start");
     const controller = new AbortController();
@@ -304,6 +316,11 @@ function anthropicSdkModelCallError(error: unknown, stage: string, timeoutMs: nu
 
 function validatePositiveInteger(value: number, name: string): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer.`);
+  return value;
+}
+
+function validateNonNegativeInteger(value: number, name: string): number {
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer.`);
   return value;
 }
 

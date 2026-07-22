@@ -560,7 +560,7 @@ describe("harness agent-environment cycle", () => {
     expect(result.pollutedAgent).toMatchObject({ turns: 1, observations: 1, hasInjectedBelief: false });
     expect(result.socialState).toMatchObject({
       agentCount: 9,
-      actedMemoryKinds: ["observation", "memo", "decision"],
+      actedMemoryKinds: ["observation", "memo", "decision", "outcome"],
       actedHasInjectedSocialBelief: false,
       actedSocialStateHash: expect.any(String)
     });

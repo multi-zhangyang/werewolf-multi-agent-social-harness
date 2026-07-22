@@ -150,7 +150,12 @@ describe("Werewolf generic social adapter", () => {
     expect(actor.state.turns).toBe(1);
     expect(actor.state.privateMemos).toEqual([expect.stringContaining("adapter memo:deterministic-inspect:inspect")]);
     expect(actor.state.socialStateHash).toEqual(expect.any(String));
-    expect(actor.state.social?.memory.entries.map((entry) => entry.kind)).toEqual(["observation", "memo", "decision"]);
+    expect(actor.state.social?.memory.entries.map((entry) => entry.kind)).toEqual(["observation", "memo", "decision", "outcome"]);
+    expect(actor.state.social?.memory.entries.at(-1)).toMatchObject({
+      source: "environment",
+      content: "Committed environment receipt.",
+      metadata: { version: "harness.committed-receipt.v1", status: "committed" }
+    });
     const committedDecision = actor.state.social?.memory.entries.find((entry) => entry.kind === "decision");
     expect(committedDecision?.metadata?.memoryRetrieval).toMatchObject({
       version: "harness.memory-retrieval.v1",
@@ -266,8 +271,16 @@ describe("Werewolf generic social adapter", () => {
           selected: [{ memorySeq: 1, rank: 1 }]
         },
         privateMemo: expect.stringContaining("adapter memo:deterministic-inspect:inspect"),
-        agentStateHash: actor.state.socialStateHash
+        // Turn metadata is fixed before the environment receipt. The actor's
+        // durable state then gains a separate receipt-gated outcome memory.
+        agentStateHash: expect.any(String)
       }
+    });
+    expect(harnessTurnEvents[0]?.trace.agentStateHash).not.toBe(actor.state.socialStateHash);
+    expect(actor.state.social?.memory.entries.at(-1)).toMatchObject({
+      kind: "outcome",
+      source: "environment",
+      tags: expect.arrayContaining(["receipt-feedback", "environment-committed"])
     });
     expect(harnessTurnEvents[0]?.trace.beliefs).toEqual(actor.state.beliefs);
     const inspectCommand = artifact.steps[1].action.command;
@@ -1584,7 +1597,7 @@ describe("Werewolf generic social adapter", () => {
     expect(secondActor.state.observations).toBe(1);
     expect(secondActor.state.turns).toBe(1);
     const secondMemory = secondActor.state.social?.memory.entries ?? [];
-    expect(secondMemory.map((entry) => entry.kind)).toEqual(["observation", "message", "memo", "decision"]);
+    expect(secondMemory.map((entry) => entry.kind)).toEqual(["observation", "message", "memo", "decision", "outcome"]);
     const observedSpeechMemory = secondMemory.find((entry) => entry.kind === "message");
     const observedPressureTargetId = observedSpeechMemory?.metadata?.pressureTargetId;
     expect(observedPressureTargetId).toEqual(expect.any(String));
@@ -2555,6 +2568,55 @@ describe("Werewolf generic social adapter", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("runs production Werewolf through the scaffold with policy-only commands, safe templates, and no model usage", async () => {
+    const initialState = createGame({ id: "werewolf-policy-only-production", seed: "werewolf-policy-only-production" });
+    const agents = agentConfigsFor(initialState, "policy-only-profile");
+
+    const result = await runHarnessMatch({
+      initialState,
+      agents,
+      maxTransitions: 7
+    });
+
+    const replay = replayHarnessTrajectory({
+      initialState: result.initialState,
+      trajectory: result.trajectory
+    });
+    expect(result.status).toBe("truncated");
+    expect(result.truncationReason).toContain("maxTransitions 7");
+    expect(result.trajectory).toHaveLength(6);
+    expect(result.trajectory.every((step) => step.turnTrace.cognitionSource === "policy")).toBe(true);
+    expect(result.trajectory.every((step) => step.reasonerOutput.cognitionSource === "policy")).toBe(true);
+    expect(result.trajectory.every((step) => step.turnTrace.latencyMs === 0)).toBe(true);
+    expect(result.metrics.modelUsage).toEqual({});
+    expect(result.socialEpisode.messages.some((message) => message.metadata?.kind === "private-reasoner-memo")).toBe(false);
+    const policyMemos = result.socialEpisode.messages.filter((message) => message.metadata?.kind === "private-policy-memo");
+    expect(policyMemos).toHaveLength(result.trajectory.length);
+    expect(policyMemos.every((message) => message.metadata?.cognitionSource === "policy")).toBe(true);
+    const publicSpeech = result.socialEpisode.messages.filter((message) => message.metadata?.kind === "public-speech");
+    expect(publicSpeech.length).toBeGreaterThan(0);
+    expect(publicSpeech.every((message) => message.content.length >= 20)).toBe(true);
+    const policyMemory = result.agents.flatMap((agent) => agent.social?.memory.entries ?? []).filter((entry) => entry.kind === "memo");
+    expect(policyMemory).toHaveLength(result.trajectory.length);
+    expect(policyMemory.every((entry) => entry.source === "policy" && entry.metadata?.cognitionSource === "policy")).toBe(true);
+    expect(replay.ok).toBe(true);
+    expect(replay.mismatches).toEqual([]);
+
+    const prefix = await runWerewolfSocialHarnessPrefix({
+      id: "werewolf-policy-only-prefix",
+      initialState,
+      agents,
+      maxTransitions: 2
+    });
+    expect(prefix.artifact.status).toBe("truncated");
+    expect(prefix.trajectory).toHaveLength(1);
+    expect(prefix.trajectory[0]?.turnTrace.cognitionSource).toBe("policy");
+    expect(prefix.artifact.messages.map((message) => message.metadata?.kind)).toEqual([
+      "private-seer-inspect",
+      "private-policy-memo"
+    ]);
   });
 
   it("keeps provider-backed decision failures as failed full HarnessRunResult artifacts", async () => {

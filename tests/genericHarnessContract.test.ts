@@ -938,8 +938,9 @@ describe("generic social harness contract", () => {
       commitStatus: "committed"
     });
     expect(committedActor.state).toMatchObject({ observations: 1, decisions: 1 });
-    expect(committedActor.state.memory.map((entry) => entry.kind)).toEqual(["observation", "memo", "decision"]);
+    expect(committedActor.state.memory.map((entry) => entry.kind)).toEqual(["observation", "memo", "decision", "outcome"]);
     expect(committedActor.state.social.journal?.entries.map((entry) => entry.mutationKind)).toEqual([
+      "memory.appended",
       "memory.appended",
       "memory.appended",
       "memory.appended"

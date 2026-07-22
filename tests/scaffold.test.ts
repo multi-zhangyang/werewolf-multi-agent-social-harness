@@ -226,14 +226,47 @@ describe("scaffolded social actor", () => {
       turnIndex: 1,
       actorId: "a",
       pendingAction: pending,
-      action
+      action,
+      reward: 0.75,
+      terminated: false,
+      truncated: false,
+      info: { visibleCount: 2, status: "accepted" },
+      postStateHash: "state-after-commit",
+      eventSeqRange: [7, 8],
+      messageSeqRange: [12, 12]
     });
 
     expect(actor.state).toMatchObject({
       actorId: "a",
       observations: 1,
-      committedValues: ["policy-selected"],
-      social: initialCanonicalState.social
+      committedValues: ["policy-selected"]
+    });
+    const outcome = actor.state.social.memory.entries.find((entry) => entry.kind === "outcome");
+    expect(outcome).toMatchObject({
+      source: "environment",
+      visibility: "private",
+      pendingAction: pending,
+      evidenceRefs: [{ artifact: "outcome", id: "canonical-tx-committed:committed", traceId: "canonical:committed" }],
+      tags: ["receipt-feedback", "environment-committed"],
+      metadata: {
+        version: "harness.committed-receipt.v1",
+        status: "committed",
+        transactionId: "canonical-tx-committed",
+        turnIndex: 1,
+        reward: 0.75,
+        hasInfo: true,
+        infoFieldCount: 2,
+        infoValueKinds: { number: 1, string: 1 },
+        postStateHash: "state-after-commit",
+        eventSeqRange: [7, 8],
+        messageSeqRange: [12, 12]
+      }
+    });
+    expect(actor.state.social.journal?.entries.at(-1)).toMatchObject({
+      mutationKind: "memory.appended",
+      traceId: "canonical:committed",
+      eventSeqRange: { start: 7, end: 8 },
+      messageSeqRange: { start: 12, end: 12 }
     });
   });
 

@@ -26159,3 +26159,71 @@ streaming Chat Completions client. The endpoint returned a controlled HTTP 503
 before stream completion, parsing, arbitration, or an environment commit.
 This is a classified external availability failure, not proof that the live
 model path is healthy. Do not retry `grok-4.5`.
+
+## 13.271 Agent Receipt Learning, Policy-Only Execution, And Protocol Retry Lock
+
+Timestamp: `2026-07-22`
+
+An actor lifecycle is not complete at policy selection. It must retain only
+the outcome of an environment-committed action, and it must be possible to
+exercise the deterministic harness without pretending that a policy template
+is a model completion.
+
+```text
+scoped observation -> staged private state -> optional reasoner/policy
+  -> typed action -> environment commit
+  -> committed receipt -> private outcome memory -> receipt-after snapshot
+```
+
+- `ScaffoldedSocialActor` appends one generic `outcome` memory entry only for a
+  committed `SocialActorStepReceipt`. It records the closed receipt facts
+  (reward/termination/truncation, coarse `info` shape, state/event/message
+  boundaries) and stable outcome evidence. It never stores raw `info` values,
+  provider diagnostics, or rejected proposal feedback. A rejected receipt
+  discards the entire staged state exactly as before.
+- The generic reducer is shared by the legacy Werewolf compatibility adapter,
+  so legacy/scaffold differential tests retain one receipt-learning state
+  contract. A canonical adapter may refresh only derived private state (for
+  example, a social-state hash) in `afterStepResult`; it may not mutate the
+  environment.
+- `HarnessTurnTrace.agentStateHash` is decision-time evidence, produced before
+  the environment receipt. A receipt-after agent snapshot can differ because
+  it includes committed outcome learning. Snapshot/frame integrity validates
+  the receipt-after snapshot hash; it must not falsely equate it with the
+  pre-receipt action hash. A redacted artifact may intentionally retain a
+  non-recomputed private social-state cache.
+- A Werewolf `HarnessReasoner` is optional. Without one, the existing policy
+  selects the typed command and provides bounded deterministic text only for
+  speech-required commands. Such records are explicitly
+  `cognitionSource: "policy"`, use `private-policy-memo`, contribute zero
+  provider/model usage, and still pass the normal scoped-observation,
+  arbitration, legality, commit, artifact, replay, and receipt path. No fake
+  model reasoner is created.
+- Chat Completions, OpenAI Responses, and Anthropic Messages use the same
+  harness-owned bounded retry loop. SDK retries remain disabled. The registry
+  forwards configured/overridden retry count to every protocol, while each
+  live stream preserves its protocol terminal-event requirement. No change
+  may introduce a Chat-Completions token-limit field.
+- On a compact Cockpit viewport, bootstrap artifact selection does not open
+  the full-width evidence drawer. It opens only through the explicit evidence
+  control; the desktop side panel remains a read-only projection of recorded
+  truth. The Cockpit now also exposes named navigation/main/tab landmarks and
+  a unique H1/H2 page hierarchy.
+
+Required regression after changing this lock:
+
+```bash
+npm run typecheck
+npx vitest run tests/scaffold.test.ts tests/providerAdapters.test.ts \
+  tests/openaiClient.test.ts tests/werewolfAdapter.test.ts tests/artifacts.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npm run test:e2e
+git diff --check
+```
+
+Live validation remains the normal bounded streaming ladder and must use only
+current allowed runtime candidates. A controlled provider error is not a
+successful model proof; never invoke the withdrawn `grok-4.5` for comparison.
