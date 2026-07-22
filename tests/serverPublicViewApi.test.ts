@@ -124,6 +124,12 @@ describe("public match API redaction", () => {
   });
 
   it("rejects full artifact views on every artifact-bearing route when the embedded server is not loopback-bound", async () => {
+    const record = await createSensitiveStoredMatch("server-public-full-view-local-only");
+    const candidate = await createSensitiveStoredMatch("server-public-full-view-local-only-candidate");
+    const checkpoint = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/checkpoints`, {
+      reason: "restricted full-view regression"
+    });
+    expect(checkpoint.status).toBe(201);
     await close(server);
     const restrictedApp = createServerApp({
       createReasoner: () => fakeReasoner,
@@ -132,8 +138,6 @@ describe("public match API redaction", () => {
     server = await listen(restrictedApp);
     const address = server.address() as AddressInfo;
     baseUrl = `http://127.0.0.1:${address.port}`;
-    const record = await createSensitiveStoredMatch("server-public-full-view-local-only");
-    const candidate = await createSensitiveStoredMatch("server-public-full-view-local-only-candidate");
     const [operatorList, operatorDetail, strictLive] = await Promise.all([
       requestJson(baseUrl, "GET", "/api/matches"),
       requestJson(baseUrl, "GET", `/api/matches/${record.id}`),
@@ -158,10 +162,29 @@ describe("public match API redaction", () => {
       `/api/matches/${record.id}/compare/${candidate.id}?view=truth-redacted`
     );
     expect(safeComparison.status).toBe(200);
-    const checkpoint = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/checkpoints`, {
-      reason: "restricted full-view regression"
-    });
-    expect(checkpoint.status).toBe(201);
+    const checkpointOperatorPaths: Array<["GET" | "POST", string]> = [
+      ["POST", `/api/matches/${record.id}/checkpoints`],
+      ["GET", `/api/matches/${record.id}/fork-lineage`],
+      ["GET", `/api/checkpoints?matchId=${encodeURIComponent(record.id)}`],
+      ["GET", `/api/checkpoints/${checkpoint.body.summary.checkpointId}`],
+      ["GET", `/api/checkpoints/${checkpoint.body.summary.checkpointId}/forks`],
+      ["GET", `/api/checkpoints/${checkpoint.body.summary.checkpointId}/branch-tree`],
+      ["POST", `/api/checkpoints/${checkpoint.body.summary.checkpointId}/fork`]
+    ];
+    for (const [method, path] of checkpointOperatorPaths) {
+      const response = await requestJson(baseUrl, method, path, method === "POST" ? { maxTransitions: 1 } : undefined);
+      expect(response.status).toBe(403);
+      expect(response.body).toMatchObject({ code: "operator_match_registry_local_only" });
+      expect(JSON.stringify(response.body)).not.toContain(record.artifact!.seed);
+    }
+
+    const publicCheckpointArtifact = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/checkpoints/${checkpoint.body.summary.checkpointId}/artifact?view=truth-redacted`
+    );
+    expect(publicCheckpointArtifact.status).toBe(200);
+    expect(publicCheckpointArtifact.body.projection).toMatchObject({ view: "truth-redacted" });
 
     const fullViewPaths = [
       `/api/matches/${record.id}/artifact?view=full`,

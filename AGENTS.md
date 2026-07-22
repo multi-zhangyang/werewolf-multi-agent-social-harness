@@ -27430,3 +27430,93 @@ Playwright left no project Chromium, Vite, or server listener running after
 teardown. This slice did not change provider/reasoner behavior, so it did not
 repeat an external model call and did not add any provider- or model-specific
 branch.
+
+## 13.289 Replay-Prefix Checkpoint, Fork Cockpit, And Operator Access Lock
+
+Timestamp: `2026-07-22`
+
+The React cockpit now completes the existing server-authoritative checkpoint
+and fork workflow without adding a browser replay engine or a new backend
+protocol:
+
+- A checkpoint created while a server replay frame is selected sends only that
+  frame's `nativeStepCount` to the existing checkpoint selector endpoint. With
+  no selected frame, the UI explicitly creates a final-boundary checkpoint.
+- The browser never submits state, actor snapshots, messages, commands, hashes,
+  paths, or a checkpoint object. The server selects and replay-verifies the
+  canonical prefix and remains the checkpoint authority.
+- Each checkpoint row exposes a real Fork action using the existing
+  `POST /api/checkpoints/:id/fork` route. The UI validates child/checkpoint
+  identity, requires an artifact-backed response, and preserves a failed child
+  as a visible failed comparison rather than calling it success.
+- A successful fork keeps the parent artifact as comparison baseline, loads the
+  child postgame-redacted artifact as candidate, loads child lineage and the
+  source checkpoint branch tree, and opens the parent-to-child comparison.
+  It does not reverse parent/child direction or clear the parent checkpoint
+  registry by replacing the main artifact.
+- The selected checkpoint must belong to the current parent run before the UI
+  can fork it. The persisted UI reason uses a bounded short checkpoint id.
+- The deterministic fixture E2E selects a complete native replay boundary,
+  proves that checkpoint creation submits the exact `nativeStepCount`, forks
+  from the returned checkpoint id, and verifies child artifact, parent-to-child
+  comparison, child lineage, and source branch tree responses.
+
+A related pre-existing access-control defect was closed during this slice.
+When the embedded server was not loopback-bound, match registry routes were
+already local-only, but checkpoint create/list/detail/forks/branch-tree,
+fork-lineage, and fork mutation routes remained remotely callable. This leaked
+canonical ids, seed/boundary/hash metadata and allowed a remote caller to
+trigger real fork model work.
+
+All checkpoint operator and mutation routes now reuse the existing loopback
+operator guard:
+
+```text
+POST /api/matches/:id/checkpoints
+GET  /api/matches/:id/fork-lineage
+GET  /api/checkpoints
+GET  /api/checkpoints/:id
+GET  /api/checkpoints/:id/forks
+GET  /api/checkpoints/:id/branch-tree
+POST /api/checkpoints/:id/fork
+```
+
+The safe possession-based display route
+`GET /api/checkpoints/:id/artifact?view=truth-redacted` remains available and
+still returns only the strict truth-redacted projection. Full and
+postgame-redacted checkpoint artifacts remain local-only. The React lineage
+workspace disables operator controls under `truth-redacted`; frontend gating is
+UX only, while the server guard is the authority.
+
+Validation recorded:
+
+```bash
+npm run typecheck
+npx vitest run tests/serverPublicViewApi.test.ts \
+  tests/serverCheckpointApi.test.ts --maxWorkers=1 --no-file-parallelism \
+  --testTimeout=60000 --hookTimeout=60000 --teardownTimeout=60000 \
+  --reporter=dot
+npm run build
+npx playwright test --config=playwright.config.ts \
+  -g "renders recorded server truth without a provider and never requests a full artifact|creates a replay-prefix checkpoint and opens its real fork comparison"
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npx playwright test --config=playwright.config.ts
+git diff --check
+```
+
+The focused server group passed **2 files / 39 tests**. The focused cockpit
+group passed **2/2** against the real fixture server and its deterministic fake
+reasoner, including the actual checkpoint and fork routes. Production build
+passed with only the existing Vite chunk-size warning. The final serial
+deterministic suite passed **49 files / 520 tests**, and the final serial
+fixture cockpit passed **15/15**. An earlier intentionally parallel validation
+run caused only deadline failures in long tests; the serial rerun closed all of
+them. Teardown left no project Playwright, Chromium, Vite, or fixture-server
+listener. No live provider call, provider/model special case, or browser-owned
+domain transition was added.
+
+Remaining follow-up: a fork that throws before producing an artifact still
+needs a durable pre-artifact fork-attempt record so failed attempts cannot
+disappear from `/forks` and branch-tree lineage. This lock does not claim that
+separate persistence problem is solved.
