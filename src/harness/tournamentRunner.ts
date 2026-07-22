@@ -10,6 +10,14 @@
 
 export type TournamentEpisodeLifecycle = "completed" | "truncated" | "failed";
 
+/**
+ * Generic control-plane output must never become a carrier for an arbitrary
+ * exception message. Domain adapters may record their own reviewed, closed
+ * failure evidence, but this fallback is deliberately stable and content-free
+ * so generic result/pack persistence cannot leak provider diagnostics.
+ */
+export const GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE = "Tournament episode failed before a result was recorded.";
+
 export interface TournamentEpisodeContext {
   index: number;
   seed: string;
@@ -100,6 +108,6 @@ export async function runTournamentEpisodes<TPrepared, TResult>(
   };
 }
 
-function defaultErrorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function defaultErrorText(_error: unknown): string {
+  return GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE;
 }

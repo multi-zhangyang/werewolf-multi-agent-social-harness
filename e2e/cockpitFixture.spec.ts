@@ -299,10 +299,48 @@ test.describe("compact cockpit", () => {
   });
 });
 
-// This test intentionally runs last: unlike the projection/replay fixtures
-// above, it creates a real artifact-backed run in the fixture server store.
-// Keeping that write after every read-only fixture assertion avoids changing
-// the recorded match selected by their bootstrap path.
+test("blocks an invalid roster assignment in the browser before it can start a match", async ({ page }) => {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+
+  await page.getByRole("button", { name: "实验编排" }).click();
+  const composer = page.getByRole("dialog", { name: "实验编排 · Agent Roster" });
+  await expect(composer).toBeVisible();
+  await composer.getByRole("textbox", { name: "profile 1 id" }).fill("wolves");
+  await composer.getByRole("textbox", { name: "profile 2 id" }).fill("village");
+
+  const strategy = composer.getByRole("combobox", { name: "Agent assignment strategy" });
+  await strategy.click();
+  await strategy.press("ArrowDown");
+  await strategy.press("ArrowDown");
+  await strategy.press("ArrowDown");
+  await strategy.press("Enter");
+  const wolvesTeam = composer.getByRole("combobox", { name: "Agent assignment team werewolves" });
+  await expect(wolvesTeam).toBeVisible();
+  await wolvesTeam.click();
+  await wolvesTeam.press("ArrowDown");
+  await wolvesTeam.press("Enter");
+
+  // Whichever valid profile keyboard selection chose is now dangling. The UI
+  // must fail this request locally rather than asking the server to discover it.
+  await composer.getByRole("textbox", { name: "profile 1 id" }).fill("retired-wolves");
+  await composer.getByRole("textbox", { name: "profile 2 id" }).fill("retired-village");
+  await composer.getByRole("button", { name: "完成编排" }).click();
+
+  let matchRunRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/matches/run") {
+      matchRunRequests += 1;
+    }
+  });
+  await page.getByRole("button", { name: "运行实验" }).click();
+  await expect(page.getByRole("status")).toContainText("无法启动：实验编排草案无效");
+  await expect(page.getByRole("status")).toContainText("unknown profile id");
+  expect(matchRunRequests).toBe(0);
+});
+
+// The remaining write tests intentionally run after every read-only fixture
+// assertion so the bootstrap path keeps selecting the recorded fixture match.
 test("submits a heterogeneous Agent roster through the existing harness control plane", async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -377,6 +415,49 @@ test("submits a heterogeneous Agent roster through the existing harness control 
   // projection route.
   expect(record).not.toHaveProperty("artifact");
   await expect(page.getByRole("status")).toContainText("真实 harness run 完成");
+});
+
+test("submits the selected parallel scheduler when exporting a tournament public pack", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/?workspace=packs", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+  await expect(page.getByRole("tabpanel", { name: "公开包" })).toBeVisible();
+
+  const scheduler = page.getByRole("combobox", { name: "联合阶段调度" });
+  await scheduler.click();
+  await scheduler.press("ArrowDown");
+  await scheduler.press("Enter");
+
+  const submittedRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST" && url.pathname === "/api/tournaments/run";
+  });
+  const tournamentResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "POST" && url.pathname === "/api/tournaments/run";
+  });
+  await page.getByRole("button", { name: "导出公开包" }).click();
+
+  const request = await submittedRequest;
+  const body = request.postDataJSON() as {
+    models?: unknown;
+    profiles?: unknown;
+    assignment?: unknown;
+    jointPhaseScheduler?: unknown;
+    exportArtifacts?: unknown;
+    [key: string]: unknown;
+  };
+  expect(body.jointPhaseScheduler).toBe("parallel");
+  expect(body.exportArtifacts).toBe(true);
+  expect(Array.isArray(body.models)).toBeTruthy();
+  expect(Array.isArray(body.profiles)).toBeTruthy();
+  expect(body.assignment).toBeTruthy();
+  expect(body).not.toHaveProperty("resolvedAssignments");
+  expect(body).not.toHaveProperty("artifact");
+  expect(body).not.toHaveProperty("winner");
+
+  const response = await tournamentResponse;
+  expect(response.ok()).toBeTruthy();
 });
 
 function isArtifactResponse(response: Response, view: "postgame-redacted" | "truth-redacted"): boolean {

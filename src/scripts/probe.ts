@@ -1,5 +1,5 @@
 import { modelClientFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
-import { normalizeModelList } from "../agents/schema";
+import { assertRuntimeModelsAvailable, normalizeModelList } from "../agents/schema";
 import { applyCommand, createGame, getPendingActions } from "../core/engine";
 import { isAgentPendingAction } from "../core/pending";
 import { safeProviderFailureMessage } from "../harness/providerFailure";
@@ -190,8 +190,10 @@ async function main(): Promise<void> {
 }
 
 function parseOptions(): ProbeOptions {
+  const models = normalizeModelList(readArg("models") ?? process.env.LLM_MODELS);
+  assertRuntimeModelsAvailable(models, "Probe");
   return {
-    models: normalizeModelList(readArg("models") ?? process.env.LLM_MODELS),
+    models,
     timeoutMs: parseDurationMs(readArg("timeoutMs") ?? readArg("timeout") ?? process.env.PROBE_TIMEOUT_MS, "probe timeout")
   };
 }

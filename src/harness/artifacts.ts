@@ -520,7 +520,10 @@ export function toTrajectoryJsonl(artifact: TrajectoryJsonlSource): string {
         redactionPolicy: receipt.redactionPolicy
       }))
     ),
-    ...(artifact.socialEpisode.exposureRecords ?? deriveSocialExposureRecords(artifact.socialEpisode)).map((exposure) => ({
+    // Exposure sidecars are optional, validated caches. JSONL evidence must
+    // always come from the canonical scoped-observation derivation so callers
+    // cannot make an export trust a mutable cached field.
+    ...deriveSocialExposureRecords(artifact.socialEpisode).map((exposure) => ({
       type: "social_exposure",
       runId: artifact.runId,
       matchId: artifact.matchId,

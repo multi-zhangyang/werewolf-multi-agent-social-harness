@@ -1,4 +1,5 @@
 import { createGame } from "../core/engine";
+import { assertRuntimeModelsAvailable } from "../agents/schema";
 import type { GameConfig, GameState, MatchMetrics, Role, Team } from "../core/types";
 import { TOURNAMENT_EXPERIMENT_VERSION, type NormalizedTournamentExperiment } from "./experiment";
 import {
@@ -160,6 +161,7 @@ export async function runTournament(options: TournamentOptions): Promise<Tournam
   if (profiles.length === 0) throw new Error("Tournament requires at least one Agent profile or model.");
   if (!Number.isInteger(options.games) || options.games <= 0) throw new Error("Tournament games must be a positive integer.");
   const models = Array.from(new Set(profiles.map((profile) => profile.model)));
+  assertRuntimeModelsAvailable(models, "Tournament");
   const jointPhaseScheduler = resolveJointPhaseScheduler(options);
   const experiment = buildEffectiveExperiment(options, { models, profiles, assignment, temperature: defaultTemperature });
 

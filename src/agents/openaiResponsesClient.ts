@@ -153,7 +153,13 @@ export class OpenAIResponsesClient implements ModelClient {
           });
         }
       }
-      return finish(content, started, usage, providerRequestId, "reader_done");
+      // A partial text delta followed only by transport EOF is not a completed
+      // Responses generation. `response.completed` is the provider terminal
+      // event that authorizes this optional reasoner output to proceed to
+      // parsing and arbitration; accepting EOF would risk committing a
+      // truncated memo or speech draft.
+      if (content) throw incompleteStreamModelCallError();
+      return finish(content, started, usage, providerRequestId, "provider_stop_event");
     } catch (error) {
       if (error instanceof ModelCallError) throw error;
       const sdkError = openAISdkModelCallError(error, "during_stream", this.timeoutMs);
@@ -251,6 +257,14 @@ function finish(
     attempts: 1,
     stream: { enabled: true, completed: true, completedBy }
   };
+}
+
+function incompleteStreamModelCallError(): ModelCallError {
+  return new ModelCallError("OpenAI Responses stream ended before a provider completion event.", {
+    failureKind: "stream_incomplete",
+    providerStage: "stream_finish",
+    retryable: true
+  });
 }
 
 function removeUndefined<T extends Record<string, unknown>>(value: T): T {
