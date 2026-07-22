@@ -244,6 +244,62 @@ export interface GossipLedger {
   records: Record<string, GossipRecord>;
 }
 
+/**
+ * A theory-of-mind record is deliberately an attribution of an *observed
+ * statement*, not a claim that the subject actually believes, knows, intends,
+ * or will do the thing described.  This keeps first-order beliefs owned by
+ * {@link BeliefStore} semantically separate from second-order social evidence.
+ */
+export type TheoryOfMindAttributionKind =
+  | "stated_assertion"
+  | "stated_intent"
+  | "stated_commitment"
+  | "stated_request"
+  | "stated_agreement"
+  | "stated_disagreement";
+
+export interface TheoryOfMindProposition {
+  /** A domain-neutral predicate derived from the explicit speech-act kind. */
+  predicate: string;
+  /** The entity named by the statement, when the typed act supplied one. */
+  subjectId?: string;
+  /** The target named by the statement, when the typed act supplied one. */
+  targetId?: string;
+  /**
+   * Exact structured speech-act payload. It is copied, never interpreted from
+   * message text, and is redacted from non-private projections.
+   */
+  value?: unknown;
+}
+
+export interface TheoryOfMindAttribution {
+  id: string;
+  /** The private social-state owner: observer A. */
+  observerId: string;
+  /** The speaker whose explicit statement A observed: subject B. */
+  subjectId: string;
+  kind: TheoryOfMindAttributionKind;
+  proposition: TheoryOfMindProposition;
+  source: "speech_act";
+  sourceMessageId: string;
+  sourceMessageSeq: number;
+  sourceSpeechActId: string;
+  sourceSpeechActKind: string;
+  /** Present when the scoped message carried a runtime delivery receipt. */
+  sourceDeliveryReceiptId?: string;
+  visibility: MemoryVisibility;
+  /** Confidence stated by the source act, not an inferred confidence. */
+  confidence?: number;
+  evidenceRefs: EvidenceRef[];
+  observedAtTraceId?: string;
+  observedAtTurnIndex?: number;
+  createdAt: string;
+}
+
+export interface TheoryOfMindStore {
+  records: Record<string, TheoryOfMindAttribution>;
+}
+
 export type NormSanctionKind = "warning" | "pressure" | "reputation" | "exclusion" | "punishment" | "repair_request" | "reward";
 export type NormSanctionStatus = "proposed" | "applied" | "repaired" | "withdrawn" | "expired" | "unknown";
 
@@ -394,6 +450,7 @@ export type SocialStateMutationStore =
   | "commitments"
   | "coalitions"
   | "gossip"
+  | "theoryOfMind"
   | "normSanctions"
   | "trustRepairs"
   | "betrayals"
@@ -413,6 +470,7 @@ export type SocialStateMutationKind =
   | "coalition.added"
   | "coalition.evidence.recorded"
   | "gossip.added"
+  | "theory_of_mind.attribution.recorded"
   | "norm_sanction.added"
   | "norm_sanction.status.updated"
   | "trust_repair.added"
@@ -487,6 +545,7 @@ export interface AgentSocialState<TObservation = unknown, TPending = unknown, TC
   commitments?: CommitmentLedger;
   coalitions?: CoalitionLedger;
   gossip?: GossipLedger;
+  theoryOfMind?: TheoryOfMindStore;
   normSanctions?: NormSanctionLedger;
   trustRepairs?: TrustRepairLedger;
   betrayals?: BetrayalLedger;
@@ -566,6 +625,10 @@ export function createGossipLedger(): GossipLedger {
   return { records: {} };
 }
 
+export function createTheoryOfMindStore(): TheoryOfMindStore {
+  return { records: {} };
+}
+
 export function createNormSanctionLedger(): NormSanctionLedger {
   return { records: {} };
 }
@@ -591,6 +654,11 @@ export function ensureCoalitionLedger(state: AgentSocialState): CoalitionLedger 
 export function ensureGossipLedger(state: AgentSocialState): GossipLedger {
   state.gossip ??= createGossipLedger();
   return state.gossip;
+}
+
+export function ensureTheoryOfMindStore(state: AgentSocialState): TheoryOfMindStore {
+  state.theoryOfMind ??= createTheoryOfMindStore();
+  return state.theoryOfMind;
 }
 
 export function ensureNormSanctionLedger(state: AgentSocialState): NormSanctionLedger {
@@ -1407,6 +1475,89 @@ export function addSocialGossip(
   return record;
 }
 
+/**
+ * Add one immutable, evidence-backed attribution. This boundary rejects
+ * postgame-only material and malformed source coordinates so callers cannot
+ * turn arbitrary private state or a later outcome into a theory-of-mind fact.
+ */
+export function addTheoryOfMindAttribution(
+  store: TheoryOfMindStore,
+  input: Omit<TheoryOfMindAttribution, "createdAt" | "confidence">
+    & { confidence?: number }
+): TheoryOfMindAttribution {
+  requireStableTheoryOfMindAttribution(input);
+  const existing = store.records[input.id];
+  if (existing) return cloneJson(existing);
+  const record: TheoryOfMindAttribution = {
+    ...cloneJson(input),
+    confidence: input.confidence === undefined ? undefined : clamp01(input.confidence),
+    createdAt: deterministicTimestamp(Object.keys(store.records).length + 1)
+  };
+  store.records[record.id] = record;
+  return cloneJson(record);
+}
+
+/**
+ * Root-state wrapper that records a redaction-safe mutation journal entry.
+ * The journal stores source coordinates and proposition shape only; it never
+ * duplicates an arbitrary speech-act value or message content.
+ */
+export function addSocialTheoryOfMindAttribution(
+  state: AgentSocialState,
+  input: Parameters<typeof addTheoryOfMindAttribution>[1],
+  context?: SocialStateMutationContext
+): TheoryOfMindAttribution {
+  const store = ensureTheoryOfMindStore(state);
+  const previous = store.records[input.id];
+  const record = addTheoryOfMindAttribution(store, input);
+  if (previous) return record;
+  recordSocialStateMutation(state, {
+    store: "theoryOfMind",
+    mutationKind: "theory_of_mind.attribution.recorded",
+    subjectId: record.subjectId,
+    beforeSummary: {
+      attributionCount: Object.keys(store.records).length - 1
+    },
+    afterSummary: {
+      attributionCount: Object.keys(store.records).length,
+      ...summarizeTheoryOfMindAttribution(record)
+    },
+    deltaSummary: {
+      attributionId: record.id,
+      source: record.source,
+      sourceMessageId: record.sourceMessageId,
+      sourceMessageSeq: record.sourceMessageSeq,
+      sourceSpeechActId: record.sourceSpeechActId,
+      sourceSpeechActKind: record.sourceSpeechActKind,
+      kind: record.kind
+    },
+    evidenceRefs: record.evidenceRefs,
+    context: mergeMutationContext(context, record.evidenceRefs, {
+      observerId: record.observerId,
+      speakerId: record.subjectId,
+      targetId: record.proposition.targetId,
+      messageId: record.sourceMessageId,
+      messageSeq: record.sourceMessageSeq,
+      speechActId: record.sourceSpeechActId,
+      speechActKind: record.sourceSpeechActKind,
+      theoryOfMindKind: record.kind,
+      visibility: record.visibility
+    }),
+    metadata: {
+      observerId: record.observerId,
+      speakerId: record.subjectId,
+      targetId: record.proposition.targetId,
+      messageId: record.sourceMessageId,
+      messageSeq: record.sourceMessageSeq,
+      speechActId: record.sourceSpeechActId,
+      speechActKind: record.sourceSpeechActKind,
+      theoryOfMindKind: record.kind,
+      visibility: record.visibility
+    }
+  });
+  return record;
+}
+
 export function addNormSanction(ledger: NormSanctionLedger, input: Omit<NormSanctionRecord, "createdAt" | "updatedAt" | "status"> & {
   status?: NormSanctionStatus;
 }): NormSanctionRecord {
@@ -1905,6 +2056,29 @@ function summarizeGossipRecord(record: GossipRecord): SocialStateMutationSummary
   };
 }
 
+function summarizeTheoryOfMindAttribution(record: TheoryOfMindAttribution): SocialStateMutationSummary {
+  return {
+    id: record.id,
+    observerId: record.observerId,
+    subjectId: record.subjectId,
+    kind: record.kind,
+    predicate: record.proposition.predicate,
+    propositionSubjectId: record.proposition.subjectId,
+    propositionTargetId: record.proposition.targetId,
+    hasValue: record.proposition.value !== undefined,
+    valueKind: kindOfObject(record.proposition.value) ?? typeof record.proposition.value,
+    source: record.source,
+    sourceMessageId: record.sourceMessageId,
+    sourceMessageSeq: record.sourceMessageSeq,
+    sourceSpeechActId: record.sourceSpeechActId,
+    sourceSpeechActKind: record.sourceSpeechActKind,
+    hasSourceDeliveryReceipt: record.sourceDeliveryReceiptId !== undefined,
+    visibility: record.visibility,
+    confidence: record.confidence,
+    evidenceRefCount: record.evidenceRefs.length
+  };
+}
+
 function summarizeNormSanctionRecord(record: NormSanctionRecord): SocialStateMutationSummary {
   return {
     id: record.id,
@@ -2082,6 +2256,7 @@ const JOURNAL_METADATA_KEYS = [
   "coalitionIds",
   "claimSource",
   "claimKind",
+  "theoryOfMindKind",
   "channelId",
   "visibility"
 ];
@@ -2169,6 +2344,30 @@ function mergeEvidenceRefs(existing: EvidenceRef[], incoming: EvidenceRef[]): Ev
     merged.push(cloneJson(ref));
   }
   return merged;
+}
+
+function requireStableTheoryOfMindAttribution(
+  input: Omit<TheoryOfMindAttribution, "createdAt" | "confidence"> & { confidence?: number }
+): void {
+  if (!input.id.trim()) throw new Error("theory-of-mind attribution requires an id.");
+  if (!input.observerId.trim()) throw new Error("theory-of-mind attribution requires an observerId.");
+  if (!input.subjectId.trim()) throw new Error("theory-of-mind attribution requires a subjectId.");
+  if (!input.proposition?.predicate?.trim()) throw new Error("theory-of-mind attribution requires a proposition predicate.");
+  if (input.source !== "speech_act") throw new Error("theory-of-mind attribution source must be speech_act.");
+  if (!input.sourceMessageId.trim()) throw new Error("theory-of-mind attribution requires a sourceMessageId.");
+  if (!Number.isInteger(input.sourceMessageSeq) || input.sourceMessageSeq < 1) {
+    throw new Error("theory-of-mind attribution requires a positive sourceMessageSeq.");
+  }
+  if (!input.sourceSpeechActId.trim()) throw new Error("theory-of-mind attribution requires a sourceSpeechActId.");
+  if (!input.sourceSpeechActKind.trim()) throw new Error("theory-of-mind attribution requires a sourceSpeechActKind.");
+  if (input.visibility === "postgame") throw new Error("theory-of-mind attribution cannot use postgame-only evidence.");
+  if (input.confidence !== undefined && (!Number.isFinite(input.confidence) || input.confidence < 0 || input.confidence > 1)) {
+    throw new Error("theory-of-mind attribution confidence must be between 0 and 1.");
+  }
+  requireEvidence(input.evidenceRefs, "theory-of-mind attribution");
+  if (!input.evidenceRefs.some((ref) => ref.artifact === "message" && ref.id === input.sourceMessageId && ref.seq === input.sourceMessageSeq)) {
+    throw new Error("theory-of-mind attribution requires matching message evidence.");
+  }
 }
 
 function requireEvidence(evidenceRefs: EvidenceRef[], operation: string): void {

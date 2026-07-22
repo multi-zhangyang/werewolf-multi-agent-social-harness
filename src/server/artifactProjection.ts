@@ -183,6 +183,7 @@ export type RedactedAgentSocialStateDto = Omit<
   | "commitments"
   | "coalitions"
   | "gossip"
+  | "theoryOfMind"
   | "normSanctions"
   | "trustRepairs"
   | "betrayals"
@@ -202,6 +203,8 @@ export type RedactedAgentSocialStateDto = Omit<
   commitments?: never;
   coalitions?: never;
   gossip?: never;
+  /** Second-order attributions are actor-private and never server-projected. */
+  theoryOfMind?: never;
   normSanctions?: never;
   trustRepairs?: never;
   betrayals?: never;
