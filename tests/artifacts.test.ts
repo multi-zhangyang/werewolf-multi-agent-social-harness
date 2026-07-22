@@ -53,7 +53,7 @@ import {
   TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_EVALUATOR_ID,
   TRUST_REPAIR_REPUTATION_TEMPORAL_ASSOCIATION_METRIC_IDS
 } from "../src/harness/socialEvaluator";
-import { deriveSocialExposureRecords, isSocialStepCommitted } from "../src/harness/social";
+import { deriveSocialExposureRecords, isSocialStepCommitted, summarizeSocialExposureRecords } from "../src/harness/social";
 import {
   addSocialBetrayal,
   addSocialCoalition,
@@ -1155,8 +1155,34 @@ describe("match artifact JSONL export", () => {
     expect(validateMatchArtifactIntegrity(artifact)).toEqual([]);
     expect(artifact.socialEpisode.messages.length).toBeGreaterThan(0);
     expect(artifact.socialEpisode.steps.some((step) => step.messageSeqRange)).toBe(true);
-    expect(deriveSocialExposureRecords(artifact.socialEpisode).length).toBeGreaterThan(0);
+    const canonicalExposureRecords = deriveSocialExposureRecords(artifact.socialEpisode);
+    expect(canonicalExposureRecords.length).toBeGreaterThan(0);
     expect(artifact.agents.some((agent) => (agent.social?.journal?.entries.length ?? 0) > 0)).toBe(true);
+
+    const canonicalExposureSidecar = cloneJson(artifact);
+    canonicalExposureSidecar.socialEpisode.exposureRecords = cloneJson(canonicalExposureRecords);
+    canonicalExposureSidecar.socialEpisode.exposureSummary = summarizeSocialExposureRecords(canonicalExposureRecords);
+    expect(validateMatchArtifactIntegrity(canonicalExposureSidecar)).toEqual([]);
+
+    const forgedExposureSidecar = cloneJson(canonicalExposureSidecar);
+    forgedExposureSidecar.socialEpisode.exposureRecords![0] = {
+      ...forgedExposureSidecar.socialEpisode.exposureRecords![0]!,
+      observerId: "forged-observer"
+    };
+    expect(validateMatchArtifactIntegrity(forgedExposureSidecar).join("\n")).toMatch(
+      /exposureRecords do not match canonical scoped-observation exposure evidence/i
+    );
+    const exportedExposureRecords = parseJsonl(toTrajectoryJsonl(forgedExposureSidecar)).filter(
+      (record) => record.type === "social_exposure"
+    );
+    expect(exportedExposureRecords.some((record) => record.observerId === "forged-observer")).toBe(false);
+    expect(exportedExposureRecords).toHaveLength(canonicalExposureRecords.length);
+
+    const forgedExposureSummary = cloneJson(canonicalExposureSidecar);
+    forgedExposureSummary.socialEpisode.exposureSummary!.observerCount += 1;
+    expect(validateMatchArtifactIntegrity(forgedExposureSummary).join("\n")).toMatch(
+      /exposureSummary does not match canonical scoped-observation exposure evidence/i
+    );
 
     const executionBudgetTamper = cloneJson(artifact);
     if (!executionBudgetTamper.socialEpisode.execution) throw new Error("Expected native social execution metadata.");

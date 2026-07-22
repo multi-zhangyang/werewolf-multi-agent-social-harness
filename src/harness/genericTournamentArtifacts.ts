@@ -7,6 +7,7 @@ import type {
   TournamentEpisodeContext,
   TournamentEpisodeLifecycle
 } from "./tournamentRunner";
+import { GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE } from "./tournamentRunner";
 
 /**
  * A small, domain-neutral research artifact set.  This intentionally stops at
@@ -110,8 +111,11 @@ export async function writeGenericTournamentRunSetArtifact<TArtifact>(options: {
   directory: string;
   artifact: GenericTournamentRunSetArtifact<TArtifact>;
 }): Promise<GenericTournamentArtifactDirectory> {
-  const errors = validateGenericTournamentRunSetArtifact(options.artifact);
-  if (errors.length) throw new Error(`Invalid generic tournament run set ${options.artifact.runSetId}: ${errors.join(" ")}`);
+  // A generic caller can construct this public type directly, bypassing the
+  // runner. Apply the same closed failure boundary at persistence time.
+  const artifact = sanitizeGenericTournamentRunSetArtifact(options.artifact);
+  const errors = validateGenericTournamentRunSetArtifact(artifact);
+  if (errors.length) throw new Error(`Invalid generic tournament run set ${artifact.runSetId}: ${errors.join(" ")}`);
   const directory = resolve(options.directory);
   await mkdir(directory, { recursive: false });
   const episodesDirectory = join(directory, "episodes");
@@ -120,7 +124,7 @@ export async function writeGenericTournamentRunSetArtifact<TArtifact>(options: {
   const episodePaths: string[] = [];
   const episodeRows: Array<Record<string, unknown>> = [];
   const metricRows: Array<Record<string, unknown>> = [];
-  for (const episode of options.artifact.episodes) {
+  for (const episode of artifact.episodes) {
     const artifactFile = episode.artifact === undefined ? undefined : `episodes/${episode.index}.json`;
     if (artifactFile) {
       const filePath = resolve(directory, artifactFile);
@@ -145,7 +149,7 @@ export async function writeGenericTournamentRunSetArtifact<TArtifact>(options: {
   const episodesJsonlPath = join(directory, "episodes.jsonl");
   const metricsJsonlPath = join(directory, "metrics.jsonl");
   await writeJson(manifestPath, {
-    ...options.artifact,
+    ...artifact,
     episodes: episodeRows,
     files: ["manifest.json", "episodes.jsonl", "metrics.jsonl", ...episodePaths.map((path) => `episodes/${basename(path)}`)]
   });
@@ -209,7 +213,7 @@ async function materializeEpisodeArtifact<TPrepared, TResult, TArtifact>(
     return {
       ...context,
       status: episode.status,
-      error: episode.error
+      ...safeEpisodeError(episode.status, episode.error)
     };
   }
   const artifact = await adapter.artifactForEpisode(episode.result, context);
@@ -223,8 +227,32 @@ async function materializeEpisodeArtifact<TPrepared, TResult, TArtifact>(
     runId: adapter.runIdOf?.(artifact, context),
     artifact,
     evaluationReport: adapter.evaluationReportOf?.(episode.result, context),
-    error: episode.error
+    ...safeEpisodeError(episode.status, episode.error)
   };
+}
+
+/**
+ * Failure strings are not generic artifact evidence.  This final boundary
+ * protects direct callers of the writer as well as runner-built artifacts.
+ */
+function sanitizeGenericTournamentRunSetArtifact<TArtifact>(
+  artifact: GenericTournamentRunSetArtifact<TArtifact>
+): GenericTournamentRunSetArtifact<TArtifact> {
+  return {
+    ...artifact,
+    episodes: artifact.episodes.map((episode) => {
+      const { error: _ignoredError, ...rest } = episode;
+      return {
+        ...rest,
+        ...safeEpisodeError(episode.status, _ignoredError)
+      };
+    })
+  };
+}
+
+function safeEpisodeError(status: TournamentEpisodeLifecycle, error: string | undefined): Pick<GenericTournamentRunSetEpisode, "error"> {
+  if (status !== "failed" || !error) return {};
+  return { error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE };
 }
 
 function metricRow<TArtifact>(episode: GenericTournamentRunSetEpisode<TArtifact>, metric: HarnessMetricRecord): Record<string, unknown> {

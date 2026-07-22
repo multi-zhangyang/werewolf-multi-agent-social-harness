@@ -7,6 +7,7 @@ import {
   isSocialStepCommitted,
   runSocialEpisode,
   SocialCommunicationBus,
+  summarizeSocialExposureRecords,
   validateSocialEpisodeArtifact,
   type SocialAction,
   type SocialActor,
@@ -1054,6 +1055,26 @@ describe("generic social harness feedback and failure contract", () => {
     expect(exposureRecords.every((record) => record.evidenceRefs.some((ref) => ref.artifact === "delivery_receipt"))).toBe(true);
     expect(exposureRecords.some((record) => record.messageId === "msg-2" && record.observerId === "c")).toBe(false);
     expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+
+    // Optional exposure sidecars are cache-only: an exact canonical cache is
+    // accepted, while a forged observer or summary cannot become alternate
+    // social evidence.
+    const canonicalSidecar = clone(artifact);
+    canonicalSidecar.exposureRecords = clone(exposureRecords);
+    canonicalSidecar.exposureSummary = summarizeSocialExposureRecords(exposureRecords);
+    expect(validateSocialEpisodeArtifact(canonicalSidecar)).toEqual([]);
+
+    const forgedExposureSidecar = clone(canonicalSidecar);
+    forgedExposureSidecar.exposureRecords![0]!.observerId = "c";
+    expect(validateSocialEpisodeArtifact(forgedExposureSidecar).join(" ")).toMatch(
+      /exposureRecords do not match canonical scoped-observation exposure evidence/i
+    );
+
+    const forgedExposureSummary = clone(canonicalSidecar);
+    forgedExposureSummary.exposureSummary!.recordCount += 1;
+    expect(validateSocialEpisodeArtifact(forgedExposureSummary).join(" ")).toMatch(
+      /exposureSummary does not match canonical scoped-observation exposure evidence/i
+    );
 
     // The direct message is legally visible to b, but that does not permit a
     // forged artifact to attach b's observation to a's decision step.

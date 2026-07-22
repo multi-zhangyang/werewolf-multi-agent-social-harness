@@ -7,7 +7,10 @@ import {
   validateGenericTournamentRunSetArtifact,
   writeGenericTournamentRunSetArtifact
 } from "../src/harness/genericTournamentArtifacts";
-import type { GenericTournamentResult } from "../src/harness/tournamentRunner";
+import {
+  GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE,
+  type GenericTournamentResult
+} from "../src/harness/tournamentRunner";
 
 interface PreparedLedgerEpisode {
   privateRuntimeSecret: string;
@@ -47,7 +50,7 @@ describe("generic tournament research artifacts", () => {
           seed: "ledger-tournament-seed:g3",
           status: "failed",
           prepared: { privateRuntimeSecret: "must-not-persist" },
-          error: "ledger provider unavailable"
+          error: "Bearer secret-token https://provider.example/raw-body request-id=unsafe"
         }
       ]
     };
@@ -77,7 +80,7 @@ describe("generic tournament research artifacts", () => {
       episodes: [
         { index: 0, status: "completed", runId: "ledger-complete" },
         { index: 1, status: "truncated", runId: "ledger-truncated" },
-        { index: 2, status: "failed", error: "ledger provider unavailable" }
+        { index: 2, status: "failed", error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE }
       ]
     });
     expect(validateGenericTournamentRunSetArtifact(artifact)).toEqual([]);
@@ -87,7 +90,16 @@ describe("generic tournament research artifacts", () => {
     try {
       const output = await writeGenericTournamentRunSetArtifact({
         directory: join(temporaryBase, "ledger-run-set-01"),
-        artifact
+        // Direct callers may bypass buildGenericTournamentRunSetArtifact. The
+        // writer must still remove arbitrary failure text before disk I/O.
+        artifact: {
+          ...artifact,
+          episodes: artifact.episodes.map((episode) =>
+            episode.index === 2
+              ? { ...episode, error: "Bearer direct-write-token https://writer.example/raw request-id=writer-unsafe" }
+              : episode
+          )
+        }
       });
       expect((await readdir(output.directory)).sort()).toEqual(["episodes", "episodes.jsonl", "manifest.json", "metrics.jsonl"]);
       expect((await readdir(join(output.directory, "episodes"))).sort()).toEqual(["0.json", "1.json"]);
@@ -95,10 +107,16 @@ describe("generic tournament research artifacts", () => {
       expect(manifest.episodes).toEqual([
         expect.objectContaining({ index: 0, artifactFile: "episodes/0.json" }),
         expect.objectContaining({ index: 1, artifactFile: "episodes/1.json" }),
-        expect.objectContaining({ index: 2, artifactFile: null, error: "ledger provider unavailable" })
+        expect.objectContaining({ index: 2, artifactFile: null, error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE })
       ]);
       expect(manifest.files).toEqual(["manifest.json", "episodes.jsonl", "metrics.jsonl", "episodes/0.json", "episodes/1.json"]);
       expect(await readFile(output.episodesJsonlPath, "utf8")).not.toContain("must-not-persist");
+      const persisted = `${await readFile(output.manifestPath, "utf8")}${await readFile(output.episodesJsonlPath, "utf8")}`;
+      expect(persisted).not.toContain("secret-token");
+      expect(persisted).not.toContain("provider.example");
+      expect(persisted).not.toContain("request-id=unsafe");
+      expect(persisted).not.toContain("direct-write-token");
+      expect(persisted).not.toContain("writer.example");
       expect(await readFile(output.metricsJsonlPath, "utf8")).toBe("");
     } finally {
       await rm(temporaryBase, { recursive: true, force: true });

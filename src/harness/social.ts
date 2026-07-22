@@ -1,3 +1,4 @@
+import { hashStableState } from "./hash";
 import { providerFailureFromError, safeProviderFailureMessage } from "./providerFailure";
 
 export type SocialChannelKind = "public" | "team" | "private" | "system";
@@ -550,6 +551,13 @@ export interface SocialExposureSummary {
   byVisibility: Record<SocialMessage["visibility"], number>;
 }
 
+/**
+ * Canonical summary identity for an optional cached social-exposure sidecar.
+ * The sidecar is never an additional evidence source: its records and summary
+ * must be reproducible from committed messages plus scoped observations.
+ */
+export const SOCIAL_EXPOSURE_SUMMARY_VERSION = "harness.social-exposure-summary.v1" as const;
+
 export interface SocialStepCommitCounts {
   nativeSteps: number;
   committedSteps: number;
@@ -699,10 +707,35 @@ export function deriveSocialExposureRecords<TState, TObservation, TPending, TCom
   return records;
 }
 
+/**
+ * Build the canonical, unredacted summary for a cached exposure sidecar. This
+ * function is deliberately separate from server projection summaries: public
+ * projections redact private evidence and therefore use their own schema.
+ */
+export function summarizeSocialExposureRecords(records: readonly SocialExposureRecord[]): SocialExposureSummary {
+  const byVisibility: Record<SocialMessage["visibility"], number> = {
+    private: 0,
+    team: 0,
+    public: 0,
+    postgame: 0
+  };
+  for (const record of records) byVisibility[record.visibility] += 1;
+  return {
+    schemaVersion: SOCIAL_EXPOSURE_SUMMARY_VERSION,
+    source: "scoped_observation",
+    privateEvidenceRedacted: false,
+    recordCount: records.length,
+    messageCount: new Set(records.map((record) => record.messageId)).size,
+    sourceCount: new Set(records.map((record) => record.sourceId)).size,
+    observerCount: new Set(records.map((record) => record.observerId)).size,
+    byVisibility
+  };
+}
+
 export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TCommand>(
   episode: Pick<
     SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>,
-    "channels" | "steps" | "messages" | "runtimeActorIds" | "execution"
+    "channels" | "steps" | "messages" | "runtimeActorIds" | "execution" | "exposureRecords" | "exposureSummary"
   >
 ): string[] {
   const errors: string[] = [];
@@ -825,7 +858,8 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
     }
   }
 
-  for (const exposure of deriveSocialExposureRecords(episode)) {
+  const canonicalExposureRecords = deriveSocialExposureRecords(episode);
+  for (const exposure of canonicalExposureRecords) {
     if (!messagesById.has(exposure.messageId)) errors.push(`social exposure references unknown message ${exposure.messageId}.`);
     if (!stepsByTraceId.has(exposure.observedAtTraceId)) errors.push(`social exposure references unknown trace ${exposure.observedAtTraceId}.`);
     for (const evidenceRef of exposure.evidenceRefs) {
@@ -838,9 +872,35 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
     }
   }
 
+  // A stored sidecar is an optional cache for export/query performance only.
+  // It must never become a second, caller-controlled source of social
+  // knowledge or evaluation evidence. Artifacts written before this field
+  // existed remain valid when both sidecar fields are absent.
+  if (episode.exposureRecords !== undefined) {
+    if (!Array.isArray(episode.exposureRecords)) {
+      errors.push("exposureRecords must be an array when present.");
+    } else if (!sameCanonicalSocialExposureValue(episode.exposureRecords, canonicalExposureRecords)) {
+      errors.push("exposureRecords do not match canonical scoped-observation exposure evidence.");
+    }
+  }
+  if (episode.exposureSummary !== undefined) {
+    const canonicalSummary = summarizeSocialExposureRecords(canonicalExposureRecords);
+    if (!sameCanonicalSocialExposureValue(episode.exposureSummary, canonicalSummary)) {
+      errors.push("exposureSummary does not match canonical scoped-observation exposure evidence.");
+    }
+  }
+
   errors.push(...validateSocialParallelBatchLayout(episode.steps));
 
   return errors;
+}
+
+function sameCanonicalSocialExposureValue(left: unknown, right: unknown): boolean {
+  try {
+    return hashStableState(left) === hashStableState(right);
+  } catch {
+    return false;
+  }
 }
 
 /**

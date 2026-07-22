@@ -5,6 +5,12 @@
  */
 export const GENERIC_EXPERIMENT_MATRIX_VERSION = "harness.generic-experiment-matrix.v1";
 
+/**
+ * A matrix cell may execute untrusted domain/provider code. Keep the generic
+ * control-plane failure closed rather than serializing arbitrary thrown text.
+ */
+export const GENERIC_EXPERIMENT_MATRIX_CELL_FAILURE_MESSAGE = "Experiment matrix cell failed before a result was recorded.";
+
 /** Closed lifecycle vocabulary for a generic, in-memory matrix cell. */
 export type GenericExperimentMatrixCellLifecycle = "completed" | "truncated" | "failed";
 
@@ -168,8 +174,8 @@ export function validateGenericExperimentMatrixSpec<TInput>(spec: GenericExperim
   }
 }
 
-function defaultErrorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function defaultErrorText(_error: unknown): string {
+  return GENERIC_EXPERIMENT_MATRIX_CELL_FAILURE_MESSAGE;
 }
 
 /**

@@ -1,5 +1,6 @@
 import type { AgentPendingAction } from "../core/pending";
 import type { GameCommand, GameState } from "../core/types";
+import { assertRuntimeModelsAvailable } from "../agents/schema";
 export { runHarnessEpisode } from "./runner";
 export type { HarnessAgentSnapshotProvider, HarnessEpisodeOptions } from "./runner";
 export { buildSocialCheckpointForkSeed, runForkedHarnessEpisode } from "./checkpointRuntime";
@@ -34,6 +35,7 @@ import {
 } from "./werewolfAdapter";
 
 export async function runHarnessMatch(options: HarnessRunOptions): Promise<HarnessRunResult> {
+  assertRuntimeModelsAvailable(options.agents.map((agent) => agent.model), "Harness match");
   return runWerewolfSocialHarnessPrefixAsHarnessResult({
     id: options.initialState.id,
     ...options
@@ -46,5 +48,6 @@ export async function probeHarnessTurn(options: {
   agent: HarnessAgentConfig;
   reasoner: HarnessRunOptions["reasoner"];
 }): Promise<{ trace: HarnessTurnTrace; command: GameCommand }> {
+  assertRuntimeModelsAvailable([options.agent.model], "Harness probe");
   return probeWerewolfSocialHarnessTurn(options);
 }

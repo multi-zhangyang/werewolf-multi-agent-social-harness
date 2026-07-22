@@ -38,7 +38,7 @@ describe("Cockpit experiment control-plane draft", () => {
     expect(JSON.stringify(request)).not.toMatch(/resolvedAssignments|winner|artifact|finalState|seed|roleSeat/i);
   });
 
-  it("keeps an explicit team assignment and delegates unknown profile references to the server", () => {
+  it("rejects an explicit team assignment that references an unknown profile before the request is sent", () => {
     const draft = {
       profiles: [{ id: "wolf", model: "fixture-wolf", policyName: "wolf-deceiver" as const }],
       assignment: {
@@ -48,7 +48,35 @@ describe("Cockpit experiment control-plane draft", () => {
       }
     };
     expect(buildCockpitExperimentRequest(draft).assignment).toEqual(draft.assignment);
-    expect(validateCockpitExperimentDraft(draft, ["fixture-wolf"])).toBeUndefined();
+    expect(validateCockpitExperimentDraft(draft, ["fixture-wolf"])).toContain("unknown-profile");
+  });
+
+  it("rejects dangling active seat, role, and team assignment references with the harness contract", () => {
+    const profiles = [
+      { id: "wolf", model: "fixture-wolf", policyName: "wolf-deceiver" as const },
+      { id: "village", model: "fixture-village", policyName: "village-analyst" as const }
+    ];
+    const drafts = [
+      {
+        profiles,
+        assignment: { strategy: "seat" as const, seats: { "1": "missing-seat-profile" }, fallback: "error" as const },
+        missing: "missing-seat-profile"
+      },
+      {
+        profiles,
+        assignment: { strategy: "role" as const, roles: { werewolf: "missing-role-profile" }, fallback: "error" as const },
+        missing: "missing-role-profile"
+      },
+      {
+        profiles,
+        assignment: { strategy: "team" as const, teams: { werewolves: ["wolf", "missing-team-profile"] }, fallback: "error" as const },
+        missing: "missing-team-profile"
+      }
+    ];
+
+    for (const draft of drafts) {
+      expect(validateCockpitExperimentDraft(draft, ["fixture-wolf", "fixture-village"])).toContain(draft.missing);
+    }
   });
 
   it("uses configured defaults without flattening them to one selected model", () => {

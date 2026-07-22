@@ -1319,6 +1319,43 @@ describe("public match API redaction", () => {
     expect(matches.body).toHaveLength(0);
   });
 
+  it("rejects a withdrawn runtime model before a probe or match can invoke the reasoner or persist state", async () => {
+    const rejectedMatch = await requestJson(baseUrl, "POST", "/api/matches/run", {
+      models: ["grok-4.5"],
+      profiles: [{ id: "withdrawn-profile", model: "grok-4.5", temperature: 0.3 }],
+      assignment: { strategy: "profile-rotation" },
+      seed: "server-run-withdrawn-model",
+      maxTransitions: 1
+    });
+
+    expect(rejectedMatch.status).toBe(400);
+    expect(rejectedMatch.body).toMatchObject({
+      summary: {
+        kind: "match",
+        ok: false,
+        models: ["grok-4.5"],
+        failureReason: expect.stringMatching(/unavailable for runtime use/i)
+      },
+      error: expect.stringMatching(/unavailable for runtime use/i)
+    });
+
+    const rejectedProbe = await requestJson(baseUrl, "POST", "/api/harness/probe", { model: "grok-4.5" });
+    expect(rejectedProbe.status).toBe(400);
+    expect(rejectedProbe.body).toMatchObject({
+      summary: {
+        kind: "probe",
+        ok: false,
+        model: "grok-4.5",
+        failureReason: expect.stringMatching(/unavailable for runtime use/i)
+      },
+      error: expect.stringMatching(/unavailable for runtime use/i)
+    });
+
+    const matches = await requestJson(baseUrl, "GET", "/api/matches");
+    expect(matches.status).toBe(200);
+    expect(matches.body).toHaveLength(0);
+  });
+
   it("accepts jointPhaseScheduler parallel and rejects invalid scheduler values", async () => {
     const rejected = await requestJson(baseUrl, "POST", "/api/matches/run", {
       models: ["alpha"],

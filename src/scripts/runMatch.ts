@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { modelClientFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
-import { normalizeModelList } from "../agents/schema";
+import { assertRuntimeModelsAvailable, normalizeModelList } from "../agents/schema";
 import { createGame } from "../core/engine";
 import type { MatchMetrics } from "../core/types";
 import { buildMatchArtifact, toTrajectoryJsonl } from "../harness/artifacts";
@@ -240,9 +240,11 @@ function parseOptions(): MatchOptions {
   }
   const temperature = parseTemperature(readArg("temperature") ?? process.env.AGENT_TEMPERATURE ?? "0.7");
   const models = normalizeModelList(readArg("models") ?? process.env.LLM_MODELS);
+  const profiles = profilesFromUnknown(readArg("profiles") ?? process.env.AGENT_PROFILES, models, temperature);
+  assertRuntimeModelsAvailable(profiles.map((profile) => profile.model), "Match");
   return {
     models,
-    profiles: profilesFromUnknown(readArg("profiles") ?? process.env.AGENT_PROFILES, models, temperature),
+    profiles,
     assignment: assignmentFromUnknown(readArg("assignment") ?? process.env.AGENT_ASSIGNMENT),
     seed: readArg("seed") ?? `cli-${Date.now()}`,
     temperature,

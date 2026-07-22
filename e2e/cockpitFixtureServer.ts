@@ -1,4 +1,7 @@
 import { createGame } from "../src/core/engine";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { buildMatchArtifact } from "../src/harness/artifacts";
 import { describeResolvedAssignments, profilesFromModels, resolveAgentConfigs } from "../src/harness/profiles";
 import { runHarnessMatch } from "../src/harness/runtime";
@@ -34,18 +37,22 @@ async function main(): Promise<void> {
   clearServerStoreForTests();
   await seedFixtureMatch(fixtureMatchId, "fixture-seed-a");
   await seedFixtureMatch(fixtureCandidateMatchId, "fixture-seed-b");
+  const tournamentArtifactBaseDir = await mkdtemp(path.join(tmpdir(), "werewolf-cockpit-e2e-tournament-"));
 
   const app = createServerApp({
     createReasoner: () => fixtureReasoner,
-    artifactAccessBindHost: "127.0.0.1"
+    artifactAccessBindHost: "127.0.0.1",
+    tournamentArtifactBaseDir
   });
   const server = app.listen(fixturePort, "127.0.0.1", () => {
     console.log(`Cockpit fixture server listening on http://127.0.0.1:${fixturePort}`);
   });
   const shutdown = () => {
     server.close(() => {
-      clearServerStoreForTests();
-      process.exit(0);
+      void rm(tournamentArtifactBaseDir, { recursive: true, force: true }).finally(() => {
+        clearServerStoreForTests();
+        process.exit(0);
+      });
     });
   };
   process.once("SIGINT", shutdown);

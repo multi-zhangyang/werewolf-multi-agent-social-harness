@@ -1,5 +1,10 @@
 import type { Team, Role } from "../../core/types";
-import type { HarnessAssignmentConfig, HarnessAssignmentStrategy } from "../../harness/profiles";
+import {
+  assertAssignmentProfileReferences,
+  assignmentFromUnknown,
+  type HarnessAssignmentConfig,
+  type HarnessAssignmentStrategy
+} from "../../harness/profiles";
 import type { HarnessAgentProfile, PolicyName } from "../../harness/types";
 
 /**
@@ -78,6 +83,15 @@ export function validateCockpitExperimentDraft(
     if (profile.temperature !== undefined && (!Number.isFinite(profile.temperature) || profile.temperature < 0 || profile.temperature > 2)) {
       return `profile ${id} 的 temperature 必须在 0 到 2 之间。`;
     }
+  }
+  try {
+    // Normalize the same assignment envelope the request builder submits, then
+    // reuse the harness contract so dangling seat/role/team references fail
+    // before a request reaches the server.
+    const assignment = assignmentFromUnknown(cloneAssignment(draft.assignment));
+    assertAssignmentProfileReferences(assignment, draft.profiles.map(cloneProfile));
+  } catch (error) {
+    return error instanceof Error ? error.message : "assignment 配置无效。";
   }
   return undefined;
 }

@@ -1,4 +1,5 @@
 import type { GameConfig } from "../core/types";
+import { assertRuntimeModelsAvailable } from "../agents/schema";
 import {
   assignmentFromUnknown,
   profilesFromUnknown,
@@ -77,6 +78,7 @@ export function normalizeTournamentExperimentSpec(
   const profiles = profilesFromUnknown(profilesRaw, explicitModels, temperature);
   const models = modelsFromProfiles(profiles);
   if (!models.length) throw new Error("Experiment spec requires at least one model or profile.");
+  assertRuntimeModelsAvailable(models, "Experiment spec");
 
   const maxTransitions = parseOptionalNonNegativeInteger(specRecord.maxTransitions ?? defaultRecord.maxTransitions, "maxTransitions");
   const jointPhaseScheduler =

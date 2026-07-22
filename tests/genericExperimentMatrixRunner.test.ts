@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  GENERIC_EXPERIMENT_MATRIX_CELL_FAILURE_MESSAGE,
   GENERIC_EXPERIMENT_MATRIX_VERSION,
   runGenericExperimentMatrix,
   validateGenericExperimentMatrixSpec
@@ -158,7 +159,7 @@ describe("generic experiment matrix control plane", () => {
     expect(result.cells[0]).toMatchObject({
       id: "bad-domain-result",
       status: "failed",
-      error: expect.stringMatching(/status must be completed, truncated, or failed/i)
+      error: GENERIC_EXPERIMENT_MATRIX_CELL_FAILURE_MESSAGE
     });
     expect(result.cells[0]).not.toHaveProperty("result");
   });
@@ -176,7 +177,7 @@ describe("generic experiment matrix control plane", () => {
       },
       runCell(input, context) {
         calls.push(context.id);
-        if (input === "throw") throw new Error("ledger execution failed");
+        if (input === "throw") throw new Error("Bearer secret-token https://provider.example/raw-body request-id=unsafe");
         return input;
       },
       statusOf: (result) => result
@@ -190,7 +191,9 @@ describe("generic experiment matrix control plane", () => {
       cellsCompleted: 1,
       cellsFailed: 1
     });
-    expect(result.cells[0]).toMatchObject({ status: "failed", error: "ledger execution failed" });
+    expect(result.cells[0]).toMatchObject({ status: "failed", error: GENERIC_EXPERIMENT_MATRIX_CELL_FAILURE_MESSAGE });
+    expect(JSON.stringify(result.cells[0])).not.toContain("secret-token");
+    expect(JSON.stringify(result.cells[0])).not.toContain("provider.example");
     expect(result.cells[0]).not.toHaveProperty("result");
   });
 });

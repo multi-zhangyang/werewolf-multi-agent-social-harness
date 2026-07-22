@@ -8,7 +8,8 @@ import {
   providerConfigSummaryFromEnv,
   providerDiagnosticSummaryFromEnv
 } from "../src/agents/providerRegistry";
-import { normalizeModelList } from "../src/agents/schema";
+import { ModelCallError } from "../src/agents/schema";
+import { assertRuntimeModelsAvailable, normalizeModelList, selectableRuntimeModels } from "../src/agents/schema";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -21,6 +22,12 @@ describe("standard provider protocol adapters", () => {
       "anthropic/model-b",
       "local-model"
     ]);
+  });
+
+  it("does not offer or execute an explicitly withdrawn runtime model", () => {
+    expect(selectableRuntimeModels(["gpt-5.4/Kimi-K2.6", "grok-4.5"])).toEqual(["gpt-5.4/Kimi-K2.6"]);
+    expect(() => assertRuntimeModelsAvailable(["grok-4.5"], "unit selection")).toThrow(/unavailable for runtime use/i);
+    expect(() => assertRuntimeModelsAvailable(["gpt-5.4/Kimi-K2.6"])).not.toThrow();
   });
 
   it("selects provider adapters only from explicit protocol configuration", async () => {
@@ -140,6 +147,32 @@ describe("standard provider protocol adapters", () => {
     expect(Object.keys(body).some((key) => /max.*tokens?/i.test(key))).toBe(false);
   });
 
+  it("rejects a non-empty OpenAI Responses stream that reaches EOF without response.completed", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock.mockResolvedValueOnce(
+      streamResponse([sse("response.output_text.delta", { type: "response.output_text.delta", delta: "partial response" })])
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await captureModelCallError(() =>
+      new OpenAIResponsesClient({
+        baseURL: "https://api.openai.test/v1",
+        apiKey: "unit-test-key",
+        timeoutMs: 1_000
+      }).complete({
+        model: "responses-model",
+        messages: [{ role: "user", content: "hello" }]
+      })
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(error.raw).toMatchObject({
+      failureKind: "stream_incomplete",
+      providerStage: "stream_finish",
+      retryable: true
+    });
+  });
+
   it("maps Anthropic Messages requests and parses content_block_delta stream as a separate protocol", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock.mockResolvedValueOnce(
@@ -190,6 +223,36 @@ describe("standard provider protocol adapters", () => {
     });
   });
 
+  it("rejects a non-empty Anthropic Messages stream that reaches EOF without message_stop", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock.mockResolvedValueOnce(
+      streamResponse([
+        sse("message_start", { type: "message_start", message: { id: "msg-partial", usage: { input_tokens: 1, output_tokens: 0 } } }),
+        sse("content_block_delta", { type: "content_block_delta", delta: { type: "text_delta", text: "partial message" } })
+      ])
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await captureModelCallError(() =>
+      new AnthropicMessagesClient({
+        baseURL: "https://api.anthropic.test",
+        apiKey: "unit-test-key",
+        maxTokens: 512,
+        timeoutMs: 1_000
+      }).complete({
+        model: "anthropic-messages-model",
+        messages: [{ role: "user", content: "hello" }]
+      })
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(error.raw).toMatchObject({
+      failureKind: "stream_incomplete",
+      providerStage: "stream_finish",
+      retryable: true
+    });
+  });
+
   it("requires explicit Anthropic max_tokens because Messages API is not the Chat Completions protocol", () => {
     expect(
       () =>
@@ -224,4 +287,14 @@ function headerValue(headers: unknown, name: string): string | undefined {
     return record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
   }
   return undefined;
+}
+
+async function captureModelCallError(run: () => Promise<unknown>): Promise<ModelCallError> {
+  try {
+    await run();
+  } catch (error) {
+    expect(error).toBeInstanceOf(ModelCallError);
+    return error as ModelCallError;
+  }
+  throw new Error("Expected ModelCallError.");
 }

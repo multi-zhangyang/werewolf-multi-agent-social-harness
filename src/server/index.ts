@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { modelClientFromEnv, providerConfigSummaryFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/providerRegistry";
-import { normalizeModelList } from "../agents/schema";
+import { assertRuntimeModelsAvailable, normalizeModelList } from "../agents/schema";
 import { applyCommand, createGame, getPendingActions } from "../core/engine";
 import { isAgentPendingAction } from "../core/pending";
 import { DEFAULT_CONFIG } from "../core/roles";
@@ -982,6 +982,7 @@ app.post("/api/matches/run", async (req, res, next) => {
     temperature = parseTemperature(process.env.AGENT_TEMPERATURE ?? req.body?.temperature ?? 0.7);
     profiles = profilesFromUnknown(req.body?.profiles ?? process.env.AGENT_PROFILES, models, temperature);
     models = modelsFromProfiles(profiles);
+    assertRuntimeModelsAvailable(models, "Match request");
     assignment = assignmentFromUnknown(req.body?.assignment ?? process.env.AGENT_ASSIGNMENT);
     assertAssignmentProfileReferences(assignment, profiles);
     maxTransitions = parseOptionalPositiveInteger(req.body?.maxTransitions, "maxTransitions");
@@ -1143,6 +1144,27 @@ app.post("/api/harness/probe", async (req, res) => {
       : normalizeModelList(process.env.LLM_MODELS)[0];
   if (!model) {
     res.status(400).json({ error: "Probe requires model or LLM_MODELS." });
+    return;
+  }
+  try {
+    assertRuntimeModelsAvailable([model], "Probe request");
+  } catch (error) {
+    const failure = publicApiFailureFromError(error);
+    res.status(400).json({
+      summary: {
+        kind: "probe",
+        ok: false,
+        provider: providerDiagnosticSummaryFromEnv(),
+        model,
+        timeoutMs: null,
+        elapsedMs: 0,
+        modelLatencyMs: null,
+        timedOut: false,
+        failureReason: failure.message,
+        providerFailure: failure.providerFailure ?? null
+      },
+      error: failure.message
+    });
     return;
   }
   const timeoutMs = parseOptionalDurationMs(req.body?.timeoutMs ?? req.body?.timeout, "timeoutMs");

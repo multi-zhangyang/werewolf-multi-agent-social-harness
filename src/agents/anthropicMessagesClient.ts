@@ -138,7 +138,12 @@ export class AnthropicMessagesClient implements ModelClient {
           return finish(content, started, usage, providerRequestId, "provider_stop_event");
         }
       }
-      return finish(content, started, usage, providerRequestId, "reader_done");
+      // A partial text delta followed only by transport EOF is not a completed
+      // Messages generation. `message_stop` is the provider terminal event
+      // that authorizes this optional reasoner output to proceed to parsing
+      // and arbitration; accepting EOF would risk committing truncated text.
+      if (content) throw incompleteStreamModelCallError();
+      return finish(content, started, usage, providerRequestId, "provider_stop_event");
     } catch (error) {
       if (error instanceof ModelCallError) throw error;
       const sdkError = anthropicSdkModelCallError(error, "during_stream", this.timeoutMs);
@@ -244,6 +249,14 @@ function finish(
     attempts: 1,
     stream: { enabled: true, completed: true, completedBy }
   };
+}
+
+function incompleteStreamModelCallError(): ModelCallError {
+  return new ModelCallError("Anthropic Messages stream ended before a provider completion event.", {
+    failureKind: "stream_incomplete",
+    providerStage: "stream_finish",
+    retryable: true
+  });
 }
 
 function removeUndefined<T extends Record<string, unknown>>(value: T): T {

@@ -7,7 +7,7 @@ import {
 } from "./openaiClient";
 import { OpenAIResponsesClient } from "./openaiResponsesClient";
 import { baseUrlFromEndpointUrl, endpointUrlFromBaseUrl, normalizeSdkBaseUrl, validateEndpointUrl } from "./providerUrls";
-import { normalizeModelList } from "./schema";
+import { normalizeModelList, selectableRuntimeModels } from "./schema";
 
 export type ModelProviderProtocol = "openai-chat-completions" | "openai-responses" | "anthropic-messages";
 
@@ -80,7 +80,7 @@ export function providerConfigSummaryFromEnv(env: NodeJS.ProcessEnv = process.en
     protocol,
     endpoint,
     configured: Boolean(endpoint && hasKey && hasProtocolRequiredConfig),
-    models: normalizeModelList(env.LLM_MODELS)
+    models: selectableRuntimeModels(normalizeModelList(env.LLM_MODELS))
   };
 }
 

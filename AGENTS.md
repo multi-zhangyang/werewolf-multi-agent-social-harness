@@ -26100,3 +26100,62 @@ npm run build
 npm run test:e2e
 git diff --check
 ```
+
+## 13.270 Runtime Execution, Stream-Terminality, And Canonical Exposure Lock
+
+Timestamp: `2026-07-22`
+
+The withdrawn `grok-4.5` runtime model is centrally unavailable. It is filtered
+from configured selectable models and rejected before any probe, match,
+tournament, or experiment-matrix execution path can create a provider request.
+This is a control-plane policy (`assertRuntimeModelsAvailable`), not a
+model-specific adapter, prompt, fallback, or parser branch. The matrix smoke
+fixture uses the current generic OpenAI-compatible candidate instead.
+
+Generic tournament and matrix control-plane failure strings are closed static
+messages. Generic run-set persistence also re-sanitizes failed episode errors
+at its disk-write boundary, so direct callers cannot place arbitrary provider
+or exception text in manifests or JSONL. This does not erase adapter-owned,
+reviewed closed telemetry from the domain-level failure contract.
+
+For every streaming protocol, transport EOF is not success merely because text
+was received. In addition to Chat Completions' `[DONE]` behavior:
+
+- OpenAI Responses requires `response.completed`.
+- Anthropic Messages requires `message_stop`.
+
+Partial text followed by EOF without its provider terminal event must become a
+retryable `stream_incomplete` / `stream_finish` failure and must not reach
+reasoner parsing, arbitration, or an environment commit.
+
+`SocialEpisodeArtifact.exposureRecords` and `exposureSummary` are optional
+caches, not alternate social evidence. When present they must match the
+canonical derivation from committed messages and scoped observations exactly;
+canonical artifact JSONL always re-derives exposure records. Server redacted
+projections remain separately server-owned DTOs.
+
+Cockpit roster editing remains control-plane-only, but it now reuses the
+harness assignment-profile reference validator before posting a match. Its
+tournament pack request carries the chosen `jointPhaseScheduler` and applies
+the same Werewolf parallel lower-bound preflight as a single match. The header
+model selector is explicitly only the default for a newly added profile; it
+does not silently flatten or overwrite the heterogeneous roster.
+
+Validation recorded for this lock:
+
+```bash
+npm run typecheck
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+# 44 files / 463 tests passed
+npm run build
+npm run test:e2e
+# 10 Playwright tests passed
+git diff --check
+```
+
+Bounded live validation used only `gpt-5.4/Kimi-K2.6` through the ordinary
+streaming Chat Completions client. The endpoint returned a controlled HTTP 503
+before stream completion, parsing, arbitration, or an environment commit.
+This is a classified external availability failure, not proof that the live
+model path is healthy. Do not retry `grok-4.5`.

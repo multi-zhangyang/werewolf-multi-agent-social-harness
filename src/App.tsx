@@ -1231,11 +1231,7 @@ export function App() {
     try {
       const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
       const transitions = parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS);
-      if (jointPhaseScheduler === "parallel" && transitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS) {
-        throw new Error(
-          `parallel 联合阶段需要 maxTransitions >= ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS}（system.advance + seer.inspect + 双狼 joint batch）。`
-        );
-      }
+      assertJointPhaseSchedulerTransitionBudget(jointPhaseScheduler, transitions);
       const record = await apiJson<MatchRecord>("/api/matches/run", {
         method: "POST",
         body: JSON.stringify({
@@ -1818,6 +1814,7 @@ export function App() {
       const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
       const transitions = parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS);
       const games = Math.min(10, Math.max(1, parsePositiveInteger(packGames, 1)));
+      assertJointPhaseSchedulerTransitionBudget(jointPhaseScheduler, transitions);
       const response = await apiJson<TournamentRunResponse>("/api/tournaments/run", {
         method: "POST",
         body: JSON.stringify({
@@ -1826,6 +1823,7 @@ export function App() {
           games,
           maxTransitions: transitions,
           timeoutMs,
+          jointPhaseScheduler,
           exportArtifacts: true
         })
       });
@@ -2063,7 +2061,17 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [experimentDraftError, experimentRequest, loadSavedComparisonById, maxTransitions, packGames, refreshMatches, setActionStatus, timeoutSeconds]);
+  }, [
+    experimentDraftError,
+    experimentRequest,
+    jointPhaseScheduler,
+    loadSavedComparisonById,
+    maxTransitions,
+    packGames,
+    refreshMatches,
+    setActionStatus,
+    timeoutSeconds
+  ]);
 
   const handleSelectTournamentPack = useCallback(
     async (pack: TournamentArtifactSetSummary) => {
@@ -2932,15 +2940,17 @@ export function App() {
                     />
                   </Tooltip>
                 ) : null}
-                <Select
-                  aria-label="模型选择"
-                  value={selectedModel}
-                  style={{ width: isCompactLayout ? 156 : 184 }}
-                  options={(models.length ? models : selectedModel ? [selectedModel] : []).map((model) => ({ value: model, label: model }))}
-                  onChange={setSelectedModel}
-                  placeholder="未检测到模型"
-                  disabled={busyAny || (!models.length && !selectedModel)}
-                />
+                <Tooltip title="新建 Agent Profile 的默认模型；不会改写当前 roster 中已有 profile。">
+                  <Select
+                    aria-label="新建 Profile 默认模型"
+                    value={selectedModel}
+                    style={{ width: isCompactLayout ? 156 : 184 }}
+                    options={(models.length ? models : selectedModel ? [selectedModel] : []).map((model) => ({ value: model, label: model }))}
+                    onChange={setSelectedModel}
+                    placeholder="未检测到模型"
+                    disabled={busyAny || (!models.length && !selectedModel)}
+                  />
+                </Tooltip>
                 <Button icon={decorativeIcon(<TeamOutlined />)} onClick={() => setRosterComposerOpen(true)} disabled={busyAny}>
                   实验编排
                 </Button>
@@ -6844,6 +6854,22 @@ const DEFAULT_SHARE_ALLOWLIST = [
 function parsePositiveInteger(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * The Werewolf adapter has a concrete lower bound for its first parallel
+ * native batch. Keep the preflight identical for a one-off match and a
+ * tournament public-pack run so the UI never advertises a scheduler that the
+ * server must reject before an experiment can start.
+ */
+function assertJointPhaseSchedulerTransitionBudget(
+  scheduler: "aec-batched-decision" | "parallel",
+  transitions: number
+): void {
+  if (scheduler !== "parallel" || transitions >= WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS) return;
+  throw new Error(
+    `parallel 联合阶段需要 maxTransitions >= ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS}（system.advance + seer.inspect + 双狼 joint batch）。`
+  );
 }
 
 function formatExperimentRosterSummary(request: {

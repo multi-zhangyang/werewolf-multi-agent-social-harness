@@ -172,5 +172,9 @@ describe("tournament experiment spec", () => {
     expect(() => normalizeTournamentExperimentSpec({ version: "bad.version" })).toThrow(/version/);
     expect(() => normalizeTournamentExperimentSpec({ kind: "match" })).toThrow(/kind/);
     expect(() => normalizeTournamentExperimentSpec({ models: [], profiles: [], games: 0 })).toThrow(/model or profile|games/);
+    expect(() => normalizeTournamentExperimentSpec({ models: ["grok-4.5"], games: 1 })).toThrow(/unavailable for runtime use/i);
+    expect(() =>
+      normalizeTournamentExperimentSpec({ profiles: [{ id: "withdrawn", model: "grok-4.5" }], games: 1 })
+    ).toThrow(/unavailable for runtime use/i);
   });
 });
