@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { HarnessEpisodeArtifactEnvelope } from "./episodeArtifacts";
 import {
@@ -24,12 +25,24 @@ export const HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V2 = "harness.experiment-ru
 export const HARNESS_EXPERIMENT_RUN_INDEX_VERSION = "harness.experiment-run-index.v1";
 
 const RUNS_DIRECTORY = "runs";
+const LOCKS_DIRECTORY = "locks";
 const REVISIONS_DIRECTORY = "revisions";
 const RECORD_FILE = "record.json";
 const MANIFEST_FILE = "manifest.json";
 const INDEX_FILE = "index.json";
 const DIRECTORY_KEY_PATTERN = /^[a-f0-9]{64}$/;
-const REVISION_DIRECTORY_PATTERN = /^(\d{12})-([a-f0-9]{16})$/;
+// New revisions use one deterministic numeric slot so two processes cannot
+// publish different candidates for the same revision. The content-addressed
+// suffix remains accepted for stores created before the CAS migration.
+const REVISION_DIRECTORY_PATTERN = /^(\d{12})(?:-([a-f0-9]{16}))?$/;
+const RUN_LEASE_ACQUIRED_MARKER = "HARNESS_RUN_LEASE_ACQUIRED\n";
+
+class ExperimentRevisionCasConflict extends Error {
+  constructor(readonly revision: number) {
+    super(`Experiment run revision ${revision} lost its canonical CAS slot.`);
+    this.name = "ExperimentRevisionCasConflict";
+  }
+}
 
 type GenericEpisodeEnvelope = HarnessEpisodeArtifactEnvelope<unknown, unknown, unknown, unknown, unknown>;
 
@@ -190,6 +203,7 @@ export interface HarnessExperimentRunStoreOptions<TArtifact extends GenericEpiso
 export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope> {
   private readonly root: string;
   private readonly runsDirectory: string;
+  private readonly locksDirectory: string;
   private readonly episodeStore: GenericExperimentEpisodeAuthority<TArtifact>;
   private readonly now: () => string;
   private readonly entries = new Map<string, HarnessExperimentRunStoreEntry>();
@@ -202,6 +216,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     }
     this.root = path.resolve(options.baseDirectory);
     this.runsDirectory = path.join(this.root, RUNS_DIRECTORY);
+    this.locksDirectory = path.join(this.root, LOCKS_DIRECTORY);
     this.episodeStore = options.episodeStore;
     this.now = options.now ?? (() => new Date().toISOString());
   }
@@ -212,6 +227,23 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     const store = new HarnessExperimentRunStore(options);
     await store.initialize();
     return store;
+  }
+
+  /**
+   * Hold a kernel-released, run-scoped lease for the complete orchestration
+   * lifecycle. A second live process fails closed instead of recovering work
+   * that is merely slow. Linux flock releases the lease automatically after a
+   * process crash; revision CAS remains the lower-level fencing boundary.
+   */
+  async withRunLease<TResult>(runSetId: string, operation: () => Promise<TResult>): Promise<TResult> {
+    assertIdentifier(runSetId, "runSetId");
+    if (typeof operation !== "function") throw new Error("Experiment run lease operation is required.");
+    const lease = await this.acquireRunLease(runSetId);
+    try {
+      return await operation();
+    } finally {
+      await releaseRunLease(lease);
+    }
   }
 
   async begin(input: {
@@ -253,8 +285,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       await this.writeRevision(revisionsDirectory, directoryKey, 1, record);
       await rename(temporaryDirectory, finalDirectory);
     } catch (error) {
-      // Temporary directories are ignored by recovery. Avoid deleting a path
-      // that could have been replaced by another process after publication.
+      await rm(temporaryDirectory, { recursive: true, force: true });
       throw error;
     }
     const entry = entryFromRecord(record, directoryKey, 1);
@@ -315,12 +346,28 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     assertRunRecord(record);
     const directoryKey = directoryKeyForRunSetId(record.runSetId);
     const finalDirectory = path.join(this.runsDirectory, directoryKey);
-    await assertPathMissing(finalDirectory, "Experiment run already exists for this runSetId.");
     const temporaryDirectory = path.join(this.runsDirectory, `.tmp-${randomUUID()}`);
     const revisionsDirectory = path.join(temporaryDirectory, REVISIONS_DIRECTORY);
     await mkdir(revisionsDirectory, { recursive: true });
-    await this.writeRevision(revisionsDirectory, directoryKey, 1, record);
-    await rename(temporaryDirectory, finalDirectory);
+    try {
+      await this.writeRevision(revisionsDirectory, directoryKey, 1, record);
+      await rename(temporaryDirectory, finalDirectory);
+    } catch (error) {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+      const winner = await this.loadKnownRun(input.runSetId);
+      if (!winner) throw error;
+      if (hashStableJsonValue(winner.record.experiment) !== hashStableJsonValue(experiment)) {
+        throw new Error("Experiment run resume provenance conflicts with concurrently published authority.");
+      }
+      if (input.createdAt !== undefined && input.createdAt !== winner.record.createdAt) {
+        throw new Error("Experiment run resume createdAt conflicts with concurrently published authority.");
+      }
+      return {
+        disposition: winner.record.state === "finalized" ? "finalized" : "active",
+        record: structuredClone(winner.record),
+        revision: winner.entry.revision
+      };
+    }
     const entry = entryFromRecord(record, directoryKey, 1);
     this.entries.set(entry.runSetId, entry);
     await this.writeIndex();
@@ -492,6 +539,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     if (this.mutating.has(input.runSetId)) throw new Error("Experiment run mutation is already in progress.");
     this.mutating.add(input.runSetId);
     try {
+      for (let attempt = 0; attempt < 16; attempt += 1) {
       const loaded = await this.loadKnownRun(input.runSetId);
       if (!loaded) throw new Error("Experiment run must begin before an episode can be recorded.");
       const expectedIndex = loaded.record.episodes.length;
@@ -560,11 +608,18 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
         revisionsDirectory,
         "Experiment run revisions directory is not safe."
       );
-      await this.writeRevision(revisionsDirectory, loaded.entry.directoryKey, loaded.entry.revision + 1, record);
+      try {
+        await this.writeRevision(revisionsDirectory, loaded.entry.directoryKey, loaded.entry.revision + 1, record);
+      } catch (error) {
+        if (error instanceof ExperimentRevisionCasConflict) continue;
+        throw error;
+      }
       const entry = entryFromRecord(record, loaded.entry.directoryKey, loaded.entry.revision + 1);
       this.entries.set(entry.runSetId, entry);
       await this.writeIndex();
       return structuredClone(entry);
+      }
+      throw new Error("Experiment run episode commit exceeded the revision CAS retry limit.");
     } finally {
       this.mutating.delete(input.runSetId);
     }
@@ -576,6 +631,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     if (this.mutating.has(runSet.runSetId)) throw new Error("Experiment run mutation is already in progress.");
     this.mutating.add(runSet.runSetId);
     try {
+      for (let attempt = 0; attempt < 16; attempt += 1) {
       const loaded = await this.loadKnownRun(runSet.runSetId);
       if (!loaded) throw new Error("Experiment run must begin before it can be finalized.");
       const refs = await this.referencesForRunSet(runSet, loaded.record);
@@ -609,11 +665,18 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
         revisionsDirectory,
         "Experiment run revisions directory is not safe."
       );
-      await this.writeRevision(revisionsDirectory, loaded.entry.directoryKey, loaded.entry.revision + 1, record);
+      try {
+        await this.writeRevision(revisionsDirectory, loaded.entry.directoryKey, loaded.entry.revision + 1, record);
+      } catch (error) {
+        if (error instanceof ExperimentRevisionCasConflict) continue;
+        throw error;
+      }
       const entry = entryFromRecord(record, loaded.entry.directoryKey, loaded.entry.revision + 1);
       this.entries.set(entry.runSetId, entry);
       await this.writeIndex();
       return structuredClone(entry);
+      }
+      throw new Error("Experiment run finalization exceeded the revision CAS retry limit.");
     } finally {
       this.mutating.delete(runSet.runSetId);
     }
@@ -625,6 +688,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
   }
 
   async list(): Promise<HarnessExperimentRunStoreEntry[]> {
+    await this.refreshEntriesFromCanonicalRuns();
     const verified: HarnessExperimentRunStoreEntry[] = [];
     for (const entry of [...this.entries.values()].sort(compareEntries)) {
       const loaded = await this.loadDirectory(entry.directoryKey, entry.runSetId);
@@ -642,22 +706,30 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     if (this.mutating.has(runSetId)) throw new Error("Experiment run mutation is already in progress.");
     this.mutating.add(runSetId);
     try {
-      const loaded = await this.loadKnownRun(runSetId);
-      if (!loaded) throw new Error("Experiment run must begin before it can mutate an episode attempt.");
-      const result = await mutation(loaded);
-      assertRunRecord(result.record);
-      if (!result.write) return structuredClone(result.record);
-      const revisionsDirectory = path.join(this.runsDirectory, loaded.entry.directoryKey, REVISIONS_DIRECTORY);
-      await assertDirectoryInside(
-        path.join(this.runsDirectory, loaded.entry.directoryKey),
-        revisionsDirectory,
-        "Experiment run revisions directory is not safe."
-      );
-      await this.writeRevision(revisionsDirectory, loaded.entry.directoryKey, loaded.entry.revision + 1, result.record);
-      const entry = entryFromRecord(result.record, loaded.entry.directoryKey, loaded.entry.revision + 1);
-      this.entries.set(entry.runSetId, entry);
-      await this.writeIndex();
-      return structuredClone(result.record);
+      for (let attempt = 0; attempt < 16; attempt += 1) {
+        const loaded = await this.loadKnownRun(runSetId);
+        if (!loaded) throw new Error("Experiment run must begin before it can mutate an episode attempt.");
+        const result = await mutation(loaded);
+        assertRunRecord(result.record);
+        if (!result.write) return structuredClone(result.record);
+        const revisionsDirectory = path.join(this.runsDirectory, loaded.entry.directoryKey, REVISIONS_DIRECTORY);
+        await assertDirectoryInside(
+          path.join(this.runsDirectory, loaded.entry.directoryKey),
+          revisionsDirectory,
+          "Experiment run revisions directory is not safe."
+        );
+        try {
+          await this.writeRevision(revisionsDirectory, loaded.entry.directoryKey, loaded.entry.revision + 1, result.record);
+        } catch (error) {
+          if (error instanceof ExperimentRevisionCasConflict) continue;
+          throw error;
+        }
+        const entry = entryFromRecord(result.record, loaded.entry.directoryKey, loaded.entry.revision + 1);
+        this.entries.set(entry.runSetId, entry);
+        await this.writeIndex();
+        return structuredClone(result.record);
+      }
+      throw new Error("Experiment run mutation exceeded the revision CAS retry limit.");
     } finally {
       this.mutating.delete(runSetId);
     }
@@ -668,8 +740,15 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     await assertDirectory(this.root, "Experiment run store root is not a safe directory.");
     await mkdir(this.runsDirectory, { recursive: true });
     await assertDirectoryInside(this.root, this.runsDirectory, "Experiment runs directory is not safe.");
+    await mkdir(this.locksDirectory, { recursive: true });
+    await assertDirectoryInside(this.root, this.locksDirectory, "Experiment run locks directory is not safe.");
     await assertWritableFileTarget(path.join(this.root, INDEX_FILE), "Experiment run index is not a safe regular file.");
 
+    await this.refreshEntriesFromCanonicalRuns();
+    await this.writeIndex();
+  }
+
+  private async refreshEntriesFromCanonicalRuns(): Promise<void> {
     const recovered = new Map<string, HarnessExperimentRunStoreEntry>();
     for (const child of await readdir(this.runsDirectory, { withFileTypes: true })) {
       if (!DIRECTORY_KEY_PATTERN.test(child.name)) continue;
@@ -683,7 +762,31 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     }
     this.entries.clear();
     for (const [runSetId, entry] of recovered) this.entries.set(runSetId, entry);
-    await this.writeIndex();
+  }
+
+  private async acquireRunLease(runSetId: string, nonblocking = true): Promise<ChildProcessWithoutNullStreams> {
+    const directoryKey = directoryKeyForRunSetId(runSetId);
+    const lockDirectory = path.join(this.locksDirectory, `${directoryKey}.lock`);
+    try {
+      await mkdir(lockDirectory, { recursive: false });
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+    }
+    await assertDirectoryInside(this.locksDirectory, lockDirectory, "Experiment run lease path is not safe.");
+
+    const child = spawn(
+      "/usr/bin/flock",
+      ["--exclusive", ...(nonblocking ? ["--nonblock"] : []), lockDirectory, "/bin/sh", "-c", `printf '${RUN_LEASE_ACQUIRED_MARKER}'; cat >/dev/null`],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    try {
+      await waitForRunLease(child, runSetId);
+      return child;
+    } catch (error) {
+      child.stdin.end();
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      throw error;
+    }
   }
 
   private async referencesForRunSet<TEmbeddedArtifact extends TArtifact>(
@@ -768,10 +871,19 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
 
   private async loadKnownRun(runSetId: string): Promise<{ record: HarnessExperimentRunRecord; entry: HarnessExperimentRunStoreEntry } | undefined> {
     assertIdentifier(runSetId, "runSetId");
-    const known = this.entries.get(runSetId);
-    if (!known) return undefined;
-    const loaded = await this.loadDirectory(known.directoryKey, runSetId);
+    const directoryKey = directoryKeyForRunSetId(runSetId);
+    try {
+      const stat = await lstat(path.join(this.runsDirectory, directoryKey));
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error("Stored experiment run identity path is not a safe directory.");
+      }
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
+    const loaded = await this.loadDirectory(directoryKey, runSetId);
     if (!loaded) throw new Error("Stored experiment run failed canonical recovery validation.");
+    this.entries.set(runSetId, loaded.entry);
     return loaded;
   }
 
@@ -885,44 +997,65 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
   ): Promise<void> {
     const recordText = jsonDocument(record);
     const recordSha256 = sha256(recordText);
-    const revisionName = revisionDirectoryName(revision, recordSha256);
+    const revisionName = revisionSlotDirectoryName(revision);
     const finalDirectory = path.join(revisionsDirectory, revisionName);
-    await assertPathMissing(finalDirectory, "Experiment run revision already exists.");
     const temporaryDirectory = path.join(revisionsDirectory, `.tmp-${randomUUID()}`);
-    await mkdir(temporaryDirectory, { recursive: false });
-    const commonManifest = {
-      kind: "experiment-run-manifest" as const,
-      runSetId: record.runSetId,
-      directoryKey,
-      revision,
-      state: record.state,
-      recordSha256,
-      files: { record: RECORD_FILE, manifest: MANIFEST_FILE } as const
-    };
-    const manifest: HarnessExperimentRunManifest = record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2
-      ? {
-          schemaVersion: HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V2,
-          recordSchemaVersion: HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2,
-          ...commonManifest
-        }
-      : { schemaVersion: HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION, ...commonManifest };
-    await writeFile(path.join(temporaryDirectory, RECORD_FILE), recordText, { encoding: "utf8", flag: "wx" });
-    await writeFile(path.join(temporaryDirectory, MANIFEST_FILE), jsonDocument(manifest), { encoding: "utf8", flag: "wx" });
-    await rename(temporaryDirectory, finalDirectory);
+    try {
+      await assertPathMissing(finalDirectory, "Experiment run revision CAS slot already exists.");
+      await mkdir(temporaryDirectory, { recursive: false });
+      const commonManifest = {
+        kind: "experiment-run-manifest" as const,
+        runSetId: record.runSetId,
+        directoryKey,
+        revision,
+        state: record.state,
+        recordSha256,
+        files: { record: RECORD_FILE, manifest: MANIFEST_FILE } as const
+      };
+      const manifest: HarnessExperimentRunManifest = record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2
+        ? {
+            schemaVersion: HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V2,
+            recordSchemaVersion: HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2,
+            ...commonManifest
+          }
+        : { schemaVersion: HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION, ...commonManifest };
+      await writeFile(path.join(temporaryDirectory, RECORD_FILE), recordText, { encoding: "utf8", flag: "wx" });
+      await writeFile(path.join(temporaryDirectory, MANIFEST_FILE), jsonDocument(manifest), { encoding: "utf8", flag: "wx" });
+      await rename(temporaryDirectory, finalDirectory);
+    } catch (error) {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+      try {
+        await lstat(finalDirectory);
+        throw new ExperimentRevisionCasConflict(revision);
+      } catch (publishedError) {
+        if (publishedError instanceof ExperimentRevisionCasConflict) throw publishedError;
+        if (!isMissing(publishedError)) throw publishedError;
+      }
+      throw error;
+    }
   }
 
   private async writeIndex(): Promise<void> {
-    const index: HarnessExperimentRunStoreIndexV1 = {
-      schemaVersion: HARNESS_EXPERIMENT_RUN_INDEX_VERSION,
-      kind: "experiment-run-index",
-      updatedAt: this.now(),
-      entries: [...this.entries.values()].sort(compareEntries).map((entry) => structuredClone(entry))
-    };
-    const target = path.join(this.root, INDEX_FILE);
-    await assertWritableFileTarget(target, "Experiment run index is not a safe regular file.");
-    const temporary = path.join(this.root, `.index-${randomUUID()}.tmp`);
-    await writeFile(temporary, jsonDocument(index), { encoding: "utf8", flag: "wx" });
-    await rename(temporary, target);
+    const lease = await this.acquireRunLease("__experiment_run_index__", false);
+    try {
+      // index.json is a rebuildable projection. Refresh while holding one
+      // global index lease so concurrent writers for different run ids cannot
+      // erase one another through last-writer-wins rename.
+      await this.refreshEntriesFromCanonicalRuns();
+      const index: HarnessExperimentRunStoreIndexV1 = {
+        schemaVersion: HARNESS_EXPERIMENT_RUN_INDEX_VERSION,
+        kind: "experiment-run-index",
+        updatedAt: this.now(),
+        entries: [...this.entries.values()].sort(compareEntries).map((entry) => structuredClone(entry))
+      };
+      const target = path.join(this.root, INDEX_FILE);
+      await assertWritableFileTarget(target, "Experiment run index is not a safe regular file.");
+      const temporary = path.join(this.root, `.index-${randomUUID()}.tmp`);
+      await writeFile(temporary, jsonDocument(index), { encoding: "utf8", flag: "wx" });
+      await rename(temporary, target);
+    } finally {
+      await releaseRunLease(lease);
+    }
   }
 }
 
@@ -1198,8 +1331,11 @@ function assertManifest(
     manifest.files.record !== RECORD_FILE ||
     manifest.files.manifest !== MANIFEST_FILE
   ) throw new Error("Experiment run manifest does not match its canonical record.");
-  if (revisionDirectory !== revisionDirectoryName(revision, manifest.recordSha256)) {
-    throw new Error("Experiment run revision directory does not match its content hash.");
+  if (
+    revisionDirectory !== revisionSlotDirectoryName(revision) &&
+    revisionDirectory !== revisionDirectoryName(revision, manifest.recordSha256)
+  ) {
+    throw new Error("Experiment run revision directory does not match its canonical slot or content hash.");
   }
 }
 
@@ -1225,6 +1361,10 @@ function entryFromRecord(record: HarnessExperimentRunRecord, directoryKey: strin
 
 function revisionDirectoryName(revision: number, recordSha256: string): string {
   return `${String(revision).padStart(12, "0")}-${recordSha256.slice(0, 16)}`;
+}
+
+function revisionSlotDirectoryName(revision: number): string {
+  return String(revision).padStart(12, "0");
 }
 
 function directoryKeyForRunSetId(runSetId: string): string {
@@ -1306,4 +1446,54 @@ async function assertPathMissing(target: string, message: string): Promise<void>
 
 function isMissing(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT");
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    ((error as { code?: string }).code === "EEXIST" || (error as { code?: string }).code === "ENOTEMPTY")
+  );
+}
+
+async function waitForRunLease(child: ChildProcessWithoutNullStreams, runSetId: string): Promise<void> {
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  await new Promise<void>((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    const onStdout = (chunk: string) => {
+      stdout += chunk;
+      if (stdout.includes(RUN_LEASE_ACQUIRED_MARKER)) finish(resolve);
+    };
+    const onStderr = (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-1_024); };
+    const onError = (error: Error) => finish(() => reject(error));
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => finish(() => reject(new Error(
+      code === 1
+        ? `Experiment run ${runSetId} is already active in another process.`
+        : `Experiment run lease failed before acquisition (code=${code}, signal=${signal}${stderr ? `, detail=${stderr.trim()}` : ""}).`
+    )));
+    const finish = (callback: () => void) => {
+      child.stdout.off("data", onStdout);
+      child.stderr.off("data", onStderr);
+      child.off("error", onError);
+      child.off("exit", onExit);
+      callback();
+    };
+    child.stdout.on("data", onStdout);
+    child.stderr.on("data", onStderr);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
+async function releaseRunLease(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", () => resolve());
+  });
+  child.stdin.end();
+  await exited;
 }
