@@ -5,6 +5,8 @@ import type { GameCommand, GameState, PendingAction } from "../core/types";
 import { WerewolfEnvironment } from "./environment";
 import type { HarnessAgentSnapshotFrame } from "./episodeArtifacts";
 import { hashStableState } from "./hash";
+import { compareSocialDomainAdapterManifests } from "./domainAdapter";
+import { createWerewolfSocialDomainAdapterManifest } from "./werewolfAdapter";
 import { replaySocialEpisode, type SocialEpisodeReplayResult } from "./socialReplay";
 import type { SocialEnvironment, SocialEpisodeArtifact } from "./social";
 import type { HarnessStepRecord } from "./types";
@@ -37,7 +39,15 @@ export function replayWerewolfSocialEpisode(
   } = {}
 ): SocialEpisodeReplayResult<GameState> {
   const rulesetMismatches = validateWerewolfReplayRulesetBinding(episode);
-  if (rulesetMismatches.length) {
+  const initialRulesetId = (episode.initialState as GameState | undefined)?.config?.rulesetId;
+  const adapterMismatches = isSupportedWerewolfRulesetId(initialRulesetId)
+    ? compareSocialDomainAdapterManifests(
+        episode.domainAdapter,
+        createWerewolfSocialDomainAdapterManifest(initialRulesetId),
+        { recordedPath: "recorded Werewolf adapter", runtimePath: "current Werewolf adapter" }
+      )
+    : [];
+  if (rulesetMismatches.length || adapterMismatches.length) {
     const initialState = cloneJson(episode.initialState as GameState);
     return {
       ok: false,
@@ -50,7 +60,10 @@ export function replayWerewolfSocialEpisode(
       messages: [],
       messagesHash: hashStableState([]),
       expectedMessagesHash: hashStableState(episode.messages),
-      mismatches: rulesetMismatches.map((mismatch) => `Werewolf ruleset binding: ${mismatch}`)
+      mismatches: [
+        ...rulesetMismatches.map((mismatch) => `Werewolf ruleset binding: ${mismatch}`),
+        ...adapterMismatches.map((mismatch) => `Werewolf adapter binding: ${mismatch}`)
+      ]
     };
   }
   const hasInlineSnapshots = episode.steps.some((step) => step.actorSnapshotsAfterStep !== undefined);
@@ -66,7 +79,8 @@ export function replayWerewolfSocialEpisode(
     auditAgentSnapshots: options.auditAgentSnapshots ?? (hasInlineSnapshots || options.agentSnapshotFrames !== undefined),
     validateRecordedStep(step, context) {
       return validateRecordedWerewolfStepEvidence(step, context.state);
-    }
+    },
+    domainAdapter: createWerewolfSocialDomainAdapterManifest(initialRulesetId as GameState["config"]["rulesetId"])
   });
 }
 

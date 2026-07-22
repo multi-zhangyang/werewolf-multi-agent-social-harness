@@ -243,6 +243,14 @@ test("renders social evidence as a server-projected graph and keeps interaction 
   expect(artifactViews).not.toContain("full");
 });
 
+test("moves keyboard focus into the named main workspace through the skip link", async ({ page }) => {
+  await page.goto("/?workspace=society", { waitUntil: "domcontentloaded" });
+  const skipLink = page.getByRole("link", { name: "跳至工作区内容" });
+  await skipLink.focus();
+  await skipLink.press("Enter");
+  await expect(page.getByRole("main", { name: "社会 工作区" })).toBeFocused();
+});
+
 test.describe("compact cockpit", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
@@ -261,6 +269,9 @@ test.describe("compact cockpit", () => {
     for (const [workspace, label] of workspaces) {
       await page.goto(`/?workspace=${workspace}`, { waitUntil: "domcontentloaded" });
       await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+      // Compact controls are provided by explicit Drawers. The desktop
+      // sidebars must be absent rather than collapsed to a focusable 0px box.
+      await expect(page.locator(".ant-layout-sider")).toHaveCount(0);
       const inspector = page.getByRole("dialog", { name: "Evidence Inspector" });
       if (await inspector.isVisible()) {
         await page.keyboard.press("Escape");
@@ -335,8 +346,9 @@ test("blocks an invalid roster assignment in the browser before it can start a m
     }
   });
   await page.getByRole("button", { name: "运行实验" }).click();
-  await expect(page.getByRole("status")).toContainText("无法启动：实验编排草案无效");
-  await expect(page.getByRole("status")).toContainText("unknown profile id");
+  const runError = page.getByRole("alert").filter({ hasText: "无法启动：实验编排草案无效" });
+  await expect(runError).toContainText("无法启动：实验编排草案无效");
+  await expect(runError).toContainText("unknown profile id");
   expect(matchRunRequests).toBe(0);
 });
 

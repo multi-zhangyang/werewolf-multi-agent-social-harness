@@ -24,7 +24,8 @@ Core objects:
 - `SocialParallelEnvironment`: optional extension for true joint-action resolution through `stepBatch(actionsByAgent)`.
 - `SocialStepFeedback`: environment transition feedback with state, per-agent rewards, terminations, truncations, infos, and episode-level termination/truncation reasons.
 - `SocialActor`: stateful actor boundary with profile, observation handling, and decision production.
-- `SocialEpisodeArtifact`: replay/eval artifact containing profiles, channels, initial/final state, steps, messages, and metrics.
+- `SocialDomainAdapterManifest`: safe, canonical execution provenance for a new domain adapter: domain/adapter id and version plus semantic hashes for environment, command codec, observation projection, scheduler, and agent-state schema. It never contains closures, prompts, provider data, credentials, or private state.
+- `SocialEpisodeArtifact`: replay/eval artifact containing profiles, channels, initial/final state, steps, messages, metrics, and optional adapter provenance. Old artifacts without a manifest remain legacy-compatible; a manifest-bearing artifact requires the exact runtime manifest before replay or checkpoint restoration can mutate an environment.
 
 This layer is domain-neutral. It does not import Werewolf rules.
 

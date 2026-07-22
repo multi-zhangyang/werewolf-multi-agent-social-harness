@@ -15,6 +15,7 @@ import {
   type SocialEpisodeOptions,
   type SocialMessage
 } from "./social";
+import { compareSocialDomainAdapterManifests, type SocialDomainAdapterManifest } from "./domainAdapter";
 
 /**
  * Domain-neutral continuation input reconstructed from a checkpoint.  It is
@@ -31,6 +32,8 @@ export interface SocialCheckpointForkSeed<TState, TAgentState> {
 }
 
 export interface SocialCheckpointRuntimeAdapter<TState, TAgentState, TObservation, TPending, TCommand> {
+  /** Runtime identity checked before replay verification or restoration. */
+  domainAdapter?: SocialDomainAdapterManifest;
   createEnvironment(initialState: TState): SocialEnvironment<TState, TObservation, TPending, TCommand>;
   restoreActors(agentStates: TAgentState[]): SocialActor<TObservation, TPending, TCommand>[];
 }
@@ -89,6 +92,24 @@ export async function runForkedHarnessEpisode<TState, TAgentState, TObservation,
 ): Promise<ForkedHarnessEpisodeResult<TState, TObservation, TPending, TCommand, TAgentState>> {
   assertStructurallyValidCheckpoint(options.checkpoint);
   assertForkableRecordedActorBoundary(options.checkpoint);
+  const adapterErrors = compareSocialDomainAdapterManifests(
+    options.checkpoint.executionPrefix.domainAdapter,
+    options.runtime.domainAdapter,
+    { recordedPath: "checkpoint execution adapter", runtimePath: "checkpoint runtime adapter" }
+  );
+  if (adapterErrors.length) {
+    throw new Error(`Checkpoint adapter compatibility failed for ${options.checkpoint.checkpointId}: ${adapterErrors.join(" ")}`);
+  }
+  if (options.episode.domainAdapter) {
+    const childAdapterErrors = compareSocialDomainAdapterManifests(
+      options.runtime.domainAdapter,
+      options.episode.domainAdapter,
+      { recordedPath: "checkpoint runtime adapter", runtimePath: "fork episode adapter" }
+    );
+    if (childAdapterErrors.length) {
+      throw new Error(`Fork episode adapter compatibility failed for ${options.checkpoint.checkpointId}: ${childAdapterErrors.join(" ")}`);
+    }
+  }
   const domainErrors = options.validateCheckpoint?.(options.checkpoint) ?? [];
   if (domainErrors.length) {
     throw new Error(`Invalid domain checkpoint ${options.checkpoint.checkpointId}: ${domainErrors.join(" ")}`);

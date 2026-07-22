@@ -2834,67 +2834,73 @@ export function App() {
         }
       }}
     >
-      <a className="skip-to-workspace" href="#workspace-main">
+      <a
+        className="skip-to-workspace"
+        href="#workspace-main"
+        onClick={() => {
+          window.requestAnimationFrame(() => document.getElementById("workspace-main")?.focus());
+        }}
+      >
         跳至工作区内容
       </a>
       <Layout style={{ minWidth: 0, minHeight: "100vh" }}>
-        <Sider
-          width={292}
-          breakpoint="xl"
-          collapsedWidth={0}
-          trigger={null}
-          style={{ borderInlineEnd: "1px solid #e4e8f0", height: "100vh", overflow: "auto", position: "sticky", insetBlockStart: 0 }}
-        >
-          <Flex vertical gap="middle" style={{ minHeight: "100%", padding: 16 }}>
-            <Space align="start">
-              <ExperimentOutlined style={{ fontSize: 28, color: "#1455d9" }} />
-              <Flex vertical gap={4}>
-                <Title level={1} style={{ margin: 0 }}>
-                  多 Agent 社会 Harness Cockpit
-                </Title>
-                <Space size={4} wrap>
-                  <Tag color="blue">server truth</Tag>
-                  <Tag color={artifactView === "truth-redacted" ? "warning" : "processing"}>{artifactView}</Tag>
-                  {!artifact ? (
-                    <Tag>no artifact</Tag>
-                  ) : artifact.projection?.postgameTruthRedacted ? (
-                    <Tag color="gold">truth redacted</Tag>
-                  ) : (
-                    <Tag>truth visible</Tag>
-                  )}
-                </Space>
-              </Flex>
-            </Space>
+        {!isNarrowLayout ? (
+          <Sider
+            width={292}
+            trigger={null}
+            style={{ borderInlineEnd: "1px solid #e4e8f0", height: "100vh", overflow: "auto", position: "sticky", insetBlockStart: 0 }}
+          >
+            <Flex vertical gap="middle" style={{ minHeight: "100%", padding: 16 }}>
+              <Space align="start">
+                <ExperimentOutlined style={{ fontSize: 28, color: "#1455d9" }} />
+                <Flex vertical gap={4}>
+                  <Title level={1} style={{ margin: 0 }}>
+                    多 Agent 社会 Harness Cockpit
+                  </Title>
+                  <Space size={4} wrap>
+                    <Tag color="blue">server truth</Tag>
+                    <Tag color={artifactView === "truth-redacted" ? "warning" : "processing"}>{artifactView}</Tag>
+                    {!artifact ? (
+                      <Tag>no artifact</Tag>
+                    ) : artifact.projection?.postgameTruthRedacted ? (
+                      <Tag color="gold">truth redacted</Tag>
+                    ) : (
+                      <Tag>truth visible</Tag>
+                    )}
+                  </Space>
+                </Flex>
+              </Space>
 
-            <nav aria-label="工作区导航">
-              <Menu
-                mode="inline"
-                selectedKeys={[workspace]}
-                items={menuItems}
-                onClick={({ key }) => handleWorkspaceChange(key as Workspace)}
+              <nav aria-label="工作区导航">
+                <Menu
+                  mode="inline"
+                  selectedKeys={[workspace]}
+                  items={menuItems}
+                  onClick={({ key }) => handleWorkspaceChange(key as Workspace)}
+                />
+              </nav>
+              <RunContextPanel
+                artifactView={artifactView}
+                onArtifactViewChange={(value) => void handleArtifactViewChange(value)}
+                busy={busyAny}
+                currentMatchId={currentMatchId}
+                artifact={artifact}
+                selectedMatch={selectedMatch}
+                messageCount={artifact ? messages.length : null}
+                metricCount={artifact ? metrics.length : null}
+                maxTransitions={maxTransitions}
+                onMaxTransitionsChange={setMaxTransitions}
+                timeoutSeconds={timeoutSeconds}
+                onTimeoutSecondsChange={setTimeoutSeconds}
+                jointPhaseScheduler={jointPhaseScheduler}
+                onJointPhaseSchedulerChange={setJointPhaseScheduler}
+                rosterSummary={formatExperimentRosterSummary(experimentRequest)}
+                rosterInvalidReason={experimentDraftError}
+                onOpenRosterComposer={() => setRosterComposerOpen(true)}
               />
-            </nav>
-            <RunContextPanel
-              artifactView={artifactView}
-              onArtifactViewChange={(value) => void handleArtifactViewChange(value)}
-              busy={busyAny}
-              currentMatchId={currentMatchId}
-              artifact={artifact}
-              selectedMatch={selectedMatch}
-              messageCount={artifact ? messages.length : null}
-              metricCount={artifact ? metrics.length : null}
-              maxTransitions={maxTransitions}
-              onMaxTransitionsChange={setMaxTransitions}
-              timeoutSeconds={timeoutSeconds}
-              onTimeoutSecondsChange={setTimeoutSeconds}
-              jointPhaseScheduler={jointPhaseScheduler}
-              onJointPhaseSchedulerChange={setJointPhaseScheduler}
-              rosterSummary={formatExperimentRosterSummary(experimentRequest)}
-              rosterInvalidReason={experimentDraftError}
-              onOpenRosterComposer={() => setRosterComposerOpen(true)}
-            />
-          </Flex>
-        </Sider>
+            </Flex>
+          </Sider>
+        ) : null}
 
         <Layout style={{ minWidth: 0 }}>
           <Header style={{ borderBlockEnd: "1px solid #e4e8f0", height: "auto", padding: isCompactLayout ? "12px" : "14px 20px" }}>
@@ -2903,7 +2909,9 @@ export function App() {
                 {isNarrowLayout ? (
                   <Space size={6}>
                     <ExperimentOutlined style={{ color: "#1455d9" }} />
-                    <Text strong>多 Agent 社会 Harness</Text>
+                    <Title level={1} style={{ margin: 0, fontSize: 16, lineHeight: 1.35 }}>
+                      多 Agent 社会 Harness Cockpit
+                    </Title>
                   </Space>
                 ) : null}
                 <Breadcrumb
@@ -2967,10 +2975,8 @@ export function App() {
           </Header>
 
           <Layout style={{ minWidth: 0 }}>
-            <main id="workspace-main" aria-label={`${activeWorkspace.label} 工作区`} style={{ minWidth: 0, padding: isCompactLayout ? 12 : 20 }}>
-              <div role="status" aria-live="polite">
-                <StatusBanner status={status} error={error} busy={busy} />
-              </div>
+            <main id="workspace-main" tabIndex={-1} aria-label={`${activeWorkspace.label} 工作区`} style={{ minWidth: 0, padding: isCompactLayout ? 12 : 20 }}>
+              <StatusBanner status={status} error={error} busy={busy} />
 
               <KpiGrid matches={matches} artifact={artifact} comparison={comparison} replay={replay} />
 
@@ -2979,15 +2985,15 @@ export function App() {
               </Card>
             </main>
 
-            <Sider
-              width={384}
-              breakpoint="lg"
-              collapsedWidth={0}
-              trigger={null}
-              style={{ borderInlineStart: "1px solid #e4e8f0", background: "#ffffff", height: "100vh", overflow: "auto", position: "sticky", insetBlockStart: 0 }}
-            >
-              <InspectorPanel item={inspector} onOpenRaw={() => setRawOpen(true)} artifactView={artifactView} />
-            </Sider>
+            {!isCompactLayout ? (
+              <Sider
+                width={384}
+                trigger={null}
+                style={{ borderInlineStart: "1px solid #e4e8f0", background: "#ffffff", height: "100vh", overflow: "auto", position: "sticky", insetBlockStart: 0 }}
+              >
+                <InspectorPanel item={inspector} onOpenRaw={() => setRawOpen(true)} artifactView={artifactView} />
+              </Sider>
+            ) : null}
           </Layout>
         </Layout>
 
@@ -3101,6 +3107,8 @@ function StatusBanner({ status, error, busy }: { status: string; error: string |
   const isWaitingForArtifact = !error && !busy && /(没有可加载|没有匹配|未选择 run|尚未选择)/.test(status);
   return (
     <Alert
+      role={error ? "alert" : "status"}
+      aria-live={error ? "assertive" : "polite"}
       showIcon
       type={error ? "error" : busy ? "info" : isWaitingForArtifact ? "warning" : "success"}
       icon={error || isWaitingForArtifact ? <WarningOutlined /> : <CheckCircleOutlined />}

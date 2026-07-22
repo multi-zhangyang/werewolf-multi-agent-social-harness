@@ -15,6 +15,7 @@ import {
   type SocialMessage,
   type SocialParallelEnvironment
 } from "./social";
+import { compareSocialDomainAdapterManifests, type SocialDomainAdapterManifest } from "./domainAdapter";
 
 /**
  * Domain-neutral replay result. Replay consumes recorded commands and a
@@ -73,6 +74,8 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
   agentSnapshotFrames?: HarnessAgentSnapshotFrame<TAgentState>[];
   /** Optional domain-owned binding of recorded action evidence to replay state. */
   validateRecordedStep?: SocialRecordedStepValidator<TState, TObservation, TPending, TCommand>;
+  /** Required when replaying an artifact that recorded adapter provenance. */
+  domainAdapter?: SocialDomainAdapterManifest;
 }): SocialEpisodeReplayResult<TState> {
   const { episode } = options;
   const mismatches: string[] = [];
@@ -85,6 +88,14 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
   let replayedSteps = 0;
   let replayedBatches = 0;
   let rejectedSteps = 0;
+
+  // This happens before the first environment snapshot/step. An environment
+  // supplied by the caller must not get a chance to reinterpret a trajectory
+  // bound to another domain adapter implementation.
+  for (const mismatch of compareSocialDomainAdapterManifests(episode.domainAdapter, options.domainAdapter)) {
+    mismatches.push(`Domain adapter binding: ${mismatch}`);
+  }
+  if (mismatches.length) return finalizeReplay();
 
   const initialStateHash = options.hashState?.(options.environment.snapshot());
   const expectedInitialStateHash = options.hashState?.(episode.initialState);

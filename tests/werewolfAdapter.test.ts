@@ -1700,6 +1700,24 @@ describe("Werewolf generic social adapter", () => {
 
     const expectedTraceId = `${initialState.id}:harness:1:${seer.id}:night_seer`;
     expect(result.artifact.domainId).toBe("werewolf");
+    expect(result.artifact.domainAdapter).toMatchObject({
+      schemaVersion: "harness.domain-adapter.v1",
+      domainId: "werewolf",
+      adapterId: "werewolf.social",
+      adapterVersion: "1",
+      components: expect.arrayContaining([
+        expect.objectContaining({ kind: "environment", id: "werewolf.social-environment" }),
+        expect.objectContaining({ kind: "command_codec", id: "werewolf.game-command" }),
+        expect.objectContaining({ kind: "agent_state_schema", id: "werewolf.agent-harness-state" })
+      ])
+    });
+    const tamperedAdapter = structuredClone(result.artifact);
+    const environmentComponent = tamperedAdapter.domainAdapter?.components.find((component) => component.kind === "environment");
+    if (!environmentComponent) throw new Error("Expected a recorded Werewolf environment manifest component.");
+    environmentComponent.semanticHash = "tampered-environment-semantics";
+    const tamperedReplay = replayWerewolfSocialEpisode(tamperedAdapter);
+    expect(tamperedReplay.ok).toBe(false);
+    expect(tamperedReplay.mismatches.join(" ")).toMatch(/Werewolf adapter binding: .*does not exactly match/i);
     expect(result.artifact.status).toBe("truncated");
     expect(result.artifact.steps).toHaveLength(2);
     expect(result.artifact.steps[0]).toMatchObject({

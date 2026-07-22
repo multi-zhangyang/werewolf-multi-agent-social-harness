@@ -2,6 +2,10 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { runEvaluationRegistry } from "../src/harness/evaluation";
 import { hashStableState } from "../src/harness/hash";
+import {
+  validateSocialDomainAdapterManifest,
+  type SocialDomainAdapterManifest
+} from "../src/harness/domainAdapter";
 import { replaySocialEpisode } from "../src/harness/generic";
 import { runHarnessEpisode } from "../src/harness/runner";
 import { ScaffoldedSocialActor } from "../src/harness/scaffold";
@@ -76,6 +80,46 @@ const privateABChannel: SocialChannel = {
   readableBy: "participants"
 };
 
+const ledgerDomainAdapter: SocialDomainAdapterManifest = {
+  schemaVersion: "harness.domain-adapter.v1",
+  domainId: "ledger",
+  adapterId: "ledger.social",
+  adapterVersion: "1",
+  semanticHash: hashStableState({ adapter: "ledger.social", version: 1 }),
+  components: [
+    {
+      kind: "agent_state_schema",
+      id: "ledger.actor-state",
+      version: "1",
+      semanticHash: hashStableState({ stores: ["committedEntries"] })
+    },
+    {
+      kind: "command_codec",
+      id: "ledger.command",
+      version: "1",
+      semanticHash: hashStableState({ command: "record" })
+    },
+    {
+      kind: "environment",
+      id: "ledger.environment",
+      version: "1",
+      semanticHash: hashStableState({ order: "a-b-c" })
+    },
+    {
+      kind: "observation_projection",
+      id: "ledger.observation",
+      version: "1",
+      semanticHash: hashStableState({ privateToken: true })
+    },
+    {
+      kind: "scheduler",
+      id: "ledger.scheduler",
+      version: "1",
+      semanticHash: hashStableState({ modes: ["aec"] })
+    }
+  ]
+};
+
 describe("generic social harness contract", () => {
   it("keeps the reusable runner, replay, checkpoint, and public barrel free of Werewolf/core imports", () => {
     const genericModulePaths = [
@@ -89,6 +133,104 @@ describe("generic social harness contract", () => {
       const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
       expect(source).not.toMatch(/from\s+["'](?:\.\.\/core|\.\/environment|\.\/artifacts|\.\/werewolfAdapter|\.\.\/server|\.\.\/components)/);
     }
+  });
+
+  it("binds replay and checkpoint restoration to a versioned domain adapter before any environment mutation", async () => {
+    expect(validateSocialDomainAdapterManifest(ledgerDomainAdapter)).toEqual([]);
+    const agents = [{ id: "a", durableMemoryVersion: 1 }];
+    const episode = await runHarnessEpisode<LedgerState, LedgerObservation, LedgerPending, LedgerCommand>({
+      id: "ledger-adapter-bound",
+      domainAdapter: ledgerDomainAdapter,
+      environment: new LedgerEnvironment({ actorIds: ["a"] }),
+      actors: [
+        new LedgerActor("a", () => ({
+          actorId: "a",
+          kind: "record",
+          command: { actorId: "a", entry: "adapter-bound" }
+        }))
+      ],
+      channels: [publicChannel],
+      schedulerMode: "aec",
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      captureAgentSnapshots: () => agents
+    });
+
+    expect(episode.domainId).toBe("ledger");
+    expect(episode.domainAdapter).toEqual(ledgerDomainAdapter);
+    expect(validateSocialEpisodeArtifact(episode)).toEqual([]);
+
+    const incompatibleAdapter = clone(ledgerDomainAdapter);
+    incompatibleAdapter.semanticHash = hashStableState({ adapter: "ledger.social", version: 2 });
+    const replayEnvironment = new LedgerEnvironment({ actorIds: ["a"] });
+    const replay = replaySocialEpisode({
+      episode,
+      environment: replayEnvironment,
+      hashState: hashStableState,
+      hashMessages: hashStableState,
+      domainAdapter: incompatibleAdapter
+    });
+    expect(replay.ok).toBe(false);
+    expect(replay.mismatches.join(" ")).toMatch(/Domain adapter binding: .*does not exactly match/i);
+    expect(replayEnvironment.stepCalls).toBe(0);
+
+    const checkpoint = buildHarnessCheckpointAtPrefix<LedgerState, LedgerObservation, LedgerPending, LedgerCommand, (typeof agents)[number]>({
+      artifactVersion: "ledger.checkpoint.v1",
+      kind: "ledger-checkpoint",
+      checkpointId: "ledger-adapter-bound-checkpoint",
+      sourceArtifactVersion: "ledger.episode.v1",
+      episode,
+      selector: { nativeStepCount: 1 },
+      replayPrefix: (executionPrefix) =>
+        replaySocialEpisode({
+          episode: executionPrefix,
+          environment: new LedgerEnvironment({ actorIds: ["a"] }),
+          hashState: hashStableState,
+          hashMessages: hashStableState,
+          domainAdapter: ledgerDomainAdapter,
+          validateExpectedFinalState: false
+        })
+    });
+    expect(checkpoint.source.domainAdapter).toEqual(ledgerDomainAdapter);
+    expect(validateHarnessCheckpointEnvelope(checkpoint)).toEqual([]);
+    expect(buildSocialCheckpointForkSeed(checkpoint).forkOf.parentDomainAdapter).toEqual(ledgerDomainAdapter);
+
+    let verifierCalls = 0;
+    let environmentRestores = 0;
+    let actorRestores = 0;
+    await expect(
+      runForkedHarnessEpisode({
+        checkpoint,
+        runtime: {
+          domainAdapter: incompatibleAdapter,
+          createEnvironment(initialState) {
+            environmentRestores += 1;
+            return new LedgerEnvironment({ initialState, actorIds: ["a"] });
+          },
+          restoreActors() {
+            actorRestores += 1;
+            return [];
+          }
+        },
+        verifyCheckpointReplay: () => {
+          verifierCalls += 1;
+          return [];
+        },
+        episode: {
+          id: "ledger-adapter-bound-forbidden-fork",
+          domainAdapter: incompatibleAdapter,
+          hashState: hashStableState,
+          hashMessages: hashStableState
+        }
+      })
+    ).rejects.toThrow(/Checkpoint adapter compatibility failed/i);
+    expect(verifierCalls).toBe(0);
+    expect(environmentRestores).toBe(0);
+    expect(actorRestores).toBe(0);
+
+    const malformed = clone(ledgerDomainAdapter) as SocialDomainAdapterManifest;
+    malformed.components = [...malformed.components].reverse();
+    expect(validateSocialDomainAdapterManifest(malformed).join(" ")).toMatch(/sorted canonically/i);
   });
 
   it("keeps environment observations scoped, delivers messages by channel visibility, and replays a non-Werewolf episode", async () => {

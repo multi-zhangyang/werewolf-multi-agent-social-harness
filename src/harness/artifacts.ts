@@ -1398,6 +1398,7 @@ function buildNativeCheckpointRecord(options: {
       agentsHash: hashStableState(options.agents),
       channelsHash: hashStableState(options.executionPrefix.channels),
       messagesHash: hashStableState(options.executionPrefix.messages),
+      domainAdapter: options.executionPrefix.domainAdapter ? cloneJson(options.executionPrefix.domainAdapter) : undefined,
       agentSnapshotFrameId: options.agentSnapshotFrameId,
       failureReason: options.artifact.failureReason,
       truncationReason: options.artifact.truncationReason
