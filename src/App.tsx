@@ -84,7 +84,7 @@ import type {
 } from "./harness/types";
 import { DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER, WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS } from "./harness/types";
 import { legacyMetricPromotionPolicyFromSummary, resolveRecordedMetricPromotion } from "./harness/evaluation";
-import { countSocialStepCommits, deriveSocialExposureRecords, isSocialStepCommitted, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
+import { countSocialStepCommits, isSocialStepCommitted, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
 import { isSafeHarnessCheckpointBoundary } from "./harness/episodeArtifacts";
 import type { SocialStateMutationJournalEntry } from "./harness/socialState";
 import { AgentDecisionEvidencePanel, buildDecisionJournalEvidence } from "./components/cockpit/AgentDecisionEvidencePanel";
@@ -136,12 +136,13 @@ interface ComparisonRequestContext {
   view: ArtifactView;
 }
 
-type SocialGraphArtifact = (
-  | Pick<MatchArtifact, "agents" | "socialEpisode">
-  | Pick<PostgameMatchProjectionDto, "agents" | "socialEpisode">
-) & {
-  projection?: PostgameMatchProjectionDto["projection"];
-};
+/**
+ * The cockpit graph deliberately accepts only the server projection contract.
+ * A canonical MatchArtifact is execution/replay authority, not browser input;
+ * accepting it here would make a future caller accidentally rederive scoped
+ * exposure evidence from private observations.
+ */
+type SocialGraphArtifact = Pick<PostgameMatchProjectionDto, "agents" | "socialEpisode" | "projection">;
 type ProjectedSocialStep = RedactedSocialStepDto;
 
 export interface SocialGraphNode {
@@ -1236,6 +1237,11 @@ export function App() {
       setActionStatus("无法复现：尚未选择 run。");
       return;
     }
+    if (artifactView !== "postgame-redacted") {
+      setReplay(null);
+      setActionStatus("原生复现仅在 postgame-redacted 本地研究复盘视图可用。");
+      return;
+    }
     setBusy("replay");
     try {
       const nextReplay = await apiJson<ReplayResponse>(`/api/matches/${encodeURIComponent(currentMatchId)}/replay`, {
@@ -1256,7 +1262,7 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [currentMatchId, setActionStatus]);
+  }, [artifactView, currentMatchId, setActionStatus]);
 
   const handleLoadReplayFrame = useCallback(
     async (index: number) => {
@@ -3467,7 +3473,13 @@ function TimelineWorkspace({
               >
                 JSONL
               </Button>
-              <Button type="primary" icon={decorativeIcon(<PlayCircleOutlined />)} onClick={onReplay} disabled={!artifact || busy === "replay"} loading={busy === "replay"}>
+              <Button
+                type="primary"
+                icon={decorativeIcon(<PlayCircleOutlined />)}
+                onClick={onReplay}
+                disabled={!artifact || artifactView !== "postgame-redacted" || busy === "replay"}
+                loading={busy === "replay"}
+              >
                 复现
               </Button>
             </Space>
@@ -3715,7 +3727,7 @@ function TimelineWorkspace({
                   description="system 与 rejected 原生步骤不会伪造 legacy committed trajectory 记录。"
                 />
               )}
-              {replay ? (
+              {artifactView === "postgame-redacted" && replay ? (
                 <Card size="small" title="Replay validation">
                   <Descriptions
                     size="small"
@@ -7369,8 +7381,8 @@ function readSocialGraphExposureRecords(artifact: SocialGraphArtifact): SocialEx
   if (Array.isArray(artifact.socialEpisode.exposureRecords)) {
     return artifact.socialEpisode.exposureRecords;
   }
-  if (artifact.projection?.view === "postgame-redacted" || artifact.projection?.view === "truth-redacted") {
-    return [];
-  }
-  return deriveSocialExposureRecords<unknown, unknown, unknown, unknown>(artifact.socialEpisode);
+  // Message recipient envelopes are not evidence that an actor received an
+  // observation. Absence of server-projected exposure records must remain an
+  // absence of graph exposure edges rather than a browser-side reconstruction.
+  return [];
 }

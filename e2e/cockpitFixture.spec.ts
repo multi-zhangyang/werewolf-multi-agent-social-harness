@@ -33,6 +33,14 @@ test("renders recorded server truth without a provider and never requests a full
   await expect(decisionEvidence).toContainText("Environment receipt");
   await expect(decisionEvidence).toContainText("private actor state");
 
+  // A complete native replay is a local postgame-research action. Exercise it
+  // before changing projection, then prove the strict public view cannot make
+  // the same request or display its scheduler/hash summary.
+  const postgameReplay = page.waitForResponse((response) => isReplayResponse(response));
+  await page.getByRole("button", { name: "复现" }).click();
+  expect((await postgameReplay).ok()).toBeTruthy();
+  await expect(page.getByRole("status")).toContainText("原生复现通过");
+
   const projection = page.getByRole("combobox", { name: "工件投影" });
   const requestCountBeforeViewChange = artifactViews.length;
   const truthArtifact = page.waitForResponse((response) => isArtifactResponse(response, "truth-redacted"));
@@ -90,10 +98,9 @@ test("renders recorded server truth without a provider and never requests a full
   await page.getByRole("tab", { name: "时间线", exact: true }).click();
   await expect(page.getByText("主时间线来自原生 social episode 执行工件")).toBeVisible();
   await expect(page.getByText("native steps").first()).toBeVisible();
-  const replayResponse = page.waitForResponse((response) => isReplayResponse(response));
-  await page.getByRole("button", { name: "复现" }).click();
-  expect((await replayResponse).ok()).toBeTruthy();
-  await expect(page.getByRole("status")).toContainText("原生复现通过");
+  const replayButton = page.getByRole("button", { name: "复现" });
+  await expect(replayButton).toBeDisabled();
+  await expect(page.getByText("Replay validation")).toHaveCount(0);
 
   // A projection change must remain selected through workspace and replay work;
   // bootstrap is not allowed to restore its default postgame projection.

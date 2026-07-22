@@ -598,6 +598,10 @@ app.get("/api/matches/:id/trajectory.jsonl", async (req, res, next) => {
  */
 app.post("/api/matches/:id/replay/frame", async (req, res, next) => {
   try {
+    // Native cursor positions and a postgame-redacted prefix state disclose
+    // more than a public observation. This is a local research-review API,
+    // not an alternate way to bypass the truth-redacted projection.
+    assertLocalPostgameReplayAccess(req, artifactAccessBindHost);
     await loadMatchArtifactIndex(matchArtifactBaseDir);
     const match = getMatch(req.params.id);
     if (!match) {
@@ -638,6 +642,10 @@ app.post("/api/matches/:id/replay/frame", async (req, res, next) => {
 app.post("/api/matches/:id/replay", async (req, res, next) => {
   let match: StoredMatch | undefined;
   try {
+    // Full replay summaries contain native step/batch counts and deterministic
+    // hashes. They are audit evidence for local postgame research only; a
+    // truth-redacted client must not use them as a scheduler side channel.
+    assertLocalPostgameReplayAccess(req, artifactAccessBindHost);
     await loadMatchArtifactIndex(matchArtifactBaseDir);
     match = getMatch(req.params.id);
     if (!match) {
@@ -3158,15 +3166,23 @@ function artifactViewFromQuery(
 ): MatchArtifactView {
   const record = isRecord(query) ? query : {};
   const view = optionalSingleQueryString(record, "view");
-  // API callers must opt in to private/debug evidence. Cockpit and download
-  // routes share this parser, so an omitted view cannot silently become a
-  // full artifact export on one of the sibling endpoints.
-  if (view === undefined) return "postgame-redacted";
+  // `postgame-redacted` is a local research projection: it retains final
+  // roles, teams, and night truth while removing private cognition evidence.
+  // A remotely reachable default must therefore degrade to the strict public
+  // projection rather than silently treating an omitted query as research
+  // authorization. Cockpit requests against the default loopback server keep
+  // their existing postgame-review default.
+  if (view === undefined) {
+    return hasLocalResearchArtifactAccess(request, artifactAccessBindHost) ? "postgame-redacted" : "truth-redacted";
+  }
   if (view === "full") {
     assertLocalFullArtifactAccess(request, artifactAccessBindHost);
     return "full";
   }
-  if (view === "postgame-redacted") return "postgame-redacted";
+  if (view === "postgame-redacted") {
+    assertLocalPostgameArtifactAccess(request, artifactAccessBindHost);
+    return "postgame-redacted";
+  }
   if (view === "truth-redacted") return "truth-redacted";
   throw new HttpError(400, `Unsupported artifact view: ${view}`);
 }
@@ -3191,11 +3207,39 @@ function assertLocalFullArtifactAccess(request: express.Request, artifactAccessB
 }
 
 function assertLocalResearchArtifactAccess(request: express.Request, artifactAccessBindHost: string): void {
-  if (isLoopbackBindHost(artifactAccessBindHost) && isLoopbackAddress(request.socket.remoteAddress)) return;
+  if (hasLocalResearchArtifactAccess(request, artifactAccessBindHost)) return;
   throw new HttpError(
     403,
     "Tournament research artifacts are available only through a loopback-only local debug server.",
     "tournament_research_artifacts_local_only"
+  );
+}
+
+function hasLocalResearchArtifactAccess(request: express.Request, artifactAccessBindHost: string): boolean {
+  return isLoopbackBindHost(artifactAccessBindHost) && isLoopbackAddress(request.socket.remoteAddress);
+}
+
+function assertLocalPostgameArtifactAccess(request: express.Request, artifactAccessBindHost: string): void {
+  if (hasLocalResearchArtifactAccess(request, artifactAccessBindHost)) return;
+  throw new HttpError(
+    403,
+    "Postgame-redacted artifact views are available only through a loopback-only local research server.",
+    "postgame_artifact_view_local_only"
+  );
+}
+
+/**
+ * Native replay is more sensitive than a truth-redacted match projection:
+ * exact scheduler progress, batch density, and deterministic hashes can leak
+ * hidden role/action cadence. Keep both replay endpoints local even when the
+ * normal match list and truth-redacted artifact APIs are externally served.
+ */
+function assertLocalPostgameReplayAccess(request: express.Request, artifactAccessBindHost: string): void {
+  if (hasLocalResearchArtifactAccess(request, artifactAccessBindHost)) return;
+  throw new HttpError(
+    403,
+    "Native replay review is available only through a loopback-only local research server.",
+    "postgame_replay_local_only"
   );
 }
 
