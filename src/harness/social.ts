@@ -303,7 +303,18 @@ export interface SocialEnvironmentStepFailureContext<TState = unknown, TObservat
   decisionStateHash?: string;
   failureState: TState;
   failureStateHash?: string;
+  /** Canonical state retained by the runner after an optional verified rollback. */
+  effectiveState?: TState;
+  effectiveStateHash?: string;
+  rollback?: SocialEnvironmentRollbackEvidence;
   error: unknown;
+}
+
+export interface SocialEnvironmentRollbackEvidence {
+  mutationDetected: boolean;
+  attempted: boolean;
+  succeeded: boolean;
+  failureCode?: "restore_threw" | "state_mismatch" | "hash_mismatch" | "event_sequence_mismatch";
 }
 
 export type SocialStepCommitStatus = "committed" | "rejected";
@@ -383,6 +394,13 @@ export type SocialStepResult<TState = unknown, TObservation = unknown> = TState 
 
 export interface SocialEnvironment<TState = unknown, TObservation = unknown, TPending = unknown, TCommand = unknown> {
   snapshot(): TState;
+  /**
+   * Optional defensive recovery for an uncommitted failed transition. It must
+   * restore all canonical state represented by snapshot() without external
+   * side effects. The runner verifies the restored snapshot; step/stepBatch
+   * remain required to be atomic even when this capability exists.
+   */
+  restore?(snapshot: TState): void;
   pendingActions(): TPending[];
   observe(agentId: string, pending: TPending): TObservation;
   /**
@@ -395,8 +413,9 @@ export interface SocialEnvironment<TState = unknown, TObservation = unknown, TPe
   /**
    * Apply one command atomically. If this method throws, `snapshot()` must
    * remain observationally equal to its value before the call. The runner
-   * cannot roll back arbitrary domain state; a mutation followed by an error
-   * is recorded as a non-atomic environment failure and is not replayable.
+   * A mutation followed by an error is recorded as non-atomic unless an
+   * optional restore() capability returns the complete state to the verified
+   * pre-transition snapshot.
    */
   step(command: TCommand): SocialStepResult<TState, TObservation>;
   done(): boolean;
@@ -2368,13 +2387,23 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
         }
       };
     }
-    const rejectedFeedback = emptyStepFeedback(failureState, input.environment);
+    const rollback = attemptEnvironmentRollback({
+      environment: input.environment,
+      preState,
+      failureState,
+      hashState: input.hashState,
+      eventSeq: input.eventSeq,
+      preStateHash,
+      beforeEventSeq
+    });
+    const rejectedFeedback = emptyStepFeedback(rollback.state, input.environment);
     const failure = environmentFailureEvidence({
       error,
       fallbackStage: failureStageForError(error, "system_environment_step"),
       environmentStepStarted,
       preStateHash,
-      failureStateHash
+      failureStateHash,
+      rollback: rollback.evidence
     });
     return {
       status: "failed",
@@ -2383,8 +2412,8 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
       step: {
         ...base,
         commitStatus: "rejected",
-        postStateHash: failureStateHash,
-        eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
+        postStateHash: rollback.stateHash,
+        eventSeqRange: rollback.evidence.succeeded ? undefined : eventSeqRange(beforeEventSeq, rollback.eventSeq),
         error: reason,
         failure
       }
@@ -2554,6 +2583,15 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
     }
 
     const failureStateBeforeHook = failureState;
+    const rollback = attemptEnvironmentRollback({
+      environment: input.environment,
+      preState,
+      failureState,
+      hashState: input.hashState,
+      eventSeq: input.eventSeq,
+      preStateHash,
+      beforeEventSeq
+    });
     const adapterFailure = input.onEnvironmentStepFailure?.({
       actor: input.decision.actor,
 	      actorId: stepBase.actorId,
@@ -2573,18 +2611,24 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
       decisionStateHash: input.decisionStateHash,
       failureState: cloneJson(failureStateBeforeHook),
       failureStateHash,
+      effectiveState: cloneJson(rollback.state),
+      effectiveStateHash: rollback.stateHash,
+      rollback: cloneJson(rollback.evidence),
       error
     }) ?? undefined;
-    const rejectedFeedback = emptyStepFeedback(failureState, input.environment);
+    const rejectedFeedback = emptyStepFeedback(rollback.state, input.environment);
     const failure = environmentFailureEvidence({
       error,
       fallbackStage: failureStageForError(error, "environment_step"),
       adapterFailure,
       environmentStepStarted,
       preStateHash,
-      failureStateHash
+      failureStateHash,
+      rollback: rollback.evidence
     });
-    const rejectedEventSeqRange = eventSeqRange(beforeEventSeq, afterEventSeq);
+    const rejectedEventSeqRange = rollback.evidence.succeeded
+      ? undefined
+      : eventSeqRange(beforeEventSeq, rollback.eventSeq);
     const receiptFailure = deliverActorStepReceipt(input.decision.actor, {
 	      id: `${stepBase.traceId}:rejected`,
 	      status: "rejected",
@@ -2594,7 +2638,7 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
 	      actorId: stepBase.actorId,
       pendingAction: cloneJson(input.decision.pending),
       action: input.decision.action,
-      postStateHash: failureStateHash,
+      postStateHash: rollback.stateHash,
       eventSeqRange: rejectedEventSeqRange,
       failure
     });
@@ -2607,7 +2651,7 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
         action: cloneJson(input.decision.action),
         commitStatus: "rejected",
         preStateHash,
-        postStateHash: failureStateHash,
+        postStateHash: rollback.stateHash,
         eventSeqRange: rejectedEventSeqRange,
         error: reason,
         failure: receiptFailure ?? failure
@@ -2823,6 +2867,15 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
     }
 
     const failureStateBeforeHook = failureState;
+    const rollback = attemptEnvironmentRollback({
+      environment: input.environment,
+      preState,
+      failureState,
+      hashState: input.hashState,
+      eventSeq: input.eventSeq,
+      preStateHash,
+      beforeEventSeq
+    });
     const parallelFailures = new Map<string, SocialStepFailureEvidence>();
     for (const [index, decision] of input.decisions.entries()) {
 	      const stepBase = baseStep({ ...input, decision, turnIndex: input.turnIndex + index });
@@ -2845,6 +2898,9 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
         decisionStateHash: input.decisionStateHash,
         failureState: cloneJson(failureStateBeforeHook),
         failureStateHash,
+        effectiveState: cloneJson(rollback.state),
+        effectiveStateHash: rollback.stateHash,
+        rollback: cloneJson(rollback.evidence),
         error
       }) ?? undefined;
       const failure = environmentFailureEvidence({
@@ -2853,7 +2909,8 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
         adapterFailure,
         environmentStepStarted,
         preStateHash,
-        failureStateHash
+        failureStateHash,
+        rollback: rollback.evidence
       });
       const receiptFailure = deliverActorStepReceipt(decision.actor, {
 	        id: `${stepBase.traceId}:rejected`,
@@ -2864,12 +2921,12 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
 	        actorId: stepBase.actorId,
         pendingAction: cloneJson(decision.pending),
         action: decision.action,
-        postStateHash: failureStateHash,
+        postStateHash: rollback.stateHash,
         failure
       });
       parallelFailures.set(decision.actorId, receiptFailure ?? failure);
     }
-    const rejectedFeedback = emptyStepFeedback(failureState, input.environment);
+    const rejectedFeedback = emptyStepFeedback(rollback.state, input.environment);
     return {
       status: "failed",
       reason,
@@ -2881,8 +2938,8 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
         atomic: true,
         resolutionPolicy: "parallel-stepBatch",
         preStateHash,
-        postStateHash: failureStateHash,
-        eventSeqRange: eventSeqRange(beforeEventSeq, afterEventSeq),
+        postStateHash: rollback.stateHash,
+        eventSeqRange: rollback.evidence.succeeded ? undefined : eventSeqRange(beforeEventSeq, rollback.eventSeq),
 	        error: reason,
 	        failure: parallelFailures.get(decision.actorId) ?? defaultFailureEvidence("parallel_environment_step", error)
 	      }))
@@ -3144,6 +3201,67 @@ function failureStageForError(error: unknown, fallback: string): string {
   return fallback;
 }
 
+interface EnvironmentRollbackResult<TState> {
+  state: TState;
+  stateHash?: string;
+  eventSeq?: number;
+  evidence: SocialEnvironmentRollbackEvidence;
+}
+
+function attemptEnvironmentRollback<TState, TObservation, TPending, TCommand>(input: {
+  environment: SocialEnvironment<TState, TObservation, TPending, TCommand>;
+  preState: TState;
+  failureState: TState;
+  hashState?: (state: TState) => string;
+  eventSeq?: (state: TState) => number;
+  preStateHash?: string;
+  beforeEventSeq?: number;
+}): EnvironmentRollbackResult<TState> {
+  const mutationDetected = fingerprintState(input.preState) !== fingerprintState(input.failureState);
+  if (!mutationDetected) {
+    return {
+      state: input.failureState,
+      stateHash: input.hashState?.(input.failureState),
+      eventSeq: input.eventSeq?.(input.failureState),
+      evidence: { mutationDetected: false, attempted: false, succeeded: false }
+    };
+  }
+  if (!input.environment.restore) {
+    return {
+      state: input.failureState,
+      stateHash: input.hashState?.(input.failureState),
+      eventSeq: input.eventSeq?.(input.failureState),
+      evidence: { mutationDetected: true, attempted: false, succeeded: false }
+    };
+  }
+
+  let restoreThrew = false;
+  try {
+    input.environment.restore(cloneJson(input.preState));
+  } catch {
+    restoreThrew = true;
+  }
+  const state = input.environment.snapshot();
+  const stateHash = input.hashState?.(state);
+  const eventSeq = input.eventSeq?.(state);
+  let failureCode: SocialEnvironmentRollbackEvidence["failureCode"];
+  if (restoreThrew) failureCode = "restore_threw";
+  else if (fingerprintState(state) !== fingerprintState(input.preState)) failureCode = "state_mismatch";
+  else if (input.preStateHash !== undefined && stateHash !== input.preStateHash) failureCode = "hash_mismatch";
+  else if (input.beforeEventSeq !== undefined && eventSeq !== input.beforeEventSeq) failureCode = "event_sequence_mismatch";
+  return {
+    state,
+    stateHash,
+    eventSeq,
+    evidence: {
+      mutationDetected: true,
+      attempted: true,
+      succeeded: failureCode === undefined,
+      ...(failureCode ? { failureCode } : {})
+    }
+  };
+}
+
 function environmentFailureEvidence(input: {
   error: unknown;
   fallbackStage: string;
@@ -3151,35 +3269,41 @@ function environmentFailureEvidence(input: {
   environmentStepStarted: boolean;
   preStateHash?: string;
   failureStateHash?: string;
+  rollback: SocialEnvironmentRollbackEvidence;
 }): SocialStepFailureEvidence {
   const base = input.adapterFailure ?? defaultFailureEvidence(input.fallbackStage, input.error);
-  if (input.error instanceof SocialPreflightMutationError) {
+  if (input.rollback.mutationDetected && input.rollback.succeeded) {
     return {
-      stage: "environment_non_atomic_failure",
-      message: "Environment validateAction() mutated domain state; the failure is not replayable.",
-      causeName: input.error.name,
+      ...base,
       metadata: {
-        originalStage: base.stage,
-        preflightBeforeFingerprint: input.error.beforeFingerprint,
-        preflightAfterFingerprint: input.error.afterFingerprint,
-        ...(base.metadata ? { originalMetadata: cloneJson(base.metadata) } : {})
+        ...(base.metadata ? cloneJson(base.metadata) : {}),
+        rollbackAttempted: true,
+        rollbackSucceeded: true,
+        ...(input.error instanceof SocialPreflightMutationError ? {
+          preflightBeforeFingerprint: input.error.beforeFingerprint,
+          preflightAfterFingerprint: input.error.afterFingerprint
+        } : {})
       }
     };
   }
-  if (
-    input.environmentStepStarted &&
-    input.preStateHash !== undefined &&
-    input.failureStateHash !== undefined &&
-    input.preStateHash !== input.failureStateHash
-  ) {
+  if (input.error instanceof SocialPreflightMutationError || input.rollback.mutationDetected) {
     return {
       stage: "environment_non_atomic_failure",
-      message: "Environment transition threw after mutating domain state; the failure is not replayable.",
-      causeName: base.causeName,
+      message: input.error instanceof SocialPreflightMutationError
+        ? "Environment validateAction() mutated domain state; the failure is not replayable."
+        : "Environment transition threw after mutating domain state; the failure is not replayable.",
+      causeName: input.error instanceof Error ? input.error.name : base.causeName,
       metadata: {
         originalStage: base.stage,
-        preStateHash: input.preStateHash,
-        failureStateHash: input.failureStateHash,
+        rollbackAttempted: input.rollback.attempted,
+        rollbackSucceeded: false,
+        ...(input.rollback.failureCode ? { rollbackFailureCode: input.rollback.failureCode } : {}),
+        ...(input.error instanceof SocialPreflightMutationError ? {
+          preflightBeforeFingerprint: input.error.beforeFingerprint,
+          preflightAfterFingerprint: input.error.afterFingerprint
+        } : {}),
+        ...(input.preStateHash !== undefined ? { preStateHash: input.preStateHash } : {}),
+        ...(input.failureStateHash !== undefined ? { failureStateHash: input.failureStateHash } : {}),
         ...(base.metadata ? { originalMetadata: cloneJson(base.metadata) } : {})
       }
     };
