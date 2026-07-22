@@ -917,7 +917,11 @@ export function App() {
   const werewolfReviewSource = useMemo(
     () =>
       replayFrame
-        ? { projection: replayFrame.projection, finalState: replayFrame.state }
+        ? {
+            projection: replayFrame.projection,
+            finalState: replayFrame.state,
+            werewolfReviewLedger: replayFrame.werewolfReviewLedger
+          }
         : artifact,
     [artifact, replayFrame]
   );
@@ -2543,6 +2547,7 @@ export function App() {
                 }
               : { kind: "artifact-final" }
           }
+          onSelectReplayBoundary={(nativeStepCount) => void handleLoadReplayFrame(nativeStepCount - 1)}
           loading={replayFrameLoadState === "loading"}
           error={replayFrameLoadState === "error" ? replayFrameError : null}
         />

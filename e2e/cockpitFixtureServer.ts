@@ -84,7 +84,9 @@ async function seedFixtureMatch(id: string, seed: string): Promise<void> {
     initialState,
     agents,
     reasoner: fixtureReasoner,
-    maxTransitions: 3,
+    // Four transitions cross the first resolved night boundary so the fixture
+    // contains at least one server-owned public ledger event and replay link.
+    maxTransitions: 4,
     recordAgentSnapshots: true
   });
   const artifact = buildMatchArtifact({

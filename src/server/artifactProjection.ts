@@ -226,6 +226,42 @@ export type RedactedAgentSnapshotFrameDto = Omit<AgentSnapshotFrame, "agents"> &
   agents: RedactedAgentStateDto[];
 };
 
+/**
+ * A deliberately narrow, server-owned narrative ledger for the Werewolf
+ * review board.  It is not a general GameEvent projection: raw payloads,
+ * actor identities, targets, command traces, and scheduler metadata remain
+ * outside this DTO.
+ */
+export interface WerewolfPostgameEventLedgerEntryDto {
+  id: string;
+  seq: number;
+  day: number;
+  phase: string;
+  eventType: string;
+  visibility: "public";
+  /** Finite server allowlist label; never derived from GameEvent.payload. */
+  safeLabel: string;
+  /**
+   * Present only in a local postgame review and only at a complete recorded
+   * native scheduler boundary.  Truth-redacted readers never receive it.
+   */
+  nativeBoundary?: {
+    nativeStepCount: number;
+  };
+}
+
+export interface WerewolfPostgameEventLedgerDto {
+  artifactVersion: "server.werewolf-postgame-event-ledger.v1";
+  kind: "werewolf-postgame-event-ledger";
+  authority: "server-owned-match-artifact" | "native-social-episode";
+  projection: {
+    view: "postgame-redacted" | "truth-redacted";
+    privateEvidenceRedacted: true;
+    postgameTruthRedacted: boolean;
+  };
+  entries: WerewolfPostgameEventLedgerEntryDto[];
+}
+
 export interface PostgameMatchProjectionDto
   extends Omit<
     MatchArtifact,
@@ -259,6 +295,8 @@ export interface PostgameMatchProjectionDto
   metrics: Partial<MatchArtifact["metrics"]>;
   agents: RedactedAgentStateDto[];
   agentSnapshotFrames?: RedactedAgentSnapshotFrameDto[];
+  /** Server-owned postgame narrative source for the React review timeline. */
+  werewolfReviewLedger: WerewolfPostgameEventLedgerDto;
 }
 
 /**
@@ -284,6 +322,8 @@ export interface PostgameReplayFrameDto {
   projection: PostgameMatchProjectionDto["projection"];
   /** Server-redacted prefix state; it is not a claim about the final artifact state. */
   state: PostgameMatchProjectionDto["finalState"];
+  /** Prefix-consistent server-owned narrative ledger for this replay frame. */
+  werewolfReviewLedger: WerewolfPostgameEventLedgerDto;
   replay: {
     ok: true;
     replayedSteps: number;
