@@ -1,6 +1,8 @@
 import { hashStableState } from "./hash";
 import {
+  isSocialParallelJointStep,
   isSocialStepCommitted,
+  validateSocialParallelBatchLayout,
   validateSocialEpisodeArtifact,
   type SocialEpisodeArtifact,
   type SocialHarnessStep,
@@ -744,6 +746,16 @@ export function buildHarnessCheckpointAtPrefix<TState, TObservation, TPending, T
 ): HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand> {
   const selected = resolveHarnessCheckpointPrefixSelection(options.episode, options.selector);
   assertSafeHarnessCheckpointBoundary(options.episode.steps, selected.index);
+  // Failure/rejection records remain valuable audit evidence and may be used
+  // for model-free replay review. They are not receipt-gated durable actor
+  // state, so a checkpoint must never ask a domain snapshot resolver to turn
+  // one into a forkable continuation boundary.
+  if (!isSocialStepCommitted(selected.step)) {
+    throw new HarnessCheckpointSelectionError(
+      "missing_agent_snapshots",
+      `Cannot build native prefix checkpoint at step ${selected.index + 1}: no durable agent snapshot exists after a rejected boundary.`
+    );
+  }
   const snapshot = resolveHarnessAgentSnapshotAtStep({
     episode: options.episode,
     step: selected.step,
@@ -883,9 +895,48 @@ export function isSafeHarnessCheckpointBoundary(steps: readonly SocialHarnessSte
   if (stepIndex < 0) return steps.length === 0;
   const step = steps[stepIndex];
   if (!step) return false;
+
+  // A true parallel transition has one atomic post-state only after every
+  // member of its declared joint batch is present. Looking merely for a next
+  // row with the same batch id accepts a truncated artifact whose missing
+  // peers were cut off at the end of the array. Treat malformed or incomplete
+  // parallel batch metadata as an unsafe replay/checkpoint boundary before a
+  // domain replay callback, snapshot resolver, or restore factory can run.
+  if (isSocialParallelJointStep(step)) {
+    return isCompleteParallelJointBatchBoundary(steps, stepIndex);
+  }
+
   const nextStep = steps[stepIndex + 1];
   if (!step.batchId || nextStep?.batchId !== step.batchId) return true;
   return step.schedulerMode === "aec" && !step.atomic;
+}
+
+function isCompleteParallelJointBatchBoundary(
+  steps: readonly SocialHarnessStep[],
+  stepIndex: number
+): boolean {
+  const boundary = steps[stepIndex];
+  if (!boundary?.batchId) return false;
+
+  let batchStart = stepIndex;
+  while (batchStart > 0 && steps[batchStart - 1]?.batchId === boundary.batchId) {
+    batchStart -= 1;
+  }
+  let batchEnd = stepIndex;
+  while (batchEnd + 1 < steps.length && steps[batchEnd + 1]?.batchId === boundary.batchId) {
+    batchEnd += 1;
+  }
+
+  // A selected prefix may end only after the entire contiguous joint batch,
+  // and a batch id may not be split into disjoint regions of the trajectory.
+  if (batchEnd !== stepIndex) return false;
+  if (steps.some((step, index) => step.batchId === boundary.batchId && (index < batchStart || index > batchEnd))) {
+    return false;
+  }
+
+  const batch = steps.slice(batchStart, batchEnd + 1);
+  if (batch.length !== boundary.batchSize) return false;
+  return validateSocialParallelBatchLayout(batch).length === 0;
 }
 
 export function latestMessageSeqForHarnessPrefix<TState, TObservation, TPending, TCommand>(

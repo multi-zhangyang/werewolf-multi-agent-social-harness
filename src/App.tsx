@@ -53,7 +53,7 @@ import {
   WarningOutlined
 } from "@ant-design/icons";
 
-import type { PublicGameState } from "./core/types";
+import type { PublicGameState, Role, Team } from "./core/types";
 import type { MatchArtifact } from "./harness/artifacts";
 import {
   applyMatchComparisonRowFilterToSearchParams,
@@ -77,12 +77,21 @@ import {
 import type { PostgameMatchProjectionDto, PostgameReplayFrameDto, RedactedHarnessStepDto, RedactedSocialStepDto } from "./server/artifactProjection";
 import type {
   AgentHarnessState,
+  HarnessAgentProfile,
   HarnessEvaluationWarning,
   HarnessMetricRecord,
   HarnessMetricPromotionDecision,
-  HarnessRunStatus
+  HarnessRunStatus,
+  PolicyName
 } from "./harness/types";
 import { DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER, WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS } from "./harness/types";
+import { POLICY_NAMES, type HarnessAssignmentConfig, type HarnessAssignmentStrategy } from "./harness/profiles";
+import {
+  buildCockpitExperimentRequest,
+  createCockpitExperimentDraft,
+  validateCockpitExperimentDraft,
+  type CockpitExperimentDraft
+} from "./components/cockpit/experimentDraft";
 import { legacyMetricPromotionPolicyFromSummary, resolveRecordedMetricPromotion } from "./harness/evaluation";
 import { countSocialStepCommits, isSocialStepCommitted, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
 import { isSafeHarnessCheckpointBoundary } from "./harness/episodeArtifacts";
@@ -192,7 +201,7 @@ interface ConfigResponse {
     id: string;
     model: string;
     temperature?: number;
-    policyName?: string;
+    policyName?: PolicyName;
   }>;
   provider?: {
     protocol?: string;
@@ -873,6 +882,10 @@ export function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string>("");
   const [query, setQuery] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
+  // This is only a request draft for the existing experiment control plane.
+  // It must never become a browser-side source of resolved role/seat truth.
+  const [experimentDraft, setExperimentDraft] = useState<CockpitExperimentDraft>(() => createCockpitExperimentDraft());
+  const [rosterComposerOpen, setRosterComposerOpen] = useState(false);
   const [maxTransitions, setMaxTransitions] = useState(String(DEFAULT_MAX_TRANSITIONS));
   const [timeoutSeconds, setTimeoutSeconds] = useState(String(DEFAULT_TIMEOUT_SECONDS));
   const [jointPhaseScheduler, setJointPhaseScheduler] = useState<"aec-batched-decision" | "parallel">(DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER);
@@ -912,6 +925,11 @@ export function App() {
   const [shareAllowlist, setShareAllowlist] = useState<string[]>(DEFAULT_SHARE_ALLOWLIST);
 
   const models = useMemo(() => config?.models ?? config?.provider?.models ?? [], [config]);
+  const experimentRequest = useMemo(() => buildCockpitExperimentRequest(experimentDraft), [experimentDraft]);
+  const experimentDraftError = useMemo(
+    () => validateCockpitExperimentDraft(experimentDraft, models),
+    [experimentDraft, models]
+  );
   const artifactBackedMatches = useMemo(() => matches.filter((match) => match.hasArtifact), [matches]);
   const currentMatchId = selectedMatch?.id ?? artifact?.matchId ?? artifact?.runId ?? "";
   const selectedStep = artifact?.socialEpisode?.steps?.[selectedStepIndex] ?? null;
@@ -972,6 +990,22 @@ export function App() {
       if (current && (!nextModels.length || nextModels.includes(current))) return current;
       const profileModel = nextConfig.defaultProfiles?.find((profile) => profile.model && (!nextModels.length || nextModels.includes(profile.model)))?.model;
       return profileModel ?? nextModels[0] ?? current;
+    });
+    setExperimentDraft((current) => {
+      // Preserve an operator's in-progress heterogeneous roster. The initial
+      // empty placeholder is the only case that gets hydrated from config.
+      const isInitialPlaceholder =
+        current.profiles.length === 1 &&
+        current.profiles[0]?.id === "research-agent-1" &&
+        !current.profiles[0]?.model.trim() &&
+        current.profiles[0]?.temperature === 0.7 &&
+        current.assignment.strategy === "profile-rotation";
+      if (!isInitialPlaceholder) return current;
+      return createCockpitExperimentDraft({
+        defaultProfiles: nextConfig.defaultProfiles,
+        models: nextModels,
+        selectedModel: nextConfig.defaultProfiles?.[0]?.model ?? nextModels[0]
+      });
     });
     return nextConfig;
   }, []);
@@ -1188,8 +1222,8 @@ export function App() {
   }, [candidateId, loadArtifact, refreshMatches, setActionStatus]);
 
   const handleRunExperiment = useCallback(async () => {
-    if (!selectedModel) {
-      setActionStatus("无法启动：没有可用模型", "请先确认 /api/config 返回模型列表。");
+    if (experimentDraftError) {
+      setActionStatus("无法启动：实验编排草案无效", experimentDraftError);
       return;
     }
     setBusy("run");
@@ -1202,21 +1236,10 @@ export function App() {
           `parallel 联合阶段需要 maxTransitions >= ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS}（system.advance + seer.inspect + 双狼 joint batch）。`
         );
       }
-      const sourceProfiles: Array<{ id: string; model?: string; temperature?: number; policyName?: string }> = config?.defaultProfiles?.length
-        ? config.defaultProfiles.slice(0, 5)
-        : [{ id: "research-agent-1" }, { id: "research-agent-2" }, { id: "research-agent-3" }];
-      const profiles = sourceProfiles.map((profile, index) => ({
-        ...profile,
-        id: profile.id || `research-agent-${index + 1}`,
-        model: selectedModel,
-        temperature: profile.temperature ?? 0.7
-      }));
       const record = await apiJson<MatchRecord>("/api/matches/run", {
         method: "POST",
         body: JSON.stringify({
-          models: [selectedModel],
-          profiles,
-          assignment: { strategy: "profile-rotation" },
+          ...experimentRequest,
           seed: `ui-cockpit-${Date.now()}`,
           maxTransitions: transitions,
           timeoutMs,
@@ -1236,7 +1259,7 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [candidateId, config?.defaultProfiles, jointPhaseScheduler, loadArtifact, maxTransitions, refreshMatches, selectedModel, setActionStatus, timeoutSeconds]);
+  }, [candidateId, experimentDraftError, experimentRequest, jointPhaseScheduler, loadArtifact, maxTransitions, refreshMatches, setActionStatus, timeoutSeconds]);
 
   const handleReplay = useCallback(async () => {
     if (!currentMatchId) {
@@ -1652,8 +1675,8 @@ export function App() {
   }, [setActionStatus]);
 
   const handleRunMatrixExperiment = useCallback(async () => {
-    if (!selectedModel) {
-      setActionStatus("无法运行实验矩阵：没有可用模型", "请先确认 /api/config 返回模型列表。");
+    if (experimentDraftError) {
+      setActionStatus("无法运行实验矩阵：实验编排草案无效", experimentDraftError);
       return;
     }
     setBusy("matrix-run");
@@ -1672,19 +1695,19 @@ export function App() {
           id: matrixId,
           continueOnError: true,
           base: {
-            models: [selectedModel],
+            ...experimentRequest,
             games,
             seed: matrixId,
             maxTransitions: transitions,
             timeout: timeoutMs,
+            jointPhaseScheduler,
             continueOnError: true
           },
           cells: [
             {
-              id: `${matrixId}-selected-model`,
-              label: selectedModel,
-              group: "cockpit-selected-model",
-              models: [selectedModel]
+              id: `${matrixId}-roster`,
+              label: `${experimentRequest.models.length} models / ${experimentRequest.profiles.length} profiles`,
+              group: `cockpit-${experimentRequest.assignment.strategy ?? "profile-rotation"}-roster`
             }
           ],
           exportArtifacts
@@ -1705,7 +1728,17 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [config?.artifactExport?.matrixConfigured, matrixExportArtifacts, matrixGames, maxTransitions, selectedModel, setActionStatus, timeoutSeconds]);
+  }, [
+    config?.artifactExport?.matrixConfigured,
+    experimentDraftError,
+    experimentRequest,
+    jointPhaseScheduler,
+    matrixExportArtifacts,
+    matrixGames,
+    maxTransitions,
+    setActionStatus,
+    timeoutSeconds
+  ]);
 
   const handleRefreshTournamentPacks = useCallback(async () => {
     setBusy("packs");
@@ -1775,8 +1808,8 @@ export function App() {
   );
 
   const handleExportTournamentPack = useCallback(async () => {
-    if (!selectedModel) {
-      setActionStatus("无法导出锦标赛公开包：没有可用模型", "请先确认 /api/config 返回模型列表。");
+    if (experimentDraftError) {
+      setActionStatus("无法导出锦标赛公开包：实验编排草案无效", experimentDraftError);
       return;
     }
     setBusy("pack-export");
@@ -1785,21 +1818,10 @@ export function App() {
       const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
       const transitions = parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS);
       const games = Math.min(10, Math.max(1, parsePositiveInteger(packGames, 1)));
-      const sourceProfiles: Array<{ id: string; model?: string; temperature?: number; policyName?: string }> = config?.defaultProfiles?.length
-        ? config.defaultProfiles.slice(0, 5)
-        : [{ id: "research-agent-1" }, { id: "research-agent-2" }, { id: "research-agent-3" }];
-      const profiles = sourceProfiles.map((profile, index) => ({
-        ...profile,
-        id: profile.id || `research-agent-${index + 1}`,
-        model: selectedModel,
-        temperature: profile.temperature ?? 0.7
-      }));
       const response = await apiJson<TournamentRunResponse>("/api/tournaments/run", {
         method: "POST",
         body: JSON.stringify({
-          models: [selectedModel],
-          profiles,
-          assignment: { strategy: "profile-rotation" },
+          ...experimentRequest,
           seed: `ui-pack-${Date.now()}`,
           games,
           maxTransitions: transitions,
@@ -2041,7 +2063,7 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [config?.defaultProfiles, loadSavedComparisonById, maxTransitions, packGames, refreshMatches, selectedModel, setActionStatus, timeoutSeconds]);
+  }, [experimentDraftError, experimentRequest, loadSavedComparisonById, maxTransitions, packGames, refreshMatches, setActionStatus, timeoutSeconds]);
 
   const handleSelectTournamentPack = useCallback(
     async (pack: TournamentArtifactSetSummary) => {
@@ -2626,7 +2648,8 @@ export function App() {
           games={matrixGames}
           exportArtifacts={matrixExportArtifacts}
           exportAvailable={Boolean(config?.artifactExport?.matrixConfigured)}
-          selectedModel={selectedModel}
+          rosterSummary={formatExperimentRosterSummary(experimentRequest)}
+          experimentReady={!experimentDraftError}
           maxTransitions={maxTransitions}
           timeoutSeconds={timeoutSeconds}
           busy={busy}
@@ -2681,7 +2704,8 @@ export function App() {
           shareExpiresInHours={shareExpiresInHours}
           shareAllowlist={shareAllowlist}
           busy={busy}
-          selectedModel={selectedModel}
+          rosterSummary={formatExperimentRosterSummary(experimentRequest)}
+          experimentReady={!experimentDraftError}
           maxTransitions={maxTransitions}
           timeoutSeconds={timeoutSeconds}
           onRefresh={() => void handleRefreshTournamentPacks()}
@@ -2858,6 +2882,9 @@ export function App() {
               onTimeoutSecondsChange={setTimeoutSeconds}
               jointPhaseScheduler={jointPhaseScheduler}
               onJointPhaseSchedulerChange={setJointPhaseScheduler}
+              rosterSummary={formatExperimentRosterSummary(experimentRequest)}
+              rosterInvalidReason={experimentDraftError}
+              onOpenRosterComposer={() => setRosterComposerOpen(true)}
             />
           </Flex>
         </Sider>
@@ -2914,6 +2941,9 @@ export function App() {
                   placeholder="未检测到模型"
                   disabled={busyAny || (!models.length && !selectedModel)}
                 />
+                <Button icon={decorativeIcon(<TeamOutlined />)} onClick={() => setRosterComposerOpen(true)} disabled={busyAny}>
+                  实验编排
+                </Button>
                 <Button icon={decorativeIcon(<ReloadOutlined />)} onClick={handleRefresh} disabled={busyAny}>
                   刷新运行
                 </Button>
@@ -2953,6 +2983,35 @@ export function App() {
         </Layout>
 
         <Drawer
+          title="实验编排 · Agent Roster"
+          placement="left"
+          width={screens.md ? 620 : "100vw"}
+          open={rosterComposerOpen}
+          onClose={() => setRosterComposerOpen(false)}
+          destroyOnHidden
+        >
+          <ExperimentRosterComposer
+            draft={experimentDraft}
+            models={models}
+            selectedModel={selectedModel}
+            policyNames={(config?.policyNames?.filter((value): value is PolicyName => POLICY_NAMES.includes(value as PolicyName)) ?? POLICY_NAMES)}
+            invalidReason={experimentDraftError}
+            disabled={busyAny}
+            onChange={setExperimentDraft}
+            onReset={() =>
+              setExperimentDraft(
+                createCockpitExperimentDraft({
+                  defaultProfiles: config?.defaultProfiles,
+                  models,
+                  selectedModel
+                })
+              )
+            }
+            onClose={() => setRosterComposerOpen(false)}
+          />
+        </Drawer>
+
+        <Drawer
           title="运行上下文"
           placement="left"
           width={screens.sm ? 360 : "100vw"}
@@ -2985,6 +3044,9 @@ export function App() {
               onTimeoutSecondsChange={setTimeoutSeconds}
               jointPhaseScheduler={jointPhaseScheduler}
               onJointPhaseSchedulerChange={setJointPhaseScheduler}
+              rosterSummary={formatExperimentRosterSummary(experimentRequest)}
+              rosterInvalidReason={experimentDraftError}
+              onOpenRosterComposer={() => setRosterComposerOpen(true)}
             />
           </Space>
         </Drawer>
@@ -3129,7 +3191,10 @@ function RunContextPanel({
   timeoutSeconds,
   onTimeoutSecondsChange,
   jointPhaseScheduler,
-  onJointPhaseSchedulerChange
+  onJointPhaseSchedulerChange,
+  rosterSummary,
+  rosterInvalidReason,
+  onOpenRosterComposer
 }: {
   artifactView: ArtifactView;
   onArtifactViewChange: (value: ArtifactView) => void;
@@ -3145,6 +3210,9 @@ function RunContextPanel({
   onTimeoutSecondsChange: (value: string) => void;
   jointPhaseScheduler: "aec-batched-decision" | "parallel";
   onJointPhaseSchedulerChange: (value: "aec-batched-decision" | "parallel") => void;
+  rosterSummary: string;
+  rosterInvalidReason?: string;
+  onOpenRosterComposer: () => void;
 }) {
   const stepCounts = useMemo(
     () => (artifact ? countSocialStepCommits(artifact.socialEpisode.steps) : null),
@@ -3196,6 +3264,24 @@ function RunContextPanel({
         </Space>
       </Card>
 
+      <Card
+        size="small"
+        title="实验编排"
+        extra={
+          <Button size="small" icon={decorativeIcon(<TeamOutlined />)} onClick={onOpenRosterComposer} disabled={busy}>
+            编辑 roster
+          </Button>
+        }
+      >
+        <Space direction="vertical" size="small" style={{ width: "100%" }}>
+          <Text>{rosterSummary}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            这里只提交 profile/model/policy 与 assignment 条件；服务端再解析真实 seat、role、team，React 不保存游戏真相。
+          </Text>
+          {rosterInvalidReason ? <Alert type="warning" showIcon message={rosterInvalidReason} /> : null}
+        </Space>
+      </Card>
+
       <Card size="small" title="运行限制">
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Form layout="vertical" size="small" style={{ marginBottom: 0 }}>
@@ -3243,6 +3329,280 @@ function RunContextPanel({
           ) : null}
         </Space>
       </Card>
+    </Space>
+  );
+}
+
+const WEREWOLF_ROSTER_ROLES: Role[] = ["villager", "werewolf", "seer", "witch", "hunter"];
+const WEREWOLF_ROSTER_TEAMS: Team[] = ["werewolves", "village"];
+const COCKPIT_ASSIGNMENT_OPTIONS: Array<{ value: HarnessAssignmentStrategy; label: string }> = [
+  { value: "profile-rotation", label: "profile rotation（默认）" },
+  { value: "seat", label: "按座位条件" },
+  { value: "role", label: "按角色条件" },
+  { value: "team", label: "按阵营条件" }
+];
+
+/**
+ * A request composer, not a second environment. It only edits the reusable
+ * profile/assignment contract accepted by the existing server control plane.
+ */
+function ExperimentRosterComposer({
+  draft,
+  models,
+  selectedModel,
+  policyNames,
+  invalidReason,
+  disabled,
+  onChange,
+  onReset,
+  onClose
+}: {
+  draft: CockpitExperimentDraft;
+  models: string[];
+  selectedModel: string;
+  policyNames: PolicyName[];
+  invalidReason?: string;
+  disabled: boolean;
+  onChange: (draft: CockpitExperimentDraft) => void;
+  onReset: () => void;
+  onClose: () => void;
+}) {
+  const updateProfile = (index: number, patch: Partial<HarnessAgentProfile>) => {
+    onChange({
+      ...draft,
+      profiles: draft.profiles.map((profile, candidateIndex) => (candidateIndex === index ? { ...profile, ...patch } : profile))
+    });
+  };
+  const removeProfile = (index: number) => onChange({ ...draft, profiles: draft.profiles.filter((_, candidateIndex) => candidateIndex !== index) });
+  const addProfile = () => {
+    const existingIds = new Set(draft.profiles.map((profile) => profile.id));
+    let index = draft.profiles.length + 1;
+    let id = `research-agent-${index}`;
+    while (existingIds.has(id)) {
+      index += 1;
+      id = `research-agent-${index}`;
+    }
+    onChange({
+      ...draft,
+      profiles: [
+        ...draft.profiles,
+        {
+          id,
+          model: selectedModel || models[0] || "",
+          temperature: 0.7
+        }
+      ]
+    });
+  };
+  const setAssignment = (patch: Partial<HarnessAssignmentConfig>) => onChange({
+    ...draft,
+    assignment: { ...draft.assignment, ...patch }
+  });
+  const profileOptions = draft.profiles.map((profile) => ({ value: profile.id, label: profile.id || "(缺少 id)" }));
+  const modelOptions = Array.from(new Set([...models, ...draft.profiles.map((profile) => profile.model).filter(Boolean)])).map((model) => ({
+    value: model,
+    label: model
+  }));
+  const setRoleProfile = (role: Role, value: string | undefined) => {
+    const roles = { ...(draft.assignment.roles ?? {}) };
+    if (value) roles[role] = value;
+    else delete roles[role];
+    setAssignment({ roles });
+  };
+  const setTeamProfile = (team: Team, value: string | undefined) => {
+    const teams = { ...(draft.assignment.teams ?? {}) };
+    if (value) teams[team] = value;
+    else delete teams[team];
+    setAssignment({ teams });
+  };
+  const setSeatProfile = (seat: number, value: string | undefined) => {
+    const seats = { ...(draft.assignment.seats ?? {}) };
+    if (value) seats[String(seat)] = value;
+    else delete seats[String(seat)];
+    setAssignment({ seats });
+  };
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Alert
+        type="info"
+        showIcon
+        message="控制面草案，不是游戏真相"
+        description="这里配置可复用的 profile、模型、policy 和 assignment 条件。服务端使用真实 roster 校验引用，环境在运行时才解析 seat/role/team；浏览器不会推断或保存隐藏身份。"
+      />
+      {invalidReason ? <Alert type="warning" showIcon message={invalidReason} /> : null}
+      <Card
+        size="small"
+        title="Agent profiles"
+        extra={
+          <Space>
+            <Button size="small" onClick={onReset} disabled={disabled}>
+              恢复默认
+            </Button>
+            <Button size="small" type="primary" onClick={addProfile} disabled={disabled}>
+              添加 profile
+            </Button>
+          </Space>
+        }
+      >
+        <Space direction="vertical" size="small" style={{ width: "100%" }}>
+          {draft.profiles.map((profile, index) => (
+            <Card
+              size="small"
+              key={`${profile.id || "profile"}-${index}`}
+              title={`Profile ${index + 1}`}
+              extra={
+                <Button size="small" danger disabled={disabled || draft.profiles.length <= 1} onClick={() => removeProfile(index)}>
+                  删除
+                </Button>
+              }
+            >
+              <Row gutter={[8, 8]}>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="profile id" style={{ marginBottom: 0 }}>
+                    <Input
+                      aria-label={`profile ${index + 1} id`}
+                      value={profile.id}
+                      disabled={disabled}
+                      onChange={(event) => updateProfile(index, { id: event.target.value })}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="model" style={{ marginBottom: 0 }}>
+                    <Select
+                      aria-label={`profile ${index + 1} model`}
+                      value={profile.model || undefined}
+                      options={modelOptions}
+                      disabled={disabled || !modelOptions.length}
+                      placeholder="来自 /api/config"
+                      onChange={(value) => updateProfile(index, { model: String(value) })}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="temperature" style={{ marginBottom: 0 }}>
+                    <Input
+                      aria-label={`profile ${index + 1} temperature`}
+                      inputMode="decimal"
+                      value={profile.temperature ?? ""}
+                      disabled={disabled}
+                      onChange={(event) => {
+                        const raw = event.target.value.trim();
+                        updateProfile(index, { temperature: raw ? Number(raw) : undefined });
+                      }}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="policy" style={{ marginBottom: 0 }}>
+                    <Select
+                      aria-label={`profile ${index + 1} policy`}
+                      value={profile.policyName ?? ""}
+                      options={[{ value: "", label: "不指定（policy 默认）" }, ...policyNames.map((policy) => ({ value: policy, label: policy }))]}
+                      disabled={disabled}
+                      onChange={(value) =>
+                        updateProfile(index, {
+                          policyName: POLICY_NAMES.includes(value as PolicyName) ? (value as PolicyName) : undefined
+                        })
+                      }
+                    />
+                  </Form.Item>
+                </Col>
+              </Row>
+            </Card>
+          ))}
+        </Space>
+      </Card>
+
+      <Card size="small" title="Assignment condition">
+        <Form layout="vertical" size="small" style={{ marginBottom: 0 }}>
+          <Row gutter={[8, 8]}>
+            <Col xs={24} sm={12}>
+              <Form.Item label="strategy">
+                <Select
+                  aria-label="Agent assignment strategy"
+                  value={draft.assignment.strategy ?? "profile-rotation"}
+                  options={COCKPIT_ASSIGNMENT_OPTIONS}
+                  disabled={disabled}
+                  onChange={(value) => setAssignment({ strategy: value as HarnessAssignmentStrategy })}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label="unmatched fallback">
+                <Select
+                  aria-label="Agent assignment fallback"
+                  value={draft.assignment.fallback ?? "profile-rotation"}
+                  options={[
+                    { value: "profile-rotation", label: "profile rotation" },
+                    { value: "error", label: "error（服务端拒绝）" }
+                  ]}
+                  disabled={disabled}
+                  onChange={(value) => setAssignment({ fallback: value as "profile-rotation" | "error" })}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          {draft.assignment.strategy === "seat" ? (
+            <Row gutter={[8, 8]}>
+              {Array.from({ length: 9 }, (_, index) => index + 1).map((seat) => (
+                <Col xs={12} sm={8} key={seat}>
+                  <Form.Item label={`seat ${seat}`} style={{ marginBottom: 8 }}>
+                    <Select
+                      aria-label={`Agent assignment seat ${seat}`}
+                      allowClear
+                      value={draft.assignment.seats?.[String(seat)]}
+                      options={profileOptions}
+                      disabled={disabled}
+                      onChange={(value) => setSeatProfile(seat, value ? String(value) : undefined)}
+                    />
+                  </Form.Item>
+                </Col>
+              ))}
+            </Row>
+          ) : null}
+          {draft.assignment.strategy === "role" ? (
+            <Row gutter={[8, 8]}>
+              {WEREWOLF_ROSTER_ROLES.map((role) => (
+                <Col xs={24} sm={12} key={role}>
+                  <Form.Item label={role} style={{ marginBottom: 8 }}>
+                    <Select
+                      aria-label={`Agent assignment role ${role}`}
+                      allowClear
+                      value={typeof draft.assignment.roles?.[role] === "string" ? draft.assignment.roles?.[role] : undefined}
+                      options={profileOptions}
+                      disabled={disabled}
+                      onChange={(value) => setRoleProfile(role, value ? String(value) : undefined)}
+                    />
+                  </Form.Item>
+                </Col>
+              ))}
+            </Row>
+          ) : null}
+          {draft.assignment.strategy === "team" ? (
+            <Row gutter={[8, 8]}>
+              {WEREWOLF_ROSTER_TEAMS.map((team) => (
+                <Col xs={24} sm={12} key={team}>
+                  <Form.Item label={team} style={{ marginBottom: 8 }}>
+                    <Select
+                      aria-label={`Agent assignment team ${team}`}
+                      allowClear
+                      value={typeof draft.assignment.teams?.[team] === "string" ? draft.assignment.teams?.[team] : undefined}
+                      options={profileOptions}
+                      disabled={disabled}
+                      onChange={(value) => setTeamProfile(team, value ? String(value) : undefined)}
+                    />
+                  </Form.Item>
+                </Col>
+              ))}
+            </Row>
+          ) : null}
+        </Form>
+      </Card>
+      <Flex justify="flex-end" gap="small">
+        <Button onClick={onClose}>完成编排</Button>
+      </Flex>
     </Space>
   );
 }
@@ -5285,7 +5645,8 @@ function ExperimentsWorkspace({
   games,
   exportArtifacts,
   exportAvailable,
-  selectedModel,
+  rosterSummary,
+  experimentReady,
   maxTransitions,
   timeoutSeconds,
   busy,
@@ -5299,7 +5660,8 @@ function ExperimentsWorkspace({
   games: string;
   exportArtifacts: boolean;
   exportAvailable: boolean;
-  selectedModel: string;
+  rosterSummary: string;
+  experimentReady: boolean;
   maxTransitions: string;
   timeoutSeconds: string;
   busy: string | null;
@@ -5379,7 +5741,7 @@ function ExperimentsWorkspace({
               type="primary"
               icon={decorativeIcon(<ExperimentOutlined />)}
               loading={busy === "matrix-run"}
-              disabled={!selectedModel || Boolean(busy)}
+              disabled={!experimentReady || Boolean(busy)}
               onClick={onRun}
             >
               运行矩阵
@@ -5389,7 +5751,7 @@ function ExperimentsWorkspace({
       >
         <Space direction="vertical" size="small" style={{ width: "100%" }}>
           <Text type="secondary">
-            该工作区提交 `POST /api/experiments/matrix/run`，由 harness 调度 cell 与 tournament；当前选择 model={selectedModel || "n/a"}
+            该工作区提交 `POST /api/experiments/matrix/run`，由 harness 调度 cell 与 tournament；当前编排={rosterSummary}
             、games={games}、maxTransitions={maxTransitions || "n/a"}、timeout={timeoutSeconds || "n/a"}s。
           </Text>
           <Text type="secondary">
@@ -5518,7 +5880,8 @@ function PacksWorkspace({
   shareExpiresInHours,
   shareAllowlist,
   busy,
-  selectedModel,
+  rosterSummary,
+  experimentReady,
   maxTransitions,
   timeoutSeconds,
   onRefresh,
@@ -5546,7 +5909,8 @@ function PacksWorkspace({
   shareExpiresInHours: string;
   shareAllowlist: string[];
   busy: string | null;
-  selectedModel: string;
+  rosterSummary: string;
+  experimentReady: boolean;
   maxTransitions: string;
   timeoutSeconds: string;
   onRefresh: () => void;
@@ -5695,7 +6059,7 @@ function PacksWorkspace({
               type="primary"
               icon={decorativeIcon(<CloudDownloadOutlined />)}
               loading={busy === "pack-export"}
-              disabled={!selectedModel || Boolean(busy)}
+              disabled={!experimentReady || Boolean(busy)}
               onClick={onExport}
             >
               导出公开包
@@ -5706,7 +6070,7 @@ function PacksWorkspace({
         <Space direction="vertical" size="small" style={{ width: "100%" }}>
           <Text type="secondary">
             导出调用 `POST /api/tournaments/run` 且 `exportArtifacts=true`，服务端写入 truth-redacted 公开包。当前控件：model=
-            {selectedModel || "n/a"} · games={packGames || "2"} · maxTransitions={maxTransitions || "n/a"} · timeout=
+            {rosterSummary} · games={packGames || "2"} · maxTransitions={maxTransitions || "n/a"} · timeout=
             {timeoutSeconds || "n/a"}s。
           </Text>
           <Text type="secondary">
@@ -6480,6 +6844,15 @@ const DEFAULT_SHARE_ALLOWLIST = [
 function parsePositiveInteger(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function formatExperimentRosterSummary(request: {
+  models: string[];
+  profiles: HarnessAgentProfile[];
+  assignment: HarnessAssignmentConfig;
+}): string {
+  const strategy = request.assignment.strategy ?? "profile-rotation";
+  return `${request.profiles.length} profiles · ${request.models.length} models · ${strategy}`;
 }
 
 function clampIndex(index: number, length: number): number {

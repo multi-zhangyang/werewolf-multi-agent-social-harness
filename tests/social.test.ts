@@ -1054,6 +1054,17 @@ describe("generic social harness feedback and failure contract", () => {
     expect(exposureRecords.every((record) => record.evidenceRefs.some((ref) => ref.artifact === "delivery_receipt"))).toBe(true);
     expect(exposureRecords.some((record) => record.messageId === "msg-2" && record.observerId === "c")).toBe(false);
     expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+
+    // The direct message is legally visible to b, but that does not permit a
+    // forged artifact to attach b's observation to a's decision step.
+    const forgedObserverIdentity = clone(artifact);
+    const forgedAObservation = forgedObserverIdentity.steps[0]!.observation as TestObservation & { you?: { id: string } };
+    forgedAObservation.agentId = "b";
+    forgedAObservation.you = { id: "b" };
+    forgedAObservation.visibleMessages = [forgedObserverIdentity.messages[1]!];
+    expect(validateSocialEpisodeArtifact(forgedObserverIdentity).join(" ")).toMatch(
+      /observation observerId b does not match scheduled actor a/i
+    );
   });
 
   it("does not infer domain speech acts from opaque message metadata", () => {
@@ -2154,6 +2165,93 @@ describe("social topology and runtime-identity authority", () => {
     const forged = clone(artifact);
     forged.messages[0]!.deliveryReceipts = forged.messages[0]!.deliveryReceipts?.filter((receipt) => receipt.observerId === "a");
     expect(validateSocialEpisodeArtifact(forged).join(" ")).toMatch(/observer set does not match runtime visibility/i);
+  });
+
+  it("uses an immutable runtime audience snapshot to exclude retired team members from delivery, observation, and exposure", async () => {
+    const teamChannel: SocialChannel = {
+      id: "team-wolves",
+      kind: "team",
+      participantIds: ["wolf-live", "wolf-retired"],
+      readableBy: "participants"
+    };
+    const liveWolf = new TestActor("wolf-live", {
+      messages: [
+        {
+          channelId: teamChannel.id,
+          senderId: "wolf-live",
+          recipientIds: [],
+          runtimeAudienceIds: ["wolf-live"],
+          visibility: "team",
+          content: "only the living team member may receive this coordination"
+        }
+      ]
+    });
+    const retiredWolf = new TestActor("wolf-retired");
+    const artifact = await runSocialEpisode({
+      id: "team-runtime-audience-snapshot",
+      environment: new SequencedEnvironment(["wolf-live", "wolf-retired"]),
+      actors: [liveWolf, retiredWolf],
+      channels: [teamChannel],
+      schedulerMode: "aec",
+      hashState,
+      assembleObservation(context) {
+        return {
+          ...context.environmentObservation,
+          visibleMessages: context.visibleSocial.messages,
+          channels: context.visibleSocial.channels
+        };
+      }
+    });
+
+    const message = artifact.messages[0];
+    expect(message).toMatchObject({
+      runtimeAudienceIds: ["wolf-live"],
+      recipientIds: [],
+      deliveryReceipts: [expect.objectContaining({ observerId: "wolf-live", visibility: "team" })]
+    });
+    expect(message?.deliveryReceipts).toHaveLength(1);
+    expect(retiredWolf.observations[0]?.visibleMessages).toEqual([]);
+    expect(artifact.steps[1]?.observation.visibleMessages).toEqual([]);
+    expect(deriveSocialExposureRecords(artifact)).toEqual([]);
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+
+    const forged = clone(artifact);
+    forged.steps[1]!.observation.visibleMessages = [forged.messages[0]!];
+    expect(validateSocialEpisodeArtifact(forged).join(" ")).toMatch(/non-visible social message/i);
+    // Even a defensive consumer that derives exposure before rejecting the
+    // artifact cannot turn that forged observation into an exposure record.
+    expect(deriveSocialExposureRecords(forged)).toEqual([]);
+
+    const legacyBus = new SocialCommunicationBus([teamChannel], [], {
+      runtimeActorIds: ["wolf-live", "wolf-retired"]
+    });
+    const legacyMessage = legacyBus.publish({
+      channelId: teamChannel.id,
+      senderId: "wolf-live",
+      recipientIds: ["wolf-retired"],
+      visibility: "team",
+      content: "legacy records without a snapshot retain channel visibility"
+    });
+    expect(legacyBus.observe("wolf-retired").messages.map((entry) => entry.id)).toEqual([legacyMessage.id]);
+    expect(legacyMessage.deliveryReceipts?.map((receipt) => receipt.observerId)).toEqual(["wolf-live", "wolf-retired"]);
+  });
+
+  it("requires every non-system step actor to belong to the recorded runtime roster", async () => {
+    const artifact = await runSocialEpisode({
+      id: "runtime-roster-step-identity",
+      environment: new TestEnvironment({ doneAfterSteps: 1 }),
+      actors: [new TestActor("a"), new TestActor("b")],
+      schedulerMode: "aec",
+      hashState
+    });
+    expect(artifact.runtimeActorIds).toEqual(["a", "b"]);
+    expect(validateSocialEpisodeArtifact(artifact)).toEqual([]);
+
+    const forged = clone(artifact);
+    forged.steps[0]!.actorId = "outside";
+    forged.steps[0]!.action.actorId = "outside";
+    forged.steps[0]!.observation.agentId = "outside";
+    expect(validateSocialEpisodeArtifact(forged).join(" ")).toMatch(/actorId outside is not in the runtime actor roster/i);
   });
 
   it("rejects message visibility that bypasses the declared communication topology", () => {

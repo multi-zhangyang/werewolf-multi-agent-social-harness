@@ -26043,3 +26043,60 @@ for the currently configured generic candidates returned controlled HTTP 503
 responses before any completion/parse/arbitration/environment commit; this is
 not evidence that a live provider path is healthy and must not be reported as
 such.
+
+## 13.269 Recorded Audience, Fork-Boundary, And Cockpit Roster Lock
+
+Timestamp: `2026-07-22`
+
+Three boundaries are coupled by the same harness invariant: an artifact must
+truthfully say which actor was eligible to observe a committed social event,
+and only committed, complete execution boundaries may become replay/fork
+authority.
+
+```text
+static channel topology
+  + immutable per-message runtime audience snapshot (when present)
+  -> receipt / observation / exposure evidence
+
+complete committed native boundary
+  -> replay prefix / checkpoint / forkable recorded actor state
+```
+
+- `SocialChannel.participantIds` remains durable topology. A newer optional
+  `SocialMessage.runtimeAudienceIds` is a sorted immutable *narrowing*
+  snapshot, never a later reconstruction of visibility. New messages with a
+  snapshot use it consistently for bus observation, delivery receipts,
+  artifact validation, and social exposure derivation. Older artifacts without
+  it keep the legacy channel-derived interpretation.
+- Werewolf team kill/whisper messages derive their snapshot from the acting
+  wolf's scoped view: known wolf allies intersected with the public live-player
+  set. Therefore a dead wolf cannot receive, observe, or gain exposure evidence
+  from a later wolf-team message. The public/truth-redacted projection remains
+  an explicit whitelist and does not expose this private audience field.
+- A persisted social observation must belong to the scheduled `step.actorId`.
+  When a runtime actor roster is present, every non-system step actor must be a
+  member. A valid private message for B cannot be attached to A's decision
+  receipt to forge knowledge provenance.
+- A true `parallel` batch is checkpoint-safe only at its complete, contiguous,
+  declared-size final row. Malformed/truncated/split batch evidence is rejected
+  before replay or actor-snapshot callbacks execute. A rejected native step,
+  even if it carries a self-consistent injected snapshot, is never forkable
+  actor-state authority.
+- Cockpit roster editing is control-plane-only. It submits the existing
+  `models`, `profiles`, and `assignment` request contract to match, matrix, and
+  tournament endpoints. The browser never resolves roles/seats, derives game
+  truth, or sends resolved assignments/artifacts/winners. Server normalization
+  and the deterministic environment remain assignment and state authority.
+
+Required regression after changing these surfaces:
+
+```bash
+npx vitest run tests/social.test.ts tests/werewolfAdapter.test.ts \
+  tests/replay.test.ts tests/genericHarnessContract.test.ts \
+  tests/serverPublicViewApi.test.ts tests/cockpitExperimentDraft.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism
+npm run typecheck
+npm run build
+npm run test:e2e
+git diff --check
+```

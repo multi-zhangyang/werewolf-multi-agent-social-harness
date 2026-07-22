@@ -813,6 +813,56 @@ describe("Werewolf generic social adapter", () => {
     ).toBe(true);
   });
 
+  it("does not expose a second-night surviving wolf kill to a dead wolf through team message delivery", () => {
+    const state = secondNightWithOneLivingWolf();
+    const wolves = state.players.filter((player) => player.role === "werewolf");
+    const livingWolf = wolves.find((player) => player.alive);
+    const deadWolf = wolves.find((player) => !player.alive);
+    if (!livingWolf || !deadWolf) throw new Error("Expected one surviving and one eliminated wolf in the second-night fixture.");
+
+    const pending = getPendingActions(state);
+    expect(pending).toEqual([
+      expect.objectContaining({ kind: "kill", actorId: livingWolf.id, phase: "night_wolves", teamActorIds: [livingWolf.id] })
+    ]);
+    const kill = pending[0];
+    if (!kill || kill.kind !== "kill") throw new Error("Expected the surviving wolf's second-night kill action.");
+    const targetId = kill.legalTargetIds[0];
+    if (!targetId) throw new Error("Expected a legal second-night kill target.");
+    const command: GameCommand = { type: "werewolf.killVote", actorId: livingWolf.id, targetId };
+    const observation = createPlayerView(state, livingWolf.id, kill);
+
+    const draft = createWerewolfMessageDrafts({
+      // This intentionally retains the original roster, including the dead
+      // wolf.  The message audience must come from the current scoped view.
+      players: state.players,
+      traceId: "second-night-survivor-kill",
+      turnIndex: 1,
+      actorId: livingWolf.id,
+      pendingAction: kill,
+      command,
+      policyPlan: {
+        policyName: policyForRole(livingWolf.role),
+        command,
+        intent: "second-night living wolf kill",
+        confidence: 1,
+        strategyTags: []
+      },
+      observation: { ...observation, social: { channels: [], messages: [] } },
+      reasonerOutput: { content: "", latencyMs: 0, attempts: 1 }
+    }).find((message) => message.metadata?.kind === "werewolf-kill-vote");
+    if (!draft) throw new Error("Expected a werewolf team kill-vote message draft.");
+
+    expect(draft.runtimeAudienceIds).toEqual([livingWolf.id]);
+    expect(draft.recipientIds).toEqual([]);
+    const bus = new SocialCommunicationBus(createWerewolfSocialChannels(state.players), [], {
+      runtimeActorIds: state.players.map((player) => player.id)
+    });
+    const message = bus.publish(draft);
+    expect(message.deliveryReceipts?.map((receipt) => receipt.observerId)).toEqual([livingWolf.id]);
+    expect(bus.observe(deadWolf.id).messages).toEqual([]);
+    expect(bus.observe(livingWolf.id).messages.map((entry) => entry.id)).toEqual([message.id]);
+  });
+
   it("threads generic execution limits through the production Werewolf scaffold path", async () => {
     const initialState = createGame({ id: "werewolf-generic-execution-limit", seed: "werewolf-generic-execution-limit" });
     const agents = resolveAgentConfigs(initialState.players, profilesFromModels(["hanging-reasoner"], 0), 0, 0);
@@ -3206,6 +3256,76 @@ function agentConfigsFor(state: ReturnType<typeof createGame>, model: string): H
     temperature: 0,
     policyName: policyForRole(player.role)
   }));
+}
+
+/**
+ * Reach the second night only through the deterministic engine: the village
+ * exiles one original wolf after the first night, leaving its teammate as the
+ * sole legal second-night kill actor.  This fixture intentionally avoids
+ * manually editing `alive`, phase, votes, or night state.
+ */
+function secondNightWithOneLivingWolf(): GameState {
+  let state = createGame({
+    id: "second-night-survivor-wolf",
+    seed: "second-night-survivor-wolf",
+    config: { wolfDiscussion: "off", lastWords: "none", sheriff: "off" }
+  });
+  const originalWolves = state.players.filter((player) => player.role === "werewolf");
+  const seer = state.players.find((player) => player.role === "seer");
+  const firstNightTarget = state.players.find((player) => player.role === "villager");
+  if (originalWolves.length !== 2 || !seer || !firstNightTarget) {
+    throw new Error("Second-night fixture requires the classic two-wolf, seer, and villager roster.");
+  }
+
+  state = applyCommand(state, { type: "system.advance", actorId: "system" });
+  const inspect = getPendingActions(state).find((action) => action.kind === "inspect");
+  if (!inspect || inspect.kind !== "inspect") throw new Error("Expected first-night seer inspection.");
+  const inspectTargetId = inspect.legalTargetIds.find((playerId) => playerId !== firstNightTarget.id);
+  if (!inspectTargetId) throw new Error("Expected a legal first-night inspection target.");
+  state = applyCommand(state, { type: "seer.inspect", actorId: seer.id, targetId: inspectTargetId });
+
+  while (state.phase === "night_wolves") {
+    const kill = getPendingActions(state).find((action) => action.kind === "kill");
+    if (!kill || kill.kind !== "kill") throw new Error("Expected first-night wolf kill vote.");
+    state = applyCommand(state, { type: "werewolf.killVote", actorId: kill.actorId, targetId: firstNightTarget.id });
+  }
+  if (state.phase !== "night_witch") throw new Error(`Expected night_witch after first wolf votes, received ${state.phase}.`);
+  const witch = state.players.find((player) => player.role === "witch" && player.alive);
+  if (!witch) throw new Error("Expected living witch after the first-night villager kill.");
+  state = applyCommand(state, { type: "witch.act", actorId: witch.id });
+
+  while (state.phase === "day_speech") {
+    const speech = getPendingActions(state).find((action) => action.kind === "speech");
+    if (!speech || speech.kind !== "speech") throw new Error("Expected scheduled day speech.");
+    state = applyCommand(state, { type: "speech.submit", actorId: speech.actorId, text: `fixture speech ${speech.actorId}` });
+  }
+  if (state.phase !== "day_vote") throw new Error(`Expected day_vote before wolf exile, received ${state.phase}.`);
+  const exiledWolfId = originalWolves[0]!.id;
+  const survivingWolfId = originalWolves[1]!.id;
+  while (state.phase === "day_vote") {
+    const vote = getPendingActions(state).find((action) => action.kind === "vote");
+    if (!vote || vote.kind !== "vote") throw new Error("Expected scheduled exile vote.");
+    state = applyCommand(state, {
+      type: "vote.cast",
+      actorId: vote.actorId,
+      // The wolf selected for exile still has a legal ballot; its lone vote
+      // cannot overcome the unanimous village votes against it.
+      targetId: vote.actorId === exiledWolfId ? survivingWolfId : exiledWolfId
+    });
+  }
+
+  if (state.phase !== "night_seer") throw new Error(`Expected second-night seer phase after wolf exile, received ${state.phase}.`);
+  if (state.players.find((player) => player.id === exiledWolfId)?.alive !== false) {
+    throw new Error("Expected the selected first wolf to be eliminated by the real day-vote resolution.");
+  }
+  const secondInspect = getPendingActions(state).find((action) => action.kind === "inspect");
+  if (!secondInspect || secondInspect.kind !== "inspect") throw new Error("Expected second-night seer inspection.");
+  const secondInspectTargetId = secondInspect.legalTargetIds[0];
+  if (!secondInspectTargetId) throw new Error("Expected a legal second-night inspection target.");
+  state = applyCommand(state, { type: "seer.inspect", actorId: secondInspect.actorId, targetId: secondInspectTargetId });
+
+  if (state.phase !== "night_wolves") throw new Error(`Expected second-night wolf phase, received ${state.phase}.`);
+  return state;
 }
 
 class InvalidInspectSocialActor implements SocialActor<WerewolfSocialObservation, WerewolfSocialPendingAction, GameCommand> {

@@ -1114,9 +1114,20 @@ function tryBuildWerewolfInitializationFailureResult(
 }
 
 export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): Array<Omit<SocialMessage, "id" | "seq" | "createdAt">> {
-  const wolfIds = input.players.filter((player) => player.team === "werewolves").map((player) => player.id);
   const messages: Array<Omit<SocialMessage, "id" | "seq" | "createdAt">> = [];
   const publicRecipientIds = input.players.filter((player) => player.id !== input.actorId).map((player) => player.id);
+  // The team channel is durable topology, not a claim that every original
+  // wolf remains a live recipient.  Build this message's immutable audience
+  // from the acting wolf's scoped view: private ally knowledge identifies the
+  // team and public state supplies the current alive boundary.  Do not derive
+  // a later audience from initial PlayerState or a later environment snapshot.
+  const alivePublicPlayerIds = new Set(input.observation.publicPlayers.filter((player) => player.alive).map((player) => player.id));
+  const liveWolfAudienceIds =
+    input.observation.you.team === "werewolves"
+      ? [...new Set([input.actorId, ...(input.observation.privateInfo.werewolfAllies ?? [])])]
+          .filter((playerId) => alivePublicPlayerIds.has(playerId))
+          .sort()
+      : [];
   const baseMetadata = {
     traceId: input.traceId,
     turnIndex: input.turnIndex,
@@ -1217,7 +1228,8 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
     messages.push({
       channelId: "werewolf-team",
       senderId: input.actorId,
-      recipientIds: wolfIds.filter((wolfId) => wolfId !== input.actorId),
+      recipientIds: liveWolfAudienceIds.filter((wolfId) => wolfId !== input.actorId),
+      runtimeAudienceIds: liveWolfAudienceIds,
       visibility: "team",
       content: `${input.actorId} selected ${input.command.targetId} as the night kill target.`,
       speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),
@@ -1233,7 +1245,8 @@ export function createWerewolfMessageDrafts(input: WerewolfMessageDraftInput): A
     messages.push({
       channelId: "werewolf-team",
       senderId: input.actorId,
-      recipientIds: wolfIds.filter((wolfId) => wolfId !== input.actorId),
+      recipientIds: liveWolfAudienceIds.filter((wolfId) => wolfId !== input.actorId),
+      runtimeAudienceIds: liveWolfAudienceIds,
       visibility: "team",
       content: input.command.text,
       speechActs: werewolfSpeechActsForCommand(input.command, input.actorId),

@@ -19,7 +19,7 @@ import {
   type HarnessCheckpointEnvelope,
   type HarnessEpisodeArtifactEnvelope
 } from "../src/harness/episodeArtifacts";
-import { runForkedHarnessEpisode } from "../src/harness/checkpointRuntime";
+import { buildSocialCheckpointForkSeed, runForkedHarnessEpisode } from "../src/harness/checkpointRuntime";
 import {
   runSocialEpisode,
   validateSocialEpisodeArtifact,
@@ -376,6 +376,94 @@ describe("generic social harness contract", () => {
     ).rejects.toThrow(/final boundary actor snapshot hash/i);
     expect(environmentRestores).toBe(0);
     expect(actorRestores).toBe(0);
+
+    // A failed/rejected record may retain a snapshot as failure evidence, but
+    // it is never an actor-state restoration boundary. This construction is
+    // structurally self-consistent under the persistence exception for failed
+    // trajectories, so the fork guard itself must reject it before invoking a
+    // verifier, environment factory, or actor restore factory.
+    const rejectedBoundarySnapshot = clone(checkpoint);
+    const rejectedBoundary = rejectedBoundarySnapshot.executionPrefix.steps.at(-1);
+    if (!rejectedBoundary) throw new Error("Expected a checkpoint boundary step.");
+    rejectedBoundary.commitStatus = "rejected";
+    rejectedBoundary.error = "forged rejected boundary";
+    rejectedBoundary.failure = { stage: "environment_step", message: "forged rejected boundary" };
+    rejectedBoundary.postStateHash = rejectedBoundary.preStateHash;
+    rejectedBoundarySnapshot.executionPrefix.status = "failed";
+    rejectedBoundarySnapshot.executionPrefix.failureReason = "forged rejected boundary";
+    rejectedBoundarySnapshot.executionPrefix.finalState = clone(rejectedBoundarySnapshot.executionPrefix.initialState);
+    rejectedBoundarySnapshot.source.status = "failed";
+    rejectedBoundarySnapshot.state = clone(rejectedBoundarySnapshot.executionPrefix.initialState);
+    rejectedBoundarySnapshot.source.stateHash = hashStableState(rejectedBoundarySnapshot.state);
+    rejectedBoundarySnapshot.source.executionPrefixHash = hashStableState(rejectedBoundarySnapshot.executionPrefix);
+    expect(validateHarnessCheckpointEnvelope(rejectedBoundarySnapshot)).toEqual([]);
+    expect(() => buildSocialCheckpointForkSeed(rejectedBoundarySnapshot)).toThrow(/final native boundary was rejected/i);
+
+    let rejectedSnapshotResolutions = 0;
+    let rejectedPrefixReplays = 0;
+    expect(() =>
+      buildHarnessCheckpointAtPrefix<LedgerState, LedgerObservation, LedgerPending, LedgerCommand, { id: string; durableMemoryVersion: number }>({
+        artifactVersion: "ledger.checkpoint.v1",
+        kind: "ledger-checkpoint",
+        checkpointId: "ledger-rejected-boundary-prefix",
+        createdAt: "2026-07-22T00:00:00.000Z",
+        sourceArtifactVersion: "ledger.episode.v1",
+        episode: rejectedBoundarySnapshot.executionPrefix,
+        selector: { nativeStepCount: 1 },
+        resolveAgentSnapshot: () => {
+          rejectedSnapshotResolutions += 1;
+          return {
+            agents: [{ id: "a", durableMemoryVersion: 999 }],
+            agentsHash: hashStableState([{ id: "a", durableMemoryVersion: 999 }])
+          };
+        },
+        replayPrefix: () => {
+          rejectedPrefixReplays += 1;
+          return {
+            mismatches: [],
+            finalState: clone(rejectedBoundarySnapshot.executionPrefix.initialState)
+          };
+        }
+      })
+    ).toThrow(/no durable agent snapshot exists after a rejected boundary/i);
+    expect(rejectedSnapshotResolutions).toBe(0);
+    expect(rejectedPrefixReplays).toBe(0);
+
+    let rejectedEnvironmentRestores = 0;
+    let rejectedActorRestores = 0;
+    let rejectedReplayVerifications = 0;
+    await expect(
+      runForkedHarnessEpisode({
+        checkpoint: rejectedBoundarySnapshot,
+        runtime: {
+          createEnvironment(initialState) {
+            rejectedEnvironmentRestores += 1;
+            return new LedgerEnvironment({ initialState, actorIds: ["a"] });
+          },
+          restoreActors(agentStates) {
+            rejectedActorRestores += 1;
+            return agentStates.map((agent) => new LedgerActor(agent.id as LedgerActorId, () => ({
+              actorId: agent.id as LedgerActorId,
+              kind: "record",
+              command: { actorId: agent.id as LedgerActorId, entry: "forbidden" }
+            })));
+          }
+        },
+        verifyCheckpointReplay: () => {
+          rejectedReplayVerifications += 1;
+          return [];
+        },
+        episode: {
+          id: "ledger-rejected-boundary-fork",
+          schedulerMode: "aec",
+          hashState: hashStableState,
+          hashMessages: hashStableState
+        }
+      })
+    ).rejects.toThrow(/final native boundary was rejected/i);
+    expect(rejectedReplayVerifications).toBe(0);
+    expect(rejectedEnvironmentRestores).toBe(0);
+    expect(rejectedActorRestores).toBe(0);
   });
 
   it("builds a generic native-prefix checkpoint, replays it without actors, and executes a restored non-Werewolf fork", async () => {

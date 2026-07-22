@@ -60,6 +60,18 @@ export interface SocialMessage {
   channelId: string;
   senderId: string;
   recipientIds: string[];
+  /**
+   * Optional, immutable-at-publication runtime observer snapshot.  A channel
+   * describes the durable communication topology, while this field narrows
+   * one committed message to the actors that could actually observe it at the
+   * moment it was produced (for example, living members of a team channel).
+   *
+   * It is deliberately optional: artifacts written before this contract keep
+   * their original channel-derived visibility semantics when the field is
+   * absent.  New snapshots are canonical sorted subsets of the normal channel
+   * audience and are never recomputed from a later environment state.
+   */
+  runtimeAudienceIds?: readonly string[];
   visibility: "private" | "team" | "public" | "postgame";
   content: string;
   speechActs?: SocialSpeechAct[];
@@ -629,6 +641,11 @@ export function deriveSocialExposureRecords<TState, TObservation, TPending, TCom
     for (const observedMessage of observed.messages) {
       const message = findCommittedMessage(committedMessages, observedMessage);
       if (!message) continue;
+      // Exposure is derived from recorded observation, but a newer immutable
+      // message audience is still a hard visibility boundary.  This keeps
+      // defensive consumers from materializing an exposure from a forged
+      // observation while preserving legacy artifacts that have no snapshot.
+      if (message.runtimeAudienceIds !== undefined && !message.runtimeAudienceIds.includes(observed.observerId)) continue;
       if (!options.includeSelf && message.senderId === observed.observerId) continue;
       const key = `${message.id}:${observed.observerId}:${step.traceId}`;
       if (seen.has(key)) continue;
@@ -735,6 +752,13 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
     stepsByTraceId.set(step.traceId, step);
     validateSeqRange(step.messageSeqRange, messagesBySeq, `steps[${index}].messageSeqRange`, errors);
 
+    // A recorded roster is a run identity boundary. System transitions are
+    // runner-owned control records; every other step must remain attributable
+    // to a durable actor from that roster.
+    if (runtimeActorIdSet && step.actorId !== "system" && !runtimeActorIdSet.has(step.actorId)) {
+      errors.push(`steps[${index}].actorId ${step.actorId} is not in the runtime actor roster.`);
+    }
+
     if (step.action.actorId !== step.actorId) {
       errors.push(
         `steps[${index}].action.actorId ${step.action.actorId} does not match scheduled actor ${step.actorId}.`
@@ -772,6 +796,15 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
 
     const observed = extractObservedSocialMessages(step);
     if (!observed) continue;
+    // Social visibility is scoped to the actor whose decision this receipt
+    // records. Without this binding, a forged artifact could attach B's
+    // private observation to A's decision step and pass channel visibility
+    // checks as though A had received it.
+    if (observed.observerId !== step.actorId) {
+      errors.push(
+        `steps[${index}] observation observerId ${observed.observerId} does not match scheduled actor ${step.actorId}.`
+      );
+    }
     for (const observedMessage of observed.messages) {
       const committed = findCommittedMessageByIndexes(messagesById, messagesBySeq, observedMessage);
       if (!committed) {
@@ -1055,6 +1088,11 @@ export class SocialCommunicationBus {
         throw new Error(`Recipient ${recipientId} is not allowed in channel ${message.channelId}.`);
       }
     }
+    assertRuntimeAudienceSnapshot({
+      message,
+      channel,
+      defaultObserverIds: unscopedVisibleObserverIdsForMessage(message, channel, this.runtimeActorIds)
+    });
     const expectedVisibility = expectedMessageVisibilityForChannel(channel);
     if (message.visibility !== expectedVisibility) {
       throw new Error(
@@ -3258,6 +3296,21 @@ function visibleObserverIdsForMessage(
   channel: SocialChannel,
   runtimeActorIds?: readonly string[]
 ): string[] {
+  const defaultObserverIds = unscopedVisibleObserverIdsForMessage(message, channel, runtimeActorIds);
+  const runtimeAudienceIds = message.runtimeAudienceIds;
+  // No snapshot is the backwards-compatible artifact semantics: visibility is
+  // determined only by the durable channel topology.  A supplied snapshot is
+  // fixed at publication and can only narrow that topology.
+  if (runtimeAudienceIds === undefined) return defaultObserverIds;
+  const audience = new Set(runtimeAudienceIds);
+  return defaultObserverIds.filter((observerId) => audience.has(observerId));
+}
+
+function unscopedVisibleObserverIdsForMessage(
+  message: Omit<SocialMessage, "id" | "seq" | "createdAt">,
+  channel: SocialChannel,
+  runtimeActorIds?: readonly string[]
+): string[] {
   if (message.visibility === "postgame" || channel.readableBy === "postgame") return [];
   if (message.visibility === "private") {
     return [...new Set([message.senderId, ...message.recipientIds])].filter((observerId) => observerId.trim()).sort();
@@ -3266,6 +3319,61 @@ function visibleObserverIdsForMessage(
     return [...runtimeActorIds].filter((observerId) => observerId.trim()).sort();
   }
   return [...new Set(channel.participantIds)].filter((observerId) => observerId.trim()).sort();
+}
+
+function assertRuntimeAudienceSnapshot(input: {
+  message: Omit<SocialMessage, "id" | "seq" | "createdAt">;
+  channel: SocialChannel;
+  defaultObserverIds: readonly string[];
+}): void {
+  const errors: string[] = [];
+  collectRuntimeAudienceSnapshotErrors({ ...input, label: "Social message", errors });
+  if (errors.length) throw new Error(errors.join(" "));
+}
+
+function collectRuntimeAudienceSnapshotErrors(input: {
+  message: Omit<SocialMessage, "id" | "seq" | "createdAt">;
+  channel: SocialChannel;
+  defaultObserverIds: readonly string[];
+  label: string;
+  errors: string[];
+}): void {
+  const runtimeAudienceIds = input.message.runtimeAudienceIds;
+  if (runtimeAudienceIds === undefined) return;
+  if (!Array.isArray(runtimeAudienceIds)) {
+    input.errors.push(`${input.label}.runtimeAudienceIds must be an array when recorded.`);
+    return;
+  }
+
+  const audienceIds = runtimeAudienceIds;
+  const seen = new Set<string>();
+  const allowed = new Set(input.defaultObserverIds);
+  for (const [index, observerId] of audienceIds.entries()) {
+    if (typeof observerId !== "string" || !observerId.trim()) {
+      input.errors.push(`${input.label}.runtimeAudienceIds[${index}] must be a non-empty actor id.`);
+      continue;
+    }
+    if (seen.has(observerId)) {
+      input.errors.push(`${input.label}.runtimeAudienceIds duplicates ${observerId}.`);
+    }
+    seen.add(observerId);
+    if (!allowed.has(observerId)) {
+      input.errors.push(`${input.label}.runtimeAudienceIds includes ${observerId}, which is not runtime-visible in channel ${input.channel.id}.`);
+    }
+  }
+
+  const canonical = [...audienceIds].sort();
+  if (canonical.some((observerId, index) => observerId !== audienceIds[index])) {
+    input.errors.push(`${input.label}.runtimeAudienceIds must be sorted for canonical artifact identity.`);
+  }
+  if (allowed.has(input.message.senderId) && !seen.has(input.message.senderId)) {
+    input.errors.push(`${input.label}.runtimeAudienceIds must include sender ${input.message.senderId}.`);
+  }
+  for (const recipientId of input.message.recipientIds) {
+    if (!seen.has(recipientId)) {
+      input.errors.push(`${input.label}.runtimeAudienceIds must include recipient ${recipientId}.`);
+    }
+  }
 }
 
 function speechActKindFromSocialFact(kind: string | undefined): SocialSpeechActKind | undefined {
@@ -3339,6 +3447,17 @@ function validateMessageEnvelope(
       errors.push(`${label}.recipientIds includes ${recipientId}, which is not allowed in channel ${message.channelId}.`);
     }
   }
+  collectRuntimeAudienceSnapshotErrors({
+    message,
+    channel,
+    defaultObserverIds: unscopedVisibleObserverIdsForMessage(
+      message,
+      channel,
+      runtimeActorIds ? [...runtimeActorIds] : undefined
+    ),
+    label,
+    errors
+  });
   const expectedVisibility = expectedMessageVisibilityForChannel(channel);
   if (message.visibility !== expectedVisibility) {
     errors.push(
@@ -3501,8 +3620,12 @@ function messageVisibleToObserver(
   if (!channel) return false;
   if (!canObserveChannelAtRuntime(channel, observerId, runtimeActorIds)) return false;
   if (message.visibility === "postgame") return false;
-  if (message.visibility === "public" || message.visibility === "team") return true;
-  return message.senderId === observerId || message.recipientIds.includes(observerId);
+  const visibleByChannel =
+    message.visibility === "public" || message.visibility === "team"
+      ? true
+      : message.senderId === observerId || message.recipientIds.includes(observerId);
+  if (!visibleByChannel) return false;
+  return message.runtimeAudienceIds === undefined || message.runtimeAudienceIds.includes(observerId);
 }
 
 function isSocialMessage(value: unknown): value is SocialMessage {

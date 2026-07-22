@@ -9,7 +9,11 @@ import {
   validateHarnessCheckpoint,
   type MatchArtifact
 } from "../src/harness/artifacts";
-import { buildReplayableSocialPrefix } from "../src/harness/episodeArtifacts";
+import {
+  buildHarnessCheckpointAtPrefix as buildGenericHarnessCheckpointAtPrefix,
+  buildReplayableSocialPrefix,
+  HarnessCheckpointSelectionError
+} from "../src/harness/episodeArtifacts";
 import { hashStableState } from "../src/harness/hash";
 import { describeResolvedAssignments, profilesFromModels, resolveAgentConfigs } from "../src/harness/profiles";
 import { replayHarnessTrajectory, replaySocialEpisode, replayWerewolfSocialEpisode } from "../src/harness/replay";
@@ -695,6 +699,76 @@ describe("harness trajectory replay", () => {
     expect(prefix.replay.ok).toBe(true);
     expect(prefix.replay.finalHash).toBe(prefix.step.postStateHash);
     expect(prefix.replay.messagesHash).toBe(hashStableState(prefix.episode.messages));
+  });
+
+  it("rejects truncated parallel prefixes before generic replay or checkpoint callbacks", () => {
+    const truncated = parallelCounterEpisode();
+    const missingParallelPeer = truncated.steps.pop();
+    if (!missingParallelPeer) throw new Error("Expected a parallel peer to remove from the fixture.");
+
+    let replayCallbacks = 0;
+    expect(() =>
+      buildReplayableSocialPrefix({
+        episode: truncated,
+        selector: { nativeStepCount: 1 },
+        replayPrefix: () => {
+          replayCallbacks += 1;
+          return {
+            mismatches: [],
+            finalState: { value: 2 },
+            finalHash: hashStableState({ value: 2 }),
+            messagesHash: hashStableState([])
+          };
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "unsafe_batch_boundary" } satisfies Partial<HarnessCheckpointSelectionError>));
+    expect(replayCallbacks).toBe(0);
+
+    const forged = parallelCounterEpisode();
+    forged.steps[1]!.batchId = "counter-forged-different-batch";
+    expect(() =>
+      buildReplayableSocialPrefix({
+        episode: forged,
+        selector: { nativeStepCount: 1 },
+        replayPrefix: () => {
+          replayCallbacks += 1;
+          return {
+            mismatches: [],
+            finalState: { value: 2 }
+          };
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "unsafe_batch_boundary" } satisfies Partial<HarnessCheckpointSelectionError>));
+    expect(replayCallbacks).toBe(0);
+
+    let snapshotResolvers = 0;
+    expect(() =>
+      buildGenericHarnessCheckpointAtPrefix({
+        artifactVersion: "counter.checkpoint.v1",
+        kind: "counter-checkpoint",
+        sourceArtifactVersion: "counter.episode.v1",
+        episode: truncated,
+        selector: { nativeStepCount: 1 },
+        resolveAgentSnapshot: () => {
+          snapshotResolvers += 1;
+          return {
+            agents: [{ id: "counter-agent" }],
+            agentsHash: hashStableState([{ id: "counter-agent" }])
+          };
+        },
+        replayPrefix: () => {
+          replayCallbacks += 1;
+          return {
+            mismatches: [],
+            finalState: { value: 2 },
+            finalHash: hashStableState({ value: 2 }),
+            messagesHash: hashStableState([])
+          };
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "unsafe_batch_boundary" } satisfies Partial<HarnessCheckpointSelectionError>));
+    expect(snapshotResolvers).toBe(0);
+    expect(replayCallbacks).toBe(0);
   });
 
   it("detects tampered native checkpoint provenance before fork execution", async () => {

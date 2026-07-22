@@ -71,7 +71,7 @@ function configureFixtureRuntime(): void {
     delete process.env[key];
   }
   process.env.LLM_PROVIDER_PROTOCOL = "openai-chat-completions";
-  process.env.LLM_MODELS = "fixture-model";
+  process.env.LLM_MODELS = "fixture-model,fixture-rival";
 }
 
 async function seedFixtureMatch(id: string, seed: string): Promise<void> {
