@@ -6,7 +6,11 @@ import { policyForRole } from "../src/harness/policy";
 import { describeResolvedAssignments, profilesFromModels, resolveAgentConfigs } from "../src/harness/profiles";
 import { replayHarnessTrajectory } from "../src/harness/replay";
 import { runHarnessMatch } from "../src/harness/runtime";
-import { buildWerewolfHarnessRunResultFromParts, type WerewolfResultEvaluator } from "../src/harness/werewolfResult";
+import {
+  buildWerewolfHarnessRunResultFromParts,
+  collectWerewolfHarnessMetrics,
+  type WerewolfResultEvaluator
+} from "../src/harness/werewolfResult";
 import type { HarnessReasoner } from "../src/harness/types";
 
 describe("Werewolf evaluator failure isolation", () => {
@@ -100,5 +104,30 @@ describe("Werewolf evaluator failure isolation", () => {
     expect(evaluationRecord).toMatchObject({ status: "incomplete", failureCount: 1, failures: rebuilt.evaluationReport.failures });
     expect(replay.ok).toBe(true);
     expect(replay.finalHash).toBeDefined();
+  });
+});
+
+describe("Werewolf compatibility metrics", () => {
+  it("keeps sheriff-election ballots out of exile-vote accuracy", () => {
+    const initial = createGame({ id: "werewolf-result-sheriff-metric", seed: "werewolf-result-sheriff-metric" });
+    const village = initial.players.find((player) => player.team === "village")!;
+    const wolf = initial.players.find((player) => player.team === "werewolves")!;
+    const metrics = collectWerewolfHarnessMetrics({
+      ...initial,
+      votes: [
+        {
+          day: 1,
+          voterId: village.id,
+          targetId: wolf.id,
+          abstain: false,
+          weight: 1,
+          kind: "sheriff"
+        }
+      ]
+    });
+
+    expect(metrics.villageVoteAccuracy).toBe(0);
+    expect(metrics.wolfVoteAccuracy).toBe(0);
+    expect(metrics.totalVotes).toBe(1);
   });
 });

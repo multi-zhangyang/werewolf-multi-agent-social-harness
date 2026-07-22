@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyCommand, createGame, getPendingActions, livingPlayers } from "../src/core/engine";
+import { applyCommand, computeMetrics, createGame, getPendingActions, livingPlayers } from "../src/core/engine";
 import { isAgentPendingAction } from "../src/core/pending";
 import { createPlayerView, serializePublicState } from "../src/core/view";
 import { hashStableState } from "../src/harness/hash";
@@ -242,6 +242,30 @@ describe("game-core state machine", () => {
     state = applyCommand(state, { type: "vote.cast", actorId: sheriffVote!.actorId, targetId: sheriffVote!.legalTargetIds[0] });
     expect(state.votes.at(-1)?.weight).toBe(1.5);
     expect(state.votes.at(-1)?.kind).toBe("exile");
+  });
+
+  it("does not count a sheriff-election ballot as village exile-vote accuracy", () => {
+    const initial = createGame({ id: "sheriff-ballot-metric-boundary", seed: "sheriff-ballot-metric-boundary" });
+    const village = initial.players.find((player) => player.team === "village")!;
+    const wolf = initial.players.find((player) => player.team === "werewolves")!;
+    const state: GameState = {
+      ...initial,
+      votes: [
+        {
+          day: 1,
+          voterId: village.id,
+          targetId: wolf.id,
+          abstain: false,
+          weight: 1,
+          kind: "sheriff"
+        }
+      ]
+    };
+
+    expect(computeMetrics(state)).toMatchObject({
+      villageVoteAccuracy: 0,
+      wolfVoteAccuracy: 0
+    });
   });
 
   it("queues exactly one public last-words turn after an eligible night death", () => {

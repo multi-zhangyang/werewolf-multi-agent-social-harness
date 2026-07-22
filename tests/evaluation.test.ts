@@ -5484,25 +5484,54 @@ describe("werewolf deception evaluator", () => {
     );
   });
 
-  it("links scoped false role pressure exposure to later vote-follow signals", () => {
+  it("links day-one scoped false role pressure to the exile vote even when a sheriff ballot was recorded first", () => {
     const baseState = createGame({ id: "deception-role-pressure-vote-follow", seed: "deception-role-pressure-vote-follow" });
     const [speaker, follower, resister, pressureTarget, otherTarget] = baseState.players;
     const speakerFalseClaim = differentRole(speaker.role);
     const publicRecipients = (senderId: string) => baseState.players.filter((player) => player.id !== senderId).map((player) => player.id);
-    const followedVote = { day: 2, voterId: follower.id, targetId: pressureTarget.id, abstain: false, weight: 1 };
-    const resistedVote = { day: 2, voterId: resister.id, targetId: otherTarget.id, abstain: false, weight: 1 };
-    const unseenSameTargetVote = { day: 2, voterId: otherTarget.id, targetId: pressureTarget.id, abstain: false, weight: 1 };
+    const sheriffBallot = {
+      day: 1,
+      voterId: follower.id,
+      targetId: otherTarget.id,
+      abstain: false,
+      weight: 1,
+      kind: "sheriff" as const
+    };
+    const followedVote = {
+      day: 1,
+      voterId: follower.id,
+      targetId: pressureTarget.id,
+      abstain: false,
+      weight: 1,
+      kind: "exile" as const
+    };
+    const resistedVote = {
+      day: 1,
+      voterId: resister.id,
+      targetId: otherTarget.id,
+      abstain: false,
+      weight: 1,
+      kind: "exile" as const
+    };
+    const unseenSameTargetVote = {
+      day: 1,
+      voterId: otherTarget.id,
+      targetId: pressureTarget.id,
+      abstain: false,
+      weight: 1,
+      kind: "exile" as const
+    };
     const state: GameState = {
       ...baseState,
-      day: 2,
+      day: 1,
       phase: "day_vote",
-      votes: [followedVote, resistedVote, unseenSameTargetVote],
+      votes: [sheriffBallot, followedVote, resistedVote, unseenSameTargetVote],
       events: [
         ...baseState.events,
         {
           id: "event-vote-followed",
           seq: baseState.events.length + 1,
-          day: 2,
+          day: 1,
           phase: "day_vote",
           type: "vote.cast",
           actorId: follower.id,
@@ -5513,7 +5542,7 @@ describe("werewolf deception evaluator", () => {
         {
           id: "event-vote-resisted",
           seq: baseState.events.length + 2,
-          day: 2,
+          day: 1,
           phase: "day_vote",
           type: "vote.cast",
           actorId: resister.id,
@@ -5524,7 +5553,7 @@ describe("werewolf deception evaluator", () => {
         {
           id: "event-vote-unseen-same-target",
           seq: baseState.events.length + 3,
-          day: 2,
+          day: 1,
           phase: "day_vote",
           type: "vote.cast",
           actorId: otherTarget.id,
@@ -5565,7 +5594,7 @@ describe("werewolf deception evaluator", () => {
         ],
         metadata: {
           kind: "public-speech",
-          day: 2,
+          day: 1,
           claimedRole: speaker.role,
           pressureTargetId: otherTarget.id
         }
@@ -5581,7 +5610,7 @@ describe("werewolf deception evaluator", () => {
         createdAt: new Date(2000).toISOString(),
         metadata: {
           kind: "public-speech",
-          day: 2,
+          day: 1,
           claimedRole: speakerFalseClaim,
           pressureTargetId: otherTarget.id
         }
@@ -5597,7 +5626,7 @@ describe("werewolf deception evaluator", () => {
         createdAt: new Date(3000).toISOString(),
         metadata: {
           kind: "public-speech",
-          day: 2,
+          day: 1,
           claimedRole: follower.role,
           pressureTargetId: pressureTarget.id
         }
@@ -6474,6 +6503,54 @@ describe("werewolf evaluation report integration", () => {
 });
 
 describe("legacy influence reward guardrail", () => {
+  it("excludes sheriff-only ballots from exile accuracy, influence, and misdirection statistics", () => {
+    const state = createGame({ id: "sheriff-only-evaluation-boundary", seed: "sheriff-only-evaluation-boundary" });
+    const villages = state.players.filter((player) => player.team === "village");
+    const wolf = state.players.find((player) => player.team === "werewolves")!;
+    const [speaker, accurateSheriffVoter, villageTarget] = villages;
+    const current: GameState = {
+      ...state,
+      day: 1,
+      speeches: [
+        {
+          day: 1,
+          playerId: speaker.id,
+          text: `${speaker.id} pressures ${wolf.id}.`,
+          pressureTargetId: wolf.id,
+          strategyTags: ["pressure"]
+        }
+      ],
+      votes: [
+        {
+          day: 1,
+          voterId: accurateSheriffVoter.id,
+          targetId: wolf.id,
+          abstain: false,
+          weight: 1,
+          kind: "sheriff"
+        },
+        {
+          day: 1,
+          voterId: speaker.id,
+          targetId: villageTarget.id,
+          abstain: false,
+          weight: 1,
+          kind: "sheriff"
+        }
+      ]
+    };
+
+    const evaluation = evaluateAdversarialMatch(current, []);
+
+    expect(evaluation.voteAccuracyByAgent).toEqual({});
+    expect(evaluation.influenceByAgent[speaker.id]).toMatchObject({
+      pressureCount: 1,
+      voteFollowCount: 0,
+      influenceRate: 0
+    });
+    expect(Object.values(evaluation.deceptionByAgent).every((record) => record.misdirectVotes === 0)).toBe(true);
+  });
+
   it("keeps global pressure vote-follow proxy out of reward-bearing metrics", () => {
     const state = createGame({ id: "legacy-influence-reward-guard", seed: "legacy-influence-reward-guard" });
     const [speaker, follower, target] = state.players;
