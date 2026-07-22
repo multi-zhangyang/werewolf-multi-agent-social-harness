@@ -231,8 +231,8 @@ describe("Werewolf generic social adapter", () => {
     expect(actor.state.turns).toBe(1);
     expect(actor.state.privateMemos).toEqual([expect.stringContaining("adapter memo:deterministic-inspect:inspect")]);
     expect(actor.state.socialStateHash).toEqual(expect.any(String));
-    expect(actor.state.social?.memory.entries.map((entry) => entry.kind)).toEqual(["observation", "memo", "decision", "outcome"]);
-    expect(actor.state.social?.memory.entries.at(-1)).toMatchObject({
+    expect(actor.state.social?.memory.entries.map((entry) => entry.kind)).toEqual(["observation", "memo", "decision", "outcome", "reflection"]);
+    expect(actor.state.social?.memory.entries.at(-2)).toMatchObject({
       source: "environment",
       content: "Committed environment receipt.",
       metadata: { version: "harness.committed-receipt.v1", status: "committed" }
@@ -358,7 +358,7 @@ describe("Werewolf generic social adapter", () => {
       }
     });
     expect(harnessTurnEvents[0]?.trace.agentStateHash).not.toBe(actor.state.socialStateHash);
-    expect(actor.state.social?.memory.entries.at(-1)).toMatchObject({
+    expect(actor.state.social?.memory.entries.at(-2)).toMatchObject({
       kind: "outcome",
       source: "environment",
       tags: expect.arrayContaining(["receipt-feedback", "environment-committed"])
@@ -1678,7 +1678,7 @@ describe("Werewolf generic social adapter", () => {
     expect(secondActor.state.observations).toBe(1);
     expect(secondActor.state.turns).toBe(1);
     const secondMemory = secondActor.state.social?.memory.entries ?? [];
-    expect(secondMemory.map((entry) => entry.kind)).toEqual(["observation", "message", "memo", "decision", "outcome"]);
+    expect(secondMemory.map((entry) => entry.kind)).toEqual(["observation", "message", "memo", "decision", "outcome", "reflection"]);
     const observedSpeechMemory = secondMemory.find((entry) => entry.kind === "message");
     const observedPressureTargetId = observedSpeechMemory?.metadata?.pressureTargetId;
     expect(observedPressureTargetId).toEqual(expect.any(String));

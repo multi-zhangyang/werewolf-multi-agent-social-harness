@@ -706,6 +706,7 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
     }
   }
   validateRecordedMemoryRetrieval(artifact, errors);
+  validateRecordedReceiptReflections(artifact, errors);
   const lastSuccessfulStep = artifact.trajectory.at(-1);
   const lastSuccessfulSnapshot = lastSuccessfulStep ? resolveAgentSnapshotsAfterStep(artifact, lastSuccessfulStep) : undefined;
   if (artifact.status !== "failed" && lastSuccessfulSnapshot) {
@@ -857,6 +858,127 @@ function validateRecordedMemoryRetrieval(artifact: MatchArtifact, errors: string
     const decisionMetadata = decision.metadata as Record<string, unknown> | undefined;
     if (hashStableState(decisionMetadata?.memoryRetrieval) !== hashStableState(retrieval)) {
       errors.push(`${label} does not match its committed decision-memory evidence.`);
+    }
+  }
+}
+
+/**
+ * Reflection prose is never re-evaluated. This validates only the immutable
+ * typed record, its committed receipt ownership, content-free recall evidence,
+ * and the memory/journal binding present at each recorded snapshot boundary.
+ */
+function validateRecordedReceiptReflections(artifact: MatchArtifact, errors: string[]): void {
+  const nativeStepByTrace = new Map(artifact.socialEpisode.steps.map((step) => [step.traceId, step]));
+  const lastTrajectoryIndexBySnapshot = new Map<string, number>();
+  const seenReflectionHashes = new Map<string, string>();
+  for (const [index, step] of artifact.trajectory.entries()) {
+    const key = step.agentSnapshotsHashAfterStep ?? step.agentSnapshotFrameIdAfterStep;
+    if (key) lastTrajectoryIndexBySnapshot.set(key, index);
+  }
+  for (const [index, step] of artifact.trajectory.entries()) {
+    const key = step.agentSnapshotsHashAfterStep ?? step.agentSnapshotFrameIdAfterStep;
+    if (!key || lastTrajectoryIndexBySnapshot.get(key) !== index) continue;
+    const snapshots = resolveAgentSnapshotsAfterStep(artifact, step);
+    if (!snapshots) continue;
+    let boundaryStart = index;
+    while (boundaryStart > 0) {
+      const previous = artifact.trajectory[boundaryStart - 1]!;
+      const previousKey = previous.agentSnapshotsHashAfterStep ?? previous.agentSnapshotFrameIdAfterStep;
+      if (previousKey !== key) break;
+      boundaryStart -= 1;
+    }
+    const boundaryTraces = new Set(artifact.trajectory.slice(boundaryStart, index + 1).map((candidate) => candidate.traceId));
+    for (const [agentIndex, agent] of snapshots.entries()) {
+      const memory = agent.social?.memory.entries ?? [];
+      for (const [memoryIndex, entry] of memory.entries()) {
+        if (entry.kind !== "reflection" && entry.reflection === undefined) continue;
+        const label = `trajectory[${index}].agents[${agentIndex}].social.memory.entries[${memoryIndex}].reflection`;
+        const record = isRecord(entry.reflection) ? entry.reflection : undefined;
+        if (!record) {
+          errors.push(`${label} must be a typed ReflectionRecord.`);
+          continue;
+        }
+        if (typeof record.id === "string" && record.id) {
+          const recordHash = hashStableState(entry);
+          const priorHash = seenReflectionHashes.get(record.id);
+          if (priorHash !== undefined) {
+            if (priorHash !== recordHash) errors.push(`${label} changed after its first recorded receipt boundary.`);
+            continue;
+          }
+          seenReflectionHashes.set(record.id, recordHash);
+        }
+        for (const field of Object.keys(record)) {
+          if (!["version", "id", "agentId", "createdAtTurn", "kind", "content", "evidenceRefs", "confidence", "visibility", "source"].includes(field)) {
+            errors.push(`${label}.${field} is not permitted in a ReflectionRecord.`);
+          }
+        }
+        if (record.version !== "harness.reflection.v1") errors.push(`${label}.version must be harness.reflection.v1.`);
+        if (record.agentId !== agent.playerId) errors.push(`${label}.agentId must match ${agent.playerId}.`);
+        if (typeof record.id !== "string" || !record.id) errors.push(`${label}.id must be non-empty.`);
+        if (!["memory_summary", "belief_revision", "strategy_update", "social_risk", "goal_revision"].includes(String(record.kind))) {
+          errors.push(`${label}.kind is invalid.`);
+        }
+        if (typeof record.content !== "string" || !record.content.trim()) errors.push(`${label}.content must be non-empty.`);
+        if (typeof record.confidence !== "number" || !Number.isFinite(record.confidence) || record.confidence < 0 || record.confidence > 1) {
+          errors.push(`${label}.confidence must be finite and within [0, 1].`);
+        }
+        if (!["private", "team", "postgame"].includes(String(record.visibility))) errors.push(`${label}.visibility is invalid.`);
+        if (!["policy", "reasoner", "evaluator", "human"].includes(String(record.source))) errors.push(`${label}.source is invalid.`);
+        if (entry.content !== record.content) errors.push(`${label} content does not match its memory entry.`);
+        if (entry.visibility !== record.visibility) errors.push(`${label} visibility does not match its memory entry.`);
+        if (entry.source !== record.source) errors.push(`${label} source does not match its memory entry.`);
+        if (hashStableState(entry.evidenceRefs) !== hashStableState(record.evidenceRefs)) {
+          errors.push(`${label} evidenceRefs do not match its memory entry.`);
+        }
+        const refs = Array.isArray(record.evidenceRefs) ? record.evidenceRefs.filter(isRecord) : [];
+        const outcomeRefs = refs.filter((ref) => ref.artifact === "outcome");
+        if (outcomeRefs.length !== 1) errors.push(`${label} must have exactly one committed outcome reference.`);
+        const outcomeRef = outcomeRefs[0];
+        const traceId = typeof outcomeRef?.traceId === "string" ? outcomeRef.traceId : undefined;
+        const nativeStep = traceId ? nativeStepByTrace.get(traceId) : undefined;
+        const inheritedParentTrace = Boolean(traceId && isForkParentTraceRef(artifact, traceId));
+        if (!traceId || (!boundaryTraces.has(traceId) && !inheritedParentTrace)) {
+          errors.push(`${label} references a future or unknown receipt trace.`);
+        }
+        if ((!nativeStep || nativeStep.commitStatus !== "committed") && !inheritedParentTrace) {
+          errors.push(`${label} must reference a committed native step.`);
+        }
+        if (nativeStep && nativeStep.actorId !== agent.playerId) errors.push(`${label} receipt actor does not match ${agent.playerId}.`);
+        if (nativeStep && record.createdAtTurn !== nativeStep.turnIndex) errors.push(`${label}.createdAtTurn must match the receipt turnIndex.`);
+        if (traceId) {
+          if (record.id !== `${agent.playerId}:reflection:${traceId}`) errors.push(`${label}.id does not match its receipt trace.`);
+          if (outcomeRef?.id !== `${traceId}:committed`) errors.push(`${label} outcome id does not match its committed receipt.`);
+        }
+        const metadata = isRecord(entry.metadata) ? entry.metadata : undefined;
+        if (!metadata) {
+          errors.push(`${label} memory metadata must be present.`);
+        } else {
+          for (const field of Object.keys(metadata)) {
+            if (!["version", "policyId", "receiptId", "traceId", "memoryRetrieval"].includes(field)) {
+              errors.push(`${label} memory metadata.${field} is not permitted.`);
+            }
+          }
+          if (metadata.version !== "harness.receipt-reflection.v1") errors.push(`${label} memory metadata.version is invalid.`);
+          if (typeof metadata.policyId !== "string" || !metadata.policyId) errors.push(`${label} memory metadata.policyId must be non-empty.`);
+          if (traceId && (metadata.receiptId !== `${traceId}:committed` || metadata.traceId !== traceId)) {
+            errors.push(`${label} memory metadata does not match its committed receipt.`);
+          }
+          if (traceId) validateMemoryRetrievalRecord(metadata.memoryRetrieval, `${label}.memoryRetrieval`, agent.playerId, traceId, errors);
+        }
+        if (traceId) {
+          const outcome = memory.find((candidate) => candidate.kind === "outcome" && candidate.evidenceRefs.some(
+            (ref) => ref.artifact === "outcome" && ref.traceId === traceId && ref.id === `${traceId}:committed`
+          ));
+          if (!outcome || outcome.seq >= entry.seq) errors.push(`${label} must follow its committed outcome memory.`);
+          const journal = agent.social?.journal?.entries.find((candidate) =>
+            candidate.mutationKind === "memory.appended" &&
+            candidate.traceId === traceId &&
+            isRecord(candidate.deltaSummary) &&
+            candidate.deltaSummary.appendedSeq === entry.seq
+          );
+          if (!journal) errors.push(`${label} is missing its receipt-bound memory journal mutation.`);
+        }
+      }
     }
   }
 }

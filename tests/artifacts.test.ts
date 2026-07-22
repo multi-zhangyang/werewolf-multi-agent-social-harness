@@ -1200,6 +1200,26 @@ describe("match artifact JSONL export", () => {
     expect(retrievalErrors).toMatch(/does not match turnTrace\.memoryRetrieval/);
     expect(retrievalErrors).toMatch(/must not persist raw memory content/);
 
+    const reflectionTamper = cloneJson(artifact);
+    const reflectionFrame = reflectionTamper.agentSnapshotFrames?.find((frame) =>
+      frame.agents.some((agent) => agent.social?.memory.entries.some((entry) => entry.kind === "reflection"))
+    );
+    const reflectionFrameTraces = new Set(
+      reflectionTamper.trajectory
+        .filter((step) => step.agentSnapshotFrameIdAfterStep === reflectionFrame?.frameId)
+        .map((step) => step.traceId)
+    );
+    const reflectionEntry = reflectionFrame?.agents
+      .flatMap((agent) => agent.social?.memory.entries ?? [])
+      .find((entry) => entry.kind === "reflection" && entry.reflection?.evidenceRefs.some(
+        (ref) => ref.artifact === "outcome" && ref.traceId !== undefined && reflectionFrameTraces.has(ref.traceId)
+      ));
+    if (!reflectionFrame || !reflectionEntry?.reflection) throw new Error("Expected a recorded receipt reflection.");
+    const oldReflectionFrameId = reflectionFrame.frameId;
+    reflectionEntry.reflection.confidence = 2;
+    retargetSnapshotFrameRefs(reflectionTamper, oldReflectionFrameId, reflectionFrame);
+    expect(validateMatchArtifactIntegrity(reflectionTamper).join("\n")).toMatch(/reflection\.confidence must be finite and within \[0, 1\]/i);
+
     const pendingEvidenceTamper = cloneJson(artifact);
     const inspectStep = pendingEvidenceTamper.socialEpisode.steps.find((step: any) =>
       step.commitStatus === "committed" && step.action.command.type === "seer.inspect"

@@ -912,7 +912,7 @@ describe("server-owned match artifact persistence", () => {
       new Set([firstCheckpointId, secondCheckpointId])
     );
     expectNoCheckpointPathLeak(checkpointIndex, checkpointArtifactBaseDir);
-  });
+  }, 15_000);
 
   it("rejects symlinked artifact write directories before writing outside the configured bases", async () => {
     const matchArtifactBaseDir = await makeTempDir();

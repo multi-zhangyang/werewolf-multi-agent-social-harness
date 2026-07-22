@@ -12,6 +12,30 @@ export interface EvidenceRef {
 
 export type MemoryVisibility = "private" | "team" | "public" | "postgame";
 
+export const REFLECTION_RECORD_VERSION = "harness.reflection.v1" as const;
+
+export type ReflectionKind = "memory_summary" | "belief_revision" | "strategy_update" | "social_risk" | "goal_revision";
+export type ReflectionVisibility = "private" | "team" | "postgame";
+export type ReflectionSource = "policy" | "reasoner" | "evaluator" | "human";
+
+/**
+ * Durable, evidence-bound reflection artifact. Reflection text is private
+ * actor memory by default; it never mutates beliefs, goals, relationships, or
+ * environment state merely by being recorded.
+ */
+export interface ReflectionRecord {
+  version: typeof REFLECTION_RECORD_VERSION;
+  id: string;
+  agentId: string;
+  createdAtTurn: number;
+  kind: ReflectionKind;
+  content: string;
+  evidenceRefs: EvidenceRef[];
+  confidence: number;
+  visibility: ReflectionVisibility;
+  source: ReflectionSource;
+}
+
 export interface SocialMemoryEntry<TObservation = unknown, TPending = unknown, TCommand = unknown> {
   seq: number;
   kind: "observation" | "message" | "decision" | "memo" | "reflection" | "action" | "outcome" | "commitment";
@@ -20,6 +44,7 @@ export interface SocialMemoryEntry<TObservation = unknown, TPending = unknown, T
   observation?: TObservation;
   pendingAction?: TPending;
   action?: SocialAction<TCommand>;
+  reflection?: ReflectionRecord;
   content?: string;
   salience: number;
   importance: number;
@@ -752,6 +777,7 @@ export function appendMemory<TObservation, TPending, TCommand>(
     observation: cloneJson(entry.observation),
     pendingAction: cloneJson(entry.pendingAction),
     action: cloneJson(entry.action),
+    reflection: cloneJson(entry.reflection),
     content: entry.content,
     salience: clamp01(entry.salience ?? 0.5),
     importance: clamp01(entry.importance ?? 0.5),
@@ -774,6 +800,7 @@ export function appendSocialMemory<TObservation, TPending, TCommand>(
   entry: Omit<Partial<SocialMemoryEntry<TObservation, TPending, TCommand>>, "seq" | "createdAt">,
   context?: SocialStateMutationContext
 ): SocialMemoryEntry<TObservation, TPending, TCommand> {
+  validateReflectionMemoryBinding(state, entry);
   const beforeCount = state.memory.entries.length;
   const beforeNextSeq = state.memory.nextSeq;
   const record = appendMemory(state.memory, entry);
@@ -801,6 +828,45 @@ export function appendSocialMemory<TObservation, TPending, TCommand>(
     }
   });
   return record;
+}
+
+function validateReflectionMemoryBinding<TObservation, TPending, TCommand>(
+  state: AgentSocialState<TObservation, TPending, TCommand>,
+  entry: Omit<Partial<SocialMemoryEntry<TObservation, TPending, TCommand>>, "seq" | "createdAt">
+): void {
+  if (entry.kind !== "reflection") {
+    if (entry.reflection !== undefined) throw new Error("Only reflection memory may carry a ReflectionRecord.");
+    return;
+  }
+  const reflection = entry.reflection;
+  if (!reflection) throw new Error("Reflection memory requires a typed ReflectionRecord.");
+  if (reflection.version !== REFLECTION_RECORD_VERSION) throw new Error(`ReflectionRecord.version must be ${REFLECTION_RECORD_VERSION}.`);
+  if (!reflection.id) throw new Error("ReflectionRecord.id must be non-empty.");
+  if (reflection.agentId !== state.agentId) throw new Error(`ReflectionRecord.agentId must match ${state.agentId}.`);
+  if (!Number.isInteger(reflection.createdAtTurn) || reflection.createdAtTurn < 0) {
+    throw new Error("ReflectionRecord.createdAtTurn must be a non-negative integer.");
+  }
+  if (!["memory_summary", "belief_revision", "strategy_update", "social_risk", "goal_revision"].includes(reflection.kind)) {
+    throw new Error("ReflectionRecord.kind is invalid.");
+  }
+  if (typeof reflection.content !== "string" || !reflection.content.trim()) throw new Error("ReflectionRecord.content must be non-empty.");
+  if (!Number.isFinite(reflection.confidence) || reflection.confidence < 0 || reflection.confidence > 1) {
+    throw new Error("ReflectionRecord.confidence must be finite and within [0, 1].");
+  }
+  if (!["private", "team", "postgame"].includes(reflection.visibility)) throw new Error("ReflectionRecord.visibility is invalid.");
+  if (!["policy", "reasoner", "evaluator", "human"].includes(reflection.source)) throw new Error("ReflectionRecord.source is invalid.");
+  if (!reflection.evidenceRefs.length || !reflection.evidenceRefs.some((ref) => ref.artifact === "outcome" && ref.traceId)) {
+    throw new Error("ReflectionRecord requires committed outcome evidence.");
+  }
+  if (entry.content !== reflection.content) throw new Error("Reflection memory content must match its ReflectionRecord.");
+  if ((entry.visibility ?? "private") !== reflection.visibility) throw new Error("Reflection memory visibility must match its ReflectionRecord.");
+  if ((entry.source ?? "agent") !== reflection.source) throw new Error("Reflection memory source must match its ReflectionRecord.");
+  if (JSON.stringify(entry.evidenceRefs ?? []) !== JSON.stringify(reflection.evidenceRefs)) {
+    throw new Error("Reflection memory evidenceRefs must match its ReflectionRecord.");
+  }
+  if (state.memory.entries.some((candidate) => candidate.reflection?.id === reflection.id)) {
+    throw new Error(`Duplicate ReflectionRecord.id ${reflection.id}.`);
+  }
 }
 
 export function retrieveMemory<TObservation, TPending, TCommand>(
@@ -1925,7 +1991,11 @@ function summarizeMemoryEntry<TObservation, TPending, TCommand>(
     pendingActionKind: kindOfObject(entry.pendingAction),
     actionKind: entry.action?.kind,
     commandType: kindOfObject(entry.action?.command),
-    metadataKeys: metadataKeys(entry.metadata)
+    metadataKeys: metadataKeys(entry.metadata),
+    reflectionId: entry.reflection?.id,
+    reflectionKind: entry.reflection?.kind,
+    reflectionSource: entry.reflection?.source,
+    reflectionConfidence: entry.reflection?.confidence
   };
 }
 

@@ -98,8 +98,8 @@ Additional user preferences:
 - The user rejects making the LLM return JSON as the definition of an agent.
 - The user wants multi-agent adversarial society design first; Werewolf is the presentation/domain.
 - Real model calls must use streaming to reduce timeout risk.
-- The env file is configured for the OpenAI-compatible endpoint and the live
-  model set `kimi-k2.7`, `deepseek-v4-flash`, and `minimax-m3`; do not ask the
+- The env file is configured for the OpenAI-compatible endpoint and the sole
+  live validation model `poolside/laguna-s-2.1:free`; do not ask the
   user for the key again unless calls fail due to authentication or
   connectivity.
 - For large research or implementation tasks, use parallel subagents when allowed by the current tool policy and when the work can be split cleanly.
@@ -209,8 +209,8 @@ Treat the following as persistent project assumptions unless validation proves
 otherwise:
 
 ```text
-LLM_CHAT_COMPLETIONS_URL=https://llm.kimchi.dev/openai/v1/chat/completions
-LLM_MODELS=kimi-k2.7,deepseek-v4-flash,minimax-m3
+LLM_CHAT_COMPLETIONS_URL=https://api.2go.live/v1/chat/completions
+LLM_MODELS=poolside/laguna-s-2.1:free
 LLM_STREAM=true
 ```
 
@@ -484,8 +484,8 @@ Subagent execution detail:
 Live API detail:
 
 - Configured endpoint variable: `LLM_CHAT_COMPLETIONS_URL`.
-- Configured model variable: `LLM_MODELS`, currently expected to include
-  `kimi-k2.7`, `deepseek-v4-flash`, and `minimax-m3`.
+- Configured model variable: `LLM_MODELS`, currently restricted to
+  `poolside/laguna-s-2.1:free` for live validation.
 - Configured stream flag: `LLM_STREAM=true`.
 - The API key belongs only in local env files and must never be copied into
   docs, test fixtures, final answers, issue text, screenshots, frontend payloads,
@@ -705,8 +705,8 @@ Repository policy:
 - Live model decisions use OpenAI-compatible chat-completions with
   `stream: true`.
 - The configured endpoint is represented by `LLM_CHAT_COMPLETIONS_URL`.
-- The configured model list is represented by `LLM_MODELS`; current validated
-  live models include `kimi-k2.7`, `deepseek-v4-flash`, and `minimax-m3`.
+- The configured model list is represented by `LLM_MODELS`; the current
+  user-selected live validation model is `poolside/laguna-s-2.1:free`.
 - The stream flag is represented by `LLM_STREAM=true`.
 - Do not send `max_tokens`, `max_completion_tokens`, or equivalent max-token
   fields on live provider requests unless a later explicit user instruction
@@ -1080,8 +1080,8 @@ asked that it be treated as persistent local runtime configuration.
 Persistent non-secret values:
 
 ```text
-LLM_CHAT_COMPLETIONS_URL=https://llm.kimchi.dev/openai/v1/chat/completions
-LLM_MODELS=kimi-k2.7,deepseek-v4-flash,minimax-m3
+LLM_CHAT_COMPLETIONS_URL=https://api.2go.live/v1/chat/completions
+LLM_MODELS=poolside/laguna-s-2.1:free
 LLM_STREAM=true
 ```
 
@@ -4597,13 +4597,13 @@ npm run arena:match -- --maxTransitions=1 --timeout=1s --json=summary
 Real API smoke when changing model/reasoner behavior:
 
 ```bash
-npm run agent:probe -- --models=kimi-k2.7 --timeout=90s
+npm run agent:probe -- --models=poolside/laguna-s-2.1:free --timeout=90s
 ```
 
 Bounded real match:
 
 ```bash
-npm run arena:match -- --models=kimi-k2.7 --maxTransitions=4 --timeout=120s --json=summary
+npm run arena:match -- --models=poolside/laguna-s-2.1:free --maxTransitions=4 --timeout=120s --json=summary
 ```
 
 Tournament smoke:
@@ -4671,8 +4671,8 @@ When using LLM APIs:
 - do not use fake fallback for real harness validation
 - record latency, usage, provider request id, attempts, and errors
 - read provider config from `.env` / `.env.local`
-- default live model set is `kimi-k2.7`, `deepseek-v4-flash`, and `minimax-m3`
-  unless profile/config explicitly says otherwise
+- the sole default live validation model is `poolside/laguna-s-2.1:free`
+  unless the user explicitly changes it later
 - call the OpenAI-compatible chat completions endpoint with `stream: true` for
   real model decisions
 - use explicit timeouts and bounded retries
@@ -6716,8 +6716,8 @@ Acceptance:
 The configured provider details that may be documented are:
 
 ```text
-LLM_CHAT_COMPLETIONS_URL=https://llm.kimchi.dev/openai/v1/chat/completions
-LLM_MODELS=kimi-k2.7,deepseek-v4-flash,minimax-m3
+LLM_CHAT_COMPLETIONS_URL=https://api.2go.live/v1/chat/completions
+LLM_MODELS=poolside/laguna-s-2.1:free
 LLM_STREAM=true
 ```
 
@@ -26629,3 +26629,73 @@ serial deterministic suite, typecheck, production build, and whitespace check
 all passed. No real provider call was run or claimed: this slice changes only
 recorded artifact/replay validation and has no reasoner, provider, model, or
 Werewolf-rule behavior change.
+
+## 13.278 Receipt-Gated Typed Reflection And Laguna Live Validation Lock
+
+Timestamp: `2026-07-22`
+
+The generic agent scaffold now supports typed reflection as a committed actor
+artifact rather than prompt residue or a second model-owned state store.
+
+- `ReflectionRecord` is versioned as `harness.reflection.v1` and remains an
+  entry in the existing private social memory and mutation journal.
+- The optional synchronous `receiptReflectionPolicy` runs only after a
+  committed environment receipt and after the sanitized outcome memory has
+  been written. It receives cloned actor/social state, a receipt projection
+  that excludes raw `info`, and deterministic recall whose persisted evidence
+  contains no recalled content.
+- The policy can draft only kind, text, and confidence. The harness owns the
+  deterministic id, actor, turn, private visibility, source, committed outcome
+  evidence, retrieval metadata, and journal context. It cannot emit a command,
+  message, arbitrary evidence, provider payload, or environment mutation.
+- Rejected, abandoned, duplicate, and unstaged receipts do not invoke the
+  policy. A policy failure is surfaced through the existing safe actor-feedback
+  failure boundary only after the authoritative outcome and durable actor state
+  have committed; the original exception text is not persisted.
+- Werewolf explicitly enables the generic deterministic baseline. Reflection
+  is written before its derived `socialStateHash` refresh, so recorded actor
+  snapshots, compacted frames, checkpoints, and forks all retain it.
+- Replay does not construct an actor or rerun the policy. Match artifact
+  integrity validates newly recorded reflection schema, actor, trace, turn,
+  committed outcome, closed metadata, content-free retrieval, memory ordering,
+  journal binding, and later immutability. Fork-parent reflections are retained
+  through recorded provenance.
+- Evaluation adds only `reflectionEntries` and `outcomeEntries` diagnostic
+  counts to the existing zero-weight social memory metric/summary. It makes no
+  claim that a reflection improved strategy or caused an outcome.
+
+The newest user-selected live configuration supersedes older historical model
+locks for future validation:
+
+```text
+LLM_CHAT_COMPLETIONS_URL=https://api.2go.live/v1/chat/completions
+LLM_MODELS=poolside/laguna-s-2.1:free
+LLM_STREAM=true
+```
+
+No provider- or model-specific adapter, parser, prompt, branch, fallback, or
+special-case was added. The ordinary OpenAI-compatible streaming path was used.
+
+Validation completed:
+
+```bash
+npm run typecheck
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npm run test:e2e
+npm run agent:probe -- --models=poolside/laguna-s-2.1:free --timeout=90s
+npm run arena:match -- --models=poolside/laguna-s-2.1:free \
+  --maxTransitions=2 --timeout=180s --json=summary
+git diff --check
+```
+
+The complete deterministic suite passed **45 files / 485 tests**. Production
+build passed with only the existing Vite chunk-size warning, and the fixture
+Cockpit E2E suite passed **13/13**. The real bounded
+streaming probe passed **1/1**: the provider stream completed through its stop
+event, the local adapter parsed it, policy/arbitration selected a typed action,
+and the environment validated it. The bounded real match completed with
+`ok: true`, **2/2 committed native steps**, `harnessErrors: 0`, one real model
+turn, and the expected `maxTransitions=2` truncation rather than failure. Both
+live validations used only `poolside/laguna-s-2.1:free`.

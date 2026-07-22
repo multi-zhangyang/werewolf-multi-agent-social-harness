@@ -38,7 +38,9 @@ import { SocialCommunicationBus } from "./social";
 import { runHarnessEpisode } from "./runner";
 import {
   createScaffoldedActor,
+  createDeterministicReceiptReflectionPolicy,
   recordCommittedReceiptOutcome,
+  recordCommittedReceiptReflection,
   type AgentDecisionInput,
   type AgentPolicy,
   type AgentReasoner,
@@ -553,6 +555,19 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
     // final durable actor snapshot.
     if (!stagedActor.state.social) throw new Error(`Werewolf social actor ${this.id} is missing social state after commit.`);
     recordCommittedReceiptOutcome(stagedActor.state.social, receipt);
+    recordCommittedReceiptReflection({
+      agentId: this.id,
+      state: stagedActor.state,
+      social: stagedActor.state.social,
+      receipt,
+      policy: createDeterministicReceiptReflectionPolicy<
+        PlayerView,
+        WerewolfSocialPendingAction,
+        GameCommand,
+        AgentHarnessState
+      >(),
+      cloneState: cloneJson
+    });
     stagedActor.state.socialStateHash = hashStableState(stagedActor.state.social);
     replaceAgentHarnessState(this.options.actor.state, stagedActor.state);
   }
@@ -684,6 +699,12 @@ function createScaffoldedWerewolfActor(input: {
     profile: input.profile,
     policy,
     reasoner,
+    receiptReflectionPolicy: createDeterministicReceiptReflectionPolicy<
+      WerewolfSocialObservation,
+      WerewolfSocialPendingAction,
+      GameCommand,
+      AgentHarnessState
+    >(),
     initialCanonicalState: cloneJson(input.initialState),
     canonicalStateAdapter: stateAdapter
   });

@@ -419,6 +419,7 @@ Generic contract:
 
 ```ts
 interface ReflectionRecord {
+  version: "harness.reflection.v1";
   id: string;
   agentId: string;
   createdAtTurn: number;

@@ -338,6 +338,134 @@ describe("scaffolded social actor", () => {
     });
   });
 
+  it("records a typed private reflection only after a committed receipt using cloned, content-safe input", async () => {
+    let calls = 0;
+    let sawOutcomeInRecall = false;
+    const actor = createScaffoldedActor<TestObservation, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      policy: policyFor("a"),
+      receiptReflectionPolicy: {
+        id: "test-receipt-reflection",
+        reflect(input) {
+          calls += 1;
+          sawOutcomeInRecall = input.memoryRetrieval.selected.some((entry) => entry.kind === "outcome");
+          expect("info" in input.receipt).toBe(false);
+          input.agent.observations = 999;
+          input.social.memory.entries[0]!.tags.push("clone-mutation-attempt");
+          input.recalledMemory[0]!.content = "clone-mutation-attempt";
+          input.memoryRetrieval.selected[0]!.tags.push("clone-mutation-attempt");
+          return { kind: "memory_summary", content: "Controlled committed receipt summary.", confidence: 0.75 };
+        }
+      }
+    });
+    const pending: TestPending = { actorId: "a", kind: "vote" };
+    const context = (traceId: string, transactionId: string) => ({
+      traceId,
+      transactionId,
+      transactional: true as const,
+      turnIndex: 4,
+      batchId: transactionId,
+      batchIndex: 1,
+      batchSize: 1,
+      schedulerMode: "aec" as const,
+      pendingAction: structuredClone(pending)
+    });
+
+    actor.observe({ turn: 3 }, context("reflection-rejected", "reflection-rejected-tx"));
+    await actor.decide(pending);
+    actor.onStepResult({
+      id: "reflection-rejected:rejected",
+      status: "rejected",
+      traceId: "reflection-rejected",
+      transactionId: "reflection-rejected-tx",
+      turnIndex: 4,
+      actorId: "a",
+      pendingAction: pending
+    });
+    expect(calls).toBe(0);
+    expect(actor.state.social.memory.entries).toEqual([]);
+
+    actor.observe({ turn: 4 }, context("reflection-committed", "reflection-committed-tx"));
+    const action = await actor.decide(pending);
+    actor.onStepResult({
+      id: "reflection-committed:committed",
+      status: "committed",
+      traceId: "reflection-committed",
+      transactionId: "reflection-committed-tx",
+      turnIndex: 4,
+      actorId: "a",
+      pendingAction: pending,
+      action,
+      info: { privateProviderPayload: "REFLECTION_INFO_SECRET_SENTINEL" }
+    });
+
+    expect(calls).toBe(1);
+    expect(sawOutcomeInRecall).toBe(true);
+    expect(actor.state.observations).toBe(1);
+    expect(JSON.stringify(actor.state)).not.toContain("REFLECTION_INFO_SECRET_SENTINEL");
+    expect(JSON.stringify(actor.state)).not.toContain("clone-mutation-attempt");
+    expect(actor.state.social.memory.entries.map((entry) => entry.kind)).toEqual(["observation", "decision", "outcome", "reflection"]);
+    const reflection = actor.state.social.memory.entries.at(-1)!;
+    expect(reflection).toMatchObject({
+      kind: "reflection",
+      source: "policy",
+      visibility: "private",
+      content: "Controlled committed receipt summary.",
+      reflection: {
+        version: "harness.reflection.v1",
+        id: "a:reflection:reflection-committed",
+        agentId: "a",
+        createdAtTurn: 4,
+        kind: "memory_summary",
+        confidence: 0.75,
+        visibility: "private",
+        source: "policy"
+      }
+    });
+    expect(reflection.reflection?.evidenceRefs).toEqual(reflection.evidenceRefs);
+  });
+
+  it("commits durable outcome state before surfacing a safe receipt-reflection failure", async () => {
+    const actor = createScaffoldedActor<TestObservation, TestPending, TestCommand>({
+      id: "a",
+      profile,
+      policy: policyFor("a"),
+      receiptReflectionPolicy: {
+        id: "failing-receipt-reflection",
+        reflect() {
+          throw new Error("PRIVATE_REFLECTION_FAILURE_SENTINEL");
+        }
+      }
+    });
+    const pending: TestPending = { actorId: "a", kind: "vote" };
+    actor.observe({ turn: 5 }, {
+      traceId: "reflection-failure",
+      transactionId: "reflection-failure-tx",
+      transactional: true,
+      turnIndex: 5,
+      batchId: "reflection-failure-batch",
+      batchIndex: 1,
+      batchSize: 1,
+      schedulerMode: "aec",
+      pendingAction: pending
+    });
+    const action = await actor.decide(pending);
+    expect(() => actor.onStepResult({
+      id: "reflection-failure:committed",
+      status: "committed",
+      traceId: "reflection-failure",
+      transactionId: "reflection-failure-tx",
+      turnIndex: 5,
+      actorId: "a",
+      pendingAction: pending,
+      action
+    })).toThrow(/safe policy boundary/);
+    expect(actor.state).toMatchObject({ observations: 1, decisions: 1, lastAction: action });
+    expect(actor.state.social.memory.entries.at(-1)?.kind).toBe("outcome");
+    expect(JSON.stringify(actor.state)).not.toContain("PRIVATE_REFLECTION_FAILURE_SENTINEL");
+  });
+
   it("provides deterministic cloned recall to scaffold policy and reasoner without granting store mutation", async () => {
     let reasonerRecallSeqs: number[] = [];
     let policyRecallSeqs: number[] = [];
