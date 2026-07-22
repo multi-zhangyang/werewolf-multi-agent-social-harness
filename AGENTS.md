@@ -27287,3 +27287,62 @@ is intentionally lifecycle-truncated and is not a provider or harness failure.
 Only `cohere/north-mini-code:free` was used for live validation. No
 model/provider-name adapter, parser, prompt branch, retry branch, fallback, or
 token-limit request field was added.
+
+## 13.287 Redacted Action-Arbitration Projection And Cockpit Lock
+
+Timestamp: `2026-07-22`
+
+The canonical action-arbitration artifact remains private execution evidence.
+Its candidate ids can encode legal target identity, and its target arrays,
+reasons, evidence refs, contribution details, metadata, and future action hashes
+can reveal or make actor-private decision state brute-forceable. Therefore a
+`postgame-redacted` response must never expose the canonical
+`AgentActionArbitrationSummary` by object spread.
+
+The server now projects a separate content-free arbitration summary through the
+existing match-artifact view boundary:
+
+- Candidate ids, social target ids, reasons, evidence refs, score-contribution
+  details, metadata, policy ids, raw arbitrator ids, selection reasons, and
+  selection evidence are omitted.
+- Candidates receive only a local ordinal, allowlisted source category, bounded
+  action kind, selected flag, finite aggregate scores, and counts for messages,
+  evidence, and score contributions.
+- Arbitrator and decision-rule values are reduced to the known default or a
+  generic `custom` category.
+- The selected candidate is represented by its local ordinal/source, never its
+  canonical id.
+- `truth-redacted` still omits the complete private trajectory. Full canonical
+  arbitration remains available only through the explicit local-only full
+  artifact path.
+
+The existing `AgentDecisionEvidencePanel` consumes this safe DTO and renders a
+compact candidate comparison surface. It shows policy/reasoner provenance,
+selection, aggregate scores, evidence/message/contribution counts, and the
+environment receipt while explicitly labeling targets, reasons, and evidence
+ids as redacted. The browser does not re-run arbitration, infer candidate
+targets, or read full artifacts.
+
+`TrajectoryJsonlStepSource` continues to model a rendered export surface rather
+than replay authority. It omits canonical action-arbitration typing because a
+server-redacted trajectory carries the safe DTO and the current line-oriented
+`step` record does not serialize arbitration. Canonical replay and artifact
+validation continue to consume `HarnessStepRecord`, not this rendering type.
+
+Validation recorded:
+
+```bash
+npm run typecheck
+npx vitest run tests/agentDecisionEvidencePanel.test.ts \
+  tests/serverPublicViewApi.test.ts --maxWorkers=1 --no-file-parallelism \
+  --testTimeout=60000 --hookTimeout=60000 --teardownTimeout=60000 \
+  --reporter=dot
+npm run build
+npx playwright test --config=playwright.config.ts
+git diff --check
+```
+
+The focused projection/UI group passed **2 files / 28 tests**. Production build
+passed with only the existing Vite chunk-size warning. The fixture cockpit
+passed **14/14**. This slice did not change model/reasoner behavior, so it did
+not repeat an external provider call.

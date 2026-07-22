@@ -39,7 +39,44 @@ describe("agent decision evidence projection", () => {
         completionTokens: 20,
         providerRequestId: "must-not-render"
       },
-      turnTrace: { privateMemo: "must-not-render" }
+      turnTrace: { privateMemo: "must-not-render" },
+      actionArbitration: {
+        version: "agent.action-arbitration.v1",
+        arbitrator: "default-score-arbitrator",
+        candidateCount: 2,
+        decisionRule: "highest_final_score_then_candidate_id",
+        selectedCandidateOrdinal: 1,
+        selectedCandidateSource: "reasoner",
+        selectedCandidateId: "candidate-secret-id",
+        candidates: [
+          {
+            ordinal: 0,
+            source: "policy",
+            kind: "inspect",
+            selected: false,
+            baseScore: 0.6,
+            finalScore: 0.6,
+            scoreContributionCount: 0,
+            evidenceCount: 2,
+            messageCount: 0,
+            id: "policy-target-p2",
+            reasons: ["private-candidate-reason"]
+          },
+          {
+            ordinal: 1,
+            source: "reasoner",
+            kind: "inspect",
+            selected: true,
+            baseScore: 0.9,
+            finalScore: 0.9,
+            scoreContributionCount: 1,
+            evidenceCount: 2,
+            messageCount: 0,
+            id: "reasoner-target-p3",
+            evidenceRefs: [{ id: "private-receipt-id" }]
+          }
+        ]
+      }
     } as unknown as RedactedHarnessStepDto;
 
     const view = buildAgentDecisionEvidenceView(native, legacy);
@@ -50,11 +87,30 @@ describe("agent decision evidence projection", () => {
       pendingKind: "seer.inspect",
       proposal: { commandType: "seer.inspect", messageDraftCount: 2 },
       policy: { name: "balanced", confidence: 0.8, strategyTags: ["evidence-led"] },
+      arbitration: {
+        candidateCount: 2,
+        selectedCandidateOrdinal: 1,
+        selectedCandidateSource: "reasoner",
+        candidates: [
+          { ordinal: 0, source: "policy", selected: false, finalScore: 0.6 },
+          { ordinal: 1, source: "reasoner", selected: true, finalScore: 0.9 }
+        ]
+      },
       cognition: { source: "reasoner", model: "model-a", latencyMs: 123, promptTokens: 10, completionTokens: 20 },
       receipt: { status: "committed", decisionStateHash: "decision-hash" }
     });
     const serialized = JSON.stringify(view);
-    for (const privateValue of ["must-not-render", "p2", "private", "providerRequestId", "infosByAgent"]) {
+    for (const privateValue of [
+      "must-not-render",
+      "p2",
+      "private-candidate-reason",
+      "candidate-secret-id",
+      "policy-target-p2",
+      "reasoner-target-p3",
+      "private-receipt-id",
+      "providerRequestId",
+      "infosByAgent"
+    ]) {
       expect(serialized).not.toContain(privateValue);
     }
   });

@@ -279,6 +279,14 @@ describe("public match API redaction", () => {
         agent.social.memory.entries.every((entry: any) => !entry.content || entry.content === "[REDACTED private memory]")
       )
     ).toBe(true);
+    const rawCandidateIds = record.artifact!.trajectory.flatMap((step) =>
+      step.actionArbitration?.candidates.map((candidate) => candidate.id) ?? []
+    );
+    expect(rawCandidateIds.length).toBeGreaterThan(0);
+    const projectedArbitrationJson = JSON.stringify(
+      projected.body.trajectory.map((step: any) => step.actionArbitration)
+    );
+    for (const candidateId of rawCandidateIds) expect(projectedArbitrationJson).not.toContain(candidateId);
     for (const step of projected.body.trajectory) {
       expect(Object.keys(step.pendingAction).sort()).toEqual(
         expect.arrayContaining(["actorId", "kind", "phase", "redacted"])
@@ -302,6 +310,38 @@ describe("public match API redaction", () => {
       expect(step.turnTrace).not.toHaveProperty("retryHistory");
       expect(step.turnTrace).not.toHaveProperty("stream");
       expect(step.turnTrace).not.toHaveProperty("memoryRetrieval");
+      expect(step.actionArbitration).toMatchObject({
+        version: "agent.action-arbitration.v1",
+        candidateCount: expect.any(Number),
+        selectedCandidateOrdinal: expect.any(Number),
+        selectedCandidateSource: expect.any(String),
+        candidates: expect.any(Array)
+      });
+      expect(step.actionArbitration).not.toHaveProperty("actorId");
+      expect(step.actionArbitration).not.toHaveProperty("policyId");
+      expect(step.actionArbitration).not.toHaveProperty("arbitratorId");
+      expect(step.actionArbitration).not.toHaveProperty("selectedCandidateId");
+      expect(step.actionArbitration).not.toHaveProperty("selectionReason");
+      expect(step.actionArbitration).not.toHaveProperty("selectionEvidenceRefs");
+      expect(step.actionArbitration.candidates.filter((candidate: any) => candidate.selected)).toHaveLength(1);
+      for (const candidate of step.actionArbitration.candidates) {
+        expect(candidate).toEqual(expect.objectContaining({
+          ordinal: expect.any(Number),
+          source: expect.any(String),
+          kind: expect.any(String),
+          selected: expect.any(Boolean),
+          scoreContributionCount: expect.any(Number),
+          evidenceCount: expect.any(Number),
+          messageCount: expect.any(Number)
+        }));
+        expect(candidate).not.toHaveProperty("id");
+        expect(candidate).not.toHaveProperty("socialTargetIds");
+        expect(candidate).not.toHaveProperty("reasons");
+        expect(candidate).not.toHaveProperty("evidenceRefs");
+        expect(candidate).not.toHaveProperty("scoreContributions");
+        expect(candidate).not.toHaveProperty("metadata");
+        expect(candidate).not.toHaveProperty("actionHash");
+      }
     }
     expect(JSON.stringify(projected.body)).not.toContain("memoryRetrieval");
     for (const step of projected.body.socialEpisode.steps) {
