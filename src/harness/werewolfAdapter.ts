@@ -9,6 +9,7 @@ import {
   type WerewolfAgentObserveContext
 } from "./actor";
 import { hashStableState } from "./hash";
+import type { SocialDomainAdapterManifest } from "./domainAdapter";
 import { attachSpeech, planAction, policyForRole } from "./policy";
 import type {
   SocialAction,
@@ -74,6 +75,37 @@ import { WerewolfEnvironment } from "./environment";
 import { buildWerewolfHarnessRunResultFromParts } from "./werewolfResult";
 
 export const WEREWOLF_SYSTEM_ACTOR_ID = "system";
+
+/**
+ * Safe, versioned provenance for the first domain adapter. The hashes cover
+ * only public semantic descriptors; they intentionally exclude model setup,
+ * prompts, provider data, player secrets, and closure source text.
+ */
+export function createWerewolfSocialDomainAdapterManifest(
+  rulesetId: GameState["config"]["rulesetId"]
+): SocialDomainAdapterManifest {
+  const component = (kind: SocialDomainAdapterManifest["components"][number]["kind"], id: string, descriptor: unknown) => ({
+    kind,
+    id,
+    version: "1",
+    semanticHash: hashStableState(descriptor)
+  });
+  const components = [
+    component("agent_state_schema", "werewolf.agent-harness-state", { version: 2, stores: ["memory", "beliefs", "social", "outcome"] }),
+    component("command_codec", "werewolf.game-command", { version: 1, rulesetId }),
+    component("environment", "werewolf.social-environment", { version: 1, rulesetId }),
+    component("observation_projection", "werewolf.player-view", { version: 1, scoped: true }),
+    component("scheduler", "werewolf.joint-phase-scheduler", { version: 1, supported: ["aec-batched-decision", "parallel"] })
+  ] as const;
+  return {
+    schemaVersion: "harness.domain-adapter.v1",
+    domainId: "werewolf",
+    adapterId: "werewolf.social",
+    adapterVersion: "1",
+    semanticHash: hashStableState({ adapter: "werewolf.social", version: 1, rulesetId, components }),
+    components
+  };
+}
 
 export const WEREWOLF_SYSTEM_PROFILE: SocialAgentProfile = {
   id: WEREWOLF_SYSTEM_ACTOR_ID,
@@ -1015,6 +1047,7 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
   const artifact = await runHarnessEpisode({
     id: options.id ?? initialState.id,
     domainId: "werewolf",
+    domainAdapter: createWerewolfSocialDomainAdapterManifest(initialState.config.rulesetId),
     environment: WerewolfSocialEnvironment.fromState(initialState),
     actors,
     channels,

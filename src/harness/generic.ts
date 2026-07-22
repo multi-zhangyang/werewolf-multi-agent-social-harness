@@ -38,6 +38,17 @@ export type {
   SocialCheckpointRuntimeAdapter
 } from "./checkpointRuntime";
 export {
+  cloneSocialDomainAdapterManifest,
+  compareSocialDomainAdapterManifests,
+  validateSocialDomainAdapterManifest,
+  SOCIAL_DOMAIN_ADAPTER_MANIFEST_VERSION
+} from "./domainAdapter";
+export type {
+  SocialDomainAdapterComponentKind,
+  SocialDomainAdapterComponentManifest,
+  SocialDomainAdapterManifest
+} from "./domainAdapter";
+export {
   countSocialStepCommits,
   countSocialStepCommitsByActor,
   deriveSocialExposureRecords,

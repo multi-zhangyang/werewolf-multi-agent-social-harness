@@ -42,8 +42,8 @@ they are never smuggled into `GameState.events`.
 | Policy and arbitration | `planAction()`, `PolicyPlan`, typed `GameCommand` | Proposes a typed candidate; the environment remains the final legality authority. |
 | Reasoner | `HarnessReasoner`, model client adapters | May produce speech or a private tactical memo and telemetry; owns no environment or agent-state mutation authority. |
 | Communication | `SocialCommunicationBus`, `SocialChannel`, `SocialMessage` | Validates message envelopes before the environment transition and publishes them after a successful transition. |
-| Native artifact | `SocialEpisodeArtifact`, `SocialHarnessStep` | Records system/player steps, commit status, hashes, message/event ranges, traces, and structured failures. |
-| Generic artifact/checkpoint core | `episodeArtifacts.ts`, `HarnessEpisodeArtifactEnvelope`, `HarnessCheckpointEnvelope` | Owns domain-neutral snapshot, hash, batch-boundary, actor-snapshot, and parent-lineage invariants. It receives a domain replay factory and never calls a model. |
+| Native artifact | `SocialEpisodeArtifact`, `SocialHarnessStep`, `SocialDomainAdapterManifest` | Records system/player steps, commit status, hashes, message/event ranges, traces, structured failures, and safe versioned domain-adapter provenance. |
+| Generic artifact/checkpoint core | `episodeArtifacts.ts`, `HarnessEpisodeArtifactEnvelope`, `HarnessCheckpointEnvelope` | Owns domain-neutral snapshot, hash, batch-boundary, actor-snapshot, adapter-binding, and parent-lineage invariants. It receives a domain replay factory and never calls a model. |
 | Domain artifact | `GameState.events`, `MatchArtifact.events` | Records domain events only. |
 | Evaluation | evaluator registry, `MatchMetrics`, evidence refs | Derives results from domain truth and native execution evidence, never model self-report alone. |
 | UI/API | server projections and React cockpit | Consume recorded truth; they do not create hidden roles, transitions, or replay truth. |
@@ -72,11 +72,19 @@ HarnessCheckpointEnvelope<TState, TAgent, TObservation, TPending, TCommand>
   + TState + durable TAgent[] + committed execution prefix
 ```
 
+For new adapter-bound executions, `SocialDomainAdapterManifest` serializes a
+safe domain id, adapter id/version, semantic digest, and canonical provenance
+for the environment, command codec, observation projection, scheduler, and
+agent-state schema. It deliberately excludes function source, prompts,
+credentials, endpoints, provider diagnostics, and private state. Legacy
+artifacts that predate this contract remain explicitly readable, but cannot be
+retroactively claimed as adapter-bound.
+
 The generic validator verifies state, execution-prefix, actor, channel, and
-message hashes; sequence and batch-boundary consistency; and generic parent
-provenance. `validateHarnessCheckpointReplay()` receives a domain-owned,
-deterministic replay function. It does not construct an actor, policy,
-reasoner, model client, or provider request.
+message hashes; sequence and batch-boundary consistency; adapter identity;
+and generic parent provenance. `validateHarnessCheckpointReplay()` receives a
+domain-owned, deterministic replay function. It does not construct an actor,
+policy, reasoner, model client, or provider request.
 
 `MatchArtifact` and `HarnessCheckpoint` are Werewolf specializations of these
 envelopes. They add seed/config/assignment, Werewolf events and evaluation,
@@ -329,7 +337,9 @@ deterministic playback. Playback:
    steps while checking that they changed neither domain state, event range,
    nor messages;
 5. uses `stepBatch()` for a recorded atomic parallel batch;
-6. verifies pre/post state hashes, domain event ranges, message ranges and
+6. for an adapter-bound artifact, exact-matches the supplied replay runtime
+   manifest before calling `environment.step()` or `stepBatch()`;
+7. verifies pre/post state hashes, domain event ranges, message ranges and
    envelopes, final state hash, and final message hash.
 
 Playback constructs no actors and invokes no policy, reasoner, or provider.
@@ -352,8 +362,10 @@ provenance and divergence evidence. New checkpoints use
 explicit system/committed/rejected steps, scoped channel topology, committed
 message prefix, domain state, actor snapshots, batch-safe boundary, and
 content hashes. Fork provenance uses native boundary turn/trace, execution
-prefix, channel, message, state, and actor hashes. It does not reinterpret a
-legacy trajectory length as a native scheduler position.
+prefix, channel, message, state, actor, and adapter hashes. A checkpoint
+runtime must exact-match the recorded adapter manifest before verifier,
+environment factory, or actor restoration work starts. It does not reinterpret
+a legacy trajectory length as a native scheduler position.
 
 This terminology intentionally avoids calling model/API re-execution
 "deterministic replay." New model calls always create a rerun or fork, never a

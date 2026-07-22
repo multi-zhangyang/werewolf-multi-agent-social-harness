@@ -1,5 +1,11 @@
 import { hashStableState } from "./hash";
 import {
+  cloneSocialDomainAdapterManifest,
+  compareSocialDomainAdapterManifests,
+  validateSocialDomainAdapterManifest,
+  type SocialDomainAdapterManifest
+} from "./domainAdapter";
+import {
   isSocialParallelJointStep,
   isSocialStepCommitted,
   validateSocialParallelBatchLayout,
@@ -38,6 +44,8 @@ export interface GenericForkProvenance<TCheckpointArtifactVersion extends string
   parentMessagesHash: string;
   parentNativeStepCount: number;
   parentMessageCount: number;
+  /** Same safe adapter identity recorded by the parent checkpoint, when present. */
+  parentDomainAdapter?: SocialDomainAdapterManifest;
   createdAt: string;
   reason?: string;
 }
@@ -113,6 +121,8 @@ export interface HarnessCheckpointSource {
   agentsHash: string;
   channelsHash: string;
   messagesHash: string;
+  /** Mirrors executionPrefix.domainAdapter for adapter-bound checkpoints. */
+  domainAdapter?: SocialDomainAdapterManifest;
   agentSnapshotFrameId?: string;
   failureReason?: string;
   truncationReason?: string;
@@ -655,6 +665,7 @@ export function buildHarnessCheckpointFromEpisode<TState, TObservation, TPending
       agentsHash: hashStableState(agents),
       channelsHash: hashStableState(executionPrefix.channels),
       messagesHash: hashStableState(executionPrefix.messages),
+      domainAdapter: executionPrefix.domainAdapter ? cloneSocialDomainAdapterManifest(executionPrefix.domainAdapter) : undefined,
       agentSnapshotFrameId: options.agentSnapshotFrameId,
       failureReason: options.failureReason,
       truncationReason: options.truncationReason
@@ -1008,6 +1019,9 @@ export function createGenericForkProvenance<
     parentMessagesHash: checkpoint.source.messagesHash,
     parentNativeStepCount: checkpoint.source.nativeStepCount,
     parentMessageCount: checkpoint.source.messageCount,
+    parentDomainAdapter: checkpoint.source.domainAdapter
+      ? cloneSocialDomainAdapterManifest(checkpoint.source.domainAdapter)
+      : undefined,
     createdAt: options.createdAt ?? new Date().toISOString(),
     reason: options.reason
   };
@@ -1084,6 +1098,9 @@ export function validateGenericForkProvenance(provenance: GenericForkProvenance)
   if (!isNonemptyString(provenance.checkpointArtifactVersion)) errors.push("forkOf.checkpointArtifactVersion is required.");
   if (!isNonemptyString(provenance.checkpointId)) errors.push("forkOf.checkpointId is required.");
   if (!isNonemptyString(provenance.createdAt)) errors.push("forkOf.createdAt is required.");
+  if (provenance.parentDomainAdapter) {
+    errors.push(...validateSocialDomainAdapterManifest(provenance.parentDomainAdapter, "forkOf.parentDomainAdapter"));
+  }
   for (const field of [
     "parentStateHash",
     "parentExecutionPrefixHash",
@@ -1136,6 +1153,22 @@ export function validateHarnessCheckpointEnvelope<
   if (!isNonemptyString(checkpoint.createdAt)) errors.push("createdAt is required.");
   if (!isNonemptyString(checkpoint.source.sourceArtifactVersion)) errors.push("source.sourceArtifactVersion is required.");
   if (!isNonemptyString(checkpoint.source.runId)) errors.push("source.runId is required.");
+  if (checkpoint.executionPrefix.domainAdapter) {
+    if (!checkpoint.source.domainAdapter) {
+      errors.push("source.domainAdapter is required when executionPrefix records adapter provenance.");
+    } else {
+      for (const error of compareSocialDomainAdapterManifests(
+        checkpoint.executionPrefix.domainAdapter,
+        checkpoint.source.domainAdapter,
+        { recordedPath: "executionPrefix.domainAdapter", runtimePath: "source.domainAdapter" }
+      )) {
+        errors.push(error);
+      }
+    }
+  } else if (checkpoint.source.domainAdapter) {
+    errors.push(...validateSocialDomainAdapterManifest(checkpoint.source.domainAdapter, "source.domainAdapter"));
+    errors.push("source.domainAdapter must be absent when executionPrefix has no adapter provenance.");
+  }
 
   const actualStateHash = hashStableState(checkpoint.state);
   if (checkpoint.source.stateHash !== actualStateHash) {

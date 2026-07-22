@@ -1,5 +1,10 @@
 import { hashStableState } from "./hash";
 import { providerFailureFromError, safeProviderFailureMessage } from "./providerFailure";
+import {
+  cloneSocialDomainAdapterManifest,
+  validateSocialDomainAdapterManifest,
+  type SocialDomainAdapterManifest
+} from "./domainAdapter";
 
 export type SocialChannelKind = "public" | "team" | "private" | "system";
 export type SocialResolvedSchedulerMode = "aec" | "aec-batched-decision" | "parallel";
@@ -489,6 +494,11 @@ export interface SocialEpisodeArtifact<TState = unknown, TObservation = unknown,
   id: string;
   /** Domain adapter identifier; absent only on legacy artifacts. */
   domainId?: string;
+  /**
+   * Immutable, safe execution provenance. New domain adapters should provide
+   * it; old artifacts without it remain explicitly legacy-compatible.
+   */
+  domainAdapter?: SocialDomainAdapterManifest;
   status: SocialEpisodeStatus;
   execution?: {
     schemaVersion: "harness.social-execution.v1";
@@ -735,10 +745,24 @@ export function summarizeSocialExposureRecords(records: readonly SocialExposureR
 export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TCommand>(
   episode: Pick<
     SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>,
-    "channels" | "steps" | "messages" | "runtimeActorIds" | "execution" | "exposureRecords" | "exposureSummary"
+    | "domainId"
+    | "domainAdapter"
+    | "channels"
+    | "steps"
+    | "messages"
+    | "runtimeActorIds"
+    | "execution"
+    | "exposureRecords"
+    | "exposureSummary"
   >
 ): string[] {
   const errors: string[] = [];
+  if (episode.domainAdapter) {
+    errors.push(...validateSocialDomainAdapterManifest(episode.domainAdapter));
+    if (episode.domainId !== episode.domainAdapter.domainId) {
+      errors.push("domainId must match domainAdapter.domainId when adapter provenance is recorded.");
+    }
+  }
   const decisionTimeoutMs = episode.execution?.decisionTimeoutMs;
   if (decisionTimeoutMs !== undefined && (!Number.isInteger(decisionTimeoutMs) || decisionTimeoutMs <= 0)) {
     errors.push("execution.decisionTimeoutMs must be a positive integer when recorded.");
@@ -1184,6 +1208,8 @@ export class SocialCommunicationBus {
 export interface SocialEpisodeOptions<TState, TObservation, TPending extends { actorId?: string }, TCommand> {
   id: string;
   domainId?: string;
+  /** Safe execution identity for a new domain adapter run. */
+  domainAdapter?: SocialDomainAdapterManifest;
   environment: SocialEnvironment<TState, TObservation, TPending, TCommand>;
   actors: Array<SocialActor<TObservation, TPending, TCommand>>;
   channels?: SocialChannel[];
@@ -1209,6 +1235,13 @@ export interface SocialEpisodeOptions<TState, TObservation, TPending extends { a
 export async function runSocialEpisode<TState, TObservation, TPending extends { actorId?: string }, TCommand>(
   options: SocialEpisodeOptions<TState, TObservation, TPending, TCommand>
 ): Promise<SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>> {
+  if (options.domainAdapter) {
+    const adapterErrors = validateSocialDomainAdapterManifest(options.domainAdapter);
+    if (adapterErrors.length) throw new Error(`Invalid social domain adapter manifest: ${adapterErrors.join(" ")}`);
+    if (options.domainId !== undefined && options.domainId !== options.domainAdapter.domainId) {
+      throw new Error("Social episode domainId must match domainAdapter.domainId.");
+    }
+  }
   const runtimeActorIds = assertUniqueSocialActorRegistry(options.actors);
   const defaultSchedulerMode = normalizeSchedulerMode(options.schedulerMode ?? "aec");
   const bus = new SocialCommunicationBus(options.channels ?? [], options.initialMessages ?? [], { runtimeActorIds });
@@ -1758,7 +1791,8 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
   }
   return {
     id: options.id,
-    domainId: options.domainId,
+    domainId: options.domainAdapter?.domainId ?? options.domainId,
+    domainAdapter: options.domainAdapter ? cloneSocialDomainAdapterManifest(options.domainAdapter) : undefined,
     status,
     execution,
     schedulerMode: defaultSchedulerMode,
