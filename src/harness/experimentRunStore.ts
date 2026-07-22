@@ -12,6 +12,7 @@ import { validateGenericTournamentRunSetArtifact } from "./genericTournamentArti
 import { hashStableJsonValue } from "./hash";
 import { GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE } from "./tournamentRunner";
 import type { HarnessMetricRecord } from "./types";
+import type { HarnessEvaluationReport } from "./types";
 
 export const HARNESS_EXPERIMENT_RUN_RECORD_VERSION = "harness.experiment-run-record.v1";
 export const HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION = "harness.experiment-run-manifest.v1";
@@ -32,6 +33,7 @@ export interface GenericExperimentEpisodeAuthority<TArtifact extends GenericEpis
   get(runId: string): Promise<TArtifact | undefined>;
   getMetrics(runId: string): Promise<HarnessMetricRecord[] | undefined>;
   getFailures(runId: string): Promise<readonly unknown[] | undefined>;
+  getEvaluationReport(runId: string): Promise<HarnessEvaluationReport | undefined>;
 }
 
 export interface HarnessExperimentRunEpisodeReferenceV1 {
@@ -42,6 +44,8 @@ export interface HarnessExperimentRunEpisodeReferenceV1 {
   artifactSha256?: string;
   metricCount: number;
   failureCount: number;
+  evaluationReportId?: string;
+  evaluationReportSha256?: string;
   error?: typeof GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE;
 }
 
@@ -307,7 +311,15 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       }
       const metrics = await this.episodeStore.getMetrics(episode.runId);
       const failures = await this.episodeStore.getFailures(episode.runId);
+      const evaluationReport = await this.episodeStore.getEvaluationReport(episode.runId);
       if (!metrics || !failures) throw new Error(`Canonical episode ${episode.runId} sidecars are missing.`);
+      if (
+        (evaluationReport === undefined) !== (episode.evaluationReport === undefined) ||
+        (evaluationReport && episode.evaluationReport &&
+          hashStableJsonValue(evaluationReport) !== hashStableJsonValue(episode.evaluationReport))
+      ) {
+        throw new Error(`Canonical episode ${episode.runId} evaluation report does not match the run-set.`);
+      }
       refs.push({
         index: episode.index,
         seed: episode.seed,
@@ -316,6 +328,10 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
         artifactSha256: hashStableJsonValue(canonical),
         metricCount: metrics.length,
         failureCount: failures.length,
+        ...(evaluationReport ? {
+          evaluationReportId: evaluationReport.id,
+          evaluationReportSha256: hashStableJsonValue(evaluationReport)
+        } : {}),
         ...(episode.status === "failed" ? { error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE } : {})
       });
     }
@@ -399,6 +415,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       const canonical = await this.episodeStore.get(episode.runId);
       const metrics = await this.episodeStore.getMetrics(episode.runId);
       const failures = await this.episodeStore.getFailures(episode.runId);
+      const evaluationReport = await this.episodeStore.getEvaluationReport(episode.runId);
       if (!canonical || !metrics || !failures) throw new Error(`Stored experiment episode reference ${episode.runId} is unresolved.`);
       if (hashStableJsonValue(canonical) !== episode.artifactSha256) throw new Error(`Stored experiment episode ${episode.runId} digest mismatch.`);
       if (canonical.status !== episode.status) throw new Error(`Stored experiment episode ${episode.runId} lifecycle mismatch.`);
@@ -410,6 +427,15 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       }
       if (metrics.length !== episode.metricCount || failures.length !== episode.failureCount) {
         throw new Error(`Stored experiment episode ${episode.runId} sidecar count mismatch.`);
+      }
+      if (episode.evaluationReportId === undefined || episode.evaluationReportSha256 === undefined) {
+        if (evaluationReport !== undefined) throw new Error(`Stored experiment episode ${episode.runId} has an unbound evaluation report.`);
+      } else if (
+        !evaluationReport ||
+        evaluationReport.id !== episode.evaluationReportId ||
+        hashStableJsonValue(evaluationReport) !== episode.evaluationReportSha256
+      ) {
+        throw new Error(`Stored experiment episode ${episode.runId} evaluation report mismatch.`);
       }
     }
   }
@@ -493,6 +519,7 @@ function assertRunRecord(record: HarnessExperimentRunRecordV1): void {
   for (const [position, episode] of record.episodes.entries()) {
     assertExactKeys(episode, [
       "index", "seed", "status", "runId", "artifactSha256", "metricCount", "failureCount", "error"
+      , "evaluationReportId", "evaluationReportSha256"
     ], `Experiment run episode ${position}`);
     if (episode.index !== position || episode.seed !== `${record.experiment.spec.seed}:g${position + 1}`) {
       throw new Error("Finalized experiment episode ordering or seed is invalid.");
@@ -513,9 +540,21 @@ function assertRunRecord(record: HarnessExperimentRunRecordV1): void {
       if (!episode.artifactSha256 || !DIRECTORY_KEY_PATTERN.test(episode.artifactSha256)) {
         throw new Error("Experiment episode reference is missing a valid artifact digest.");
       }
+      if ((episode.evaluationReportId === undefined) !== (episode.evaluationReportSha256 === undefined)) {
+        throw new Error("Experiment episode evaluation report reference is incomplete.");
+      }
+      if (episode.evaluationReportId !== undefined) {
+        assertIdentifier(episode.evaluationReportId, `episodes[${position}].evaluationReportId`);
+        if (!DIRECTORY_KEY_PATTERN.test(episode.evaluationReportSha256!)) {
+          throw new Error("Experiment episode evaluation report digest is invalid.");
+        }
+      }
     } else {
       if (episode.status !== "failed") throw new Error("Only a failed episode may lack a canonical artifact reference.");
-      if (episode.artifactSha256 || episode.metricCount || episode.failureCount) {
+      if (
+        episode.artifactSha256 || episode.metricCount || episode.failureCount ||
+        episode.evaluationReportId || episode.evaluationReportSha256
+      ) {
         throw new Error("Pre-artifact experiment failure cannot claim canonical episode sidecars.");
       }
     }

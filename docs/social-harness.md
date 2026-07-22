@@ -355,8 +355,8 @@ scheduling. Before evaluation, generic identity/status/state/agent/social
 fields are compared with the canonical artifact. The public execution result
 omits preparation objects and raw domain results.
 
-The single-episode store persists `artifact.json`, `trajectory.jsonl`,
-`metrics.jsonl`, reviewed `failures.jsonl`, and a hashed checkpoint registry.
+The single-episode store persists `artifact.json`, `trajectory.jsonl`, the full
+`evaluation-report.json`, `metrics.jsonl`, reviewed `failures.jsonl`, and a hashed checkpoint registry.
 Checkpoint writes/reads/recovery require a separate domain strong verifier;
 restart recovery revalidates content hashes, canonical JSONL, ordinary-file
 status, realpath containment, and symlink absence. Reading these records never
@@ -365,8 +365,9 @@ The experiment run store uses immutable active/finalized revisions, treats its
 index as a rebuildable cache, and revalidates all canonical episode references
 after restart. It does not copy episode artifacts or evaluator sidecars into a
 second authority.
-The current manifest is v2; a strict compatibility reader recovers the prior
-v1 artifact/trajectory-only layout with empty sidecars. Directory hashes are
+The current manifest is v3; strict compatibility readers recover the prior v1
+artifact/trajectory-only layout and v2 metric/failure layout without inventing
+a complete evaluation report. Directory hashes are
 re-derived from recorded identities, failure rows reject unknown fields, and a
 checkpoint must be an exact step/message prefix of its verified parent rather
 than merely an internally self-consistent checkpoint with the same run id.

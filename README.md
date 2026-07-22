@@ -281,7 +281,7 @@ environment replay, recorded pending/action validation, and explicit durable
 agent-state semantic validation. `HarnessEpisodeArtifactStore` accepts a
 domain-owned instance of that strong verifier and writes only server-owned,
 content-hashed directories containing `artifact.json`, `trajectory.jsonl`,
-`metrics.jsonl`, `failures.jsonl`, a checkpoint registry, and manifests.
+`evaluation-report.json`, `metrics.jsonl`, `failures.jsonl`, a checkpoint registry, and manifests.
 Evaluator exceptions are reduced to reviewed failure codes/messages instead of
 copying arbitrary provider text. Checkpoints require a separate explicit
 domain-owned strong verifier and are stored below hashed checkpoint ids. Every
@@ -290,10 +290,10 @@ truth; run/checkpoint ids never become host paths, and symlinked or tampered
 files are rejected. This generic store does not call an actor, policy,
 reasoner, or model.
 
-The current layout is `harness.episode-store-manifest.v2`. Restart recovery
-strictly dual-reads the earlier v1 artifact/trajectory-only layout as a legacy
-record with empty evaluation/checkpoint projections; a valid v1 episode is not
-silently dropped just because newer sidecars are absent. New v2 recovery also
+The current layout is `harness.episode-store-manifest.v3`. Restart recovery
+strictly reads the earlier v1 artifact/trajectory-only and v2 metric/failure
+layouts without fabricating a missing complete evaluation report. A valid
+legacy episode is not silently dropped just because newer sidecars are absent. New v3 recovery also
 re-derives directory hashes from run/checkpoint ids and binds every checkpoint
 to a real prefix of its canonical parent episode.
 
