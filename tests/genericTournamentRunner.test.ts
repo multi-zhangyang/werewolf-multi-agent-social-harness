@@ -99,4 +99,31 @@ describe("generic tournament control plane", () => {
       episodes: []
     });
   });
+
+  it("awaits terminal progress hooks before scheduling the next episode and treats hook failure as fatal", async () => {
+    const lifecycle: string[] = [];
+    await expect(
+      runTournamentEpisodes({
+        games: 2,
+        seed: "durable-progress",
+        continueOnError: true,
+        prepareEpisode: ({ index }) => {
+          lifecycle.push(`prepare:${index}`);
+          return index;
+        },
+        runEpisode: (index): { status: TournamentEpisodeLifecycle } => ({ status: index === 0 ? "completed" : "failed" }),
+        statusOf: (episode) => episode.status,
+        async onEpisodeSettled(episode) {
+          lifecycle.push(`settle:${episode.index}:${episode.status}`);
+          if (episode.index === 1) throw new Error("durable progress unavailable");
+        }
+      })
+    ).rejects.toThrow(/durable progress unavailable/i);
+    expect(lifecycle).toEqual([
+      "prepare:0",
+      "settle:0:completed",
+      "prepare:1",
+      "settle:1:failed"
+    ]);
+  });
 });

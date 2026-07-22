@@ -27602,3 +27602,104 @@ left no project Playwright, Chromium, Vite, Vitest, or fixture-server process.
 This slice changes no model client, prompt, reasoner policy, streaming parser,
 provider selection, or domain action semantics, so it did not repeat an
 external provider call and added no provider/model-specific branch.
+
+## 13.291 Durable Terminal Episode Progress And Control-Plane Failure Lock
+
+Timestamp: `2026-07-22`
+
+Generic experiment execution no longer waits until final run-set publication
+to persist all episode membership. Every settled episode now crosses an awaited
+control-plane boundary before the tournament may schedule the next slot:
+
+```text
+domain prepare/run/artifact construction/evaluation
+  -> terminal candidate
+  -> canonical episode artifact publication, when one exists
+  -> durable experiment-run membership revision
+  -> only then apply continueOnError / schedule the next slot
+```
+
+The tournament runner exposes the existing generic terminal episode record to
+an optional `onEpisodeSettled` hook. It appends the terminal in-memory record,
+awaits the hook outside the domain execution `try/catch`, and only then decides
+whether to continue. Hook failures are therefore control-plane fatal even when
+`continueOnError=true`; they are never rewritten into a normal domain episode
+failure.
+
+The experiment orchestrator keeps adapter preparation, environment execution,
+artifact construction, execution-attestation checks, and evaluation binding in
+the domain boundary. Canonical artifact publication and durable run-membership
+publication occur in the terminal control-plane hook. As a result:
+
+- a reviewed pre-artifact adapter/execution failure is durably recorded without
+  fabricating an episode artifact;
+- an artifact-backed completed, truncated, or failed episode is published to
+  the canonical episode store before its run membership is appended;
+- artifact-store failure stops the experiment before membership publication,
+  before the next episode, and before finalization;
+- run-store failure stops the experiment after artifact publication but before
+  the next episode and before finalization;
+- `continueOnError` applies only after the relevant durable commit boundary has
+  succeeded.
+
+`HarnessExperimentRunStore.recordEpisode()` now appends a terminal, contiguous
+episode reference as a new active revision. It does not trust only the caller's
+embedded object: artifact-backed entries are resolved again through the
+canonical episode authority, including artifact content, lifecycle,
+experiment provenance, metrics, failures, and optional evaluation report.
+Pre-artifact failures are reduced to the fixed reviewed failure message.
+
+Active records may contain a contiguous terminal prefix. Their lifecycle
+counts and unstarted count must agree with that prefix. Recovery accepts an
+arbitrary contiguous revision sequence, requires revision 1 to be an empty
+active header, preserves immutable header authority, rejects time rollback,
+requires each later active revision to append exactly one terminal episode,
+rejects revisions after finalization, and revalidates active as well as
+finalized artifact references against canonical episode storage.
+
+An exact retry of either a reviewed pre-artifact failure or an artifact-backed
+terminal episode is idempotent and returns the existing revision. Retry
+validation excludes only the same slot's prior run id; reuse of that run id by
+another slot remains invalid. A different reference for an already durable
+slot fails closed. Finalization requires exact equality with the durable
+terminal prefix, cannot backfill missing episode revisions, and is idempotent
+only when the complete run-set lifecycle and canonical references still match.
+Revision timestamps remain monotonic if the process wall clock moves backwards.
+
+This lock is intentionally narrower than full exactly-once crash recovery. It
+does **not** claim any of the following are solved:
+
+- a durable `started` or `publishing` pending-episode phase;
+- `beginOrResume` orchestration or automatic scheduling from an active prefix;
+- automatic adoption after a process exits between canonical artifact
+  publication and `recordEpisode()`;
+- cross-process filesystem leasing for multiple simultaneous run-store writers;
+- read-after-publication reconciliation when a derived index write fails;
+- absolute exactly-once provider calls for an in-flight episode.
+
+Those remaining gaps require an explicit staged slot identity and recovery
+protocol. Until that protocol exists, do not describe terminal-prefix
+persistence as full experiment resume or exactly-once execution.
+
+Validation recorded:
+
+```bash
+npm run typecheck
+npx vitest run tests/genericTournamentRunner.test.ts \
+  tests/experimentRunStore.test.ts \
+  tests/genericExperimentOrchestrator.test.ts --maxWorkers=1 \
+  --no-file-parallelism --testTimeout=60000 --hookTimeout=60000 \
+  --teardownTimeout=60000 --reporter=dot
+npm test -- --maxWorkers=1 --no-file-parallelism --testTimeout=60000 \
+  --hookTimeout=60000 --teardownTimeout=60000 --reporter=dot
+npm run build
+npx playwright test --config=playwright.config.ts
+git diff --check
+```
+
+The final focused group passed **3 files / 18 tests**. The complete deterministic
+suite passed **49 files / 531 tests**. Production build passed with only the
+existing Vite chunk-size warning, and the fixture cockpit passed **15/15**.
+This slice changed no provider/model selection, model client, prompt, reasoner,
+stream parser, or domain action behavior, so no external model call was
+repeated and no provider- or model-specific branch was added.

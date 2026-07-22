@@ -72,6 +72,7 @@ describe("restart-safe experiment run store", () => {
         error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE
       }]
     };
+    await store.recordEpisode({ runSetId: "failed-run", episode: runSet.episodes[0]! });
     await store.finalize(runSet);
 
     const restarted = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
@@ -91,6 +92,238 @@ describe("restart-safe experiment run store", () => {
     await symlink(".finalized-backup", path.join(revisions, finalRevision), "dir");
     await expect(HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority }))
       .rejects.toThrow(/revision path is not a safe directory/i);
+  });
+
+  it("persists each terminal episode as a restart-safe active prefix before finalization", async () => {
+    const root = await temporaryRoot();
+    const reads = { artifacts: 0, metrics: 0, failures: 0, evaluations: 0 };
+    const authority = emptyAuthority(reads);
+    const experiment = createGenericExperimentProvenance(experimentSpec(3));
+    const store = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    await store.begin({ runSetId: "progress-run", experiment, createdAt: "2026-07-22T15:00:00.000Z" });
+
+    const firstFailure = {
+      index: 0,
+      seed: `${experiment.spec.seed}:g1`,
+      status: "failed" as const,
+      error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE
+    };
+    const first = await store.recordEpisode({ runSetId: "progress-run", episode: firstFailure });
+    expect(first).toMatchObject({ revision: 2, state: "active", gamesFailed: 1, gamesUnstarted: 2 });
+
+    const restarted = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    expect(await restarted.get("progress-run")).toMatchObject({
+      state: "active",
+      gamesRequested: 3,
+      gamesFailed: 1,
+      gamesUnstarted: 2,
+      episodes: [firstFailure]
+    });
+    expect(reads).toEqual({ artifacts: 0, metrics: 0, failures: 0, evaluations: 0 });
+
+    const duplicate = await restarted.recordEpisode({ runSetId: "progress-run", episode: firstFailure });
+    expect(duplicate.revision).toBe(2);
+    await expect(
+      restarted.recordEpisode({
+        runSetId: "progress-run",
+        episode: {
+          index: 2,
+          seed: `${experiment.spec.seed}:g3`,
+          status: "failed",
+          error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE
+        }
+      })
+    ).rejects.toThrow(/contiguous and ordered/i);
+
+    const secondFailure = {
+      index: 1,
+      seed: `${experiment.spec.seed}:g2`,
+      status: "failed" as const,
+      error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE
+    };
+    await restarted.recordEpisode({ runSetId: "progress-run", episode: secondFailure });
+    const runSet: GenericTournamentRunSetArtifact<Artifact> = {
+      artifactVersion: "harness.tournament-run-set.v1",
+      kind: "tournament-run-set",
+      domainId: experiment.spec.domainId,
+      runSetId: "progress-run",
+      createdAt: "2026-07-22T15:00:00.000Z",
+      seed: experiment.spec.seed,
+      gamesRequested: 3,
+      gamesCompleted: 0,
+      gamesTruncated: 0,
+      gamesFailed: 2,
+      gamesUnstarted: 1,
+      experiment,
+      episodes: [firstFailure, secondFailure]
+    };
+    const finalized = await restarted.finalize(runSet);
+    expect(finalized).toMatchObject({ revision: 4, state: "finalized", gamesFailed: 2, gamesUnstarted: 1 });
+    const reopened = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    expect(await reopened.get("progress-run")).toMatchObject({
+      state: "finalized",
+      gamesFailed: 2,
+      gamesUnstarted: 1,
+      episodes: [firstFailure, secondFailure]
+    });
+  });
+
+  it("treats an identical artifact-backed terminal episode retry as idempotent", async () => {
+    const root = await temporaryRoot();
+    const experiment = createGenericExperimentProvenance(experimentSpec(1));
+    const artifact = {
+      runId: "artifact-backed-retry:g1",
+      status: "completed",
+      experiment
+    } as unknown as Artifact;
+    const authority = {
+      async get(runId: string) {
+        return runId === artifact.runId ? structuredClone(artifact) : undefined;
+      },
+      async getMetrics() {
+        return [];
+      },
+      async getFailures() {
+        return [];
+      },
+      async getEvaluationReport() {
+        return undefined;
+      }
+    };
+    const store = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    await store.begin({ runSetId: "artifact-backed-retry", experiment });
+    const episode = {
+      index: 0,
+      seed: `${experiment.spec.seed}:g1`,
+      status: "completed" as const,
+      runId: artifact.runId,
+      artifact
+    };
+
+    const first = await store.recordEpisode({ runSetId: "artifact-backed-retry", episode });
+    const retry = await store.recordEpisode({ runSetId: "artifact-backed-retry", episode });
+
+    expect(first).toMatchObject({ revision: 2, gamesCompleted: 1, gamesUnstarted: 0 });
+    expect(retry).toEqual(first);
+  });
+
+  it("makes finalization and the last terminal retry idempotent without accepting drift", async () => {
+    const root = await temporaryRoot();
+    const experiment = createGenericExperimentProvenance(experimentSpec(1));
+    const authority = emptyAuthority({ artifacts: 0, metrics: 0, failures: 0, evaluations: 0 });
+    const store = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    await store.begin({
+      runSetId: "finalize-retry",
+      experiment,
+      createdAt: "2026-07-22T15:00:00.000Z"
+    });
+    const episode = {
+      index: 0,
+      seed: `${experiment.spec.seed}:g1`,
+      status: "failed" as const,
+      error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE
+    };
+    await store.recordEpisode({ runSetId: "finalize-retry", episode });
+    const runSet: GenericTournamentRunSetArtifact<Artifact> = {
+      artifactVersion: "harness.tournament-run-set.v1",
+      kind: "tournament-run-set",
+      domainId: experiment.spec.domainId,
+      runSetId: "finalize-retry",
+      createdAt: "2026-07-22T15:00:00.000Z",
+      seed: experiment.spec.seed,
+      gamesRequested: 1,
+      gamesCompleted: 0,
+      gamesTruncated: 0,
+      gamesFailed: 1,
+      gamesUnstarted: 0,
+      experiment,
+      episodes: [episode]
+    };
+
+    const finalized = await store.finalize(runSet);
+    expect(await store.finalize(structuredClone(runSet))).toEqual(finalized);
+    expect(await store.recordEpisode({ runSetId: "finalize-retry", episode })).toEqual(finalized);
+    await expect(store.recordEpisode({
+      runSetId: "finalize-retry",
+      episode: { ...episode, seed: "different:g1" }
+    })).rejects.toThrow(/does not match its durable schedule/i);
+  });
+
+  it("requires finalization to exactly match the durable terminal prefix", async () => {
+    const root = await temporaryRoot();
+    const experiment = createGenericExperimentProvenance(experimentSpec(1));
+    const authority = emptyAuthority({ artifacts: 0, metrics: 0, failures: 0, evaluations: 0 });
+    const store = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    await store.begin({
+      runSetId: "no-finalize-backfill",
+      experiment,
+      createdAt: "2026-07-22T15:00:00.000Z"
+    });
+    const episode = {
+      index: 0,
+      seed: `${experiment.spec.seed}:g1`,
+      status: "failed" as const,
+      error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE
+    };
+    await expect(store.finalize({
+      artifactVersion: "harness.tournament-run-set.v1",
+      kind: "tournament-run-set",
+      domainId: experiment.spec.domainId,
+      runSetId: "no-finalize-backfill",
+      createdAt: "2026-07-22T15:00:00.000Z",
+      seed: experiment.spec.seed,
+      gamesRequested: 1,
+      gamesCompleted: 0,
+      gamesTruncated: 0,
+      gamesFailed: 1,
+      gamesUnstarted: 0,
+      experiment,
+      episodes: [episode]
+    })).rejects.toThrow(/does not match durable episode progress/i);
+  });
+
+  it("keeps revision timestamps monotonic when the wall clock moves backwards", async () => {
+    const root = await temporaryRoot();
+    const experiment = createGenericExperimentProvenance(experimentSpec(1));
+    const authority = emptyAuthority({ artifacts: 0, metrics: 0, failures: 0, evaluations: 0 });
+    const store = await HarnessExperimentRunStore.open({
+      baseDirectory: root,
+      episodeStore: authority,
+      now: () => "2026-07-22T14:59:00.000Z"
+    });
+    await store.begin({
+      runSetId: "clock-rollback",
+      experiment,
+      createdAt: "2026-07-22T15:00:00.000Z"
+    });
+    const episode = {
+      index: 0,
+      seed: `${experiment.spec.seed}:g1`,
+      status: "failed" as const,
+      error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE
+    };
+    await store.recordEpisode({ runSetId: "clock-rollback", episode });
+    const runSet: GenericTournamentRunSetArtifact<Artifact> = {
+      artifactVersion: "harness.tournament-run-set.v1",
+      kind: "tournament-run-set",
+      domainId: experiment.spec.domainId,
+      runSetId: "clock-rollback",
+      createdAt: "2026-07-22T15:00:00.000Z",
+      seed: experiment.spec.seed,
+      gamesRequested: 1,
+      gamesCompleted: 0,
+      gamesTruncated: 0,
+      gamesFailed: 1,
+      gamesUnstarted: 0,
+      experiment,
+      episodes: [episode]
+    };
+    await store.finalize(runSet);
+
+    const record = await store.get("clock-rollback");
+    expect(record?.updatedAt).toBe("2026-07-22T15:00:00.000Z");
+    await expect(HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority }))
+      .resolves.toBeDefined();
   });
 
   it("fails closed when a formally published record is changed without its manifest", async () => {

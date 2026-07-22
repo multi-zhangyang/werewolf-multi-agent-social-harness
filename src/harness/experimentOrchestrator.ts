@@ -14,11 +14,13 @@ import {
 import { runEvaluationRegistry, type HarnessEvaluationContext, type HarnessEvaluator } from "./evaluation";
 import {
   buildGenericTournamentRunSetArtifact,
+  type GenericTournamentRunSetEpisode,
   type GenericTournamentRunSetArtifact
 } from "./genericTournamentArtifacts";
 import { hashStableJsonValue, hashStableState } from "./hash";
 import {
   runTournamentEpisodes,
+  GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE,
   type GenericTournamentResult,
   type TournamentEpisodeContext,
   type TournamentEpisodeLifecycle
@@ -48,6 +50,10 @@ export interface GenericExperimentRunStore<TArtifact extends GenericEpisodeEnvel
     runSetId: string;
     experiment: GenericExperimentProvenanceV1;
     createdAt?: string;
+  }): Promise<unknown>;
+  recordEpisode(input: {
+    runSetId: string;
+    episode: GenericTournamentRunSetEpisode<TArtifact>;
   }): Promise<unknown>;
   finalize(runSet: GenericTournamentRunSetArtifact<TArtifact>): Promise<unknown>;
 }
@@ -184,6 +190,7 @@ export async function runGenericExperiment<
   if (
     !options.runStore ||
     typeof options.runStore.begin !== "function" ||
+    typeof options.runStore.recordEpisode !== "function" ||
     typeof options.runStore.finalize !== "function"
   ) {
     throw new Error("Generic experiment execution requires a durable experiment run store.");
@@ -256,17 +263,47 @@ export async function runGenericExperiment<
         }
         throwIfAborted(deadline.signal);
         assertArtifactBinding(artifact, normalizedSpec, status, context);
-        await options.artifactStore.put(
-          artifact,
-          evaluationReport === undefined ? undefined : { evaluationReport }
-        );
         return {
           status,
           artifact,
           ...(evaluationReport ? { evaluationReport } : {})
         };
       },
-      statusOf: (episode) => episode.status
+      statusOf: (episode) => episode.status,
+      async onEpisodeSettled(episode) {
+        const result = episode.result;
+        if (result) {
+          // Canonical publication is a control-plane operation. Keeping it in
+          // this terminal hook, outside the tournament's domain error boundary,
+          // makes storage failure fatal even when continueOnError is enabled.
+          await options.artifactStore.put(
+            result.artifact,
+            result.evaluationReport === undefined
+              ? undefined
+              : { evaluationReport: result.evaluationReport }
+          );
+        }
+        await options.runStore.recordEpisode({
+          runSetId,
+          episode: {
+            index: episode.index,
+            seed: episode.seed,
+            status: episode.status,
+            ...(result
+              ? {
+                  runId: result.artifact.runId,
+                  artifact: structuredClone(result.artifact),
+                  ...(result.evaluationReport
+                    ? { evaluationReport: structuredClone(result.evaluationReport) }
+                    : {})
+                }
+              : {}),
+            ...(episode.status === "failed"
+              ? { error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE }
+              : {})
+          }
+        });
+      }
     });
     const runSet = await buildGenericTournamentRunSetArtifact({
       runSetId,

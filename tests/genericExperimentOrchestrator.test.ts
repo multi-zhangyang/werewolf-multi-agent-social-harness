@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { SocialDomainAdapterManifest } from "../src/harness/domainAdapter";
 import type { HarnessEpisodeArtifactEnvelope } from "../src/harness/episodeArtifacts";
 import { HarnessEpisodeArtifactStore } from "../src/harness/episodeArtifactStore";
-import { runGenericExperiment } from "../src/harness/experimentOrchestrator";
+import {
+  runGenericExperiment,
+  type GenericExperimentArtifactStore,
+  type GenericExperimentRunStore
+} from "../src/harness/experimentOrchestrator";
 import { HarnessExperimentRunStore } from "../src/harness/experimentRunStore";
 import {
   createGenericExperimentProvenance,
@@ -140,19 +144,30 @@ describe("generic normalized experiment orchestration", () => {
       now: () => "2026-07-22T14:00:00.000Z"
     });
     const lifecycle: string[] = [];
+    const artifactStore: GenericExperimentArtifactStore<Artifact> = {
+      async put(artifact, options) {
+        lifecycle.push(`put:${artifact.runId.endsWith(":g1") ? 0 : 1}`);
+        return store.put(artifact, options);
+      }
+    };
+    const runStore: GenericExperimentRunStore<Artifact> = {
+      async begin(input) {
+        lifecycle.push("begin");
+        return persistedRunStore.begin(input);
+      },
+      async recordEpisode(input) {
+        lifecycle.push(`record:${input.episode.index}`);
+        return persistedRunStore.recordEpisode(input);
+      },
+      async finalize(runSet) {
+        lifecycle.push("finalize");
+        return persistedRunStore.finalize(runSet);
+      }
+    };
     const result = await runGenericExperiment({
       spec: experimentSpec(),
-      artifactStore: store,
-      runStore: {
-        async begin(input) {
-          lifecycle.push("begin");
-          return persistedRunStore.begin(input);
-        },
-        async finalize(runSet) {
-          lifecycle.push("finalize");
-          return persistedRunStore.finalize(runSet);
-        }
-      },
+      artifactStore,
+      runStore,
       now: () => "2026-07-22T14:00:00.000Z",
       adapter: {
         domainId: "counter-orchestration",
@@ -224,7 +239,16 @@ describe("generic normalized experiment orchestration", () => {
     ]);
     expect(preparations).toBe(2);
     expect(decisions).toBe(2);
-    expect(lifecycle).toEqual(["begin", "prepare:0", "prepare:1", "finalize"]);
+    expect(lifecycle).toEqual([
+      "begin",
+      "prepare:0",
+      "put:0",
+      "record:0",
+      "prepare:1",
+      "put:1",
+      "record:1",
+      "finalize"
+    ]);
 
     const restarted = await HarnessEpisodeArtifactStore.open<Artifact>({
       baseDirectory: path.join(root, "episodes"),
@@ -303,6 +327,90 @@ describe("generic normalized experiment orchestration", () => {
     expect(result.runSet.episodes[0]).toMatchObject({ status: "failed" });
     expect(result.runSet.episodes[0]?.artifact).toBeUndefined();
     expect(puts).toBe(0);
+  });
+
+  it("fails closed on canonical artifact persistence errors even when domain failures may continue", async () => {
+    const lifecycle: string[] = [];
+    const socialEpisode = await counterEpisode(
+      "counter-experiment:counter-orchestration-seed:g1",
+      () => undefined,
+      { maxTransitions: 2, decisionTimeoutMs: 5_000 }
+    );
+
+    await expect(runGenericExperiment({
+      spec: { ...experimentSpec(), evaluatorIds: [], continueOnError: true },
+      artifactStore: {
+        async put() {
+          lifecycle.push("artifact-put");
+          throw new Error("canonical artifact storage unavailable");
+        }
+      },
+      runStore: {
+        async begin() {
+          lifecycle.push("begin");
+        },
+        async recordEpisode() {
+          lifecycle.push("record");
+        },
+        async finalize() {
+          lifecycle.push("finalize");
+        }
+      },
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode(context) {
+          lifecycle.push(`prepare:${context.index}`);
+          return {};
+        },
+        runEpisode: () => socialEpisode,
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode: (episode) => artifactFromEpisode(episode)
+      }
+    })).rejects.toThrow(/canonical artifact storage unavailable/i);
+
+    expect(lifecycle).toEqual(["begin", "prepare:0", "artifact-put"]);
+  });
+
+  it("stops scheduling when durable episode membership cannot be recorded", async () => {
+    const lifecycle: string[] = [];
+    const socialEpisode = await counterEpisode(
+      "counter-experiment:counter-orchestration-seed:g1",
+      () => undefined,
+      { maxTransitions: 2, decisionTimeoutMs: 5_000 }
+    );
+
+    await expect(runGenericExperiment({
+      spec: { ...experimentSpec(), evaluatorIds: [], continueOnError: true },
+      artifactStore: {
+        async put() {
+          lifecycle.push("artifact-put");
+        }
+      },
+      runStore: {
+        async begin() {
+          lifecycle.push("begin");
+        },
+        async recordEpisode() {
+          lifecycle.push("record");
+          throw new Error("durable episode membership unavailable");
+        },
+        async finalize() {
+          lifecycle.push("finalize");
+        }
+      },
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode(context) {
+          lifecycle.push(`prepare:${context.index}`);
+          return {};
+        },
+        runEpisode: () => socialEpisode,
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode: (episode) => artifactFromEpisode(episode)
+      }
+    })).rejects.toThrow(/durable episode membership unavailable/i);
+
+    expect(lifecycle).toEqual(["begin", "prepare:0", "artifact-put", "record"]);
   });
 
   it("isolates callback mutations and enforces an in-flight experiment deadline", async () => {
@@ -652,6 +760,7 @@ async function temporaryRoot(): Promise<string> {
 function memoryRunStore() {
   return {
     async begin() {},
+    async recordEpisode() {},
     async finalize() {}
   };
 }
