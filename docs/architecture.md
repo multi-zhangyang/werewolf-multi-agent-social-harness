@@ -86,14 +86,28 @@ counterfactual fields and reasons. The fields are optional only for legacy
 artifact compatibility.
 
 `runGenericExperiment()` composes the existing generic tournament scheduler,
-domain execution seam, evaluator registry, canonical episode store, and generic
-run-set writer. The control plane creates provenance once and injects it into an
+domain execution seam, evaluator registry, canonical episode store, and durable
+experiment run store. The control plane creates provenance once and injects it into an
 otherwise unbound domain artifact; if an adapter already supplied provenance,
 it must match exactly. New executions also require recorded scheduler and
 runtime actor count to match the normalized spec. Domain-owned strong artifact
 verification remains responsible for proving that domain configuration and
 profile/model assignments were actually consumed; the generic layer does not
 guess those semantics.
+
+`HarnessExperimentRunStore` is the restart-safe experiment lifecycle and
+ordered-membership authority. It publishes an immutable active header before
+the first domain preparation and a finalized reference-only revision after the
+run-set passes validation. It never duplicates canonical episode content:
+episode artifacts, metrics, and reviewed failures remain owned by
+`HarnessEpisodeArtifactStore` and are re-read and revalidated on every
+finalize/get/list/restart recovery. The index is a rebuildable cache; run-set
+ids are hashed into server-owned paths, immutable revision manifests bind
+content hashes, and formal symlink/non-directory/tampered revisions fail
+closed. Recovery performs no actor, policy, reasoner, or provider call.
+The current two-revision implementation assumes one server writer across
+processes and records only active/finalized lifecycle boundaries; a durable
+per-stage journal and full evaluation-report persistence remain separate work.
 
 Adapter callbacks receive cloned spec/provenance contexts, not the hidden
 control-plane authority object. In-flight prepare/run/artifact promises are

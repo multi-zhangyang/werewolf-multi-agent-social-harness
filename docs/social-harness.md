@@ -340,7 +340,10 @@ It resolves evaluator ids before preparing any episode, schedules stable
 `${seed}:gN` episode identities, delegates domain execution, binds the exact
 experiment provenance into each canonical episode, runs the evaluator registry,
 passes the normalized evaluation report to `HarnessEpisodeArtifactStore`, and
-builds `harness.tournament-run-set.v1`. Missing evaluator ids, adapter identity
+builds `harness.tournament-run-set.v1`. It also requires a generic run store:
+the active experiment provenance/schedule is durable before the first prepare,
+and finalization stores only ordered episode references after re-reading the
+canonical episode store. Missing evaluator ids, adapter identity
 mismatches, scheduler/actor-count mismatches, and contradictory provenance fail
 closed. The generic runner has no provider/model branch and does not turn model
 output into environment authority.
@@ -358,6 +361,10 @@ Checkpoint writes/reads/recovery require a separate domain strong verifier;
 restart recovery revalidates content hashes, canonical JSONL, ordinary-file
 status, realpath containment, and symlink absence. Reading these records never
 constructs an actor or reruns a reasoner/provider.
+The experiment run store uses immutable active/finalized revisions, treats its
+index as a rebuildable cache, and revalidates all canonical episode references
+after restart. It does not copy episode artifacts or evaluator sidecars into a
+second authority.
 The current manifest is v2; a strict compatibility reader recovers the prior
 v1 artifact/trajectory-only layout with empty sidecars. Directory hashes are
 re-derived from recorded identities, failure rows reject unknown fields, and a
