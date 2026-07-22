@@ -137,7 +137,7 @@ describe("public match API redaction", () => {
     const safeComparison = await requestJson(
       baseUrl,
       "GET",
-      `/api/matches/${record.id}/compare/${candidate.id}?view=postgame-redacted`
+      `/api/matches/${record.id}/compare/${candidate.id}?view=truth-redacted`
     );
     expect(safeComparison.status).toBe(200);
     const checkpoint = await requestJson(baseUrl, "POST", `/api/matches/${record.id}/checkpoints`, {
@@ -161,9 +161,31 @@ describe("public match API redaction", () => {
       expect(JSON.stringify(response.body)).not.toContain("seerInspection");
     }
 
+    const [nativeReplay, replayFrame] = await Promise.all([
+      requestJson(baseUrl, "POST", `/api/matches/${record.id}/replay`, {}),
+      requestJson(baseUrl, "POST", `/api/matches/${record.id}/replay/frame`, { nativeStepCount: 1 })
+    ]);
+    for (const response of [nativeReplay, replayFrame]) {
+      expect(response.status).toBe(403);
+      expect(response.body).toMatchObject({ code: "postgame_replay_local_only" });
+      const responseJson = JSON.stringify(response.body);
+      expect(responseJson).not.toContain("nativeStepCount");
+      expect(responseJson).not.toContain("stateHash");
+      expect(responseJson).not.toContain("seerInspection");
+    }
+
     const defaultProjection = await requestJson(baseUrl, "GET", `/api/matches/${record.id}/artifact`);
     expect(defaultProjection.status).toBe(200);
-    expect(defaultProjection.body.projection).toMatchObject({ view: "postgame-redacted" });
+    expect(defaultProjection.body.projection).toMatchObject({ view: "truth-redacted", postgameTruthRedacted: true });
+    expect(defaultProjection.body.finalState).not.toHaveProperty("night");
+
+    const explicitPostgameProjection = await requestJson(
+      baseUrl,
+      "GET",
+      `/api/matches/${record.id}/artifact?view=postgame-redacted`
+    );
+    expect(explicitPostgameProjection.status).toBe(403);
+    expect(explicitPostgameProjection.body).toMatchObject({ code: "postgame_artifact_view_local_only" });
   });
 
   it("serves a server-side postgame artifact projection with private evidence redacted", async () => {

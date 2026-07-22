@@ -6,10 +6,11 @@ import type { SocialExposureRecord, SocialMessage } from "../src/harness/social"
 import { emptyEvaluationSummary } from "../src/harness/evaluation";
 
 describe("artifact social graph", () => {
-  it("derives message exposure edges from scoped observations, not recipient envelopes", () => {
+  it("uses server-projected exposure records and does not treat recipient envelopes as observation proof", () => {
     const artifact = createExposureArtifact({
       directObservedBy: ["p3"],
-      wrappedObservedBy: []
+      wrappedObservedBy: [],
+      exposureRecords: [projectedExposure("p3", "trace-projected-p3", 3)]
     });
 
     const graph = buildSocialGraph(artifact);
@@ -28,17 +29,17 @@ describe("artifact social graph", () => {
       messages: 1,
       observations: 1,
       actionKinds: ["speech.submit"],
-      traceIds: ["trace-direct-p3"],
+      traceIds: ["trace-projected-p3"],
       turnIndexes: [3],
       evidenceCount: 1,
-      evidenceLabels: ["msg#1 observed@turn3 speech.submit trace-direct-p3"]
+      evidenceLabels: ["msg#1 observed@turn3 speech.submit trace-projected-p3"]
     });
     expect(graph.exposureEdges.some((edge) => edge.targetId === "p2")).toBe(false);
     expect(graph.nodes.find((node) => node.id === "p2")).toMatchObject({ received: 1, observed: 0 });
     expect(graph.nodes.find((node) => node.id === "p3")).toMatchObject({ received: 1, observed: 1 });
   });
 
-  it("also reads wrapped generic social adapter observations", () => {
+  it("does not reconstruct exposure from wrapped generic social adapter observations", () => {
     const artifact = createExposureArtifact({
       directObservedBy: [],
       wrappedObservedBy: ["p2"]
@@ -46,21 +47,7 @@ describe("artifact social graph", () => {
 
     const graph = buildSocialGraph(artifact);
 
-    expect(graph.exposureEdges).toHaveLength(1);
-    expect(graph.exposureEdges[0]).toMatchObject({
-      sourceId: "p1",
-      targetId: "p2",
-      channelId: "table",
-      visibility: "public",
-      kind: "public-speech",
-      messages: 1,
-      observations: 1,
-      actionKinds: ["speech.submit"],
-      traceIds: ["trace-wrapped-p2"],
-      turnIndexes: [3],
-      evidenceCount: 1,
-      evidenceLabels: ["msg#1 observed@turn3 speech.submit trace-wrapped-p2"]
-    });
+    expect(graph.exposureEdges).toEqual([]);
   });
 
   it("uses server-projected exposureRecords before observation-derived exposure", () => {
@@ -92,7 +79,7 @@ describe("artifact social graph", () => {
     expect(graph.nodes.find((node) => node.id === "p3")).toMatchObject({ received: 1, observed: 0 });
   });
 
-  it("does not derive exposure from redacted postgame projections without server records", () => {
+  it("fails closed for a broad artifact with observations but no server-projected exposure record", () => {
     const artifact = createExposureArtifact({
       directObservedBy: ["p3"],
       wrappedObservedBy: [],
@@ -132,14 +119,7 @@ function createExposureArtifact(options: {
   exposureRecords?: SocialExposureRecord[];
   projection?: boolean;
   redactSocialObservations?: boolean;
-}): MatchArtifact & {
-  projection?: {
-    view: "postgame-redacted";
-    privateEvidenceRedacted: boolean;
-    postgameTruthRedacted: boolean;
-    generatedAt: string;
-  };
-} {
+}): Parameters<typeof buildSocialGraph>[0] {
   const state = createGame({ id: "social-graph-exposure", seed: "social-graph-exposure" });
   const publicSpeech: SocialMessage = {
     id: "msg-1",
@@ -337,7 +317,9 @@ function createExposureArtifact(options: {
       generatedAt: "2026-01-01T00:00:00.000Z"
     };
   }
-  return artifact;
+  // Tests intentionally provide a broad raw-shaped fixture to prove the
+  // cockpit selector fails closed without the server exposure projection.
+  return artifact as unknown as Parameters<typeof buildSocialGraph>[0];
 }
 
 function projectedExposure(observerId: string, traceId: string, turnIndex: number): SocialExposureRecord {

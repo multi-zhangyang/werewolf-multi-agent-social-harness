@@ -25702,3 +25702,53 @@ passed; the complete deterministic suite passed 43 files / 436 tests; the
 production build and the 7-test fixture browser suite passed. The existing
 Vite main-chunk-size warning remains a performance follow-up, not a ledger
 authority or redaction exception.
+
+## 13.263 Postgame Research Access And Server-Only Exposure Lock
+
+Timestamp: `2026-07-21`
+
+`postgame-redacted` is a local research review capability, not a public
+projection tier. It can retain final role, team, night, native scheduler, and
+deterministic replay evidence after private cognition is removed. Therefore a
+truth-redacted reader must not be able to recover that evidence through a
+sibling route, a stale React state object, or browser-side reconstruction.
+
+```text
+loopback-only local research server
+  -> default artifact: postgame-redacted
+  -> explicit postgame-redacted artifact / native replay / replay frame: allowed
+
+remote or non-loopback public server
+  -> default artifact: truth-redacted
+  -> explicit postgame-redacted artifact / native replay / replay frame: 403
+  -> truth-redacted artifact: allowed
+```
+
+- `POST /api/matches/:id/replay` and
+  `POST /api/matches/:id/replay/frame` are both protected by the server-side
+  loopback-local research gate. Native step and batch density, hashes, cursors,
+  and prefix state are never a public-playback surrogate.
+- Omitted artifact `view` selects `postgame-redacted` only for loopback local
+  research access; it degrades to `truth-redacted` for remote/non-loopback
+  access. Explicit remote postgame access fails rather than relying on a
+  client-selected view name as authorization. Existing `full` access remains
+  separately stricter.
+- React clears native replay state when a user enters `truth-redacted`, disables
+  the native replay control, and never renders its scheduler/hash summary in
+  that view. This UI is defense in depth only; route authorization remains the
+  authority.
+- The social evidence graph accepts only the server projection DTO and consumes
+  only server-projected `socialEpisode.exposureRecords`. It must fail closed
+  when those records are absent. Browser code may not derive actor observation
+  exposure from recipient envelopes, legacy raw steps, or a canonical artifact.
+
+Required regression after changing artifact view selection, replay APIs, or the
+cockpit social graph:
+
+```bash
+npx vitest run tests/socialGraph.test.ts tests/serverPublicViewApi.test.ts \
+  tests/serverCheckpointApi.test.ts --testTimeout=60000 --maxWorkers=1 \
+  --no-file-parallelism
+npm run test:e2e
+git diff --check
+```
