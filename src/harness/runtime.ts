@@ -46,7 +46,7 @@ export async function probeHarnessTurn(options: {
   state: GameState;
   action: AgentPendingAction;
   agent: HarnessAgentConfig;
-  reasoner: HarnessRunOptions["reasoner"];
+  reasoner?: HarnessRunOptions["reasoner"];
 }): Promise<{ trace: HarnessTurnTrace; command: GameCommand }> {
   assertRuntimeModelsAvailable([options.agent.model], "Harness probe");
   return probeWerewolfSocialHarnessTurn(options);
