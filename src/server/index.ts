@@ -88,6 +88,7 @@ import type { EvidenceRef } from "../harness/socialState";
 import { runTournament, type TournamentEpisode, type TournamentResult } from "../harness/tournament";
 import {
   assertPublicTournamentMatchArtifact,
+  summarizeTournamentExecutionTelemetry,
   summarizeTournamentMetricPromotionsFromMetrics,
   summarizeTournamentMetricPromotionsFromReports,
   PUBLIC_TOURNAMENT_ARTIFACT_VERSION,
@@ -5304,6 +5305,7 @@ function buildTournamentSummary(
     },
     elapsedMs: options.elapsedMs,
     timedOut: options.timedOut,
+    executionTelemetry: summarizeTournamentExecutionTelemetry(result),
     evaluation: summarizeTournamentEvaluation(result.episodes),
     evaluationReports: summarizeTournamentEvaluationReports(result.episodes),
     failures,
