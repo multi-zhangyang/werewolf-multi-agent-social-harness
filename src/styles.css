@@ -104,6 +104,23 @@ body {
   stroke-width: 3;
 }
 
+.skip-to-workspace {
+  position: fixed;
+  z-index: 1001;
+  inset-block-start: 8px;
+  inset-inline-start: 8px;
+  transform: translateY(-160%);
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #1455d9;
+  color: #fff;
+  font-weight: 600;
+}
+
+.skip-to-workspace:focus {
+  transform: translateY(0);
+}
+
 .social-evidence-graph__node-label {
   fill: #20344e;
   font-family: Geist, "Noto Sans SC", sans-serif;
@@ -148,7 +165,17 @@ body {
 }
 
 @media (max-width: 576px) {
+  .social-evidence-graph__canvas {
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+  }
+
   .social-evidence-graph__canvas svg {
-    min-height: 188px;
+    min-width: 680px;
+    min-height: 406px;
+  }
+
+  .social-evidence-graph__node-meta {
+    display: none;
   }
 }

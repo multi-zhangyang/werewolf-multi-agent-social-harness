@@ -2834,6 +2834,9 @@ export function App() {
         }
       }}
     >
+      <a className="skip-to-workspace" href="#workspace-main">
+        跳至工作区内容
+      </a>
       <Layout style={{ minWidth: 0, minHeight: "100vh" }}>
         <Sider
           width={292}
@@ -2964,7 +2967,7 @@ export function App() {
           </Header>
 
           <Layout style={{ minWidth: 0 }}>
-            <main aria-label={`${activeWorkspace.label} 工作区`} style={{ minWidth: 0, padding: isCompactLayout ? 12 : 20 }}>
+            <main id="workspace-main" aria-label={`${activeWorkspace.label} 工作区`} style={{ minWidth: 0, padding: isCompactLayout ? 12 : 20 }}>
               <div role="status" aria-live="polite">
                 <StatusBanner status={status} error={error} busy={busy} />
               </div>
@@ -3753,6 +3756,17 @@ function TimelineWorkspace({
   const nativeStepByTraceId = useMemo(() => new Map(steps.map((step) => [step.traceId, step])), [steps]);
   const legacyStepByTraceId = useMemo(() => new Map(legacySteps.map((step) => [step.traceId, step])), [legacySteps]);
   const selectedLegacyStep = selectedStep ? legacyStepByTraceId.get(selectedStep.traceId) ?? null : null;
+  const selectedLegacyPolicyOnly =
+    selectedLegacyStep?.reasonerOutput.cognitionSource === "policy" || selectedLegacyStep?.turnTrace.cognitionSource === "policy";
+  const selectedLegacyDetails: Array<[string, unknown]> = selectedLegacyStep
+    ? [
+        ["legacy turn", selectedLegacyStep.turnIndex],
+        ["cognition", selectedLegacyPolicyOnly ? "deterministic policy narration · no model call" : "model reasoner advisory"],
+        ...(selectedLegacyPolicyOnly ? [] : [["model", selectedLegacyStep.model] as [string, unknown]]),
+        ["command", readCommandType(selectedLegacyStep.command)],
+        ...(selectedLegacyPolicyOnly ? [] : [["attempts", selectedLegacyStep.reasonerOutput.attempts ?? "n/a"] as [string, unknown]])
+      ]
+    : [];
   const selectedDecisionJournal = useMemo(
     () =>
       selectedStep
@@ -4063,12 +4077,7 @@ function TimelineWorkspace({
                     <Descriptions
                       size="small"
                       column={1}
-                      items={descriptionItems([
-                        ["legacy turn", selectedLegacyStep.turnIndex],
-                        ["model", selectedLegacyStep.model],
-                        ["command", readCommandType(selectedLegacyStep.command)],
-                        ["attempts", selectedLegacyStep.reasonerOutput.attempts ?? "n/a"]
-                      ])}
+                      items={descriptionItems(selectedLegacyDetails)}
                     />
                     <Card size="small" title="Policy arbitration">
                       <Space direction="vertical" size="small" style={{ width: "100%" }}>
@@ -4077,18 +4086,27 @@ function TimelineWorkspace({
                         <Tag color="warning">private arbitration evidence redacted</Tag>
                       </Space>
                     </Card>
-                    <Card size="small" title="Reasoner telemetry">
-                      <Descriptions
-                        size="small"
-                        column={1}
-                        items={descriptionItems([
-                          ["latency", `${selectedLegacyStep.reasonerOutput.latencyMs}ms`],
-                          ["prompt tokens", selectedLegacyStep.reasonerOutput.promptTokens ?? "n/a"],
-                          ["completion tokens", selectedLegacyStep.reasonerOutput.completionTokens ?? "n/a"],
-                          ["attempts", selectedLegacyStep.reasonerOutput.attempts ?? "n/a"]
-                        ])}
+                    {selectedLegacyPolicyOnly ? (
+                      <Alert
+                        type="info"
+                        showIcon
+                        message="Deterministic policy narration · no model call"
+                        description="本行由受 harness 管理的 policy 生成；没有 provider/model telemetry 可以或应当显示。"
                       />
-                    </Card>
+                    ) : (
+                      <Card size="small" title="Reasoner telemetry">
+                        <Descriptions
+                          size="small"
+                          column={1}
+                          items={descriptionItems([
+                            ["latency", `${selectedLegacyStep.reasonerOutput.latencyMs}ms`],
+                            ["prompt tokens", selectedLegacyStep.reasonerOutput.promptTokens ?? "n/a"],
+                            ["completion tokens", selectedLegacyStep.reasonerOutput.completionTokens ?? "n/a"],
+                            ["attempts", selectedLegacyStep.reasonerOutput.attempts ?? "n/a"]
+                          ])}
+                        />
+                      </Card>
+                    )}
                   </Space>
                 </Card>
               ) : (
@@ -4206,7 +4224,7 @@ function SocietyWorkspace({
       align: "right",
       render: (_, row) =>
         row.agent ? (
-          <Button type="link" size="small" onClick={() => onSelectAgent(row.agent!)}>
+          <Button type="link" size="small" aria-label={`查看 agent ${row.node.id}`} onClick={() => onSelectAgent(row.agent!)}>
             查看
           </Button>
         ) : null

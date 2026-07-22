@@ -233,11 +233,12 @@ test("renders social evidence as a server-projected graph and keeps interaction 
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
   const graph = page.getByTestId("social-evidence-graph");
   await expect(graph).toBeVisible();
-  await expect(graph.getByRole("img", { name: "Agent 社会可见性与通信证据图" })).toBeVisible();
+  await expect(graph.getByRole("group", { name: "Agent 社会可见性与通信证据图" })).toBeVisible();
 
   const agentNode = graph.getByRole("button", { name: "查看 agent p1 的社会证据" });
   await expect(agentNode).toBeVisible();
-  await agentNode.click();
+  await agentNode.focus();
+  await agentNode.press("Space");
   await expect(page.getByText("Agent p1")).toBeVisible();
   expect(artifactViews).not.toContain("full");
 });

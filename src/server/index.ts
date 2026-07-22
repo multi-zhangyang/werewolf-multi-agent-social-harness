@@ -4065,6 +4065,7 @@ function redactHarnessStepPrivateEvidence(step: MatchArtifact["trajectory"][numb
       beliefs: {},
       privateMemo: "[REDACTED private memo]",
       publicSpeech: step.turnTrace.publicSpeech ? "[REDACTED generated speech]" : undefined,
+      cognitionSource: redactCognitionSource(step.turnTrace.cognitionSource),
       latencyMs: step.turnTrace.latencyMs,
       promptTokens: step.turnTrace.promptTokens,
       completionTokens: step.turnTrace.completionTokens,
@@ -4076,13 +4077,25 @@ function redactHarnessStepPrivateEvidence(step: MatchArtifact["trajectory"][numb
 }
 
 function redactReasonerOutput(value: MatchArtifact["trajectory"][number]["reasonerOutput"]): RedactedHarnessStepDto["reasonerOutput"] {
+  const cognitionSource = redactCognitionSource(value.cognitionSource);
   return {
-    content: "[REDACTED model reasoning output]",
+    content: cognitionSource === "policy" ? "[REDACTED deterministic policy memo]" : "[REDACTED model reasoning output]",
+    cognitionSource,
     latencyMs: value.latencyMs,
     promptTokens: value.promptTokens,
     completionTokens: value.completionTokens,
     attempts: value.attempts
   };
+}
+
+/**
+ * Cognition provenance is a closed, non-content-bearing control-plane fact.
+ * Retaining it in local postgame review prevents a deterministic policy turn
+ * from being misrepresented as a provider/model invocation. Historical
+ * records without the field retain their legacy reasoner-backed meaning.
+ */
+function redactCognitionSource(value: unknown): "reasoner" | "policy" {
+  return value === "policy" ? "policy" : "reasoner";
 }
 
 function redactPendingAction(action: unknown): RedactedPendingActionDto {
@@ -4200,13 +4213,7 @@ function redactSocialActionMetadata(value: unknown): Record<string, unknown> | u
         })
       : undefined,
     reasonerOutput: reasoner
-      ? compactRecord({
-          content: "[REDACTED model reasoning output]",
-          latencyMs: safeMetadataNumber(reasoner.latencyMs),
-          promptTokens: safeMetadataNumber(reasoner.promptTokens),
-          completionTokens: safeMetadataNumber(reasoner.completionTokens),
-          attempts: safeMetadataNumber(reasoner.attempts)
-        })
+      ? redactReasonerMetadata(reasoner)
       : undefined,
     turnTrace: trace
       ? compactRecord({
@@ -4223,6 +4230,7 @@ function redactSocialActionMetadata(value: unknown): Record<string, unknown> | u
           beliefs: {},
           privateMemo: "[REDACTED private memo]",
           publicSpeech: trace.publicSpeech ? "[REDACTED generated speech]" : undefined,
+          cognitionSource: redactCognitionSource(trace.cognitionSource),
           latencyMs: safeMetadataNumber(trace.latencyMs),
           promptTokens: safeMetadataNumber(trace.promptTokens),
           completionTokens: safeMetadataNumber(trace.completionTokens),
@@ -4230,6 +4238,18 @@ function redactSocialActionMetadata(value: unknown): Record<string, unknown> | u
           agentStateHash: safeMetadataString(trace.agentStateHash)
         })
       : undefined
+  });
+}
+
+function redactReasonerMetadata(reasoner: Record<string, unknown>): Record<string, unknown> {
+  const cognitionSource = redactCognitionSource(reasoner.cognitionSource);
+  return compactRecord({
+    content: cognitionSource === "policy" ? "[REDACTED deterministic policy memo]" : "[REDACTED model reasoning output]",
+    cognitionSource,
+    latencyMs: safeMetadataNumber(reasoner.latencyMs),
+    promptTokens: safeMetadataNumber(reasoner.promptTokens),
+    completionTokens: safeMetadataNumber(reasoner.completionTokens),
+    attempts: safeMetadataNumber(reasoner.attempts)
   });
 }
 
@@ -4904,6 +4924,7 @@ function buildProbeSummary(options: {
       actionRecorded: Boolean(options.action.kind),
       policyRecorded: Boolean(options.probe.trace.policyName),
       commandRecorded: Boolean(options.probe.command.type),
+      environmentValidated: options.probe.environmentValidated,
       confidence: options.probe.trace.confidence
     },
     modelLatencyMs: options.probe.trace.latencyMs,

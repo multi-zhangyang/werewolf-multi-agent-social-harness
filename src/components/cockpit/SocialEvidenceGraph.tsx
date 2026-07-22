@@ -75,7 +75,15 @@ export function SocialEvidenceGraph({
     >
       <Flex vertical gap="small">
         <div className="social-evidence-graph__canvas" aria-label="Agent 社会可见性与通信证据图">
-          <svg viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`} role="img" aria-label="Agent 社会可见性与通信证据图">
+          <svg
+            viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
+            role="group"
+            aria-labelledby="social-evidence-graph-title social-evidence-graph-description"
+          >
+            <title id="social-evidence-graph-title">Agent 社会可见性与通信证据图</title>
+            <desc id="social-evidence-graph-description">
+              节点和边都是可键盘操作的 server-projected 通信与可见性证据；按 Enter 或空格查看对应的既有检查器。
+            </desc>
             <defs>
               <marker id="social-evidence-graph-arrow-public" markerWidth="7" markerHeight="7" refX="7" refY="3.5" orient="auto">
                 <path d="M0,0 L7,3.5 L0,7 z" className="social-evidence-graph__arrow social-evidence-graph__arrow--public" />

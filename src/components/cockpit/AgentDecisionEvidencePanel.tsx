@@ -33,13 +33,16 @@ export interface AgentDecisionEvidenceView {
     confidence: number;
     strategyTags: string[];
   };
-  reasoner?: {
-    model: string;
-    latencyMs: number;
-    promptTokens?: number;
-    completionTokens?: number;
-    attempts?: number;
-  };
+  cognition?:
+    | { source: "policy" }
+    | {
+        source: "reasoner";
+        model: string;
+        latencyMs: number;
+        promptTokens?: number;
+        completionTokens?: number;
+        attempts?: number;
+      };
   proposal: {
     commandType: string;
     messageDraftCount: number;
@@ -123,15 +126,7 @@ export function buildAgentDecisionEvidenceView(
           strategyTags: [...linkedLegacyStep.policyPlan.strategyTags]
         }
       : undefined,
-    reasoner: linkedLegacyStep
-      ? {
-          model: linkedLegacyStep.model,
-          latencyMs: linkedLegacyStep.reasonerOutput.latencyMs,
-          promptTokens: linkedLegacyStep.reasonerOutput.promptTokens,
-          completionTokens: linkedLegacyStep.reasonerOutput.completionTokens,
-          attempts: linkedLegacyStep.reasonerOutput.attempts
-        }
-      : undefined,
+    cognition: cognitionEvidence(linkedLegacyStep),
     proposal: {
       commandType: nativeStep.action.command.type,
       messageDraftCount: nativeStep.action.messages?.length ?? 0
@@ -228,16 +223,20 @@ export function AgentDecisionEvidencePanel({
             },
             {
               title: "3. Optional reasoner advisory",
-              description: evidence.reasoner ? (
+              description: evidence.cognition?.source === "policy" ? (
+                <Text type="secondary">
+                  Deterministic policy narration · no model call。此 actor 没有调用 optional model reasoner；policy 仍由 harness 管理，并且环境 receipt 才能提交结果。
+                </Text>
+              ) : evidence.cognition ? (
                 <Descriptions
                   size="small"
                   column={1}
                   items={descriptionItems([
-                    ["model", evidence.reasoner.model],
-                    ["latency", `${evidence.reasoner.latencyMs}ms`],
-                    ["prompt tokens", evidence.reasoner.promptTokens ?? "n/a"],
-                    ["completion tokens", evidence.reasoner.completionTokens ?? "n/a"],
-                    ["attempts", evidence.reasoner.attempts ?? "n/a"]
+                    ["model", evidence.cognition.model],
+                    ["latency", `${evidence.cognition.latencyMs}ms`],
+                    ["prompt tokens", evidence.cognition.promptTokens ?? "n/a"],
+                    ["completion tokens", evidence.cognition.completionTokens ?? "n/a"],
+                    ["attempts", evidence.cognition.attempts ?? "n/a"]
                   ])}
                 />
               ) : (
@@ -346,6 +345,20 @@ function formatBatch(
 function readCommitStatus(step: RedactedSocialStepDto): string {
   if (step.commitStatus) return step.commitStatus;
   return step.failure || step.error ? "rejected" : "committed";
+}
+
+function cognitionEvidence(legacyStep: RedactedHarnessStepDto | undefined): AgentDecisionEvidenceView["cognition"] {
+  if (!legacyStep) return undefined;
+  const source = legacyStep.reasonerOutput.cognitionSource ?? legacyStep.turnTrace.cognitionSource ?? "reasoner";
+  if (source === "policy") return { source };
+  return {
+    source,
+    model: legacyStep.model,
+    latencyMs: legacyStep.reasonerOutput.latencyMs,
+    promptTokens: legacyStep.reasonerOutput.promptTokens,
+    completionTokens: legacyStep.reasonerOutput.completionTokens,
+    attempts: legacyStep.reasonerOutput.attempts
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -29,6 +29,7 @@ interface ProbeSummary {
     actionKind: string;
     policy: string;
     command: string;
+    environmentValidated: boolean;
     intent: string;
     confidence: number;
   };
@@ -138,6 +139,7 @@ async function main(): Promise<void> {
             actionKind: action.kind,
             policy: probe.trace.policyName,
             command: probe.command.type,
+            environmentValidated: probe.environmentValidated,
             intent: probe.trace.intent,
             confidence: probe.trace.confidence
           },

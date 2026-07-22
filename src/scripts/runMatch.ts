@@ -3,7 +3,7 @@ import { modelClientFromEnv, providerDiagnosticSummaryFromEnv } from "../agents/
 import { assertRuntimeModelsAvailable, normalizeModelList } from "../agents/schema";
 import { createGame } from "../core/engine";
 import type { MatchMetrics } from "../core/types";
-import { buildMatchArtifact, toTrajectoryJsonl } from "../harness/artifacts";
+import { assertValidMatchArtifactIntegrity, buildMatchArtifact, toTrajectoryJsonl } from "../harness/artifacts";
 import { harnessFailureEvidenceFromEpisode } from "../harness/executionEvidence";
 import { werewolfHarnessTurnEvidenceFromEpisode } from "../harness/werewolfExecutionEvidence";
 import { safeProviderFailureMessage } from "../harness/providerFailure";
@@ -179,6 +179,9 @@ async function main(): Promise<void> {
       resolvedAssignments,
       result
     });
+    // CLI artifacts are an artifact-plane authority just like server-persisted
+    // artifacts. Validate before any file write or full JSON emission.
+    assertValidMatchArtifactIntegrity(artifact);
 
     if (options.export) {
       await writeFile(options.export, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
