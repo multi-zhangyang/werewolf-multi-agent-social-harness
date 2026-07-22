@@ -28275,3 +28275,166 @@ and episode sidecars. The canonical-head index projection fix was then applied;
 the failed scenario passed alone in 33.5 seconds and the complete E2E suite
 passed in 2.8 minutes, with the final scenario completing in 31.0 seconds. This
 failure was not ignored or reclassified as success.
+
+## 13.298 Episode Authority Fencing And Exile-Ballot Evaluation Lock
+
+Timestamp: `2026-07-22`
+
+This lock records the next harness-first correctness pass. It does not change
+provider/model selection, prompt behavior, reasoner policy, streaming request
+shape, or any unresolved Werewolf ruleset variant.
+
+### 13.298.1 Canonical Episode And Checkpoint Discovery
+
+`HarnessEpisodeArtifactStore` now follows the same authority principle as the
+V2 experiment run store:
+
+```text
+canonical authority:
+  episodes/<sha256(runId)>
+  episodes/<sha256(runId)>/checkpoints/<sha256(checkpointId)>
+
+rebuildable projections:
+  index.json
+  checkpoints.index.json
+
+instance maps:
+  cache only
+```
+
+An already-open store no longer returns `undefined` merely because another
+instance or process published an episode/checkpoint after its initial scan.
+`get(runId)` and `getCheckpoint(runId, checkpointId)` derive the fixed identity
+directory directly, verify its safe path and immutable contents, run the
+injected canonical verifier, and refresh the instance cache.
+
+Episode/checkpoint mutations and both derived indexes are serialized by one
+single-host Linux `flock` lease. Candidate artifact/checkpoint cloning,
+identity checks, domain verification, evaluation normalization, and immutable
+sidecar materialization occur before the lease where possible. The lease owns
+canonical collision checks, fixed-directory publication, checkpoint membership
+publication, and root-index replacement. This avoids making a slow candidate
+artifact verifier the global store critical section.
+
+Root index publication reads the latest globally serialized projection and
+overlays only the run ids dirtied by the current mutation. It never overlays an
+instance's complete cache, because unrelated cached entries may have stale
+checkpoint counts. Projected entries are compared against canonical manifest
+identity and the strongly verified checkpoint set. A missing, malformed,
+semantically drifted, or stale projection triggers full canonical recovery.
+
+The mutation path also scans for fixed episode directories missing from the
+projection. This closes the process-crash window where canonical directory
+rename succeeded but root index replacement did not. Full initialization and
+repair rebuild each `checkpoints.index.json` as well as the root index, closing
+the equivalent checkpoint rename/index crash window.
+
+Tests prove:
+
+- two already-open instances discover one another's episode publications;
+- two instances publishing different episodes preserve both root-index rows;
+- two real Node processes publishing different episodes preserve both rows;
+- two instances publishing different checkpoints preserve checkpoint index and
+  root checkpoint count;
+- exact episode retry refreshes canonical checkpoint membership;
+- a stale instance publishing an unrelated episode cannot roll back a peer's
+  checkpoint count;
+- a typed-valid but semantically altered root index is repaired;
+- checkpoint content tampering followed by an unrelated write repairs both
+  indexes and excludes the invalid checkpoint;
+- reopen reconstructs a stale checkpoint index from canonical checkpoint
+  directories;
+- worker tests use READY/GO/DONE barriers, await IPC delivery and normal exit,
+  isolate child env from provider secrets, and clean up child processes.
+
+Capability boundary:
+
+```text
+proved:
+  single-host/local-filesystem cross-instance episode/checkpoint discovery
+  single-host cross-process derived-index fencing
+  canonical rename -> missing index crash-window recovery
+  semantic index repair against canonical manifest/checkpoint authority
+
+not claimed:
+  distributed or network-filesystem consensus
+  power-loss durability or fsync publication
+  cross-host exactly-once
+```
+
+### 13.298.2 Sheriff Ballots Are Not Exile Votes
+
+Werewolf stores both sheriff-election and exile ballots in `state.votes`.
+Evaluation paths that specifically measure exile-vote accuracy, influence, or
+misdirection now use the compatibility boundary:
+
+```ts
+(vote.kind ?? "exile") === "exile"
+```
+
+This excludes explicit `kind: "sheriff"` ballots while retaining historical
+artifact compatibility for older vote records without `kind`.
+
+The filter now covers:
+
+- core village/wolf exile-vote accuracy;
+- canonical Werewolf harness result metrics;
+- adversarial per-agent vote accuracy;
+- legacy public-pressure vote-follow influence;
+- village-on-village misdirection;
+- vote/misdirection fallback evidence;
+- false-role-pressure temporal vote lookup.
+
+`totalVotes` intentionally remains all public ballots, including sheriff
+election ballots. Sheriff events remain `sheriff.vote_cast`; exile evidence
+continues to use `vote.cast`. No election, tie, Witch, Hunter, wolf-kill, or
+other unresolved ruleset semantics changed.
+
+### 13.298.3 Validation Recorded
+
+Focused validation after integration:
+
+```text
+npm run typecheck
+  passed
+
+focused integration
+  6 files / 101 tests passed
+
+episode-store focused suite
+  17 tests passed
+
+git diff --check
+  passed
+```
+
+Final repository validation after the integrated patch:
+
+```text
+complete deterministic suite
+  52 files / 576 tests passed
+  508.22s
+  invoked with testTimeout=60000 and hookTimeout=60000
+
+npm run build
+  passed
+  existing 1,264.51 kB minified / 388.95 kB gzip bundle warning only
+
+npm run test:e2e
+  15 passed
+  3.0m
+
+git diff --check
+  passed
+```
+
+The first default-timeout full attempt exposed host-load sensitivity in several
+server public-pack tests: their fixed five-second Vitest budget expired while a
+separate workspace process was consuming substantial CPU. This was not hidden
+by changing repository timeout configuration. The same representative test was
+run from a detached, unmodified `f27253a` worktree on the same host and also
+exceeded the default budget (13–17 seconds), while the patched worktree was
+faster in the direct comparison. The complete suite was then rerun with a wider
+outer test/hook timeout but unchanged assertions and passed all 576 tests. No
+provider/model call was required because this pass did not change reasoner or
+provider behavior.
