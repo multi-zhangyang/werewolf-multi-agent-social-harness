@@ -16,7 +16,13 @@ test("renders recorded server truth without a provider and never requests a full
   await expect(page.getByText("多 Agent 社会 Harness Cockpit")).toBeVisible();
   await expect(page.getByText("运行注册表")).toBeVisible();
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
-  await expect(page.getByText(fixtureMatchId).first()).toBeVisible();
+  // Ordinary desktop widths use the existing evidence Drawer so the center
+  // workspace does not collapse between two fixed side rails.
+  await page.getByRole("button", { name: "打开证据检查器" }).click();
+  const bootstrapInspector = page.getByRole("dialog", { name: "Evidence Inspector" });
+  await expect(bootstrapInspector).toContainText(fixtureMatchId);
+  await page.keyboard.press("Escape");
+  await expect(bootstrapInspector).toBeHidden();
 
   // The postgame projection contains the recorded native timeline. Its
   // explicit inspector action must be usable with ordinary keyboard focus;
@@ -32,6 +38,11 @@ test("renders recorded server truth without a provider and never requests a full
   await expect(decisionEvidence).toBeVisible();
   await expect(decisionEvidence).toContainText("Environment receipt");
   await expect(decisionEvidence).toContainText("private actor state");
+  const stepInspector = page.getByRole("dialog", { name: "Evidence Inspector" });
+  if (await stepInspector.isVisible()) {
+    await page.keyboard.press("Escape");
+    await expect(stepInspector).toBeHidden();
+  }
 
   // A complete native replay is a local postgame-research action. Exercise it
   // before changing projection, then prove the strict public view cannot make
@@ -542,6 +553,32 @@ test.describe("compact cockpit", () => {
   });
 });
 
+test("keeps the fixed evidence inspector in its drawer at 1200px and 1280px", async ({ page }) => {
+  for (const width of [1200, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/?workspace=timeline", { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+
+    // At these desktop widths the 292px context rail may remain fixed, but
+    // mounting the 384px inspector as a second rail would collapse the main
+    // workspace to 524-604px. The existing bounded Drawer owns evidence until
+    // the xxl breakpoint.
+    await expect(page.locator(".ant-layout-sider")).toHaveCount(1);
+    const main = page.getByRole("main", { name: "时间线 工作区" });
+    const mainBox = await main.boundingBox();
+    expect(mainBox).not.toBeNull();
+    expect(mainBox!.width).toBeGreaterThanOrEqual(width - 293);
+    await expectPageWithinViewport(page);
+
+    await page.getByRole("button", { name: "打开证据检查器" }).click();
+    const inspector = page.getByRole("dialog", { name: "Evidence Inspector" });
+    await expect(inspector).toBeVisible();
+    await expectDrawerWithinViewport(page, inspector);
+    await page.keyboard.press("Escape");
+    await expect(inspector).toBeHidden();
+  }
+});
+
 test("blocks an invalid roster assignment in the browser before it can start a match", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
@@ -677,6 +714,11 @@ test("submits the selected parallel scheduler when exporting a tournament public
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
   await expect(page.getByRole("tabpanel", { name: "公开包" })).toBeVisible();
 
+  const games = page.getByRole("combobox", { name: "锦标赛游戏局数" });
+  await games.click();
+  await games.press("ArrowUp");
+  await games.press("Enter");
+
   const scheduler = page.getByRole("combobox", { name: "联合阶段调度" });
   await scheduler.click();
   await scheduler.press("ArrowDown");
@@ -712,6 +754,29 @@ test("submits the selected parallel scheduler when exporting a tournament public
 
   const response = await tournamentResponse;
   expect(response.ok()).toBeTruthy();
+  const responseBody = await response.json();
+  expect(responseBody.summary).toMatchObject({
+    status: "truncated",
+    executionTelemetry: {
+      schemaVersion: "harness.tournament-execution-telemetry.v1",
+      lifecycle: { completed: 0, truncated: 1, failed: 0, preparationFailed: 0, unstarted: 0 }
+    }
+  });
+  expect(responseBody.summary.executionTelemetry.totals.calls).toBeGreaterThan(0);
+  expect(responseBody.summary.executionTelemetry.totals.totalTokens).toBeGreaterThan(0);
+
+  const telemetry = page.getByTestId("tournament-execution-telemetry");
+  await expect(telemetry).toContainText("执行分母与结果分母严格分离");
+  await expect(telemetry).toContainText("truncated 1");
+  await expect(page.getByTestId("tournament-execution-calls")).toContainText(
+    String(responseBody.summary.executionTelemetry.totals.calls)
+  );
+  await expect(page.getByTestId("tournament-execution-tokens")).toContainText(
+    String(responseBody.summary.executionTelemetry.totals.totalTokens)
+  );
+  await expect(page.getByTestId("tournament-execution-attempts")).toContainText("attempts");
+  await expect(page.getByTestId("tournament-execution-errors")).toContainText("harness errors");
+  await expect(telemetry).toContainText("fixture-model");
 });
 
 function isArtifactResponse(response: Response, view: "postgame-redacted" | "truth-redacted"): boolean {

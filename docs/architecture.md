@@ -43,7 +43,8 @@ they are never smuggled into `GameState.events`.
 | Reasoner | `HarnessReasoner`, model client adapters | May produce speech or a private tactical memo and telemetry; owns no environment or agent-state mutation authority. |
 | Communication | `SocialCommunicationBus`, `SocialChannel`, `SocialMessage` | Validates message envelopes before the environment transition and publishes them after a successful transition. |
 | Native artifact | `SocialEpisodeArtifact`, `SocialHarnessStep`, `SocialDomainAdapterManifest` | Records system/player steps, commit status, hashes, message/event ranges, traces, structured failures, and safe versioned domain-adapter provenance. |
-| Generic artifact/checkpoint core | `episodeArtifacts.ts`, `HarnessEpisodeArtifactEnvelope`, `HarnessCheckpointEnvelope` | Owns domain-neutral snapshot, hash, batch-boundary, actor-snapshot, adapter-binding, and parent-lineage invariants. It receives a domain replay factory and never calls a model. |
+| Generic control plane | `experimentSpec.ts`, `NormalizedGenericExperimentSpecV1` | Owns portable experiment identity, adapter/profile/model assignment, scheduler, limits, evaluator ids, and safe versioned policy refs; never persists factories, endpoints, credentials, or raw provider options. |
+| Generic artifact/checkpoint core | `episodeArtifacts.ts`, `socialReplay.ts`, `episodeArtifactStore.ts`, `HarnessEpisodeArtifactEnvelope`, `HarnessCheckpointEnvelope` | Owns domain-neutral structural checks, strong semantic replay acceptance, snapshot/hash/batch/adapter/lineage invariants, and safe single-episode persistence. It receives domain validators and a deterministic environment factory and never calls a model. |
 | Domain artifact | `GameState.events`, `MatchArtifact.events` | Records domain events only. |
 | Evaluation | evaluator registry, `MatchMetrics`, evidence refs | Derives results from domain truth and native execution evidence, never model self-report alone. |
 | UI/API | server projections and React cockpit | Consume recorded truth; they do not create hidden roles, transitions, or replay truth. |
@@ -80,11 +81,32 @@ credentials, endpoints, provider diagnostics, and private state. Legacy
 artifacts that predate this contract remain explicitly readable, but cannot be
 retroactively claimed as adapter-bound.
 
-The generic validator verifies state, execution-prefix, actor, channel, and
-message hashes; sequence and batch-boundary consistency; adapter identity;
-and generic parent provenance. `validateHarnessCheckpointReplay()` receives a
-domain-owned, deterministic replay function. It does not construct an actor,
-policy, reasoner, model client, or provider request.
+`validateHarnessEpisodeArtifactEnvelope()` is intentionally structural-only:
+it verifies state, actor, message, frame, and provenance hashes plus generic
+sequence/batch invariants. Persistence, evaluation authority, and fork-source
+acceptance use the stronger `verifyHarnessEpisodeArtifact()` boundary. That
+boundary requires exact runtime/recorded adapter identity, a deterministic
+environment factory, state/message hashers, a recorded-step semantic validator,
+and an explicit durable-agent-state policy. A state-bearing artifact cannot opt
+out; each committed actor receipt boundary must have a resolvable snapshot.
+Callbacks receive clones, malformed/throwing callbacks fail closed, and replay
+never constructs an actor, policy, reasoner, model client, or provider request.
+
+`HarnessEpisodeArtifactStore` is the domain-neutral, single-episode disk
+authority. It hashes run ids into fixed child directories, writes canonical
+artifact/trajectory/manifest files atomically, rebuilds its index by recovery
+scan after restart, and invokes the supplied strong verifier before put and
+after every read. Manifest digests, regenerated JSONL equality, regular-file
+checks, realpath containment, and symlink rejection prevent a persisted record
+from gaining authority through path or content tampering.
+
+`validateHarnessCheckpointReplay()` receives a domain-owned deterministic
+replay function. Checkpoint creation and restoration additionally require an
+explicit recorded-agent-state policy before factories run. A bare compacted
+checkpoint may validate only its selected final actor boundary because the
+full parent snapshot-frame sidecar is not necessarily embedded; full historical
+semantic validation belongs to the canonical parent artifact before checkpoint
+selection.
 
 `MatchArtifact` and `HarnessCheckpoint` are Werewolf specializations of these
 envelopes. They add seed/config/assignment, Werewolf events and evaluation,
