@@ -205,6 +205,27 @@ describe("public match API redaction", () => {
       byVisibility: expect.any(Object)
     });
     expect(projected.body.socialEpisode.exposureRecords.every((exposure: any) => exposure.deliveryReceipt === undefined)).toBe(true);
+    expect(projected.body.werewolfReviewLedger).toMatchObject({
+      artifactVersion: "server.werewolf-postgame-event-ledger.v1",
+      kind: "werewolf-postgame-event-ledger",
+      authority: "server-owned-match-artifact",
+      projection: {
+        view: "postgame-redacted",
+        privateEvidenceRedacted: true,
+        postgameTruthRedacted: false
+      },
+      entries: expect.any(Array)
+    });
+    const postgameLedger = projected.body.werewolfReviewLedger;
+    expect(postgameLedger.entries.every((entry: any) => entry.visibility === "public")).toBe(true);
+    expect(postgameLedger.entries.every((entry: any) => typeof entry.safeLabel === "string")).toBe(true);
+    expect(postgameLedger.entries.map((entry: any) => entry.eventType)).not.toEqual(
+      expect.arrayContaining(["seer.inspected", "werewolves.voted", "werewolves.whispered", "witch.acted"])
+    );
+    const postgameLedgerJson = JSON.stringify(postgameLedger);
+    for (const forbidden of ["payload", "actorId", "targetId", "sourceId", "traceId", "batchId", "eventSeqRange", "command", "postStateHash"]) {
+      expect(postgameLedgerJson).not.toContain(forbidden);
+    }
     expect(
       projected.body.socialEpisode.exposureRecords.every((exposure: any) =>
         exposure.evidenceRefs.every((ref: { description?: string }) => ref.description === undefined)
@@ -412,6 +433,36 @@ describe("public match API redaction", () => {
     expect(projected.body.config.roles).toEqual(expect.arrayContaining(["werewolf", "villager", "seer"]));
     expect(projected.body.socialEpisode.exposureSummary.privateEvidenceRedacted).toBe(true);
     assertTruthRedactedSocialTopology(projected.body.socialEpisode);
+    expect(projected.body.werewolfReviewLedger).toMatchObject({
+      artifactVersion: "server.werewolf-postgame-event-ledger.v1",
+      kind: "werewolf-postgame-event-ledger",
+      authority: "server-owned-match-artifact",
+      projection: {
+        view: "truth-redacted",
+        privateEvidenceRedacted: true,
+        postgameTruthRedacted: true
+      },
+      entries: expect.any(Array)
+    });
+    const truthLedgerJson = JSON.stringify(projected.body.werewolfReviewLedger);
+    for (const forbidden of [
+      "nativeBoundary",
+      "nativeStepCount",
+      "traceId",
+      "batchId",
+      "eventSeqRange",
+      "command",
+      "postStateHash",
+      "seer.inspected",
+      "werewolves.voted",
+      "werewolves.whispered",
+      "witch.acted",
+      "winner",
+      "resultTeam",
+      "sourceId"
+    ]) {
+      expect(truthLedgerJson).not.toContain(forbidden);
+    }
 
     const second = await createSensitiveStoredMatch("server-truth-redacted-compare-candidate");
     const truthCompared = await requestJson(

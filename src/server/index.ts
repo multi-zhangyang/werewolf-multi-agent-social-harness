@@ -167,6 +167,7 @@ import {
   type RedactedSocialMessageDto,
   type RedactedSocialStepFailureDto
 } from "./artifactProjection";
+import { projectWerewolfPostgameEventLedger } from "./werewolfReviewLedger";
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -3372,6 +3373,14 @@ function projectPostgameReplayFrame(prefix: {
 }): PostgameReplayFrameDto {
   const state = redactStatePrivateEvents(prefix.replay.finalState);
   const eventCount = Array.isArray(state.events) ? state.events.length : 0;
+  const werewolfReviewLedger = projectWerewolfPostgameEventLedger({
+    // A replay frame can describe only its recorded native prefix. The parent
+    // final artifact is deliberately not consulted here.
+    events: prefix.replay.finalState.events,
+    episode: prefix.episode,
+    view: "postgame-redacted",
+    authority: "native-social-episode"
+  });
   return {
     artifactVersion: "server.match-replay-frame.v1",
     kind: "match-replay-frame",
@@ -3391,6 +3400,7 @@ function projectPostgameReplayFrame(prefix: {
       generatedAt: new Date(0).toISOString()
     },
     state,
+    werewolfReviewLedger,
     replay: {
       ok: true,
       replayedSteps: prefix.replay.replayedSteps,
@@ -3476,6 +3486,12 @@ function projectPostgameRedactedArtifact(artifact: MatchArtifact): PostgameMatch
     exposureRecords,
     exposureSummary
   };
+  const werewolfReviewLedger = projectWerewolfPostgameEventLedger({
+    events: artifact.finalState.events,
+    episode: artifact.socialEpisode,
+    view: "postgame-redacted",
+    authority: "server-owned-match-artifact"
+  });
   return {
     ...source,
     failureReason: source.failureReason ? "[REDACTED harness failure detail]" : undefined,
@@ -3502,7 +3518,8 @@ function projectPostgameRedactedArtifact(artifact: MatchArtifact): PostgameMatch
     agentSnapshotFrames: source.agentSnapshotFrames?.map((frame) => ({
       ...frame,
       agents: frame.agents.map(redactAgentPrivateEvidence)
-    }))
+    })),
+    werewolfReviewLedger
   };
 }
 
@@ -3510,6 +3527,13 @@ function projectTruthRedactedArtifact(artifact: PostgameMatchProjectionDto): Pos
   const source = cloneJson(artifact);
   const initialState = redactPostgameTruthFromState(source.initialState);
   const finalState = redactPostgameTruthFromState(source.finalState);
+  const werewolfReviewLedger = projectWerewolfPostgameEventLedger({
+    // The strict public state is already the truth-redacted domain boundary.
+    // Never pass native execution rows here: scheduler cadence is private.
+    events: ((finalState as unknown as { events?: GameEvent[] }).events ?? []),
+    view: "truth-redacted",
+    authority: "server-owned-match-artifact"
+  });
   const socialEpisode = redactSocialTopologyForTruthView({
     ...source.socialEpisode,
     initialState: redactPostgameTruthFromState(source.socialEpisode.initialState as MatchArtifact["finalState"]) as RedactedSocialEpisodeDto["initialState"],
@@ -3546,6 +3570,7 @@ function projectTruthRedactedArtifact(artifact: PostgameMatchProjectionDto): Pos
     metrics: {} as MatchArtifact["metrics"],
     agents: [],
     agentSnapshotFrames: undefined,
+    werewolfReviewLedger,
     projection: {
       view: "truth-redacted",
       privateEvidenceRedacted: true,

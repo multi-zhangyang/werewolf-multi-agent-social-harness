@@ -140,6 +140,13 @@ test("renders a projection-safe Werewolf postgame review board", async ({ page }
   await expect(board.getByText("狼人杀赛后复盘")).toBeVisible();
   await expect(seatBoard.getByRole("listitem")).toHaveCount(9);
   await expect(board.locator('[data-testid^="werewolf-seat-role-"]')).toHaveCount(9);
+  await expect(board.getByText("服务端事件账本")).toBeVisible();
+  const ledgerBoundary = board.getByRole("button", { name: /定位事件 \d+ 的服务端回放边界/ }).first();
+  await expect(ledgerBoundary).toBeVisible();
+  const ledgerFrameResponse = page.waitForResponse((response) => isReplayFrameResponse(response));
+  await ledgerBoundary.click();
+  expect((await ledgerFrameResponse).ok()).toBeTruthy();
+  await expect(board.getByText("狼人杀回放局面")).toBeVisible();
 
   const projection = page.getByRole("combobox", { name: "工件投影" });
   const truthArtifact = page.waitForResponse((response) => isArtifactResponse(response, "truth-redacted"));
@@ -152,6 +159,7 @@ test("renders a projection-safe Werewolf postgame review board", async ({ page }
   await expect(seatBoard.getByRole("listitem")).toHaveCount(9);
   await expect(seatBoard).toContainText("身份隐藏");
   await expect(board.locator('[data-testid^="werewolf-seat-role-"]')).toHaveCount(0);
+  await expect(board.getByRole("button", { name: /定位事件 \d+ 的服务端回放边界/ })).toHaveCount(0);
   expect(await seatBoard.textContent()).not.toMatch(/狼人|预言家|女巫|猎人|村民/);
 });
 

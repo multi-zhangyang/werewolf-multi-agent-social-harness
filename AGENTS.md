@@ -25634,3 +25634,71 @@ browser suite completed 7/7, including the no-full-artifact decision-panel
 path, truth-redacted panel removal, all-workspace 390px width check, and
 bounded evidence drawer check. The production build retains the existing
 bundle-size warning as a separate performance task.
+
+## 13.262 Server-Owned Werewolf Postgame Event Ledger Lock
+
+Timestamp: `2026-07-21`
+
+The Werewolf review narrative is now a server-owned, narrow event ledger. It
+is not a browser scan over `finalState.events`, a payload formatter, a legacy
+trajectory projection, or an inferred timeline of private night actions.
+
+```text
+canonical GameEvent envelope
+  + recorded committed native eventSeqRange
+  -> server finite public-event allowlist and safe label
+  -> optional complete native-batch replay boundary (postgame only)
+  -> redacted artifact / prefix replay-frame ledger DTO
+  -> React display and existing server replay-frame request
+```
+
+- `src/server/werewolfReviewLedger.ts` accepts only a finite public-event
+  allowlist. Its Chinese safe labels are selected by event type and never use
+  `GameEvent.payload`. It excludes private night events (`seer.inspected`,
+  `werewolves.voted`, `werewolves.whispered`, and `witch.acted`) and the
+  postgame `game.created` record even when the enclosing postgame state retains
+  broader domain truth.
+- A ledger entry contains only id, sequence, day, phase, approved event type,
+  public visibility, and a safe label. It never serializes payload, actor,
+  target, source, role/team/result/winner, command, trace, batch id,
+  event range, state hash, policy/reasoner data, or private message text.
+- In `postgame-redacted` review only, an event can link to
+  `nativeBoundary.nativeStepCount` when a committed native
+  `eventSeqRange` covers it. The projector advances a parallel/atomic batch
+  to its complete final row and uses `isSafeHarnessCheckpointBoundary()`;
+  it never makes an unsafe intermediate batch row a replay cursor.
+- `truth-redacted` builds its ledger from the strict public-state event
+  projection and passes no native episode rows. It therefore never contains a
+  native boundary, cursor, trace, batch, action, or hash analogue. This
+  prevents scheduler cadence from becoming a public hidden-role/action side
+  channel.
+- A final postgame artifact ledger is constructed from its canonical final
+  state and social episode. A replay-frame ledger is constructed independently
+  from `buildReplayableSocialPrefix()`'s replayed prefix state and prefix
+  episode. A frame therefore cannot display later final-artifact narrative
+  events.
+- `WerewolfReviewBoard` consumes only this server DTO for its event timeline;
+  it fails closed to an empty ledger if it is missing or malformed and does not
+  fall back to state events. A postgame boundary button calls the existing
+  server `/replay/frame` route through the App callback. It does not replay the
+  engine in the browser. Truth-redacted entries cannot render that control.
+
+Required regression after any ledger, artifact projection, replay-frame, or
+Werewolf review UI change:
+
+```bash
+npm run typecheck
+npx vitest run tests/werewolfReviewLedger.test.ts \
+  tests/werewolfReviewProjection.test.ts tests/serverPublicViewApi.test.ts \
+  tests/serverCheckpointApi.test.ts --testTimeout=60000 --maxWorkers=1 \
+  --no-file-parallelism
+npm test -- --maxWorkers=1 --no-file-parallelism
+npm run test:e2e
+git diff --check
+```
+
+Recorded validation for this lock: focused ledger/projection/server tests
+passed; the complete deterministic suite passed 43 files / 436 tests; the
+production build and the 7-test fixture browser suite passed. The existing
+Vite main-chunk-size warning remains a performance follow-up, not a ledger
+authority or redaction exception.

@@ -1335,6 +1335,29 @@ describe("checkpoint and fork API", () => {
     expect(frame.body.frame).not.toHaveProperty("agentSnapshotFrames");
     expect(frame.body.frame).not.toHaveProperty("trajectory");
     expect(frame.body.frame).not.toHaveProperty("socialEpisode");
+    expect(frame.body.frame.werewolfReviewLedger).toMatchObject({
+      artifactVersion: "server.werewolf-postgame-event-ledger.v1",
+      kind: "werewolf-postgame-event-ledger",
+      authority: "native-social-episode",
+      projection: {
+        view: "postgame-redacted",
+        privateEvidenceRedacted: true,
+        postgameTruthRedacted: false
+      },
+      entries: expect.any(Array)
+    });
+    expect(
+      frame.body.frame.werewolfReviewLedger.entries.every(
+        (entry: any) => !entry.nativeBoundary || entry.nativeBoundary.nativeStepCount <= 1
+      )
+    ).toBe(true);
+    expect(
+      frame.body.frame.werewolfReviewLedger.entries.every((entry: any) => entry.seq <= frame.body.frame.cursor.eventCount)
+    ).toBe(true);
+    const frameLedgerJson = JSON.stringify(frame.body.frame.werewolfReviewLedger);
+    for (const forbidden of ["payload", "actorId", "targetId", "sourceId", "traceId", "batchId", "eventSeqRange", "command", "postStateHash"]) {
+      expect(frameLedgerJson).not.toContain(forbidden);
+    }
     expect(JSON.stringify(frame.body.frame)).not.toContain("privateMemos");
     expect(JSON.stringify(frame.body.frame)).not.toContain("providerRequestId");
     expect(JSON.stringify(frame.body.frame)).not.toContain("pendingAction");

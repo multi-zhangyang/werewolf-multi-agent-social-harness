@@ -1,10 +1,10 @@
-import { Alert, Badge, Card, Col, Descriptions, Empty, Flex, Row, Space, Spin, Table, Tag, Timeline, Typography } from "antd";
+import { Alert, Badge, Button, Card, Col, Descriptions, Empty, Flex, Row, Space, Spin, Table, Tag, Timeline, Typography } from "antd";
 import { CrownOutlined, EyeInvisibleOutlined, UserOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import type { Role } from "../../core/types";
 import type {
   WerewolfReviewModel,
-  WerewolfReviewPublicEvent,
+  WerewolfReviewLedgerEvent,
   WerewolfReviewSeat,
   WerewolfReviewSpeech,
   WerewolfReviewVote
@@ -23,11 +23,14 @@ const ROLE_LABELS: Record<Role, string> = {
 export function WerewolfReviewBoard({
   review,
   source = { kind: "artifact-final" },
+  onSelectReplayBoundary,
   loading = false,
   error = null
 }: {
   review: WerewolfReviewModel | null;
   source?: { kind: "artifact-final" | "replay-frame"; nativeStepCount?: number; stateHash?: string };
+  /** Requests an existing server replay frame; it never performs browser replay. */
+  onSelectReplayBoundary?: (nativeStepCount: number) => void;
   loading?: boolean;
   error?: string | null;
 }) {
@@ -139,8 +142,8 @@ export function WerewolfReviewBoard({
           </Card>
         </Col>
         <Col xs={24} xl={14}>
-          <Card title="公开事件时间线" bordered={false}>
-            <PublicEventTimeline events={review.publicEvents} />
+          <Card title="服务端事件账本" bordered={false}>
+            <PublicEventTimeline events={review.eventLedger} onSelectReplayBoundary={onSelectReplayBoundary} />
           </Card>
         </Col>
       </Row>
@@ -228,24 +231,47 @@ function VoteLedger({ votes }: { votes: WerewolfReviewVote[] }) {
   );
 }
 
-function PublicEventTimeline({ events }: { events: WerewolfReviewPublicEvent[] }) {
-  if (!events.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无公开事件。" />;
+function PublicEventTimeline({
+  events,
+  onSelectReplayBoundary
+}: {
+  events: WerewolfReviewLedgerEvent[];
+  onSelectReplayBoundary?: (nativeStepCount: number) => void;
+}) {
+  if (!events.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务端未提供可展示的公开事件账本。" />;
   return (
     <Timeline
       items={events.map((event) => ({
         color: "blue",
         key: event.id,
-        children: <PublicEventRow event={event} />
+        children: <PublicEventRow event={event} onSelectReplayBoundary={onSelectReplayBoundary} />
       }))}
     />
   );
 }
 
-function PublicEventRow({ event }: { event: WerewolfReviewPublicEvent }) {
+function PublicEventRow({
+  event,
+  onSelectReplayBoundary
+}: {
+  event: WerewolfReviewLedgerEvent;
+  onSelectReplayBoundary?: (nativeStepCount: number) => void;
+}) {
   return (
     <Flex vertical gap={2}>
-      <Text strong>{event.type}</Text>
+      <Text strong>{event.safeLabel}</Text>
       <Text type="secondary">#{event.seq} · 第 {event.day} 天 · {event.phase}</Text>
+      {event.nativeStepCount && onSelectReplayBoundary ? (
+        <Button
+          type="link"
+          size="small"
+          style={{ paddingInline: 0, width: "fit-content" }}
+          onClick={() => onSelectReplayBoundary(event.nativeStepCount!)}
+          aria-label={`定位事件 ${event.seq} 的服务端回放边界 ${event.nativeStepCount}`}
+        >
+          定位服务端回放边界 #{event.nativeStepCount}
+        </Button>
+      ) : null}
     </Flex>
   );
 }

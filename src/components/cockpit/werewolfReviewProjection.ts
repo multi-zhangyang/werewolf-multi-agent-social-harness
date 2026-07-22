@@ -45,13 +45,15 @@ export interface WerewolfReviewDeath {
   reason: string;
 }
 
-export interface WerewolfReviewPublicEvent {
+/** A narrow render projection of the server-owned event ledger. */
+export interface WerewolfReviewLedgerEvent {
   id: string;
   seq: number;
   day: number;
   phase: string;
-  type: string;
-  createdAt: string;
+  safeLabel: string;
+  /** Present only for a server-approved local postgame boundary. */
+  nativeStepCount?: number;
 }
 
 /**
@@ -70,11 +72,11 @@ export interface WerewolfReviewModel {
   speeches: WerewolfReviewSpeech[];
   votes: WerewolfReviewVote[];
   deaths: WerewolfReviewDeath[];
-  publicEvents: WerewolfReviewPublicEvent[];
+  eventLedger: WerewolfReviewLedgerEvent[];
 }
 
 /** The review board needs only a server-projected state and its view policy. */
-export type WerewolfReviewSource = Pick<PostgameMatchProjectionDto, "projection" | "finalState">;
+export type WerewolfReviewSource = Pick<PostgameMatchProjectionDto, "projection" | "finalState" | "werewolfReviewLedger">;
 
 export function buildWerewolfReviewModel(artifact: WerewolfReviewSource | null): WerewolfReviewModel | null {
   if (!artifact || !isRecord(artifact.projection)) return null;
@@ -105,10 +107,10 @@ export function buildWerewolfReviewModel(artifact: WerewolfReviewSource | null):
     deaths: readArray(state.deaths)
       .map(reviewDeath)
       .filter((death): death is WerewolfReviewDeath => death !== null),
-    publicEvents: readArray(state.events)
-      .map(reviewPublicEvent)
-      .filter((event): event is WerewolfReviewPublicEvent => event !== null)
-      .sort((left, right) => left.seq - right.seq)
+    // The browser does not scan GameState.events.  The narrative timeline is
+    // a separate server-owned ledger so a broad postgame state or a replay
+    // prefix cannot accidentally become a client-side interpretation surface.
+    eventLedger: reviewServerLedger(artifact.werewolfReviewLedger, visibility)
   };
 }
 
@@ -175,16 +177,31 @@ function reviewDeath(value: unknown): WerewolfReviewDeath | null {
   return { day, playerId, reason };
 }
 
-function reviewPublicEvent(value: unknown): WerewolfReviewPublicEvent | null {
+function reviewServerLedger(value: unknown, visibility: WerewolfReviewVisibility): WerewolfReviewLedgerEvent[] {
+  if (!isRecord(value) || !isRecord(value.projection)) return [];
+  const expectedView = visibility === "truth-redacted" ? "truth-redacted" : "postgame-redacted";
+  if (value.projection.view !== expectedView || value.projection.privateEvidenceRedacted !== true) return [];
+  if (visibility === "truth-redacted" && value.projection.postgameTruthRedacted !== true) return [];
+  if (visibility === "postgame-review" && value.projection.postgameTruthRedacted !== false) return [];
+  return readArray(value.entries)
+    .map((entry) => reviewServerLedgerEntry(entry, visibility))
+    .filter((entry): entry is WerewolfReviewLedgerEvent => entry !== null)
+    .sort((left, right) => left.seq - right.seq || left.id.localeCompare(right.id));
+}
+
+function reviewServerLedgerEntry(value: unknown, visibility: WerewolfReviewVisibility): WerewolfReviewLedgerEvent | null {
   if (!isRecord(value) || value.visibility !== "public") return null;
   const id = readString(value.id);
   const seq = readFiniteNumber(value.seq);
   const day = readFiniteNumber(value.day);
   const phase = readString(value.phase);
-  const type = readString(value.type);
-  const createdAt = readString(value.createdAt);
-  if (!id || seq === undefined || day === undefined || !phase || !type || !createdAt) return null;
-  return { id, seq, day, phase, type, createdAt };
+  const safeLabel = readString(value.safeLabel);
+  if (!id || seq === undefined || day === undefined || !phase || !safeLabel) return null;
+  const nativeStepCount =
+    visibility === "postgame-review" && isRecord(value.nativeBoundary)
+      ? readPositiveInteger(value.nativeBoundary.nativeStepCount)
+      : undefined;
+  return { id, seq, day, phase, safeLabel, ...(nativeStepCount ? { nativeStepCount } : {}) };
 }
 
 function compactElimination(value: Record<string, unknown>): WerewolfReviewSeat["eliminatedAt"] {
@@ -205,6 +222,10 @@ function readString(value: unknown): string | undefined {
 
 function readFiniteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readPositiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function readArray(value: unknown): unknown[] {

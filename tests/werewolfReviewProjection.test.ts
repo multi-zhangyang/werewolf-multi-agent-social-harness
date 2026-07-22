@@ -26,8 +26,8 @@ describe("Werewolf review projection selector", () => {
       expect.objectContaining({ kind: "exile", voterId: "p1", targetId: "p2" }),
       expect.objectContaining({ kind: "sheriff", voterId: "p2", abstain: true })
     ]);
-    expect(review?.publicEvents).toEqual([
-      expect.objectContaining({ id: "event-public", type: "vote.cast", phase: "day_vote" })
+    expect(review?.eventLedger).toEqual([
+      expect.objectContaining({ id: "ledger-public", safeLabel: "放逐投票已记录", phase: "day_vote" })
     ]);
 
     const serialized = JSON.stringify(review);
@@ -38,6 +38,7 @@ describe("Werewolf review projection selector", () => {
     expect(serialized).not.toContain("wolfWhispers");
     expect(serialized).not.toContain("sourceId");
     expect(serialized).not.toContain("private-payload");
+    expect(serialized).not.toContain("event-public");
   });
 
   it("permits only role cards in explicit postgame review and keeps team/night truth out of the model", () => {
@@ -82,17 +83,61 @@ describe("Werewolf review projection selector", () => {
     expect(review).toMatchObject({ visibility: "truth-redacted", day: 1, phase: "day_speech" });
     expect(review?.seats.map((seat) => seat.seat)).toEqual([1, 9]);
     expect(review?.seats.every((seat) => seat.postgameRole === undefined)).toBe(true);
+    expect(review?.eventLedger[0]?.nativeStepCount).toBeUndefined();
+  });
+
+  it("does not fall back to finalState events when the server ledger is missing or malformed", () => {
+    const review = buildWerewolfReviewModel(
+      artifact({
+        projection: { view: "postgame-redacted", postgameTruthRedacted: false },
+        finalState: hiddenState(),
+        ledger: { entries: [{ id: "malformed", visibility: "public", safeLabel: "not enough fields" }] }
+      })
+    );
+
+    expect(review?.eventLedger).toEqual([]);
+    expect(JSON.stringify(review)).not.toContain("event-public");
+    expect(JSON.stringify(review)).not.toContain("private-payload");
   });
 });
 
-function artifact(input: { projection: { view: "postgame-redacted" | "truth-redacted"; postgameTruthRedacted: boolean }; finalState: unknown }) {
+function artifact(input: {
+  projection: { view: "postgame-redacted" | "truth-redacted"; postgameTruthRedacted: boolean };
+  finalState: unknown;
+  ledger?: { entries?: unknown[] };
+}) {
   return {
     projection: {
       ...input.projection,
       privateEvidenceRedacted: true,
       generatedAt: "2026-07-21T00:00:00.000Z"
     },
-    finalState: input.finalState
+    finalState: input.finalState,
+    werewolfReviewLedger: {
+      artifactVersion: "server.werewolf-postgame-event-ledger.v1",
+      kind: "werewolf-postgame-event-ledger",
+      authority: "server-owned-match-artifact",
+      projection: {
+        view: input.projection.view,
+        privateEvidenceRedacted: true,
+        postgameTruthRedacted: input.projection.postgameTruthRedacted
+      },
+      entries:
+        input.ledger?.entries ?? [
+          {
+            id: "ledger-public",
+            seq: 1,
+            day: 2,
+            phase: "day_vote",
+            eventType: "vote.cast",
+            visibility: "public",
+            safeLabel: "放逐投票已记录",
+            // A deliberately malicious truth-view boundary verifies that the
+            // client accepts replay linkage only in postgame review.
+            nativeBoundary: { nativeStepCount: 2 }
+          }
+        ]
+    }
   } as unknown as PostgameMatchProjectionDto;
 }
 
