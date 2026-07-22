@@ -98,7 +98,9 @@ import { isSafeHarnessCheckpointBoundary } from "./harness/episodeArtifacts";
 import type { SocialStateMutationJournalEntry } from "./harness/socialState";
 import { AgentDecisionEvidencePanel, buildDecisionJournalEvidence } from "./components/cockpit/AgentDecisionEvidencePanel";
 import { SocialEvidenceGraph } from "./components/cockpit/SocialEvidenceGraph";
+import { WerewolfLiveBoard } from "./components/cockpit/WerewolfLiveBoard";
 import { WerewolfReviewBoard } from "./components/cockpit/WerewolfReviewBoard";
+import { readLiveMatchProjection, type LiveMatchProjection } from "./components/cockpit/werewolfLiveProjection";
 import { buildWerewolfReviewModel } from "./components/cockpit/werewolfReviewProjection";
 
 type Workspace = "runs" | "timeline" | "domain" | "society" | "lineage" | "evaluation" | "experiments" | "compare" | "packs";
@@ -858,6 +860,11 @@ export function App() {
   const [matches, setMatches] = useState<MatchRecord[]>([]);
   const [selectedMatch, setSelectedMatch] = useState<MatchRecord | null>(null);
   const [artifact, setArtifact] = useState<ProjectedMatchArtifact | null>(null);
+  // Live state is a disposable server projection, never a browser GameState
+  // or a substitute for the artifact/replay authority.
+  const [liveMatchId, setLiveMatchId] = useState<string | null>(null);
+  const [liveProjection, setLiveProjection] = useState<LiveMatchProjection | null>(null);
+  const [livePollError, setLivePollError] = useState<string | null>(null);
   const initialCompareSelection = useMemo(
     () =>
       typeof window === "undefined"
@@ -894,6 +901,7 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const comparisonLoadSeqRef = useRef(0);
   const artifactLoadSeqRef = useRef(0);
+  const livePollSeqRef = useRef(0);
   // Startup is an initialization transaction, not a reaction to later view or
   // comparison selection changes. Re-running it would overwrite user intent.
   const bootstrapStartedRef = useRef(false);
@@ -1086,6 +1094,12 @@ export function App() {
     async (match: MatchRecord, view: ArtifactView, comparisonCandidateId?: string) => {
       const requestSeq = artifactLoadSeqRef.current + 1;
       artifactLoadSeqRef.current = requestSeq;
+      // A terminal artifact is the next authority boundary. It supersedes any
+      // ephemeral live table and also cancels an in-flight poll response.
+      livePollSeqRef.current += 1;
+      setLiveMatchId(null);
+      setLiveProjection(null);
+      setLivePollError(null);
       setBusy(`artifact:${match.id}`);
       try {
         const nextArtifact = await apiJson<ProjectedMatchArtifact>(`/api/matches/${encodeURIComponent(match.id)}/artifact?view=${view}`);
@@ -1239,23 +1253,105 @@ export function App() {
           seed: `ui-cockpit-${Date.now()}`,
           maxTransitions: transitions,
           timeoutMs,
-          jointPhaseScheduler
+          jointPhaseScheduler,
+          // Explicitly select the server-owned live-public contract. The
+          // browser will poll its projection; it does not execute a match.
+          live: true
         })
       });
       await refreshMatches();
-      if (record.hasArtifact) {
-        await loadArtifact(record, "postgame-redacted", candidateId);
-        setWorkspace("timeline");
-      }
+      artifactLoadSeqRef.current += 1;
+      livePollSeqRef.current += 1;
+      setSelectedMatch(record);
+      setArtifact(null);
+      setCandidateArtifact(null);
+      setComparison(null);
+      setComparisonRequestContext(null);
+      setReplay(null);
+      replayFrameLoadSeqRef.current += 1;
+      setReplayFrame(null);
+      setReplayFrameCursorIndex(null);
+      setReplayFrameLoadState("idle");
+      setReplayFrameError(null);
+      setCheckpoints([]);
+      setSelectedCheckpointId("");
+      setForkLineage(null);
+      setBranchTree(null);
+      setLiveProjection(null);
+      setLivePollError(null);
+      setLiveMatchId(record.id);
+      setWorkspace("domain");
       setActionStatus(
-        `真实 harness run 完成：${shortId(record.id)} · artifact=${record.hasArtifact ? "yes" : "no"} · joint=${jointPhaseScheduler}`
+        `真实 harness run 已启动：${shortId(record.id)} · 正在显示服务端公开实时局面 · joint=${jointPhaseScheduler}`
       );
     } catch (nextError) {
       setActionStatus("真实 harness run 失败", errorMessage(nextError));
     } finally {
       setBusy(null);
     }
-  }, [candidateId, experimentDraftError, experimentRequest, jointPhaseScheduler, loadArtifact, maxTransitions, refreshMatches, setActionStatus, timeoutSeconds]);
+  }, [experimentDraftError, experimentRequest, jointPhaseScheduler, maxTransitions, refreshMatches, setActionStatus, timeoutSeconds]);
+
+  useEffect(() => {
+    if (!liveMatchId) return;
+    const pollSequence = livePollSeqRef.current + 1;
+    livePollSeqRef.current = pollSequence;
+    const abortController = new AbortController();
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const finishTerminalProjection = async (projection: Extract<LiveMatchProjection, { lifecycle: "completed" | "truncated" | "failed" }>) => {
+      try {
+        const records = await refreshMatches();
+        if (disposed || pollSequence !== livePollSeqRef.current) return;
+        const terminalMatch = records.find((match) => match.id === projection.matchId);
+        if (projection.artifactAvailable && terminalMatch?.hasArtifact) {
+          // loadArtifact owns the final switch and invalidates this polling
+          // sequence before it fetches the postgame-redacted artifact.
+          void loadArtifact(terminalMatch, "postgame-redacted", candidateId);
+          return;
+        }
+        setLiveMatchId(null);
+        setActionStatus(
+          projection.lifecycle === "failed"
+            ? "实时局已失败，服务端未提供可加载的赛后工件。"
+            : "实时局已结束，但服务端没有可加载的赛后工件。"
+        );
+      } catch (nextError) {
+        if (disposed || pollSequence !== livePollSeqRef.current) return;
+        setLivePollError(errorMessage(nextError));
+        setLiveMatchId(null);
+        setActionStatus("实时局已结束，但运行注册表刷新失败。", errorMessage(nextError));
+      }
+    };
+
+    const poll = async () => {
+      try {
+        const rawProjection = await apiJson<unknown>(`/api/matches/${encodeURIComponent(liveMatchId)}/live`, {
+          signal: abortController.signal
+        });
+        if (disposed || pollSequence !== livePollSeqRef.current) return;
+        const projection = readLiveMatchProjection(rawProjection, liveMatchId);
+        setLiveProjection(projection);
+        setLivePollError(null);
+        if (projection.lifecycle === "running") {
+          timer = setTimeout(() => void poll(), 900);
+          return;
+        }
+        await finishTerminalProjection(projection);
+      } catch (nextError) {
+        if (disposed || abortController.signal.aborted || pollSequence !== livePollSeqRef.current) return;
+        setLivePollError(errorMessage(nextError));
+        timer = setTimeout(() => void poll(), 1_500);
+      }
+    };
+
+    void poll();
+    return () => {
+      disposed = true;
+      abortController.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [candidateId, liveMatchId, loadArtifact, refreshMatches, setActionStatus]);
 
   const handleReplay = useCallback(async () => {
     if (!currentMatchId) {
@@ -2572,21 +2668,34 @@ export function App() {
       key: "domain",
       label: "狼人杀复盘",
       children: (
-        <WerewolfReviewBoard
-          review={werewolfReview}
-          source={
-            replayFrame
-              ? {
-                  kind: "replay-frame",
-                  nativeStepCount: replayFrame.cursor.nativeStepCount,
-                  stateHash: replayFrame.cursor.stateHash ?? replayFrame.cursor.recordedPostStateHash
-                }
-              : { kind: "artifact-final" }
-          }
-          onSelectReplayBoundary={(nativeStepCount) => void handleLoadReplayFrame(nativeStepCount - 1)}
-          loading={replayFrameLoadState === "loading"}
-          error={replayFrameLoadState === "error" ? replayFrameError : null}
-        />
+        liveProjection ? (
+          <WerewolfLiveBoard projection={liveProjection} pollError={livePollError} />
+        ) : liveMatchId ? (
+          <Card bordered={false} data-testid="werewolf-live-board">
+            <Alert
+              type="info"
+              showIcon
+              message="实时公开局正在连接"
+              description="等待服务端的公开投影；浏览器不会从旧工件或本地状态构造实时局面。"
+            />
+          </Card>
+        ) : (
+          <WerewolfReviewBoard
+            review={werewolfReview}
+            source={
+              replayFrame
+                ? {
+                    kind: "replay-frame",
+                    nativeStepCount: replayFrame.cursor.nativeStepCount,
+                    stateHash: replayFrame.cursor.stateHash ?? replayFrame.cursor.recordedPostStateHash
+                  }
+                : { kind: "artifact-final" }
+            }
+            onSelectReplayBoundary={(nativeStepCount) => void handleLoadReplayFrame(nativeStepCount - 1)}
+            loading={replayFrameLoadState === "loading"}
+            error={replayFrameLoadState === "error" ? replayFrameError : null}
+          />
+        )
       )
     },
     {
@@ -2925,7 +3034,9 @@ export function App() {
                   <Title level={2} style={{ margin: 0 }}>
                     {activeWorkspace.label}
                   </Title>
-                  <Tag color={artifact ? "processing" : "default"}>{artifact ? "artifact loaded" : "artifact not loaded"}</Tag>
+                  <Tag color={liveProjection?.lifecycle === "running" || liveMatchId ? "processing" : artifact ? "processing" : "default"}>
+                    {liveProjection?.lifecycle === "running" || liveMatchId ? "server-owned live public view" : artifact ? "artifact loaded" : "artifact not loaded"}
+                  </Tag>
                 </Space>
               </Flex>
               <Space wrap>

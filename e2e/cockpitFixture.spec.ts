@@ -170,6 +170,132 @@ test("renders a projection-safe Werewolf postgame review board", async ({ page }
   expect(await seatBoard.textContent()).not.toMatch(/狼人|预言家|女巫|猎人|村民/);
 });
 
+test("renders only a server-owned live public table and does not reconstruct a failed match", async ({ page }) => {
+  test.setTimeout(15_000);
+  const artifactViews: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.endsWith("/artifact")) artifactViews.push(url.searchParams.get("view") ?? "default");
+  });
+
+  await page.goto("/?workspace=domain", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+  const artifactViewsBeforeLiveRun = artifactViews.length;
+
+  const liveMatchId = "fixture-live-public-ui";
+  let liveReads = 0;
+  await page.route("**/api/matches/run", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: liveMatchId,
+        createdAt: "2026-07-22T00:00:00.000Z",
+        state: { phase: "role_reveal", day: 1, players: [] },
+        models: ["fixture-model"],
+        status: "running",
+        hasArtifact: false
+      })
+    });
+  });
+  await page.route(`**/api/matches/${liveMatchId}/live`, async (route) => {
+    liveReads += 1;
+    const body =
+      liveReads <= 4
+        ? {
+            artifactVersion: "server.match-live-projection.v1",
+            kind: "match-live-projection",
+            matchId: liveMatchId,
+            lifecycle: "running",
+            artifactAvailable: false,
+            projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true },
+            publicState: {
+              phase: "night",
+              day: 1,
+              players: [
+                {
+                  id: "p1",
+                  seat: 1,
+                  name: "1号",
+                  alive: true,
+                  isSheriff: false,
+                  role: "werewolf",
+                  team: "werewolves",
+                  privateMemo: "fixture-private-live-memo"
+                },
+                {
+                  id: "p2",
+                  seat: 2,
+                  name: "2号",
+                  alive: false,
+                  isSheriff: true,
+                  eliminatedAt: { day: 1, reason: "night_kill", phase: "night_resolve" },
+                  ability: { poison: true }
+                }
+              ],
+              speeches: [
+                { day: 1, playerId: "p1", text: "公开发言", kind: "day", claimedRole: "seer" }
+              ],
+              votes: [{ day: 1, voterId: "p1", targetId: "p2", abstain: false, weight: 2 }],
+              deaths: [{ day: 1, playerId: "p2", reason: "night_kill", traceId: "fixture-secret-trace" }],
+              currentSpeakerSeat: 1,
+              pendingActionCount: 3,
+              night: { seerInspection: { targetId: "p2" } }
+            }
+          }
+        : {
+            artifactVersion: "server.match-live-projection.v1",
+            kind: "match-live-projection",
+            matchId: liveMatchId,
+            lifecycle: "failed",
+            artifactAvailable: false
+          };
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+
+  const runRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return request.method() === "POST" && url.pathname === "/api/matches/run";
+  });
+  const runResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "POST" && url.pathname === "/api/matches/run";
+  });
+  await page.getByRole("button", { name: "运行实验", exact: true }).click();
+  const request = await runRequest;
+  expect(request.postDataJSON()).toMatchObject({ live: true });
+  expect((await runResponse).status()).toBe(202);
+
+  const board = page.getByTestId("werewolf-live-board");
+  await expect(board.getByText("实时公开局面 · 服务端权威")).toBeVisible();
+  await expect(board.getByRole("region", { name: "狼人杀实时公开座位" }).getByRole("listitem")).toHaveCount(2);
+  await expect(board).toContainText("夜晚");
+  const liveText = await board.textContent();
+  for (const forbidden of [
+    "werewolf",
+    "werewolves",
+    "fixture-private-live-memo",
+    "night_resolve",
+    "seer",
+    "fixture-secret-trace",
+    "pendingActionCount",
+    "seerInspection"
+  ]) {
+    expect(liveText).not.toContain(forbidden);
+  }
+  await expect(board.locator('[data-testid^="werewolf-seat-role-"]')).toHaveCount(0);
+  await expect(board.getByRole("button")).toHaveCount(0);
+
+  await expect(page.locator(".ant-alert-error").filter({ hasText: "服务端没有可加载的赛后工件" })).toBeVisible({ timeout: 5_000 });
+  expect(liveReads).toBeGreaterThanOrEqual(2);
+  expect(artifactViews.slice(artifactViewsBeforeLiveRun)).not.toContain("full");
+  expect(artifactViews.slice(artifactViewsBeforeLiveRun)).not.toContain("postgame-redacted");
+});
+
 test("loads a server-authoritative native replay frame without a browser-side game transition", async ({ page }) => {
   const pageErrors: string[] = [];
   const artifactViews: string[] = [];
@@ -418,16 +544,17 @@ test("submits a heterogeneous Agent roster through the existing harness control 
   expect(body).not.toHaveProperty("resolvedAssignments");
   expect(body).not.toHaveProperty("artifact");
   expect(body).not.toHaveProperty("winner");
+  expect(body.live).toBe(true);
 
   const response = await runResponse;
+  expect(response.status()).toBe(202);
   expect(response.ok()).toBeTruthy();
   const record = await response.json();
-  expect(record).toMatchObject({ profileCount: 2, hasArtifact: true });
-  // The response is the existing summary projection; the full persisted
-  // artifact remains server-owned and is fetched only through its redacted
-  // projection route.
+  expect(record).toMatchObject({ status: "running", hasArtifact: false });
+  // The immediate response only acknowledges the server-owned run. Its
+  // terminal artifact remains server-owned and is fetched later through the
+  // ordinary redacted route after the live projection reaches a terminal state.
   expect(record).not.toHaveProperty("artifact");
-  await expect(page.getByRole("status")).toContainText("真实 harness run 完成");
 });
 
 test("submits the selected parallel scheduler when exporting a tournament public pack", async ({ page }) => {
