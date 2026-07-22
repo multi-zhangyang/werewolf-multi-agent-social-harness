@@ -25302,6 +25302,50 @@ npm run test:e2e
 git diff --check
 ```
 
+## 13.266 OpenAI-Compatible Stream Terminal-Event Integrity Lock
+
+Timestamp: `2026-07-22`
+
+The generic OpenAI-compatible chat-completions client now treats an explicit
+provider `finish_reason` as the minimum completion boundary for newly-created
+live streams. This is a streaming transport-integrity rule, not a Grok,
+Werewolf, prompt, parser, or policy special case.
+
+```text
+non-empty delta + iterator EOF + no provider finish_reason
+  -> stream_incomplete (retryable, stream_finish)
+  -> no reasoner candidate / policy arbitration / environment transition
+```
+
+- A non-empty partial response may not be accepted merely because the SDK
+  iterator ended. That avoids committing a truncated reasoner memo or speech
+  draft after a gateway/network EOF.
+- `stream_incomplete` is a closed `ProviderFailureKind`; it is recorded as a
+  controlled retryable failure rather than a successful completion telemetry
+  record.
+- `stream_empty` remains the classification for an empty stream. An observed
+  `finish_reason` (for example `stop`) remains a normal
+  `provider_stop_event` completion.
+- `reader_done` remains readable in the telemetry type for historical artifact
+  compatibility only. The current live chat-completions client never emits it.
+- This strengthens only the optional reasoner component. The existing harness
+  boundary remains unchanged: any accepted candidate still passes local parse,
+  policy, arbitration, and deterministic environment legality before a commit.
+
+Focused validation passed:
+
+```bash
+npm run typecheck
+npx vitest run tests/openaiClient.test.ts tests/providerAdapters.test.ts \
+  tests/reasonerProposal.test.ts tests/cliDiagnosticSafety.test.ts \
+  --testTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=dot
+git diff --check
+```
+
+Use the normal bounded `grok-4.5` streaming probe after changing this boundary.
+Do not claim a live result unless its final safe summary and process exit status
+were captured; partial CLI heartbeat output is not proof of stream completion.
+
 ## 13.264 Generic Execution Limits And Deadline-Control Lifecycle Lock
 
 Timestamp: `2026-07-21`

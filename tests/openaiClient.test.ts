@@ -46,7 +46,13 @@ describe("OpenAI-compatible client provider telemetry", () => {
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock
       .mockResolvedValueOnce(new Response("rate limited", { status: 429, headers: { "retry-after": "0" } }))
-      .mockResolvedValueOnce(streamResponse([chunk({ id: "stream-ok", choices: [{ delta: { content: "hello" } }] }), doneChunk()]));
+      .mockResolvedValueOnce(
+        streamResponse([
+          chunk({ id: "stream-ok", choices: [{ delta: { content: "hello" } }] }),
+          completionChunk({ id: "stream-ok", finishReason: "stop" }),
+          doneChunk()
+        ])
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await client({ maxRetries: 1 }).complete(request());
@@ -69,7 +75,7 @@ describe("OpenAI-compatible client provider telemetry", () => {
       stream: {
         enabled: true,
         completed: true,
-        completedBy: "reader_done"
+        completedBy: "provider_stop_event"
       }
     });
     expect(fetchMock.mock.calls[1][0]).toBe("https://provider.test/openai/v1/chat/completions");
@@ -78,7 +84,13 @@ describe("OpenAI-compatible client provider telemetry", () => {
 
   it("sends streaming requests without max-token limits", async () => {
     const fetchMock = vi.fn<typeof fetch>();
-    fetchMock.mockResolvedValueOnce(streamResponse([chunk({ id: "no-max-token", choices: [{ delta: { content: "hello" } }] }), doneChunk()]));
+    fetchMock.mockResolvedValueOnce(
+      streamResponse([
+        chunk({ id: "no-max-token", choices: [{ delta: { content: "hello" } }] }),
+        completionChunk({ id: "no-max-token", finishReason: "stop" }),
+        doneChunk()
+      ])
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await client().complete(request());
@@ -164,21 +176,28 @@ describe("OpenAI-compatible client provider telemetry", () => {
     });
   });
 
-  it("records reader_done when a stream succeeds without a DONE sentinel", async () => {
+  it("rejects a non-empty stream that ends without an explicit provider completion event", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock.mockResolvedValueOnce(streamResponse([chunk({ id: "reader-done", choices: [{ delta: { content: "partial but valid" } }] })]));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await client().complete(request());
+    const error = await captureModelCallError(() => client({ maxRetries: 0 }).complete(request()));
+    const raw = error.raw as Record<string, unknown>;
 
-    expect(result).toMatchObject({
-      content: "partial but valid",
-      providerRequestId: "reader-done",
-      stream: {
-        enabled: true,
-        completed: true,
-        completedBy: "reader_done"
-      }
+    expect(raw).toMatchObject({
+      failureKind: "stream_incomplete",
+      providerStage: "stream_finish",
+      retryable: true,
+      attempts: 1,
+      maxAttempts: 1,
+      retryHistory: [
+        expect.objectContaining({
+          attempt: 1,
+          failureKind: "stream_incomplete",
+          providerStage: "stream_finish",
+          retryable: true
+        })
+      ]
     });
   });
 
@@ -347,6 +366,10 @@ function chunk(value: unknown): string {
 
 function doneChunk(): string {
   return "data: [DONE]\n\n";
+}
+
+function completionChunk(input: { id: string; finishReason: string }): string {
+  return chunk({ id: input.id, choices: [{ delta: {}, finish_reason: input.finishReason }] });
 }
 
 function requestBody(fetchMock: ReturnType<typeof vi.fn>, callIndex: number): Record<string, unknown> {

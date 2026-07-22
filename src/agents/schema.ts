@@ -49,6 +49,7 @@ export type ProviderFailureKind =
   | "abort"
   | "stream_invalid_json"
   | "stream_empty"
+  | "stream_incomplete"
   | "stream_missing_body"
   | "non_json"
   | "empty_content"
@@ -62,6 +63,7 @@ export const PROVIDER_FAILURE_KINDS: readonly ProviderFailureKind[] = [
   "abort",
   "stream_invalid_json",
   "stream_empty",
+  "stream_incomplete",
   "stream_missing_body",
   "non_json",
   "empty_content",
