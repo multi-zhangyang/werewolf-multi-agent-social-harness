@@ -27812,3 +27812,52 @@ drift, and concurrent exact publishers converging onto one canonical directory.
 The complete deterministic suite passed **49 files / 536 tests**.
 This slice changes no provider, model, reasoner, prompt, stream parser, domain
 adapter, or UI behavior and therefore makes no external model call.
+
+## 13.294 Versioned Experiment Attempt State And Canonical Adoption Lock
+
+Timestamp: `2026-07-22`
+
+`HarnessExperimentRunStore` now dual-reads legacy v1 records and new staged v2
+records. Legacy `begin()` remains create-only and writes v1 for compatibility;
+production resume work uses `beginOrResume()` and creates v2 authority. An
+active v1 run is explicitly rejected as ambiguous, while exact provenance for
+v2 active/finalized or v1 finalized authority is returned without a revision.
+
+V2 owns at most one `currentEpisode` and persists the legal sequence:
+
+```text
+idle -> started -> staged -> committed terminal reference -> idle
+```
+
+Started identity is written before domain work and binds attempt id, absolute
+index, seed, and times. Staged identity additionally binds lifecycle, run id,
+artifact digest, and optional evaluation-report id/digest. Exact start/stage
+retries are idempotent; drift fails closed. Committing an artifact-backed
+episode requires a canonical store re-read matching the staged identity;
+pre-artifact failure can commit only from `started`.
+
+`recoverCurrentEpisode()` never calls an adapter or provider. A `started`
+attempt becomes a reviewed interrupted failure. A staged attempt with no
+canonical artifact becomes a reviewed candidate-lost failure. A staged attempt
+with exact canonical artifact/sidecars/evaluation is adopted into terminal
+membership without rerunning model work. Canonical drift is fatal.
+
+V2 records and manifests are version-paired: a v2 record requires a v2 manifest
+that explicitly names the v2 record schema. V1/V2 schema mixing within a
+revision history, stage rollback, changed attempt identity, finalization with
+an in-flight attempt, and revisions after finalization are rejected. The
+derived v1 index remains a rebuildable projection and now optionally carries
+the in-flight count; canonical revisions remain authority.
+
+Focused validation:
+
+```text
+npm run typecheck
+tests/experimentRunStore.test.ts
+tests/genericExperimentOrchestrator.test.ts
+2 files / 17 tests passed
+```
+
+The v2 restart test proves started recovery, staged persistence, canonical
+artifact adoption, absolute index/seed continuity, terminal counts, and exact
+begin-or-resume revision stability. This slice changes no provider/model code.

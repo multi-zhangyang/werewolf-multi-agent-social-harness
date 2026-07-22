@@ -18,7 +18,9 @@ import type { HarnessMetricRecord } from "./types";
 import type { HarnessEvaluationReport } from "./types";
 
 export const HARNESS_EXPERIMENT_RUN_RECORD_VERSION = "harness.experiment-run-record.v1";
+export const HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 = "harness.experiment-run-record.v2";
 export const HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION = "harness.experiment-run-manifest.v1";
+export const HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V2 = "harness.experiment-run-manifest.v2";
 export const HARNESS_EXPERIMENT_RUN_INDEX_VERSION = "harness.experiment-run-index.v1";
 
 const RUNS_DIRECTORY = "runs";
@@ -68,19 +70,84 @@ export interface HarnessExperimentRunRecordV1 {
   episodes: HarnessExperimentRunEpisodeReferenceV1[];
 }
 
+export interface HarnessExperimentRunStartedEpisodeV2 {
+  phase: "started";
+  attemptId: string;
+  index: number;
+  seed: string;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface HarnessExperimentRunStagedEpisodeV2 {
+  phase: "staged";
+  attemptId: string;
+  index: number;
+  seed: string;
+  startedAt: string;
+  updatedAt: string;
+  status: "completed" | "truncated" | "failed";
+  runId: string;
+  artifactSha256: string;
+  evaluationReportId?: string;
+  evaluationReportSha256?: string;
+}
+
+export type HarnessExperimentRunCurrentEpisodeV2 =
+  | HarnessExperimentRunStartedEpisodeV2
+  | HarnessExperimentRunStagedEpisodeV2;
+
+export interface HarnessExperimentRunRecordV2 {
+  schemaVersion: typeof HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2;
+  kind: "experiment-run-record";
+  state: "active" | "finalized";
+  runSetId: string;
+  createdAt: string;
+  updatedAt: string;
+  experiment: GenericExperimentProvenanceV1;
+  gamesRequested: number;
+  gamesCompleted: number;
+  gamesTruncated: number;
+  gamesFailed: number;
+  gamesInFlight: 0 | 1;
+  gamesUnstarted: number;
+  episodes: HarnessExperimentRunEpisodeReferenceV1[];
+  currentEpisode?: HarnessExperimentRunCurrentEpisodeV2;
+}
+
+export type HarnessExperimentRunRecord = HarnessExperimentRunRecordV1 | HarnessExperimentRunRecordV2;
+
+export interface HarnessExperimentRunResume {
+  disposition: "created" | "active" | "finalized";
+  record: HarnessExperimentRunRecord;
+  revision: number;
+}
+
+export interface HarnessExperimentRunRecovery {
+  disposition: "none" | "committed-staged-artifact" | "failed-interrupted-start" | "failed-staged-without-artifact";
+  record: HarnessExperimentRunRecordV2;
+}
+
 export interface HarnessExperimentRunManifestV1 {
   schemaVersion: typeof HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION;
   kind: "experiment-run-manifest";
   runSetId: string;
   directoryKey: string;
   revision: number;
-  state: HarnessExperimentRunRecordV1["state"];
+  state: HarnessExperimentRunRecord["state"];
   recordSha256: string;
   files: {
     record: typeof RECORD_FILE;
     manifest: typeof MANIFEST_FILE;
   };
 }
+
+export interface HarnessExperimentRunManifestV2 extends Omit<HarnessExperimentRunManifestV1, "schemaVersion"> {
+  schemaVersion: typeof HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V2;
+  recordSchemaVersion: typeof HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2;
+}
+
+export type HarnessExperimentRunManifest = HarnessExperimentRunManifestV1 | HarnessExperimentRunManifestV2;
 
 export interface HarnessExperimentRunStoreEntry {
   runSetId: string;
@@ -91,11 +158,12 @@ export interface HarnessExperimentRunStoreEntry {
   updatedAt: string;
   directoryKey: string;
   revision: number;
-  state: HarnessExperimentRunRecordV1["state"];
+  state: HarnessExperimentRunRecord["state"];
   gamesRequested: number;
   gamesCompleted: number;
   gamesTruncated: number;
   gamesFailed: number;
+  gamesInFlight?: 0 | 1;
   gamesUnstarted: number;
 }
 
@@ -196,6 +264,222 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
   }
 
   /**
+   * Production experiment entrypoint. New runs use the staged v2 lifecycle;
+   * exact v2/finalized retries return durable authority without creating a
+   * revision. Active v1 runs are intentionally ambiguous and never resume.
+   */
+  async beginOrResume(input: {
+    runSetId: string;
+    experiment: GenericExperimentProvenanceV1;
+    createdAt?: string;
+  }): Promise<HarnessExperimentRunResume> {
+    assertIdentifier(input.runSetId, "runSetId");
+    const experiment = structuredClone(input.experiment);
+    const provenanceErrors = validateGenericExperimentProvenance(experiment);
+    if (provenanceErrors.length) throw new Error(`Experiment run provenance is invalid: ${provenanceErrors.join(" ")}`);
+    const loaded = await this.loadKnownRun(input.runSetId);
+    if (loaded) {
+      if (hashStableJsonValue(loaded.record.experiment) !== hashStableJsonValue(experiment)) {
+        throw new Error("Experiment run resume provenance conflicts with durable authority.");
+      }
+      if (input.createdAt !== undefined && input.createdAt !== loaded.record.createdAt) {
+        throw new Error("Experiment run resume createdAt conflicts with durable authority.");
+      }
+      if (loaded.record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION && loaded.record.state === "active") {
+        throw new Error("Active v1 experiment run is ambiguous and cannot be resumed automatically.");
+      }
+      return {
+        disposition: loaded.record.state === "finalized" ? "finalized" : "active",
+        record: structuredClone(loaded.record),
+        revision: loaded.entry.revision
+      };
+    }
+
+    const createdAt = input.createdAt ?? this.now();
+    const record: HarnessExperimentRunRecordV2 = {
+      schemaVersion: HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2,
+      kind: "experiment-run-record",
+      state: "active",
+      runSetId: input.runSetId,
+      createdAt,
+      updatedAt: createdAt,
+      experiment,
+      gamesRequested: experiment.spec.episodeCount,
+      gamesCompleted: 0,
+      gamesTruncated: 0,
+      gamesFailed: 0,
+      gamesInFlight: 0,
+      gamesUnstarted: experiment.spec.episodeCount,
+      episodes: []
+    };
+    assertRunRecord(record);
+    const directoryKey = directoryKeyForRunSetId(record.runSetId);
+    const finalDirectory = path.join(this.runsDirectory, directoryKey);
+    await assertPathMissing(finalDirectory, "Experiment run already exists for this runSetId.");
+    const temporaryDirectory = path.join(this.runsDirectory, `.tmp-${randomUUID()}`);
+    const revisionsDirectory = path.join(temporaryDirectory, REVISIONS_DIRECTORY);
+    await mkdir(revisionsDirectory, { recursive: true });
+    await this.writeRevision(revisionsDirectory, directoryKey, 1, record);
+    await rename(temporaryDirectory, finalDirectory);
+    const entry = entryFromRecord(record, directoryKey, 1);
+    this.entries.set(entry.runSetId, entry);
+    await this.writeIndex();
+    return { disposition: "created", record: structuredClone(record), revision: 1 };
+  }
+
+  async startEpisode(input: {
+    runSetId: string;
+    index: number;
+    seed: string;
+    startedAt?: string;
+  }): Promise<HarnessExperimentRunRecordV2> {
+    return this.mutateV2(input.runSetId, async (loaded) => {
+      const record = requireV2Active(loaded.record);
+      const expectedIndex = record.episodes.length;
+      const expectedSeed = `${record.experiment.spec.seed}:g${expectedIndex + 1}`;
+      if (input.index !== expectedIndex || input.seed !== expectedSeed) {
+        throw new Error("Experiment episode start does not match the next durable schedule slot.");
+      }
+      if (record.currentEpisode) {
+        if (record.currentEpisode.index === input.index && record.currentEpisode.seed === input.seed) {
+          return { record, write: false };
+        }
+        throw new Error("Experiment run already has a different episode in flight.");
+      }
+      if (record.gamesUnstarted <= 0) throw new Error("Experiment run has no unstarted episode slot.");
+      const startedAt = input.startedAt ?? this.now();
+      assertTimestamp(startedAt, "startedAt");
+      const next: HarnessExperimentRunRecordV2 = {
+        ...structuredClone(record),
+        updatedAt: monotonicTimestamp(startedAt, record.updatedAt),
+        gamesInFlight: 1,
+        gamesUnstarted: record.gamesUnstarted - 1,
+        currentEpisode: {
+          phase: "started",
+          attemptId: randomUUID(),
+          index: input.index,
+          seed: input.seed,
+          startedAt,
+          updatedAt: startedAt
+        }
+      };
+      return { record: next, write: true };
+    });
+  }
+
+  async stageEpisode(input: {
+    runSetId: string;
+    episode: GenericTournamentRunSetEpisode<TArtifact> & { runId: string; artifact: TArtifact };
+    stagedAt?: string;
+  }): Promise<HarnessExperimentRunRecordV2> {
+    return this.mutateV2(input.runSetId, async (loaded) => {
+      const record = requireV2Active(loaded.record);
+      const current = record.currentEpisode;
+      if (!current) throw new Error("Experiment episode must be durably started before staging publication.");
+      const episode = input.episode;
+      if (episode.index !== current.index || episode.seed !== current.seed || episode.runId !== episode.artifact.runId) {
+        throw new Error("Experiment staged episode identity does not match the durable attempt.");
+      }
+      if (!episode.artifact.experiment || hashStableJsonValue(episode.artifact.experiment) !== hashStableJsonValue(record.experiment)) {
+        throw new Error("Experiment staged episode provenance does not match durable authority.");
+      }
+      if (episode.artifact.status !== episode.status) {
+        throw new Error("Experiment staged episode lifecycle does not match its artifact.");
+      }
+      const candidate = {
+        status: episode.status,
+        runId: episode.runId,
+        artifactSha256: hashStableJsonValue(episode.artifact),
+        ...(episode.evaluationReport ? {
+          evaluationReportId: episode.evaluationReport.id,
+          evaluationReportSha256: hashStableJsonValue(episode.evaluationReport)
+        } : {})
+      };
+      if (current.phase === "staged") {
+        const existing = {
+          status: current.status,
+          runId: current.runId,
+          artifactSha256: current.artifactSha256,
+          ...(current.evaluationReportId ? {
+            evaluationReportId: current.evaluationReportId,
+            evaluationReportSha256: current.evaluationReportSha256
+          } : {})
+        };
+        if (hashStableJsonValue(existing) !== hashStableJsonValue(candidate)) {
+          throw new Error("Experiment staged episode retry conflicts with durable candidate identity.");
+        }
+        return { record, write: false };
+      }
+      const stagedAt = input.stagedAt ?? this.now();
+      assertTimestamp(stagedAt, "stagedAt");
+      const next: HarnessExperimentRunRecordV2 = {
+        ...structuredClone(record),
+        updatedAt: monotonicTimestamp(stagedAt, record.updatedAt),
+        currentEpisode: {
+          phase: "staged",
+          attemptId: current.attemptId,
+          index: current.index,
+          seed: current.seed,
+          startedAt: current.startedAt,
+          updatedAt: stagedAt,
+          ...candidate
+        }
+      };
+      return { record: next, write: true };
+    });
+  }
+
+  async recoverCurrentEpisode(runSetId: string): Promise<HarnessExperimentRunRecovery> {
+    let disposition: HarnessExperimentRunRecovery["disposition"] = "none";
+    const record = await this.mutateV2(runSetId, async (loaded) => {
+      const currentRecord = requireV2Active(loaded.record);
+      const current = currentRecord.currentEpisode;
+      if (!current) return { record: currentRecord, write: false };
+      let reference: HarnessExperimentRunEpisodeReferenceV1;
+      if (current.phase === "staged") {
+        const artifact = await this.episodeStore.get(current.runId);
+        if (artifact) {
+          const evaluationReport = await this.episodeStore.getEvaluationReport(current.runId);
+          reference = await this.referenceForEpisode({
+            index: current.index,
+            seed: current.seed,
+            status: current.status,
+            runId: current.runId,
+            artifact,
+            ...(evaluationReport ? { evaluationReport } : {})
+          }, currentRecord, new Set(currentRecord.episodes.flatMap((episode) => episode.runId ? [episode.runId] : [])));
+          if (
+            reference.artifactSha256 !== current.artifactSha256 ||
+            reference.evaluationReportId !== current.evaluationReportId ||
+            reference.evaluationReportSha256 !== current.evaluationReportSha256
+          ) throw new Error("Canonical staged episode does not match durable publication identity.");
+          disposition = "committed-staged-artifact";
+        } else {
+          reference = reviewedFailureReference(current.index, current.seed);
+          disposition = "failed-staged-without-artifact";
+        }
+      } else {
+        reference = reviewedFailureReference(current.index, current.seed);
+        disposition = "failed-interrupted-start";
+      }
+      const episodes = [...currentRecord.episodes, reference];
+      const counts = lifecycleCountsForReferences(episodes);
+      const next: HarnessExperimentRunRecordV2 = {
+        ...structuredClone(currentRecord),
+        updatedAt: monotonicTimestamp(this.now(), currentRecord.updatedAt),
+        gamesCompleted: counts.completed,
+        gamesTruncated: counts.truncated,
+        gamesFailed: counts.failed,
+        gamesInFlight: 0,
+        episodes
+      };
+      delete next.currentEpisode;
+      return { record: next, write: true };
+    });
+    return { disposition, record };
+  }
+
+  /**
    * Append one terminal episode membership revision after its canonical
    * artifact/sidecars have been published (or after a reviewed pre-artifact
    * failure). The ordered prefix survives process restart independently of
@@ -228,15 +512,47 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       if (input.episode.index > expectedIndex) throw new Error("Experiment run episode progress must be contiguous and ordered.");
       const episodes = [...loaded.record.episodes, reference];
       const counts = lifecycleCountsForReferences(episodes);
-      const record: HarnessExperimentRunRecordV1 = {
-        ...structuredClone(loaded.record),
-        updatedAt: monotonicTimestamp(this.now(), loaded.record.updatedAt),
-        gamesCompleted: counts.completed,
-        gamesTruncated: counts.truncated,
-        gamesFailed: counts.failed,
-        gamesUnstarted: loaded.record.gamesRequested - episodes.length,
-        episodes
-      };
+      let record: HarnessExperimentRunRecord;
+      if (loaded.record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2) {
+        const current = loaded.record.currentEpisode;
+        if (!current || current.index !== input.episode.index || current.seed !== input.episode.seed) {
+          throw new Error("Experiment terminal episode does not match the durable in-flight attempt.");
+        }
+        if (input.episode.artifact) {
+          if (
+            current.phase !== "staged" ||
+            current.runId !== reference.runId ||
+            current.status !== reference.status ||
+            current.artifactSha256 !== reference.artifactSha256 ||
+            current.evaluationReportId !== reference.evaluationReportId ||
+            current.evaluationReportSha256 !== reference.evaluationReportSha256
+          ) {
+            throw new Error("Experiment terminal episode does not match the staged candidate.");
+          }
+        } else if (current.phase !== "started") {
+          throw new Error("Only a started episode may commit a pre-artifact failure.");
+        }
+        record = {
+          ...structuredClone(loaded.record),
+          updatedAt: monotonicTimestamp(this.now(), loaded.record.updatedAt),
+          gamesCompleted: counts.completed,
+          gamesTruncated: counts.truncated,
+          gamesFailed: counts.failed,
+          gamesInFlight: 0,
+          episodes
+        };
+        delete record.currentEpisode;
+      } else {
+        record = {
+          ...structuredClone(loaded.record),
+          updatedAt: monotonicTimestamp(this.now(), loaded.record.updatedAt),
+          gamesCompleted: counts.completed,
+          gamesTruncated: counts.truncated,
+          gamesFailed: counts.failed,
+          gamesUnstarted: loaded.record.gamesRequested - episodes.length,
+          episodes
+        };
+      }
       assertRunRecord(record);
       const revisionsDirectory = path.join(this.runsDirectory, loaded.entry.directoryKey, REVISIONS_DIRECTORY);
       await assertDirectoryInside(
@@ -266,10 +582,12 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       assertEpisodeReferencesEqual(loaded.record.episodes, refs);
       assertFinalRunSetMatchesRecord(runSet, loaded.record);
       if (loaded.record.state === "finalized") return structuredClone(loaded.entry);
-      const record: HarnessExperimentRunRecordV1 = {
-        schemaVersion: HARNESS_EXPERIMENT_RUN_RECORD_VERSION,
-        kind: "experiment-run-record",
-        state: "finalized",
+      if (loaded.record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 && loaded.record.currentEpisode) {
+        throw new Error("Experiment run cannot finalize while an episode is in flight.");
+      }
+      const commonFinal = {
+        kind: "experiment-run-record" as const,
+        state: "finalized" as const,
         runSetId: loaded.record.runSetId,
         createdAt: loaded.record.createdAt,
         updatedAt: monotonicTimestamp(this.now(), loaded.record.updatedAt),
@@ -281,6 +599,9 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
         gamesUnstarted: runSet.gamesUnstarted ?? runSet.gamesRequested - runSet.episodes.length,
         episodes: refs
       };
+      const record: HarnessExperimentRunRecord = loaded.record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2
+        ? { schemaVersion: HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2, gamesInFlight: 0, ...commonFinal }
+        : { schemaVersion: HARNESS_EXPERIMENT_RUN_RECORD_VERSION, ...commonFinal };
       assertRunRecord(record);
       const revisionsDirectory = path.join(this.runsDirectory, loaded.entry.directoryKey, REVISIONS_DIRECTORY);
       await assertDirectoryInside(
@@ -298,7 +619,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     }
   }
 
-  async get(runSetId: string): Promise<HarnessExperimentRunRecordV1 | undefined> {
+  async get(runSetId: string): Promise<HarnessExperimentRunRecord | undefined> {
     const loaded = await this.loadKnownRun(runSetId);
     return loaded ? structuredClone(loaded.record) : undefined;
   }
@@ -311,6 +632,35 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       verified.push(structuredClone(loaded.entry));
     }
     return verified;
+  }
+
+  private async mutateV2(
+    runSetId: string,
+    mutation: (loaded: { record: HarnessExperimentRunRecord; entry: HarnessExperimentRunStoreEntry }) =>
+      Promise<{ record: HarnessExperimentRunRecordV2; write: boolean }>
+  ): Promise<HarnessExperimentRunRecordV2> {
+    if (this.mutating.has(runSetId)) throw new Error("Experiment run mutation is already in progress.");
+    this.mutating.add(runSetId);
+    try {
+      const loaded = await this.loadKnownRun(runSetId);
+      if (!loaded) throw new Error("Experiment run must begin before it can mutate an episode attempt.");
+      const result = await mutation(loaded);
+      assertRunRecord(result.record);
+      if (!result.write) return structuredClone(result.record);
+      const revisionsDirectory = path.join(this.runsDirectory, loaded.entry.directoryKey, REVISIONS_DIRECTORY);
+      await assertDirectoryInside(
+        path.join(this.runsDirectory, loaded.entry.directoryKey),
+        revisionsDirectory,
+        "Experiment run revisions directory is not safe."
+      );
+      await this.writeRevision(revisionsDirectory, loaded.entry.directoryKey, loaded.entry.revision + 1, result.record);
+      const entry = entryFromRecord(result.record, loaded.entry.directoryKey, loaded.entry.revision + 1);
+      this.entries.set(entry.runSetId, entry);
+      await this.writeIndex();
+      return structuredClone(result.record);
+    } finally {
+      this.mutating.delete(runSetId);
+    }
   }
 
   private async initialize(): Promise<void> {
@@ -338,7 +688,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
 
   private async referencesForRunSet<TEmbeddedArtifact extends TArtifact>(
     runSet: GenericTournamentRunSetArtifact<TEmbeddedArtifact>,
-    header: HarnessExperimentRunRecordV1
+    header: HarnessExperimentRunRecord
   ): Promise<HarnessExperimentRunEpisodeReferenceV1[]> {
     const errors = validateGenericTournamentRunSetArtifact(runSet);
     if (errors.length) throw new Error(`Experiment run-set is invalid: ${errors.join(" ")}`);
@@ -356,7 +706,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
 
   private async referenceForEpisode<TEmbeddedArtifact extends TArtifact>(
     episode: GenericTournamentRunSetEpisode<TEmbeddedArtifact>,
-    header: HarnessExperimentRunRecordV1,
+    header: HarnessExperimentRunRecord,
     runIds: Set<string>
   ): Promise<HarnessExperimentRunEpisodeReferenceV1> {
     const expectedSeed = `${header.experiment.spec.seed}:g${episode.index + 1}`;
@@ -416,7 +766,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     };
   }
 
-  private async loadKnownRun(runSetId: string): Promise<{ record: HarnessExperimentRunRecordV1; entry: HarnessExperimentRunStoreEntry } | undefined> {
+  private async loadKnownRun(runSetId: string): Promise<{ record: HarnessExperimentRunRecord; entry: HarnessExperimentRunStoreEntry } | undefined> {
     assertIdentifier(runSetId, "runSetId");
     const known = this.entries.get(runSetId);
     if (!known) return undefined;
@@ -428,7 +778,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
   private async loadDirectory(
     directoryKey: string,
     expectedRunSetId?: string
-  ): Promise<{ record: HarnessExperimentRunRecordV1; entry: HarnessExperimentRunStoreEntry } | undefined> {
+  ): Promise<{ record: HarnessExperimentRunRecord; entry: HarnessExperimentRunStoreEntry } | undefined> {
     if (!DIRECTORY_KEY_PATTERN.test(directoryKey)) return undefined;
     const runDirectory = path.join(this.runsDirectory, directoryKey);
     const revisionsDirectory = path.join(runDirectory, REVISIONS_DIRECTORY);
@@ -444,9 +794,9 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       .filter((child) => child.isDirectory() && REVISION_DIRECTORY_PATTERN.test(child.name))
       .sort((a, b) => a.name.localeCompare(b.name));
     if (!children.length) throw new Error("Stored experiment run has no canonical revision.");
-    let latest: { record: HarnessExperimentRunRecordV1; entry: HarnessExperimentRunStoreEntry } | undefined;
-    let header: HarnessExperimentRunRecordV1 | undefined;
-    let previous: HarnessExperimentRunRecordV1 | undefined;
+    let latest: { record: HarnessExperimentRunRecord; entry: HarnessExperimentRunStoreEntry } | undefined;
+    let header: HarnessExperimentRunRecord | undefined;
+    let previous: HarnessExperimentRunRecord | undefined;
     for (const [position, child] of children.entries()) {
       const match = REVISION_DIRECTORY_PATTERN.exec(child.name)!;
       const revision = Number(match[1]);
@@ -455,8 +805,8 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
       await assertDirectoryInside(revisionsDirectory, revisionDirectory, "Stored experiment revision directory is not safe.");
       const recordText = await readSafeFile(revisionDirectory, RECORD_FILE);
       const manifestText = await readSafeFile(revisionDirectory, MANIFEST_FILE);
-      const record = JSON.parse(recordText) as HarnessExperimentRunRecordV1;
-      const manifest = JSON.parse(manifestText) as HarnessExperimentRunManifestV1;
+      const record = JSON.parse(recordText) as HarnessExperimentRunRecord;
+      const manifest = JSON.parse(manifestText) as HarnessExperimentRunManifest;
       assertRunRecord(record);
       assertManifest(manifest, record, directoryKey, revision, recordText, child.name);
       if (revision === 1) {
@@ -479,7 +829,10 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
           throw new Error("Experiment run revision updatedAt moved backwards.");
         }
         if (record.state === "active") assertActiveProgressTransition(previous, record);
-        else assertEpisodeReferencesEqual(previous.episodes, record.episodes);
+        else {
+          if (previous.schemaVersion !== record.schemaVersion) throw new Error("Experiment run finalization changed record schema version.");
+          assertEpisodeReferencesEqual(previous.episodes, record.episodes);
+        }
       }
       if (expectedRunSetId && record.runSetId !== expectedRunSetId) throw new Error("Stored experiment run id does not match the registry.");
       await this.assertEpisodeReferences(record);
@@ -493,7 +846,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     return latest;
   }
 
-  private async assertEpisodeReferences(record: HarnessExperimentRunRecordV1): Promise<void> {
+  private async assertEpisodeReferences(record: HarnessExperimentRunRecord): Promise<void> {
     for (const episode of record.episodes) {
       if (!episode.runId) continue;
       const canonical = await this.episodeStore.get(episode.runId);
@@ -528,7 +881,7 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     revisionsDirectory: string,
     directoryKey: string,
     revision: number,
-    record: HarnessExperimentRunRecordV1
+    record: HarnessExperimentRunRecord
   ): Promise<void> {
     const recordText = jsonDocument(record);
     const recordSha256 = sha256(recordText);
@@ -537,16 +890,22 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
     await assertPathMissing(finalDirectory, "Experiment run revision already exists.");
     const temporaryDirectory = path.join(revisionsDirectory, `.tmp-${randomUUID()}`);
     await mkdir(temporaryDirectory, { recursive: false });
-    const manifest: HarnessExperimentRunManifestV1 = {
-      schemaVersion: HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION,
-      kind: "experiment-run-manifest",
+    const commonManifest = {
+      kind: "experiment-run-manifest" as const,
       runSetId: record.runSetId,
       directoryKey,
       revision,
       state: record.state,
       recordSha256,
-      files: { record: RECORD_FILE, manifest: MANIFEST_FILE }
+      files: { record: RECORD_FILE, manifest: MANIFEST_FILE } as const
     };
+    const manifest: HarnessExperimentRunManifest = record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2
+      ? {
+          schemaVersion: HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V2,
+          recordSchemaVersion: HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2,
+          ...commonManifest
+        }
+      : { schemaVersion: HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION, ...commonManifest };
     await writeFile(path.join(temporaryDirectory, RECORD_FILE), recordText, { encoding: "utf8", flag: "wx" });
     await writeFile(path.join(temporaryDirectory, MANIFEST_FILE), jsonDocument(manifest), { encoding: "utf8", flag: "wx" });
     await rename(temporaryDirectory, finalDirectory);
@@ -567,13 +926,21 @@ export class HarnessExperimentRunStore<TArtifact extends GenericEpisodeEnvelope>
   }
 }
 
-function assertRunRecord(record: HarnessExperimentRunRecordV1): void {
+function assertRunRecord(record: HarnessExperimentRunRecord): void {
   assertExactKeys(record, [
     "schemaVersion", "kind", "state", "runSetId", "createdAt", "updatedAt", "experiment",
-    "gamesRequested", "gamesCompleted", "gamesTruncated", "gamesFailed", "gamesUnstarted", "episodes"
+    "gamesRequested", "gamesCompleted", "gamesTruncated", "gamesFailed", "gamesInFlight", "gamesUnstarted", "episodes",
+    "currentEpisode"
   ], "Experiment run record");
-  if (record.schemaVersion !== HARNESS_EXPERIMENT_RUN_RECORD_VERSION || record.kind !== "experiment-run-record") {
+  if (
+    (record.schemaVersion !== HARNESS_EXPERIMENT_RUN_RECORD_VERSION &&
+      record.schemaVersion !== HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2) ||
+    record.kind !== "experiment-run-record"
+  ) {
     throw new Error("Experiment run record version or kind is invalid.");
+  }
+  if (record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION && ("gamesInFlight" in record || "currentEpisode" in record)) {
+    throw new Error("Experiment run v1 record contains v2 lifecycle fields.");
   }
   assertIdentifier(record.runSetId, "runSetId");
   assertTimestamp(record.createdAt, "createdAt");
@@ -588,10 +955,18 @@ function assertRunRecord(record: HarnessExperimentRunRecordV1): void {
   if (record.gamesRequested !== record.experiment.spec.episodeCount) throw new Error("Experiment run gamesRequested does not match provenance.");
   const counts = [record.gamesRequested, record.gamesCompleted, record.gamesTruncated, record.gamesFailed, record.gamesUnstarted];
   if (counts.some((count) => !Number.isInteger(count) || count < 0)) throw new Error("Experiment run lifecycle counts must be non-negative integers.");
-  if (record.gamesCompleted + record.gamesTruncated + record.gamesFailed + record.gamesUnstarted !== record.gamesRequested) {
+  const gamesInFlight = record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 ? record.gamesInFlight : 0;
+  if (record.gamesCompleted + record.gamesTruncated + record.gamesFailed + gamesInFlight + record.gamesUnstarted !== record.gamesRequested) {
     throw new Error("Experiment run lifecycle counts do not cover the requested schedule.");
   }
-  if (record.episodes.length !== record.gamesRequested - record.gamesUnstarted) throw new Error("Experiment run episode count mismatch.");
+  if (record.episodes.length !== record.gamesRequested - record.gamesUnstarted - gamesInFlight) throw new Error("Experiment run episode count mismatch.");
+  if (record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2) {
+    if (!("gamesInFlight" in record)) throw new Error("Experiment run v2 record is missing gamesInFlight.");
+    if (record.gamesInFlight !== 0 && record.gamesInFlight !== 1) throw new Error("Experiment run gamesInFlight is invalid.");
+    if ((record.currentEpisode === undefined) !== (record.gamesInFlight === 0)) throw new Error("Experiment run in-flight count does not match currentEpisode.");
+    if (record.state === "finalized" && record.currentEpisode) throw new Error("Finalized experiment run cannot retain an in-flight episode.");
+    if (record.currentEpisode) assertCurrentEpisodeV2(record.currentEpisode, record);
+  }
   const lifecycleCounts = { completed: 0, truncated: 0, failed: 0 };
   const runIds = new Set<string>();
   for (const [position, episode] of record.episodes.entries()) {
@@ -666,6 +1041,65 @@ function lifecycleCountsForReferences(episodes: HarnessExperimentRunEpisodeRefer
   };
 }
 
+function reviewedFailureReference(index: number, seed: string): HarnessExperimentRunEpisodeReferenceV1 {
+  return {
+    index,
+    seed,
+    status: "failed",
+    metricCount: 0,
+    failureCount: 0,
+    error: GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE
+  };
+}
+
+function requireV2Active(record: HarnessExperimentRunRecord): HarnessExperimentRunRecordV2 {
+  if (record.schemaVersion !== HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2) {
+    throw new Error("Experiment episode attempt mutation requires a v2 run record.");
+  }
+  if (record.state !== "active") throw new Error("Finalized experiment run cannot mutate an episode attempt.");
+  return record;
+}
+
+function assertCurrentEpisodeV2(
+  current: HarnessExperimentRunCurrentEpisodeV2,
+  record: HarnessExperimentRunRecordV2
+): void {
+  assertExactKeys(current, [
+    "phase", "attemptId", "index", "seed", "startedAt", "updatedAt", "status", "runId",
+    "artifactSha256", "evaluationReportId", "evaluationReportSha256"
+  ], "Experiment current episode");
+  if (current.phase !== "started" && current.phase !== "staged") throw new Error("Experiment current episode phase is invalid.");
+  assertIdentifier(current.attemptId, "currentEpisode.attemptId");
+  if (current.index !== record.episodes.length || current.seed !== `${record.experiment.spec.seed}:g${current.index + 1}`) {
+    throw new Error("Experiment current episode does not match the next schedule slot.");
+  }
+  assertTimestamp(current.startedAt, "currentEpisode.startedAt");
+  assertTimestamp(current.updatedAt, "currentEpisode.updatedAt");
+  if (Date.parse(current.updatedAt) < Date.parse(current.startedAt)) throw new Error("Experiment current episode time moved backwards.");
+  if (current.phase === "staged") {
+    if (current.status !== "completed" && current.status !== "truncated" && current.status !== "failed") throw new Error("Experiment staged lifecycle is invalid.");
+    assertIdentifier(current.runId, "currentEpisode.runId");
+    if (!DIRECTORY_KEY_PATTERN.test(current.artifactSha256)) throw new Error("Experiment staged artifact digest is invalid.");
+    if ((current.evaluationReportId === undefined) !== (current.evaluationReportSha256 === undefined)) throw new Error("Experiment staged evaluation reference is incomplete.");
+  }
+}
+
+function assertV2Transition(previous: HarnessExperimentRunRecordV2, current: HarnessExperimentRunRecordV2): void {
+  assertEpisodeReferencePrefix(previous.episodes, current.episodes);
+  const previousStage = previous.currentEpisode;
+  const currentStage = current.currentEpisode;
+  if (!previousStage && currentStage?.phase === "started" && current.episodes.length === previous.episodes.length) return;
+  if (previousStage?.phase === "started" && currentStage?.phase === "staged" && current.episodes.length === previous.episodes.length) {
+    if (
+      previousStage.attemptId !== currentStage.attemptId || previousStage.index !== currentStage.index ||
+      previousStage.seed !== currentStage.seed || previousStage.startedAt !== currentStage.startedAt
+    ) throw new Error("Experiment staged transition changed durable attempt identity.");
+    return;
+  }
+  if (previousStage && !currentStage && current.episodes.length === previous.episodes.length + 1) return;
+  throw new Error("Experiment v2 revision transition is invalid.");
+}
+
 function assertEpisodeReferencePrefix(
   prefix: HarnessExperimentRunEpisodeReferenceV1[],
   episodes: HarnessExperimentRunEpisodeReferenceV1[]
@@ -694,7 +1128,7 @@ function assertEpisodeReferencesEqual(
 
 function assertFinalRunSetMatchesRecord<TArtifact extends GenericEpisodeEnvelope>(
   runSet: GenericTournamentRunSetArtifact<TArtifact>,
-  record: HarnessExperimentRunRecordV1
+  record: HarnessExperimentRunRecord
 ): void {
   const expectedUnstarted = runSet.gamesUnstarted ?? runSet.gamesRequested - runSet.episodes.length;
   if (
@@ -715,9 +1149,14 @@ function monotonicTimestamp(candidate: string, previous: string): string {
 }
 
 function assertActiveProgressTransition(
-  previous: HarnessExperimentRunRecordV1,
-  current: HarnessExperimentRunRecordV1
+  previous: HarnessExperimentRunRecord,
+  current: HarnessExperimentRunRecord
 ): void {
+  if (previous.schemaVersion !== current.schemaVersion) throw new Error("Experiment run revision changed record schema version.");
+  if (previous.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 && current.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2) {
+    assertV2Transition(previous, current);
+    return;
+  }
   assertEpisodeReferencePrefix(previous.episodes, current.episodes);
   if (current.episodes.length !== previous.episodes.length + 1) {
     throw new Error("Active experiment run revision must append exactly one terminal episode.");
@@ -725,20 +1164,31 @@ function assertActiveProgressTransition(
 }
 
 function assertManifest(
-  manifest: HarnessExperimentRunManifestV1,
-  record: HarnessExperimentRunRecordV1,
+  manifest: HarnessExperimentRunManifest,
+  record: HarnessExperimentRunRecord,
   directoryKey: string,
   revision: number,
   recordText: string,
   revisionDirectory: string
 ): void {
   assertExactKeys(manifest, [
-    "schemaVersion", "kind", "runSetId", "directoryKey", "revision", "state", "recordSha256", "files"
+    "schemaVersion", "recordSchemaVersion", "kind", "runSetId", "directoryKey", "revision", "state", "recordSha256", "files"
   ], "Experiment run manifest");
   assertExactKeys(manifest.files, ["record", "manifest"], "Experiment run manifest files");
-  if (manifest.schemaVersion !== HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION || manifest.kind !== "experiment-run-manifest") {
+  if (
+    (manifest.schemaVersion !== HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION &&
+      manifest.schemaVersion !== HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V2) ||
+    manifest.kind !== "experiment-run-manifest"
+  ) {
     throw new Error("Experiment run manifest version or kind is invalid.");
   }
+  if (
+    (record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 &&
+      (manifest.schemaVersion !== HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V2 ||
+        manifest.recordSchemaVersion !== HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2)) ||
+    (record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION &&
+      (manifest.schemaVersion !== HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION || "recordSchemaVersion" in manifest))
+  ) throw new Error("Experiment run manifest does not match the record schema version.");
   if (
     manifest.runSetId !== record.runSetId ||
     manifest.directoryKey !== directoryKey ||
@@ -753,7 +1203,7 @@ function assertManifest(
   }
 }
 
-function entryFromRecord(record: HarnessExperimentRunRecordV1, directoryKey: string, revision: number): HarnessExperimentRunStoreEntry {
+function entryFromRecord(record: HarnessExperimentRunRecord, directoryKey: string, revision: number): HarnessExperimentRunStoreEntry {
   return {
     runSetId: record.runSetId,
     specId: record.experiment.spec.id,
@@ -768,6 +1218,7 @@ function entryFromRecord(record: HarnessExperimentRunRecordV1, directoryKey: str
     gamesCompleted: record.gamesCompleted,
     gamesTruncated: record.gamesTruncated,
     gamesFailed: record.gamesFailed,
+    ...(record.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 ? { gamesInFlight: record.gamesInFlight } : {}),
     gamesUnstarted: record.gamesUnstarted
   };
 }

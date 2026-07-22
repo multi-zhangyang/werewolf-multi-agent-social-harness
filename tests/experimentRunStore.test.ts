@@ -207,6 +207,61 @@ describe("restart-safe experiment run store", () => {
     expect(retry).toEqual(first);
   });
 
+  it("persists and recovers the v2 started and staged episode lifecycle", async () => {
+    const root = await temporaryRoot();
+    const experiment = createGenericExperimentProvenance(experimentSpec(2));
+    const artifacts = new Map<string, Artifact>();
+    const authority = {
+      async get(runId: string) { return artifacts.get(runId); },
+      async getMetrics(runId: string) { return artifacts.has(runId) ? [] : undefined; },
+      async getFailures(runId: string) { return artifacts.has(runId) ? [] : undefined; },
+      async getEvaluationReport() { return undefined; }
+    };
+    const store = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    const begun = await store.beginOrResume({
+      runSetId: "v2-recovery",
+      experiment,
+      createdAt: "2026-07-22T15:00:00.000Z"
+    });
+    expect(begun).toMatchObject({ disposition: "created", record: { schemaVersion: "harness.experiment-run-record.v2" } });
+
+    await store.startEpisode({ runSetId: "v2-recovery", index: 0, seed: `${experiment.spec.seed}:g1` });
+    const afterStart = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    expect(await afterStart.get("v2-recovery")).toMatchObject({
+      gamesInFlight: 1,
+      gamesUnstarted: 1,
+      currentEpisode: { phase: "started", index: 0, seed: `${experiment.spec.seed}:g1` }
+    });
+
+    const interrupted = await afterStart.recoverCurrentEpisode("v2-recovery");
+    expect(interrupted).toMatchObject({
+      disposition: "failed-interrupted-start",
+      record: { gamesFailed: 1, gamesInFlight: 0, episodes: [{ index: 0, status: "failed" }] }
+    });
+
+    await afterStart.startEpisode({ runSetId: "v2-recovery", index: 1, seed: `${experiment.spec.seed}:g2` });
+    const artifact = {
+      runId: "v2-recovery-artifact",
+      status: "completed",
+      experiment
+    } as unknown as Artifact;
+    await afterStart.stageEpisode({
+      runSetId: "v2-recovery",
+      episode: { index: 1, seed: `${experiment.spec.seed}:g2`, status: "completed", runId: artifact.runId, artifact }
+    });
+    artifacts.set(artifact.runId, artifact);
+
+    const stagedRestart = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    const adopted = await stagedRestart.recoverCurrentEpisode("v2-recovery");
+    expect(adopted).toMatchObject({
+      disposition: "committed-staged-artifact",
+      record: { gamesCompleted: 1, gamesFailed: 1, gamesInFlight: 0, gamesUnstarted: 0 }
+    });
+    expect(adopted.record.currentEpisode).toBeUndefined();
+    expect(adopted.record.episodes.map((episode) => episode.index)).toEqual([0, 1]);
+    expect((await stagedRestart.beginOrResume({ runSetId: "v2-recovery", experiment })).revision).toBe(6);
+  });
+
   it("makes finalization and the last terminal retry idempotent without accepting drift", async () => {
     const root = await temporaryRoot();
     const experiment = createGenericExperimentProvenance(experimentSpec(1));
