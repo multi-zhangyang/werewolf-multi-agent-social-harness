@@ -74,7 +74,7 @@ import {
   type MatchComparisonRowGroup,
   type MatchComparisonView
 } from "../harness/matchComparison";
-import { providerFailureFromError } from "../harness/providerFailure";
+import { providerFailureFromError, sanitizePersistedProviderDiagnostics } from "../harness/providerFailure";
 import { harnessFailureEvidenceFromEpisode } from "../harness/executionEvidence";
 import { redactSecrets } from "../harness/redaction";
 import { countSocialStepCommits, countSocialStepCommitsByActor, deriveSocialExposureRecords, type SocialExposureRecord, type SocialMessage } from "../harness/social";
@@ -2418,7 +2418,7 @@ async function persistMatchArtifact(artifact: MatchArtifact, baseDir: string | u
   await ensureWritableArtifactSubdirectory(root, matchArtifactDirectory(root), "Match artifact directory is not safe.");
   // Overwrite is intentional for deterministic tournament episode ids so a re-export
   // under the same seed/episode replaces the prior match store entry.
-  await writeFile(file, `${JSON.stringify(redactSecrets(artifact), null, 2)}\n`, {
+  await writeFile(file, `${JSON.stringify(sanitizePersistedProviderDiagnostics(redactSecrets(artifact)), null, 2)}\n`, {
     encoding: "utf8"
   });
 }
@@ -2678,7 +2678,10 @@ async function persistCheckpointArtifact(checkpoint: HarnessCheckpoint, baseDir:
   const root = path.resolve(baseDir);
   const file = checkpointArtifactAbsoluteFile(root, checkpoint.checkpointId);
   await ensureWritableArtifactSubdirectory(root, checkpointArtifactDirectory(root), "Checkpoint artifact directory is not safe.");
-  await writeFile(file, `${JSON.stringify(redactSecrets(checkpoint), null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+  await writeFile(file, `${JSON.stringify(sanitizePersistedProviderDiagnostics(redactSecrets(checkpoint)), null, 2)}\n`, {
+    encoding: "utf8",
+    flag: "wx"
+  });
 }
 
 async function loadCheckpointArtifactIndex(baseDir: string | undefined): Promise<void> {
@@ -3402,7 +3405,7 @@ function projectMatchArtifactForView(artifact: MatchArtifact, view: MatchArtifac
   } catch {
     throw new HttpError(409, "Stored match artifact failed integrity validation.", "artifact_integrity_invalid");
   }
-  if (view === "full") return redactSecrets(artifact);
+  if (view === "full") return sanitizePersistedProviderDiagnostics(redactSecrets(artifact));
   const privateProjected = projectPostgameRedactedArtifact(artifact);
   if (view === "postgame-redacted") return privateProjected;
   return redactSecrets(projectTruthRedactedArtifact(privateProjected));
@@ -3475,7 +3478,7 @@ function projectHarnessCheckpointForView(
   } catch {
     throw new HttpError(409, "Stored checkpoint failed integrity validation.", "checkpoint_integrity_invalid");
   }
-  if (view === "full") return redactSecrets(checkpoint);
+  if (view === "full") return sanitizePersistedProviderDiagnostics(redactSecrets(checkpoint));
 
   const source = cloneJson(checkpoint);
   const privateState = redactStatePrivateEvents(source.state);

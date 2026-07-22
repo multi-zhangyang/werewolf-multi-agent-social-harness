@@ -27,7 +27,6 @@ export interface WerewolfAgentObserveContext {
 
 export interface WerewolfAgentCommitContext extends WerewolfAgentObserveContext {
   pendingAction: AgentPendingAction;
-  providerRequestId?: string;
 }
 
 export class WerewolfAgentActor {
@@ -355,7 +354,6 @@ export function commitWerewolfAgentTurn(input: {
       policyName: input.plan.policyName,
       confidence: input.plan.confidence,
       strategyTags: input.plan.strategyTags,
-      providerRequestId: input.context?.providerRequestId,
       turnIndex: input.context?.turnIndex
     }
   }, mutationContextFromPending(input.context));

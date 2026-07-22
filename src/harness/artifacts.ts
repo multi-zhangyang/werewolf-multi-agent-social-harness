@@ -19,6 +19,7 @@ import { harnessFailureEvidenceFromEpisode } from "./executionEvidence";
 import { werewolfHarnessTurnEvidenceFromEpisode } from "./werewolfExecutionEvidence";
 import { replayWerewolfSocialEpisode } from "./replay";
 import { redactSecrets } from "./redaction";
+import { sanitizePersistedProviderDiagnostics } from "./providerFailure";
 import {
   HARNESS_AGENT_SNAPSHOT_FRAME_VERSION,
   compactRecordedSocialAgentSnapshots,
@@ -232,7 +233,7 @@ export function buildMatchArtifact(options: {
     agents: cloneJson(options.result.agents),
     agentSnapshotFrames: agentSnapshotFrames.length ? agentSnapshotFrames : undefined
   };
-  const redacted = redactSecrets(artifact);
+  const redacted = sanitizePersistedProviderDiagnostics(redactSecrets(artifact));
   normalizeAgentSnapshotFramesAfterRedaction(redacted);
   return redacted;
 }
@@ -600,7 +601,7 @@ export function toTrajectoryJsonl(artifact: TrajectoryJsonlSource): string {
       ...metric
     }))
   ];
-  return `${lines.map((line) => JSON.stringify(redactSecrets(line))).join("\n")}\n`;
+  return `${lines.map((line) => JSON.stringify(sanitizePersistedProviderDiagnostics(redactSecrets(line)))).join("\n")}\n`;
 }
 
 export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[] {

@@ -1,3 +1,5 @@
+import { providerFailureFromError, safeProviderFailureMessage } from "./providerFailure";
+
 export type SocialChannelKind = "public" | "team" | "private" | "system";
 export type SocialResolvedSchedulerMode = "aec" | "aec-batched-decision" | "parallel";
 export type SocialSchedulerMode = SocialResolvedSchedulerMode | "simultaneous-batch";
@@ -1924,7 +1926,7 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       transactionId,
       actorTurnIndex,
       failureStage,
-      error: error instanceof Error ? error.message : String(error),
+      error: safeSocialFailureMessage(error),
       rawError: error
     };
   }
@@ -2885,7 +2887,7 @@ function defaultFailureEvidence(stage: string, error: unknown): SocialStepFailur
   const validation = error instanceof SocialActionValidationError ? error.result : undefined;
   return {
     stage,
-    message: error instanceof Error ? error.message : String(error),
+    message: safeSocialFailureMessage(error),
     causeName: error instanceof Error ? error.name : undefined,
     metadata: validation
       ? {
@@ -2894,6 +2896,13 @@ function defaultFailureEvidence(stage: string, error: unknown): SocialStepFailur
         }
       : undefined
   };
+}
+
+function safeSocialFailureMessage(error: unknown): string {
+  if (providerFailureFromError(error)) {
+    return safeProviderFailureMessage(error, "Model provider execution failed before a social action could be committed.");
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 function failureStageForError(error: unknown, fallback: string): string {

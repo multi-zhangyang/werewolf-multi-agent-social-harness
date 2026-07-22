@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isProviderFailureKind } from "../agents/schema";
 import { toTrajectoryJsonl, validateMatchArtifactIntegrity, type MatchArtifact, type TrajectoryJsonlSource } from "./artifacts";
 import { harnessFailureEvidenceFromEpisode } from "./executionEvidence";
 import {
@@ -27,6 +28,7 @@ import type {
   HarnessMetricRecord,
   ProviderFailureSummary
 } from "./types";
+import { sanitizePersistedProviderDiagnostics } from "./providerFailure";
 import { redactSecrets } from "./redaction";
 import { countSocialStepCommits, countSocialStepCommitsByActor, isSocialStepCommitted } from "./social";
 import {
@@ -421,7 +423,6 @@ export interface TournamentFailureAttribution {
   retryable: boolean | null;
   attempts: number | null;
   maxAttempts: number | null;
-  providerRequestId: string | null;
   providerFailure: ProviderFailureSummary | null;
   source: "social_step_failure";
 }
@@ -2141,7 +2142,6 @@ function failureAttributionsForEpisode(
         retryable: providerFailure?.retryable ?? null,
         attempts: providerFailure?.attempts ?? null,
         maxAttempts: providerFailure?.maxAttempts ?? null,
-        providerRequestId: providerFailure?.providerRequestId ?? null,
         providerFailure,
         source: "social_step_failure"
       };
@@ -2176,10 +2176,6 @@ function providerFailurePayload(value: unknown): ProviderFailureSummary | undefi
   copyBoolean(value, summary, "retryable");
   copyNumber(value, summary, "attempts");
   copyNumber(value, summary, "maxAttempts");
-  copyString(value, summary, "providerRequestId");
-  copyString(value, summary, "retryCause");
-  copyString(value, summary, "abortReason");
-  copyString(value, summary, "causeName");
   return summary;
 }
 
@@ -2191,31 +2187,6 @@ function copyNumber(source: Record<string, unknown>, target: ProviderFailureSumm
 function copyBoolean(source: Record<string, unknown>, target: ProviderFailureSummary, key: "aborted" | "retryable"): void {
   const value = source[key];
   if (typeof value === "boolean") target[key] = value;
-}
-
-function copyString(
-  source: Record<string, unknown>,
-  target: ProviderFailureSummary,
-  key: "providerRequestId" | "retryCause" | "abortReason" | "causeName"
-): void {
-  const value = source[key];
-  if (typeof value === "string" && value.length > 0) target[key] = value;
-}
-
-function isProviderFailureKind(value: string | undefined): value is ProviderFailureSummary["failureKind"] {
-  return (
-    value === "http" ||
-    value === "timeout" ||
-    value === "abort" ||
-    value === "stream_invalid_json" ||
-    value === "stream_empty" ||
-    value === "stream_missing_body" ||
-    value === "non_json" ||
-    value === "empty_content" ||
-    value === "network" ||
-    value === "gateway_html" ||
-    value === "unknown"
-  );
 }
 
 function isProviderFailureStage(value: string | undefined): value is NonNullable<ProviderFailureSummary["providerStage"]> {
@@ -2343,7 +2314,6 @@ function buildCostLatencyReport(
       matchId: episode.matchId ?? artifact?.matchId ?? null,
       status: episode.status,
       harnessStatus: episode.harnessStatus ?? artifact?.status ?? null,
-      providerRequestIds: traceStats.providerRequestIds,
       attempts: traceStats.attempts,
       ...finalizeCostLatencyStats(episodeStats),
       modelUsage: Object.fromEntries(
@@ -2726,7 +2696,6 @@ function createEmptyCostLatencyStats(): {
   nativeSteps: number;
   committedSteps: number;
   rejectedSteps: number;
-  providerRequestIds: string[];
   attempts: {
     count: number;
     sum: number;
@@ -2746,7 +2715,6 @@ function createEmptyCostLatencyStats(): {
     nativeSteps: 0,
     committedSteps: 0,
     rejectedSteps: 0,
-    providerRequestIds: [],
     attempts: {
       count: 0,
       sum: 0,
@@ -2766,7 +2734,6 @@ function createEmptyProviderFailureStats(): {
   aborted: number;
   timeouts: number;
   streamAborts: number;
-  providerRequestIds: string[];
   attempts: {
     count: number;
     sum: number;
@@ -2783,7 +2750,6 @@ function createEmptyProviderFailureStats(): {
     aborted: 0,
     timeouts: 0,
     streamAborts: 0,
-    providerRequestIds: [],
     attempts: {
       count: 0,
       sum: 0,
@@ -2809,23 +2775,18 @@ function traceCostLatencyStats(artifact: MatchArtifact | undefined): ReturnType<
   });
   const nativeTraces = werewolfHarnessTurnEvidenceFromEpisode(artifact?.socialEpisode).map(({ trace }) => ({
     model: trace.model,
-    providerRequestId: trace.providerRequestId,
     attempts: trace.attempts
   }));
   const traces = nativeTraces.length
     ? nativeTraces
     : (artifact?.trajectory ?? []).map((step) => ({
         model: step.model,
-        providerRequestId: step.reasonerOutput.providerRequestId ?? step.turnTrace.providerRequestId,
         attempts: step.reasonerOutput.attempts
       }));
   for (const trace of traces) {
-    const providerRequestId = trace.providerRequestId;
-    if (providerRequestId) addUnique(stats.providerRequestIds, providerRequestId);
     const attempts = trace.attempts;
     recordAttempts(stats, attempts);
     const modelStats = stats.byModel.get(trace.model) ?? createEmptyCostLatencyStats();
-    if (providerRequestId) addUnique(modelStats.providerRequestIds, providerRequestId);
     recordAttempts(modelStats, attempts);
     stats.byModel.set(trace.model, modelStats);
   }
@@ -2833,7 +2794,6 @@ function traceCostLatencyStats(artifact: MatchArtifact | undefined): ReturnType<
 }
 
 function mergeTraceStats(target: ReturnType<typeof createEmptyCostLatencyStats>, traceStats: ReturnType<typeof createEmptyCostLatencyStats>): void {
-  for (const providerRequestId of traceStats.providerRequestIds) addUnique(target.providerRequestIds, providerRequestId);
   target.attempts.count += traceStats.attempts.count;
   target.attempts.sum += traceStats.attempts.sum;
   target.attempts.max = Math.max(target.attempts.max, traceStats.attempts.max);
@@ -2874,7 +2834,6 @@ function finalizeCostLatencyStats(stats: ReturnType<typeof createEmptyCostLatenc
     nativeSteps: stats.nativeSteps,
     committedSteps: stats.committedSteps,
     rejectedSteps: stats.rejectedSteps,
-    providerRequestIds: stats.providerRequestIds,
     attempts: {
       ...stats.attempts,
       average: stats.attempts.count ? Math.round((stats.attempts.sum / stats.attempts.count) * 1000) / 1000 : 0
@@ -2892,7 +2851,6 @@ function recordProviderFailure(stats: ReturnType<typeof createEmptyProviderFailu
   if (failure.aborted) stats.aborted += 1;
   if (failure.failureKind === "timeout") stats.timeouts += 1;
   if (failure.aborted && failure.providerStage === "during_stream") stats.streamAborts += 1;
-  if (failure.providerRequestId) addUnique(stats.providerRequestIds, failure.providerRequestId);
   recordAttempts(stats, failure.attempts);
 }
 
@@ -2905,7 +2863,6 @@ function mergeProviderFailureStats(target: ReturnType<typeof createEmptyProvider
   target.aborted += source.aborted;
   target.timeouts += source.timeouts;
   target.streamAborts += source.streamAborts;
-  for (const providerRequestId of source.providerRequestIds) addUnique(target.providerRequestIds, providerRequestId);
   target.attempts.count += source.attempts.count;
   target.attempts.sum += source.attempts.sum;
   target.attempts.max = Math.max(target.attempts.max, source.attempts.max);
@@ -2922,7 +2879,6 @@ function finalizeProviderFailureStats(stats: ReturnType<typeof createEmptyProvid
     aborted: stats.aborted,
     timeouts: stats.timeouts,
     streamAborts: stats.streamAborts,
-    providerRequestIds: stats.providerRequestIds,
     attempts: {
       ...stats.attempts,
       average: stats.attempts.count ? Math.round((stats.attempts.sum / stats.attempts.count) * 1000) / 1000 : 0
@@ -3581,11 +3537,13 @@ function stableJson(value: unknown): string {
 }
 
 async function writeJson(filePath: string, value: unknown, overwrite: boolean): Promise<void> {
-  await writeFile(filePath, `${JSON.stringify(redactSecrets(value), null, 2)}\n`, { encoding: "utf8", flag: overwrite ? "w" : "wx" });
+  await writeFile(filePath, `${JSON.stringify(sanitizePersistedProviderDiagnostics(redactSecrets(value)), null, 2)}\n`, { encoding: "utf8", flag: overwrite ? "w" : "wx" });
 }
 
 async function writeJsonl(filePath: string, records: unknown[], overwrite: boolean): Promise<void> {
-  const data = records.length ? `${records.map((record) => JSON.stringify(redactSecrets(record))).join("\n")}\n` : "";
+  const data = records.length
+    ? `${records.map((record) => JSON.stringify(sanitizePersistedProviderDiagnostics(redactSecrets(record)))).join("\n")}\n`
+    : "";
   await writeFile(filePath, data, { encoding: "utf8", flag: overwrite ? "w" : "wx" });
 }
 

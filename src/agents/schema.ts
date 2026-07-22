@@ -128,7 +128,6 @@ export interface ProviderRetryHistoryEntry {
   aborted?: boolean;
   retryable: boolean;
   delayMs?: number;
-  message: string;
 }
 
 export class ModelCallError extends Error {

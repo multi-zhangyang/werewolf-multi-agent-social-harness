@@ -115,10 +115,6 @@ export interface ProviderFailureSummary {
   retryable?: boolean;
   attempts?: number;
   maxAttempts?: number;
-  providerRequestId?: string;
-  retryCause?: string;
-  abortReason?: string;
-  causeName?: string;
 }
 
 export interface HarnessErrorPayload {
@@ -128,7 +124,6 @@ export interface HarnessErrorPayload {
   message: string;
   traceId: string;
   providerFailure?: ProviderFailureSummary;
-  providerRequestId?: string;
   attempts?: number;
 }
 
@@ -291,7 +286,6 @@ export interface HarnessTurnTrace {
   latencyMs: number;
   promptTokens?: number;
   completionTokens?: number;
-  providerRequestId?: string;
   attempts?: number;
   retryHistory?: ProviderRetryHistoryEntry[];
   stream?: ProviderStreamTelemetry;
@@ -303,7 +297,6 @@ export interface ReasonerOutputSummary {
   latencyMs: number;
   promptTokens?: number;
   completionTokens?: number;
-  providerRequestId?: string;
   attempts?: number;
   retryHistory?: ProviderRetryHistoryEntry[];
   stream?: ProviderStreamTelemetry;

@@ -424,8 +424,7 @@ function retryHistoryEntry(error: unknown, attempt: number, retryable: boolean, 
   const raw = error instanceof ModelCallError && isRecord(error.raw) ? error.raw : {};
   const entry: ProviderRetryHistoryEntry = {
     attempt,
-    retryable,
-    message: error instanceof Error ? error.message : String(error)
+    retryable
   };
   const failureKind = stringValue(raw.failureKind);
   if (isProviderFailureKind(failureKind)) entry.failureKind = failureKind;

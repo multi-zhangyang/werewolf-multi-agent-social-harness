@@ -2,7 +2,21 @@ import { ModelCallError, isProviderFailureKind as schemaIsProviderFailureKind } 
 import { redactSecretText } from "./redaction";
 import type { ProviderFailureSummary } from "./types";
 
+const PERSISTED_PROVIDER_DIAGNOSTIC_KEYS = new Set([
+  "providerRequestId",
+  "providerRequestIds",
+  "retryCause",
+  "abortReason",
+  "causeName",
+  "causeMessage",
+  "providerBody",
+  "providerHeaders"
+]);
+
 export function describeError(error: unknown): string {
+  if (providerFailureFromError(error)) {
+    return safeProviderFailureMessage(error, "Model provider failed before the harness operation completed.");
+  }
   return redactSecretText(error instanceof Error ? error.message : String(error));
 }
 
@@ -34,6 +48,35 @@ export function providerFailureFromError(error: unknown): ProviderFailureSummary
   return undefined;
 }
 
+/**
+ * Removes provider-opaque identifiers and free-form diagnostics from values
+ * that cross into durable artifacts, JSONL, checkpoints, server responses, or
+ * research exports. This deliberately operates structurally rather than
+ * relying on token-shaped secret redaction: provider request IDs and arbitrary
+ * routing/error prose are not reliably secret-shaped.
+ *
+ * Closed execution telemetry (kind, stage, status, timeout, retryability,
+ * attempts, and stream completion enum) remains intact for evaluation and
+ * operational aggregation. The original runtime object is never mutated.
+ */
+export function sanitizePersistedProviderDiagnostics<T>(value: T): T {
+  return sanitizeValue(value, false) as T;
+}
+
+function sanitizeValue(value: unknown, retryHistoryEntry: boolean): unknown {
+  if (Array.isArray(value)) return value.map((entry) => sanitizeValue(entry, retryHistoryEntry));
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, entry]) => {
+      if (PERSISTED_PROVIDER_DIAGNOSTIC_KEYS.has(key)) return [];
+      // `message` is otherwise valid social/domain evidence. It becomes
+      // provider-owned free-form diagnostics only inside retry-history rows.
+      if (retryHistoryEntry && key === "message") return [];
+      return [[key, sanitizeValue(entry, key === "retryHistory")]];
+    })
+  );
+}
+
 function providerFailureFromRaw(raw: unknown): ProviderFailureSummary {
   const record = isRecord(raw) ? raw : {};
   const failureKind = providerFailureKindFromRaw(record);
@@ -52,14 +95,6 @@ function providerFailureFromRaw(raw: unknown): ProviderFailureSummary {
   if (attempts !== undefined) summary.attempts = attempts;
   const maxAttempts = numberValue(record.maxAttempts);
   if (maxAttempts !== undefined) summary.maxAttempts = maxAttempts;
-  const providerRequestId = redactedStringValue(record.providerRequestId);
-  if (providerRequestId) summary.providerRequestId = providerRequestId;
-  const retryCause = redactedStringValue(record.retryCause);
-  if (retryCause) summary.retryCause = retryCause;
-  const abortReason = redactedStringValue(record.abortReason);
-  if (abortReason) summary.abortReason = abortReason;
-  const causeName = redactedStringValue(record.causeName);
-  if (causeName) summary.causeName = causeName;
   return summary;
 }
 
@@ -107,11 +142,6 @@ function isProviderFailureStage(value: string | undefined): value is NonNullable
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function redactedStringValue(value: unknown): string | undefined {
-  const raw = stringValue(value);
-  return raw ? redactSecretText(raw) : undefined;
 }
 
 function numberValue(value: unknown): number | undefined {
