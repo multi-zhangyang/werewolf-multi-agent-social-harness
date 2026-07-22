@@ -33,7 +33,7 @@ The runtime does not use a local scripted substitute when the API key is missing
 export LLM_CHAT_COMPLETIONS_URL="https://your-openai-compatible-provider.example/v1/chat/completions"
 export LLM_PROVIDER_PROTOCOL="openai-chat-completions"
 export LLM_API_KEY="..."
-export LLM_MODELS="gpt-5.4/yourmodel-K2.6"
+export LLM_MODELS="poolside/laguna-s-2.1:free"
 export LLM_STREAM=true
 export LLM_TIMEOUT_MS=120000
 export LLM_RETRY_COUNT=2
@@ -201,6 +201,15 @@ npm run arena:tournament -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village
 
 `arena:match -- --json=full` prints `{ summary, artifact }`. If you redirect stdout, unwrap `.artifact` before passing the file to `arena:replay`; `--export` writes the artifact object directly. Full artifacts can contain private observations and reasoner evidence, so keep local exports under the ignored `artifacts/` directory or outside the repository.
 `socialEpisode.messages[*]` may include top-level `speechActs` and `deliveryReceipts`; these are evaluator-ready typed facts, not only display metadata. JSONL exports include flat `social_speech_act`, `social_delivery_receipt`, and derived `social_exposure` records for analysis.
+
+Committed actor receipts may also produce a typed private
+`harness.reflection.v1` memory record through the scaffold's optional,
+synchronous `receiptReflectionPolicy`. The harness fixes actor/turn identity,
+private visibility, committed-outcome evidence, content-free recall metadata,
+mutation-journal binding, and snapshot timing; the policy supplies only a
+bounded reflection draft. Rejected receipts never reflect, policy failures
+cannot roll back an already committed actor outcome, replay never reruns the
+policy, and diagnostic reflection counts remain zero-weight evaluation data.
 
 Tournament directory export is the paper/reproduction artifact pack. Use
 `arena:tournament -- --outputDir=<dir>` or `POST /api/tournaments/run` with
@@ -414,6 +423,11 @@ inference, policy execution, or a model call—and works for inline and compacte
 snapshot frames. Domain adapters may add this or other stronger snapshot schema
 checks, but they must not reconstruct durable agent state from commands or
 retry a model.
+Receipt-gated `ReflectionRecord` entries follow the same boundary. Artifact
+integrity validates their schema, actor, trace, turn, outcome, retrieval,
+metadata, and journal binding at first appearance, then checks that retained
+records remain immutable. Checkpoints and forks preserve the recorded entry;
+they do not regenerate its prose or call a reasoner.
 The same post-receipt rule applies to a fork child through
 `SocialCheckpointRuntimeAdapter.captureAgentSnapshots`. Omitting that optional
 runtime callback preserves execution compatibility but intentionally leaves the

@@ -345,6 +345,8 @@ export interface SocialStateEvaluation {
   agentCount: number;
   agentsWithSocialState: number;
   memoryEntries: number;
+  reflectionEntries: number;
+  outcomeEntries: number;
   beliefClaims: number;
   relationshipEdges: number;
   reputationRecords: number;
@@ -1212,7 +1214,9 @@ function metricsForAgent(agent: SocialAgentSnapshot): HarnessMetricRecord[] {
         observationEntries: memoryEntries.filter((entry) => entry.kind === "observation").length,
         messageEntries: memoryEntries.filter((entry) => entry.kind === "message").length,
         memoEntries: memoryEntries.filter((entry) => entry.kind === "memo").length,
-        decisionEntries: memoryEntries.filter((entry) => entry.kind === "decision").length
+        decisionEntries: memoryEntries.filter((entry) => entry.kind === "decision").length,
+        reflectionEntries: memoryEntries.filter((entry) => entry.kind === "reflection").length,
+        outcomeEntries: memoryEntries.filter((entry) => entry.kind === "outcome").length
       }
     }),
     ratioMetric(agent, subject, evidenceRefs, {
@@ -2189,6 +2193,8 @@ function summarizeSocialState(agents: SocialAgentSnapshot[]): SocialStateEvaluat
     agentCount: agents.length,
     agentsWithSocialState: states.length,
     memoryEntries: states.reduce((sum, state) => sum + state.memory.entries.length, 0),
+    reflectionEntries: states.reduce((sum, state) => sum + state.memory.entries.filter((entry) => entry.kind === "reflection").length, 0),
+    outcomeEntries: states.reduce((sum, state) => sum + state.memory.entries.filter((entry) => entry.kind === "outcome").length, 0),
     beliefClaims: states.reduce((sum, state) => sum + Object.keys(state.beliefs.claims).length, 0),
     relationshipEdges: states.reduce((sum, state) => sum + Object.keys(state.relationships.edges).length, 0),
     reputationRecords: states.reduce((sum, state) => sum + Object.keys(state.reputation.records).length, 0),

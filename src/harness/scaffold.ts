@@ -28,6 +28,9 @@ import {
   type GossipRecord,
   type GossipValence,
   type MemoryRetrievalRecord,
+  REFLECTION_RECORD_VERSION,
+  type ReflectionKind,
+  type ReflectionRecord,
   type SocialMemoryEntry,
   type MemoryVisibility,
   type NormSanctionKind,
@@ -313,6 +316,70 @@ export interface AgentReasoner<
   ): Promise<string | AgentReasonerOutput<TReasonerAdvice>> | string | AgentReasonerOutput<TReasonerAdvice>;
 }
 
+export interface ReceiptReflectionDraft {
+  kind: ReflectionKind;
+  content: string;
+  confidence: number;
+}
+
+export interface ReceiptReflectionInput<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>
+> {
+  /** Cloned post-outcome private state; mutation cannot affect durability. */
+  agent: TAgentState;
+  /** Cloned post-outcome social state for domain-neutral policies. */
+  social: AgentSocialState<TObservation, TPending, TCommand>;
+  /** Closed receipt facts only. Raw info, observation, action, and provider diagnostics are excluded. */
+  receipt: {
+    id: string;
+    traceId: string;
+    transactionId?: string;
+    turnIndex: number;
+    actorId: string;
+    pendingAction: TPending;
+    reward?: number;
+    terminated: boolean;
+    truncated: boolean;
+    postStateHash?: string;
+    eventSeqRange?: [number, number];
+    messageSeqRange?: [number, number];
+  };
+  /** Content-free retrieval evidence suitable for durable artifacts. */
+  memoryRetrieval: MemoryRetrievalRecord;
+  /** Cloned private entries available only while the pure policy runs. */
+  recalledMemory: Array<SocialMemoryEntry<TObservation, TPending, TCommand>>;
+}
+
+/** Synchronous and pure by contract; live model work belongs to an explicit scheduled lifecycle. */
+export interface ReceiptReflectionPolicy<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>
+> {
+  id: string;
+  reflect(input: ReceiptReflectionInput<TObservation, TPending, TCommand, TAgentState>): ReceiptReflectionDraft | undefined;
+}
+
+export function createDeterministicReceiptReflectionPolicy<
+  TObservation = unknown,
+  TPending = unknown,
+  TCommand = unknown,
+  TAgentState = AgentScaffoldState<TObservation, TPending, TCommand>
+>(): ReceiptReflectionPolicy<TObservation, TPending, TCommand, TAgentState> {
+  return {
+    id: "deterministic-receipt-reflection-v1",
+    reflect: () => ({
+      kind: "memory_summary",
+      content: "Reviewed the committed environment outcome and retained its evidence for later decisions.",
+      confidence: 1
+    })
+  };
+}
+
 /**
  * Domain-neutral bridge for actors whose canonical private state is not the
  * default {@link AgentScaffoldState}. The scaffold still owns transaction
@@ -368,6 +435,7 @@ export interface ScaffoldedActorOptions<
   reasoner?: AgentReasoner<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
   candidateScorers?: Array<AgentActionCandidateScorer<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>>;
   actionArbitrator?: AgentActionArbitrator<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
+  receiptReflectionPolicy?: ReceiptReflectionPolicy<TObservation, TPending, TCommand, TAgentState>;
   initialSocialState?: AgentSocialState<TObservation, TPending, TCommand>;
   /** Required together with canonicalStateAdapter; it is the sole durable private state owner. */
   initialCanonicalState?: TAgentState;
@@ -403,6 +471,7 @@ export class ScaffoldedSocialActor<
   readonly reasoner?: AgentReasoner<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
   readonly candidateScorers: Array<AgentActionCandidateScorer<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>>;
   readonly actionArbitrator?: AgentActionArbitrator<TObservation, TPending, TCommand, TAgentState, TReasonerAdvice>;
+  readonly receiptReflectionPolicy?: ReceiptReflectionPolicy<TObservation, TPending, TCommand, TAgentState>;
   readonly maxMemoryEntries: number;
   private readonly canonicalStateAdapter?: ScaffoldCanonicalStateAdapter<TAgentState, TObservation, TPending, TCommand, TReasonerAdvice>;
   private mutableState: TAgentState;
@@ -420,6 +489,7 @@ export class ScaffoldedSocialActor<
     this.reasoner = options.reasoner;
     this.candidateScorers = [...(options.candidateScorers ?? [])];
     this.actionArbitrator = options.actionArbitrator;
+    this.receiptReflectionPolicy = options.receiptReflectionPolicy;
     this.maxMemoryEntries = options.maxMemoryEntries ?? 200;
     this.canonicalStateAdapter = options.canonicalStateAdapter;
     if (this.canonicalStateAdapter) {
@@ -592,6 +662,23 @@ export class ScaffoldedSocialActor<
       receipt,
       receiptMutationContext(receipt)
     );
+    let receiptReflectionFailure: Error | undefined;
+    if (this.receiptReflectionPolicy) {
+      try {
+        recordCommittedReceiptReflection({
+          agentId: this.id,
+          state: committedState,
+          social: this.socialStateForState(committedState),
+          receipt,
+          policy: this.receiptReflectionPolicy,
+          cloneState: (state) => this.cloneState(state)
+        });
+      } catch (error) {
+        receiptReflectionFailure = error instanceof Error
+          ? error
+          : new Error(`Receipt reflection policy ${this.receiptReflectionPolicy.id} failed at the safe policy boundary.`);
+      }
+    }
     this.canonicalStateAdapter?.afterStepResult?.({
       state: committedState,
       receipt: cloneJson(receipt)
@@ -603,6 +690,10 @@ export class ScaffoldedSocialActor<
       for (const messageId of stagedTurn.seenMessageIds) this.seenMessageIds.add(messageId);
       this.syncCompatibilityMemory();
     }
+    // The environment transition is already authoritative. A faulty optional
+    // reflection policy may fail the episode, but it must not roll durable
+    // outcome feedback or the domain finalizer back to the pre-step snapshot.
+    if (receiptReflectionFailure) throw receiptReflectionFailure;
   }
 
   private async selectAction(
@@ -1566,6 +1657,112 @@ export function recordCommittedReceiptOutcome<TSocialObservation, TReceiptObserv
     },
     context ?? receiptMutationContext(receipt)
   );
+}
+
+export function recordCommittedReceiptReflection<
+  TSocialObservation,
+  TReceiptObservation,
+  TPending,
+  TCommand,
+  TAgentState
+>(input: {
+  agentId: string;
+  state: TAgentState;
+  social: AgentSocialState<TSocialObservation, TPending, TCommand>;
+  receipt: SocialActorStepReceipt<TReceiptObservation, TPending, TCommand>;
+  policy: ReceiptReflectionPolicy<TSocialObservation, TPending, TCommand, TAgentState>;
+  cloneState: (state: TAgentState) => TAgentState;
+}): ReflectionRecord | undefined {
+  if (input.receipt.status !== "committed") return undefined;
+  const context = receiptMutationContext(input.receipt);
+  const recall = retrieveMemoryContext(input.social.memory, {
+    actorId: input.agentId,
+    traceId: input.receipt.traceId,
+    limit: 6
+  });
+  let draft: ReceiptReflectionDraft | undefined;
+  try {
+    const candidate = input.policy.reflect(cloneJson({
+      agent: input.cloneState(input.state),
+      social: cloneJson(input.social),
+      receipt: {
+        id: input.receipt.id,
+        traceId: input.receipt.traceId,
+        transactionId: input.receipt.transactionId,
+        turnIndex: input.receipt.turnIndex,
+        actorId: input.receipt.actorId,
+        pendingAction: cloneJson(input.receipt.pendingAction),
+        reward: finiteNumber(input.receipt.reward),
+        terminated: Boolean(input.receipt.terminated),
+        truncated: Boolean(input.receipt.truncated),
+        postStateHash: input.receipt.postStateHash,
+        eventSeqRange: cloneJson(input.receipt.eventSeqRange),
+        messageSeqRange: cloneJson(input.receipt.messageSeqRange)
+      },
+      memoryRetrieval: cloneJson(recall.evidence),
+      recalledMemory: cloneJson(recall.entries)
+    }));
+    if (isThenable(candidate)) {
+      throw new Error("Receipt reflection policies must be synchronous.");
+    }
+    draft = candidate;
+  } catch {
+    throw new Error(`Receipt reflection policy ${input.policy.id} failed at the safe policy boundary.`);
+  }
+  if (!draft) return undefined;
+  validateReceiptReflectionDraft(draft, input.policy.id);
+  const evidenceRefs: EvidenceRef[] = [{
+    artifact: "outcome",
+    id: input.receipt.id,
+    traceId: input.receipt.traceId,
+    description: "receipt-reflection"
+  }];
+  const record: ReflectionRecord = {
+    version: REFLECTION_RECORD_VERSION,
+    id: `${input.agentId}:reflection:${input.receipt.traceId}`,
+    agentId: input.agentId,
+    createdAtTurn: input.receipt.turnIndex,
+    kind: draft.kind,
+    content: draft.content,
+    evidenceRefs,
+    confidence: draft.confidence,
+    visibility: "private",
+    source: "policy"
+  };
+  appendSocialMemory(input.social, {
+    kind: "reflection",
+    source: record.source,
+    visibility: record.visibility,
+    reflection: record,
+    content: record.content,
+    salience: 0.6,
+    importance: 0.6,
+    evidenceRefs,
+    tags: ["receipt-reflection", record.kind],
+    metadata: {
+      version: "harness.receipt-reflection.v1",
+      policyId: input.policy.id,
+      receiptId: input.receipt.id,
+      traceId: input.receipt.traceId,
+      memoryRetrieval: cloneJson(recall.evidence)
+    }
+  }, context);
+  return cloneJson(record);
+}
+
+function validateReceiptReflectionDraft(draft: ReceiptReflectionDraft, policyId: string): void {
+  const kinds: ReflectionKind[] = ["memory_summary", "belief_revision", "strategy_update", "social_risk", "goal_revision"];
+  if (!kinds.includes(draft.kind)) throw new Error(`Receipt reflection policy ${policyId} returned an invalid kind.`);
+  if (typeof draft.content !== "string" || !draft.content.trim()) {
+    throw new Error(`Receipt reflection policy ${policyId} returned empty content.`);
+  }
+  if (typeof draft.confidence !== "number" || !Number.isFinite(draft.confidence) || draft.confidence < 0 || draft.confidence > 1) {
+    throw new Error(`Receipt reflection policy ${policyId} returned confidence outside [0, 1].`);
+  }
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return typeof value === "object" && value !== null && "then" in value && typeof (value as { then?: unknown }).then === "function";
 }
 
 function receiptMutationContext<TObservation, TPending, TCommand>(
