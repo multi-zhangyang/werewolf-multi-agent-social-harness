@@ -1,611 +1,300 @@
-# Werewolf Multi-Agent Arena
+# Werewolf Multi-Agent Social Harness
 
-React + TypeScript implementation of a real social-deduction game loop and a multi-agent adversarial harness. The engine is deterministic and event-sourced; the harness owns observation, belief updates, role policies, action arbitration, trajectories, and metrics. Provider-backed model adapters are used as pluggable reasoner/speech components, not as Agents themselves.
+[![Validate](https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness/actions/workflows/validate.yml/badge.svg)](https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness/actions/workflows/validate.yml)
+![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111827)
 
-Harness terminology is defined in [docs/architecture.md](docs/architecture.md), with the standalone social harness contract in [docs/social-harness.md](docs/social-harness.md), external research notes in [docs/harness-research.md](docs/harness-research.md), and the current multi-agent society harness plan in [docs/multi-agent-society-harness-plan.md](docs/multi-agent-society-harness-plan.md). In project terms, an Agent is the stateful player actor managed by the harness; an LLM is only the optional reasoner inside that actor.
+一个可重放、可评测、可分叉的多 Agent 对抗社会运行时。它统一管理有状态
+Agent、隐藏信息、分级通信、合法动作、确定性环境转换、运行工件、重放、
+checkpoint、fork、评测与锦标赛。
 
-## Run
+狼人杀是第一个高压领域适配器，React Cockpit 是运行和分析界面。大语言模型
+只是 Agent 内部可选的推理与表达组件，不是 Agent 本身，也不是调度器或环境
+事实来源。
+
+<p align="center">
+  <img src="docs/assets/cockpit-overview.png" alt="React Cockpit 运行注册表与证据检查器" width="100%">
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#系统架构">系统架构</a> ·
+  <a href="#运行实验">运行实验</a> ·
+  <a href="docs/architecture.md">架构参考</a> ·
+  <a href="CONTRIBUTING.md">参与贡献</a>
+</p>
+
+## 项目定位
+
+许多多 Agent 演示只是让多个模型会话互相发送文本。这不足以支撑受控社会实验、
+对抗游戏和可复现评测。
+
+本项目明确拆分不同职责：
+
+| 概念 | 职责 |
+| --- | --- |
+| **Agent** | 持久身份、profile 与角色分配、私有状态、记忆、belief、关系、声誉、规范、目标、策略、可选 reasoner 与动作仲裁 |
+| **Reasoner** | 可选的模型组件，用于提出发言、反思、证据摘要或动作候选 |
+| **Harness** | 实验控制、调度、观察范围、通信拓扑、合法性、状态转换权、工件记录、重放、checkpoint/fork 谱系与评测 |
+| **领域适配器** | 将具体环境映射为类型化观察、待处理动作、命令、转换、checkpoint、投影和 evaluator |
+| **React Cockpit** | 展示服务端记录的工件与安全投影，不成为第二套游戏真相来源 |
+
+系统大量使用结构化记录，但 JSON 只是编码格式，不是 Agent 的定义。
+
+## 核心能力
+
+- **有状态社会 Actor**：Agent 的记忆、belief、信任、怀疑、关系、声誉、
+  规范、承诺、联盟、目标和基于 receipt 的反思可以跨回合持久化。
+- **严格的信息范围**：Harness 管理 public、team 和 private channel，并记录
+  每个 Actor 在什么时间能够观察到什么信息。
+- **类型化环境权威**：模型只能提出候选；只有策略仲裁和确定性环境校验才能
+  提交状态转换。
+- **原生执行工件**：committed、rejected、system、sequential、batched 和
+  parallel step 都带有 hash、receipt、message 与 evidence reference。
+- **无模型重放**：Replay 只消费已记录的原生步骤，不调用 Agent、策略、
+  reasoner 或 provider。
+- **Checkpoint 与 Fork 谱系**：经过验证的执行边界可以创建新分支，同时严格
+  区分 deterministic replay 与重新执行。
+- **规模化评测**：Evaluator registry、生命周期安全指标、锦标赛聚合、实验矩阵
+  和执行遥测将结果分母与诊断分母分开。
+- **运行驾驶舱**：九个响应式工作区覆盖运行、时间线、狼人杀复盘、社会证据、
+  谱系、评测、实验矩阵、对比和公开工件包。
+
+## Cockpit
+
+以下截图由仓库自带的 deterministic fixture server 和 production React build
+生成，不包含真实 provider 凭据、私有模型推理或用户数据。
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/werewolf-review.png" alt="包含九人座位和工件证据的狼人杀赛后复盘">
+    </td>
+    <td width="50%">
+      <img src="docs/assets/social-evidence.png" alt="展示多 Agent 社会关系图的社会证据工作区">
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><strong>狼人杀赛后复盘</strong></td>
+    <td align="center"><strong>社会证据图</strong></td>
+  </tr>
+</table>
+
+Cockpit 只消费服务端脱敏投影，不会在浏览器本地重建隐藏角色、私有观察、胜负、
+回放帧或社会信息暴露关系。
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    Spec[实验规格] --> Control[控制面]
+    Control --> Scheduler[调度器与通信拓扑]
+    Scheduler --> Agents[有状态社会 Agent]
+    Reasoners[可选模型 Reasoner] -. 提供候选 .-> Agents
+    Agents --> Boundary[策略仲裁与类型化命令边界]
+    Boundary --> Environment[确定性环境权威]
+    Environment --> Artifact[原生 Episode 工件]
+    Artifact --> Replay[无模型重放]
+    Artifact --> Lineage[Checkpoint 与 Fork]
+    Artifact --> Evaluation[评测、锦标赛与矩阵]
+    Artifact --> API[安全 API 投影]
+    API --> Cockpit[React Cockpit]
+```
+
+通用 Harness 不需要理解狼人杀角色。狼人杀规则保留在核心引擎和领域适配器中，
+持久化、重放、评测编排和发布合同保持可复用。
+
+详细设计文档：
+
+- [系统架构](docs/architecture.md)
+- [社会 Harness](docs/social-harness.md)
+- [Harness 技术研究](docs/harness-research.md)
+- [多 Agent 社会演进计划](docs/multi-agent-society-harness-plan.md)
+
+## 快速开始
+
+### 环境要求
+
+- Node.js 22 或更高版本
+- npm
+- 仅在运行真实模型 Agent 时需要 provider API key
+
+### 安装与启动
 
 ```bash
-npm install
+git clone https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness.git
+cd werewolf-multi-agent-social-harness
+npm ci
 cp .env.example .env.local
-# Fill LLM_API_KEY or export it in the shell.
 npm run dev
 ```
 
-Frontend: `http://127.0.0.1:5173` by default. If that port is occupied, Vite will pick the next local-only port and print it.
+默认服务只监听本机：
 
-API: `http://127.0.0.1:8787` by default. Set `HOST` explicitly if you intentionally want a different bind address.
+- React Cockpit：<http://127.0.0.1:5173>
+- Express API：<http://127.0.0.1:8787>
 
-> Deployment boundary: the bundled Express server is a **local research and
-> development server**, not an Internet-facing multi-tenant service. It has
-> local-only defaults and local gates for full/research artifacts, but run,
-> probe, and postgame research routes are intentionally not a public auth
-> surface. Do not bind it directly to a public interface. Put any remote use
-> behind an authenticated, rate-limited reverse proxy and use the
-> truth-redacted share APIs rather than research projections.
+> **部署边界**
+>
+> 内置服务面向本地研究与开发，不能直接暴露到不可信网络。远程部署必须增加
+> 身份认证、限流、经过审计的反向代理、传输加密和存储隔离，并使用脱敏发布
+> 路由，而不是完整研究工件接口。
 
-## Required LLM environment
+## 模型 Provider 配置
 
-The runtime does not use a local scripted substitute when the API key is missing. Set:
+运行时必须显式选择协议。模型 ID 始终是透明传递的配置值，不会选择特殊
+parser、prompt、fallback 或动作路径。
 
-```bash
-export LLM_CHAT_COMPLETIONS_URL="https://your-openai-compatible-provider.example/v1/chat/completions"
-export LLM_PROVIDER_PROTOCOL="openai-chat-completions"
-export LLM_API_KEY="..."
-export LLM_MODELS="your-model-id"
-export LLM_STREAM=true
-export LLM_TIMEOUT_MS=120000
-export LLM_RETRY_COUNT=2
+最小 OpenAI-compatible Chat Completions 配置：
+
+```dotenv
+LLM_PROVIDER_PROTOCOL=openai-chat-completions
+LLM_CHAT_COMPLETIONS_URL=https://provider.example/v1/chat/completions
+LLM_API_KEY=replace-with-your-key
+LLM_MODELS=your-model-id
+LLM_STREAM=true
+LLM_TIMEOUT_MS=120000
+LLM_RETRY_COUNT=2
 ```
 
-Default protocol is `openai-chat-completions`. In that protocol no `max_tokens`, `max_completion_tokens`, or equivalent max-token request limit field is sent. Streaming is enabled by default through `stream: true`. Transient retries use the same model only; the harness does not substitute another model or use a fake local fallback.
+| 协议 | Endpoint 配置 | 说明 |
+| --- | --- | --- |
+| `openai-chat-completions` | `LLM_CHAT_COMPLETIONS_URL` | OpenAI-compatible messages 与 SSE event |
+| `openai-responses` | `LLM_RESPONSES_URL` | Responses API input/instructions 与 output-text event |
+| `anthropic-messages` | `ANTHROPIC_MESSAGES_URL` | Anthropic Messages event；需要 `ANTHROPIC_MAX_TOKENS` |
 
-Provider integration policy:
+真实 Chat Completions 调用使用 streaming。通用 adapter 不发送
+`max_tokens`、`max_completion_tokens` 或等价 token 限制字段。瞬时重试保持
+同一个已配置模型；系统不会使用假本地 fallback，也不会自动替换模型。
 
-- Do not add provider-specific request/response branches for one hosted endpoint.
-- OpenAI-compatible Chat Completions adapters must follow the OpenAI-compatible `/chat/completions` request and SSE streaming shapes.
-- OpenAI Responses support is implemented as a separate `openai-responses` protocol adapter with `/responses`, `input`/`instructions`, and `response.output_text.delta` stream events.
-- Anthropic support is implemented as a separate `anthropic-messages` protocol adapter with Messages/SDK-shaped `system`, `messages`, `stream`, and `content_block_delta` events. Anthropic Messages requires explicit `ANTHROPIC_MAX_TOKENS`; this is not sent by the default Chat Completions adapter.
-- Concrete model ids remain opaque runtime configuration. The repository does
-  not maintain a model allowlist or denylist, and changing `LLM_MODELS` must not
-  create a provider- or model-specific adapter branch.
-- Select the adapter explicitly with `LLM_PROVIDER_PROTOCOL`; never infer protocol from a model string.
-- Default `agent:probe`, `arena:match`, and `arena:tournament` CLI summaries expose only provider protocol/configuration state, bounded metrics, safe failure classification, and stream-completion status. They deliberately omit provider endpoints, provider request ids, and raw provider errors. `--json=full` is explicit local/debug output and must not be published without applying the artifact redaction policy.
+不要提交 `.env`、`.env.local`、凭据、provider request payload 或未经脱敏
+的完整工件。
 
-## Werewolf proof ruleset
+## 运行实验
 
-The first adapter is the documented deterministic `classic-9-seat-v1` proof
-ruleset. It has one optional Seer, Witch, and Hunter at most; duplicate special
-role cards are rejected at game creation rather than silently losing a turn.
-The engine, not a model or the React cockpit, owns the following rules:
-
-- `sheriff: "day1"` opens a public day-one election after night resolution.
-  Every living player casts one unweighted ballot, including self-nomination.
-  A unique plurality becomes sheriff; a tie or all-abstention leaves the office
-  vacant. The elected sheriff's ordinary exile vote uses
-  `sheriffVoteWeight`. The office becomes vacant on death; this ruleset has no
-  unconfigured transfer/tie-break procedure.
-- `lastWords: "all"` queues one ordered public final statement per eliminated
-  player before the engine resumes the next public/night phase.
-  `firstNightOnly` applies only to first-night kill/poison deaths, and `none`
-  suppresses the phase. Last words are typed `lastWords.submit` actions and
-  recorded public messages/events, not transcript-only UI text.
-- Witch save must target the actual selected wolf-night victim, and poison
-  must target a living non-self player. These checks exist in the core engine
-  as well as the harness adapter.
-- Equal wolf-night kill tallies use the versioned
-  `first_committed_target_vote` rule: the target whose first supporting ballot
-  was committed earliest wins. This is recorded ruleset semantics, not a
-  scheduler accident; a no-kill, revote, random, or consensus variant requires
-  a new ruleset id.
-- `wolfDiscussion: "one_turn"` enables one serialized, wolf-team-only
-  `werewolf.whisper` per living wolf before the night kill-vote batch. It is
-  off by default so existing experiment specifications retain their previous
-  transition and provider-call budgets; enable it explicitly in a game config
-  when studying private coordination.
-- `timers` are presentation/default-duration metadata for human-facing
-  surfaces. They are not a wall-clock authority for unattended model runs;
-  harness `timeout` and `maxTransitions` are the deterministic execution
-  bounds recorded in artifacts.
-
-Different real-world Werewolf variants make different choices about sheriff
-handoff, election ties, hunter poison, and potion timing. Add a versioned
-ruleset contract before changing any of these deterministic semantics; do not
-hide a variant change in a prompt or UI branch.
-
-## Commands
+探测一个真实 Harness 回合：
 
 ```bash
-npm test              # deterministic engine tests
-npm run agent:probe   # real OpenAI-compatible model calls inside one harness turn
-npm run arena:match   # full multi-agent harness match using the configured models
-npm run arena:tournament -- --games=3 --maxTransitions=8 --timeout=5m
-npm run build         # typecheck and production build
+npm run agent:probe -- --models=your-model-id --timeout=90s
 ```
 
-Profile-based adversarial run:
+运行有界多 Agent 对局：
 
 ```bash
-npm run arena:tournament -- \
-  --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 \
-  --games=3 \
+npm run arena:match -- \
+  --models=your-model-id \
   --maxTransitions=24 \
   --timeout=5m \
   --json=summary
 ```
 
-Profiles are `id:model[:policyName[:temperature]]`. They are the harness-level Agent identities used for profile stats, trajectory records, social episode artifacts, and evaluator output. `--models` remains a shortcut that creates default profiles.
-
-The profile parser also accepts a JSON array with the implemented fields `id`, `model`, `policyName`, and `temperature`:
-
-```json
-[
-  { "id": "wolf", "model": "model-wolf", "policyName": "wolf-deceiver", "temperature": 0.7 },
-  { "id": "village", "model": "model-village", "policyName": "village-analyst", "temperature": 0.35 }
-]
-```
-
-Assignment JSON controls profile placement. It is accepted by `--assignment`, `AGENT_ASSIGNMENT`, `POST /api/matches/run`, `POST /api/tournaments/run`, and the library-level `runTournament({ assignment })`. Supported strategies are:
-
-```json
-{ "strategy": "profile-rotation" }
-```
-
-```json
-{ "strategy": "seat", "seats": { "1": "wolf", "2": "village" }, "fallback": "profile-rotation" }
-```
-
-```json
-{ "strategy": "role", "roles": { "werewolf": "wolf", "seer": "village" }, "fallback": "error" }
-```
-
-```json
-{ "strategy": "team", "teams": { "werewolves": "wolf", "village": ["village", "wolf"] } }
-```
-
-`roles` supports `villager`, `werewolf`, `seer`, `witch`, and `hunter`. `teams` supports `village` and `werewolves`. Role/team values may be a profile id string or a profile id array; arrays rotate by local role/team occurrence and episode index. `fallback` is `profile-rotation` by default, or `error` to require explicit coverage.
-
-Example assignment run:
+运行可复现锦标赛：
 
 ```bash
-npm run arena:match -- \
-  --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 \
-  --assignment='{"strategy":"team","teams":{"werewolves":"wolf","village":"village"},"fallback":"error"}' \
-  --maxTransitions=24 \
+npm run arena:tournament -- \
+  --spec=experiments/wolf-vs-village.json \
   --json=summary
 ```
 
-Experiment specs make tournament runs reproducible. The checked-in spec at `experiments/wolf-vs-village.json` uses `version: "werewolf.experiment.v1"` and is executable:
+运行实验矩阵：
 
 ```bash
-npm run arena:tournament -- --spec=experiments/wolf-vs-village.json
+npm run arena:matrix -- \
+  --spec=experiments/matrix-smoke.json \
+  --outputDir=.artifacts/matrix-smoke
 ```
 
-Spec fields are normalized by the harness, not by ad hoc CLI parsing: `id`, `kind`, `seed`, `games`, `maxTransitions`, `jointPhaseScheduler`, `timeout`/`timeoutMs`, `profiles`, `assignment`, `temperature`, `json`, `continueOnError`, and optional game `config`. `jointPhaseScheduler` is an experiment condition, not a model option: the explicit values are `aec-batched-decision` (the recorded default) and `parallel`. A `parallel` condition requires `maxTransitions >= 4`, so the first atomic joint wolf-vote batch is actually reachable instead of being silently compared as the default scheduler. Matrix dimensions may use `jointPhaseSchedulers` to construct scheduler control groups. Environment values are defaults, spec fields override them, and explicit CLI flags override the spec:
+在不调用模型的情况下重放已有对局：
 
 ```bash
-npm run arena:tournament -- --spec=experiments/wolf-vs-village.json --games=1 --maxTransitions=2 --timeout=90s
-npm run arena:tournament -- --games=1 --maxTransitions=4 --jointPhaseScheduler=parallel --timeout=90s
+npm run arena:replay -- \
+  --artifact=.artifacts/match.json \
+  --json=summary
 ```
 
-The `wolf-vs-village` spec uses team assignment, so werewolf seats are resolved to `wolf-profile` and village seats rotate between `village-profile-a` and `village-profile-b`; it is not just model rotation by seat. The checked-in models are placeholders for contract examples; replace them with runtime-configured live models before claiming real provider validation.
+Profile 与 assignment policy 用于明确模型、策略、座位、角色和阵营分配。
+实验规格由 Harness 统一规范化；CLI 参数覆盖规格文件，规格文件覆盖环境默认值。
+[experiments](experiments/) 目录包含可直接执行的示例。
 
-Short real-API validation run:
+## 狼人杀验证领域
+
+`classic-9-seat-v1` 是一个确定性、版本化的验证规则集，包含隐藏角色、夜间
+行动、公开发言、投票、可选警长竞选与遗言、狼人团队协作和可配置展示计时器。
+
+角色数量、合法目标、阶段转换、死亡结算和胜负由引擎负责。Prompt 和 UI 不能
+修改这些规则。不同桌规必须定义新的版本化规则合同，不能通过隐式 prompt 或
+前端分支改变环境语义。
+
+## 工件、重放与可见性
+
+`socialEpisode.steps` 是原生执行权威。`trajectory` 只是兼容投影，不能用于
+重建缺失的 system step 或 rejected step。
+
+| 视图 | 使用场景 |
+| --- | --- |
+| `postgame-redacted` | 本地研究界面；移除私有观察和 reasoner 内容 |
+| `truth-redacted` | 公开与分享界面；移除赛后真相和私有证据 |
+| `full` | 显式本地调试与服务端 canonical authority |
+
+完整工件可能包含隐藏角色、分级观察、Agent 状态和私有证据，应视为敏感研究
+数据。公开投影是与 canonical artifact hash 绑定的派生 sidecar，不是 replay
+或 checkpoint authority。
+
+Replay 按已记录转换执行，不进行任何 provider 调用。Fork 从经过验证的
+checkpoint 恢复，创建新的执行谱系，并可以重新调用 Agent。
+
+## API 概览
+
+Express 服务暴露与 CLI 相同的 Harness 控制面：
+
+| Endpoint | 用途 |
+| --- | --- |
+| `GET /api/config` | 安全运行时摘要与请求级 capabilities |
+| `POST /api/harness/probe` | 一个有界的 provider-backed Harness 回合 |
+| `POST /api/matches/run` | 运行对局并记录原生工件 |
+| `POST /api/tournaments/run` | 运行包含完整生命周期记录的锦标赛 |
+| `POST /api/experiments/matrix/run` | 执行锦标赛 cell 矩阵 |
+| `GET /api/matches/:id/artifact` | 读取指定安全投影视图 |
+| `GET /api/matches/:id/replay` | 校验和检查无模型重放 |
+
+完整工件与 operator capability 只适用于本地边界。公开调用方只能获得受限
+capability 和脱敏投影。
+
+## 开发与验证
 
 ```bash
-npm run arena:tournament -- --games=1 --maxTransitions=2 --timeout=90s --json=summary
+npm run typecheck  # TypeScript 合同检查
+npm test           # 确定性单元与集成测试
+npm run build      # 类型检查、生产构建与 bundle budget
+npm run test:e2e   # deterministic Playwright Cockpit 测试
+npm run ci         # 完整本地验证流水线
 ```
 
-API equivalents:
+主要技术栈为 React 19、TypeScript、Vite、Express、Vitest 和 Playwright。
+CI 使用 Node.js 22，依次执行类型检查、确定性测试、生产构建和 Chromium E2E。
 
-```bash
-curl -X POST http://localhost:8787/api/harness/probe \
-  -H 'content-type: application/json' \
-  -d '{"model":"model-a","timeout":"90s"}'
-
-curl -X POST http://localhost:8787/api/tournaments/run \
-  -H 'content-type: application/json' \
-  -d '{"models":["model-a","model-b"],"games":1,"maxTransitions":2,"timeout":"90s"}'
-```
-
-Probe and match commands print a JSON `summary` with the harness turn, policy,
-command, model latency, and any real failure reason. Full match output uses
-`harness.match.v2`. Its `socialEpisode.steps` are the native execution, replay,
-and integrity authority. `trajectory` remains only a legacy migration/debug
-projection and must not be used to reconstruct missing native system or rejected
-steps.
-
-Artifact export is available through stdout or explicit files:
-
-```bash
-npm run arena:match -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --maxTransitions=24 --json=full
-npm run arena:match -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --maxTransitions=24 --export=artifacts/match-artifact.json --exportJsonl=artifacts/trajectory.jsonl
-npm run arena:tournament -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35 --games=3 --json=full > artifacts/tournament-artifacts.json
-```
-
-`arena:match -- --json=full` prints `{ summary, artifact }`. If you redirect stdout, unwrap `.artifact` before passing the file to `arena:replay`; `--export` writes the artifact object directly. Full artifacts can contain private observations and reasoner evidence, so keep local exports under the ignored `artifacts/` directory or outside the repository.
-`socialEpisode.messages[*]` may include top-level `speechActs` and `deliveryReceipts`; these are evaluator-ready typed facts, not only display metadata. JSONL exports include flat `social_speech_act`, `social_delivery_receipt`, and derived `social_exposure` records for analysis.
-
-Committed actor receipts may also produce a typed private
-`harness.reflection.v1` memory record through the scaffold's optional,
-synchronous `receiptReflectionPolicy`. The harness fixes actor/turn identity,
-private visibility, committed-outcome evidence, content-free recall metadata,
-mutation-journal binding, and snapshot timing; the policy supplies only a
-bounded reflection draft. Rejected receipts never reflect, policy failures
-cannot roll back an already committed actor outcome, replay never reruns the
-policy, and diagnostic reflection counts remain zero-weight evaluation data.
-
-Tournament directory export is the paper/reproduction artifact pack. Use
-`arena:tournament -- --outputDir=<dir>` or `POST /api/tournaments/run` with
-`exportArtifacts: true` and a configured `TOURNAMENT_ARTIFACT_BASE_DIR`. The
-directory includes `manifest.json`, `spec.normalized.json`, `assignment.json`,
-aggregate `episodes.jsonl` / `trajectory.jsonl` / `metrics.jsonl`, per-match
-artifacts under `matches/`, audit files (`integrity.jsonl`, `failures.jsonl`,
-`cost_latency.json`), deterministic aggregate reports (`leaderboard.json`,
-`benchmark_statistics.json`), a human-readable `summary.md`, and tabular
-analysis exports (`episodes.csv`, `agents.csv`, `metrics.csv`,
-`leaderboard.csv`). `leaderboard.json`, `leaderboard.csv`, and the leaderboard
-tables in `summary.md` are rebuilt from the normalized spec plus the persisted
-research raw records (`episodes.jsonl`, `metrics.jsonl`, and
-`cost_latency.json`); they do not trust an in-memory tournament statistics
-cache. The raw rows include explicit per-profile committed harness-turn and
-step-density evidence so profile aggregates are not inferred from actor step
-counts. Strict public/share packs intentionally omit those research inputs and
-are not leaderboard-rebuild authority. CSV files do not replace replay or JSONL
-evidence.
-
-Production tournament execution uses the domain-neutral V2 experiment
-orchestrator whenever `EXPERIMENT_RUN_BASE_DIR` is configured (the CLI defaults
-to `.artifacts/experiment-runs`). Before domain preparation it persists the
-episode attempt, then stages the immutable MatchArtifact identity, publishes the
-canonical episode/evaluation sidecar, commits terminal membership, and finally
-finalizes the run set. Repeating the same normalized tournament request adopts
-or hydrates that authority and does not rerun already committed model work.
-Matrix cells use stable child run-set ids over the same authority. Local
-operators can inspect safe lifecycle/membership projections through
-`GET /api/experiments/runs` and
-`GET /api/experiments/runs/:runSetId`; these endpoints do not expose provider
-credentials, private observations, or hidden role truth. The current guarantee
-is single-writer process-crash recovery, not cross-process exactly-once or
-power-loss durability.
-
-Tournament outcome aggregates and execution telemetry deliberately use
-different denominators. `modelStats` / `profileStats` remain completed-only so
-bounded or failed partial games cannot affect wins, rewards, roles, seats, or
-leaderboards. CLI and server tournament summaries additionally expose
-`executionTelemetry` (`harness.tournament-execution-telemetry.v1`), derived by
-the same reducer as `cost_latency.json`; it includes calls, tokens, latency,
-harness errors, and committed/rejected/native steps from every completed,
-truncated, or failed episode that actually produced a harness result. Preparation
-failures and unstarted episodes never invent provider or step usage.
-
-The domain-neutral package surface in `src/harness/generic.ts` now also owns a
-portable `harness.experiment.v1` control-plane contract and a single-episode
-artifact store. `normalizeGenericExperimentSpec()` records adapter identity,
-actors, profiles/model assignments, scheduler, execution limits, evaluator
-ids, and versioned policy references as stable JSON; it deliberately cannot
-represent provider endpoints, credentials, raw request options, runtime
-factories, or abort signals. The existing `werewolf.experiment.v1` contract
-remains the Werewolf adapter's compatibility specialization.
-
-`createGenericExperimentProvenance()` binds the complete normalized spec to a
-stable `harness.experiment-provenance.v1` identity inside a generic episode or
-checkpoint. Experiment-bound forks retain both parent and child spec/hash
-authority and a canonical list of explicitly caller-declared changed fields
-(for example seed, profiles, model assignments, scheduler, or domain config).
-The generic harness verifies exact field coverage and before/after hashes; it
-does not invent a domain meaning for a counterfactual. Legacy envelopes without
-experiment provenance remain readable, but cannot claim this stronger binding.
-
-`runGenericExperiment()` is the domain-neutral control-plane composition root:
-it normalizes the spec once, derives deterministic episode seeds, resolves the
-requested evaluator registry before starting work, delegates only domain-owned
-prepare/run/artifact projections, binds every produced episode to that exact
-experiment provenance, persists the canonical episode plus reviewed
-metric/failure projections from the evaluation report, and materializes a
-lifecycle-complete tournament run-set. A required `HarnessExperimentRunStore`
-persists the active schedule before the first prepare and finalizes an ordered,
-reference-only run record against canonical episode-store reads. It does not
-copy episode truth or invoke actors/models during recovery. A contradictory
-adapter-supplied provenance is rejected rather than overwritten. The runner
-passes every adapter callback an isolated control-plane snapshot, validates
-the evaluation context against the canonical artifact, races in-flight work
-against the experiment deadline, and exposes no preparation object or raw
-domain result in its public result. It contains no provider, model, prompt, or
-Werewolf-specific behavior.
-
-`verifyHarnessEpisodeArtifact()` is the canonical model-free acceptance gate:
-it combines structural envelope checks, exact adapter binding, deterministic
-environment replay, recorded pending/action validation, and explicit durable
-agent-state semantic validation. `HarnessEpisodeArtifactStore` accepts a
-domain-owned instance of that strong verifier and writes only server-owned,
-content-hashed directories containing `artifact.json`, `trajectory.jsonl`,
-`evaluation-report.json`, `metrics.jsonl`, `failures.jsonl`, a checkpoint registry, and manifests.
-Evaluator exceptions are reduced to reviewed failure codes/messages instead of
-copying arbitrary provider text. Checkpoints require a separate explicit
-domain-owned strong verifier and are stored below hashed checkpoint ids. Every
-put, get, list, checkpoint read, and restart recovery re-verifies canonical
-truth; run/checkpoint ids never become host paths, and symlinked or tampered
-files are rejected. This generic store does not call an actor, policy,
-reasoner, or model.
-
-The current layout is `harness.episode-store-manifest.v3`. Restart recovery
-strictly reads the earlier v1 artifact/trajectory-only and v2 metric/failure
-layouts without fabricating a missing complete evaluation report. A valid
-legacy episode is not silently dropped just because newer sidecars are absent. New v3 recovery also
-re-derives directory hashes from run/checkpoint ids and binds every checkpoint
-to a real prefix of its canonical parent episode.
-
-The API also stores a `MatchArtifact` for completed `/api/matches/run` records:
-
-```bash
-curl 'http://localhost:8787/api/matches/<match-id>/artifact?view=postgame-redacted'
-curl 'http://localhost:8787/api/matches/<match-id>/artifact?view=truth-redacted'
-curl 'http://localhost:8787/api/matches/<match-id>/artifact?view=full'
-curl 'http://localhost:8787/api/matches/<match-id>/trajectory.jsonl?view=postgame-redacted'
-```
-
-A finished server match has exactly one validated `MatchArtifact` as its
-canonical stored value; response summaries, counters, public state, trajectory
-JSONL, and cockpit views are derived projections. The domain `GameState` and
-`GameEvent` stream contain only Werewolf facts. Reasoner memos, provider
-telemetry, harness traces, and harness failures live in the native execution
-artifact and do not alter the domain-state hash.
-
-Omitting `view` for a match artifact or trajectory JSONL is equivalent to
-`view=postgame-redacted`. That server projection redacts private observations,
-private messages, private agent state, and private model reasoning while
-preserving sanitized `socialEpisode.exposureRecords` and
-`socialEpisode.exposureSummary` derived from scoped observations.
-`view=truth-redacted` is the narrower public/share projection. Fetch an
-artifact or JSONL with `view=full` only for explicit local postgame/debug/export
-work; it is not the API default.
-
-The redacted route now returns an honest `PostgameMatchProjectionDto`, not a
-structurally redacted object cast back to `MatchArtifact`. Its redacted harness
-step, social step/message, command/pending-action, failure, delivery/speech-act,
-agent-state, and snapshot-frame DTOs make omitted private fields explicit in the
-type contract. Comparison and trajectory JSONL use their own structural source
-types, so they can consume either canonical artifacts or server-owned redacted
-projections without treating a projection as replay authority. The projection
-uses deep whitelists: legal targets and provider request/stream telemetry are
-removed, `infosByAgent` is omitted, private/team speech acts are not exposed,
-nested agent metadata is stripped, and evidence-ref descriptions are removed.
-
-### Cockpit projection boundaries
-
-The React Cockpit is a presentation and analysis surface over server-owned
-projections; it is never a source of game truth. Its **狼人杀复盘** workspace
-renders a narrow review model rather than receiving a raw `GameState` in JSX:
-
-- `postgame-redacted` is a clearly labelled local postgame review. Private
-  reasoner evidence is redacted, but it may reveal a seat's role so the game can
-  be reviewed after it ends. It is not a public/live-game view.
-- `truth-redacted` is the public/share-safe view. The review board displays
-  only public phase/day data, seat status, public speeches, sheriff/exile
-  ballots, deaths without a source id, and public event metadata. It never
-  derives or renders a seat role, team, ability, night action, private social
-  message, agent state, model/profile identity, winner, or raw event payload.
-
-The client-side selector fails closed: even if an incorrectly shaped upstream
-`truth-redacted` payload contains hidden fields, they are not copied into the
-review model. The authoritative server projection and its API tests remain the
-security boundary; the selector is a second containment boundary for the UI.
-
-### Running public spectator lifecycle
-
-An explicit live request is a different API audience from the local research
-operator registry:
+## 仓库结构
 
 ```text
-POST /api/matches/run { live: true }
-  -> 202 server.match-live-start.v1
-  -> browser polls GET /api/matches/:id/live
-  -> terminal artifactAvailable=true
-  -> browser reads GET /api/matches/:id/artifact?view=postgame-redacted
+src/harness/              通用编排、社会 Actor、工件与评测
+src/core/                 确定性狼人杀引擎与版本化规则
+src/agents/               模型 Provider 协议适配器
+src/server/               Express API、持久化 Store 与安全投影
+src/components/cockpit/   React 运行与分析工作区
+experiments/              可执行实验规格
+tests/                    确定性单元与集成测试
+e2e/                      Playwright fixture 与浏览器测试
+docs/                     架构、研究与设计文档
 ```
 
-The `202` acknowledgement contains only `matchId`, `lifecycle: "running"`,
-`artifactAvailable: false`, and the fixed `live-public` redaction policy. It is
-not a `MatchRecord`: it never includes public game state, models/profiles,
-native/committed/rejected step counts, checkpoints, provider data, or an
-artifact. The running `/live` frame is likewise an ephemeral, `no-store`
-projection of committed public table facts only; it is not replay, checkpoint,
-artifact, or environment authority. A process restart may honestly return a
-`running` marker with no frame rather than fabricate a game state.
+## 参与贡献与安全
 
-During a live run the React application mounts a spectator-only shell. It does
-not render the runs registry, Run Context, model/roster controls, scheduler,
-trace, replay, checkpoint, comparison, inspector, or any retained postgame
-artifact. On a successful terminal marker it fetches the named redacted
-artifact directly; it does not first fetch the operator registry. A failed or
-artifact-less terminal stays a closed spectator state and is never rebuilt from
-old UI state.
+欢迎提交贡献。请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，了解开发流程与
+架构边界。安全问题请按照 [SECURITY.md](SECURITY.md) 私下报告，不要在公开
+Issue 中发布凭据、私有工件或漏洞利用细节。
 
-`GET /api/matches` and `GET /api/matches/:id` are intentionally local operator
-registry routes because their summaries contain research metadata such as model
-assignments and execution counts. They are available only through a loopback
-local operator server. A remote spectator must use the narrow `/live` endpoint
-and, where authorized, the appropriate redacted artifact/share route.
+## 许可证
 
-Replay has CLI, server-owned API, and programmatic entries:
-
-```bash
-npm run arena:replay -- --artifact=artifacts/match-artifact.json
-```
-
-Use `POST /api/matches/:id/replay` for a server-owned match artifact. The server
-does not accept client-submitted state or trajectories as replay truth.
-
-```ts
-import { replayWerewolfSocialEpisode } from "./src/harness/replay";
-
-const replay = replayWerewolfSocialEpisode(artifact.socialEpisode, {
-  stopOnMismatch: true
-});
-```
-
-Native replay starts from the recorded `socialEpisode.initialState`, applies
-explicit recorded system steps and only committed player steps, validates
-domain event/message ranges and hashes, and skips rejected proposals. It does
-not call actors, policies, reasoners, or model providers. Re-querying a model is
-a new fork/rerun, not replay. `replayHarnessTrajectory()` remains a legacy
-projection verifier, not the `harness.match.v2` authority.
-The server-owned replay response returns hash, command-count, and mismatch
-summaries by default; it does not return the replayed `finalState`. Full
-postgame/debug truth remains available through explicit artifact routes such as
-`GET /api/matches/:id/artifact`.
-
-Persisted checkpoints use `harness.checkpoint.v2` and bind a batch-safe native
-`executionPrefix` together with domain state, agent snapshots, channel topology,
-message prefix, hashes, and boundary metadata. Forks use
-`harness.fork-provenance.v2`; they restore that native prefix state and record
-parent native-step/message/hash provenance. Legacy trajectory length is not a
-checkpoint selector or lineage authority.
-
-`GET /api/checkpoints/:id/artifact` defaults to `view=truth-redacted`; explicit
-`view=full` is local/debug access only. Fork execution always restores the
-canonical validated checkpoint stored by the server, not an API projection.
-
-### Domain-neutral checkpoint and fork contract
-
-The Werewolf server routes remain Werewolf adapters, but the underlying
-checkpoint operation is now reusable without importing Werewolf state, roles,
-or a reasoner. `buildHarnessCheckpointAtPrefix()` selects exactly one complete
-native scheduler boundary, resolves the domain-owned durable actor snapshot at
-that boundary, replays the prefix without actors or model calls, and emits the
-existing generic `HarnessCheckpointEnvelope`. `runForkedHarnessEpisode()` then
-asks the domain only to restore its environment and actors from that recorded
-state; it does not deserialize policy closures or provider clients. A domain
-can additionally supply a runtime-only actor snapshot serializer for the
-restored child roster, so every committed child boundary can remain
-checkpointable and seed a later verified fork.
-
-```ts
-import { buildHarnessCheckpointAtPrefix } from "./src/harness/episodeArtifacts";
-import { runForkedHarnessEpisode } from "./src/harness/checkpointRuntime";
-
-const checkpoint = buildHarnessCheckpointAtPrefix({
-  artifactVersion: "ledger.checkpoint.v1",
-  kind: "ledger-checkpoint",
-  sourceArtifactVersion: "ledger.episode.v1",
-  episode,
-  selector: { nativeStepCount: 12 },
-  // Domain-owned durable actor state; never recreated by a model during replay.
-  resolveAgentSnapshot,
-  replayPrefix: replayLedgerEpisode
-});
-
-const fork = await runForkedHarnessEpisode({
-  checkpoint,
-  runtime: {
-    createEnvironment,
-    restoreActors,
-    // Called only after a child commit and receipt delivery. It is not stored
-    // in the artifact and never runs during deterministic replay.
-    captureAgentSnapshots: (actors) => actors.map(snapshotLedgerActor)
-  },
-  episode: { id: "ledger-fork-01", schedulerMode: "aec" }
-});
-```
-
-`runHarnessEpisode()` also accepts an opt-in `captureAgentSnapshots` callback.
-It records a cloned full actor-state snapshot only after an environment commit
-and receipt delivery (after the full receipt set in a parallel batch), then binds the
-snapshot hash to the native step. `replaySocialEpisode()` audits inline
-recorded snapshots when present; that audit checks hashes, rejected-step
-non-mutation, and shared parallel-batch state without constructing an actor or
-calling a model. Canonical compacted match artifacts use the generic
-`harness.agent-snapshot-frame.v1` sidecar registry: its frame id/hash/payload
-binding, references, and final-agent hash are audited model-free during replay.
-When a domain needs stronger causal proof, it may pass the optional
-`validateRecordedAgentState` replay callback. The callback receives only the
-completed receipt boundary: prior/current recorded snapshots, pre/post
-environment state, committed messages, channel-authorized slices, and canonical
-scoped-observation exposures from the recorded prefix. It runs once after a
-complete `stepBatch()` rather than against a fictional intermediate parallel
-state. It is a pure audit seam—never actor reconstruction, free-text belief
-inference, policy execution, or a model call—and works for inline and compacted
-snapshot frames. Domain adapters may add this or other stronger snapshot schema
-checks, but they must not reconstruct durable agent state from commands or
-retry a model.
-Receipt-gated `ReflectionRecord` entries follow the same boundary. Artifact
-integrity validates their schema, actor, trace, turn, outcome, retrieval,
-metadata, and journal binding at first appearance, then checks that retained
-records remain immutable. Checkpoints and forks preserve the recorded entry;
-they do not regenerate its prose or call a reasoner.
-The same post-receipt rule applies to a fork child through
-`SocialCheckpointRuntimeAdapter.captureAgentSnapshots`. Omitting that optional
-runtime callback preserves execution compatibility but intentionally leaves the
-child without a durable actor-state boundary for a subsequent generic fork.
-
-The generic tournament control plane can likewise persist a minimal research
-run set through `buildGenericTournamentRunSetArtifact()` and
-`writeGenericTournamentRunSetArtifact()`. Its fixed layout is
-`manifest.json`, `episodes.jsonl`, `metrics.jsonl`, and one canonical
-`episodes/<index>.json` file per materialized domain episode. This layer owns
-only ordered seeds and `completed | truncated | failed` accounting; domain
-adapters own artifact validation, replay/fork codecs, redaction, public shares,
-and any role/team/winner leaderboard semantics. Runtime `prepared` objects are
-intentionally never serialized.
-
-Historical end-to-end validation on 2026-07-14 used the then user-specified configured
-OpenAI-compatible endpoint and `tencent/hy3:free`. The streaming probe passed
-1/1. A first match with a 40-second bound timed out and correctly remained a
-failed/rejected native step with zero commits; this failure is part of the
-validation record, not discarded. A second `maxTransitions=2` match completed
-its model stream with `completedBy: provider_stop_event`, committed one model
-turn with zero harness errors, then ended with the expected bounded `truncated`
-status. Its two native steps replayed with matching state/message hashes, zero
-mismatches, and full artifact integrity success.
-
-The production Express-backed Playwright cockpit passed 1/1 and treats HTTP 207
-or any reported harness failure as test failure. The first real tournament run
-exposed a model-list parser bug: `splitModels()` incorrectly split slash-bearing
-model ids. The delimiter was narrowed from `/[,\s/]+/` to `/[,\s]+/` and an
-experiment regression test was added. The second real tournament completed one
-game with zero failed games, one harness turn, zero harness errors, and 641
-metrics. Final deterministic validation passed 24 test files / 253 tests,
-TypeScript typecheck, production build, and `git diff --check`. The existing
-large-chunk build warning and intentional invalid-streaming-JSON parser-test
-stderr remained non-fatal. No provider request id, credential, or raw sensitive
-provider output is part of these records.
-
-Current incremental validation is intentionally recorded separately from that
-historical run: the production dependency audit is clean after moving the
-dev-only launcher out of runtime dependencies and upgrading its vulnerable
-transitive parser; focused engine/harness tests cover sheriff election, last
-words, role cardinality, core witch legality, and day-vote separation. A
-bounded real streaming probe is required whenever the provider/reasoner path
-changes and is reported only through its safe summary.
-
-Current validation on 2026-07-23 uses the configured model only as an opaque,
-configuration-driven test input. No model/provider-specific branch was added.
-The streaming probe completed through `provider_stop_event`; a bounded match
-and one-game tournament each recorded three streamed model calls, four native
-steps, four commits, zero rejected steps, zero harness errors, zero provider
-failures, and zero stream aborts. Both multi-step runs intentionally stopped at
-`maxTransitions=4`, so their lifecycle is `truncated` rather than falsely
-promoted to completed outcome data. The full deterministic suite passed 57
-files / 629 tests, the production build passed the manifest-derived bundle
-budgets, and the complete Playwright cockpit suite passed 24/24. Live Chat
-Completions requests include `stream: true` and omit max-token fields.
-
-Useful CLI limits:
-
-```bash
-# Probe one real harness turn per model. Duration values accept ms, s, or m.
-npm run agent:probe -- --models=model-a --timeout=30s
-
-# Run a bounded full match. maxTransitions limits engine/harness transitions.
-npm run arena:match -- --models=model-a,model-b --seed=smoke-1 --maxTransitions=40 --timeout=3m
-```
-
-For non-interactive validation you can also set:
-
-```bash
-export PROBE_TIMEOUT_MS=30000
-export MATCH_MAX_TRANSITIONS=40
-export MATCH_TIMEOUT_MS=180000
-export TOURNAMENT_GAMES=3
-export TOURNAMENT_TIMEOUT_MS=600000
-```
-
-The API route `POST /api/matches/run` accepts `models`, `profiles`, `assignment`, `maxTransitions`, `timeoutMs`/`timeout`, `temperature`, `seed`, and optional game `config`. Its default synchronous response includes the normal local-operator public summary, `hasArtifact`, and artifact counters. Adding `live: true` instead returns only the narrow live-start acknowledgement described above. Ordinary UI reads the default `postgame-redacted` artifact projections with sanitized exposure records; `truth-redacted` is the public/share projection, while full private/postgame truth requires an explicit `view=full` artifact or JSONL request. `POST /api/harness/probe` accepts `model`, `timeoutMs`/`timeout`, and optional `seed`. `POST /api/tournaments/run` accepts `models`, `profiles`, `assignment`, `games`, `maxTransitions`, `jointPhaseScheduler`, `timeoutMs`/`timeout`, `temperature`, `seed`, `continueOnError`, and optional game `config`; it returns bounded, redaction-safe episode summaries plus `gamesCompleted`, `gamesTruncated`, and `gamesFailed`. The normalized scheduler is retained in the experiment artifact and API limits summary; it is never inferred from a model name. `gamesCompleted` means the domain reached a terminal outcome; `gamesTruncated` means an auditable run hit a configured bound; `gamesFailed` is an execution failure. `ok: true` means no failures, not that every game reached terminal state. Full trajectory/social evidence remains server-owned in match artifacts and tournament packs.
-
-`POST /api/experiments/matrix/run` adds the reusable experiment-matrix control
-plane (`harness.experiment-matrix.v1`): it schedules normalized tournament cells
-from explicit cells or dimensions, preserves `completed` / `truncated` /
-`failed` cell and game counts, and returns server-recorded model/profile and
-descriptive pairwise statistics. Terminal completed seats are the only
-win-rate/reward denominator; bounded and failed episodes remain visible rather
-than being promoted to completed results. `exportArtifacts: true` writes a
-local-only research bundle to `MATRIX_ARTIFACT_BASE_DIR` (or a namespaced
-`matrices` child under `TOURNAMENT_ARTIFACT_BASE_DIR`). Registered matrix
-downloads are allowlisted and are intentionally separate from public
-tournament-share routes. The Cockpit's **实验矩阵** workspace consumes these
-server projections and download URLs; it does not calculate winners, p-values,
-or artifact paths locally.
-
-`POST /api/tournaments/run` also accepts `{ "spec": { ... } }`; top-level request fields such as `games`, `maxTransitions`, `jointPhaseScheduler`, `timeout`, `profiles`, and `assignment` override the embedded spec using the same normalizer as `arena:tournament -- --spec`.
+仓库目前尚未声明软件许可证。公开仓库本身不会自动授予复制、修改或再分发权限；
+维护者需要在允许下游复用前选择并添加明确许可证。
