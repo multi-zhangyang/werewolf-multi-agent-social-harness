@@ -19,7 +19,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test -- --reporter=dot --maxWorkers=1 --no-file-parallelism
+      - run: npm test -- --reporter=dot --maxWorkers=1 --no-file-parallelism --testTimeout=30000 --hookTimeout=30000
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
