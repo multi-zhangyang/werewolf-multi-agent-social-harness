@@ -15,6 +15,7 @@ import type {
   HarnessStepRecord
 } from "./types";
 import { hashStableState } from "./hash";
+import { validateWerewolfAgentHarnessStateSnapshot } from "./actor";
 import { harnessFailureEvidenceFromEpisode } from "./executionEvidence";
 import { werewolfHarnessTurnEvidenceFromEpisode } from "./werewolfExecutionEvidence";
 import { replayWerewolfSocialEpisode } from "./replay";
@@ -796,6 +797,12 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
     if (seenAgentIds.has(agent.playerId)) errors.push(`agents[${index}] duplicates playerId ${agent.playerId}.`);
     seenAgentIds.add(agent.playerId);
     if (!playerIds.has(agent.playerId)) errors.push(`agents[${index}] references unknown player ${agent.playerId}.`);
+    for (const error of validateWerewolfAgentHarnessStateSnapshot(agent, {
+      requireSocialState: true,
+      requireSocialStateHash: true
+    })) {
+      errors.push(`agents[${index}].${error}`);
+    }
 
     for (const entry of agent.social?.journal?.entries ?? []) {
       if (entry.agentId !== agent.playerId) {
@@ -1563,6 +1570,12 @@ export function validateHarnessCheckpoint(checkpoint: HarnessCheckpoint): string
     if (!playerIds.has(agent.playerId)) {
       errors.push(`Restored agent state references unknown player ${agent.playerId}.`);
     }
+    for (const error of validateWerewolfAgentHarnessStateSnapshot(agent, {
+      requireSocialState: true,
+      requireSocialStateHash: true
+    })) {
+      errors.push(`Restored agent state ${agent.playerId}: ${error}`);
+    }
   }
   for (const playerId of playerIds) {
     if (!seenAgentIds.has(playerId)) {
@@ -1931,6 +1944,14 @@ function validateAgentSnapshotFrames(artifact: MatchArtifact, playerIds: Set<str
       snapshotPayloadAlreadyValidated: true,
       errors
     });
+    for (const [agentIndex, agent] of frame.agents.entries()) {
+      for (const error of validateWerewolfAgentHarnessStateSnapshot(agent, {
+        requireSocialState: true,
+        requireSocialStateHash: true
+      })) {
+        errors.push(`${label}.agents[${agentIndex}].${error}`);
+      }
+    }
   }
 }
 
@@ -1984,6 +2005,14 @@ function validateStepAgentSnapshots(input: {
     seen.add(agent.playerId);
     if (!input.playerIds.has(agent.playerId)) {
       input.errors.push(`${input.label}.agentSnapshotsAfterStep[${index}] references unknown player ${agent.playerId}.`);
+    }
+    if (!input.snapshotPayloadAlreadyValidated) {
+      for (const error of validateWerewolfAgentHarnessStateSnapshot(agent, {
+        requireSocialState: true,
+        requireSocialStateHash: true
+      })) {
+        input.errors.push(`${input.label}.agentSnapshotsAfterStep[${index}].${error}`);
+      }
     }
   }
   for (const playerId of input.playerIds) {

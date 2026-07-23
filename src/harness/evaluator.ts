@@ -20,7 +20,7 @@ import type {
   HarnessStepRecord,
   HarnessTurnTrace
 } from "./types";
-import type { EvidenceRef, SocialStateMutationJournalEntry } from "./socialState";
+import { socialStateRetentionWindow, type EvidenceRef, type SocialStateMutationJournalEntry } from "./socialState";
 
 type WerewolfEvaluationContext<TSocialEpisode = unknown> = HarnessEvaluationContext<
   GameState,
@@ -1710,6 +1710,7 @@ interface FalseRoleClaimBeliefTemporalAssociationAudit {
   ambiguousOrderingExposureCount: number;
   formationOnlyCount: number;
   noLaterMutationCount: number;
+  outsideRetainedJournalWindowCount: number;
 }
 
 interface FalseRoleClaimBeliefTemporalAssociationRecord {
@@ -1766,7 +1767,8 @@ function falseRoleClaimBeliefTemporalAssociationAudit(
     missingJournalExposureCount: 0,
     ambiguousOrderingExposureCount: 0,
     formationOnlyCount: 0,
-    noLaterMutationCount: 0
+    noLaterMutationCount: 0,
+    outsideRetainedJournalWindowCount: 0
   };
 
   if (!agent || !entries.length) {
@@ -1785,15 +1787,21 @@ function falseRoleClaimBeliefTemporalAssociationAudit(
       continue;
     }
 
-    audit.evaluableExposureRecords.push(exposure);
     audit.formationOnlyCount += orderedEntries.filter((entry) => !entry.beforeSummary && entry.turnIndex <= exposure.observedAtTurnIndex).length;
     const laterShiftEntries = orderedEntries.filter(
       (entry) => entry.turnIndex > exposure.observedAtTurnIndex && journalEntryHasBeliefShift(entry)
     );
     if (!laterShiftEntries.length) {
+      if (agent.social?.journal && !socialStateRetentionWindow(agent.social.journal).windowComplete) {
+        audit.outsideRetainedJournalWindowCount += 1;
+        continue;
+      }
+      audit.evaluableExposureRecords.push(exposure);
       audit.noLaterMutationCount += 1;
       continue;
     }
+
+    audit.evaluableExposureRecords.push(exposure);
 
     for (const entry of laterShiftEntries) {
       const predicate = journalEntryBeliefPredicate(entry);
@@ -1910,6 +1918,7 @@ function falseRoleClaimBeliefTemporalAssociationMetadata(audit: FalseRoleClaimBe
     ambiguousOrderingExposureCount: audit.ambiguousOrderingExposureCount,
     formationOnlyCount: audit.formationOnlyCount,
     noLaterMutationCount: audit.noLaterMutationCount,
+    outsideRetainedJournalWindowCount: audit.outsideRetainedJournalWindowCount,
     hiddenTruthUsedInLiveStore: audit.linkedRecords.some((record) => record.journalEntry.hiddenTruthUsed) ? true : false,
     postgameTruthUsedForFalseClaimClassification: true,
     stores: audit.linkedRecords.length ? ["beliefs"] : [],
@@ -2022,6 +2031,7 @@ interface FalseRoleClaimReputationTemporalAssociationAudit {
   ambiguousOrderingExposureCount: number;
   sameTurnMutationCount: number;
   noLaterMutationCount: number;
+  outsideRetainedJournalWindowCount: number;
 }
 
 interface FalseRoleClaimReputationTemporalAssociationRecord {
@@ -2078,7 +2088,8 @@ function falseRoleClaimReputationTemporalAssociationAudit(
     missingJournalExposureCount: 0,
     ambiguousOrderingExposureCount: 0,
     sameTurnMutationCount: 0,
-    noLaterMutationCount: 0
+    noLaterMutationCount: 0,
+    outsideRetainedJournalWindowCount: 0
   };
 
   if (!agent || !entries.length) {
@@ -2097,15 +2108,21 @@ function falseRoleClaimReputationTemporalAssociationAudit(
       continue;
     }
 
-    audit.evaluableExposureRecords.push(exposure);
     audit.sameTurnMutationCount += orderedEntries.filter((entry) => entry.turnIndex <= exposure.observedAtTurnIndex).length;
     const laterMutationEntries = orderedEntries.filter(
       (entry) => entry.turnIndex > exposure.observedAtTurnIndex && journalEntryHasReputationDelta(entry)
     );
     if (!laterMutationEntries.length) {
+      if (agent.social?.journal && !socialStateRetentionWindow(agent.social.journal).windowComplete) {
+        audit.outsideRetainedJournalWindowCount += 1;
+        continue;
+      }
+      audit.evaluableExposureRecords.push(exposure);
       audit.noLaterMutationCount += 1;
       continue;
     }
+
+    audit.evaluableExposureRecords.push(exposure);
 
     for (const entry of laterMutationEntries) {
       const reputationDimensions = journalEntryReputationDimensions(entry);
@@ -2208,6 +2225,7 @@ function falseRoleClaimReputationTemporalAssociationMetadata(audit: FalseRoleCla
     ambiguousOrderingExposureCount: audit.ambiguousOrderingExposureCount,
     sameTurnMutationCount: audit.sameTurnMutationCount,
     noLaterMutationCount: audit.noLaterMutationCount,
+    outsideRetainedJournalWindowCount: audit.outsideRetainedJournalWindowCount,
     hiddenTruthUsedInLiveStore: audit.linkedRecords.some((record) => record.journalEntry.hiddenTruthUsed) ? true : false,
     postgameTruthUsedForFalseClaimClassification: true,
     stores: audit.linkedRecords.length ? ["reputation"] : [],

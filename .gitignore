@@ -18,6 +18,7 @@ test-results/
 
 # Local run artifacts and screenshots
 artifacts/
+/.artifacts/
 # Historical root-level CLI example names. Keep the precise patterns rather
 # than ignoring every JSON/JSONL file, because experiment specs are source.
 /match-artifact.json

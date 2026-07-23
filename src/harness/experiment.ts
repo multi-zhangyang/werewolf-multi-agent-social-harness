@@ -192,7 +192,8 @@ function assertJointPhaseSchedulerBudget(
 ): void {
   if (
     jointPhaseScheduler === "parallel" &&
-    (maxTransitions === undefined || maxTransitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS)
+    maxTransitions !== undefined &&
+    maxTransitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS
   ) {
     throw new Error(
       `jointPhaseScheduler=parallel requires maxTransitions >= ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS} (system.advance + seer.inspect + joint wolf batch).`
