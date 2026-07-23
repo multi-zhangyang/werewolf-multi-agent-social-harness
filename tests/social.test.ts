@@ -118,6 +118,26 @@ describe("countSocialStepCommitsByActor", () => {
 
 
 describe("generic social harness scheduler contract", () => {
+  it("runs without an implicit transition cap when maxTransitions is omitted", async () => {
+    const environment = new TestEnvironment({
+      pending: [{ actorId: "a", kind: "act" }],
+      doneAfterSteps: 321
+    });
+    const artifact = await runSocialEpisode<TestState, TestObservation, TestPending, TestCommand>({
+      id: "social-unbounded-default",
+      environment,
+      actors: [new TestActor("a")],
+      schedulerMode: "aec",
+      hashState,
+      eventSeq
+    });
+
+    expect(artifact.status).toBe("completed");
+    expect(artifact.steps).toHaveLength(321);
+    expect(artifact.execution).not.toHaveProperty("maxTransitions");
+    expect(artifact.truncationReason).toBeUndefined();
+  });
+
   it("runs AEC as a single selected actor per environment transition", async () => {
     const environment = new TestEnvironment({ doneAfterSteps: 2 });
     const actorA = new TestActor("a");

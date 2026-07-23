@@ -575,7 +575,7 @@ function buildWerewolfGenericExperimentSpec(input: {
       version: "1",
       configuration: portableJsonObject(input.assignment)
     },
-    maxTransitions: input.options.maxTransitions ?? 320,
+    ...(input.options.maxTransitions === undefined ? {} : { maxTransitions: input.options.maxTransitions }),
     timeoutPolicy: {
       id: "harness.deadline",
       version: "1",
@@ -591,7 +591,7 @@ function buildWerewolfGenericExperimentSpec(input: {
     // cannot satisfy the checkpoint envelope's durable actor-snapshot proof.
     // Record that truth explicitly instead of claiming a final checkpoint the
     // runtime cannot lawfully publish.
-    checkpointPolicy: (input.options.maxTransitions ?? 320) === 0
+    checkpointPolicy: input.options.maxTransitions === 0
       ? { id: "harness.checkpoint.none.zero-transition", version: "1", mode: "none" }
       : { id: "harness.final-checkpoint", version: "1", mode: "final" },
     ...(classifyHarnessReasonerExecution(input.options.reasoner) === "live-provider"
@@ -699,7 +699,11 @@ function resolveJointPhaseScheduler(options: TournamentOptions): WerewolfJointPh
     throw new Error(`Tournament scheduler mismatch: options=${requested}, experiment=${recorded}.`);
   }
   const scheduler = requested ?? recorded ?? DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER;
-  if (scheduler === "parallel" && (options.maxTransitions === undefined || options.maxTransitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS)) {
+  if (
+    scheduler === "parallel" &&
+    options.maxTransitions !== undefined &&
+    options.maxTransitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS
+  ) {
     throw new Error(
       `jointPhaseScheduler=parallel requires maxTransitions >= ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS} (system.advance + seer.inspect + joint wolf batch).`
     );

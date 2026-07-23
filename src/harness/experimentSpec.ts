@@ -131,7 +131,7 @@ export interface NormalizedGenericExperimentSpecV1 {
   profiles: GenericExperimentProfileSpecV1[];
   modelAssignments: GenericExperimentModelAssignmentV1[];
   assignmentPolicy: GenericExperimentAssignmentPolicyV1;
-  maxTransitions: number;
+  maxTransitions?: number;
   timeoutPolicy: GenericExperimentTimeoutPolicyV1;
   retryPolicy: GenericExperimentRetryPolicyV1;
   evaluatorIds: string[];
@@ -178,7 +178,7 @@ export interface GenericExperimentExecutionAttestationV1 {
     | typeof LEGACY_GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION;
   specHash: string;
   schedulerMode: SocialResolvedSchedulerMode;
-  maxTransitions: number;
+  maxTransitions?: number;
   decisionTimeoutMs?: number;
   /** Exact episode-level cognition provenance authored by runHarnessEpisode. */
   reasonerExecutionClass?: SocialReasonerExecutionClass;
@@ -337,7 +337,9 @@ export function normalizeGenericExperimentSpec(
     profiles,
     modelAssignments,
     assignmentPolicy: normalizeAssignmentPolicy(merged.assignmentPolicy),
-    maxTransitions: nonNegativeInteger(merged.maxTransitions, "maxTransitions"),
+    ...(merged.maxTransitions === undefined
+      ? {}
+      : { maxTransitions: nonNegativeInteger(merged.maxTransitions, "maxTransitions") }),
     timeoutPolicy: normalizeTimeoutPolicy(merged.timeoutPolicy),
     retryPolicy: normalizeRetryPolicy(merged.retryPolicy),
     evaluatorIds: normalizeUniqueIds(merged.evaluatorIds ?? [], "evaluatorIds", true),
@@ -498,7 +500,9 @@ export function createGenericExperimentExecutionAttestation(
       : LEGACY_GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION,
     specHash: hashStableJsonValue(spec),
     schedulerMode: episode.schedulerMode,
-    maxTransitions: episode.execution!.maxTransitions!,
+    ...(episode.execution?.maxTransitions === undefined
+      ? {}
+      : { maxTransitions: episode.execution.maxTransitions }),
     ...(episode.execution?.decisionTimeoutMs === undefined
       ? {}
       : { decisionTimeoutMs: episode.execution.decisionTimeoutMs }),

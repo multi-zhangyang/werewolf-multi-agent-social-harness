@@ -18,6 +18,7 @@ import {
   updateSocialGoalStatus,
   updateSocialReputation,
   upsertSocialBelief,
+  validateAgentSocialStateSnapshot,
   type AgentSocialState,
   type EvidenceRef,
   type MemoryRetrievalRecord,
@@ -43,6 +44,16 @@ export class WerewolfAgentActor {
   private readonly seenMessageIds = new Set<string>();
 
   constructor(public readonly state: AgentHarnessState) {
+    if (this.state.social) {
+      const errors = validateWerewolfAgentHarnessStateSnapshot(this.state, {
+        requireSocialState: true,
+        requireSocialStateHash: this.state.socialStateHash !== undefined,
+        validateSocialStateHash: this.state.socialStateHash !== undefined
+      });
+      if (errors.length) {
+        throw new Error(`Invalid restored Werewolf agent state ${this.state.playerId}: ${errors.join(" ")}`);
+      }
+    }
     this.ensureSocialState();
     this.hydrateSeenMessageIds();
     this.updateSocialHash();
@@ -281,6 +292,37 @@ export class WerewolfAgentActor {
   private hydrateSeenMessageIds(): void {
     hydrateSeenSocialMessageIds(this.ensureSocialState(), this.seenMessageIds);
   }
+}
+
+export function validateWerewolfAgentHarnessStateSnapshot(
+  state: AgentHarnessState,
+  options: {
+    requireSocialState?: boolean;
+    requireSocialStateHash?: boolean;
+    /** Canonical redacted artifacts bind the whole frame payload instead. */
+    validateSocialStateHash?: boolean;
+  } = {}
+): string[] {
+  const errors: string[] = [];
+  if (typeof state.playerId !== "string" || !state.playerId.trim()) errors.push("playerId is required.");
+  if (!state.social) {
+    if (options.requireSocialState) errors.push("social state is required.");
+    if (options.requireSocialStateHash && !state.socialStateHash) errors.push("socialStateHash is required.");
+    return errors;
+  }
+  errors.push(...validateAgentSocialStateSnapshot(state.social, {
+    expectedAgentId: state.playerId,
+    maxMemoryEntries: WEREWOLF_AGENT_MEMORY_MAX_ENTRIES,
+    maxJournalEntries: WEREWOLF_AGENT_JOURNAL_MAX_ENTRIES,
+    requireJournal: true
+  }).map((error) => `social.${error}`));
+  if (options.requireSocialStateHash && !state.socialStateHash) {
+    errors.push("socialStateHash is required.");
+  }
+  if (options.validateSocialStateHash && state.socialStateHash && state.socialStateHash !== hashStableState(state.social)) {
+    errors.push("socialStateHash does not match social state.");
+  }
+  return errors;
 }
 
 const WEREWOLF_COMMITMENT_REDUCER_VERSION = "werewolf.social-commitment-reducer.v1" as const;
@@ -730,7 +772,9 @@ function ensureWerewolfAgentSocialState(state: AgentHarnessState): NonNullable<A
       model: state.model,
       temperature: state.temperature,
       policyId: state.policyName
-    }
+    },
+    maxMemoryEntries: WEREWOLF_AGENT_MEMORY_MAX_ENTRIES,
+    maxJournalEntries: WEREWOLF_AGENT_JOURNAL_MAX_ENTRIES
   });
   return state.social;
 }

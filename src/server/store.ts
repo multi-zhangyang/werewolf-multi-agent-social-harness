@@ -41,7 +41,7 @@ export interface StoredMatch {
   assignment?: HarnessAssignmentConfig;
   resolvedAssignments?: ResolvedAgentAssignment[];
   models: string[];
-  status: "created" | "running" | "completed" | "failed";
+  status: "created" | "running" | "completed" | "truncated" | "failed";
   error?: string;
 }
 
@@ -261,8 +261,8 @@ export function saveMatch(record: StoredMatch): void {
     });
     return;
   }
-  if (record.status === "completed") {
-    throw new Error(`Completed match ${record.id} must contain a validated match artifact.`);
+  if (record.status === "completed" || record.status === "truncated") {
+    throw new Error(`Terminal match ${record.id} must contain a validated match artifact.`);
   }
   matches.set(record.id, {
     lifecycle: "pre-artifact",
@@ -682,7 +682,7 @@ function materializeStoredMatch(entry: StoredMatchEntry): StoredMatch {
     assignment: artifact.assignment,
     resolvedAssignments: artifact.resolvedAssignments,
     models: artifact.models,
-    status: artifact.status === "failed" ? "failed" : "completed",
+    status: artifact.status,
     error: artifact.failureReason
   };
 }

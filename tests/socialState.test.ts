@@ -34,6 +34,7 @@ import {
   createRelationshipGraph,
   createReputationLedger,
   createSocialMessageIngestionState,
+  socialStateRetentionWindow,
   pushGoal,
   pushSocialGoal,
   recordSocialStateMutation,
@@ -60,6 +61,7 @@ import {
   updateTrustRepairStatus,
   upsertSocialBelief,
   upsertBelief,
+  validateAgentSocialStateSnapshot,
   type EvidenceRef
 } from "../src/harness/socialState";
 
@@ -128,6 +130,68 @@ describe("agent social state stores", () => {
     expect(restored.memory.nextSeq).toBe(5);
     expect(restored.journal?.entries.map((entry) => entry.journalSeq)).toEqual([3, 4]);
     expect(restored.journal?.nextSeq).toBe(5);
+    expect(socialStateRetentionWindow(restored.memory)).toEqual({
+      retainedEntryCount: 2,
+      totalEntryCount: 4,
+      droppedEntryCount: 2,
+      firstRetainedSeq: 3,
+      lastRetainedSeq: 4,
+      windowComplete: false
+    });
+    expect(socialStateRetentionWindow(restored.journal!)).toEqual({
+      retainedEntryCount: 2,
+      totalEntryCount: 4,
+      droppedEntryCount: 2,
+      firstRetainedSeq: 3,
+      lastRetainedSeq: 4,
+      windowComplete: false
+    });
+    expect(validateAgentSocialStateSnapshot(restored, {
+      expectedAgentId: "bounded-agent",
+      maxMemoryEntries: 2,
+      maxJournalEntries: 2,
+      requireJournal: true
+    })).toEqual([]);
+  });
+
+  it("rejects malformed or over-limit retained memory and journal sequence windows", () => {
+    expect(() => createMemoryStore(0)).toThrow(/positive integer/);
+    expect(() => createMemoryStore(-1)).toThrow(/positive integer/);
+    expect(() => createMemoryStore(1.5)).toThrow(/positive integer/);
+    expect(() => createAgentSocialState({
+      agentId: "invalid-capacity",
+      profile: { id: "invalid-capacity", model: "stub-model" },
+      maxJournalEntries: 0
+    })).toThrow(/positive integer/);
+
+    const state = createAgentSocialState({
+      agentId: "bounded-agent",
+      profile: { id: "bounded-profile", model: "stub-model" },
+      maxMemoryEntries: 2,
+      maxJournalEntries: 2
+    });
+    appendSocialMemory(state, {
+      kind: "message",
+      source: "speaker",
+      visibility: "public",
+      evidenceRefs: [{ artifact: "message", id: "bounded-message-1", seq: 1 }]
+    });
+
+    const malformed = JSON.parse(JSON.stringify(state)) as typeof state;
+    malformed.memory.maxEntries = 200;
+    malformed.memory.nextSeq = 1;
+    malformed.journal!.maxEntries = 1000;
+    malformed.journal!.entries[0].journalSeq = 9;
+    malformed.messageIngestion!.seenMessageIds = ["duplicate", "duplicate"];
+
+    expect(validateAgentSocialStateSnapshot(malformed, {
+      expectedAgentId: "bounded-agent",
+      maxMemoryEntries: 64,
+      maxJournalEntries: 64,
+      requireJournal: true
+    }).join("\n")).toMatch(
+      /memory\.maxEntries exceeds|memory\.nextSeq is smaller|journal\.maxEntries exceeds|journal\.entries\[0\] sequence|duplicate duplicate/
+    );
   });
 
   it("keeps evidence-backed statement attributions distinct from first-order beliefs", () => {

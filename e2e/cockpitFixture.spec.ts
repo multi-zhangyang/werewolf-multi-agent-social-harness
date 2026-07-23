@@ -166,6 +166,7 @@ test("honors public capabilities before touching the local operator registry", a
 });
 
 test("renders matrix lifecycle and statistics only from the harness API response", async ({ page }) => {
+  test.setTimeout(90_000);
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.goto("/?workspace=experiments", { waitUntil: "domcontentloaded" });
@@ -176,6 +177,9 @@ test("renders matrix lifecycle and statistics only from the harness API response
   await games.click();
   await games.press("ArrowUp");
   await games.press("Enter");
+  // This fixture validates matrix lifecycle rendering, not a full match. Keep
+  // its diagnostic truncation explicit now that the product default is uncapped.
+  await page.getByLabel("最大 transitions").fill("4");
   const matrixResponse = page.waitForResponse((response) => {
     const url = new URL(response.url());
     return response.request().method() === "POST" && url.pathname === "/api/experiments/matrix/run";
@@ -439,6 +443,7 @@ test("renders only a server-owned live public table and does not reconstruct a f
   await page.getByRole("button", { name: "运行实验", exact: true }).click();
   const request = await runRequest;
   expect(request.postDataJSON()).toMatchObject({ live: true });
+  expect(request.postDataJSON()).not.toHaveProperty("maxTransitions");
   expect((await runResponse).status()).toBe(202);
 
   const board = page.getByTestId("werewolf-live-board");
@@ -748,7 +753,6 @@ test("blocks an invalid roster assignment in the browser before it can start a m
   await composer.getByRole("textbox", { name: "profile 1 id" }).fill("retired-wolves");
   await composer.getByRole("textbox", { name: "profile 2 id" }).fill("retired-village");
   await composer.getByRole("button", { name: "完成编排" }).click();
-
   let matchRunRequests = 0;
   page.on("request", (request) => {
     if (request.method() === "POST" && new URL(request.url()).pathname === "/api/matches/run") {
@@ -798,6 +802,9 @@ test("submits a heterogeneous Agent roster through the existing harness control 
   await villageTeam.press("ArrowDown");
   await villageTeam.press("Enter");
   await composer.getByRole("button", { name: "完成编排" }).click();
+  // This test only verifies control-plane roster transport; keep the server
+  // run bounded explicitly so it cannot outlive the browser assertion.
+  await page.getByLabel("最大 transitions").fill("4");
 
   const submittedRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
@@ -872,6 +879,8 @@ test("submits the selected parallel scheduler when exporting a tournament public
   await scheduler.click();
   await scheduler.press("ArrowDown");
   await scheduler.press("Enter");
+  // The expected public-pack lifecycle below is intentionally truncated.
+  await page.getByLabel("最大 transitions").fill("4");
 
   const submittedRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());

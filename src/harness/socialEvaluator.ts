@@ -6,20 +6,21 @@ import type {
   HarnessMetricEvidenceRef,
   HarnessMetricRecord
 } from "./types";
-import type {
-  BetrayalRecord,
-  AgentSocialState,
-  CoalitionRecord,
-  CommitmentRecord,
-  EvidenceRef,
-  GossipRecord,
-  NormSanctionRecord,
-  NormRecord,
-  RelationshipEdge,
-  ReputationRecord,
-  SocialMemoryEntry,
-  SocialStateMutationJournalEntry,
-  TrustRepairRecord
+import {
+  socialStateRetentionWindow,
+  type AgentSocialState,
+  type BetrayalRecord,
+  type CoalitionRecord,
+  type CommitmentRecord,
+  type EvidenceRef,
+  type GossipRecord,
+  type NormSanctionRecord,
+  type NormRecord,
+  type RelationshipEdge,
+  type ReputationRecord,
+  type SocialMemoryEntry,
+  type SocialStateMutationJournalEntry,
+  type TrustRepairRecord
 } from "./socialState";
 
 /**
@@ -383,15 +384,19 @@ export interface SocialFactIngestEvidenceEvaluation {
   commitmentSpeechActCandidates: number;
   commitmentSpeechActLinkedCandidates: number;
   commitmentSpeechActMissingMutationCandidates: number;
+  commitmentSpeechActOutsideRetainedJournalWindowCandidates: number;
   coalitionSpeechActCandidates: number;
   coalitionSpeechActLinkedCandidates: number;
   coalitionSpeechActMissingMutationCandidates: number;
+  coalitionSpeechActOutsideRetainedJournalWindowCandidates: number;
   relationshipFactCandidates: number;
   relationshipFactLinkedCandidates: number;
   relationshipFactMissingMutationCandidates: number;
+  relationshipFactOutsideRetainedJournalWindowCandidates: number;
   reputationFactCandidates: number;
   reputationFactLinkedCandidates: number;
   reputationFactMissingMutationCandidates: number;
+  reputationFactOutsideRetainedJournalWindowCandidates: number;
 }
 
 export interface CommitmentCoalitionAssociationEvaluation {
@@ -856,6 +861,7 @@ interface SocialFactIngestRecordEvaluation {
   candidate: SocialFactIngestCandidate;
   linked: boolean;
   missingMutation: boolean;
+  outsideRetainedJournalWindow: boolean;
   mutationEntries: SocialStateMutationJournalEntry[];
 }
 
@@ -918,14 +924,19 @@ function socialFactIngestEvidenceMetricPair(
 ): HarnessMetricRecord[] {
   const records = evaluations.filter((item) => item.candidate.kind === kind);
   const linkedRecords = records.filter((item) => item.linked);
+  const evaluableRecords = records.filter((item) => !item.outsideRetainedJournalWindow);
+  const outsideWindowRecords = records.filter((item) => item.outsideRetainedJournalWindow);
   const evidenceRefs = evidenceFromSocialFactIngestRecords(agent, linkedRecords);
   const metadata = {
     candidateKind: kind,
     [labels.candidateLabel]: records.length,
     linkedCandidates: linkedRecords.length,
     missingMutationCandidates: records.filter((item) => item.missingMutation).length,
+    outsideRetainedJournalWindowCandidates: outsideWindowRecords.length,
+    evaluableCandidates: evaluableRecords.length,
     sampleLinkedCandidates: sampleSocialFactIngestCandidates(linkedRecords),
     sampleMissingMutationCandidates: sampleSocialFactIngestCandidates(records.filter((item) => item.missingMutation)),
+    sampleOutsideRetainedJournalWindowCandidates: sampleSocialFactIngestCandidates(outsideWindowRecords),
     coverageLevel: "explicit_scoped_exposure_to_social_state_mutation",
     causalClaim: false
   };
@@ -935,18 +946,18 @@ function socialFactIngestEvidenceMetricPair(
       label: labels.countLabel,
       value: linkedRecords.length,
       unit: "count",
-      denominator: records.length,
-      confidence: confidence(records.length),
+      denominator: evaluableRecords.length,
+      confidence: confidence(evaluableRecords.length),
       aggregation: "sum",
       metadata
     }),
     socialFactIngestMetric(agent, subject, evidenceRefs, {
       id: labels.rateId,
       label: labels.rateLabel,
-      value: ratio(linkedRecords.length, records.length),
+      value: ratio(linkedRecords.length, evaluableRecords.length),
       unit: "ratio",
-      denominator: records.length,
-      confidence: confidence(records.length),
+      denominator: evaluableRecords.length,
+      confidence: confidence(evaluableRecords.length),
       aggregation: "ratio",
       metadata
     })
@@ -996,12 +1007,15 @@ function evaluateSocialFactIngestEvidenceForAgent(
 ): SocialFactIngestRecordEvaluation[] {
   const candidates = socialFactIngestCandidatesFromExposure(exposureRecords, messages);
   const journalEntries = agent.social?.journal?.entries ?? [];
+  const window = agent.social?.journal ? socialStateRetentionWindow(agent.social.journal) : undefined;
   return candidates.map((candidate) => {
     const mutationEntries = journalEntries.filter((entry) => socialFactIngestCandidateMatchesMutation(candidate, entry));
+    const outsideRetainedJournalWindow = mutationEntries.length === 0 && window?.windowComplete === false;
     return {
       candidate,
       linked: mutationEntries.length > 0,
-      missingMutation: mutationEntries.length === 0,
+      missingMutation: mutationEntries.length === 0 && !outsideRetainedJournalWindow,
+      outsideRetainedJournalWindow,
       mutationEntries
     };
   });
@@ -2251,15 +2265,19 @@ function summarizeSocialFactIngestEvidence(agents: SocialAgentSnapshot[], social
       commitmentSpeechActCandidates: commitment.length,
       commitmentSpeechActLinkedCandidates: commitment.filter((item) => item.linked).length,
       commitmentSpeechActMissingMutationCandidates: commitment.filter((item) => item.missingMutation).length,
+      commitmentSpeechActOutsideRetainedJournalWindowCandidates: commitment.filter((item) => item.outsideRetainedJournalWindow).length,
       coalitionSpeechActCandidates: coalition.length,
       coalitionSpeechActLinkedCandidates: coalition.filter((item) => item.linked).length,
       coalitionSpeechActMissingMutationCandidates: coalition.filter((item) => item.missingMutation).length,
+      coalitionSpeechActOutsideRetainedJournalWindowCandidates: coalition.filter((item) => item.outsideRetainedJournalWindow).length,
       relationshipFactCandidates: relationship.length,
       relationshipFactLinkedCandidates: relationship.filter((item) => item.linked).length,
       relationshipFactMissingMutationCandidates: relationship.filter((item) => item.missingMutation).length,
+      relationshipFactOutsideRetainedJournalWindowCandidates: relationship.filter((item) => item.outsideRetainedJournalWindow).length,
       reputationFactCandidates: reputation.length,
       reputationFactLinkedCandidates: reputation.filter((item) => item.linked).length,
-      reputationFactMissingMutationCandidates: reputation.filter((item) => item.missingMutation).length
+      reputationFactMissingMutationCandidates: reputation.filter((item) => item.missingMutation).length,
+      reputationFactOutsideRetainedJournalWindowCandidates: reputation.filter((item) => item.outsideRetainedJournalWindow).length
     };
   });
   return {
@@ -2271,15 +2289,19 @@ function summarizeSocialFactIngestEvidence(agents: SocialAgentSnapshot[], social
     commitmentSpeechActCandidates: aggregate.reduce((sum, item) => sum + item.commitmentSpeechActCandidates, 0),
     commitmentSpeechActLinkedCandidates: aggregate.reduce((sum, item) => sum + item.commitmentSpeechActLinkedCandidates, 0),
     commitmentSpeechActMissingMutationCandidates: aggregate.reduce((sum, item) => sum + item.commitmentSpeechActMissingMutationCandidates, 0),
+    commitmentSpeechActOutsideRetainedJournalWindowCandidates: aggregate.reduce((sum, item) => sum + item.commitmentSpeechActOutsideRetainedJournalWindowCandidates, 0),
     coalitionSpeechActCandidates: aggregate.reduce((sum, item) => sum + item.coalitionSpeechActCandidates, 0),
     coalitionSpeechActLinkedCandidates: aggregate.reduce((sum, item) => sum + item.coalitionSpeechActLinkedCandidates, 0),
     coalitionSpeechActMissingMutationCandidates: aggregate.reduce((sum, item) => sum + item.coalitionSpeechActMissingMutationCandidates, 0),
+    coalitionSpeechActOutsideRetainedJournalWindowCandidates: aggregate.reduce((sum, item) => sum + item.coalitionSpeechActOutsideRetainedJournalWindowCandidates, 0),
     relationshipFactCandidates: aggregate.reduce((sum, item) => sum + item.relationshipFactCandidates, 0),
     relationshipFactLinkedCandidates: aggregate.reduce((sum, item) => sum + item.relationshipFactLinkedCandidates, 0),
     relationshipFactMissingMutationCandidates: aggregate.reduce((sum, item) => sum + item.relationshipFactMissingMutationCandidates, 0),
+    relationshipFactOutsideRetainedJournalWindowCandidates: aggregate.reduce((sum, item) => sum + item.relationshipFactOutsideRetainedJournalWindowCandidates, 0),
     reputationFactCandidates: aggregate.reduce((sum, item) => sum + item.reputationFactCandidates, 0),
     reputationFactLinkedCandidates: aggregate.reduce((sum, item) => sum + item.reputationFactLinkedCandidates, 0),
-    reputationFactMissingMutationCandidates: aggregate.reduce((sum, item) => sum + item.reputationFactMissingMutationCandidates, 0)
+    reputationFactMissingMutationCandidates: aggregate.reduce((sum, item) => sum + item.reputationFactMissingMutationCandidates, 0),
+    reputationFactOutsideRetainedJournalWindowCandidates: aggregate.reduce((sum, item) => sum + item.reputationFactOutsideRetainedJournalWindowCandidates, 0)
   };
 }
 
@@ -3503,6 +3525,7 @@ interface LifecycleRecordEvaluation {
   evaluable: boolean;
   associated: boolean;
   missingCreation: boolean;
+  outsideRetainedJournalWindow: boolean;
   ambiguousOrdering: boolean;
   noLaterLifecycle: boolean;
   creationEntry?: SocialStateMutationJournalEntry;
@@ -3516,6 +3539,7 @@ interface GossipExposureRecordEvaluation {
   evaluable: boolean;
   associated: boolean;
   missingCreation: boolean;
+  outsideRetainedJournalWindow: boolean;
   missingMessageEvidence: boolean;
   missingScopedExposure: boolean;
   ambiguousOrdering: boolean;
@@ -3532,6 +3556,7 @@ interface TrustRepairJournalMutationRecordEvaluation {
   evaluable: boolean;
   associated: boolean;
   missingCreation: boolean;
+  outsideRetainedJournalWindow: boolean;
   ambiguousOrdering: boolean;
   sameTurnMutation: boolean;
   noLaterMutation: boolean;
@@ -3565,6 +3590,7 @@ function evaluateCommitmentLifecycleRecord(
   );
   return evaluateLifecycleRecord({
     recordId: record.id,
+    windowComplete: journalEntriesCoverFullHistory(entries),
     creationEntry,
     lifecycleEntries,
     lifecycleKinds: lifecycleEntries.flatMap((entry) => stringValue(entry.deltaSummary?.nextStatus))
@@ -3589,6 +3615,7 @@ function evaluateCoalitionLifecycleRecord(record: CoalitionRecord, entries: Soci
   );
   return evaluateLifecycleRecord({
     recordId: record.id,
+    windowComplete: journalEntriesCoverFullHistory(entries),
     creationEntry,
     lifecycleEntries,
     lifecycleKinds: lifecycleEntries.flatMap((entry) => stringValue(entry.deltaSummary?.evidenceKind))
@@ -3612,6 +3639,7 @@ function evaluateNormLifecycleRecord(record: NormRecord, entries: SocialStateMut
   );
   return evaluateLifecycleRecord({
     recordId: record.id,
+    windowComplete: journalEntriesCoverFullHistory(entries),
     creationEntry,
     lifecycleEntries,
     lifecycleKinds: lifecycleEntries.flatMap((entry) => stringValue(entry.deltaSummary?.nextStatus))
@@ -3635,6 +3663,7 @@ function evaluateNormSanctionLifecycleRecord(record: NormSanctionRecord, entries
   );
   return evaluateLifecycleRecord({
     recordId: record.id,
+    windowComplete: journalEntriesCoverFullHistory(entries),
     creationEntry,
     lifecycleEntries,
     lifecycleKinds: lifecycleEntries.flatMap((entry) => stringValue(entry.deltaSummary?.nextStatus))
@@ -3658,6 +3687,7 @@ function evaluateTrustRepairLifecycleRecord(record: TrustRepairRecord, entries: 
   );
   return evaluateLifecycleRecord({
     recordId: record.id,
+    windowComplete: journalEntriesCoverFullHistory(entries),
     creationEntry,
     lifecycleEntries,
     lifecycleKinds: lifecycleEntries.flatMap((entry) => stringValue(entry.deltaSummary?.nextStatus))
@@ -3681,6 +3711,7 @@ function evaluateBetrayalLifecycleRecord(record: BetrayalRecord, entries: Social
   );
   return evaluateLifecycleRecord({
     recordId: record.id,
+    windowComplete: journalEntriesCoverFullHistory(entries),
     creationEntry,
     lifecycleEntries,
     lifecycleKinds: lifecycleEntries.flatMap((entry) => stringValue(entry.deltaSummary?.evidenceKind))
@@ -3742,7 +3773,8 @@ function evaluateTrustRepairJournalMutationRecord(input: {
 
   if (!creationEntry) {
     return trustRepairJournalMutationRecordResult(input.record.id, {
-      missingCreation: true,
+      missingCreation: journalEntriesCoverFullHistory(input.entries),
+      outsideRetainedJournalWindow: !journalEntriesCoverFullHistory(input.entries),
       mutationEntries,
       mutationDimensions
     });
@@ -3787,7 +3819,8 @@ function evaluateGossipExposureRecord(
 
   if (!creationEntry) {
     return gossipExposureRecordResult(record.id, {
-      missingCreation: true,
+      missingCreation: journalEntriesCoverFullHistory(entries),
+      outsideRetainedJournalWindow: !journalEntriesCoverFullHistory(entries),
       messageEvidenceRefs,
       matchingExposureRecords
     });
@@ -3833,6 +3866,7 @@ function evaluateGossipExposureRecord(
 
 function evaluateLifecycleRecord(input: {
   recordId: string;
+  windowComplete: boolean;
   creationEntry?: SocialStateMutationJournalEntry;
   lifecycleEntries: SocialStateMutationJournalEntry[];
   lifecycleKinds: string[];
@@ -3842,7 +3876,8 @@ function evaluateLifecycleRecord(input: {
       recordId: input.recordId,
       evaluable: false,
       associated: false,
-      missingCreation: true,
+      missingCreation: input.windowComplete,
+      outsideRetainedJournalWindow: !input.windowComplete,
       ambiguousOrdering: false,
       noLaterLifecycle: false,
       lifecycleEntries: input.lifecycleEntries,
@@ -3858,6 +3893,7 @@ function evaluateLifecycleRecord(input: {
       evaluable: false,
       associated: false,
       missingCreation: false,
+      outsideRetainedJournalWindow: false,
       ambiguousOrdering: true,
       noLaterLifecycle: false,
       creationEntry: input.creationEntry,
@@ -3873,6 +3909,7 @@ function evaluateLifecycleRecord(input: {
     evaluable: true,
     associated: associatedLifecycleEntries.length > 0,
     missingCreation: false,
+    outsideRetainedJournalWindow: false,
     ambiguousOrdering: false,
     noLaterLifecycle: associatedLifecycleEntries.length === 0,
     creationEntry: input.creationEntry,
@@ -3900,6 +3937,7 @@ function gossipExposureRecordResult(
     evaluable: options.evaluable ?? false,
     associated: options.associated ?? false,
     missingCreation: options.missingCreation ?? false,
+    outsideRetainedJournalWindow: options.outsideRetainedJournalWindow ?? false,
     missingMessageEvidence: options.missingMessageEvidence ?? false,
     missingScopedExposure: options.missingScopedExposure ?? false,
     ambiguousOrdering: options.ambiguousOrdering ?? false,
@@ -3921,6 +3959,7 @@ function trustRepairJournalMutationRecordResult(
     evaluable: options.evaluable ?? false,
     associated: options.associated ?? false,
     missingCreation: options.missingCreation ?? false,
+    outsideRetainedJournalWindow: options.outsideRetainedJournalWindow ?? false,
     ambiguousOrdering: options.ambiguousOrdering ?? false,
     sameTurnMutation: options.sameTurnMutation ?? false,
     noLaterMutation: options.noLaterMutation ?? false,
@@ -3929,6 +3968,13 @@ function trustRepairJournalMutationRecordResult(
     associatedMutationEntries: options.associatedMutationEntries ?? [],
     mutationDimensions: sampleIds(options.mutationDimensions ?? [])
   };
+}
+
+/** Journal entries are a retained suffix. A first sequence greater than one
+ * proves that earlier mutations were intentionally evicted and absence is
+ * therefore unknown rather than negative evidence. */
+function journalEntriesCoverFullHistory(entries: SocialStateMutationJournalEntry[]): boolean {
+  return entries.length === 0 || Math.min(...entries.map((entry) => entry.journalSeq)) === 1;
 }
 
 function journalEntryHasDimensionDelta(entry: SocialStateMutationJournalEntry, dimensions: string[]): boolean {
@@ -4119,6 +4165,7 @@ function uniqueEvidenceRefs(refs: HarnessMetricEvidenceRef[]): HarnessMetricEvid
 function withSocialHash(agent: SocialAgentSnapshot, metadata: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     ...metadata,
+    journalRetentionWindow: agent.social?.journal ? socialStateRetentionWindow(agent.social.journal) : null,
     socialStateHash: agent.socialStateHash ?? null
   };
 }

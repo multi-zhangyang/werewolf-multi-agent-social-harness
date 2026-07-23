@@ -3,13 +3,14 @@ import { isSupportedWerewolfRulesetId } from "../core/roles";
 import { isAgentPendingAction, type AgentPendingAction } from "../core/pending";
 import type { GameCommand, GameState, PendingAction } from "../core/types";
 import { WerewolfEnvironment } from "./environment";
+import { validateWerewolfAgentHarnessStateSnapshot } from "./actor";
 import type { HarnessAgentSnapshotFrame } from "./episodeArtifacts";
 import { hashStableState } from "./hash";
 import { compareSocialDomainAdapterManifests } from "./domainAdapter";
 import { createWerewolfSocialDomainAdapterManifest } from "./werewolfAdapter";
 import { replaySocialEpisode, type SocialEpisodeReplayResult } from "./socialReplay";
 import type { SocialEnvironment, SocialEpisodeArtifact } from "./social";
-import type { HarnessStepRecord } from "./types";
+import type { AgentHarnessState, HarnessStepRecord } from "./types";
 
 // Backward-compatible exports. New domain adapters should import generic replay
 // directly from socialReplay.ts (or generic.ts), which has no Werewolf/core
@@ -33,7 +34,7 @@ export function replayWerewolfSocialEpisode(
     stopOnMismatch?: boolean;
     /** Prefix review derives its final state from recorded commands, not a parent finalState. */
     validateExpectedFinalState?: boolean;
-    agentSnapshotFrames?: readonly HarnessAgentSnapshotFrame<unknown>[];
+    agentSnapshotFrames?: readonly HarnessAgentSnapshotFrame<AgentHarnessState>[];
     /** A checkpoint prefix can intentionally omit its parent's frame sidecar. */
     auditAgentSnapshots?: boolean;
   } = {}
@@ -67,7 +68,7 @@ export function replayWerewolfSocialEpisode(
     };
   }
   const hasInlineSnapshots = episode.steps.some((step) => step.actorSnapshotsAfterStep !== undefined);
-  return replaySocialEpisode({
+  return replaySocialEpisode<GameState, unknown, unknown, GameCommand, AgentHarnessState>({
     episode: episode as SocialEpisodeArtifact<GameState, unknown, unknown, GameCommand>,
     environment: new WerewolfEnvironment(episode.initialState as GameState) as unknown as SocialEnvironment<GameState, unknown, unknown, GameCommand>,
     hashState: hashStableState,
@@ -79,6 +80,14 @@ export function replayWerewolfSocialEpisode(
     auditAgentSnapshots: options.auditAgentSnapshots ?? (hasInlineSnapshots || options.agentSnapshotFrames !== undefined),
     validateRecordedStep(step, context) {
       return validateRecordedWerewolfStepEvidence(step, context.state);
+    },
+    validateRecordedAgentState({ recordedAgents }) {
+      return recordedAgents.flatMap((agent, index) =>
+        validateWerewolfAgentHarnessStateSnapshot(agent, {
+          requireSocialState: true,
+          requireSocialStateHash: true
+        }).map((error) => `agents[${index}].${error}`)
+      );
     },
     domainAdapter: createWerewolfSocialDomainAdapterManifest(initialRulesetId as GameState["config"]["rulesetId"])
   });

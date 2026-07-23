@@ -22,7 +22,7 @@ describe("tournament experiment spec", () => {
       kind: "tournament",
       seed: "wolf-vs-village-smoke",
       games: 3,
-      maxTransitions: 24,
+      maxTransitions: undefined,
       jointPhaseScheduler: "aec-batched-decision",
       timeoutMs: 300000,
       temperature: 0.7,

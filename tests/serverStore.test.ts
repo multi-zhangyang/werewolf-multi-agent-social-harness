@@ -93,7 +93,7 @@ describe("server match store authority", () => {
       createdAt: artifact.createdAt,
       state: artifact.finalState,
       models: artifact.models,
-      status: artifact.status === "failed" ? "failed" : "completed",
+      status: artifact.status,
       trajectory: artifact.trajectory,
       socialEpisode: artifact.socialEpisode,
       metrics: artifact.metrics
@@ -110,6 +110,7 @@ describe("server match store authority", () => {
     const initialState = createGame({ id: "store-invalid", seed: "store-invalid" });
     const record = createMatchRecordFromState({ state: initialState, models: ["store-model"] });
     expect(() => saveMatch({ ...record, status: "completed" })).toThrow(/must contain a validated match artifact/);
+    expect(() => saveMatch({ ...record, status: "truncated" })).toThrow(/must contain a validated match artifact/);
 
     const profiles = profilesFromModels(["store-model"], 0);
     const agents = resolveAgentConfigs(initialState.players, profiles, 0, 0);

@@ -340,6 +340,7 @@ const matrixArtifactBaseDir = normalizeOptionalDirectory(
 );
 const checkpointArtifactBaseDir = normalizeOptionalDirectory(dependencies.checkpointArtifactBaseDir ?? process.env.CHECKPOINT_ARTIFACT_BASE_DIR);
 const matchArtifactBaseDir = normalizeOptionalDirectory(dependencies.matchArtifactBaseDir ?? process.env.MATCH_ARTIFACT_BASE_DIR);
+let matchArtifactStoreLoad: Promise<void> | undefined;
 const comparisonArtifactBaseDir = normalizeOptionalDirectory(
   dependencies.comparisonArtifactBaseDir ?? process.env.COMPARISON_ARTIFACT_BASE_DIR
 );
@@ -1236,7 +1237,8 @@ app.post("/api/matches/run", async (req, res, next) => {
     jointPhaseScheduler = parseOptionalJointPhaseScheduler(req.body?.jointPhaseScheduler);
     if (
       jointPhaseScheduler === "parallel" &&
-      (maxTransitions === undefined || maxTransitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS)
+      maxTransitions !== undefined &&
+      maxTransitions < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS
     ) {
       throw new Error(
         `jointPhaseScheduler=parallel requires maxTransitions >= ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS} (system.advance + seer.inspect + joint wolf batch).`
@@ -2924,13 +2926,22 @@ async function persistMatchArtifact(artifact: MatchArtifact, baseDir: string | u
   await ensureWritableArtifactSubdirectory(root, matchArtifactDirectory(root), "Match artifact directory is not safe.");
   // Overwrite is intentional for deterministic tournament episode ids so a re-export
   // under the same seed/episode replaces the prior match store entry.
-  await writeFile(file, `${JSON.stringify(sanitizePersistedProviderDiagnostics(redactSecrets(artifact)), null, 2)}\n`, {
-    encoding: "utf8"
-  });
+  await atomicReplaceUtf8(
+    file,
+    `${JSON.stringify(sanitizePersistedProviderDiagnostics(redactSecrets(artifact)), null, 2)}\n`
+  );
 }
 
 async function loadMatchArtifactIndex(baseDir: string | undefined): Promise<void> {
   if (!baseDir) return;
+  matchArtifactStoreLoad ??= recoverMatchArtifactIndex(baseDir).catch((error) => {
+    matchArtifactStoreLoad = undefined;
+    throw error;
+  });
+  await matchArtifactStoreLoad;
+}
+
+async function recoverMatchArtifactIndex(baseDir: string): Promise<void> {
   const root = path.resolve(baseDir);
   await loadArtifactRecoveryAuditSidecar(root, "match");
   let parsed: unknown;
@@ -3029,7 +3040,25 @@ async function writeMatchArtifactIndex(baseDir: string | undefined): Promise<voi
     updatedAt: new Date().toISOString(),
     matches
   };
-  await writeFile(matchArtifactIndexPath(root), `${JSON.stringify(redactSecrets(index), null, 2)}\n`, "utf8");
+  await atomicReplaceUtf8(matchArtifactIndexPath(root), `${JSON.stringify(redactSecrets(index), null, 2)}\n`);
+}
+
+async function atomicReplaceUtf8(target: string, contents: string): Promise<void> {
+  try {
+    const current = await lstat(target);
+    if (!current.isFile() || current.isSymbolicLink()) {
+      throw new HttpError(500, "Artifact publication target is not a safe regular file.");
+    }
+  } catch (error) {
+    if (!isFileReadNotFound(error)) throw error;
+  }
+  const temporary = path.join(path.dirname(target), `.${path.basename(target)}-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, contents, { encoding: "utf8", flag: "wx" });
+    await rename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 async function matchArtifactFromIndexRecord(baseDir: string, value: unknown): Promise<MatchArtifact | null> {
@@ -3144,7 +3173,7 @@ function storedMatchFromMatchArtifact(artifact: MatchArtifact): StoredMatch {
     assignment: artifact.assignment,
     resolvedAssignments: artifact.resolvedAssignments,
     models: artifact.models,
-    status: artifact.status === "failed" ? "failed" : "completed",
+    status: artifact.status,
     error: artifact.failureReason
   };
 }

@@ -263,7 +263,7 @@ interface MatchRecord {
   createdAt: string;
   state: PublicGameState;
   models: string[];
-  status: "created" | "running" | "completed" | "failed";
+  status: "created" | "running" | "completed" | "truncated" | "failed";
   harnessStatus?: HarnessRunStatus | null;
   truncationReason?: string | null;
   error?: string;
@@ -955,8 +955,10 @@ interface InspectorItem {
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
 
-const DEFAULT_MAX_TRANSITIONS = 4;
-const DEFAULT_TIMEOUT_SECONDS = 180;
+// An empty transition limit means a normal complete run. Short bounded runs
+// remain an explicit diagnostic choice and are never the Cockpit default.
+const DEFAULT_MAX_TRANSITIONS = "";
+const DEFAULT_TIMEOUT_SECONDS = 5_400;
 
 const workspaceItems: Array<{
   id: Workspace;
@@ -1014,7 +1016,7 @@ export function App() {
   // It must never become a browser-side source of resolved role/seat truth.
   const [experimentDraft, setExperimentDraft] = useState<CockpitExperimentDraft>(() => createCockpitExperimentDraft());
   const [rosterComposerOpen, setRosterComposerOpen] = useState(false);
-  const [maxTransitions, setMaxTransitions] = useState(String(DEFAULT_MAX_TRANSITIONS));
+  const [maxTransitions, setMaxTransitions] = useState(DEFAULT_MAX_TRANSITIONS);
   const [timeoutSeconds, setTimeoutSeconds] = useState(String(DEFAULT_TIMEOUT_SECONDS));
   const [jointPhaseScheduler, setJointPhaseScheduler] = useState<"aec-batched-decision" | "parallel">(DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER);
   const [status, setStatus] = useState("正在连接 harness API...");
@@ -1431,14 +1433,14 @@ export function App() {
     setActionStatus("正在通过真实 API 启动 harness run...");
     try {
       const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
-      const transitions = parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS);
+      const transitions = parseOptionalPositiveInteger(maxTransitions);
       assertJointPhaseSchedulerTransitionBudget(jointPhaseScheduler, transitions);
       const rawStart = await apiJson<unknown>("/api/matches/run", {
         method: "POST",
         body: JSON.stringify({
           ...experimentRequest,
           seed: `ui-cockpit-${Date.now()}`,
-          maxTransitions: transitions,
+          ...(transitions === undefined ? {} : { maxTransitions: transitions }),
           timeoutMs,
           jointPhaseScheduler,
           // Explicitly select the server-owned live-public contract. The
@@ -1964,7 +1966,7 @@ export function App() {
     setActionStatus("正在通过 harness control plane 运行实验矩阵...");
     try {
       const games = Math.min(10, Math.max(1, parsePositiveInteger(matrixGames, 1)));
-      const transitions = parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS);
+      const transitions = parseOptionalPositiveInteger(maxTransitions);
       const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
       const matrixId = `ui-matrix-${Date.now()}`;
       const exportArtifacts = matrixExportArtifacts && config?.capabilities?.artifactExport?.matrix === true;
@@ -1979,7 +1981,7 @@ export function App() {
             ...experimentRequest,
             games,
             seed: matrixId,
-            maxTransitions: transitions,
+            ...(transitions === undefined ? {} : { maxTransitions: transitions }),
             timeout: timeoutMs,
             jointPhaseScheduler,
             continueOnError: true
@@ -2098,7 +2100,7 @@ export function App() {
     setActionStatus("正在运行锦标赛并导出 truth-redacted 公开包...");
     try {
       const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
-      const transitions = parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS);
+      const transitions = parseOptionalPositiveInteger(maxTransitions);
       const games = Math.min(10, Math.max(1, parsePositiveInteger(packGames, 1)));
       assertJointPhaseSchedulerTransitionBudget(jointPhaseScheduler, transitions);
       const response = await apiJson<TournamentRunResponse>("/api/tournaments/run", {
@@ -2107,7 +2109,7 @@ export function App() {
           ...experimentRequest,
           seed: `ui-pack-${Date.now()}`,
           games,
-          maxTransitions: transitions,
+          ...(transitions === undefined ? {} : { maxTransitions: transitions }),
           timeoutMs,
           jointPhaseScheduler,
           exportArtifacts: true
@@ -2747,13 +2749,14 @@ export function App() {
       const forkBusyId = `checkpoint:fork:${checkpoint.checkpointId}`;
       setBusy(forkBusyId);
       try {
+        const transitions = parseOptionalPositiveInteger(maxTransitions);
         const forked = await apiJson<CheckpointForkResponse>(
           `/api/checkpoints/${encodeURIComponent(checkpoint.checkpointId)}/fork`,
           {
             method: "POST",
             body: JSON.stringify({
               reason: `ui fork ${shortId(checkpoint.checkpointId)}`,
-              maxTransitions: parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS),
+              ...(transitions === undefined ? {} : { maxTransitions: transitions }),
               timeoutMs: parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000
             })
           }
@@ -3894,7 +3897,7 @@ function RunContextPanel({
       <Card size="small" title="运行限制">
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Form layout="vertical" size="small" style={{ marginBottom: 0 }}>
-            <Form.Item label="最大 transitions">
+            <Form.Item label="最大 transitions（留空即完整运行）">
               <Input
                 aria-label="最大 transitions"
                 inputMode="numeric"
@@ -3926,10 +3929,11 @@ function RunContextPanel({
             </Form.Item>
           </Form>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {`parallel 仅用于狼人杀票/白天投票的联合阶段；需要 maxTransitions ≥ ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS}（system.advance + seer.inspect + 双狼 joint batch）。默认仍为 ${DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER}（opt-in only）。`}
+            {`正常运行默认不设 transition 上限；填写后即进入诊断截断模式。parallel 仅用于狼人杀联合阶段；若填写上限，需要 maxTransitions ≥ ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS}。默认调度仍为 ${DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER}。`}
           </Text>
           {jointPhaseScheduler === "parallel" &&
-          parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS) < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS ? (
+          isPositiveIntegerText(maxTransitions) &&
+          Number(maxTransitions) < WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS ? (
             <Alert
               type="warning"
               showIcon
@@ -7474,6 +7478,20 @@ function parsePositiveInteger(value: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseOptionalPositiveInteger(value: string): number | undefined {
+  if (!value.trim()) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error("最大 transitions 必须留空或填写正整数。");
+  }
+  return parsed;
+}
+
+function isPositiveIntegerText(value: string): boolean {
+  const parsed = Number(value);
+  return value.trim().length > 0 && Number.isInteger(parsed) && parsed > 0;
+}
+
 /**
  * The Werewolf adapter has a concrete lower bound for its first parallel
  * native batch. Keep the preflight identical for a one-off match and a
@@ -7482,9 +7500,9 @@ function parsePositiveInteger(value: string, fallback: number): number {
  */
 function assertJointPhaseSchedulerTransitionBudget(
   scheduler: "aec-batched-decision" | "parallel",
-  transitions: number
+  transitions: number | undefined
 ): void {
-  if (scheduler !== "parallel" || transitions >= WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS) return;
+  if (scheduler !== "parallel" || transitions === undefined || transitions >= WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS) return;
   throw new Error(
     `parallel 联合阶段需要 maxTransitions >= ${WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS}（system.advance + seer.inspect + 双狼 joint batch）。`
   );

@@ -81,7 +81,7 @@ describe("server-owned match artifact persistence", () => {
     expect(listed.body.map((match: any) => match.id)).toEqual([matchId]);
     expect(listed.body[0]).toMatchObject({
       id: matchId,
-      status: artifact.status === "failed" ? "failed" : "completed",
+      status: artifact.status,
       harnessStatus: artifact.status,
       truncationReason: artifact.truncationReason ?? null,
       hasArtifact: true,

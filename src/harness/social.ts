@@ -1647,13 +1647,13 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
   const bus = new SocialCommunicationBus(options.channels ?? [], options.initialMessages ?? [], { runtimeActorIds });
   const initialMessages = bus.listMessages();
   const executionLimits = normalizeSocialExecutionLimits(options.executionLimits);
-  const maxTransitions = options.maxTransitions ?? 320;
+  const maxTransitions = options.maxTransitions;
   const execution = {
     schemaVersion: "harness.social-execution.v1" as const,
     started: true,
     initialMessageCount: initialMessages.length,
     initialMessagesHash: options.hashMessages?.(initialMessages),
-    maxTransitions,
+    ...(maxTransitions === undefined ? {} : { maxTransitions }),
     ...(executionLimits.decisionTimeoutMs === undefined
       ? {}
       : { decisionTimeoutMs: executionLimits.decisionTimeoutMs })
@@ -1717,7 +1717,11 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     );
   }
 
-  while (!options.environment.done() && turnIndex <= maxTransitions && !executionLimits.abortSignal?.aborted) {
+  while (
+    !options.environment.done() &&
+    (maxTransitions === undefined || turnIndex <= maxTransitions) &&
+    !executionLimits.abortSignal?.aborted
+  ) {
     // Pending actions are scheduler input owned by the harness. Detach them at
     // the environment boundary so actor/adapter callbacks cannot rewrite the
     // environment's own pending registry or another actor's joint decision.
@@ -2005,7 +2009,7 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
     const successfulDecisions = decisions.filter(isSuccessfulDecision);
 
     if (schedulerMode === "parallel") {
-      if (turnIndex + successfulDecisions.length - 1 > maxTransitions) {
+      if (maxTransitions !== undefined && turnIndex + successfulDecisions.length - 1 > maxTransitions) {
         status = "truncated";
         truncationReason = `maxTransitions ${maxTransitions} reached before parallel batch could be applied`;
         const truncationFailure: SocialStepFailureEvidence = {
@@ -2190,9 +2194,12 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
       );
       status = "failed";
       failureReason = "Social episode aborted by the harness execution control plane after a committed environment transition.";
-    } else {
+    } else if (maxTransitions !== undefined) {
       status = "truncated";
       truncationReason = `maxTransitions ${maxTransitions} reached before terminal state`;
+    } else {
+      status = "failed";
+      failureReason = "Social environment stopped producing transitions before reaching a terminal state.";
     }
   }
   return {

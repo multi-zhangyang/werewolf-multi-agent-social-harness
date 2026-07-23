@@ -9,6 +9,7 @@ import {
   applyWerewolfReasonerProposal,
   commitWerewolfAgentTurn,
   reduceCommittedWerewolfSocialAction,
+  validateWerewolfAgentHarnessStateSnapshot,
   type WerewolfAgentObserveContext
 } from "./actor";
 import { hashStableState } from "./hash";
@@ -1416,6 +1417,13 @@ export function initializeWerewolfAgentActors(
       const policyName = config.policyName ?? policyForRole(player.role);
       const restored = restoredByPlayer.get(player.id);
       if (restored) {
+        const restoredErrors = validateWerewolfAgentHarnessStateSnapshot(restored, {
+          requireSocialState: true,
+          requireSocialStateHash: true
+        });
+        if (restoredErrors.length) {
+          throw new Error(`Invalid restored Werewolf agent state ${player.id}: ${restoredErrors.join(" ")}`);
+        }
         const restoredPolicyName = config.policyName ?? restored.policyName ?? policyName;
         const restoredState: AgentHarnessState = {
           ...restored,
@@ -1427,7 +1435,10 @@ export function initializeWerewolfAgentActors(
           beliefs: cloneJson(restored.beliefs ?? {}),
           privateMemos: cloneJson(restored.privateMemos ?? []),
           social: cloneJson(restored.social),
-          socialStateHash: restored.socialStateHash
+          // The child assignment may intentionally change profile/model/policy.
+          // Validate the canonical parent snapshot before that rewrite, then
+          // let the actor derive the child hash from the rewritten state.
+          socialStateHash: undefined
         };
         if (restoredState.social) {
           restoredState.social.profile = {

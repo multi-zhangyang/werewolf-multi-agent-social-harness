@@ -1291,7 +1291,7 @@ describe("public match API redaction", () => {
 	    expect([200, 207]).toContain(run.status);
 	    assertPublicMatchResponse(run.body);
 	    expect(run.body).toMatchObject({
-	      status: "completed",
+	      status: "truncated",
 	      harnessStatus: "truncated",
 	      truncationReason: expect.stringContaining("maxTransitions")
 	    });

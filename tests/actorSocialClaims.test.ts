@@ -3,6 +3,7 @@ import type { AgentPendingAction } from "../src/core/pending";
 import type { GameCommand } from "../src/core/types";
 import { SocialCommunicationBus, type SocialActorStepReceipt, type SocialChannel, type SocialMessage } from "../src/harness/social";
 import { WerewolfAgentActor, reduceCommittedWerewolfSocialAction } from "../src/harness/actor";
+import { hashStableState } from "../src/harness/hash";
 import type { AgentHarnessState, HarnessPlayerView } from "../src/harness/types";
 
 describe("Werewolf agent social claim ingestion", () => {
@@ -2009,6 +2010,23 @@ describe("Werewolf agent social claim ingestion", () => {
         (entry) => entry.store === "relationships" && entry.metadata?.messageId === firstMessage.id
       )
     ).toHaveLength(1);
+  });
+
+  it("rejects hash-consistent restored Werewolf state that violates bounded sequence contracts", () => {
+    const actor = new WerewolfAgentActor(agentState("observer"));
+    if (!actor.state.social?.journal) throw new Error("Expected initialized social journal.");
+
+    const overLimit = JSON.parse(JSON.stringify(actor.state)) as AgentHarnessState;
+    overLimit.social!.memory.maxEntries = 200;
+    overLimit.social!.journal!.maxEntries = 1000;
+    overLimit.socialStateHash = hashStableState(overLimit.social);
+    expect(() => new WerewolfAgentActor(overLimit)).toThrow(/memory\.maxEntries exceeds.*journal\.maxEntries exceeds/);
+
+    const sequenceReuse = JSON.parse(JSON.stringify(actor.state)) as AgentHarnessState;
+    sequenceReuse.social!.memory.nextSeq = 9;
+    sequenceReuse.social!.journal!.nextSeq = 9;
+    sequenceReuse.socialStateHash = hashStableState(sequenceReuse.social);
+    expect(() => new WerewolfAgentActor(sequenceReuse)).toThrow(/must retain 8 sequence entries/);
   });
 
   it("creates and resolves linked commitment goals only from delivered typed vote evidence", () => {

@@ -28726,3 +28726,62 @@ model substitution, policy fallback, fake success, token-limit field, or
 non-streaming live request was added. Canonical live artifacts remain local and
 must not be committed; repository screenshots come only from the server-owned
 `postgame-redacted` projection.
+
+## 13.302 Latest Runtime And Completion Lock (2026-07-23)
+
+This section supersedes earlier model-selection text while preserving every
+provider-neutral, streaming, privacy, harness-authority, replay, and evaluation
+rule above.
+
+```text
+LLM_MODELS=qwen/qwen3.8-max-preview:free
+LLM_STREAM=true
+```
+
+- The model id is an opaque local validation value only. Do not add a model,
+  provider, or endpoint branch for it.
+- Omitted `maxTransitions` means no transition cap at the generic scheduler,
+  experiment, tournament, server, and React boundaries. Abort/deadline control
+  remains mandatory; an explicit cap remains a diagnostic truncation tool.
+- The default full-match deadline is 90 minutes. A 30-minute real run with the
+  current validation model reached 56 completed streaming decisions but was
+  correctly rejected after the global deadline before `game_over`; never cite
+  that failed run as live completion evidence.
+- A rolling mutation journal is a retained suffix. Evaluators must treat facts
+  outside an incomplete retention window as unevaluable, never as proven
+  missing or as proof that no later mutation occurred.
+- Terminal `truncated` matches remain `truncated` in the server registry and UI;
+  they must never be relabeled `completed`.
+- Persisted match artifacts and indexes use same-directory staging plus atomic
+  rename. Match-store recovery is coalesced once per server instance rather
+  than repeated for every list/detail request.
+- Final delivery requires the new commit to be pushed, the exact pushed SHA's
+  CI to conclude successfully, a redacted Git audit, and cleanup of test/server/
+  browser/provider-call processes. Never commit canonical private live
+  artifacts or local env files.
+
+Current live validation evidence after the deadline correction:
+
+```text
+streaming probe:
+  completed=true
+  completedBy=provider_stop_event
+  environmentValidated=true
+
+full uncapped nine-seat match:
+  status=completed
+  phase=game_over
+  provider calls=59
+  completed streaming calls=59
+  native=60 committed=60 rejected=0
+  harness errors=0
+
+model-free replay:
+  replayed steps=60
+  final state matched=true
+  messages matched=true
+  mismatches=0
+```
+
+The canonical artifact and strict content-free verification receipt are local
+validation material only and must remain ignored by Git.

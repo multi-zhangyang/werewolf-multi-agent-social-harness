@@ -118,6 +118,11 @@ npm run dev
 - API：<http://127.0.0.1:8787>
 - 健康检查：<http://127.0.0.1:8787/api/health>
 
+`.env.example` 默认不设置 `MATCH_MAX_TRANSITIONS`，因此正常对局会运行到
+`completed + game_over`；只有显式填写该变量或传入 `--maxTransitions` 才会进入诊断截断模式。
+示例同时配置 match、checkpoint、tournament、experiment 与 comparison 的本地工件目录，
+服务重启后仍可恢复已发布的研究工件。
+
 内置服务默认面向本地研究与开发。部署到共享网络前，应增加身份认证、限流、TLS、
 存储隔离和经过审计的反向代理，并只开放适合目标受众的脱敏投影接口。
 
@@ -203,7 +208,7 @@ npm run agent:probe -- --models=your-model-id --timeout=90s
 mkdir -p artifacts
 npm run arena:match -- \
   --models=your-model-id \
-  --timeout=30m \
+  --timeout=90m \
   --json=summary \
   --export=artifacts/match.json
 ```
@@ -211,6 +216,18 @@ npm run arena:match -- \
 只有 `completed + game_over` 且没有 Harness failure 的对局才返回成功。显式设置
 `--maxTransitions` 可用于诊断，但达到上限的 `truncated` 工件不会计作完整真实运行，
 CLI 也会以非零状态退出。
+
+需要快速验证接口而不等待完整对局时，请明确使用诊断命令：
+
+```bash
+npm run arena:match -- \
+  --models=your-model-id \
+  --maxTransitions=4 \
+  --timeout=3m \
+  --json=summary
+```
+
+该命令预期产生 `truncated` 生命周期，只用于诊断，不是完整真实模型验收。
 
 ### 锦标赛
 
