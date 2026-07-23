@@ -451,6 +451,228 @@ describe("restart-safe experiment run store", () => {
     await expect(HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority }))
       .rejects.toThrow(/gamesRequested does not match|manifest does not match/i);
   });
+
+  it("uses v3 only for multi-attempt runs and preserves an append-only retry ledger through restart", async () => {
+    const root = await temporaryRoot();
+    const artifacts = new Map<string, Artifact>();
+    const authority = {
+      async get(runId: string) { return artifacts.get(runId); },
+      async getMetrics(runId: string) { return artifacts.has(runId) ? [] : undefined; },
+      async getFailures(runId: string) { return artifacts.has(runId) ? [] : undefined; },
+      async getEvaluationReport() { return undefined; }
+    };
+    const single = createGenericExperimentProvenance(experimentSpec(1));
+    const multi = createGenericExperimentProvenance({
+      ...experimentSpec(1),
+      retryPolicy: { id: "ledger.retry", version: "2", maxAttempts: 3, backoffMs: 1_000 }
+    });
+    const store = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    expect((await store.beginOrResume({ runSetId: "v2-single", experiment: single })).record.schemaVersion)
+      .toBe("harness.experiment-run-record.v2");
+    expect((await store.beginOrResume({ runSetId: "v3-retry", experiment: multi, createdAt: "2026-07-23T01:00:00.000Z" })).record.schemaVersion)
+      .toBe("harness.experiment-run-record.v3");
+
+    const firstStarted = await store.startEpisode({
+      runSetId: "v3-retry",
+      index: 0,
+      seed: `${multi.spec.seed}:g1`,
+      startedAt: "2026-07-23T01:00:01.000Z"
+    });
+    expect(firstStarted).toMatchObject({
+      gamesInFlight: 1,
+      gamesUnstarted: 0,
+      currentEpisode: { phase: "started", ordinal: 1, priorAttempts: [] }
+    });
+    const firstAttemptId = firstStarted.currentEpisode!.attemptId;
+    const waiting = await store.scheduleEpisodeRetry({
+      runSetId: "v3-retry",
+      code: "counter.prepare-temporary",
+      scheduledAt: "2026-07-23T01:00:02.000Z",
+      backoffMs: 1_000
+    });
+    expect(waiting).toMatchObject({
+      gamesInFlight: 1,
+      gamesUnstarted: 0,
+      currentEpisode: {
+        phase: "retry-wait",
+        ordinal: 1,
+        attemptId: firstAttemptId,
+        eligibleAt: "2026-07-23T01:00:03.000Z",
+        code: "counter.prepare-temporary"
+      }
+    });
+
+    const restarted = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    await expect(restarted.recoverCurrentEpisode("v3-retry")).resolves.toMatchObject({
+      disposition: "retry-wait",
+      record: { gamesInFlight: 1, currentEpisode: { phase: "retry-wait" } }
+    });
+    await expect(restarted.startEpisode({
+      runSetId: "v3-retry",
+      index: 0,
+      seed: `${multi.spec.seed}:g1`,
+      startedAt: "2026-07-23T01:00:02.999Z"
+    })).rejects.toThrow(/not eligible/i);
+
+    const secondStarted = await restarted.startEpisode({
+      runSetId: "v3-retry",
+      index: 0,
+      seed: `${multi.spec.seed}:g1`,
+      startedAt: "2026-07-23T01:00:03.000Z"
+    });
+    expect(secondStarted).toMatchObject({
+      gamesUnstarted: 0,
+      currentEpisode: {
+        phase: "started",
+        ordinal: 2,
+        priorAttempts: [{
+          ordinal: 1,
+          attemptId: firstAttemptId,
+          outcome: "retry-scheduled",
+          code: "counter.prepare-temporary"
+        }]
+      }
+    });
+    expect(secondStarted.currentEpisode!.attemptId).not.toBe(firstAttemptId);
+
+    const artifact = { runId: "v3-retry:g1", status: "completed", experiment: multi } as unknown as Artifact;
+    await restarted.stageEpisode({
+      runSetId: "v3-retry",
+      stagedAt: "2026-07-23T01:00:04.000Z",
+      episode: { index: 0, seed: `${multi.spec.seed}:g1`, status: "completed", runId: artifact.runId, artifact }
+    });
+    artifacts.set(artifact.runId, artifact);
+    await restarted.recordEpisode({
+      runSetId: "v3-retry",
+      episode: { index: 0, seed: `${multi.spec.seed}:g1`, status: "completed", runId: artifact.runId, artifact }
+    });
+    const terminal = await restarted.get("v3-retry");
+    expect(terminal).toMatchObject({
+      schemaVersion: "harness.experiment-run-record.v3",
+      gamesCompleted: 1,
+      gamesInFlight: 0,
+      episodes: [{
+        acceptedAttemptId: secondStarted.currentEpisode!.attemptId,
+        attempts: [
+          { ordinal: 1, attemptId: firstAttemptId, outcome: "retry-scheduled" },
+          { ordinal: 2, attemptId: secondStarted.currentEpisode!.attemptId, outcome: "artifact-committed" }
+        ]
+      }]
+    });
+    expect(JSON.stringify(terminal)).not.toMatch(/exception|provider|temporary failure text/i);
+    await restarted.finalize({
+      artifactVersion: "harness.tournament-run-set.v1",
+      kind: "tournament-run-set",
+      domainId: multi.spec.domainId,
+      runSetId: "v3-retry",
+      createdAt: "2026-07-23T01:00:00.000Z",
+      seed: multi.spec.seed,
+      gamesRequested: 1,
+      gamesCompleted: 1,
+      gamesTruncated: 0,
+      gamesFailed: 0,
+      gamesUnstarted: 0,
+      experiment: multi,
+      episodes: [{ index: 0, seed: `${multi.spec.seed}:g1`, status: "completed", runId: artifact.runId, artifact }]
+    });
+    await expect(HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority }))
+      .resolves.toBeDefined();
+  });
+
+  it("fails closed on unsafe retry codes, scheduling drift, exhaustion, and an ambiguous started crash", async () => {
+    const root = await temporaryRoot();
+    const authority = emptyAuthority({ artifacts: 0, metrics: 0, failures: 0, evaluations: 0 });
+    const experiment = createGenericExperimentProvenance({
+      ...experimentSpec(1),
+      retryPolicy: { id: "ledger.retry", version: "2", maxAttempts: 2 }
+    });
+    const store = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    await store.beginOrResume({ runSetId: "v3-exhaustion", experiment, createdAt: "2026-07-23T02:00:00.000Z" });
+    await store.startEpisode({
+      runSetId: "v3-exhaustion", index: 0, seed: `${experiment.spec.seed}:g1`, startedAt: "2026-07-23T02:00:01.000Z"
+    });
+    await expect(store.scheduleEpisodeRetry({
+      runSetId: "v3-exhaustion", code: "raw exception: secret", scheduledAt: "2026-07-23T02:00:02.000Z", backoffMs: 0
+    })).rejects.toThrow(/safe reviewed classifier code/i);
+    await store.scheduleEpisodeRetry({
+      runSetId: "v3-exhaustion", code: "counter.run-timeout", scheduledAt: "2026-07-23T02:00:02.000Z", backoffMs: 0
+    });
+    await expect(store.scheduleEpisodeRetry({
+      runSetId: "v3-exhaustion", code: "counter.run-timeout", scheduledAt: "2026-07-23T02:00:03.000Z", backoffMs: 0
+    })).rejects.toThrow(/conflicts with durable authority/i);
+    await store.startEpisode({
+      runSetId: "v3-exhaustion", index: 0, seed: `${experiment.spec.seed}:g1`, startedAt: "2026-07-23T02:00:02.000Z"
+    });
+    await expect(store.scheduleEpisodeRetry({
+      runSetId: "v3-exhaustion", code: "counter.run-timeout", scheduledAt: "2026-07-23T02:00:03.000Z", backoffMs: 0
+    })).rejects.toThrow(/exceed maxAttempts/i);
+
+    const restarted = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    const recovered = await restarted.recoverCurrentEpisode("v3-exhaustion");
+    expect(recovered).toMatchObject({
+      disposition: "failed-interrupted-start",
+      record: {
+        gamesFailed: 1,
+        gamesInFlight: 0,
+        episodes: [{ attempts: [
+          { ordinal: 1, outcome: "retry-scheduled" },
+          { ordinal: 2, outcome: "interrupted-unknown" }
+        ] }]
+      }
+    });
+  });
+
+  it("converges concurrent exact retry scheduling and adopts a staged v3 artifact after restart", async () => {
+    const root = await temporaryRoot();
+    const artifacts = new Map<string, Artifact>();
+    const authority = {
+      async get(runId: string) { return artifacts.get(runId); },
+      async getMetrics(runId: string) { return artifacts.has(runId) ? [] : undefined; },
+      async getFailures(runId: string) { return artifacts.has(runId) ? [] : undefined; },
+      async getEvaluationReport() { return undefined; }
+    };
+    const experiment = createGenericExperimentProvenance({
+      ...experimentSpec(1),
+      retryPolicy: { id: "ledger.retry", version: "2", maxAttempts: 2, backoffMs: 5 }
+    });
+    const [first, second] = await Promise.all([
+      HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority }),
+      HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority })
+    ]);
+    await first.beginOrResume({ runSetId: "v3-concurrent", experiment, createdAt: "2026-07-23T03:00:00.000Z" });
+    await first.startEpisode({
+      runSetId: "v3-concurrent", index: 0, seed: `${experiment.spec.seed}:g1`, startedAt: "2026-07-23T03:00:01.000Z"
+    });
+    const scheduled = await Promise.all([first, second].map((store) => store.scheduleEpisodeRetry({
+      runSetId: "v3-concurrent",
+      code: "counter.prepare-busy",
+      scheduledAt: "2026-07-23T03:00:02.000Z",
+      backoffMs: 5
+    })));
+    expect(scheduled[0]).toEqual(scheduled[1]);
+    await first.startEpisode({
+      runSetId: "v3-concurrent", index: 0, seed: `${experiment.spec.seed}:g1`, startedAt: "2026-07-23T03:00:02.005Z"
+    });
+    const artifact = { runId: "v3-concurrent:g1", status: "completed", experiment } as unknown as Artifact;
+    await first.stageEpisode({
+      runSetId: "v3-concurrent",
+      stagedAt: "2026-07-23T03:00:03.000Z",
+      episode: { index: 0, seed: `${experiment.spec.seed}:g1`, status: "completed", runId: artifact.runId, artifact }
+    });
+    artifacts.set(artifact.runId, artifact);
+    const restarted = await HarnessExperimentRunStore.open({ baseDirectory: root, episodeStore: authority });
+    await expect(restarted.recoverCurrentEpisode("v3-concurrent")).resolves.toMatchObject({
+      disposition: "committed-staged-artifact",
+      record: {
+        gamesCompleted: 1,
+        gamesInFlight: 0,
+        episodes: [{ attempts: [
+          { ordinal: 1, outcome: "retry-scheduled" },
+          { ordinal: 2, outcome: "artifact-committed" }
+        ] }]
+      }
+    });
+  });
 });
 
 function emptyAuthority(reads: { artifacts: number; metrics: number; failures: number; evaluations: number }) {

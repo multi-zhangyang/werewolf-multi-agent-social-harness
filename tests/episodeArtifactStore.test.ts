@@ -1,12 +1,19 @@
 import { createHash } from "node:crypto";
 import { fork, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SocialDomainAdapterManifest } from "../src/harness/domainAdapter";
-import type { HarnessCheckpointEnvelope, HarnessEpisodeArtifactEnvelope } from "../src/harness/episodeArtifacts";
+import {
+  HARNESS_EPISODE_PROJECTION_VERSION,
+  validateHarnessEpisodeProjectionEnvelope,
+  type HarnessCheckpointEnvelope,
+  type HarnessEpisodeArtifactEnvelope,
+  type HarnessEpisodeProjectionEnvelope
+} from "../src/harness/episodeArtifacts";
+import { deriveHarnessEpisodeArtifactSha256 } from "../src/harness/episodeArtifactStore";
 import { runEvaluationRegistry } from "../src/harness/evaluation";
 import {
   HarnessEpisodeArtifactStore,
@@ -19,7 +26,7 @@ import {
   validateHarnessCheckpointReplay,
   verifyHarnessEpisodeArtifact
 } from "../src/harness/generic";
-import { hashStableState } from "../src/harness/hash";
+import { hashStableJsonValue, hashStableState } from "../src/harness/hash";
 import { runHarnessEpisode } from "../src/harness/runner";
 import type { SocialActor, SocialEnvironment } from "../src/harness/social";
 
@@ -572,6 +579,132 @@ describe("generic single-episode artifact store", () => {
       .rejects.toThrow(/different immutable content/i);
   });
 
+  it("atomically stores one manifest-bound projection and requires exact retry content", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const projection = counterProjection(artifact, {
+      summary: "The counter reached its public terminal value.",
+      finalValue: artifact.finalState.value
+    });
+    const store = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+
+    expect(validateHarnessEpisodeProjectionEnvelope({
+      ...projection,
+      generatedAt: "2026-07-23T04:00:00.000Z"
+    })).toContain("projection contains unsupported field generatedAt.");
+
+    const first = await store.put(artifact, { projection });
+    expect(await store.get(artifact.runId)).toEqual(artifact);
+    expect(await store.getProjection(artifact.runId)).toEqual(projection);
+    const episodeDirectory = path.join(root, "episodes", first.directoryKey);
+    const projectionText = await readFile(path.join(episodeDirectory, "projection.json"), "utf8");
+    const manifest = JSON.parse(await readFile(path.join(episodeDirectory, "manifest.json"), "utf8")) as {
+      schemaVersion: string;
+      artifactSha256: string;
+      projectionSha256: string;
+      projectionVisibility: string;
+      projectionPolicyId: string;
+      projectionPolicyVersion: string;
+      files: { projection: string; manifest: string };
+    };
+    expect(manifest).toMatchObject({
+      schemaVersion: "harness.episode-store-manifest.v4",
+      artifactSha256: projection.source.artifactSha256,
+      projectionSha256: rawSha256(projectionText),
+      projectionVisibility: "public",
+      projectionPolicyId: "counter.public",
+      projectionPolicyVersion: "1",
+      files: { projection: "projection.json", manifest: "manifest.json" }
+    });
+
+    expect(await store.put(structuredClone(artifact), { projection: structuredClone(projection) })).toEqual(first);
+    const reopened = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    expect(await reopened.put(structuredClone(artifact), { projection: structuredClone(projection) })).toEqual(first);
+
+    const drifted = counterProjection(artifact, { summary: "Different projection", finalValue: 999 });
+    await expect(reopened.put(structuredClone(artifact), { projection: drifted }))
+      .rejects.toThrow(/different immutable content/i);
+    await expect(reopened.put(structuredClone(artifact)))
+      .rejects.toThrow(/different immutable content/i);
+  });
+
+  it("cleans a complete projection staging tree when final publication loses an external collision", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const projection = counterProjection(artifact, { publicSummary: "x".repeat(4_000_000) });
+    const store = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    const episodesDirectory = path.join(root, "episodes");
+    const finalDirectory = path.join(episodesDirectory, rawSha256(artifact.runId));
+    const blockerDirectory = path.join(root, "publication-blocker");
+    await mkdir(blockerDirectory);
+    await writeFile(path.join(blockerDirectory, "occupied"), "external collision\n", "utf8");
+
+    const publication = store.put(artifact, { projection });
+    await waitForEpisodeStagingDirectory(episodesDirectory);
+    await rename(blockerDirectory, finalDirectory);
+    await expect(publication).rejects.toThrow();
+    const childrenAfterFailure = await readdir(episodesDirectory);
+    expect(childrenAfterFailure.filter((name) => name.startsWith(".tmp-"))).toEqual([]);
+    expect(await readdir(finalDirectory)).toEqual(["occupied"]);
+
+    await rm(finalDirectory, { recursive: true, force: true });
+    await expect(store.put(artifact, { projection })).resolves.toMatchObject({ runId: artifact.runId });
+    expect(await store.getProjection(artifact.runId)).toEqual(projection);
+  }, 30_000);
+
+  it("rejects a tampered manifest-bound projection during reads and restart recovery", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const projection = counterProjection(artifact, { summary: "Reviewed public projection" });
+    const store = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    const entry = await store.put(artifact, { projection });
+    const projectionPath = path.join(root, "episodes", entry.directoryKey, "projection.json");
+    const tampered = structuredClone(projection);
+    (tampered.payload as { summary: string }).summary = "tampered";
+    await writeFile(projectionPath, `${JSON.stringify(tampered, null, 2)}\n`, "utf8");
+
+    await expect(store.getProjection(artifact.runId)).rejects.toThrow(/canonical recovery validation/i);
+    const reopened = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    expect(await reopened.list()).toEqual([]);
+    await expect(reopened.getProjection(artifact.runId)).rejects.toThrow(/canonical recovery validation/i);
+  });
+
+  it("reopens legacy v3 manifests as full artifacts without inventing projection authority", async () => {
+    const root = await temporaryStoreRoot();
+    const artifact = await buildCounterArtifact();
+    const store = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    const entry = await store.put(artifact);
+    const manifestPath = path.join(root, "episodes", entry.directoryKey, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { schemaVersion: string };
+    manifest.schemaVersion = "harness.episode-store-manifest.v3";
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+    const reopened = await HarnessEpisodeArtifactStore.open({
+      baseDirectory: root,
+      verifyArtifact: counterVerifier()
+    });
+    expect(await reopened.get(artifact.runId)).toEqual(artifact);
+    expect(await reopened.getProjection(artifact.runId)).toBeUndefined();
+  });
+
   it("converges concurrent exact publishers onto one canonical episode directory", async () => {
     const root = await temporaryStoreRoot();
     const artifact = await buildCounterArtifact();
@@ -951,6 +1084,35 @@ function counterCheckpointVerifier() {
 
 function rawSha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function counterProjection(
+  artifact: CounterArtifact,
+  payload: unknown
+): HarnessEpisodeProjectionEnvelope {
+  return {
+    schemaVersion: HARNESS_EPISODE_PROJECTION_VERSION,
+    kind: "episode-projection",
+    source: {
+      runId: artifact.runId,
+      artifactSha256: deriveHarnessEpisodeArtifactSha256(artifact),
+      visibility: "public",
+      policyId: "counter.public",
+      policyVersion: "1"
+    },
+    payloadSha256: hashStableJsonValue(payload),
+    payload
+  };
+}
+
+async function waitForEpisodeStagingDirectory(episodesDirectory: string): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 10_000) {
+    const children = await readdir(episodesDirectory);
+    if (children.some((name) => name.startsWith(".tmp-"))) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("Timed out waiting for episode staging directory.");
 }
 
 interface EpisodeStoreWorkerMessage {

@@ -995,6 +995,115 @@ describe("Werewolf generic social adapter", () => {
     expect(replayWerewolfSocialEpisode(result.socialEpisode).ok).toBe(true);
   });
 
+  it("keeps a late timed-out reasoner report out of the next transaction", async () => {
+    const initialState = createGame({ id: "werewolf-late-reasoner-report", seed: "werewolf-late-reasoner-report" });
+    const seer = initialState.players.find((player) => player.role === "seer");
+    if (!seer) throw new Error("Expected a seer in the default Werewolf config.");
+    type Output = Awaited<ReturnType<HarnessReasoner["think"]>>;
+    let resolveFirst!: (output: Output) => void;
+    const firstOutput = new Promise<Output>((resolve) => { resolveFirst = resolve; });
+    let reasonerCalls = 0;
+    const output = (label: string, latencyMs: number): Output => ({
+      content: label,
+      completion: {
+        content: label,
+        latencyMs,
+        usage: { promptTokens: latencyMs, completionTokens: 1, totalTokens: latencyMs + 1 },
+        attempts: 1,
+        stream: { enabled: true, completed: true, completedBy: "done_sentinel" }
+      }
+    });
+    const reasoner: HarnessReasoner = {
+      think() {
+        reasonerCalls += 1;
+        return reasonerCalls === 1 ? firstOutput : Promise.resolve(output("turn-two-report", 22));
+      }
+    };
+    const adapter = new WerewolfSocialActorAdapter({
+      actor: new WerewolfAgentActor({
+        playerId: seer.id,
+        profileId: "late-report-profile",
+        model: "late-report-model",
+        temperature: 0,
+        policyName: policyForRole(seer.role),
+        turns: 0,
+        observations: 0,
+        beliefs: {},
+        privateMemos: []
+      }),
+      reasoner,
+      players: initialState.players,
+      executionMode: "scaffold"
+    });
+
+    const timedOut = await runSocialEpisode({
+      id: "werewolf-late-reasoner-turn-one",
+      environment: WerewolfSocialEnvironment.fromState(initialState),
+      actors: [adapter],
+      channels: createWerewolfSocialChannels(initialState.players),
+      schedulerMode: "aec",
+      maxTransitions: 2,
+      executionLimits: { decisionTimeoutMs: 5 },
+      hashState: hashStableState,
+      eventSeq: werewolfEventSeq,
+      assembleObservation: assembleWerewolfSocialObservation,
+      systemTransition: werewolfSystemTransition
+    });
+    expect(timedOut.status).toBe("failed");
+    expect(timedOut.steps.at(-1)).toMatchObject({
+      actorId: seer.id,
+      commitStatus: "rejected",
+      failure: { stage: "decision_timeout" }
+    });
+    expect(timedOut.steps.at(-1)?.reasonerCalls).toBeUndefined();
+
+    const nightSeerState = applyCommand(initialState, { type: "system.advance", actorId: "system" });
+    const pending = getPendingActions(nightSeerState).find(
+      (action) => action.kind === "inspect" && action.actorId === seer.id
+    );
+    if (!pending || pending.kind !== "inspect") throw new Error("Expected a seer inspection action for turn two.");
+    const traceId = "werewolf-late-reasoner-turn-two:trace";
+    const transactionId = "werewolf-late-reasoner-turn-two:transaction";
+    adapter.observe({
+      kind: "player",
+      agentId: seer.id,
+      view: {
+        ...createPlayerView(nightSeerState, seer.id, pending),
+        social: { channels: [], messages: [] }
+      }
+    }, {
+      traceId,
+      transactionId,
+      transactional: true,
+      turnIndex: 2,
+      actorTurnIndex: 2,
+      batchId: "werewolf-late-reasoner-turn-two:batch",
+      batchIndex: 2,
+      batchSize: 1,
+      schedulerMode: "aec",
+      pendingAction: pending
+    });
+    const secondAction = await adapter.decide(pending);
+    expect(secondAction.traceId).toBe(traceId);
+
+    // The first provider settles only after turn two has produced its own
+    // report but before the runner consumes turn two's transaction evidence.
+    resolveFirst(output("stale-turn-one-report", 11));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const secondReports = adapter.takeReasonerCallReports({ transactionId, traceId, turnIndex: 2 });
+    expect(secondReports).toEqual([
+      expect.objectContaining({
+        outcome: "completed",
+        latencyMs: 22,
+        usage: { promptTokens: 22, completionTokens: 1, totalTokens: 23 },
+        stream: { enabled: true, completed: true, completedBy: "done_sentinel" }
+      })
+    ]);
+    expect(JSON.stringify(secondReports)).not.toContain("stale-turn-one-report");
+    expect(adapter.takeReasonerCallReports({ transactionId, traceId, turnIndex: 2 })).toEqual([]);
+  });
+
   it("can project generic Werewolf steps with legacy harness trace ids", async () => {
     const initialState = createGame({ id: "werewolf-social-legacy-trace", seed: "werewolf-social-legacy-trace" });
     const seer = initialState.players.find((player) => player.role === "seer");
@@ -2647,7 +2756,7 @@ describe("Werewolf generic social adapter", () => {
         trajectory: generic.trajectory
       });
 
-      expect(generic.artifact.status).toBe("truncated");
+      expect(generic.artifact.status, generic.artifact.failureReason).toBe("truncated");
       expect(generic.artifact.truncationReason).toContain("maxTransitions 7");
       expect(generic.artifact.finalState.phase).toBe("day_speech");
       expect(generic.trajectory.map((step) => step.command.type)).toEqual([
@@ -2662,6 +2771,12 @@ describe("Werewolf generic social adapter", () => {
       expect(generic.artifact.messages).toHaveLength(12);
       expect(generic.trajectory.every((step) => step.reasonerOutput.retryHistory?.[0]?.failureKind === "http")).toBe(true);
       expect(generic.trajectory.every((step) => step.reasonerOutput.stream?.completedBy === "done_sentinel")).toBe(true);
+      const nativePlayerSteps = generic.artifact.steps.filter((step) => step.actorId !== "system" && !step.error);
+      expect(nativePlayerSteps.every((step) => step.reasonerCalls?.length === 1)).toBe(true);
+      expect(nativePlayerSteps.every((step) => step.reasonerCalls?.[0]?.actorId === step.actorId)).toBe(true);
+      expect(nativePlayerSteps.every((step) => step.reasonerCalls?.[0]?.traceId === step.traceId)).toBe(true);
+      expect(nativePlayerSteps.every((step) => step.reasonerCalls?.[0]?.stream.completedBy === "done_sentinel")).toBe(true);
+      expect(JSON.stringify(nativePlayerSteps.map((step) => step.reasonerCalls))).not.toContain("providerRequestId");
       const killSteps = generic.socialSteps.filter((step) => step.action.command.type === "werewolf.killVote");
       expect(killSteps).toHaveLength(2);
       expect(new Set(killSteps.map((step) => step.decisionStateHash)).size).toBe(1);
@@ -3050,7 +3165,25 @@ describe("Werewolf generic social adapter", () => {
       expect(result.socialEpisode.steps.filter((step) => isSocialStepCommitted(step) && step.actorId !== "system").map((step) => step.traceId)).toEqual(
         result.trajectory.map((step) => step.traceId)
       );
-      expect(result.socialEpisode.steps.at(-1)).toMatchObject({ commitStatus: "rejected", failure: expect.any(Object) });
+      const failedReasonerStep = result.socialEpisode.steps.find((step) =>
+        step.reasonerCalls?.some((call) => call.outcome === "failed")
+      );
+      expect(failedReasonerStep).toMatchObject({
+        commitStatus: "rejected",
+        reasonerCalls: [
+          expect.objectContaining({
+            outcome: "failed",
+            actorId: expect.any(String),
+            model: "failed-result-parity-profile",
+            stream: { enabled: true, completed: false },
+            failure: expect.objectContaining({ failureKind: "timeout", providerStage: "during_request" })
+          })
+        ],
+        failure: expect.any(Object)
+      });
+      expect(JSON.stringify(failedReasonerStep?.reasonerCalls)).not.toMatch(
+        /providerRequestId|providerBody|causeMessage/i
+      );
       expect(result.socialEpisode.messages).toHaveLength(2);
       expect(harnessTurns).toHaveLength(2);
       expect(harnessTurns.filter(({ step }) => isSocialStepCommitted(step))).toHaveLength(1);

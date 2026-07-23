@@ -265,9 +265,9 @@ describe("tournament artifact directory writer", () => {
     expect(metricsCsv).toContain(
       "evidence_ref_count,promotion_class,scorecard_eligible,promotion_reasons,promotion_decision_id,metadata,promotion_policy_id,promotion_policy_version,promotion_policy_hash,promotion_catalog_id,promotion_catalog_version,promotion_catalog_hash,promotion_resolution"
     );
-    expect(metricsCsv).toContain("agent.reward");
+    expect(metricsCsv).not.toContain("agent.reward");
     expect(metricsCsv).toContain(WEREWOLF_OUTCOME_EVALUATOR_ID);
-    expect(metricsCsv).toMatch(/agent\.reward,.*,scorecard,/);
+    expect(metricsCsv).toMatch(/episode\.completed_with_winner,.*,scorecard,/);
 
     const leaderboardCsv = await readFile(path.join(outputDir, "leaderboard.csv"), "utf8");
     expect(leaderboardCsv).toMatch(
@@ -365,10 +365,7 @@ describe("tournament artifact directory writer", () => {
     expect(metrics.every((metric) => !("warnings" in metric) && !("warningSummary" in metric))).toBe(true);
     expect(metrics.map((metric) => metric.id)).toEqual(
       expect.arrayContaining([
-        "team.reward",
-        "agent.reward",
-        "profile.agent_reward",
-        "model.agent_reward",
+        "episode.completed_with_winner",
         "agent.survival_rate",
         "agent.social.memory_count",
         "agent.social.commitment_status_temporal_association_count",
@@ -376,19 +373,20 @@ describe("tournament artifact directory writer", () => {
         "agent.social.coordination_message_count"
       ])
     );
+    const rewardMetricIds = new Set(["team.reward", "agent.reward", "profile.agent_reward", "model.agent_reward"]);
+    expect(metrics.filter((metric) => rewardMetricIds.has(String(metric.id)))).toEqual([]);
     const betrayalMetricIds = new Set<string>(BETRAYAL_LIFECYCLE_TEMPORAL_ASSOCIATION_METRIC_IDS);
     const betrayalMetrics = metrics.filter((metric) => betrayalMetricIds.has(String(metric.id)));
     expect(betrayalMetrics.every((metric) => (metric.weight ?? 0) === 0)).toBe(true);
     expect(metrics.every((metric) => metric.episodeIndex === 0 && metric.tournamentEpisodeIndex === 0 && metric.tournamentSeed === "writer-truncated")).toBe(true);
-    expect(metrics.find((metric) => metric.id === "agent.reward")).toMatchObject({
+    expect(metrics.find((metric) => metric.id === "episode.completed_with_winner")).toMatchObject({
       type: "metric",
       episodeIndex: 0,
       tournamentEpisodeIndex: 0,
       tournamentSeed: "writer-truncated",
       evaluatorId: WEREWOLF_OUTCOME_EVALUATOR_ID,
       evaluatorVersion: "1.0.0",
-      subject: expect.objectContaining({ playerId: expect.any(String), model: expect.any(String), role: expect.any(String), team: expect.any(String) }),
-      denominator: expect.any(Number),
+      value: 0,
       confidence: expect.any(Number),
       aggregation: expect.any(String),
       evidenceRefs: expect.arrayContaining([expect.objectContaining({ artifact: "event" })]),
@@ -1575,6 +1573,12 @@ describe("tournament artifact directory writer", () => {
       expect(matchArtifact.socialEpisode.steps.some((step: any) => step.commitStatus === "rejected" && step.failure)).toBe(true);
       expect(matchArtifact.metrics.harnessErrorCount).toBe(1);
       expect(matchArtifact.socialEpisode.status).toBe("failed");
+      expect(
+        matchArtifact.evaluationReport.metrics.filter((metric: { id: string }) =>
+          ["team.reward", "agent.reward", "profile.agent_reward", "model.agent_reward"].includes(metric.id)
+        )
+      ).toEqual([]);
+      expect(matchArtifact.evaluationReport.metrics.some((metric: { id: string }) => metric.id === "episode.completed_with_winner")).toBe(true);
 
       const trajectory = await readJsonl<Record<string, any>>(path.join(outputDir, "trajectory.jsonl"));
       expect(
@@ -2081,8 +2085,19 @@ describe("tournament artifact directory writer", () => {
     expect(summaryMarkdown).not.toContain("917555911");
 
     const changedRaw = JSON.parse(JSON.stringify(raw)) as typeof raw;
-    const rewardMetric = changedRaw.metrics.find((metric) => metric.id === "agent.reward" && metric.status === "completed");
-    if (!rewardMetric) throw new Error("Expected a persisted completed agent.reward metric.");
+    const completedAgentMetric = changedRaw.metrics.find(
+      (metric) => metric.status === "completed" && metric.scope === "agent" && typeof metric.subjectId === "string"
+    );
+    if (!completedAgentMetric) throw new Error("Expected a persisted completed agent-scoped metric fixture.");
+    const rewardMetric = {
+      ...completedAgentMetric,
+      id: "agent.reward",
+      label: "Synthetic completed reward sample for raw-record rebuild",
+      value: 0,
+      promotionClass: "scorecard",
+      scorecardEligible: true
+    };
+    changedRaw.metrics.push(rewardMetric);
     const priorPromotion = rebuildTournamentLeaderboardFromRawRecords({
       models: changedRaw.spec.models,
       profiles: changedRaw.spec.profiles,

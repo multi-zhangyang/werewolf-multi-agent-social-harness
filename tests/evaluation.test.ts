@@ -31,6 +31,7 @@ import {
   createWerewolfDeceptionEvaluator,
   createWerewolfSocialCalibrationEvaluator,
   evaluateAdversarialMatch,
+  metricsFromWerewolfOutcomeEvaluation,
   metricsFromWerewolfDeceptionEvaluation,
   metricsFromWerewolfInfluenceEvaluation,
   metricsFromWerewolfVoteAccuracyEvaluation,
@@ -6221,6 +6222,29 @@ describe("werewolf social calibration evaluator", () => {
 });
 
 describe("werewolf evaluation report integration", () => {
+  it("emits reward-bearing metrics only for completed episodes with a legal winner", () => {
+    const unfinished = createGame({ id: "outcome-lifecycle-gate", seed: "outcome-lifecycle-gate" });
+    const unfinishedEvaluation = evaluateAdversarialMatch(unfinished, []);
+    const rewardMetricIds = new Set(["team.reward", "agent.reward", "profile.agent_reward", "model.agent_reward"]);
+
+    for (const status of ["completed", "truncated", "failed"] as const) {
+      const metrics = metricsFromWerewolfOutcomeEvaluation(unfinishedEvaluation, unfinished, [], undefined, status);
+      expect(metrics.map((item) => item.id)).toEqual(["episode.completed_with_winner"]);
+      expect(metrics[0]).toMatchObject({ value: 0, metadata: expect.objectContaining({ status, winner: null }) });
+      expect(metrics.filter((item) => rewardMetricIds.has(item.id))).toEqual([]);
+    }
+
+    const completed = { ...unfinished, phase: "game_over" as const, winner: "village" as const };
+    const completedMetrics = metricsFromWerewolfOutcomeEvaluation(
+      evaluateAdversarialMatch(completed, []),
+      completed,
+      [],
+      undefined,
+      "completed"
+    );
+    expect(completedMetrics.filter((item) => rewardMetricIds.has(item.id))).not.toEqual([]);
+  });
+
   it("emits evaluator metrics through runtime and match artifacts", async () => {
     const initialState = createGame({ id: "evaluation-report", seed: "evaluation-report" });
     const profiles = profilesFromModels(["alpha", "beta"], 0.2);
@@ -6239,6 +6263,7 @@ describe("werewolf evaluation report integration", () => {
       resolvedAssignments: describeResolvedAssignments(initialState.players, agents),
       result
     });
+    expect(result.status).toBe("truncated");
 
     expect(result.evaluationReport.evaluatorIds).toEqual(
       expect.arrayContaining([
@@ -6615,10 +6640,7 @@ describe("werewolf evaluation report integration", () => {
     expect(newlyWiredMetrics.every((item) => (item.weight ?? 0) === 0)).toBe(true);
     expect(result.evaluationReport.metrics.map((item) => item.id)).toEqual(
       expect.arrayContaining([
-        "team.reward",
-        "agent.reward",
-        "profile.agent_reward",
-        "model.agent_reward",
+        "episode.completed_with_winner",
         "agent.survival_rate",
         "agent.wolf_belief_brier_score",
         "agent.social.memory_count",
@@ -6631,10 +6653,16 @@ describe("werewolf evaluation report integration", () => {
         "agent.social.reputation_evidence_rate"
       ])
     );
-    expect(result.evaluationReport.metrics.find((item) => item.id === "agent.reward")).toMatchObject({
+    expect(
+      result.evaluationReport.metrics.filter((item) =>
+        ["team.reward", "agent.reward", "profile.agent_reward", "model.agent_reward"].includes(item.id)
+      )
+    ).toEqual([]);
+    expect(result.evaluationReport.metrics.find((item) => item.id === "episode.completed_with_winner")).toMatchObject({
       evaluatorId: WEREWOLF_OUTCOME_EVALUATOR_ID,
       evaluatorVersion: "1.0.0",
-      evidenceRefs: expect.arrayContaining([expect.objectContaining({ artifact: "trace", traceId: expect.any(String) })])
+      value: 0,
+      metadata: expect.objectContaining({ status: "truncated", winner: null })
     });
     expect(result.evaluationReport.metrics.find((item) => item.id === "agent.survival_rate")).toMatchObject({
       evaluatorId: WEREWOLF_ROLE_SURVIVAL_EVALUATOR_ID,
@@ -6784,8 +6812,15 @@ describe("werewolf evaluation report integration", () => {
         ])
       });
     }
-    expect(Object.keys(result.evaluationReport.summary.agentScores)).toEqual(expect.arrayContaining(initialState.players.map((player) => player.id)));
-    expect(Object.keys(result.evaluationReport.summary.profileScores)).toEqual(expect.arrayContaining(profiles.map((profile) => profile.id)));
+    const scorecardAgentIds = [
+      ...new Set(
+        result.evaluationReport.metrics
+          .filter((item) => item.scope === "agent" && item.promotionDecision?.eligibleForScorecard && item.subjectId)
+          .map((item) => item.subjectId!)
+      )
+    ].sort();
+    expect(Object.keys(result.evaluationReport.summary.agentScores).sort()).toEqual(scorecardAgentIds);
+    expect(Object.keys(result.evaluationReport.summary.profileScores)).toEqual([]);
     expect(artifact.evaluationReport.id).toBe(result.evaluationReport.id);
     const serializableEvaluation = JSON.parse(JSON.stringify(result.evaluation));
     expect(artifact.evaluation).toEqual(serializableEvaluation);

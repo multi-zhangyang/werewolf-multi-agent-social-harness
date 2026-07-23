@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { applyCommand, computeMetrics, createGame, getPendingActions, livingPlayers } from "../src/core/engine";
+import { applyCommand, computeMetrics, createGame, getPendingActions, livingPlayers, selectWolfTarget } from "../src/core/engine";
 import { isAgentPendingAction } from "../src/core/pending";
+import { WEREWOLF_CLASSIC_9_SEAT_RULESET_MANIFEST } from "../src/core/roles";
 import { createPlayerView, serializePublicState } from "../src/core/view";
 import { hashStableState } from "../src/harness/hash";
 import { WEREWOLF_CLASSIC_9_SEAT_RULESET_ID, type GameState, type PendingAction, type PlayerState, type Role } from "../src/core/types";
@@ -31,6 +32,10 @@ describe("game-core state machine", () => {
   it("binds every created game to a supported explicit ruleset and rejects unknown semantics", () => {
     const state = createGame({ id: "ruleset-id", seed: "ruleset-id" });
     expect(state.config.rulesetId).toBe(WEREWOLF_CLASSIC_9_SEAT_RULESET_ID);
+    expect(WEREWOLF_CLASSIC_9_SEAT_RULESET_MANIFEST).toMatchObject({
+      id: WEREWOLF_CLASSIC_9_SEAT_RULESET_ID,
+      wolfKillVoteTieBreak: "first_committed_target_vote"
+    });
 
     expect(() =>
       createGame({
@@ -204,6 +209,51 @@ describe("game-core state machine", () => {
     expect(hashStableState(before)).toBe(beforeHash);
     expect(before.night.wolfVotes[firstVote.actorId]).toBe(firstTarget);
     expect(before.events.filter((event) => event.type === "werewolves.voted" && event.actorId === firstVote.actorId)).toHaveLength(1);
+  });
+
+  it("binds equal wolf kill tallies to the v1 first-committed target-vote order", () => {
+    const prepareNightWolves = (): GameState => {
+      let state = createGame({ id: "wolf-tie-break", seed: "wolf-tie-break-fixed" });
+      state = advanceSystem(state);
+      const inspect = pendingByKind(state, "inspect")[0];
+      return applyCommand(state, {
+        type: "seer.inspect",
+        actorId: inspect.actorId,
+        targetId: inspect.legalTargetIds[0]
+      });
+    };
+    const base = prepareNightWolves();
+    const [firstWolf, secondWolf] = pendingByKind(base, "kill");
+    const firstTarget = firstWolf?.legalTargetIds[0];
+    const secondTarget = firstWolf?.legalTargetIds[1];
+    if (!firstWolf || !secondWolf || !firstTarget || !secondTarget) throw new Error("Expected two wolves and two legal tie targets.");
+
+    let firstOrder = applyCommand(base, {
+      type: "werewolf.killVote",
+      actorId: firstWolf.actorId,
+      targetId: firstTarget
+    });
+    firstOrder = applyCommand(firstOrder, {
+      type: "werewolf.killVote",
+      actorId: secondWolf.actorId,
+      targetId: secondTarget
+    });
+
+    let reverseOrder = applyCommand(base, {
+      type: "werewolf.killVote",
+      actorId: secondWolf.actorId,
+      targetId: secondTarget
+    });
+    reverseOrder = applyCommand(reverseOrder, {
+      type: "werewolf.killVote",
+      actorId: firstWolf.actorId,
+      targetId: firstTarget
+    });
+
+    expect(selectWolfTarget(firstOrder)).toBe(firstTarget);
+    expect(pendingByKind(firstOrder, "witch")[0].nightVictimId).toBe(firstTarget);
+    expect(selectWolfTarget(reverseOrder)).toBe(secondTarget);
+    expect(pendingByKind(reverseOrder, "witch")[0].nightVictimId).toBe(secondTarget);
   });
 
   it("runs a public day-one sheriff election and makes the elected vote weight effective", () => {

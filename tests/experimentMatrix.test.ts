@@ -91,7 +91,9 @@ describe("experiment matrix harness", () => {
     });
     expect(restarted.cells[0]?.tournament?.episodes.map((episode) => episode.runId))
       .toEqual(first.cells[0]?.tournament?.episodes.map((episode) => episode.runId));
-    expect(restarted.cells[0]?.elapsedMs).toBe(0);
+    expect(restarted.cells[0]?.elapsedMs).toBe(first.cells[0]?.elapsedMs);
+    expect(restarted.createdAt).toBe(first.createdAt);
+    expect(restarted.completedAt).toBe(first.completedAt);
     expect(restarted.statistics).toEqual(first.statistics);
 
     const conflicting = structuredClone(experiment);

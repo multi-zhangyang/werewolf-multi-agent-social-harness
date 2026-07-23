@@ -2,12 +2,18 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { HarnessCheckpointEnvelope, HarnessEpisodeArtifactEnvelope } from "./episodeArtifacts";
+import {
+  validateHarnessEpisodeProjectionEnvelope,
+  type HarnessCheckpointEnvelope,
+  type HarnessEpisodeArtifactEnvelope,
+  type HarnessEpisodeProjectionEnvelope,
+  type HarnessEpisodeProjectionVisibility
+} from "./episodeArtifacts";
 import { hashStableJsonValue, hashStableState } from "./hash";
 import type { HarnessEvaluationReport, HarnessEvaluatorFailure, HarnessMetricRecord } from "./types";
 
 export const HARNESS_EPISODE_STORE_INDEX_VERSION = "harness.episode-store-index.v2";
-export const HARNESS_EPISODE_STORE_MANIFEST_VERSION = "harness.episode-store-manifest.v3";
+export const HARNESS_EPISODE_STORE_MANIFEST_VERSION = "harness.episode-store-manifest.v4";
 export const HARNESS_EPISODE_EVALUATION_RECORD_VERSION = "harness.episode-evaluation.v1";
 export const HARNESS_EPISODE_TRAJECTORY_HEADER_VERSION = "harness.episode-trajectory.header.v1";
 export const HARNESS_EPISODE_TRAJECTORY_STEP_VERSION = "harness.episode-trajectory.step.v1";
@@ -26,13 +32,16 @@ const TRAJECTORY_FILE = "trajectory.jsonl";
 const METRICS_FILE = "metrics.jsonl";
 const FAILURES_FILE = "failures.jsonl";
 const EVALUATION_FILE = "evaluation-report.json";
+const PROJECTION_FILE = "projection.json";
 const CHECKPOINTS_DIRECTORY = "checkpoints";
 const CHECKPOINT_INDEX_FILE = "checkpoints.index.json";
 const CHECKPOINT_FILE = "checkpoint.json";
 const DIRECTORY_KEY_PATTERN = /^[a-f0-9]{64}$/;
 const LEGACY_EPISODE_STORE_MANIFEST_V1_VERSION = "harness.episode-store-manifest.v1";
 const LEGACY_EPISODE_STORE_MANIFEST_V2_VERSION = "harness.episode-store-manifest.v2";
+const LEGACY_EPISODE_STORE_MANIFEST_V3_VERSION = "harness.episode-store-manifest.v3";
 const STORE_LEASE_ACQUIRED_MARKER = "HARNESS_EPISODE_STORE_LEASE_ACQUIRED\n";
+const INVALID_PROJECTION = Symbol("invalid-episode-projection");
 
 type GenericEpisodeEnvelope = HarnessEpisodeArtifactEnvelope<unknown, unknown, unknown, unknown, unknown>;
 type GenericCheckpointEnvelope = HarnessCheckpointEnvelope<unknown, unknown, unknown, unknown, unknown>;
@@ -72,6 +81,8 @@ export interface HarnessEpisodeFailureRow {
 export interface HarnessEpisodeStorePutOptions {
   /** Optional already-normalized evaluator output; arbitrary exception text is never copied. */
   evaluationReport?: HarnessEvaluationReport;
+  /** Optional derived visibility projection; never replay/checkpoint/evaluator authority. */
+  projection?: HarnessEpisodeProjectionEnvelope;
 }
 
 export interface HarnessEpisodeStoreEntry {
@@ -107,12 +118,17 @@ export interface HarnessEpisodeStoreManifest extends HarnessEpisodeStoreEntry {
   failuresSha256: string;
   evaluationSha256: string;
   evaluationReportId?: string;
+  projectionSha256?: string;
+  projectionVisibility?: HarnessEpisodeProjectionVisibility;
+  projectionPolicyId?: string;
+  projectionPolicyVersion?: string;
   files: {
     artifact: typeof ARTIFACT_FILE;
     trajectory: typeof TRAJECTORY_FILE;
     metrics: typeof METRICS_FILE;
     failures: typeof FAILURES_FILE;
     evaluation: typeof EVALUATION_FILE;
+    projection?: typeof PROJECTION_FILE;
     manifest: typeof MANIFEST_FILE;
     checkpointIndex: typeof CHECKPOINT_INDEX_FILE;
     checkpoints: typeof CHECKPOINTS_DIRECTORY;
@@ -229,14 +245,27 @@ export class HarnessEpisodeArtifactStore<
     const evaluationReport = options.evaluationReport
       ? jsonClone(options.evaluationReport, "Episode evaluation report is not JSON serializable.")
       : undefined;
+    const artifactText = jsonDocument(canonical);
+    let projection: HarnessEpisodeProjectionEnvelope | undefined;
+    if (options.projection !== undefined) {
+      const projectionErrors = validateHarnessEpisodeProjectionEnvelope(options.projection);
+      if (projectionErrors.length) throw new Error(`Episode projection is invalid: ${projectionErrors.join(" ")}`);
+      projection = jsonClone(options.projection, "Episode projection is not JSON serializable.");
+      if (projection.source.runId !== canonical.runId) {
+        throw new Error("Episode projection source runId does not match the canonical artifact.");
+      }
+      if (projection.source.artifactSha256 !== sha256(artifactText)) {
+        throw new Error("Episode projection source artifactSha256 does not match the canonical artifact.");
+      }
+    }
     const metricRows = metricRowsForArtifact(canonical, evaluationReport);
     const failureRows = failureRowsForArtifact(canonical, evaluationReport);
     const directoryKey = directoryKeyForRunId(canonical.runId);
-    const artifactText = jsonDocument(canonical);
     const trajectoryText = trajectoryJsonl(canonical);
     const metricsText = jsonLines(metricRows);
     const failuresText = jsonLines(failureRows);
     const evaluationText = evaluationRecordJson(artifact, artifactText, evaluationReport);
+    const projectionText = projection ? jsonDocument(projection) : undefined;
     const manifest = manifestForArtifact(
       canonical,
       directoryKey,
@@ -245,11 +274,14 @@ export class HarnessEpisodeArtifactStore<
       metricsText,
       failuresText,
       evaluationText,
+      projection,
+      projectionText,
       evaluationReport?.id
     );
     return this.withStoreLease(() => this.putUnderLease({
       canonical,
       evaluationReport,
+      projection,
       metricRows,
       failureRows,
       directoryKey,
@@ -258,6 +290,7 @@ export class HarnessEpisodeArtifactStore<
       metricsText,
       failuresText,
       evaluationText,
+      projectionText,
       manifest
     }));
   }
@@ -265,6 +298,7 @@ export class HarnessEpisodeArtifactStore<
   private async putUnderLease(prepared: {
     canonical: TArtifact;
     evaluationReport?: HarnessEvaluationReport;
+    projection?: HarnessEpisodeProjectionEnvelope;
     metricRows: HarnessEpisodeMetricRow[];
     failureRows: HarnessEpisodeFailureRow[];
     directoryKey: string;
@@ -273,11 +307,13 @@ export class HarnessEpisodeArtifactStore<
     metricsText: string;
     failuresText: string;
     evaluationText: string;
+    projectionText?: string;
     manifest: HarnessEpisodeStoreManifest;
   }): Promise<HarnessEpisodeStoreEntry> {
     const {
       canonical,
       evaluationReport,
+      projection,
       metricRows,
       failureRows,
       directoryKey,
@@ -286,12 +322,13 @@ export class HarnessEpisodeArtifactStore<
       metricsText,
       failuresText,
       evaluationText,
+      projectionText,
       manifest
     } = prepared;
     const finalDirectory = path.join(this.episodesDirectory, directoryKey);
     const existing = await this.loadDirectory(directoryKey, canonical.runId, false);
     if (existing) {
-      return this.acceptExactEpisodeRetry(existing, canonical, metricRows, failureRows, evaluationReport);
+      return this.acceptExactEpisodeRetry(existing, canonical, metricRows, failureRows, evaluationReport, projection);
     }
     await assertPathMissing(finalDirectory, "Episode artifact already exists for this run id.");
 
@@ -304,6 +341,9 @@ export class HarnessEpisodeArtifactStore<
       await writeFile(path.join(temporaryDirectory, METRICS_FILE), metricsText, { encoding: "utf8", flag: "wx" });
       await writeFile(path.join(temporaryDirectory, FAILURES_FILE), failuresText, { encoding: "utf8", flag: "wx" });
       await writeFile(path.join(temporaryDirectory, EVALUATION_FILE), evaluationText, { encoding: "utf8", flag: "wx" });
+      if (projectionText !== undefined) {
+        await writeFile(path.join(temporaryDirectory, PROJECTION_FILE), projectionText, { encoding: "utf8", flag: "wx" });
+      }
       await mkdir(path.join(temporaryDirectory, CHECKPOINTS_DIRECTORY), { recursive: false });
       await writeFile(
         path.join(temporaryDirectory, CHECKPOINT_INDEX_FILE),
@@ -324,7 +364,8 @@ export class HarnessEpisodeArtifactStore<
           canonical,
           metricRows,
           failureRows,
-          evaluationReport
+          evaluationReport,
+          projection
         );
       }
       throw error;
@@ -344,11 +385,13 @@ export class HarnessEpisodeArtifactStore<
       metrics: HarnessEpisodeMetricRow[];
       failures: HarnessEpisodeFailureRow[];
       evaluationReport?: HarnessEvaluationReport;
+      projection?: HarnessEpisodeProjectionEnvelope;
     },
     artifact: TArtifact,
     metrics: HarnessEpisodeMetricRow[],
     failures: HarnessEpisodeFailureRow[],
-    evaluationReport?: HarnessEvaluationReport
+    evaluationReport?: HarnessEvaluationReport,
+    projection?: HarnessEpisodeProjectionEnvelope
   ): Promise<HarnessEpisodeStoreEntry> {
     if (
       hashStableJsonValue(existing.artifact) !== hashStableJsonValue(artifact) ||
@@ -356,7 +399,10 @@ export class HarnessEpisodeArtifactStore<
       hashStableJsonValue(existing.failures) !== hashStableJsonValue(failures) ||
       (existing.evaluationReport === undefined) !== (evaluationReport === undefined) ||
       (existing.evaluationReport !== undefined && evaluationReport !== undefined &&
-        hashStableJsonValue(existing.evaluationReport) !== hashStableJsonValue(evaluationReport))
+        hashStableJsonValue(existing.evaluationReport) !== hashStableJsonValue(evaluationReport)) ||
+      (existing.projection === undefined) !== (projection === undefined) ||
+      (existing.projection !== undefined && projection !== undefined &&
+        hashStableJsonValue(existing.projection) !== hashStableJsonValue(projection))
     ) {
       throw new Error("Episode artifact run id already exists with different immutable content.");
     }
@@ -376,6 +422,13 @@ export class HarnessEpisodeArtifactStore<
     const loaded = await this.loadKnownEpisode(runId);
     if (!loaded) return undefined;
     return jsonClone(loaded.artifact, "Stored episode artifact could not be cloned.");
+  }
+
+  async getProjection(runId: string): Promise<HarnessEpisodeProjectionEnvelope | undefined> {
+    const loaded = await this.loadKnownEpisode(runId);
+    return loaded?.projection
+      ? jsonClone(loaded.projection, "Stored episode projection could not be cloned.")
+      : undefined;
   }
 
   async list(): Promise<HarnessEpisodeStoreEntry[]> {
@@ -716,6 +769,7 @@ export class HarnessEpisodeArtifactStore<
     metrics: HarnessEpisodeMetricRow[];
     failures: HarnessEpisodeFailureRow[];
     evaluationReport?: HarnessEvaluationReport;
+    projection?: HarnessEpisodeProjectionEnvelope;
   } | undefined> {
     assertRunId(runId);
     const directoryKey = directoryKeyForRunId(runId);
@@ -751,6 +805,7 @@ export class HarnessEpisodeArtifactStore<
     metrics: HarnessEpisodeMetricRow[];
     failures: HarnessEpisodeFailureRow[];
     evaluationReport?: HarnessEvaluationReport;
+    projection?: HarnessEpisodeProjectionEnvelope;
   } | undefined> {
     if (!DIRECTORY_KEY_PATTERN.test(directoryKey)) return undefined;
     const directory = path.join(this.episodesDirectory, directoryKey);
@@ -775,7 +830,8 @@ export class HarnessEpisodeArtifactStore<
           entry: entryForArtifact(artifact, directoryKey),
           metrics: [],
           failures: [],
-          evaluationReport: undefined
+          evaluationReport: undefined,
+          projection: undefined
         };
       }
       if (isValidLegacyV2Manifest(manifest, directoryKey, artifact)) {
@@ -789,7 +845,25 @@ export class HarnessEpisodeArtifactStore<
         const failures = parseFailureRows(recordedFailures, artifact.runId);
         if (metrics.length !== manifest.metricCount || failures.length !== manifest.failureCount) return undefined;
         if (verifyCanonical) await this.assertCanonical(artifact);
-        return { artifact, entry: entryFromManifest(manifest), metrics, failures, evaluationReport: undefined };
+        return { artifact, entry: entryFromManifest(manifest), metrics, failures, evaluationReport: undefined, projection: undefined };
+      }
+      if (isValidLegacyV3Manifest(manifest, directoryKey, artifact)) {
+        const recordedMetrics = await readSafeFile(directory, METRICS_FILE);
+        const recordedFailures = await readSafeFile(directory, FAILURES_FILE);
+        const recordedEvaluation = await readSafeFile(directory, EVALUATION_FILE);
+        if (sha256(artifactText) !== manifest.artifactSha256) return undefined;
+        if (sha256(recordedTrajectory) !== manifest.trajectorySha256) return undefined;
+        if (sha256(recordedMetrics) !== manifest.metricsSha256) return undefined;
+        if (sha256(recordedFailures) !== manifest.failuresSha256) return undefined;
+        if (sha256(recordedEvaluation) !== manifest.evaluationSha256) return undefined;
+        const metrics = parseMetricRows(recordedMetrics, artifact.runId, manifest.evaluationReportId);
+        const failures = parseFailureRows(recordedFailures, artifact.runId);
+        if (metrics.length !== manifest.metricCount || failures.length !== manifest.failureCount) return undefined;
+        const evaluationReport = parseEvaluationRecord(recordedEvaluation, artifact, artifactText, manifest.evaluationReportId);
+        if (hashStableJsonValue(evaluationReport?.metrics ?? []) !== hashStableJsonValue(metrics.map(metricFromRow))) return undefined;
+        if (hashStableJsonValue(failureRowsForArtifact(artifact, evaluationReport)) !== hashStableJsonValue(failures)) return undefined;
+        if (verifyCanonical) await this.assertCanonical(artifact);
+        return { artifact, entry: entryFromManifest(manifest), metrics, failures, evaluationReport, projection: undefined };
       }
       if (!isValidManifest(manifest, directoryKey, artifact)) return undefined;
       const recordedMetrics = await readSafeFile(directory, METRICS_FILE);
@@ -806,8 +880,17 @@ export class HarnessEpisodeArtifactStore<
       const evaluationReport = parseEvaluationRecord(recordedEvaluation, artifact, artifactText, manifest.evaluationReportId);
       if (hashStableJsonValue(evaluationReport?.metrics ?? []) !== hashStableJsonValue(metrics.map(metricFromRow))) return undefined;
       if (hashStableJsonValue(failureRowsForArtifact(artifact, evaluationReport)) !== hashStableJsonValue(failures)) return undefined;
+      const projection = await readProjection(directory, manifest, artifact, artifactText);
+      if (projection === INVALID_PROJECTION) return undefined;
       if (verifyCanonical) await this.assertCanonical(artifact);
-      return { artifact, entry: entryFromManifest(manifest), metrics, failures, evaluationReport };
+      return {
+        artifact,
+        entry: entryFromManifest(manifest),
+        metrics,
+        failures,
+        evaluationReport,
+        ...(projection ? { projection } : {})
+      };
     } catch (error) {
       if (isRecord(error) && typeof error.code === "string" && error.code !== "ENOENT") throw error;
       return undefined;
@@ -1013,6 +1096,11 @@ export function deriveHarnessEpisodeTrajectoryJsonl(artifact: GenericEpisodeEnve
   return trajectoryJsonl(artifact);
 }
 
+/** Exact digest used to bind a derived projection to the canonical artifact document. */
+export function deriveHarnessEpisodeArtifactSha256(artifact: GenericEpisodeEnvelope): string {
+  return sha256(jsonDocument(jsonClone(artifact, "Episode artifact is not JSON serializable.")));
+}
+
 function manifestForArtifact(
   artifact: GenericEpisodeEnvelope,
   directoryKey: string,
@@ -1021,6 +1109,8 @@ function manifestForArtifact(
   metricsText: string,
   failuresText: string,
   evaluationText: string,
+  projection: HarnessEpisodeProjectionEnvelope | undefined,
+  projectionText: string | undefined,
   evaluationReportId?: string
 ): HarnessEpisodeStoreManifest {
   const metrics = parseMetricRows(metricsText, artifact.runId, evaluationReportId);
@@ -1035,12 +1125,19 @@ function manifestForArtifact(
     failuresSha256: sha256(failuresText),
     evaluationSha256: sha256(evaluationText),
     evaluationReportId,
+    ...(projection && projectionText ? {
+      projectionSha256: sha256(projectionText),
+      projectionVisibility: projection.source.visibility,
+      projectionPolicyId: projection.source.policyId,
+      projectionPolicyVersion: projection.source.policyVersion
+    } : {}),
     files: {
       artifact: ARTIFACT_FILE,
       trajectory: TRAJECTORY_FILE,
       metrics: METRICS_FILE,
       failures: FAILURES_FILE,
       evaluation: EVALUATION_FILE,
+      ...(projection ? { projection: PROJECTION_FILE } : {}),
       manifest: MANIFEST_FILE,
       checkpointIndex: CHECKPOINT_INDEX_FILE,
       checkpoints: CHECKPOINTS_DIRECTORY
@@ -1091,9 +1188,10 @@ function projectionEntryFromManifest(value: unknown, directoryKey: string): Harn
   if (!isRecord(value)) return undefined;
   const legacyV1 = value.schemaVersion === LEGACY_EPISODE_STORE_MANIFEST_V1_VERSION;
   const legacyV2 = value.schemaVersion === LEGACY_EPISODE_STORE_MANIFEST_V2_VERSION;
+  const legacyV3 = value.schemaVersion === LEGACY_EPISODE_STORE_MANIFEST_V3_VERSION;
   const current = value.schemaVersion === HARNESS_EPISODE_STORE_MANIFEST_VERSION;
   if (
-    (!legacyV1 && !legacyV2 && !current) ||
+    (!legacyV1 && !legacyV2 && !legacyV3 && !current) ||
     value.manifestKind !== "episode-store-manifest" ||
     !isNonemptyString(value.runId) ||
     directoryKeyForRunId(value.runId) !== directoryKey ||
@@ -1211,10 +1309,105 @@ function isValidManifest(
     value.files.metrics === METRICS_FILE &&
     value.files.failures === FAILURES_FILE &&
     value.files.evaluation === EVALUATION_FILE &&
+    isValidProjectionManifestBinding(value) &&
     value.files.manifest === MANIFEST_FILE &&
     value.files.checkpointIndex === CHECKPOINT_INDEX_FILE &&
     value.files.checkpoints === CHECKPOINTS_DIRECTORY
   );
+}
+
+function isValidLegacyV3Manifest(
+  value: unknown,
+  directoryKey: string,
+  artifact: GenericEpisodeEnvelope
+): value is HarnessEpisodeStoreManifest {
+  if (!isRecord(value)) return false;
+  const expected = entryForArtifact(
+    artifact,
+    directoryKey,
+    typeof value.metricCount === "number" ? value.metricCount : 0,
+    typeof value.failureCount === "number" ? value.failureCount : 0
+  );
+  return (
+    value.schemaVersion === LEGACY_EPISODE_STORE_MANIFEST_V3_VERSION &&
+    value.manifestKind === "episode-store-manifest" &&
+    value.runId === expected.runId &&
+    value.artifactVersion === expected.artifactVersion &&
+    value.kind === expected.kind &&
+    value.createdAt === expected.createdAt &&
+    value.status === expected.status &&
+    value.directoryKey === expected.directoryKey &&
+    value.nativeStepCount === expected.nativeStepCount &&
+    value.messageCount === expected.messageCount &&
+    Number.isInteger(value.metricCount) && Number(value.metricCount) >= 0 &&
+    Number.isInteger(value.failureCount) && Number(value.failureCount) >= 0 &&
+    typeof value.artifactSha256 === "string" &&
+    typeof value.trajectorySha256 === "string" &&
+    typeof value.metricsSha256 === "string" &&
+    typeof value.failuresSha256 === "string" &&
+    typeof value.evaluationSha256 === "string" &&
+    (value.evaluationReportId === undefined || isNonemptyString(value.evaluationReportId)) &&
+    isRecord(value.files) &&
+    value.files.artifact === ARTIFACT_FILE &&
+    value.files.trajectory === TRAJECTORY_FILE &&
+    value.files.metrics === METRICS_FILE &&
+    value.files.failures === FAILURES_FILE &&
+    value.files.evaluation === EVALUATION_FILE &&
+    value.files.projection === undefined &&
+    value.files.manifest === MANIFEST_FILE &&
+    value.files.checkpointIndex === CHECKPOINT_INDEX_FILE &&
+    value.files.checkpoints === CHECKPOINTS_DIRECTORY &&
+    value.projectionSha256 === undefined &&
+    value.projectionVisibility === undefined &&
+    value.projectionPolicyId === undefined &&
+    value.projectionPolicyVersion === undefined
+  );
+}
+
+function isValidProjectionManifestBinding(value: Record<string, unknown>): boolean {
+  if (!isRecord(value.files)) return false;
+  const fields = [
+    value.projectionSha256,
+    value.projectionVisibility,
+    value.projectionPolicyId,
+    value.projectionPolicyVersion,
+    value.files.projection
+  ];
+  const hasProjection = fields.some((field) => field !== undefined);
+  if (!hasProjection) return true;
+  return (
+    isSha256(value.projectionSha256) &&
+    (value.projectionVisibility === "postgame-redacted" || value.projectionVisibility === "public") &&
+    isNonemptyString(value.projectionPolicyId) &&
+    isNonemptyString(value.projectionPolicyVersion) &&
+    value.files.projection === PROJECTION_FILE
+  );
+}
+
+async function readProjection(
+  directory: string,
+  manifest: HarnessEpisodeStoreManifest,
+  artifact: GenericEpisodeEnvelope,
+  artifactText: string
+): Promise<HarnessEpisodeProjectionEnvelope | undefined | typeof INVALID_PROJECTION> {
+  if (manifest.projectionSha256 === undefined) return undefined;
+  try {
+    const projectionText = await readSafeFile(directory, PROJECTION_FILE);
+    if (sha256(projectionText) !== manifest.projectionSha256) return INVALID_PROJECTION;
+    const projection = JSON.parse(projectionText) as unknown;
+    if (validateHarnessEpisodeProjectionEnvelope(projection).length) return INVALID_PROJECTION;
+    const envelope = projection as HarnessEpisodeProjectionEnvelope;
+    if (
+      envelope.source.runId !== artifact.runId ||
+      envelope.source.artifactSha256 !== sha256(artifactText) ||
+      envelope.source.visibility !== manifest.projectionVisibility ||
+      envelope.source.policyId !== manifest.projectionPolicyId ||
+      envelope.source.policyVersion !== manifest.projectionPolicyVersion
+    ) return INVALID_PROJECTION;
+    return envelope;
+  } catch {
+    return INVALID_PROJECTION;
+  }
 }
 
 function isValidLegacyV1Manifest(
@@ -1943,6 +2136,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonemptyString(value: unknown): value is string {
   return typeof value === "string" && Boolean(value.trim());
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === "string" && DIRECTORY_KEY_PATTERN.test(value);
 }
 
 function isNonnegativeInteger(value: unknown): value is number {

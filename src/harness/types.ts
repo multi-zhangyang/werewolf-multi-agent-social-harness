@@ -360,6 +360,7 @@ export interface HarnessTurnTrace {
   latencyMs: number;
   promptTokens?: number;
   completionTokens?: number;
+  totalTokens?: number;
   attempts?: number;
   retryHistory?: ProviderRetryHistoryEntry[];
   stream?: ProviderStreamTelemetry;
@@ -379,6 +380,7 @@ export interface ReasonerOutputSummary {
   latencyMs: number;
   promptTokens?: number;
   completionTokens?: number;
+  totalTokens?: number;
   attempts?: number;
   retryHistory?: ProviderRetryHistoryEntry[];
   stream?: ProviderStreamTelemetry;

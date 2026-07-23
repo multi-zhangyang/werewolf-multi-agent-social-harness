@@ -6,9 +6,11 @@ import {
 import { hashStableJsonValue } from "./hash";
 import type {
   SocialEpisodeArtifact,
+  SocialReasonerCallEvidence,
   SocialResolvedSchedulerMode,
   SocialRuntimeActorBinding
 } from "./social";
+import { validateSocialReasonerCallEvidence } from "./social";
 
 /**
  * Portable, domain-neutral experiment control-plane input.
@@ -169,6 +171,8 @@ export interface GenericExperimentExecutionAttestationV1 {
   maxTransitions: number;
   decisionTimeoutMs?: number;
   actors: GenericExperimentExecutionActorAttestationV1[];
+  /** Exact runner-bound provider/reasoner calls, in native step/call order. */
+  reasonerCalls?: SocialReasonerCallEvidence[];
 }
 
 export type GenericExperimentForkChangeFieldV1 = Exclude<keyof NormalizedGenericExperimentSpecV1, "version">;
@@ -395,7 +399,7 @@ export function createGenericExperimentExecutionAttestation(
   spec: NormalizedGenericExperimentSpecV1,
   episode: Pick<
     SocialEpisodeArtifact,
-    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "schedulerMode"
+    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "schedulerMode" | "steps"
   >
 ): GenericExperimentExecutionAttestationV1 {
   const evidenceErrors = validateGenericExperimentExecutionEvidence(spec, episode);
@@ -404,6 +408,10 @@ export function createGenericExperimentExecutionAttestation(
   }
   const profileById = new Map(spec.profiles.map((profile) => [profile.id, profile]));
   const modelByProfileId = new Map(spec.modelAssignments.map((assignment) => [assignment.profileId, assignment]));
+  const reasonerCalls = episode.steps.flatMap((step) => step.reasonerCalls ?? []);
+  const bindsProviderBackedReasoners = spec.profiles.some(
+    (profile) => profile.reasonerId !== undefined && modelByProfileId.has(profile.id)
+  );
   return {
     schemaVersion: GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION,
     specHash: hashStableJsonValue(spec),
@@ -420,7 +428,8 @@ export function createGenericExperimentExecutionAttestation(
         profile: clonePortable(profile),
         ...(modelAssignment === undefined ? {} : { modelAssignment: clonePortable(modelAssignment) })
       };
-    })
+    }),
+    ...(bindsProviderBackedReasoners ? { reasonerCalls: clonePortable(reasonerCalls) } : {})
   };
 }
 
@@ -429,7 +438,7 @@ export function validateGenericExperimentExecutionAttestation(
   spec: NormalizedGenericExperimentSpecV1,
   episode: Pick<
     SocialEpisodeArtifact,
-    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "schedulerMode"
+    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "schedulerMode" | "steps"
   >,
   path = "executionAttestation"
 ): string[] {
@@ -441,7 +450,7 @@ export function validateGenericExperimentExecutionAttestation(
     return [`${path} cannot be validated: ${error instanceof Error ? error.message : "invalid execution evidence"}`];
   }
   const unknownFields = Object.keys(input).filter(
-    (key) => !["schemaVersion", "specHash", "schedulerMode", "maxTransitions", "decisionTimeoutMs", "actors"].includes(key)
+    (key) => !["schemaVersion", "specHash", "schedulerMode", "maxTransitions", "decisionTimeoutMs", "actors", "reasonerCalls"].includes(key)
   );
   const errors = unknownFields.length
     ? [`${path} contains unknown field(s): ${unknownFields.sort().join(", ")}.`]
@@ -467,7 +476,7 @@ export function validateGenericExperimentExecutionEvidence(
   spec: NormalizedGenericExperimentSpecV1,
   episode: Pick<
     SocialEpisodeArtifact,
-    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles"
+    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "steps"
   >,
   path = "socialEpisode"
 ): string[] {
@@ -510,7 +519,74 @@ export function validateGenericExperimentExecutionEvidence(
       errors
     });
   }
+  validateExperimentReasonerCallEvidence({ spec, episode, runtimeActors, path, errors });
   return errors;
+}
+
+function validateExperimentReasonerCallEvidence(input: {
+  spec: NormalizedGenericExperimentSpecV1;
+  episode: Pick<SocialEpisodeArtifact, "steps">;
+  runtimeActors: SocialRuntimeActorBinding[];
+  path: string;
+  errors: string[];
+}): void {
+  const runtimeByActorId = new Map(input.runtimeActors.map((binding) => [binding.actorId, binding]));
+  const assignedModels = new Map(input.spec.modelAssignments.map((assignment) => [assignment.profileId, assignment.modelId]));
+  const providerBackedActors = new Set(
+    input.runtimeActors
+      .filter((binding) => binding.reasonerId !== undefined && assignedModels.has(binding.profileId))
+      .map((binding) => binding.actorId)
+  );
+
+  for (const [stepIndex, step] of input.episode.steps.entries()) {
+    const calls = step.reasonerCalls ?? [];
+    const binding = runtimeByActorId.get(step.actorId);
+    const providerBacked = providerBackedActors.has(step.actorId);
+    const failureBeforeDecision =
+      step.failure?.stage === "pending_actor_resolution" ||
+      step.failure?.stage === "actor_lookup" ||
+      step.failure?.stage === "decision_identity" ||
+      step.failure?.stage === "environment_observe" ||
+      step.failure?.stage === "observation_assembly" ||
+      step.failure?.stage === "actor_observe";
+    const reachedDecision = step.actorId !== "system" && !failureBeforeDecision;
+    const decisionEndedByHarnessControl =
+      step.failure?.stage === "decision_timeout" ||
+      step.failure?.stage === "execution_abort" ||
+      (step.failure?.stage === "batch_aborted" && input.episode.steps.some((controlStep) =>
+        controlStep.actorId === "system" &&
+        controlStep.failure?.stage === "execution_abort" &&
+        controlStep.batchId === `${step.batchId}:execution-control`
+      ));
+    if (providerBacked && reachedDecision && calls.length === 0 && !decisionEndedByHarnessControl) {
+      input.errors.push(`${input.path}.steps[${stepIndex}] is missing runner-bound reasoner call evidence.`);
+    }
+    if (!providerBacked && calls.length > 0) {
+      input.errors.push(`${input.path}.steps[${stepIndex}] records provider calls for a policy-only or unassigned actor.`);
+    }
+    for (const [callIndex, call] of calls.entries()) {
+      const label = `${input.path}.steps[${stepIndex}].reasonerCalls[${callIndex}]`;
+      input.errors.push(...validateSocialReasonerCallEvidence(call, {
+        label,
+        actorId: step.actorId,
+        profileId: step.profileId,
+        model: binding?.model,
+        traceId: step.traceId
+      }));
+      const stream = call && typeof call === "object" && call.stream && typeof call.stream === "object"
+        ? call.stream
+        : undefined;
+      if (call?.outcome !== "aborted" && stream?.enabled !== true) {
+        input.errors.push(`${label}.stream.enabled must be true under experiment.spec.providerPolicy.`);
+      }
+      if (call?.outcome === "completed" && stream?.completed !== true) {
+        input.errors.push(`${label} did not complete its provider stream.`);
+      }
+      if (binding && assignedModels.get(binding.profileId) !== call?.model) {
+        input.errors.push(`${label}.model must match experiment.spec.modelAssignments.`);
+      }
+    }
+  }
 }
 
 function validateExperimentRuntimeActorBinding(input: {

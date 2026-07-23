@@ -4,11 +4,18 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SocialDomainAdapterManifest } from "../src/harness/domainAdapter";
 import {
+  buildHarnessCheckpointAtPrefix as buildGenericHarnessCheckpointAtPrefix,
+  HARNESS_EPISODE_PROJECTION_VERSION,
+  isSafeHarnessCheckpointBoundary,
   validateHarnessCheckpointEnvelope,
   type HarnessCheckpointEnvelope,
-  type HarnessEpisodeArtifactEnvelope
+  type HarnessEpisodeArtifactEnvelope,
+  type HarnessEpisodeProjectionEnvelope
 } from "../src/harness/episodeArtifacts";
-import { HarnessEpisodeArtifactStore } from "../src/harness/episodeArtifactStore";
+import {
+  HarnessEpisodeArtifactStore,
+  deriveHarnessEpisodeArtifactSha256
+} from "../src/harness/episodeArtifactStore";
 import {
   runGenericExperiment,
   type GenericExperimentArtifactStore,
@@ -21,12 +28,20 @@ import {
 } from "../src/harness/experimentRunStore";
 import {
   createGenericExperimentProvenance,
+  validateGenericExperimentExecutionEvidence,
   type GenericExperimentSpecV1
 } from "../src/harness/experimentSpec";
 import type { HarnessEvaluator } from "../src/harness/evaluation";
-import { hashStableState } from "../src/harness/hash";
+import { hashStableJsonValue, hashStableState } from "../src/harness/hash";
 import { runHarnessEpisode } from "../src/harness/runner";
-import type { SocialActor, SocialAgentProfile, SocialEnvironment, SocialEpisodeArtifact } from "../src/harness/social";
+import {
+  isSocialStepCommitted,
+  validateSocialParallelBatchLayout,
+  type SocialActor,
+  type SocialAgentProfile,
+  type SocialEnvironment,
+  type SocialEpisodeArtifact
+} from "../src/harness/social";
 import { verifyHarnessEpisodeArtifact } from "../src/harness/socialReplay";
 
 interface State {
@@ -35,17 +50,17 @@ interface State {
 }
 
 interface Pending {
-  actorId: "a";
+  actorId: string;
   kind: "increment";
 }
 
 interface Observation {
-  actorId: "a";
+  actorId: string;
   value: number;
 }
 
 interface Command {
-  actorId: "a";
+  actorId: string;
   amount: 1;
 }
 
@@ -124,6 +139,47 @@ class Environment implements SocialEnvironment<State, Observation, Pending, Comm
   step(command: Command): State {
     if (this.state.done || command.amount !== 1) throw new Error("invalid counter command");
     this.state = { value: this.state.value + 1, done: true };
+    return this.snapshot();
+  }
+
+  done(): boolean {
+    return this.state.done;
+  }
+}
+
+class ParallelEnvironment implements SocialEnvironment<State, Observation, Pending, Command> {
+  private state: State = { value: 0, done: false };
+
+  snapshot(): State {
+    return structuredClone(this.state);
+  }
+
+  pendingActions(): Pending[] {
+    return this.state.done
+      ? []
+      : [
+          { actorId: "a", kind: "increment" },
+          { actorId: "b", kind: "increment" }
+        ];
+  }
+
+  observe(actorId: string): Observation {
+    return { actorId, value: this.state.value };
+  }
+
+  validateAction(command: Command, pending: Pending) {
+    return { valid: command.actorId === pending.actorId && command.amount === 1 };
+  }
+
+  step(): State {
+    throw new Error("parallel counter requires stepBatch");
+  }
+
+  stepBatch(commandsByAgent: Record<string, Command>): State {
+    if (this.state.done || Object.keys(commandsByAgent).sort().join(",") !== "a,b") {
+      throw new Error("invalid parallel counter batch");
+    }
+    this.state = { value: 2, done: true };
     return this.snapshot();
   }
 
@@ -232,6 +288,7 @@ describe("generic normalized experiment orchestration", () => {
     });
     expect(result.specHash).toBe(result.experiment.specHash);
     expect(result.experiment.spec).toEqual(result.normalizedSpec);
+    expect(result.publication).toBeUndefined();
     expect(result.tournament).toMatchObject({
       gamesRequested: 2,
       gamesCompleted: 2,
@@ -789,6 +846,159 @@ describe("generic normalized experiment orchestration", () => {
     }
   });
 
+  it("retries only domain-classified prepare/run throws and persists the accepted v3 attempt ledger", async () => {
+    const root = await temporaryRoot();
+    const artifactStore = await HarnessEpisodeArtifactStore.open<Artifact>({
+      baseDirectory: path.join(root, "retry-episodes"),
+      verifyArtifact
+    });
+    const runStore = await HarnessExperimentRunStore.open({
+      baseDirectory: path.join(root, "retry-runs"),
+      episodeStore: artifactStore
+    });
+    const classifications: Array<{ stage: string; ordinal: number }> = [];
+    let prepareCalls = 0;
+    let runCalls = 0;
+    const spec = {
+      ...experimentSpec(),
+      episodeCount: 1,
+      retryPolicy: { id: "counter.retry", version: "2", maxAttempts: 3, backoffMs: 0 }
+    };
+    const result = await runGenericExperiment({
+      spec,
+      runSetId: "classified-retry",
+      artifactStore,
+      runStore,
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode(context) {
+          prepareCalls += 1;
+          if (prepareCalls === 1) throw new Error("injected prepare failure that must not be persisted");
+          return { runId: `${context.spec.id}:${context.seed}` };
+        },
+        runEpisode(prepared) {
+          runCalls += 1;
+          if (runCalls === 1) throw new Error("injected run failure that must not be persisted");
+          return counterEpisode(prepared.runId, () => undefined);
+        },
+        retrying: {
+          classifyAttemptError(_error, context) {
+            classifications.push({ stage: context.stage, ordinal: context.attempt.ordinal });
+            return {
+              decision: "safe-to-retry" as const,
+              code: context.stage === "prepare" ? "counter.prepare-transient" : "counter.run-transient"
+            };
+          }
+        },
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode: (episode) => artifactFromEpisode(episode),
+        evaluation: {
+          evaluators: [counterEvaluator],
+          contextForEpisode(episode, artifact) {
+            return {
+              id: artifact.runId,
+              status: artifact.status,
+              initialState: artifact.initialState,
+              finalState: artifact.finalState,
+              agents: [],
+              trajectory: [],
+              socialEpisode: episode
+            };
+          }
+        }
+      }
+    });
+    expect(result.runSet).toMatchObject({ gamesCompleted: 1, gamesFailed: 0 });
+    expect(classifications).toEqual([
+      { stage: "prepare", ordinal: 1 },
+      { stage: "run", ordinal: 2 }
+    ]);
+    expect({ prepareCalls, runCalls }).toEqual({ prepareCalls: 3, runCalls: 2 });
+    expect(await runStore.get("classified-retry")).toMatchObject({
+      schemaVersion: "harness.experiment-run-record.v3",
+      state: "finalized",
+      episodes: [{ attempts: [
+        { ordinal: 1, outcome: "retry-scheduled", code: "counter.prepare-transient" },
+        { ordinal: 2, outcome: "retry-scheduled", code: "counter.run-transient" },
+        { ordinal: 3, outcome: "artifact-committed" }
+      ] }]
+    });
+    expect(JSON.stringify(await runStore.get("classified-retry"))).not.toContain("injected");
+  });
+
+  it("resumes a durable v3 retry-wait without replaying the ambiguous prior attempt", async () => {
+    const root = await temporaryRoot();
+    const artifactStore = await HarnessEpisodeArtifactStore.open<Artifact>({
+      baseDirectory: path.join(root, "retry-resume-episodes"),
+      verifyArtifact
+    });
+    const runStore = await HarnessExperimentRunStore.open({
+      baseDirectory: path.join(root, "retry-resume-runs"),
+      episodeStore: artifactStore
+    });
+    const spec = {
+      ...experimentSpec(),
+      episodeCount: 1,
+      retryPolicy: { id: "counter.retry", version: "2", maxAttempts: 2, backoffMs: 0 }
+    };
+    const experiment = createGenericExperimentProvenance(spec);
+    await runStore.beginOrResume({ runSetId: "retry-wait-resume", experiment });
+    await runStore.startEpisode({
+      runSetId: "retry-wait-resume", index: 0, seed: `${spec.seed}:g1`
+    });
+    await runStore.scheduleEpisodeRetry({
+      runSetId: "retry-wait-resume", code: "counter.prepare-transient", backoffMs: 0
+    });
+    let prepareCalls = 0;
+    let runCalls = 0;
+    await runGenericExperiment({
+      spec,
+      runSetId: "retry-wait-resume",
+      artifactStore,
+      runStore,
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode(context) {
+          prepareCalls += 1;
+          return { runId: `${context.spec.id}:${context.seed}` };
+        },
+        runEpisode(prepared) {
+          runCalls += 1;
+          return counterEpisode(prepared.runId, () => undefined);
+        },
+        retrying: {
+          classifyAttemptError() {
+            throw new Error("completed resumed attempt must not classify an error");
+          }
+        },
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode: (episode) => artifactFromEpisode(episode),
+        evaluation: {
+          evaluators: [counterEvaluator],
+          contextForEpisode(episode, artifact) {
+            return {
+              id: artifact.runId,
+              status: artifact.status,
+              initialState: artifact.initialState,
+              finalState: artifact.finalState,
+              agents: [],
+              trajectory: [],
+              socialEpisode: episode
+            };
+          }
+        }
+      }
+    });
+    expect({ prepareCalls, runCalls }).toEqual({ prepareCalls: 1, runCalls: 1 });
+    expect(await runStore.get("retry-wait-resume")).toMatchObject({
+      state: "finalized",
+      episodes: [{ attempts: [
+        { ordinal: 1, outcome: "retry-scheduled" },
+        { ordinal: 2, outcome: "artifact-committed" }
+      ] }]
+    });
+  });
+
   it("fails missing evaluator and adapter identity preflight before preparing an episode", async () => {
     let preparations = 0;
     const base = {
@@ -874,7 +1084,7 @@ describe("generic normalized experiment orchestration", () => {
       artifactStore: memoryArtifactStore<Artifact>(),
       runStore,
       adapter
-    })).rejects.toThrow(/native-boundaries.*not supported/i);
+    })).rejects.toThrow(/native-boundaries.*requires a deterministic native-boundary checkpoint builder/i);
 
     await expect(runGenericExperiment({
       spec: {
@@ -884,7 +1094,7 @@ describe("generic normalized experiment orchestration", () => {
       artifactStore: memoryArtifactStore<Artifact>(),
       runStore,
       adapter
-    })).rejects.toThrow(/supports exactly one durable episode attempt/i);
+    })).rejects.toThrow(/requires a domain-owned attempt error classifier/i);
 
     await expect(runGenericExperiment({
       spec: {
@@ -894,10 +1104,752 @@ describe("generic normalized experiment orchestration", () => {
       artifactStore: memoryArtifactStore<Artifact>(),
       runStore,
       adapter
-    })).rejects.toThrow(/requires research-full canonical episode authority/i);
+    })).rejects.toThrow(/requires a domain artifact projector/i);
+
+    await expect(runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        artifactPolicy: { id: "counter.artifact", version: "1", visibility: "public" }
+      },
+      artifactStore: memoryArtifactStore<Artifact>(),
+      runStore,
+      adapter: {
+        ...adapter,
+        artifactProjection: {
+          projectArtifact(artifact: Artifact) {
+            return counterProjection(artifact, "public");
+          }
+        } as never
+      }
+    })).rejects.toThrow(/requires a domain projection validator/i);
+
+    const noProjectionRead = memoryArtifactStore<Artifact>();
+    delete noProjectionRead.getProjection;
+    await expect(runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        artifactPolicy: { id: "counter.artifact", version: "1", visibility: "public" }
+      },
+      artifactStore: noProjectionRead,
+      runStore,
+      adapter: {
+        ...adapter,
+        artifactProjection: counterProjectionAdapter()
+      }
+    })).rejects.toThrow(/requires canonical projection read authority/i);
 
     expect(begins).toBe(0);
     expect(preparations).toBe(0);
+  });
+
+  it("projects only after staging and atomically publishes the sidecar without replacing full authority", async () => {
+    const lifecycle: string[] = [];
+    const baseArtifactStore = memoryArtifactStore<Artifact>();
+    const checkpoints = new Map<string, Checkpoint>();
+    let publishedArtifact: Artifact | undefined;
+    let publishedOptions: Parameters<GenericExperimentArtifactStore<Artifact>["put"]>[1];
+    const artifactStore: GenericExperimentArtifactStore<Artifact, Checkpoint> = {
+      ...baseArtifactStore,
+      async put(artifact, options) {
+        lifecycle.push("put");
+        publishedArtifact = structuredClone(artifact);
+        publishedOptions = structuredClone(options);
+        return baseArtifactStore.put(artifact, options);
+      },
+      async putCheckpoint(_runId, checkpoint) {
+        lifecycle.push("checkpoint");
+        checkpoints.set(checkpoint.checkpointId, structuredClone(checkpoint));
+      },
+      async getCheckpoint(_runId, checkpointId) {
+        const checkpoint = checkpoints.get(checkpointId);
+        return checkpoint ? structuredClone(checkpoint) : undefined;
+      }
+    };
+    const baseRunStore = memoryRunStore<Artifact>();
+    const runStore: GenericExperimentRunStore<Artifact> = {
+      ...baseRunStore,
+      async stageEpisode(input) {
+        lifecycle.push("stage");
+        expect(input.episode.artifact.finalState.value).toBe(1);
+        return baseRunStore.stageEpisode(input);
+      },
+      async recordEpisode(input) {
+        lifecycle.push("membership");
+        return baseRunStore.recordEpisode(input);
+      }
+    };
+
+    await runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        episodeCount: 1,
+        artifactPolicy: { id: "counter.artifact", version: "1", visibility: "public" },
+        checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "final" }
+      },
+      artifactStore,
+      runStore,
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode: (context) => ({ runId: `${context.spec.id}:${context.seed}` }),
+        runEpisode: (prepared) => counterEpisode(prepared.runId, () => undefined),
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode: (episode) => artifactFromEpisode(episode),
+        artifactProjection: {
+          projectArtifact(artifact, visibility, context) {
+            lifecycle.push("project");
+            const projection = counterProjection(artifact, visibility);
+            artifact.finalState.value = 700;
+            context.spec.id = "mutated-project-context";
+            return projection;
+          },
+          validateProjection(projection, artifact, context) {
+            lifecycle.push("validate-projection");
+            expect(artifact.finalState.value).toBe(1);
+            expect(context.spec.id).toBe("counter-experiment");
+            projection.payload = { mutatedByValidator: true };
+            artifact.finalState.value = 800;
+            context.spec.id = "mutated-validator-context";
+            return [];
+          }
+        },
+        checkpointing: {
+          finalCheckpointForArtifact(artifact) {
+            expect(artifact.finalState.value).toBe(1);
+            return buildCounterFinalCheckpoint(artifact);
+          }
+        },
+        evaluation: {
+          evaluators: [counterEvaluator],
+          contextForEpisode(episode, artifact) {
+            lifecycle.push("evaluate");
+            expect(artifact.finalState.value).toBe(1);
+            return {
+              id: artifact.runId,
+              status: artifact.status,
+              initialState: artifact.initialState,
+              finalState: artifact.finalState,
+              agents: [],
+              trajectory: [],
+              socialEpisode: episode
+            };
+          }
+        }
+      }
+    });
+
+    expect(lifecycle).toEqual([
+      "evaluate",
+      "stage",
+      "project",
+      "validate-projection",
+      "put",
+      "checkpoint",
+      "membership"
+    ]);
+    expect(publishedArtifact?.finalState.value).toBe(1);
+    expect(publishedOptions?.evaluationReport).toBeDefined();
+    expect(publishedOptions?.projection).toEqual(counterProjection(publishedArtifact!, "public"));
+    expect(checkpoints.values().next().value?.state).toEqual({ value: 1, done: true });
+  });
+
+  it("rejects forged projection source and policy bindings before canonical publication", async () => {
+    const cases: Array<{
+      name: string;
+      mutate(projection: HarnessEpisodeProjectionEnvelope): void;
+      message: RegExp;
+    }> = [
+      {
+        name: "run id",
+        mutate: (projection) => { projection.source.runId = "forged-run"; },
+        message: /source does not match/i
+      },
+      {
+        name: "artifact digest",
+        mutate: (projection) => { projection.source.artifactSha256 = "0".repeat(64); },
+        message: /source does not match/i
+      },
+      {
+        name: "payload digest",
+        mutate: (projection) => { projection.payloadSha256 = "0".repeat(64); },
+        message: /invalid projection.*payloadSha256/i
+      },
+      {
+        name: "visibility",
+        mutate: (projection) => { projection.source.visibility = "postgame-redacted"; },
+        message: /policy binding/i
+      },
+      {
+        name: "policy identity",
+        mutate: (projection) => {
+          projection.source.policyId = "forged.policy";
+          projection.source.policyVersion = "99";
+        },
+        message: /policy binding/i
+      }
+    ];
+
+    for (const testCase of cases) {
+      let puts = 0;
+      const authority = memoryArtifactStore<Artifact>();
+      await expect(runGenericExperiment({
+        spec: {
+          ...experimentSpec(),
+          episodeCount: 1,
+          evaluatorIds: [],
+          artifactPolicy: { id: "counter.artifact", version: "1", visibility: "public" }
+        },
+        artifactStore: {
+          ...authority,
+          async put(artifact, options) {
+            puts += 1;
+            return authority.put(artifact, options);
+          }
+        },
+        runStore: memoryRunStore<Artifact>(),
+        adapter: {
+          domainId: "counter-orchestration",
+          prepareEpisode: (context) => ({ runId: `${context.spec.id}:${context.seed}` }),
+          runEpisode: (prepared) => counterEpisode(prepared.runId, () => undefined),
+          lifecycleOf: (episode) => episode.status,
+          artifactForEpisode: (episode) => artifactFromEpisode(episode),
+          artifactProjection: {
+            projectArtifact(artifact, visibility) {
+              const projection = counterProjection(artifact, visibility);
+              testCase.mutate(projection);
+              return projection;
+            },
+            validateProjection: () => []
+          }
+        }
+      }), testCase.name).rejects.toThrow(testCase.message);
+      expect(puts, testCase.name).toBe(0);
+    }
+  });
+
+  it("fails closed on domain projection validator evidence before artifact publication", async () => {
+    let puts = 0;
+    const authority = memoryArtifactStore<Artifact>();
+    await expect(runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        episodeCount: 1,
+        evaluatorIds: [],
+        artifactPolicy: { id: "counter.artifact", version: "1", visibility: "postgame-redacted" }
+      },
+      artifactStore: {
+        ...authority,
+        async put(artifact, options) {
+          puts += 1;
+          return authority.put(artifact, options);
+        }
+      },
+      runStore: memoryRunStore<Artifact>(),
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode: (context) => ({ runId: `${context.spec.id}:${context.seed}` }),
+        runEpisode: (prepared) => counterEpisode(prepared.runId, () => undefined),
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode: (episode) => artifactFromEpisode(episode),
+        artifactProjection: {
+          projectArtifact: (artifact, visibility) => counterProjection(artifact, visibility),
+          validateProjection: () => ["sentinel-private-field-exposed"]
+        }
+      }
+    })).rejects.toThrow(/sentinel-private-field-exposed/i);
+    expect(puts).toBe(0);
+  });
+
+  it("returns only canonical projection publications for non-research visibility", async () => {
+    for (const visibility of ["public", "postgame-redacted"] as const) {
+      const privateSeedSentinel = `PRIVATE_EXPERIMENT_SEED_${visibility}`;
+      const privateArtifactSentinel = `PRIVATE_CANONICAL_ARTIFACT_${visibility}`;
+      const privateEvaluationSentinel = `PRIVATE_EVALUATION_${visibility}`;
+      const authority = memoryArtifactStore<Artifact>();
+      let projectionReads = 0;
+      const artifactStore: GenericExperimentArtifactStore<Artifact> = {
+        ...authority,
+        async getProjection(runId) {
+          projectionReads += 1;
+          return authority.getProjection?.(runId);
+        }
+      };
+      const spec: GenericExperimentSpecV1 = {
+        ...experimentSpec(),
+        id: `restricted-${visibility}`,
+        seed: privateSeedSentinel,
+        episodeCount: 1,
+        artifactPolicy: { id: "counter.artifact", version: "1", visibility },
+        domainConfig: {
+          terminalValue: 1,
+          privateArtifactSentinel
+        }
+      };
+      const privateEvaluator: HarnessEvaluator<
+        State,
+        undefined,
+        SocialEpisodeArtifact<State, Observation, Pending, Command>,
+        unknown,
+        never,
+        never
+      > = {
+        id: "counter.value.v1",
+        label: privateEvaluationSentinel,
+        version: "1",
+        evaluate(context) {
+          return {
+            evaluatorId: "counter.value.v1",
+            label: privateEvaluationSentinel,
+            version: "1",
+            metrics: [{
+              id: "episode.counter_value",
+              label: privateEvaluationSentinel,
+              source: "counter.value.v1",
+              scope: "episode",
+              value: context.finalState.value,
+              weight: 1,
+              evidenceRefs: []
+            }]
+          };
+        }
+      };
+
+      const result = await runGenericExperiment({
+        spec,
+        runSetId: `restricted-run-set-${visibility}`,
+        artifactStore,
+        runStore: memoryRunStore<Artifact>(),
+        now: () => "2026-07-22T14:00:00.000Z",
+        adapter: {
+          domainId: "counter-orchestration",
+          prepareEpisode: (context) => ({ runId: `restricted-run-${visibility}-${context.index}` }),
+          runEpisode: (prepared) => counterEpisode(prepared.runId, () => undefined),
+          lifecycleOf: (episode) => episode.status,
+          artifactForEpisode(episode) {
+            const artifact = artifactFromEpisode(episode);
+            (artifact as Artifact & { privateArtifactSentinel: string }).privateArtifactSentinel = privateArtifactSentinel;
+            return artifact;
+          },
+          artifactProjection: counterProjectionAdapter(),
+          evaluation: {
+            evaluators: [privateEvaluator],
+            contextForEpisode(episode, artifact) {
+              return {
+                id: artifact.runId,
+                status: artifact.status,
+                initialState: artifact.initialState,
+                finalState: artifact.finalState,
+                agents: [],
+                trajectory: [],
+                socialEpisode: episode
+              };
+            }
+          }
+        }
+      });
+
+      const outward = result as unknown as Record<string, unknown>;
+      expect(outward).not.toHaveProperty("normalizedSpec");
+      expect(outward).not.toHaveProperty("experiment");
+      expect(result.tournament).not.toHaveProperty("seed");
+      expect(result.tournament.episodes[0]).not.toHaveProperty("seed");
+      expect(result.tournament.episodes[0]).not.toHaveProperty("result");
+      expect(result.runSet).not.toHaveProperty("seed");
+      expect(result.runSet).not.toHaveProperty("experiment");
+      expect(result.runSet.episodes[0]).not.toHaveProperty("seed");
+      expect(result.runSet.episodes[0]).not.toHaveProperty("artifact");
+      expect(result.runSet.episodes[0]).not.toHaveProperty("evaluationReport");
+      expect(result.publication).toMatchObject({
+        schemaVersion: "harness.experiment-publication.v1",
+        kind: "experiment-publication",
+        visibility,
+        artifactPolicy: { id: "counter.artifact", version: "1" },
+        domainId: "counter-orchestration",
+        runSetId: `restricted-run-set-${visibility}`,
+        gamesRequested: 1,
+        gamesCompleted: 1,
+        gamesFailed: 0,
+        gamesUnstarted: 0,
+        episodes: [{
+          index: 0,
+          status: "completed",
+          runId: `restricted-run-${visibility}-0`,
+          projection: {
+            schemaVersion: HARNESS_EPISODE_PROJECTION_VERSION,
+            kind: "episode-projection",
+            source: { visibility, policyId: "counter.artifact", policyVersion: "1" },
+            payload: { kind: "counter-projection", status: "completed", finalValue: 1 }
+          }
+        }]
+      });
+      expect(projectionReads).toBe(1);
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(privateSeedSentinel);
+      expect(serialized).not.toContain(privateArtifactSentinel);
+      expect(serialized).not.toContain(privateEvaluationSentinel);
+
+      const canonical = await authority.get(`restricted-run-${visibility}-0`);
+      expect(JSON.stringify(canonical)).toContain(privateArtifactSentinel);
+      expect(JSON.stringify(canonical)).toContain(privateSeedSentinel);
+      expect(JSON.stringify(await authority.getEvaluationReport(`restricted-run-${visibility}-0`)))
+        .toContain(privateEvaluationSentinel);
+    }
+  });
+
+  it("hydrates a finalized full artifact and its bound sidecar without re-running the projector", async () => {
+    const root = await temporaryRoot();
+    const artifactStore = await HarnessEpisodeArtifactStore.open<Artifact>({
+      baseDirectory: path.join(root, "episodes"),
+      verifyArtifact
+    });
+    const runStore = await HarnessExperimentRunStore.open({
+      baseDirectory: path.join(root, "experiment-runs"),
+      episodeStore: artifactStore,
+      now: () => "2026-07-22T14:00:00.000Z"
+    });
+    const spec = {
+      ...experimentSpec(),
+      episodeCount: 1,
+      evaluatorIds: [],
+      artifactPolicy: { id: "counter.artifact", version: "1", visibility: "public" as const }
+    };
+    let projections = 0;
+    const first = await runGenericExperiment({
+      spec,
+      artifactStore,
+      runStore,
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode: (context) => ({ runId: `${context.spec.id}:${context.seed}` }),
+        runEpisode: (prepared) => counterEpisode(prepared.runId, () => undefined),
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode: (episode) => artifactFromEpisode(episode),
+        artifactProjection: {
+          projectArtifact(artifact, visibility) {
+            projections += 1;
+            return counterProjection(artifact, visibility);
+          },
+          validateProjection: () => []
+        }
+      },
+      now: () => "2026-07-22T14:00:00.000Z"
+    });
+    expect(projections).toBe(1);
+
+    const resumed = await runGenericExperiment({
+      spec,
+      artifactStore,
+      runStore,
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode() { throw new Error("finalized resume must not prepare"); },
+        runEpisode() { throw new Error("finalized resume must not execute"); },
+        lifecycleOf() { throw new Error("finalized resume must not inspect lifecycle"); },
+        artifactForEpisode() { throw new Error("finalized resume must not materialize full artifact"); },
+        artifactProjection: {
+          projectArtifact() { throw new Error("finalized resume must not reproject"); },
+          validateProjection() { throw new Error("finalized resume must not revalidate domain projection"); }
+        }
+      },
+      now: () => "2026-07-22T14:00:00.000Z"
+    });
+
+    expect(projections).toBe(1);
+    expect(resumed.runSet).toEqual(first.runSet);
+    expect(resumed.publication).toEqual(first.publication);
+    expect(resumed as unknown as Record<string, unknown>).not.toHaveProperty("normalizedSpec");
+    expect(resumed.runSet.episodes[0]).not.toHaveProperty("artifact");
+    expect(await artifactStore.getProjection(first.runSet.episodes[0]!.runId!)).toBeDefined();
+  });
+
+  it("publishes harness-selected committed sequential boundaries before terminal membership", async () => {
+    const checkpoints = new Map<string, Checkpoint>();
+    const lifecycle: string[] = [];
+    const artifactAuthority = memoryArtifactStore<Artifact>();
+    const artifactStore: GenericExperimentArtifactStore<Artifact, Checkpoint> = {
+      ...artifactAuthority,
+      async put(artifact, options) {
+        lifecycle.push("artifact");
+        return artifactAuthority.put(artifact, options);
+      },
+      async putCheckpoint(_runId, checkpoint) {
+        lifecycle.push(`checkpoint:${checkpoint.source.nativeStepCount}`);
+        checkpoints.set(checkpoint.checkpointId, structuredClone(checkpoint));
+      },
+      async getCheckpoint(_runId, checkpointId) {
+        const checkpoint = checkpoints.get(checkpointId);
+        return checkpoint ? structuredClone(checkpoint) : undefined;
+      }
+    };
+    const baseRunStore = memoryRunStore<Artifact>();
+    const runStore: GenericExperimentRunStore<Artifact> = {
+      ...baseRunStore,
+      async recordEpisode(input) {
+        lifecycle.push("membership");
+        return baseRunStore.recordEpisode(input);
+      }
+    };
+    const boundaries: Array<{ nativeStepCount: number; traceId: string }> = [];
+
+    await runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        episodeCount: 1,
+        evaluatorIds: [],
+        checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "native-boundaries" }
+      },
+      artifactStore,
+      runStore,
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode: (context) => ({ runId: `${context.spec.id}:${context.seed}` }),
+        runEpisode: (prepared) => counterEpisode(prepared.runId, () => undefined),
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode: (episode) => artifactFromEpisode(episode),
+        checkpointing: {
+          nativeCheckpointForArtifactBoundary(artifact, boundary) {
+            boundaries.push(structuredClone(boundary));
+            return buildCounterNativeCheckpoint(artifact, boundary.nativeStepCount);
+          }
+        }
+      }
+    });
+
+    expect(boundaries).toHaveLength(1);
+    expect(boundaries[0]).toMatchObject({ nativeStepCount: 1 });
+    expect(checkpoints).toHaveLength(1);
+    expect(lifecycle).toEqual(["artifact", "checkpoint:1", "membership"]);
+  });
+
+  it("publishes one checkpoint only at the end of a complete parallel joint batch", async () => {
+    const checkpoints = new Map<string, Checkpoint>();
+    const boundaries: number[] = [];
+    let observedEpisode: SocialEpisodeArtifact<State, Observation, Pending, Command> | undefined;
+    const artifactAuthority = memoryArtifactStore<Artifact>();
+    const artifactStore: GenericExperimentArtifactStore<Artifact, Checkpoint> = {
+      ...artifactAuthority,
+      async get(runId) {
+        const artifact = await artifactAuthority.get(runId);
+        if (artifact) {
+          expect(artifact.socialEpisode.steps.map((_step, index) =>
+            isSafeHarnessCheckpointBoundary(artifact.socialEpisode.steps, index)
+          )).toEqual([false, true]);
+          expect(artifact.socialEpisode.steps.map(isSocialStepCommitted)).toEqual([true, true]);
+        }
+        return artifact;
+      },
+      async putCheckpoint(_runId, checkpoint) {
+        checkpoints.set(checkpoint.checkpointId, structuredClone(checkpoint));
+      },
+      async getCheckpoint(_runId, checkpointId) {
+        const checkpoint = checkpoints.get(checkpointId);
+        return checkpoint ? structuredClone(checkpoint) : undefined;
+      }
+    };
+    const spec: GenericExperimentSpecV1 = {
+      ...experimentSpec(),
+      episodeCount: 1,
+      actorCount: 2,
+      schedulerMode: "parallel",
+      profiles: [
+        { id: "counter-profile-a", version: "1", policyId: "counter.policy" },
+        { id: "counter-profile-b", version: "1", policyId: "counter.policy" }
+      ],
+      evaluatorIds: [],
+      checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "native-boundaries" }
+    };
+
+    const execution = await runGenericExperiment({
+      spec,
+      artifactStore,
+      runStore: memoryRunStore(),
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode: (context) => ({ runId: `${context.spec.id}:${context.seed}` }),
+        runEpisode: (prepared) => parallelCounterEpisode(prepared.runId),
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode(episode) {
+          observedEpisode = structuredClone(episode);
+          return artifactFromEpisode(episode);
+        },
+        checkpointing: {
+          nativeCheckpointForArtifactBoundary(artifact, boundary) {
+            boundaries.push(boundary.nativeStepCount);
+            return buildCounterNativeCheckpoint(artifact, boundary.nativeStepCount);
+          }
+        }
+      }
+    });
+
+    expect(execution.normalizedSpec.checkpointPolicy.mode).toBe("native-boundaries");
+    expect(observedEpisode?.status).toBe("completed");
+    expect(observedEpisode?.steps).toHaveLength(2);
+    expect(validateGenericExperimentExecutionEvidence(execution.normalizedSpec, observedEpisode!)).toEqual([]);
+    expect(validateSocialParallelBatchLayout(observedEpisode!.steps)).toEqual([]);
+    expect(observedEpisode!.steps.map((_step, index) =>
+      isSafeHarnessCheckpointBoundary(observedEpisode!.steps, index)
+    )).toEqual([false, true]);
+    expect(boundaries).toEqual([2]);
+    expect([...checkpoints.values()].map((checkpoint) => checkpoint.source.nativeStepCount)).toEqual([2]);
+  });
+
+  it("skips rejected native records and rejects a conflicting canonical boundary checkpoint", async () => {
+    let builderCalls = 0;
+    const rejectedAuthority = memoryArtifactStore<Artifact>();
+    const rejectedStore: GenericExperimentArtifactStore<Artifact, Checkpoint> = {
+      ...rejectedAuthority,
+      async putCheckpoint() {
+        throw new Error("rejected records must not publish checkpoints");
+      },
+      async getCheckpoint() {
+        return undefined;
+      }
+    };
+    await runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        episodeCount: 1,
+        evaluatorIds: [],
+        checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "native-boundaries" }
+      },
+      artifactStore: rejectedStore,
+      runStore: memoryRunStore(),
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode: (context) => ({ runId: `${context.spec.id}:${context.seed}` }),
+        runEpisode: (prepared) => counterEpisode(prepared.runId, () => undefined),
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode(episode) {
+          const artifact = artifactFromEpisode(episode);
+          artifact.socialEpisode.steps[0]!.commitStatus = "rejected";
+          artifact.socialEpisode.steps[0]!.error = "reviewed rejection";
+          return artifact;
+        },
+        checkpointing: {
+          nativeCheckpointForArtifactBoundary() {
+            builderCalls += 1;
+            throw new Error("rejected boundary must not be built");
+          }
+        }
+      }
+    });
+    expect(builderCalls).toBe(0);
+
+    const checkpointAuthority = new Map<string, Checkpoint>();
+    const collisionArtifactAuthority = memoryArtifactStore<Artifact>();
+    const collisionStore: GenericExperimentArtifactStore<Artifact, Checkpoint> = {
+      ...collisionArtifactAuthority,
+      async putCheckpoint() {
+        throw new Error("conflicting checkpoint must fail before publication");
+      },
+      async getCheckpoint(_runId, checkpointId) {
+        const checkpoint = checkpointAuthority.get(checkpointId);
+        return checkpoint ? structuredClone(checkpoint) : undefined;
+      }
+    };
+    await expect(runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        episodeCount: 1,
+        evaluatorIds: [],
+        checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "native-boundaries" }
+      },
+      artifactStore: collisionStore,
+      runStore: memoryRunStore(),
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode: (context) => ({ runId: `${context.spec.id}:${context.seed}` }),
+        runEpisode: (prepared) => counterEpisode(prepared.runId, () => undefined),
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode: (episode) => artifactFromEpisode(episode),
+        checkpointing: {
+          nativeCheckpointForArtifactBoundary(artifact, boundary) {
+            const candidate = buildCounterNativeCheckpoint(artifact, boundary.nativeStepCount);
+            checkpointAuthority.set(candidate.checkpointId, {
+              ...structuredClone(candidate),
+              reason: "different deterministic candidate"
+            });
+            return candidate;
+          }
+        }
+      }
+    })).rejects.toThrow(/canonical native-boundary checkpoint identity conflicts/i);
+  });
+
+  it("repairs a missing native-boundary checkpoint from canonical authority without rerunning the episode", async () => {
+    const root = await temporaryRoot();
+    let decisions = 0;
+    let failCheckpointPublication = true;
+    const openAuthorities = async () => {
+      const store = await HarnessEpisodeArtifactStore.open<Artifact, Checkpoint>({
+        baseDirectory: path.join(root, "native-boundary-episodes"),
+        verifyArtifact,
+        verifyCheckpoint(checkpoint) {
+          const mismatches = validateHarnessCheckpointEnvelope(checkpoint);
+          return { ok: mismatches.length === 0, mismatches };
+        }
+      });
+      const runStore = await HarnessExperimentRunStore.open({
+        baseDirectory: path.join(root, "native-boundary-runs"),
+        episodeStore: store,
+        now: () => "2026-07-22T14:00:00.000Z"
+      });
+      return { store, runStore };
+    };
+    const spec = {
+      ...experimentSpec(),
+      episodeCount: 1,
+      evaluatorIds: [],
+      checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "native-boundaries" as const }
+    };
+    const adapter = {
+      domainId: "counter-orchestration",
+      prepareEpisode(context: { seed: string; spec: { id: string } }) {
+        return { runId: `${context.spec.id}:${context.seed}` };
+      },
+      runEpisode(prepared: { runId: string }) {
+        return counterEpisode(prepared.runId, () => { decisions += 1; });
+      },
+      lifecycleOf: (episode: SocialEpisodeArtifact<State, Observation, Pending, Command>) => episode.status,
+      artifactForEpisode: (episode: SocialEpisodeArtifact<State, Observation, Pending, Command>) => artifactFromEpisode(episode),
+      checkpointing: {
+        nativeCheckpointForArtifactBoundary(artifact: Artifact, boundary: { nativeStepCount: number }) {
+          return buildCounterNativeCheckpoint(artifact, boundary.nativeStepCount);
+        }
+      }
+    };
+
+    const first = await openAuthorities();
+    await expect(runGenericExperiment({
+      spec,
+      artifactStore: {
+        put: (artifact, options) => first.store.put(artifact, options),
+        get: (runId) => first.store.get(runId),
+        getEvaluationReport: (runId) => first.store.getEvaluationReport(runId),
+        getCheckpoint: (runId, checkpointId) => first.store.getCheckpoint(runId, checkpointId),
+        async putCheckpoint(runId, checkpoint) {
+          if (failCheckpointPublication) {
+            failCheckpointPublication = false;
+            throw new Error("injected native checkpoint publication failure");
+          }
+          return first.store.putCheckpoint(runId, checkpoint);
+        }
+      },
+      runStore: first.runStore,
+      adapter
+    })).rejects.toThrow(/injected native checkpoint publication failure/i);
+    expect(decisions).toBe(1);
+
+    const restarted = await openAuthorities();
+    const result = await runGenericExperiment({
+      spec,
+      artifactStore: restarted.store,
+      runStore: restarted.runStore,
+      adapter
+    });
+    expect(decisions).toBe(1);
+    const runId = result.runSet.episodes[0]?.runId;
+    expect(runId).toBeTruthy();
+    await expect(restarted.store.listCheckpoints(runId!)).resolves.toHaveLength(1);
   });
 
   it("rejects final checkpoints that drift from canonical agent or execution-prefix authority before publication", async () => {
@@ -1192,6 +2144,38 @@ function artifactFromEpisode(
   };
 }
 
+function counterProjection(
+  artifact: Artifact,
+  visibility: "public" | "postgame-redacted"
+): HarnessEpisodeProjectionEnvelope {
+  const payload = {
+    kind: "counter-projection",
+    status: artifact.status,
+    finalValue: artifact.finalState.value
+  };
+  return {
+    schemaVersion: HARNESS_EPISODE_PROJECTION_VERSION,
+    kind: "episode-projection",
+    source: {
+      runId: artifact.runId,
+      artifactSha256: deriveHarnessEpisodeArtifactSha256(artifact),
+      visibility,
+      policyId: "counter.artifact",
+      policyVersion: "1"
+    },
+    payloadSha256: hashStableJsonValue(payload),
+    payload
+  };
+}
+
+function counterProjectionAdapter() {
+  return {
+    projectArtifact: (artifact: Artifact, visibility: "public" | "postgame-redacted") =>
+      counterProjection(artifact, visibility),
+    validateProjection: () => [] as string[]
+  };
+}
+
 function buildCounterFinalCheckpoint(artifact: Artifact): Checkpoint {
   const executionPrefix = structuredClone(artifact.socialEpisode);
   const boundary = executionPrefix.steps.at(-1);
@@ -1225,6 +2209,36 @@ function buildCounterFinalCheckpoint(artifact: Artifact): Checkpoint {
     agents: [],
     executionPrefix
   };
+}
+
+function buildCounterNativeCheckpoint(artifact: Artifact, nativeStepCount: number): Checkpoint {
+  return buildGenericHarnessCheckpointAtPrefix({
+    artifactVersion: "counter-orchestration.checkpoint.v1",
+    kind: "checkpoint",
+    checkpointId: `${artifact.runId}:checkpoint:native:${nativeStepCount}`,
+    createdAt: artifact.createdAt,
+    reason: "experiment checkpointPolicy native-boundaries",
+    sourceArtifactVersion: artifact.artifactVersion,
+    runId: artifact.runId,
+    sourceStatus: artifact.status,
+    episode: artifact.socialEpisode,
+    selector: { nativeStepCount },
+    experiment: artifact.experiment,
+    recordedAgentState: { mode: "validate", validator: () => [] },
+    replayPrefix(executionPrefix) {
+      const value = executionPrefix.steps.filter(isSocialStepCommitted).reduce((total, step) => {
+        const command = step.action.command as Command;
+        return total + command.amount;
+      }, 0);
+      const finalState = { value, done: true };
+      return {
+        mismatches: [],
+        finalState,
+        finalHash: hashStableState(finalState),
+        messagesHash: hashStableState(executionPrefix.messages)
+      };
+    }
+  });
 }
 
 function counterEpisode(
@@ -1267,6 +2281,35 @@ function counterEpisode(
   });
 }
 
+function parallelCounterEpisode(runId: string): Promise<SocialEpisodeArtifact<State, Observation, Pending, Command>> {
+  const actors: Array<SocialActor<Observation, Pending, Command>> = ["a", "b"].map((actorId) => ({
+    id: actorId,
+    profile: {
+      id: `counter-profile-${actorId}`,
+      version: "1",
+      model: "deterministic",
+      policyId: "counter.policy"
+    },
+    observe() {},
+    decide(pending) {
+      return { actorId, kind: "increment", command: { actorId: pending.actorId, amount: 1 } };
+    }
+  }));
+  return runHarnessEpisode<State, Observation, Pending, Command>({
+    id: runId,
+    domainAdapter: adapterManifest,
+    environment: new ParallelEnvironment(),
+    actors,
+    channels: [],
+    captureAgentSnapshots: () => [],
+    schedulerMode: "parallel",
+    maxTransitions: 2,
+    executionLimits: { decisionTimeoutMs: 5_000 },
+    hashState: hashStableState,
+    hashMessages: hashStableState
+  });
+}
+
 function verifyArtifact(artifact: Artifact) {
   return verifyHarnessEpisodeArtifact({
     artifact,
@@ -1303,6 +2346,9 @@ function memoryArtifactStore<TArtifact extends Artifact>(): GenericExperimentArt
     },
     async getEvaluationReport(runId) {
       return structuredClone(evaluations.get(runId)?.evaluationReport);
+    },
+    async getProjection(runId) {
+      return structuredClone(evaluations.get(runId)?.projection);
     }
   };
 }

@@ -2,11 +2,39 @@ import { describe, expect, it } from "vitest";
 import {
   GENERIC_EXPERIMENT_MATRIX_CELL_FAILURE_MESSAGE,
   GENERIC_EXPERIMENT_MATRIX_VERSION,
+  createGenericExperimentMatrixAuthoritySpec,
   runGenericExperimentMatrix,
+  validateGenericExperimentMatrixAuthoritySpec,
   validateGenericExperimentMatrixSpec
 } from "../src/harness/experimentMatrixRunner";
 
 describe("generic experiment matrix control plane", () => {
+  it("builds a closed domain-neutral authority header from opaque ledger input hashes", () => {
+    const authority = createGenericExperimentMatrixAuthoritySpec({
+      experiment: {
+        id: "ledger-authority",
+        continueOnError: false,
+        cells: [{ id: "journal", label: "Journal", group: "ledger", input: { entries: ["cash:-5"] } }]
+      },
+      sourceSpecHash: "a".repeat(64),
+      inputHashOf: () => "b".repeat(64)
+    });
+    expect(authority).toEqual({
+      version: "harness.generic-experiment-matrix-authority.v1",
+      id: "ledger-authority",
+      continueOnError: false,
+      sourceSpecHash: "a".repeat(64),
+      cells: [{ id: "journal", label: "Journal", group: "ledger", inputHash: "b".repeat(64) }]
+    });
+    expect(() => validateGenericExperimentMatrixAuthoritySpec({ ...authority, model: "forbidden" } as never)).toThrow(
+      /unsupported field model/i
+    );
+    expect(() => validateGenericExperimentMatrixAuthoritySpec({
+      ...authority,
+      cells: [{ ...authority.cells[0]!, tournament: { hidden: true } }]
+    } as never)).toThrow(/unsupported field tournament/i);
+  });
+
   it("preserves deterministic cell order, tri-state lifecycle, opaque results, and continue-on-error without domain imports", async () => {
     const calls: string[] = [];
     const result = await runGenericExperimentMatrix({
@@ -228,6 +256,31 @@ describe("generic experiment matrix control plane", () => {
       ["settled", "truncated"],
       ["suffix", "completed"]
     ]);
+  });
+
+  it("does not schedule a suffix after restoring a terminal stop-on-error failure", async () => {
+    const calls: string[] = [];
+    const result = await runGenericExperimentMatrix({
+      experiment: {
+        id: "resume-terminal-matrix",
+        continueOnError: false,
+        cells: [{ id: "failed", input: 1 }, { id: "must-not-run", input: 2 }]
+      },
+      initialCells: [{
+        index: 0,
+        id: "failed",
+        label: "failed",
+        group: "default",
+        executionId: "resume-terminal-matrix:cell:failed:0",
+        status: "failed"
+      }],
+      onCellStarting: (context) => { calls.push(`start:${context.id}`); },
+      runCell: (input) => { calls.push(`run:${input}`); return input; },
+      statusOf: () => "completed"
+    });
+
+    expect(calls).toEqual([]);
+    expect(result).toMatchObject({ status: "partial", cellsAttempted: 1, cellsFailed: 1, cellsUnstarted: 1 });
   });
 
   it("keeps control-plane hooks and durable cell exceptions outside ordinary failure capture", async () => {

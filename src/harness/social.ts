@@ -1,5 +1,11 @@
 import { hashStableState } from "./hash";
 import { providerFailureFromError, safeProviderFailureMessage } from "./providerFailure";
+import type {
+  ProviderFailureKind,
+  ProviderFailureStage,
+  ProviderRetryHistoryEntry,
+  ProviderStreamTelemetry
+} from "../agents/schema";
 import {
   cloneSocialDomainAdapterManifest,
   validateSocialDomainAdapterManifest,
@@ -190,6 +196,60 @@ export interface SocialAction<TCommand = unknown> {
   command: TCommand;
   messages?: Array<Omit<SocialMessage, "id" | "seq" | "createdAt">>;
   metadata?: Record<string, unknown>;
+}
+
+export const SOCIAL_REASONER_CALL_EVIDENCE_VERSION = "harness.reasoner-call-evidence.v1" as const;
+
+export type SocialReasonerCallOutcome = "completed" | "failed" | "aborted";
+
+export interface SocialReasonerCallFailure {
+  failureKind: ProviderFailureKind;
+  providerStage?: ProviderFailureStage;
+  status?: number;
+  timeoutMs?: number;
+  aborted?: boolean;
+  retryable?: boolean;
+  attempts?: number;
+  maxAttempts?: number;
+}
+
+/**
+ * Unbound, provider-neutral lifecycle facts exposed by an instrumented actor.
+ * The actor deliberately cannot choose actor/profile/model/trace/call identity;
+ * those fields are stamped by the generic runner after decide() settles.
+ *
+ * This is an in-process instrumentation trust boundary, not remote attestation:
+ * the runner proves canonical binding and closed shape, while the actor/model
+ * client remains responsible for honestly reporting its SDK result.
+ */
+export interface SocialReasonerCallReport {
+  outcome: SocialReasonerCallOutcome;
+  latencyMs?: number;
+  attempts?: number;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+  retryHistory?: ProviderRetryHistoryEntry[];
+  stream: ProviderStreamTelemetry;
+  failure?: SocialReasonerCallFailure;
+}
+
+/** Portable, runner-bound reasoner execution evidence retained by one native step. */
+export interface SocialReasonerCallEvidence extends SocialReasonerCallReport {
+  schemaVersion: typeof SOCIAL_REASONER_CALL_EVIDENCE_VERSION;
+  callId: string;
+  traceId: string;
+  actorId: string;
+  profileId: string;
+  model: string;
+}
+
+export interface SocialReasonerCallCollectionContext {
+  transactionId: string;
+  traceId: string;
+  turnIndex: number;
 }
 
 export interface SocialActorObservationContext<TPending = unknown> {
@@ -435,6 +495,12 @@ export interface SocialActor<TObservation = unknown, TPending = unknown, TComman
   readonly profile: SocialAgentProfile;
   observe(observation: TObservation, context?: SocialActorObservationContext<TPending>): void;
   decide(pending: TPending): Promise<SocialAction<TCommand>> | SocialAction<TCommand>;
+  /**
+   * Consume reports produced while resolving exactly one transactional
+   * decision. The runner invokes this at most once after decide() settles or
+   * throws. Returning no reports is valid for a policy-only actor.
+   */
+  takeReasonerCallReports?(context: SocialReasonerCallCollectionContext): SocialReasonerCallReport[];
   onStepResult?(receipt: SocialActorStepReceipt<TObservation, TPending, TCommand>): void;
 }
 
@@ -515,6 +581,8 @@ export interface SocialHarnessStep<TObservation = unknown, TPending = unknown, T
    */
   receiptObservation?: TObservation;
   action: SocialAction<TCommand>;
+  /** Runner-bound, content-free provider/reasoner lifecycle evidence. */
+  reasonerCalls?: SocialReasonerCallEvidence[];
   commitStatus?: SocialStepCommitStatus;
   decisionStateHash?: string;
   preStateHash?: string;
@@ -871,6 +939,7 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
   }
 
   const stepsByTraceId = new Map<string, SocialHarnessStep<TObservation, TPending, TCommand>>();
+  const reasonerCallIds = new Set<string>();
   for (const [index, step] of episode.steps.entries()) {
     if (!step.traceId.trim()) {
       errors.push(`steps[${index}] is missing traceId.`);
@@ -878,6 +947,17 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
       errors.push(`Duplicate social step traceId ${step.traceId}.`);
     }
     stepsByTraceId.set(step.traceId, step);
+    for (const [callIndex, call] of (step.reasonerCalls ?? []).entries()) {
+      const label = `steps[${index}].reasonerCalls[${callIndex}]`;
+      errors.push(...validateSocialReasonerCallEvidence(call, {
+        label,
+        actorId: step.actorId,
+        profileId: step.profileId,
+        traceId: step.traceId
+      }));
+      if (reasonerCallIds.has(call.callId)) errors.push(`${label}.callId duplicates ${call.callId}.`);
+      reasonerCallIds.add(call.callId);
+    }
     validateSeqRange(step.messageSeqRange, messagesBySeq, `steps[${index}].messageSeqRange`, errors);
 
     // A recorded roster is a run identity boundary. System transitions are
@@ -988,6 +1068,177 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
   errors.push(...validateSocialParallelBatchLayout(episode.steps));
 
   return errors;
+}
+
+export function validateSocialReasonerCallEvidence(
+  input: unknown,
+  expected?: { label?: string; actorId?: string; profileId?: string; model?: string; traceId?: string }
+): string[] {
+  const label = expected?.label ?? "reasonerCall";
+  if (!isReasonerEvidenceRecord(input)) return [`${label} must be an object.`];
+  const allowed = new Set([
+    "schemaVersion",
+    "callId",
+    "traceId",
+    "actorId",
+    "profileId",
+    "model",
+    "outcome",
+    "latencyMs",
+    "attempts",
+    "usage",
+    "retryHistory",
+    "stream",
+    "failure"
+  ]);
+  const errors = Object.keys(input)
+    .filter((key) => !allowed.has(key))
+    .sort()
+    .map((key) => `${label} contains unknown field ${key}.`);
+  if (input.schemaVersion !== SOCIAL_REASONER_CALL_EVIDENCE_VERSION) {
+    errors.push(`${label}.schemaVersion must be ${SOCIAL_REASONER_CALL_EVIDENCE_VERSION}.`);
+  }
+  for (const field of ["callId", "traceId", "actorId", "profileId", "model"] as const) {
+    if (typeof input[field] !== "string" || !input[field].trim()) errors.push(`${label}.${field} must be a nonempty string.`);
+  }
+  if (expected?.actorId !== undefined && input.actorId !== expected.actorId) errors.push(`${label}.actorId must match its native step.`);
+  if (expected?.profileId !== undefined && input.profileId !== expected.profileId) errors.push(`${label}.profileId must match its native step.`);
+  if (expected?.model !== undefined && input.model !== expected.model) errors.push(`${label}.model must match its runtime actor binding.`);
+  if (expected?.traceId !== undefined && input.traceId !== expected.traceId) errors.push(`${label}.traceId must match its native step.`);
+  errors.push(...validateReasonerCallReport(input, label));
+  return errors;
+}
+
+function validateReasonerCallReport(input: unknown, label: string): string[] {
+  if (!isReasonerEvidenceRecord(input)) return [`${label} must be an object.`];
+  const allowed = new Set([
+    "schemaVersion",
+    "callId",
+    "traceId",
+    "actorId",
+    "profileId",
+    "model",
+    "outcome",
+    "latencyMs",
+    "attempts",
+    "usage",
+    "retryHistory",
+    "stream",
+    "failure"
+  ]);
+  const errors = Object.keys(input)
+    .filter((key) => !allowed.has(key))
+    .sort()
+    .map((key) => `${label} contains unknown field ${key}.`);
+  const outcome = input.outcome;
+  if (outcome !== "completed" && outcome !== "failed" && outcome !== "aborted") {
+    errors.push(`${label}.outcome must be completed, failed, or aborted.`);
+  }
+  if (input.latencyMs !== undefined && (!Number.isFinite(input.latencyMs) || Number(input.latencyMs) < 0)) {
+    errors.push(`${label}.latencyMs must be a finite nonnegative number when recorded.`);
+  }
+  if (input.attempts !== undefined && (!Number.isInteger(input.attempts) || Number(input.attempts) <= 0)) {
+    errors.push(`${label}.attempts must be a positive integer when recorded.`);
+  }
+  if (outcome === "completed" && input.latencyMs === undefined) errors.push(`${label}.latencyMs is required for a completed call.`);
+  if (outcome === "completed" && input.attempts === undefined) errors.push(`${label}.attempts is required for a completed call.`);
+  errors.push(...validateReasonerCallUsage(input.usage, `${label}.usage`));
+  errors.push(...validateReasonerRetryHistory(input.retryHistory, `${label}.retryHistory`));
+  const stream = isReasonerEvidenceRecord(input.stream) ? input.stream : undefined;
+  if (!stream) {
+    errors.push(`${label}.stream must be an object.`);
+  } else {
+    const unknownStreamFields = Object.keys(stream).filter((key) => !["enabled", "completed", "completedBy"].includes(key));
+    if (unknownStreamFields.length) errors.push(`${label}.stream contains unknown field(s): ${unknownStreamFields.sort().join(", ")}.`);
+    if (typeof stream.enabled !== "boolean") errors.push(`${label}.stream.enabled must be boolean.`);
+    if (typeof stream.completed !== "boolean") errors.push(`${label}.stream.completed must be boolean.`);
+    const completedBy = stream.completedBy;
+    if (
+      completedBy !== undefined &&
+      completedBy !== "done_sentinel" &&
+      completedBy !== "provider_stop_event" &&
+      completedBy !== "reader_done"
+    ) {
+      errors.push(`${label}.stream.completedBy is invalid.`);
+    }
+    if (outcome === "completed" && stream.completed !== true) errors.push(`${label}.stream.completed must be true for a completed call.`);
+    if (outcome === "completed" && completedBy === undefined) errors.push(`${label}.stream.completedBy is required for a completed call.`);
+    if ((outcome === "failed" || outcome === "aborted") && stream.completed !== false) {
+      errors.push(`${label}.stream.completed must be false for a failed or aborted call.`);
+    }
+    if ((outcome === "failed" || outcome === "aborted") && completedBy !== undefined) {
+      errors.push(`${label}.stream.completedBy must be absent for a failed or aborted call.`);
+    }
+  }
+  errors.push(...validateReasonerCallFailure(input.failure, outcome, `${label}.failure`));
+  return errors;
+}
+
+function validateReasonerCallUsage(input: unknown, label: string): string[] {
+  if (input === undefined) return [];
+  if (!isReasonerEvidenceRecord(input)) return [`${label} must be an object when recorded.`];
+  const errors: string[] = [];
+  const unknown = Object.keys(input).filter((key) => !["promptTokens", "completionTokens", "totalTokens"].includes(key));
+  if (unknown.length) errors.push(`${label} contains unknown field(s): ${unknown.sort().join(", ")}.`);
+  for (const field of ["promptTokens", "completionTokens", "totalTokens"] as const) {
+    const value = input[field];
+    if (value !== undefined && (!Number.isInteger(value) || Number(value) < 0)) {
+      errors.push(`${label}.${field} must be a nonnegative integer when recorded.`);
+    }
+  }
+  return errors;
+}
+
+function validateReasonerRetryHistory(input: unknown, label: string): string[] {
+  if (input === undefined) return [];
+  if (!Array.isArray(input)) return [`${label} must be an array when recorded.`];
+  const errors: string[] = [];
+  const allowed = new Set(["attempt", "failureKind", "providerStage", "status", "timeoutMs", "aborted", "retryable", "delayMs"]);
+  for (const [index, entry] of input.entries()) {
+    const itemLabel = `${label}[${index}]`;
+    if (!isReasonerEvidenceRecord(entry)) {
+      errors.push(`${itemLabel} must be an object.`);
+      continue;
+    }
+    const unknown = Object.keys(entry).filter((key) => !allowed.has(key));
+    if (unknown.length) errors.push(`${itemLabel} contains unknown field(s): ${unknown.sort().join(", ")}.`);
+    if (!Number.isInteger(entry.attempt) || Number(entry.attempt) <= 0) errors.push(`${itemLabel}.attempt must be a positive integer.`);
+    if (typeof entry.retryable !== "boolean") errors.push(`${itemLabel}.retryable must be boolean.`);
+    for (const field of ["status", "timeoutMs", "delayMs"] as const) {
+      const value = entry[field];
+      if (value !== undefined && (!Number.isFinite(value) || Number(value) < 0)) errors.push(`${itemLabel}.${field} must be nonnegative.`);
+    }
+    if (entry.aborted !== undefined && typeof entry.aborted !== "boolean") errors.push(`${itemLabel}.aborted must be boolean.`);
+  }
+  return errors;
+}
+
+function validateReasonerCallFailure(input: unknown, outcome: unknown, label: string): string[] {
+  if (outcome === "completed") return input === undefined ? [] : [`${label} must be absent for a completed call.`];
+  if (outcome !== "failed" && outcome !== "aborted") return [];
+  if (!isReasonerEvidenceRecord(input)) return [`${label} is required for a failed or aborted call.`];
+  const allowed = new Set(["failureKind", "providerStage", "status", "timeoutMs", "aborted", "retryable", "attempts", "maxAttempts"]);
+  const errors: string[] = [];
+  const unknown = Object.keys(input).filter((key) => !allowed.has(key));
+  if (unknown.length) errors.push(`${label} contains unknown field(s): ${unknown.sort().join(", ")}.`);
+  const failureKinds = new Set(["http", "timeout", "abort", "stream_invalid_json", "stream_empty", "stream_incomplete", "stream_missing_body", "non_json", "empty_content", "network", "gateway_html", "unknown"]);
+  if (typeof input.failureKind !== "string" || !failureKinds.has(input.failureKind)) errors.push(`${label}.failureKind is invalid.`);
+  if (outcome === "aborted" && input.failureKind !== "abort" && input.failureKind !== "timeout" && input.aborted !== true) {
+    errors.push(`${label} must identify an abort or timeout for an aborted call.`);
+  }
+  for (const field of ["status", "timeoutMs", "attempts", "maxAttempts"] as const) {
+    const value = input[field];
+    if (value !== undefined && (!Number.isInteger(value) || Number(value) < (field === "attempts" || field === "maxAttempts" ? 1 : 0))) {
+      errors.push(`${label}.${field} is invalid.`);
+    }
+  }
+  if (input.aborted !== undefined && typeof input.aborted !== "boolean") errors.push(`${label}.aborted must be boolean.`);
+  if (input.retryable !== undefined && typeof input.retryable !== "boolean") errors.push(`${label}.retryable must be boolean.`);
+  return errors;
+}
+
+function isReasonerEvidenceRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function sameCanonicalSocialExposureValue(left: unknown, right: unknown): boolean {
@@ -1908,6 +2159,7 @@ type SocialDecision<TObservation, TPending, TCommand> =
       pending: TPending;
       observation: TObservation;
       action: SocialAction<TCommand>;
+      reasonerCalls?: SocialReasonerCallEvidence[];
       pendingIndex: number;
       turnIndex: number;
       transactionId: string;
@@ -1926,6 +2178,7 @@ type SocialDecision<TObservation, TPending, TCommand> =
       failureStage: SocialDecisionFailureStage;
       error: string;
       rawError: unknown;
+      reasonerCalls?: SocialReasonerCallEvidence[];
     };
 
 function isSuccessfulDecision<TObservation, TPending, TCommand>(
@@ -2074,6 +2327,7 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
   let traceId: string | undefined;
   let actorTurnIndex: number | undefined;
   let failureStage: SocialDecisionFailureStage = "decision_identity";
+  let decisionStarted = false;
   try {
     const stateBeforeObserve = input.environment.snapshot();
     const decisionIdentityContext: SocialTraceIdProviderContext<TState, TPending> = {
@@ -2119,11 +2373,18 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       pendingAction: cloneJson(input.pending)
     });
     failureStage = "actor_decide";
+    decisionStarted = true;
     const action = cloneJson(await awaitActorDecisionWithinExecutionLimits(
       () => actor.decide(cloneJson(input.pending)),
       input.executionLimits
     ));
     const actionWithTraceId = action.traceId ? action : { ...action, traceId };
+    const reasonerCalls = takeRunnerBoundReasonerCalls({
+      actor,
+      transactionId,
+      traceId: actionWithTraceId.traceId!,
+      turnIndex: input.turnIndex
+    });
     return {
       ok: true,
       actor,
@@ -2131,12 +2392,45 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       pending: input.pending,
       observation,
       action: actionWithTraceId,
+      ...(reasonerCalls.length ? { reasonerCalls } : {}),
       pendingIndex: input.pendingIndex,
       turnIndex: input.turnIndex,
       transactionId
     };
   } catch (error) {
     if (error instanceof SocialExecutionLimitError) failureStage = error.failureStage;
+    let reasonerCalls: SocialReasonerCallEvidence[] = [];
+    if (decisionStarted) {
+      try {
+        reasonerCalls = takeRunnerBoundReasonerCalls({
+          actor,
+          transactionId,
+          traceId: traceId ?? `${input.optionsId}:social:${input.turnIndex}:${actorId}`,
+          turnIndex: input.turnIndex
+        });
+      } catch (evidenceError) {
+        return {
+          ok: false,
+          actor,
+          actorId,
+          pending: input.pending,
+          observation,
+          pendingIndex: input.pendingIndex,
+          turnIndex: input.turnIndex,
+          traceId,
+          transactionId,
+          actorTurnIndex,
+          failureStage: "actor_decide",
+          error: safeSocialFailureMessage(evidenceError),
+          rawError: evidenceError
+        };
+      }
+      // A harness timeout/abort proves only that the decision budget ended.
+      // If the actor has not supplied a transaction-bound report, the runner
+      // does not know whether a provider request started or whether a stream
+      // was enabled. Keep that uncertainty in the native step's control-plane
+      // failure evidence instead of fabricating a provider call lifecycle.
+    }
     return {
       ok: false,
       actor,
@@ -2150,9 +2444,53 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       actorTurnIndex,
       failureStage,
       error: safeSocialFailureMessage(error),
-      rawError: error
+      rawError: error,
+      ...(reasonerCalls.length ? { reasonerCalls } : {})
     };
   }
+}
+
+function takeRunnerBoundReasonerCalls<TObservation, TPending, TCommand>(input: {
+  actor: SocialActor<TObservation, TPending, TCommand>;
+  transactionId: string;
+  traceId: string;
+  turnIndex: number;
+}): SocialReasonerCallEvidence[] {
+  const reports = input.actor.takeReasonerCallReports?.({
+    transactionId: input.transactionId,
+    traceId: input.traceId,
+    turnIndex: input.turnIndex
+  }) ?? [];
+  if (!Array.isArray(reports)) throw new Error("Social actor reasoner call reports must be an array.");
+  return reports.map((report, index) => bindReasonerCallReport({
+    report,
+    callIndex: index,
+    traceId: input.traceId,
+    actorId: input.actor.id,
+    profileId: input.actor.profile.id,
+    model: input.actor.profile.model
+  }));
+}
+
+function bindReasonerCallReport(input: {
+  report: SocialReasonerCallReport;
+  callIndex: number;
+  traceId: string;
+  actorId: string;
+  profileId: string;
+  model: string;
+}): SocialReasonerCallEvidence {
+  const errors = validateReasonerCallReport(input.report, "reasoner call report");
+  if (errors.length) throw new Error(`Invalid social actor reasoner call report: ${errors.join(" ")}`);
+  return {
+    schemaVersion: SOCIAL_REASONER_CALL_EVIDENCE_VERSION,
+    callId: `${input.traceId}:reasoner-call:${input.callIndex + 1}`,
+    traceId: input.traceId,
+    actorId: input.actorId,
+    profileId: input.profileId,
+    model: input.model,
+    ...cloneJson(input.report)
+  };
 }
 
 /** A controlled runner failure which deliberately never incorporates an
@@ -2160,7 +2498,7 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
 class SocialExecutionLimitError extends Error {
   constructor(
     readonly failureStage: Extract<SocialDecisionFailureStage, "execution_abort" | "decision_timeout">,
-    timeoutMs?: number
+    readonly timeoutMs?: number
   ) {
     super(
       failureStage === "decision_timeout"
@@ -2977,6 +3315,9 @@ function baseStep<TObservation, TPending, TCommand>(input: {
     resolutionPolicy: input.schedulerMode === "aec-batched-decision" ? "sequential-apply-from-shared-decision-state" : "sequential-apply",
     pendingAction: cloneJson(input.decision.pending),
     observation: cloneJson(input.decision.observation),
+    ...(input.decision.reasonerCalls?.length
+      ? { reasonerCalls: cloneJson(input.decision.reasonerCalls) }
+      : {}),
     decisionStateHash: input.decisionStateHash
   };
 }
@@ -3014,6 +3355,9 @@ function failedDecisionToStep<TObservation, TPending, TCommand>(input: {
     pendingAction: cloneJson(input.decision.pending),
     observation: cloneJson(input.decision.observation as TObservation),
     action: { actorId: input.decision.actorId, kind: "error", command: undefined as TCommand },
+    ...(input.decision.reasonerCalls?.length
+      ? { reasonerCalls: cloneJson(input.decision.reasonerCalls) }
+      : {}),
     commitStatus: "rejected",
     decisionStateHash: input.decisionStateHash,
     preStateHash: input.preStateHash,
