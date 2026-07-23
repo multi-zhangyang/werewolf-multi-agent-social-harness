@@ -13,8 +13,10 @@ test("renders recorded server truth without a provider and never requests a full
   });
 
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  await expect(page.getByText("多 Agent 社会 Harness Cockpit")).toBeVisible();
+  await expect(page.getByText("多 Agent 社会实验台")).toBeVisible();
   await expect(page.getByText("运行注册表")).toBeVisible();
+  await expect(page.getByRole("region", { name: "运行 工作区内容" })).toBeVisible();
+  await expect(page.getByRole("tablist", { name: "工作区标签" })).toHaveCount(0);
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
   // Ordinary desktop widths use the existing evidence Drawer so the center
   // workspace does not collapse between two fixed side rails.
@@ -28,7 +30,7 @@ test("renders recorded server truth without a provider and never requests a full
   // explicit inspector action must be usable with ordinary keyboard focus;
   // pointer row selection remains only a convenience path.
   await page.getByRole("menuitem", { name: /时间线/ }).click();
-  await expect(page.getByRole("tabpanel", { name: "时间线" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "时间线 工作区内容" })).toBeVisible();
   const firstNativeStep = page.getByRole("button", { name: "查看原生步骤 1" });
   await firstNativeStep.focus();
   await expect(firstNativeStep).toBeFocused();
@@ -73,8 +75,8 @@ test("renders recorded server truth without a provider and never requests a full
   await expect(page.getByTestId("agent-decision-evidence-panel")).toHaveCount(0);
 
   await page.getByRole("menuitem", { name: /谱系/ }).click();
-  const truthLineagePanel = page.getByRole("tabpanel", { name: "谱系" });
-  await expect(truthLineagePanel.getByText("Checkpoint operator controls are local-only")).toBeVisible();
+  const truthLineagePanel = page.getByRole("region", { name: "谱系 工作区内容" });
+  await expect(truthLineagePanel.getByText("当前连接没有 checkpoint operator 能力")).toBeVisible();
   await expect(truthLineagePanel.getByRole("button", { name: "刷新 checkpoint" })).toBeDisabled();
   await expect(truthLineagePanel.getByRole("button", { name: "创建最终边界 checkpoint" })).toBeDisabled();
 
@@ -84,7 +86,7 @@ test("renders recorded server truth without a provider and never requests a full
   // Use the primary navigation path, which invokes the same workspace state
   // transition without relying on rc-tabs' transient horizontal scroll offset.
   await page.getByRole("menuitem", { name: /对比/ }).click();
-  const comparePanel = page.getByRole("tabpanel", { name: "对比" });
+  const comparePanel = page.getByRole("region", { name: "对比 工作区内容" });
   await expect(comparePanel).toBeVisible();
   const truthComparison = page.waitForResponse((response) => isComparisonResponse(response, "truth-redacted"));
   const candidate = comparePanel.getByRole("combobox", { name: "候选运行" });
@@ -112,7 +114,7 @@ test("renders recorded server truth without a provider and never requests a full
   await expect(page.getByText(new RegExp(`候选 ${fixtureCandidateMatchId.slice(0, 8)}`))).toBeVisible();
   expect(artifactViews.slice(requestCountBeforeViewChange)).toEqual(["truth-redacted", "truth-redacted"]);
 
-  await page.getByRole("tab", { name: "时间线", exact: true }).click();
+  await page.getByRole("menuitem", { name: /时间线/ }).click();
   await expect(page.getByText("主时间线来自原生 social episode 执行工件")).toBeVisible();
   await expect(page.getByText("native steps").first()).toBeVisible();
   const replayButton = page.getByRole("button", { name: "复现" });
@@ -126,11 +128,48 @@ test("renders recorded server truth without a provider and never requests a full
   expect(pageErrors).toEqual([]);
 });
 
+test("honors public capabilities before touching the local operator registry", async ({ page }) => {
+  let operatorRegistryRequests = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/matches") operatorRegistryRequests += 1;
+  });
+  await page.route("**/api/config", async (route) => {
+    const response = await route.fetch();
+    const config = await response.json();
+    await route.fulfill({
+      response,
+      json: {
+        ...config,
+        capabilities: {
+          operatorRegistry: false,
+          postgameArtifact: false,
+          postgameReplay: false,
+          checkpointCreate: false,
+          checkpointFork: false,
+          artifactExport: { match: false, tournament: false, matrix: false }
+        }
+      }
+    });
+  });
+
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("status")).toContainText("已连接公开只读服务");
+  expect(operatorRegistryRequests).toBe(0);
+  await expect(page.getByRole("button", { name: "刷新运行" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "加载最近" })).toBeDisabled();
+
+  const projection = page.getByRole("combobox", { name: "工件投影" });
+  await expect(page.getByText("公开视图 · 真相脱敏", { exact: true }).first()).toBeVisible();
+  await projection.click();
+  await expect(page.getByRole("option", { name: "研究视图 · 私有脱敏" })).toHaveCount(0);
+  await expect(page.getByRole("option", { name: "公开视图 · 真相脱敏" })).toHaveCount(1);
+});
+
 test("renders matrix lifecycle and statistics only from the harness API response", async ({ page }) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.goto("/?workspace=experiments", { waitUntil: "domcontentloaded" });
-  const experimentPanel = page.getByRole("tabpanel", { name: "实验矩阵" });
+  const experimentPanel = page.getByRole("region", { name: "实验矩阵 工作区内容" });
   await expect(experimentPanel).toBeVisible();
 
   const games = experimentPanel.getByRole("combobox", { name: "矩阵游戏局数" });
@@ -158,7 +197,7 @@ test("renders matrix lifecycle and statistics only from the harness API response
 test("renders a projection-safe Werewolf postgame review board", async ({ page }) => {
   await page.goto("/?workspace=domain", { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
-  await expect(page.getByRole("tabpanel", { name: "狼人杀复盘" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "狼人杀复盘 工作区内容" })).toBeVisible();
   const board = page.getByTestId("werewolf-review-board");
   const seatBoard = page.getByRole("region", { name: "狼人杀座位复盘" });
   await expect(board.getByText("狼人杀赛后复盘")).toBeVisible();
@@ -193,7 +232,7 @@ test("creates a replay-prefix checkpoint and opens its real fork comparison", as
   await page.goto(`/?workspace=timeline&compareBaseline=${fixtureMatchId}`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
 
-  const timelinePanel = page.getByRole("tabpanel", { name: "时间线" });
+  const timelinePanel = page.getByRole("region", { name: "时间线 工作区内容" });
   const replayCursor = timelinePanel.getByRole("combobox", { name: "跳转服务端回放帧" });
   const frameResponsePromise = page.waitForResponse((response) => isReplayFrameResponse(response));
   await replayCursor.click();
@@ -206,7 +245,7 @@ test("creates a replay-prefix checkpoint and opens its real fork comparison", as
   expect(nativeStepCount).toBeGreaterThan(0);
 
   await page.getByRole("menuitem", { name: /谱系/ }).click();
-  const lineagePanel = page.getByRole("tabpanel", { name: "谱系" });
+  const lineagePanel = page.getByRole("region", { name: "谱系 工作区内容" });
   await expect(lineagePanel).toBeVisible();
   await expect(lineagePanel.getByText(new RegExp(`当前 selector：服务端 replay native #${nativeStepCount}`))).toBeVisible();
 
@@ -276,7 +315,7 @@ test("creates a replay-prefix checkpoint and opens its real fork comparison", as
   expect(branchTreeResponse.ok()).toBeTruthy();
   expect((await branchTreeResponse.json()).summary.counts.matches).toBeGreaterThan(0);
 
-  await expect(page.getByRole("tabpanel", { name: "对比" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "对比 工作区内容" })).toBeVisible();
   await expect(page.getByText("对比已就绪")).toBeVisible();
   await expect(page.getByRole("status")).toContainText("checkpoint fork 已完成");
   expect(pageErrors).toEqual([]);
@@ -620,7 +659,9 @@ test.describe("compact cockpit", () => {
         await page.keyboard.press("Escape");
         await expect(inspector).toBeHidden();
       }
-      await expect(page.getByRole("tabpanel", { name: label })).toBeVisible();
+      await expect(page.getByRole("region", { name: `${label} 工作区内容` })).toBeVisible();
+      await expect(page.getByTestId("compact-kpi-strip")).toHaveCount(1);
+      await expect(page.getByRole("tablist", { name: "工作区标签" })).toHaveCount(0);
       await expectPageWithinViewport(page);
     }
   });
@@ -643,7 +684,7 @@ test.describe("compact cockpit", () => {
     await expectDrawerWithinViewport(page, context);
     await context.getByRole("menuitem", { name: /社会/ }).click();
     await expect(context).toBeHidden();
-    await expect(page.getByRole("tabpanel", { name: "社会" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "社会 工作区内容" })).toBeVisible();
     await expect(page.getByText("可见性 / 影响边")).toBeVisible();
 
     await page.getByRole("button", { name: "打开证据检查器" }).click();
@@ -813,7 +854,7 @@ test("submits the selected parallel scheduler when exporting a tournament public
   test.setTimeout(90_000);
   await page.goto("/?workspace=packs", { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
-  await expect(page.getByRole("tabpanel", { name: "公开包" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "公开包 工作区内容" })).toBeVisible();
 
   const games = page.getByRole("combobox", { name: "锦标赛游戏局数" });
   await games.click();

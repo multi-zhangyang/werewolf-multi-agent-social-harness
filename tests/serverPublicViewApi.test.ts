@@ -90,6 +90,47 @@ describe("public match API redaction", () => {
       expect(JSON.stringify(response.body)).not.toContain('"endpoint"');
       expect(JSON.stringify(response.body)).not.toContain('"chatCompletionsUrl"');
     }
+
+    expect(config.body.capabilities).toEqual({
+      operatorRegistry: true,
+      postgameArtifact: true,
+      postgameReplay: true,
+      checkpointCreate: true,
+      checkpointFork: true,
+      artifactExport: {
+        match: true,
+        tournament: false,
+        matrix: false
+      }
+    });
+  });
+
+  it("publishes request-scoped public capabilities instead of making the cockpit infer operator access", async () => {
+    await close(server);
+    const restrictedApp = createServerApp({
+      createReasoner: () => fakeReasoner,
+      artifactAccessBindHost: "0.0.0.0"
+    });
+    server = await listen(restrictedApp);
+    const address = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const config = await requestJson(baseUrl, "GET", "/api/config");
+    expect(config.status).toBe(200);
+    expect(config.body.capabilities).toEqual({
+      operatorRegistry: false,
+      postgameArtifact: false,
+      postgameReplay: false,
+      checkpointCreate: false,
+      checkpointFork: false,
+      artifactExport: {
+        match: false,
+        tournament: false,
+        matrix: false
+      }
+    });
+    expect(JSON.stringify(config.body)).not.toContain('"endpoint"');
+    expect(JSON.stringify(config.body)).not.toContain('"chatCompletionsUrl"');
   });
 
   it("defaults artifact reads to a private-evidence-redacted projection and keeps full postgame truth explicit", async () => {

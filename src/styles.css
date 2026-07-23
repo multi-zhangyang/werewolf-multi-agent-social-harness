@@ -1,7 +1,3 @@
-@import "@fontsource-variable/geist";
-@import "@fontsource/noto-sans-sc/chinese-simplified-400.css";
-@import "@fontsource/noto-sans-sc/chinese-simplified-600.css";
-
 html,
 body,
 #root {
@@ -10,8 +6,100 @@ body,
   margin: 0;
 }
 
+/* Ant Design's default tertiary text and semantic filled tags fall below
+   4.5:1 on the cockpit's pale surfaces, especially inside selected rows. */
+.ant-typography-secondary,
+.ant-statistic-title,
+.ant-descriptions-item-label,
+.ant-breadcrumb-link {
+  color: #4f5d70 !important;
+}
+
+.ant-empty-description {
+  color: #4f5d70 !important;
+}
+
+.ant-tag-success {
+  color: #0b5c40 !important;
+  background: #e7f6ef !important;
+  border-color: #a7dac4 !important;
+}
+
+.ant-tag-processing,
+.ant-tag-blue {
+  color: #123f8c !important;
+  background: #eaf1ff !important;
+  border-color: #aac4f5 !important;
+}
+
+.ant-tag-warning,
+.ant-tag-gold {
+  color: #704000 !important;
+  background: #fff3d6 !important;
+  border-color: #e8c77d !important;
+}
+
+.ant-tag-error {
+  color: #842737 !important;
+  background: #fdecef !important;
+  border-color: #efb5c0 !important;
+}
+
 body {
   background: #f4f6fa;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Source Han Sans SC", Arial, sans-serif;
+}
+
+.cockpit-ready-status {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid #dce7e2;
+  border-radius: 8px;
+  background: #f6fbf8;
+  color: #157a58;
+}
+
+.cockpit-ready-status > .ant-typography {
+  min-width: 0;
+  flex: 1;
+}
+
+.cockpit-ready-status > .ant-tag {
+  margin-inline-end: 0;
+}
+
+.cockpit-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+}
+
+.cockpit-kpi-strip__item {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 4px 16px;
+  border-inline-start: 1px solid #e4e8f0;
+}
+
+.cockpit-kpi-strip__item:first-child {
+  border-inline-start: 0;
+}
+
+.cockpit-kpi-strip__label,
+.cockpit-kpi-strip__detail {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cockpit-kpi-strip__value {
+  font-size: 18px;
+  line-height: 1.35;
 }
 
 .social-evidence-graph__canvas {
@@ -123,7 +211,7 @@ body {
 
 .social-evidence-graph__node-label {
   fill: #20344e;
-  font-family: Geist, "Noto Sans SC", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   font-size: 13px;
   font-weight: 650;
   pointer-events: none;
@@ -131,7 +219,7 @@ body {
 
 .social-evidence-graph__node-meta {
   fill: #667f9e;
-  font-family: Geist, "Noto Sans SC", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   font-size: 8px;
   pointer-events: none;
 }
@@ -203,6 +291,28 @@ body {
 }
 
 @media (max-width: 576px) {
+  .cockpit-kpi-strip-card .ant-card-body {
+    padding: 8px;
+  }
+
+  .cockpit-kpi-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cockpit-kpi-strip__item {
+    padding: 8px 10px;
+    border-inline-start: 0;
+    border-block-start: 1px solid #e4e8f0;
+  }
+
+  .cockpit-kpi-strip__item:nth-child(-n + 2) {
+    border-block-start: 0;
+  }
+
+  .cockpit-kpi-strip__item:nth-child(even) {
+    border-inline-start: 1px solid #e4e8f0;
+  }
+
   .social-evidence-graph__canvas {
     overflow-x: auto;
     overscroll-behavior-inline: contain;
@@ -215,5 +325,16 @@ body {
 
   .social-evidence-graph__node-meta {
     display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Badge,
@@ -28,8 +28,7 @@ import {
   Tooltip,
   Typography
 } from "antd";
-import type { DescriptionsProps, MenuProps, TableProps, TabsProps } from "antd";
-import zhCN from "antd/locale/zh_CN";
+import type { DescriptionsProps, MenuProps, TableProps } from "antd";
 import {
   ApiOutlined,
   BarChartOutlined,
@@ -93,16 +92,32 @@ import {
   validateCockpitExperimentDraft,
   type CockpitExperimentDraft
 } from "./components/cockpit/experimentDraft";
-import { legacyMetricPromotionPolicyFromSummary, resolveRecordedMetricPromotion } from "./harness/evaluation";
 import { countSocialStepCommits, isSocialStepCommitted, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
 import { isSafeHarnessCheckpointBoundary } from "./harness/episodeArtifacts";
 import type { SocialStateMutationJournalEntry } from "./harness/socialState";
-import { AgentDecisionEvidencePanel, buildDecisionJournalEvidence } from "./components/cockpit/AgentDecisionEvidencePanel";
-import { SocialEvidenceGraph } from "./components/cockpit/SocialEvidenceGraph";
-import { WerewolfLiveBoard } from "./components/cockpit/WerewolfLiveBoard";
-import { WerewolfReviewBoard } from "./components/cockpit/WerewolfReviewBoard";
 import { readLiveMatchProjection, readLiveMatchStart, type LiveMatchProjection } from "./components/cockpit/werewolfLiveProjection";
 import { buildWerewolfReviewModel } from "./components/cockpit/werewolfReviewProjection";
+
+const SocialEvidenceGraph = lazy(async () => {
+  const module = await import("./components/cockpit/SocialEvidenceGraph");
+  return { default: module.SocialEvidenceGraph };
+});
+const AgentDecisionEvidencePanel = lazy(async () => {
+  const module = await import("./components/cockpit/AgentDecisionEvidencePanel");
+  return { default: module.AgentDecisionEvidencePanel };
+});
+const WerewolfLiveBoard = lazy(async () => {
+  const module = await import("./components/cockpit/WerewolfLiveBoard");
+  return { default: module.WerewolfLiveBoard };
+});
+const WerewolfReviewBoard = lazy(async () => {
+  const module = await import("./components/cockpit/WerewolfReviewBoard");
+  return { default: module.WerewolfReviewBoard };
+});
+const EvaluationWorkspace = lazy(async () => {
+  const module = await import("./components/cockpit/EvaluationWorkspace");
+  return { default: module.EvaluationWorkspace };
+});
 
 type Workspace = "runs" | "timeline" | "domain" | "society" | "lineage" | "evaluation" | "experiments" | "compare" | "packs";
 
@@ -111,7 +126,19 @@ const DEFAULT_TABLE_SCROLL = { x: "max-content" } as const;
 function Table<RecordType extends object>(props: TableProps<RecordType>) {
   // Evidence tables may be wider than a compact cockpit viewport. Keep that
   // overflow within the table so it never widens the page or mobile drawers.
-  return <AntTable {...props} scroll={props.scroll ?? DEFAULT_TABLE_SCROLL} />;
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const scrollRegions = hostRef.current?.querySelectorAll<HTMLElement>(".ant-table-content, .ant-table-body") ?? [];
+    for (const region of scrollRegions) {
+      region.tabIndex = 0;
+      if (!region.getAttribute("aria-label")) region.setAttribute("aria-label", "可横向滚动的数据表");
+    }
+  });
+  return (
+    <div ref={hostRef} className="cockpit-table-host">
+      <AntTable {...props} scroll={props.scroll ?? DEFAULT_TABLE_SCROLL} />
+    </div>
+  );
 }
 
 function parseWorkspaceFromSearch(search: string): Workspace | null {
@@ -216,6 +243,18 @@ interface ConfigResponse {
     matrixConfigured?: boolean;
     checkpointConfigured?: boolean;
     matchConfigured?: boolean;
+  };
+  capabilities?: {
+    operatorRegistry?: boolean;
+    postgameArtifact?: boolean;
+    postgameReplay?: boolean;
+    checkpointCreate?: boolean;
+    checkpointFork?: boolean;
+    artifactExport?: {
+      match?: boolean;
+      tournament?: boolean;
+      matrix?: boolean;
+    };
   };
 }
 
@@ -1015,6 +1054,9 @@ export function App() {
   const [rawOpen, setRawOpen] = useState(false);
   const [mobileContextOpen, setMobileContextOpen] = useState(false);
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
+  const mobileContextTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const mobileInspectorTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const rawReturnFocusRef = useRef<HTMLElement | null>(null);
   const [tournamentPacks, setTournamentPacks] = useState<TournamentArtifactSetSummary[]>([]);
   const [tournamentExecutionTelemetry, setTournamentExecutionTelemetry] =
     useState<TournamentExecutionTelemetry | null>(null);
@@ -1031,6 +1073,15 @@ export function App() {
   const [shareAllowlist, setShareAllowlist] = useState<string[]>(DEFAULT_SHARE_ALLOWLIST);
 
   const models = useMemo(() => config?.models ?? config?.provider?.models ?? [], [config]);
+  const operatorRegistryEnabled = config?.capabilities?.operatorRegistry === true;
+  const canUsePostgameArtifact = config?.capabilities?.postgameArtifact === true;
+  const canUsePostgameReplay = config?.capabilities?.postgameReplay === true;
+  const canExportMatchArtifacts = config?.capabilities?.artifactExport?.match === true;
+  const canUseCheckpointControls =
+    artifactView === "postgame-redacted" &&
+    config?.capabilities?.operatorRegistry === true &&
+    config.capabilities.checkpointCreate === true &&
+    config.capabilities.checkpointFork === true;
   const experimentRequest = useMemo(() => buildCockpitExperimentRequest(experimentDraft), [experimentDraft]);
   const experimentDraftError = useMemo(
     () => validateCockpitExperimentDraft(experimentDraft, models),
@@ -1102,6 +1153,9 @@ export function App() {
   const loadConfig = useCallback(async () => {
     const nextConfig = await apiJson<ConfigResponse>("/api/config");
     setConfig(nextConfig);
+    if (nextConfig.capabilities?.postgameArtifact !== true) {
+      setArtifactView((current) => current === "postgame-redacted" ? "truth-redacted" : current);
+    }
     const nextModels = nextConfig.models ?? nextConfig.provider?.models ?? [];
     setSelectedModel((current) => {
       if (current && (!nextModels.length || nextModels.includes(current))) return current;
@@ -1275,6 +1329,10 @@ export function App() {
 
   const handleArtifactViewChange = useCallback(
     async (view: ArtifactView) => {
+      if (view === "postgame-redacted" && !canUsePostgameArtifact) {
+        setActionStatus("当前连接没有本地研究投影权限；继续使用公开真相脱敏视图。");
+        return;
+      }
       if (!selectedMatch?.hasArtifact) {
         setArtifactView(view);
         setActionStatus(`投影模式已切换为 ${view}；加载工件后生效。`);
@@ -1282,17 +1340,25 @@ export function App() {
       }
       await loadArtifact(selectedMatch, view, candidateId);
     },
-    [candidateId, loadArtifact, selectedMatch, setActionStatus]
+    [canUsePostgameArtifact, candidateId, loadArtifact, selectedMatch, setActionStatus]
   );
 
   const bootstrap = useCallback(async () => {
     setBusy("bootstrap");
     try {
-      await loadConfig();
+      const nextConfig = await loadConfig();
+      if (nextConfig.capabilities?.operatorRegistry !== true) {
+        setActionStatus("已连接公开只读服务；运行注册表与本地研究工件未向当前连接开放。");
+        return;
+      }
       const records = await refreshMatches();
       const preferredBaselineId = initialCompareSelection.baselineId;
       const preferredCandidateId = initialCompareSelection.candidateId;
-      const preferredView = initialCompareSelection.view ?? "postgame-redacted";
+      const preferredView =
+        initialCompareSelection.view === "truth-redacted" ||
+        nextConfig.capabilities?.postgameArtifact !== true
+          ? "truth-redacted"
+          : "postgame-redacted";
       const preferredBaseline = preferredBaselineId
         ? records.find((match) => match.hasArtifact && match.id === preferredBaselineId)
         : undefined;
@@ -1329,6 +1395,10 @@ export function App() {
   }, [bootstrap]);
 
   const handleRefresh = useCallback(async () => {
+    if (!operatorRegistryEnabled) {
+      setActionStatus("当前连接没有运行注册表权限；未发送刷新请求。");
+      return;
+    }
     setBusy("matches");
     try {
       const records = await refreshMatches();
@@ -1338,9 +1408,13 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [refreshMatches, setActionStatus]);
+  }, [operatorRegistryEnabled, refreshMatches, setActionStatus]);
 
   const handleLoadLatest = useCallback(async () => {
+    if (!operatorRegistryEnabled) {
+      setActionStatus("当前连接没有运行注册表权限；未发送加载请求。");
+      return;
+    }
     setBusy("latest");
     try {
       const records = await refreshMatches();
@@ -1349,14 +1423,18 @@ export function App() {
         setActionStatus("没有可加载的 artifact-backed run。");
         return;
       }
-      await loadArtifact(latest, "postgame-redacted", candidateId);
+      await loadArtifact(
+        latest,
+        canUsePostgameArtifact ? "postgame-redacted" : "truth-redacted",
+        candidateId
+      );
       setWorkspace("timeline");
     } catch (nextError) {
       setActionStatus("加载最近工件失败", errorMessage(nextError));
     } finally {
       setBusy(null);
     }
-  }, [candidateId, loadArtifact, refreshMatches, setActionStatus]);
+  }, [canUsePostgameArtifact, candidateId, loadArtifact, operatorRegistryEnabled, refreshMatches, setActionStatus]);
 
   const handleRunExperiment = useCallback(async () => {
     if (experimentDraftError) {
@@ -1441,7 +1519,12 @@ export function App() {
       // Do not consult `/api/matches` first: that is an operator registry and
       // must not be a spectator prerequisite or a live metadata side channel.
       if (disposed || pollSequence !== livePollSeqRef.current) return;
-      void loadArtifact(projection.matchId, "postgame-redacted", candidateId, { preserveLiveUntilLoaded: true });
+      void loadArtifact(
+        projection.matchId,
+        canUsePostgameArtifact ? "postgame-redacted" : "truth-redacted",
+        candidateId,
+        { preserveLiveUntilLoaded: true }
+      );
     };
 
     const poll = async () => {
@@ -1471,16 +1554,16 @@ export function App() {
       abortController.abort();
       if (timer) clearTimeout(timer);
     };
-  }, [candidateId, liveMatchId, loadArtifact, setActionStatus]);
+  }, [canUsePostgameArtifact, candidateId, liveMatchId, loadArtifact, setActionStatus]);
 
   const handleReplay = useCallback(async () => {
     if (!currentMatchId) {
       setActionStatus("无法复现：尚未选择 run。");
       return;
     }
-    if (artifactView !== "postgame-redacted") {
+    if (!canUsePostgameReplay || artifactView !== "postgame-redacted") {
       setReplay(null);
-      setActionStatus("原生复现仅在 postgame-redacted 本地研究复盘视图可用。");
+      setActionStatus("当前连接没有 postgame replay 权限；未发送复现请求。");
       return;
     }
     setBusy("replay");
@@ -1503,7 +1586,7 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [artifactView, currentMatchId, setActionStatus]);
+  }, [artifactView, canUsePostgameReplay, currentMatchId, setActionStatus]);
 
   const handleLoadReplayFrame = useCallback(
     async (index: number) => {
@@ -1511,8 +1594,8 @@ export function App() {
         setActionStatus("无法定位回放帧：尚未选择带工件的 run。");
         return;
       }
-      if (artifactView !== "postgame-redacted") {
-        setActionStatus("原生步骤回放帧仅在 postgame-redacted 本地复盘视图可用。");
+      if (!canUsePostgameReplay || artifactView !== "postgame-redacted") {
+        setActionStatus("当前连接没有 postgame replay frame 权限；未发送请求。");
         return;
       }
       const step = artifact.socialEpisode.steps[index];
@@ -1553,7 +1636,7 @@ export function App() {
         if (requestSeq === replayFrameLoadSeqRef.current) setBusy(null);
       }
     },
-    [artifact, artifactView, currentMatchId, setActionStatus]
+    [artifact, artifactView, canUsePostgameReplay, currentMatchId, setActionStatus]
   );
 
   const handleCandidateChange = useCallback(
@@ -1898,7 +1981,7 @@ export function App() {
       const transitions = parsePositiveInteger(maxTransitions, DEFAULT_MAX_TRANSITIONS);
       const timeoutMs = parsePositiveInteger(timeoutSeconds, DEFAULT_TIMEOUT_SECONDS) * 1000;
       const matrixId = `ui-matrix-${Date.now()}`;
-      const exportArtifacts = matrixExportArtifacts && Boolean(config?.artifactExport?.matrixConfigured);
+      const exportArtifacts = matrixExportArtifacts && config?.capabilities?.artifactExport?.matrix === true;
       const response = await apiJson<ExperimentMatrixRunResponse>("/api/experiments/matrix/run", {
         method: "POST",
         body: JSON.stringify({
@@ -1941,7 +2024,7 @@ export function App() {
       setBusy(null);
     }
   }, [
-    config?.artifactExport?.matrixConfigured,
+    config?.capabilities?.artifactExport?.matrix,
     experimentDraftError,
     experimentRequest,
     jointPhaseScheduler,
@@ -2546,6 +2629,10 @@ export function App() {
   }, [packShares, setActionStatus]);
 
   const handleDownloadArtifact = useCallback(() => {
+    if (!canExportMatchArtifacts) {
+      setActionStatus("当前连接没有 match artifact 导出权限；未发送下载请求。");
+      return;
+    }
     if (!currentMatchId) return;
     const target = `/api/matches/${encodeURIComponent(currentMatchId)}/trajectory.jsonl?view=${artifactView}`;
     setBusy("download");
@@ -2565,9 +2652,13 @@ export function App() {
         setActionStatus("trajectory.jsonl 下载失败", errorMessage(nextError));
       })
       .finally(() => setBusy(null));
-  }, [artifactView, currentMatchId, setActionStatus]);
+  }, [artifactView, canExportMatchArtifacts, currentMatchId, setActionStatus]);
 
   const handleDownloadMatchArtifact = useCallback(() => {
+    if (!canExportMatchArtifacts) {
+      setActionStatus("当前连接没有 match artifact 导出权限；未发送下载请求。");
+      return;
+    }
     if (!currentMatchId) return;
     const target = `/api/matches/${encodeURIComponent(currentMatchId)}/artifact?view=${artifactView}&download=1`;
     setBusy("download-match");
@@ -2587,9 +2678,13 @@ export function App() {
         setActionStatus("match artifact 下载失败", errorMessage(nextError));
       })
       .finally(() => setBusy(null));
-  }, [artifactView, currentMatchId, setActionStatus]);
+  }, [artifactView, canExportMatchArtifacts, currentMatchId, setActionStatus]);
 
   const handleRefreshCheckpoints = useCallback(async () => {
+    if (!canUseCheckpointControls) {
+      setActionStatus("当前连接没有 checkpoint registry 权限；未发送刷新请求。");
+      return;
+    }
     if (!currentMatchId) {
       setActionStatus("无法刷新 checkpoint：尚未选择 run。");
       return;
@@ -2606,9 +2701,13 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [currentMatchId, setActionStatus]);
+  }, [canUseCheckpointControls, currentMatchId, setActionStatus]);
 
   const handleCreateCheckpoint = useCallback(async () => {
+    if (!canUseCheckpointControls) {
+      setActionStatus("当前连接没有 checkpoint create 权限；未发送创建请求。");
+      return;
+    }
     if (!currentMatchId) {
       setActionStatus("无法创建 checkpoint：尚未选择 run。");
       return;
@@ -2638,10 +2737,14 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [currentMatchId, replayFrame?.cursor.nativeStepCount, setActionStatus]);
+  }, [canUseCheckpointControls, currentMatchId, replayFrame?.cursor.nativeStepCount, setActionStatus]);
 
   const handleForkCheckpoint = useCallback(
     async (checkpoint: CheckpointSummary) => {
+      if (!canUseCheckpointControls) {
+        setActionStatus("当前连接没有 checkpoint fork 权限；未发送 fork 请求。");
+        return;
+      }
       if (!currentMatchId) {
         setActionStatus("无法 fork checkpoint：尚未选择 parent run。");
         return;
@@ -2708,10 +2811,14 @@ export function App() {
         setBusy(null);
       }
     },
-    [artifactView, currentMatchId, loadComparisonPair, maxTransitions, refreshMatches, setActionStatus, timeoutSeconds]
+    [artifactView, canUseCheckpointControls, currentMatchId, loadComparisonPair, maxTransitions, refreshMatches, setActionStatus, timeoutSeconds]
   );
 
   const handleLoadForkLineage = useCallback(async () => {
+    if (!canUseCheckpointControls) {
+      setActionStatus("当前连接没有 fork lineage 权限；未发送请求。");
+      return;
+    }
     if (!currentMatchId) {
       setActionStatus("无法加载 fork lineage：尚未选择 run。");
       return;
@@ -2727,7 +2834,7 @@ export function App() {
     } finally {
       setBusy(null);
     }
-  }, [currentMatchId, setActionStatus]);
+  }, [canUseCheckpointControls, currentMatchId, setActionStatus]);
 
   const handleSelectCheckpoint = useCallback(
     (checkpoint: CheckpointSummary) => {
@@ -2740,6 +2847,10 @@ export function App() {
 
   const handleLoadBranchTree = useCallback(
     async (checkpointId = selectedCheckpointId) => {
+      if (!canUseCheckpointControls) {
+        setActionStatus("当前连接没有 branch tree 权限；未发送请求。");
+        return;
+      }
       if (!checkpointId) {
         setActionStatus("无法加载 branch tree：尚未选择 checkpoint。");
         return;
@@ -2758,7 +2869,7 @@ export function App() {
         setBusy(null);
       }
     },
-    [selectedCheckpointId, setActionStatus]
+    [canUseCheckpointControls, selectedCheckpointId, setActionStatus]
   );
 
   const handleSelectStep = useCallback(
@@ -2829,7 +2940,7 @@ export function App() {
     )
   }));
 
-  const tabItems: TabsProps["items"] = [
+  const workspacePanels: Array<{ key: Workspace; label: string; children: ReactNode }> = [
     {
       key: "runs",
       label: "运行",
@@ -2863,6 +2974,8 @@ export function App() {
           replayFrame={replayFrame}
           replayFrameCursorIndex={replayFrameCursorIndex}
           replayFrameLoadState={replayFrameLoadState}
+          replayEnabled={canUsePostgameReplay}
+          artifactDownloadEnabled={canExportMatchArtifacts}
           busy={busy}
         />
       )
@@ -2872,7 +2985,9 @@ export function App() {
       label: "狼人杀复盘",
       children: (
         liveProjection ? (
-          <WerewolfLiveBoard projection={liveProjection} pollError={livePollError} />
+          <Suspense fallback={<CockpitChunkFallback label="正在加载实时公开桌面…" />}>
+            <WerewolfLiveBoard projection={liveProjection} pollError={livePollError} />
+          </Suspense>
         ) : liveMatchId ? (
           <Card bordered={false} data-testid="werewolf-live-board">
             <Alert
@@ -2883,21 +2998,23 @@ export function App() {
             />
           </Card>
         ) : (
-          <WerewolfReviewBoard
-            review={werewolfReview}
-            source={
-              replayFrame
-                ? {
-                    kind: "replay-frame",
-                    nativeStepCount: replayFrame.cursor.nativeStepCount,
-                    stateHash: replayFrame.cursor.stateHash ?? replayFrame.cursor.recordedPostStateHash
-                  }
-                : { kind: "artifact-final" }
-            }
-            onSelectReplayBoundary={(nativeStepCount) => void handleLoadReplayFrame(nativeStepCount - 1)}
-            loading={replayFrameLoadState === "loading"}
-            error={replayFrameLoadState === "error" ? replayFrameError : null}
-          />
+          <Suspense fallback={<CockpitChunkFallback label="正在加载狼人杀复盘…" />}>
+            <WerewolfReviewBoard
+              review={werewolfReview}
+              source={
+                replayFrame
+                  ? {
+                      kind: "replay-frame",
+                      nativeStepCount: replayFrame.cursor.nativeStepCount,
+                      stateHash: replayFrame.cursor.stateHash ?? replayFrame.cursor.recordedPostStateHash
+                    }
+                  : { kind: "artifact-final" }
+              }
+              onSelectReplayBoundary={(nativeStepCount) => void handleLoadReplayFrame(nativeStepCount - 1)}
+              loading={replayFrameLoadState === "loading"}
+              error={replayFrameLoadState === "error" ? replayFrameError : null}
+            />
+          </Suspense>
         )
       )
     },
@@ -2928,7 +3045,7 @@ export function App() {
           forkLineage={forkLineage}
           branchTree={branchTree}
           replayBoundaryNativeStepCount={replayFrame?.cursor.nativeStepCount ?? null}
-          operatorEnabled={artifactView === "postgame-redacted"}
+          operatorEnabled={canUseCheckpointControls}
           busy={busy}
           onRefreshCheckpoints={handleRefreshCheckpoints}
           onCreateCheckpoint={handleCreateCheckpoint}
@@ -2946,13 +3063,15 @@ export function App() {
       key: "evaluation",
       label: "评测",
       children: (
-        <EvaluationWorkspace
-          artifact={artifact}
-          metrics={metrics}
-          warnings={warnings}
-          onInspectMetric={(metric, decision) => revealInspector(inspectorFromMetric(metric, decision))}
-          onInspectWarning={(warning) => revealInspector(inspectorFromWarning(warning))}
-        />
+        <Suspense fallback={<CockpitChunkFallback label="正在加载评测工作区…" />}>
+          <EvaluationWorkspace
+            artifact={artifact}
+            metrics={metrics}
+            warnings={warnings}
+            onInspectMetric={(metric, decision) => revealInspector(inspectorFromMetric(metric, decision))}
+            onInspectWarning={(warning) => revealInspector(inspectorFromWarning(warning))}
+          />
+        </Suspense>
       )
     },
     {
@@ -2964,7 +3083,7 @@ export function App() {
           artifactSets={matrixArtifactSets}
           games={matrixGames}
           exportArtifacts={matrixExportArtifacts}
-          exportAvailable={Boolean(config?.artifactExport?.matrixConfigured)}
+          exportAvailable={config?.capabilities?.artifactExport?.matrix === true}
           rosterSummary={formatExperimentRosterSummary(experimentRequest)}
           experimentReady={!experimentDraftError}
           maxTransitions={maxTransitions}
@@ -3102,6 +3221,7 @@ export function App() {
     }
   ];
 
+  const activeWorkspacePanel = workspacePanels.find((panel) => panel.key === workspace) ?? workspacePanels[0];
   const busyAny = Boolean(busy);
   // A live spectator is a distinct audience from the local research
   // operator. While this is true, no registry, model/profile, phase-detail,
@@ -3112,7 +3232,6 @@ export function App() {
 
   return (
     <ConfigProvider
-      locale={zhCN}
       theme={{
         token: {
           borderRadius: 8,
@@ -3128,7 +3247,7 @@ export function App() {
           colorTextSecondary: "#667085",
           controlHeight: 34,
           fontFamily:
-            "\"Noto Sans SC\", \"PingFang SC\", \"Microsoft YaHei\", \"Source Han Sans SC\", \"Geist Variable\", system-ui, sans-serif"
+            "-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", \"Source Han Sans SC\", Arial, sans-serif"
         },
         components: {
           Layout: {
@@ -3180,11 +3299,11 @@ export function App() {
               <Space align="start">
                 <ExperimentOutlined style={{ fontSize: 28, color: "#1455d9" }} />
                 <Flex vertical gap={4}>
-                  <Title level={1} style={{ margin: 0 }}>
-                    多 Agent 社会 Harness Cockpit
+                  <Title level={1} style={{ margin: 0, fontSize: 20, lineHeight: 1.35 }}>
+                    多 Agent 社会实验台
                   </Title>
                   <Space size={4} wrap>
-                    <Tag color="blue">server truth</Tag>
+                    <Tag color="blue">服务端事实</Tag>
                     <Tag color={artifactView === "truth-redacted" ? "warning" : "processing"}>{artifactView}</Tag>
                     {!artifact ? (
                       <Tag>no artifact</Tag>
@@ -3207,6 +3326,7 @@ export function App() {
               </nav>
               <RunContextPanel
                 artifactView={artifactView}
+                postgameArtifactEnabled={canUsePostgameArtifact}
                 onArtifactViewChange={(value) => void handleArtifactViewChange(value)}
                 busy={busyAny}
                 currentMatchId={currentMatchId}
@@ -3236,7 +3356,7 @@ export function App() {
                   <Space size={6}>
                     <ExperimentOutlined style={{ color: "#1455d9" }} />
                     <Title level={1} style={{ margin: 0, fontSize: 16, lineHeight: 1.35 }}>
-                      多 Agent 社会 Harness Cockpit
+                      多 Agent 社会实验台
                     </Title>
                   </Space>
                 ) : null}
@@ -3252,7 +3372,7 @@ export function App() {
                     {activeWorkspace.label}
                   </Title>
                   <Tag color={liveProjection?.lifecycle === "running" || liveMatchId ? "processing" : artifact ? "processing" : "default"}>
-                    {liveProjection?.lifecycle === "running" || liveMatchId ? "server-owned live public view" : artifact ? "artifact loaded" : "artifact not loaded"}
+                    {liveProjection?.lifecycle === "running" || liveMatchId ? "服务端公开观战" : artifact ? "工件已加载" : "未加载工件"}
                   </Tag>
                 </Space>
               </Flex>
@@ -3260,6 +3380,7 @@ export function App() {
                 {isNarrowLayout ? (
                   <Tooltip title="运行上下文">
                     <Button
+                      ref={mobileContextTriggerRef}
                       aria-label="打开运行上下文"
                       icon={decorativeIcon(<SettingOutlined />)}
                       onClick={() => setMobileContextOpen(true)}
@@ -3269,6 +3390,7 @@ export function App() {
                 {isCompactLayout ? (
                   <Tooltip title="证据检查器">
                     <Button
+                      ref={mobileInspectorTriggerRef}
                       aria-label="打开证据检查器"
                       icon={decorativeIcon(<FileSearchOutlined />)}
                       onClick={() => setMobileInspectorOpen(true)}
@@ -3289,10 +3411,10 @@ export function App() {
                 <Button icon={decorativeIcon(<TeamOutlined />)} onClick={() => setRosterComposerOpen(true)} disabled={busyAny}>
                   实验编排
                 </Button>
-                <Button icon={decorativeIcon(<ReloadOutlined />)} onClick={handleRefresh} disabled={busyAny}>
+                <Button icon={decorativeIcon(<ReloadOutlined />)} onClick={handleRefresh} disabled={busyAny || !operatorRegistryEnabled}>
                   刷新运行
                 </Button>
-                <Button icon={decorativeIcon(<EyeOutlined />)} onClick={handleLoadLatest} disabled={busyAny}>
+                <Button icon={decorativeIcon(<EyeOutlined />)} onClick={handleLoadLatest} disabled={busyAny || !operatorRegistryEnabled}>
                   加载最近
                 </Button>
                 <Button type="primary" icon={decorativeIcon(<PlayCircleOutlined />)} loading={busy === "run"} onClick={handleRunExperiment} disabled={busyAny}>
@@ -3306,10 +3428,22 @@ export function App() {
             <main id="workspace-main" tabIndex={-1} aria-label={`${activeWorkspace.label} 工作区`} style={{ minWidth: 0, padding: isCompactLayout ? 12 : 20 }}>
               <StatusBanner status={status} error={error} busy={busy} />
 
-              <KpiGrid matches={matches} artifact={artifact} comparison={comparison} replay={replay} />
+              <KpiGrid
+                matches={matches}
+                artifact={artifact}
+                comparison={comparison}
+                replay={replay}
+                compact={isNarrowLayout || workspace !== "runs"}
+              />
 
               <Card style={{ marginTop: 16 }}>
-                <Tabs aria-label="工作区标签" destroyOnHidden activeKey={workspace} items={tabItems} onChange={(key) => handleWorkspaceChange(key as Workspace)} />
+                <section
+                  role="region"
+                  aria-label={`${activeWorkspace.label} 工作区内容`}
+                  data-testid={`workspace-${workspace}`}
+                >
+                  {activeWorkspacePanel?.children ?? null}
+                </section>
               </Card>
             </main>
 
@@ -3359,7 +3493,15 @@ export function App() {
           placement="left"
           width={screens.sm ? 360 : "100vw"}
           open={mobileContextOpen}
-          onClose={() => setMobileContextOpen(false)}
+          onClose={() => {
+            setMobileContextOpen(false);
+            window.requestAnimationFrame(() => {
+              window.requestAnimationFrame(() => mobileContextTriggerRef.current?.focus());
+            });
+          }}
+          afterOpenChange={(open) => {
+            if (!open) mobileContextTriggerRef.current?.focus();
+          }}
           destroyOnHidden
         >
           <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -3374,6 +3516,7 @@ export function App() {
             />
             <RunContextPanel
               artifactView={artifactView}
+              postgameArtifactEnabled={canUsePostgameArtifact}
               onArtifactViewChange={(value) => void handleArtifactViewChange(value)}
               busy={busyAny}
               currentMatchId={currentMatchId}
@@ -3399,13 +3542,24 @@ export function App() {
           placement="right"
           width={screens.sm ? 440 : "100vw"}
           open={mobileInspectorOpen}
-          onClose={() => setMobileInspectorOpen(false)}
+          onClose={() => {
+            setMobileInspectorOpen(false);
+            if (!rawOpen) {
+              window.requestAnimationFrame(() => {
+                window.requestAnimationFrame(() => mobileInspectorTriggerRef.current?.focus());
+              });
+            }
+          }}
+          afterOpenChange={(open) => {
+            if (!open && !rawOpen) mobileInspectorTriggerRef.current?.focus();
+          }}
           destroyOnHidden
           styles={{ body: { padding: 0 } }}
         >
           <InspectorPanel
             item={inspector}
             onOpenRaw={() => {
+              rawReturnFocusRef.current = mobileInspectorTriggerRef.current;
               setMobileInspectorOpen(false);
               setRawOpen(true);
             }}
@@ -3418,6 +3572,13 @@ export function App() {
           width={screens.md ? 760 : "100vw"}
           open={rawOpen}
           onClose={() => setRawOpen(false)}
+          afterOpenChange={(open) => {
+            if (open) return;
+            const target = rawReturnFocusRef.current;
+            rawReturnFocusRef.current = null;
+            if (target?.isConnected) target.focus();
+            else document.getElementById("workspace-main")?.focus();
+          }}
           extra={<Tag color="processing">{artifactView}</Tag>}
         >
           <Paragraph type="secondary">
@@ -3473,7 +3634,9 @@ function LiveSpectatorShell({ projection, pollError }: { projection: LiveMatchPr
         </Header>
         <Content id="workspace-main" tabIndex={-1} aria-label="狼人杀实时公开观战" style={{ minWidth: 0, maxWidth: 1500, width: "100%", margin: "0 auto", padding: "20px" }}>
           {projection ? (
-            <WerewolfLiveBoard projection={projection} pollError={pollError} />
+            <Suspense fallback={<CockpitChunkFallback label="正在加载实时公开桌面…" />}>
+              <WerewolfLiveBoard projection={projection} pollError={pollError} />
+            </Suspense>
           ) : (
             <Card bordered={false} data-testid="werewolf-live-board">
               <Alert
@@ -3492,6 +3655,15 @@ function LiveSpectatorShell({ projection, pollError }: { projection: LiveMatchPr
 
 function StatusBanner({ status, error, busy }: { status: string; error: string | null; busy: string | null }) {
   const isWaitingForArtifact = !error && !busy && /(没有可加载|没有匹配|未选择 run|尚未选择)/.test(status);
+  if (!error && !busy && !isWaitingForArtifact) {
+    return (
+      <div className="cockpit-ready-status" role="status" aria-live="polite">
+        <CheckCircleOutlined aria-hidden="true" />
+        <Text ellipsis={{ tooltip: status }}>{status}</Text>
+        <Tag color="success">就绪</Tag>
+      </div>
+    );
+  }
   return (
     <Alert
       role={error ? "alert" : "status"}
@@ -3500,8 +3672,16 @@ function StatusBanner({ status, error, busy }: { status: string; error: string |
       type={error ? "error" : busy ? "info" : isWaitingForArtifact ? "warning" : "success"}
       icon={error || isWaitingForArtifact ? <WarningOutlined /> : <CheckCircleOutlined />}
       message={error ? `${status}: ${error}` : status}
-      action={<Tag color={error ? "error" : busy ? "processing" : isWaitingForArtifact ? "warning" : "success"}>{error ? "error" : busy ? busy : isWaitingForArtifact ? "awaiting data" : "ready"}</Tag>}
+      action={<Tag color={error ? "error" : busy ? "processing" : "warning"}>{error ? "错误" : busy ? busy : "等待数据"}</Tag>}
     />
+  );
+}
+
+function CockpitChunkFallback({ label }: { label: string }) {
+  return (
+    <Card loading aria-busy="true" aria-label={label}>
+      <Text>{label}</Text>
+    </Card>
   );
 }
 
@@ -3509,18 +3689,48 @@ function KpiGrid({
   matches,
   artifact,
   comparison,
-  replay
+  replay,
+  compact
 }: {
   matches: MatchRecord[];
   artifact: ProjectedMatchArtifact | null;
   comparison: MatchComparisonArtifact | null;
   replay: ReplayResponse | null;
+  compact: boolean;
 }) {
   const completed = matches.filter((match) => (match.harnessStatus ?? match.status) === "completed").length;
   const truncated = matches.filter((match) => (match.harnessStatus ?? match.status) === "truncated").length;
   const failed = matches.filter((match) => (match.harnessStatus ?? match.status) === "failed").length;
   const replayOk = replay?.summary?.ok;
   const stepCounts = artifact ? countSocialStepCommits(artifact.socialEpisode.steps) : null;
+  if (compact) {
+    return (
+      <Card className="cockpit-kpi-strip-card" size="small" style={{ marginTop: 12 }} data-testid="compact-kpi-strip">
+        <div className="cockpit-kpi-strip" aria-label="当前运行摘要">
+          <CompactKpi
+            label="运行"
+            value={`${completed}/${matches.length}`}
+            detail={`截断 ${truncated} · 失败 ${failed}`}
+          />
+          <CompactKpi
+            label="原生步骤"
+            value={String(stepCounts?.nativeSteps ?? "—")}
+            detail={artifact ? `提交 ${stepCounts?.committedSteps ?? 0} · 拒绝 ${stepCounts?.rejectedSteps ?? 0}` : "未加载工件"}
+          />
+          <CompactKpi
+            label="社会消息"
+            value={String(artifact?.socialEpisode.messages.length ?? "—")}
+            detail={artifact ? `${artifact.socialEpisode.channels.length} 个通道` : "未加载工件"}
+          />
+          <CompactKpi
+            label="对比 / 复现"
+            value={comparison ? `${comparison.summary.changedRowCount}/${comparison.summary.rowCount}` : replayOk ? "通过" : "待运行"}
+            detail={comparison ? "变化行 / 总行" : replay ? `不匹配 ${replay.summary?.mismatchCount ?? 0}` : "尚无结果"}
+          />
+        </div>
+      </Card>
+    );
+  }
   return (
     <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
       <Col xs={24} sm={12} xl={6}>
@@ -3581,8 +3791,19 @@ function KpiGrid({
   );
 }
 
+function CompactKpi({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <div className="cockpit-kpi-strip__item">
+      <Text type="secondary" className="cockpit-kpi-strip__label">{label}</Text>
+      <Text strong className="cockpit-kpi-strip__value">{value}</Text>
+      <Text type="secondary" className="cockpit-kpi-strip__detail">{detail}</Text>
+    </div>
+  );
+}
+
 function RunContextPanel({
   artifactView,
+  postgameArtifactEnabled,
   onArtifactViewChange,
   busy,
   currentMatchId,
@@ -3601,6 +3822,7 @@ function RunContextPanel({
   onOpenRosterComposer
 }: {
   artifactView: ArtifactView;
+  postgameArtifactEnabled: boolean;
   onArtifactViewChange: (value: ArtifactView) => void;
   busy: boolean;
   currentMatchId: string;
@@ -3642,7 +3864,9 @@ function RunContextPanel({
                 aria-label="工件投影"
                 value={artifactView}
                 options={[
-                  { value: "postgame-redacted", label: "研究视图 · 私有脱敏" },
+                  ...(postgameArtifactEnabled
+                    ? [{ value: "postgame-redacted" as const, label: "研究视图 · 私有脱敏" }]
+                    : []),
                   { value: "truth-redacted", label: "公开视图 · 真相脱敏" }
                 ]}
                 onChange={(value) => onArtifactViewChange(value as ArtifactView)}
@@ -4129,6 +4353,8 @@ function TimelineWorkspace({
   replayFrame,
   replayFrameCursorIndex,
   replayFrameLoadState,
+  replayEnabled,
+  artifactDownloadEnabled,
   busy
 }: {
   artifact: ProjectedMatchArtifact | null;
@@ -4144,6 +4370,8 @@ function TimelineWorkspace({
   replayFrame: PostgameReplayFrameDto | null;
   replayFrameCursorIndex: number | null;
   replayFrameLoadState: ReplayFrameLoadState;
+  replayEnabled: boolean;
+  artifactDownloadEnabled: boolean;
   busy: string | null;
 }) {
   const steps = artifact?.socialEpisode.steps ?? [];
@@ -4162,17 +4390,6 @@ function TimelineWorkspace({
         ...(selectedLegacyPolicyOnly ? [] : [["attempts", selectedLegacyStep.reasonerOutput.attempts ?? "n/a"] as [string, unknown]])
       ]
     : [];
-  const selectedDecisionJournal = useMemo(
-    () =>
-      selectedStep
-        ? buildDecisionJournalEvidence(
-            artifact?.agents.flatMap((agent) => agent.social?.journal?.entries ?? []) ?? [],
-            selectedStep.actorId,
-            selectedStep.traceId
-          )
-        : [],
-    [artifact?.agents, selectedStep]
-  );
   const schedulerCounts = useMemo(() => countSocialSchedulerModes(steps), [steps]);
   const { committedSteps, rejectedSteps } = useMemo(() => countSocialStepCommits(steps), [steps]);
   const replayFrameBoundaryIndexes = useMemo(
@@ -4181,7 +4398,7 @@ function TimelineWorkspace({
   );
   const replayFrameCursorPosition = replayFrameCursorIndex === null ? -1 : replayFrameBoundaryIndexes.indexOf(replayFrameCursorIndex);
   const canLoadSelectedReplayFrame =
-    artifactView === "postgame-redacted" && selectedStepIndex >= 0 && isSafeHarnessCheckpointBoundary(steps, selectedStepIndex);
+    replayEnabled && artifactView === "postgame-redacted" && selectedStepIndex >= 0 && isSafeHarnessCheckpointBoundary(steps, selectedStepIndex);
   const progress = steps.length ? ((selectedStepIndex + 1) / steps.length) * 100 : 0;
   const columns: TableProps<ProjectedSocialStep>["columns"] = [
     { title: "#", width: 64, render: (_, __, index) => index + 1 },
@@ -4241,7 +4458,7 @@ function TimelineWorkspace({
               <Button
                 icon={decorativeIcon(<CloudDownloadOutlined />)}
                 onClick={onDownloadMatch}
-                disabled={!artifact}
+                disabled={!artifact || !artifactDownloadEnabled}
                 loading={busy === "download-match"}
               >
                 工件 JSON
@@ -4249,7 +4466,7 @@ function TimelineWorkspace({
               <Button
                 icon={decorativeIcon(<CloudDownloadOutlined />)}
                 onClick={onDownloadJsonl}
-                disabled={!artifact}
+                disabled={!artifact || !artifactDownloadEnabled}
                 loading={busy === "download"}
               >
                 JSONL
@@ -4258,7 +4475,7 @@ function TimelineWorkspace({
                 type="primary"
                 icon={decorativeIcon(<PlayCircleOutlined />)}
                 onClick={onReplay}
-                disabled={!artifact || artifactView !== "postgame-redacted" || busy === "replay"}
+                disabled={!artifact || !replayEnabled || artifactView !== "postgame-redacted" || busy === "replay"}
                 loading={busy === "replay"}
               >
                 复现
@@ -4270,7 +4487,7 @@ function TimelineWorkspace({
             <Text type="secondary">
               主时间线来自原生 social episode 执行工件；system、committed 与 rejected 步骤均为可选择、可审计证据，确定性 replay 不重新调用模型。
             </Text>
-            {artifactView === "postgame-redacted" ? (
+            {artifactView === "postgame-redacted" && replayEnabled ? (
               <Card size="small" title="服务端回放游标" data-testid="server-replay-cursor-controls">
                 <Space direction="vertical" size="small" style={{ width: "100%" }}>
                   <Text type="secondary">
@@ -4329,8 +4546,16 @@ function TimelineWorkspace({
               <Alert
                 type="warning"
                 showIcon
-                message="真相脱敏视图不暴露原生 scheduler 游标"
-                description="原生步骤序列可能反推出夜间角色节奏；该视图仅显示最终公共投影。"
+                message={
+                  artifactView === "truth-redacted"
+                    ? "真相脱敏视图不暴露原生 scheduler 游标"
+                    : "当前连接没有服务端回放权限"
+                }
+                description={
+                  artifactView === "truth-redacted"
+                    ? "原生步骤序列可能反推出夜间角色节奏；该视图仅显示最终公共投影。"
+                    : "Cockpit 按 /api/config capabilities 关闭 replay 和回放帧控件，不会先发出必然失败的 operator 请求。"
+                }
               />
             )}
             <Row gutter={[12, 12]}>
@@ -4353,7 +4578,7 @@ function TimelineWorkspace({
               <Tag color="warning">parallel {schedulerCounts.parallel}</Tag>
               <Tag color="default">episode {artifact?.socialEpisode.schedulerMode ?? "n/a"}</Tag>
             </Space>
-            <Progress percent={Math.round(progress)} />
+            <Progress aria-label="原生步骤回放进度" percent={Math.round(progress)} />
             <Table
               rowKey="traceId"
               size="small"
@@ -4434,13 +4659,15 @@ function TimelineWorkspace({
                   ["event seq", selectedStep.eventSeqRange ? rangeLabel(selectedStep.eventSeqRange) : "none"]
                 ])}
               />
-              <AgentDecisionEvidencePanel
-                nativeStep={selectedStep}
-                legacyStep={selectedLegacyStep}
-                view={artifactView}
-                journal={selectedDecisionJournal}
-                shortId={shortId}
-              />
+              <Suspense fallback={<CockpitChunkFallback label="正在加载 Agent 决策证据…" />}>
+                <AgentDecisionEvidencePanel
+                  nativeStep={selectedStep}
+                  legacyStep={selectedLegacyStep}
+                  view={artifactView}
+                  journalEntries={artifact?.agents.flatMap((agent) => agent.social?.journal?.entries ?? []) ?? []}
+                  shortId={shortId}
+                />
+              </Suspense>
               {canLoadSelectedReplayFrame ? (
                 <Button
                   type="primary"
@@ -4611,7 +4838,13 @@ function SocietyWorkspace({
     { title: "flow", render: (_, row) => `${row.node.sent}/${row.node.received}/${row.node.observed}`, width: 92 },
     {
       title: "activity",
-      render: (_, row) => <Progress percent={Math.round((row.total / maxAgentActivity) * 100)} showInfo={false} />,
+      render: (_, row) => (
+        <Progress
+          aria-label={`${row.node.id} 社交活动占比`}
+          percent={Math.round((row.total / maxAgentActivity) * 100)}
+          showInfo={false}
+        />
+      ),
       width: 120
     },
     {
@@ -4703,15 +4936,17 @@ function SocietyWorkspace({
         </Col>
       </Row>
 
-      <SocialEvidenceGraph
-        graph={socialGraph}
-        selectedAgentId={selectedAgent?.playerId}
-        onSelectAgent={(agentId) => {
-          const agent = agents.find((candidate) => candidate.playerId === agentId);
-          if (agent) onSelectAgent(agent);
-        }}
-        onSelectExposure={onInspectExposure}
-      />
+      <Suspense fallback={<CockpitChunkFallback label="正在加载社会证据图…" />}>
+        <SocialEvidenceGraph
+          graph={socialGraph}
+          selectedAgentId={selectedAgent?.playerId}
+          onSelectAgent={(agentId) => {
+            const agent = agents.find((candidate) => candidate.playerId === agentId);
+            if (agent) onSelectAgent(agent);
+          }}
+          onSelectExposure={onInspectExposure}
+        />
+      </Suspense>
 
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={8}>
@@ -5103,8 +5338,8 @@ function LineageWorkspace({
             <Alert
               type="info"
               showIcon
-              message="Checkpoint operator controls are local-only"
-              description="切换到 postgame-redacted 本地研究视图后，才可列出、创建、fork 或检查 checkpoint 谱系。truth-redacted 只保留安全 artifact 展示面。"
+              message="当前连接没有 checkpoint operator 能力"
+              description="Cockpit 同时检查 postgame-redacted 视图与 /api/config capabilities；缺少 registry、create 或 fork 任一能力时都会 fail closed。"
             />
           ) : null}
           <Text type="secondary">
@@ -5283,181 +5518,6 @@ function LineageWorkspace({
               )
             }
           ]}
-        />
-      </Card>
-    </Space>
-  );
-}
-
-function EvaluationWorkspace({
-  artifact,
-  metrics,
-  warnings,
-  onInspectMetric,
-  onInspectWarning
-}: {
-  artifact: ProjectedMatchArtifact | null;
-  metrics: HarnessMetricRecord[];
-  warnings: HarnessEvaluationWarning[];
-  onInspectMetric: (metric: HarnessMetricRecord, decision: HarnessMetricPromotionDecision) => void;
-  onInspectWarning: (warning: HarnessEvaluationWarning) => void;
-}) {
-  const summary = artifact?.evaluationReport.summary;
-  const promotion = summary?.promotion;
-  const promotionFallbackPolicy = legacyMetricPromotionPolicyFromSummary(promotion);
-  const resolvePromotion = (metric: HarnessMetricRecord) =>
-    resolveRecordedMetricPromotion(metric, promotionFallbackPolicy);
-  const metricColumns: TableProps<HarnessMetricRecord>["columns"] = [
-    {
-      title: "metric",
-      render: (_, metric) => (
-        <Space direction="vertical" size={0}>
-          <Text strong>{metric.label}</Text>
-          <Text code>{metric.id}</Text>
-        </Space>
-      )
-    },
-    { title: "scope", dataIndex: "scope" },
-    { title: "subject", dataIndex: "subjectId", render: (value?: string) => value ?? "episode" },
-    { title: "value", dataIndex: "value", render: (value: unknown) => String(value) },
-    {
-      title: "promotion",
-      render: (_, metric) => {
-        const decision = resolvePromotion(metric);
-        const color =
-          decision.promotionClass === "scorecard"
-            ? decision.eligibleForScorecard
-              ? "success"
-              : "warning"
-            : decision.promotionClass === "benchmark_only"
-              ? "processing"
-              : "default";
-        return (
-          <Tag color={color}>
-            {decision.promotionClass}
-            {decision.eligibleForScorecard ? " · scorecard" : " · excluded"}
-          </Tag>
-        );
-      }
-    },
-    { title: "weight", dataIndex: "weight", render: (value?: number) => (value === undefined ? "n/a" : value) },
-    { title: "source", render: (_, metric) => metric.evaluatorId ?? metric.source },
-    { title: "evidence", render: (_, metric) => metric.evidenceRefs?.length ?? 0 },
-    {
-      title: "查看",
-      fixed: "right",
-      width: 72,
-      render: (_, metric) => (
-        <Button type="link" size="small" aria-label={`查看指标 ${metric.id}`} onClick={() => onInspectMetric(metric, resolvePromotion(metric))}>
-          查看
-        </Button>
-      )
-    }
-  ];
-  const warningColumns: TableProps<HarnessEvaluationWarning>["columns"] = [
-    { title: "severity", dataIndex: "severity", render: (severity: HarnessEvaluationWarning["severity"]) => <SeverityTag severity={severity} /> },
-    { title: "code", dataIndex: "code" },
-    { title: "evaluator", dataIndex: "evaluatorId", render: (value?: string) => value ?? "n/a" },
-    { title: "message", dataIndex: "message", ellipsis: true },
-    { title: "evidence", render: (_, warning) => warning.evidenceRefs?.length ?? 0 },
-    {
-      title: "查看",
-      fixed: "right",
-      width: 72,
-      render: (_, warning) => (
-        <Button type="link" size="small" aria-label={`查看告警 ${warning.code}`} onClick={() => onInspectWarning(warning)}>
-          查看
-        </Button>
-      )
-    }
-  ];
-
-  return (
-    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title="episode score" value={summary?.episodeScore !== undefined ? formatNumber(summary.episodeScore, 2) : "n/a"} prefix={<BarChartOutlined />} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic
-              title="scorecard metrics"
-              value={promotion?.scorecardMetricCount ?? metrics.filter((metric) => resolvePromotion(metric).eligibleForScorecard).length}
-              prefix={<SafetyCertificateOutlined />}
-              suffix={<Text type="secondary">of {metrics.length}</Text>}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic
-              title="diagnostic metrics"
-              value={promotion?.diagnosticMetricCount ?? metrics.filter((metric) => !resolvePromotion(metric).eligibleForScorecard).length}
-              prefix={<DatabaseOutlined />}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic
-              title="excluded weighted"
-              value={promotion?.excludedWeightedMetricCount ?? 0}
-              prefix={<WarningOutlined />}
-              suffix={<Text type="secondary">warnings {warnings.length}</Text>}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      {promotion ? (
-        <Card size="small" title="metric promotion policy">
-          <Space wrap>
-            <Tag color="processing">{promotion.policyId}</Tag>
-            <Tag color="blue">{promotion.catalogId}</Tag>
-            <Tag>catalogEntries={promotion.catalogEntryCount}</Tag>
-            <Tag>catalogRules={promotion.catalogRuleCount}</Tag>
-            <Tag>scorecardRequiresEvidence={String(promotion.scorecardRequiresEvidence)}</Tag>
-            <Tag>scorecardRequiresPositiveWeight={String(promotion.scorecardRequiresPositiveWeight)}</Tag>
-            <Tag>uncataloged={promotion.uncatalogedMetricPolicy}</Tag>
-            {promotion.excludedWeightedMetricIds.length ? (
-              <Tag color="warning">excluded: {promotion.excludedWeightedMetricIds.join(", ")}</Tag>
-            ) : (
-              <Tag color="success">no weighted exclusions</Tag>
-            )}
-          </Space>
-        </Card>
-      ) : null}
-
-      <Card title="指标表">
-        <Text type="secondary">
-          每条 metric 保留 evaluator、scope、subject、evidence refs，并用 `evaluation.metric-promotion.v1` 标注 scorecard /
-          diagnostic / benchmark_only。零权重 temporal-association 默认 diagnostic，不进入 agentScores。
-        </Text>
-        <Table
-          rowKey={(metric) => `${metric.id}-${metric.subjectId ?? "episode"}`}
-          size="small"
-          bordered
-          columns={metricColumns}
-          dataSource={metrics}
-          pagination={{ pageSize: 8 }}
-          onRow={(metric) => ({ onClick: () => onInspectMetric(metric, resolvePromotion(metric)) })}
-          locale={{ emptyText: <Empty description="当前 artifact 没有 evaluationReport.metrics。" /> }}
-        />
-      </Card>
-
-      <Card title="评测告警">
-        <Text type="secondary">失败、脱敏、覆盖不足和 evaluator 风险不能被隐藏。</Text>
-        <Table
-          rowKey={(warning, index) => `${warning.code}-${index}`}
-          size="small"
-          bordered
-          columns={warningColumns}
-          dataSource={warnings}
-          pagination={{ pageSize: 6 }}
-          onRow={(warning) => ({ onClick: () => onInspectWarning(warning) })}
-          locale={{ emptyText: <Empty description="当前 evaluation report 未记录 warning。" /> }}
         />
       </Card>
     </Space>
