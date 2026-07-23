@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ModelClient } from "../src/agents/modelClient";
 import { ModelCallError } from "../src/agents/schema";
 import { applyCommand, createGame, getPendingActions } from "../src/core/engine";
 import { createPlayerView } from "../src/core/view";
@@ -6,6 +7,7 @@ import type { GameCommand, GameState } from "../src/core/types";
 import { WerewolfAgentActor } from "../src/harness/actor";
 import { buildFinalHarnessCheckpoint, buildMatchArtifact, forkHarnessRunOptions, toTrajectoryJsonl, type MatchArtifact } from "../src/harness/artifacts";
 import { hashStableState } from "../src/harness/hash";
+import { OpenAIHarnessReasoner } from "../src/harness/reasoner";
 import { harnessFailureEvidenceFromEpisode } from "../src/harness/executionEvidence";
 import { werewolfHarnessTurnEvidenceFromEpisode } from "../src/harness/werewolfExecutionEvidence";
 import { policyForRole } from "../src/harness/policy";
@@ -17,6 +19,7 @@ import {
   isSocialStepCommitted,
   runSocialEpisode,
   SocialCommunicationBus,
+  validateSocialEpisodeArtifact,
   type SocialActor,
   type SocialActorObservationContext,
   type SocialAgentProfile
@@ -3017,6 +3020,49 @@ describe("Werewolf generic social adapter", () => {
     expect(JSON.stringify(arbitration)).not.toContain("private candidate memo");
     expect(JSON.stringify(arbitration)).not.toContain("private candidate rationale");
     expect(replayHarnessTrajectory({ initialState, trajectory: result.trajectory })).toMatchObject({ ok: true, mismatches: [] });
+  });
+
+  it("fails an invalid completed live speech without silently selecting the policy candidate", async () => {
+    const initialState = createGame({ id: "werewolf-invalid-live-speech", seed: "werewolf-invalid-live-speech" });
+    initialState.phase = "day_speech";
+    initialState.day = 2;
+    const speaker = initialState.players.filter((player) => player.alive).sort((a, b) => a.seat - b.seat)[0]!;
+    initialState.currentSpeakerSeat = speaker.seat;
+    const agents = agentConfigsFor(initialState, "invalid-live-speech-profile");
+    let calls = 0;
+    const client: ModelClient = {
+      async complete() {
+        calls += 1;
+        return {
+          content: "太短",
+          latencyMs: 3,
+          usage: { promptTokens: 2, completionTokens: 1, totalTokens: 3 },
+          attempts: 1,
+          stream: { enabled: true, completed: true, completedBy: "provider_stop_event" }
+        };
+      }
+    };
+    const reasoner = OpenAIHarnessReasoner.forLiveProvider(client);
+
+    const result = await runHarnessMatch({ initialState, agents, reasoner, maxTransitions: 1 });
+    const actorStep = result.socialEpisode.steps.find((step) => step.actorId === speaker.id);
+
+    expect(calls).toBe(1);
+    expect(result.status).toBe("failed");
+    expect(result.trajectory).toEqual([]);
+    expect(result.socialEpisode.execution?.reasonerExecutionClass).toBe("live-provider");
+    expect(actorStep).toMatchObject({
+      commitStatus: "rejected",
+      failure: { stage: "actor_decide" },
+      reasonerCalls: [
+        expect.objectContaining({
+          outcome: "completed",
+          stream: { enabled: true, completed: true, completedBy: "provider_stop_event" }
+        })
+      ]
+    });
+    expect(actorStep?.error).toMatch(/too short/i);
+    expect(validateSocialEpisodeArtifact(result.socialEpisode)).toEqual([]);
   });
 
   it("deduplicates rejected or command-identical reasoner proposals to the legal policy candidate", async () => {

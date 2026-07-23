@@ -28676,3 +28676,53 @@ All real Chat Completions requests used `stream: true`. No `max_tokens`,
 `max_completion_tokens`, or equivalent max-token field was sent. The live model
 was used only as a test configuration value. No secret, endpoint detail, raw
 provider payload, or provider request id is recorded here.
+
+## 13.301 Final Live Completion, Snapshot Memory, And Publication Lock (2026-07-23)
+
+This section supersedes the bounded-live status in 13.300.4 while preserving
+all stricter provider-neutral, harness-first, privacy, replay, and lifecycle
+rules.
+
+- Fresh Werewolf actors use 64-entry memory and private mutation-journal rolling
+  windows. Trimming preserves monotonic sequence identities across JSON restore.
+- Observation memory stores `werewolf.memory-core.v1`; exact scoped observations
+  remain in native step artifacts instead of being recursively copied into each
+  later actor snapshot.
+- Match construction compacts inline actor tables into one content-addressed
+  snapshot-frame registry during cloning. Legacy social-step presentation no
+  longer carries a third snapshot payload.
+- Redaction still rehashes/deduplicates frames and rewrites both trajectory and
+  native references. Checkpoint/fork and replay authority remain unchanged.
+- Server recovery validates large completed artifacts through indexed read-only
+  frame access, avoiding repeated deep clones while preserving payload/hash,
+  frame-id, roster, replay, and tamper checks.
+
+Final validation:
+
+```text
+typecheck: passed
+deterministic Vitest: 57 files / 638 tests passed
+production build and bundle budget: passed
+Playwright: 24 / 24 passed
+
+real streaming full match:
+  status=completed
+  phase=game_over
+  native=59 committed=59 rejected=0
+  reasoner calls=58
+  harness errors=0
+  maxTransitions=none
+
+model-free replay:
+  replayed native steps=59
+  final state hash matched
+  messages hash matched
+  mismatches=0
+```
+
+The real model remained an opaque runtime configuration value on the generic
+OpenAI-compatible streaming path. No provider/model/endpoint special case,
+model substitution, policy fallback, fake success, token-limit field, or
+non-streaming live request was added. Canonical live artifacts remain local and
+must not be committed; repository screenshots come only from the server-owned
+`postgame-redacted` projection.

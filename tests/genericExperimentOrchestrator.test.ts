@@ -264,6 +264,9 @@ describe("generic normalized experiment orchestration", () => {
         artifactForEpisode(episode) {
           return artifactFromEpisode(episode);
         },
+        assignmentResolutionForEpisode(_episode, artifact) {
+          return counterAssignmentRows(artifact);
+        },
         evaluation: {
           evaluators: [counterEvaluator],
           contextForEpisode(episode, artifact) {
@@ -304,11 +307,14 @@ describe("generic normalized experiment orchestration", () => {
     expect(result.runSet.episodes.every((episode) => episode.artifact !== undefined)).toBe(true);
     expect(result.runSet.episodes.every((episode) => episode.artifact?.experiment?.specHash === result.specHash)).toBe(true);
     expect(result.runSet.episodes.every((episode) =>
-      episode.artifact?.executionAttestation?.schemaVersion === "harness.experiment-execution-attestation.v1" &&
+      episode.artifact?.experiment?.schemaVersion === "harness.experiment-provenance.v3" &&
+      episode.artifact.executionAttestation?.schemaVersion === "harness.experiment-execution-attestation.v2" &&
       episode.artifact.executionAttestation.maxTransitions === 2 &&
       episode.artifact.executionAttestation.decisionTimeoutMs === 5_000 &&
       episode.artifact.executionAttestation.actors[0]?.actorId === "a" &&
-      episode.artifact.executionAttestation.actors[0]?.profile.id === "counter-profile"
+      episode.artifact.executionAttestation.actors[0]?.profile.id === "counter-profile" &&
+      episode.artifact.executionAttestation.assignmentResolution?.policy.id === "counter.assignment" &&
+      episode.artifact.executionAttestation.assignmentResolution.episode.seed === episode.seed
     )).toBe(true);
     expect((await store.list()).map((entry) => entry.runId)).toEqual([
       "counter-experiment:counter-orchestration-seed:g1",
@@ -393,6 +399,9 @@ describe("generic normalized experiment orchestration", () => {
         },
         artifactForEpisode() {
           throw new Error("finalized resume must not materialize");
+        },
+        assignmentResolutionForEpisode() {
+          throw new Error("finalized resume must not resolve assignments");
         }
       }
     });
@@ -416,7 +425,8 @@ describe("generic normalized experiment orchestration", () => {
         prepareEpisode() { throw new Error("tampered prefix must not prepare"); },
         runEpisode() { throw new Error("tampered prefix must not execute"); },
         lifecycleOf() { throw new Error("tampered prefix must not inspect lifecycle"); },
-        artifactForEpisode() { throw new Error("tampered prefix must not materialize"); }
+        artifactForEpisode() { throw new Error("tampered prefix must not materialize"); },
+        assignmentResolutionForEpisode() { throw new Error("tampered prefix must not resolve assignments"); }
       }
     })).rejects.toThrow(/drifted from durable experiment membership/i);
     expect(decisions).toBe(2);
@@ -702,6 +712,9 @@ describe("generic normalized experiment orchestration", () => {
         runEpisode: () => socialEpisode,
         lifecycleOf: (episode) => episode.status,
         artifactForEpisode: (episode) => artifactFromEpisode(episode),
+        assignmentResolutionForEpisode(_episode, artifact) {
+          return counterAssignmentRows(artifact);
+        },
         evaluation: {
           evaluators: [counterEvaluator],
           contextForEpisode(episode, artifact) {
@@ -844,6 +857,33 @@ describe("generic normalized experiment orchestration", () => {
       expect(result.runSet.episodes[0]?.artifact, testCase.name).toBeUndefined();
       expect(puts, testCase.name).toBe(0);
     }
+  });
+
+  it("rejects domain assignment rows that do not bind the actual runtime roster before persistence", async () => {
+    let puts = 0;
+    const result = await runGenericExperiment({
+      spec: { ...experimentSpec(), episodeCount: 1, evaluatorIds: [], continueOnError: false },
+      artifactStore: {
+        ...memoryArtifactStore<Artifact>(),
+        async put() { puts += 1; }
+      },
+      runStore: memoryRunStore(),
+      adapter: {
+        domainId: "counter-orchestration",
+        prepareEpisode: () => ({}),
+        runEpisode: () => counterEpisode("forged-assignment-resolution", () => undefined),
+        lifecycleOf: (episode) => episode.status,
+        artifactForEpisode: (episode) => artifactFromEpisode(episode),
+        assignmentResolutionForEpisode(_episode, artifact) {
+          return counterAssignmentRows(artifact).map((row) => ({ ...row, profileId: "forged-profile" }));
+        }
+      }
+    });
+
+    expect(result.tournament).toMatchObject({ gamesCompleted: 0, gamesFailed: 1, gamesUnstarted: 0 });
+    expect(result.runSet.episodes[0]?.status).toBe("failed");
+    expect(result.runSet.episodes[0]).not.toHaveProperty("artifact");
+    expect(puts).toBe(0);
   });
 
   it("retries only domain-classified prepare/run throws and persists the accepted v3 attempt ledger", async () => {
@@ -1194,6 +1234,9 @@ describe("generic normalized experiment orchestration", () => {
         runEpisode: (prepared) => counterEpisode(prepared.runId, () => undefined),
         lifecycleOf: (episode) => episode.status,
         artifactForEpisode: (episode) => artifactFromEpisode(episode),
+        assignmentResolutionForEpisode(_episode, artifact) {
+          return counterAssignmentRows(artifact);
+        },
         artifactProjection: {
           projectArtifact(artifact, visibility, context) {
             lifecycle.push("project");
@@ -1250,6 +1293,12 @@ describe("generic normalized experiment orchestration", () => {
     expect(publishedOptions?.evaluationReport).toBeDefined();
     expect(publishedOptions?.projection).toEqual(counterProjection(publishedArtifact!, "public"));
     expect(checkpoints.values().next().value?.state).toEqual({ value: 1, done: true });
+    const checkpoint = checkpoints.values().next().value;
+    expect(checkpoint?.source.experiment?.schemaVersion).toBe("harness.experiment-provenance.v3");
+    expect(checkpoint?.executionPrefix.assignmentResolution).toEqual(
+      publishedArtifact?.socialEpisode.assignmentResolution
+    );
+    expect(validateHarnessCheckpointEnvelope(checkpoint!)).toEqual([]);
   });
 
   it("rejects forged projection source and policy bindings before canonical publication", async () => {
@@ -2142,6 +2191,15 @@ function artifactFromEpisode(
     socialEpisode,
     agents: []
   };
+}
+
+function counterAssignmentRows(artifact: Artifact) {
+  return (artifact.socialEpisode.runtimeActors ?? []).map((actor) => ({
+    actorId: actor.actorId,
+    profileId: actor.profileId,
+    model: actor.model,
+    domain: { counterLane: "primary" }
+  }));
 }
 
 function counterProjection(

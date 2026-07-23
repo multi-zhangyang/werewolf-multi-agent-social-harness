@@ -11,6 +11,7 @@ import {
 } from "./episodeArtifacts";
 import { deriveHarnessEpisodeArtifactSha256 } from "./episodeArtifactStore";
 import {
+  createGenericExperimentAssignmentResolution,
   createGenericExperimentExecutionAttestation,
   createGenericExperimentProvenance,
   normalizeGenericExperimentSpec,
@@ -37,7 +38,11 @@ import {
   type HarnessExperimentRunResume
 } from "./experimentRunStore";
 import { hashStableJsonValue, hashStableState } from "./hash";
-import { isSocialStepCommitted } from "./social";
+import {
+  isSocialStepCommitted,
+  validateSocialEpisodeArtifact,
+  type SocialAssignmentActorResolution
+} from "./social";
 import {
   runTournamentEpisodes,
   GENERIC_TOURNAMENT_EPISODE_FAILURE_MESSAGE,
@@ -197,6 +202,16 @@ export interface GenericExperimentExecutionAdapter<
   runEpisode(prepared: TPrepared, context: GenericExperimentEpisodeContext): TResult | Promise<TResult>;
   lifecycleOf(result: TResult): TournamentEpisodeLifecycle;
   artifactForEpisode(result: TResult, context: GenericExperimentEpisodeContext): TArtifact | Promise<TArtifact>;
+  /**
+   * Domain-owned assignment result for this exact episode. The control plane
+   * stamps policy/configuration and episode identity, binds the rows to the
+   * runtime actor roster, and persists the resulting execution evidence.
+   */
+  assignmentResolutionForEpisode?(
+    result: TResult,
+    artifact: TArtifact,
+    context: GenericExperimentEpisodeContext
+  ): readonly SocialAssignmentActorResolution[] | Promise<readonly SocialAssignmentActorResolution[]>;
   retrying?: {
     classifyAttemptError(
       error: unknown,
@@ -410,7 +425,8 @@ export async function runGenericExperiment<
   if (options.runSetId !== undefined && !options.runSetId.trim()) {
     throw new Error("Generic experiment runSetId must be a nonempty string when present.");
   }
-  const experiment = createGenericExperimentProvenance(normalizedSpec);
+  const assignmentResolutionRequired = options.adapter.assignmentResolutionForEpisode !== undefined;
+  const experiment = createGenericExperimentProvenance(normalizedSpec, { assignmentResolutionRequired });
   const specHash = experiment.specHash;
   const now = options.now ?? (() => new Date().toISOString());
   const runSetId = options.runSetId ?? normalizedSpec.id;
@@ -597,16 +613,32 @@ export async function runGenericExperiment<
         }
         throwIfAborted(deadline.signal);
         const status = options.adapter.lifecycleOf(domainResult);
-        const artifact = bindArtifactToExperiment(
-          await awaitWithAbort(
+        const rawArtifact = await awaitWithAbort(
             () => options.adapter.artifactForEpisode(
               domainResult,
               createEpisodeContext(context, normalizedSpec, experiment, deadline.signal)
             ),
             deadline.signal
-          ),
+          );
+        const assignmentResolution = options.adapter.assignmentResolutionForEpisode
+          ? createGenericExperimentAssignmentResolution(
+              normalizedSpec,
+              context,
+              await awaitWithAbort(
+                () => options.adapter.assignmentResolutionForEpisode!(
+                  domainResult,
+                  structuredClone(rawArtifact),
+                  createEpisodeContext(context, normalizedSpec, experiment, deadline.signal)
+                ),
+                deadline.signal
+              )
+            )
+          : undefined;
+        const artifact = bindArtifactToExperiment(
+          rawArtifact,
           experiment,
-          context
+          context,
+          assignmentResolution
         );
         assertArtifactBinding(artifact, normalizedSpec, status, context);
         let evaluationReport: HarnessEvaluationReport | undefined;
@@ -627,6 +659,9 @@ export async function runGenericExperiment<
             createEpisodeContext(context, normalizedSpec, experiment, deadline.signal)
           );
           assertEvaluationContextBinding(evaluationContext, artifact, context);
+          if (evaluationContext.socialEpisode !== undefined) {
+            evaluationContext.socialEpisode = structuredClone(artifact.socialEpisode) as typeof evaluationContext.socialEpisode;
+          }
           evaluationReport = runEvaluationRegistry({
               id: `${normalizedSpec.id}:g${context.index + 1}:evaluation`,
               createdAt: now(),
@@ -1567,6 +1602,12 @@ function assertArtifactBinding(
   if (artifact.socialEpisode.schedulerMode !== spec.schedulerMode) {
     throw new Error(`Generic experiment episode ${context.index} scheduler does not match the normalized spec.`);
   }
+  const socialStructureErrors = validateSocialEpisodeArtifact(artifact.socialEpisode);
+  if (socialStructureErrors.length) {
+    throw new Error(
+      `Generic experiment episode ${context.index} social artifact structure failed: ${socialStructureErrors.join(" ")}`
+    );
+  }
   if (
     !artifact.socialEpisode.runtimeActorIds ||
     artifact.socialEpisode.runtimeActorIds.length !== spec.actorCount
@@ -1612,12 +1653,27 @@ function assertArtifactBinding(
 function bindArtifactToExperiment<TArtifact extends GenericEpisodeEnvelope>(
   artifact: TArtifact,
   experiment: GenericExperimentProvenanceV1,
-  context: TournamentEpisodeContext
+  context: TournamentEpisodeContext,
+  assignmentResolution: import("./social").SocialAssignmentResolutionEvidence | undefined
 ): TArtifact {
   if (!artifact || typeof artifact !== "object") {
     throw new Error("Generic experiment adapter did not return an episode artifact.");
   }
   const canonical = structuredClone(artifact);
+  if (
+    assignmentResolution !== undefined &&
+    canonical.socialEpisode.assignmentResolution !== undefined &&
+    hashStableJsonValue(canonical.socialEpisode.assignmentResolution) !== hashStableJsonValue(assignmentResolution)
+  ) {
+    throw new Error(`Generic experiment episode ${context.index} assignment resolution contradicts control-plane evidence.`);
+  }
+  if (assignmentResolution !== undefined) {
+    canonical.socialEpisode.assignmentResolution = structuredClone(assignmentResolution);
+  } else if (canonical.socialEpisode.assignmentResolution !== undefined) {
+    throw new Error(
+      `Generic experiment episode ${context.index} supplied assignment resolution without a reviewed adapter resolution hook.`
+    );
+  }
   let bound: TArtifact;
   if (canonical.experiment !== undefined) {
     const errors = validateGenericExperimentProvenance(
@@ -1639,7 +1695,8 @@ function bindArtifactToExperiment<TArtifact extends GenericEpisodeEnvelope>(
   }
   const executionAttestation = createGenericExperimentExecutionAttestation(
     experiment.spec,
-    bound.socialEpisode
+    bound.socialEpisode,
+    { assignmentResolutionRequired: experiment.assignmentResolutionRequired === true }
   );
   if (
     bound.executionAttestation !== undefined &&
@@ -1686,10 +1743,15 @@ function assertEvaluationContextBinding(
     throw new Error(`Generic experiment episode ${episode.index} evaluation agents do not match its artifact.`);
   }
   if (
-    context.socialEpisode !== undefined &&
-    hashStableState(context.socialEpisode) !== hashStableState(artifact.socialEpisode)
+    context.socialEpisode !== undefined
   ) {
-    throw new Error(`Generic experiment episode ${episode.index} evaluation social episode does not match its artifact.`);
+    const contextEpisode = structuredClone(context.socialEpisode) as { assignmentResolution?: unknown };
+    const artifactEpisode = structuredClone(artifact.socialEpisode);
+    delete contextEpisode.assignmentResolution;
+    delete artifactEpisode.assignmentResolution;
+    if (hashStableState(contextEpisode) !== hashStableState(artifactEpisode)) {
+      throw new Error(`Generic experiment episode ${episode.index} evaluation social episode does not match its artifact.`);
+    }
   }
 }
 

@@ -114,7 +114,7 @@ async function main(): Promise<void> {
       config: options.config,
       temperature: options.temperature,
       experiment: options.experiment,
-      reasoner: new OpenAIHarnessReasoner(modelClientFromEnv(process.env, { abortSignal: abortController.signal })),
+      reasoner: OpenAIHarnessReasoner.forLiveProvider(modelClientFromEnv(process.env, { abortSignal: abortController.signal })),
       executionLimits: { abortSignal: abortController.signal },
       continueOnError: options.continueOnError,
       includeArtifacts: Boolean(options.outputDir),
@@ -139,7 +139,11 @@ async function main(): Promise<void> {
     );
     const summary = {
       kind: "tournament",
-      ok: result.gamesFailed === 0 && (result.gamesUnstarted ?? 0) === 0,
+      ok:
+        result.gamesCompleted === result.gamesRequested &&
+        result.gamesFailed === 0 &&
+        (result.gamesTruncated ?? 0) === 0 &&
+        (result.gamesUnstarted ?? 0) === 0,
       status:
         result.gamesFailed > 0
           ? "failed"
@@ -180,7 +184,14 @@ async function main(): Promise<void> {
         }))
     };
     console.log(JSON.stringify(options.json === "full" ? { summary, episodes: result.episodes } : { summary }, null, 2));
-    if (result.gamesFailed > 0 || (result.gamesUnstarted ?? 0) > 0) process.exitCode = 1;
+    if (
+      result.gamesCompleted !== result.gamesRequested ||
+      result.gamesFailed > 0 ||
+      (result.gamesTruncated ?? 0) > 0 ||
+      (result.gamesUnstarted ?? 0) > 0
+    ) {
+      process.exitCode = 1;
+    }
   } finally {
     clearInterval(heartbeat);
     if (timeout) clearTimeout(timeout);
@@ -458,7 +469,7 @@ function printUsage(): void {
       "Usage: npm run arena:tournament -- [--models=modelA,modelB] [--games=3] [--seed=name] [--maxTransitions=8] [--timeout=5m] [--json=summary|full]",
       "       npm run arena:tournament -- --spec=experiments/wolf-vs-village.json",
       "       npm run arena:tournament -- --profiles=wolf:model-wolf:wolf-deceiver:0.7,village:model-village:village-analyst:0.35",
-      "       npm run arena:tournament -- --assignment='{\"strategy\":\"role\",\"roles\":{\"werewolf\":[\"wolf\"],\"seer\":\"seer\"},\"fallback\":\"profile-rotation\"}'",
+      "       npm run arena:tournament -- --assignment='{\"strategy\":\"role\",\"roles\":{\"werewolf\":\"wolf\",\"seer\":\"seer\",\"villager\":\"village\",\"witch\":\"village\",\"hunter\":\"village\"},\"fallback\":\"error\"}'",
       "       npm run arena:tournament -- --games=1 --maxTransitions=0 --outputDir=/tmp/werewolf-tournament-artifacts",
       "",
       "Runs role-balanced multi-agent harness episodes. No fake fallback or model substitution is used.",

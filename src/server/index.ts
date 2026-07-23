@@ -324,7 +324,8 @@ app.disable("x-powered-by");
 const artifactAccessBindHost = dependencies.artifactAccessBindHost ?? host;
 const createReasoner =
   dependencies.createReasoner ??
-  ((abortSignal: AbortSignal): HarnessReasoner => new OpenAIHarnessReasoner(modelClientFromEnv(process.env, { abortSignal })));
+  ((abortSignal: AbortSignal): HarnessReasoner =>
+    OpenAIHarnessReasoner.forLiveProvider(modelClientFromEnv(process.env, { abortSignal })));
 const tournamentArtifactBaseDir = normalizeOptionalDirectory(dependencies.tournamentArtifactBaseDir ?? process.env.TOURNAMENT_ARTIFACT_BASE_DIR);
 const experimentRunBaseDir = normalizeOptionalDirectory(
   dependencies.experimentRunBaseDir ??
@@ -2064,7 +2065,7 @@ function buildMatchSummary(
   const stepCounts = countSocialStepCommits(result.socialEpisode.steps);
   return {
     kind: "match",
-    ok: result.status !== "failed" && harnessFailures.length === 0,
+    ok: result.status === "completed" && result.state.phase === "game_over" && harnessFailures.length === 0,
     provider: providerDiagnosticSummaryFromEnv(),
     seed: options.seed,
     rulesetId: result.initialState.config.rulesetId,
@@ -4531,7 +4532,8 @@ function redactSocialTopologyForTruthView(episode: RedactedSocialEpisodeDto): Re
       ? {
           schemaVersion: episode.execution.schemaVersion,
           started: episode.execution.started,
-          initialMessageCount: messages.filter((message) => initialPublicMessageIds.has(message.id)).length
+          initialMessageCount: messages.filter((message) => initialPublicMessageIds.has(message.id)).length,
+          reasonerExecutionClass: episode.execution.reasonerExecutionClass
         }
       : undefined,
     schedulerMode: episode.schedulerMode,
@@ -4935,6 +4937,7 @@ function redactCommandPayload(command: unknown): RedactedCommandDto {
 function redactSocialEpisodePrivateEvidence(episode: MatchArtifact["socialEpisode"]): RedactedSocialEpisodeDto {
   return {
     ...episode,
+    assignmentResolution: undefined,
     failureReason: episode.failureReason ? "[REDACTED social episode failure detail]" : undefined,
     error: episode.error ? "[REDACTED social episode error]" : undefined,
     initialState: redactStatePrivateEvents(episode.initialState),
@@ -5919,7 +5922,7 @@ function buildTournamentSummary(
   return {
     kind: "tournament",
     status,
-    ok: status === "completed" || status === "truncated",
+    ok: status === "completed",
     provider: providerDiagnosticSummaryFromEnv(),
     experimentId: options.experimentId ?? null,
     seed: options.seed,

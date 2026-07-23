@@ -88,5 +88,6 @@ describe("Cockpit experiment control-plane draft", () => {
       ]
     });
     expect(buildCockpitExperimentRequest(draft).models).toEqual(["fixture-wolf", "fixture-village"]);
+    expect(draft.assignment).toEqual({ strategy: "profile-rotation", fallback: "error" });
   });
 });

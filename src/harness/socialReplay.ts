@@ -12,6 +12,7 @@ import {
   isSocialStepCommitted,
   isSocialStepNonReplayableFailure,
   SocialCommunicationBus,
+  validateSocialEpisodeArtifact,
   validateSocialParallelBatchLayout,
   type SocialEpisodeArtifact,
   type SocialEnvironment,
@@ -329,6 +330,11 @@ export function replaySocialEpisode<TState, TObservation, TPending, TCommand, TA
   // bound to another domain adapter implementation.
   for (const mismatch of compareSocialDomainAdapterManifests(episode.domainAdapter, options.domainAdapter)) {
     mismatches.push(`Domain adapter binding: ${mismatch}`);
+  }
+  for (const error of validateSocialEpisodeArtifact(episode).filter((error) =>
+    error.startsWith("execution.reasonerExecutionClass")
+  )) {
+    mismatches.push(`Execution classification: ${error}`);
   }
   if (mismatches.length) return finalizeReplay();
 

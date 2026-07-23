@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AgentPendingAction } from "../src/core/pending";
-import { SocialCommunicationBus, type SocialChannel, type SocialMessage } from "../src/harness/social";
-import { WerewolfAgentActor } from "../src/harness/actor";
+import type { GameCommand } from "../src/core/types";
+import { SocialCommunicationBus, type SocialActorStepReceipt, type SocialChannel, type SocialMessage } from "../src/harness/social";
+import { WerewolfAgentActor, reduceCommittedWerewolfSocialAction } from "../src/harness/actor";
 import type { AgentHarnessState, HarnessPlayerView } from "../src/harness/types";
 
 describe("Werewolf agent social claim ingestion", () => {
@@ -56,6 +57,27 @@ describe("Werewolf agent social claim ingestion", () => {
 
     const social = actor.state.social;
     expect(social).toBeDefined();
+    expect(social?.memory.maxEntries).toBe(64);
+    expect(social?.journal?.maxEntries).toBe(64);
+    const observationMemory = social?.memory.entries.find((entry) => entry.kind === "observation");
+    expect(observationMemory).toMatchObject({
+      metadata: {
+        observationProjection: "werewolf.memory-core.v1",
+        visibleMessageCount: 5,
+        publicSpeechCount: 0,
+        voteCount: 0,
+        recentEventCount: 0
+      },
+      observation: {
+        you: { id: "observer" },
+        pendingAction: { kind: "vote" },
+        speeches: [],
+        votes: [],
+        recentEvents: []
+      }
+    });
+    expect(observationMemory?.observation).not.toHaveProperty("social");
+    expect(JSON.stringify(observationMemory?.observation)).not.toContain("voter voted for target-a");
     const beliefs = social?.beliefs.claims ?? {};
 
     expect(beliefs["voter:publicVoteTarget"]).toMatchObject({
@@ -1988,6 +2010,283 @@ describe("Werewolf agent social claim ingestion", () => {
       )
     ).toHaveLength(1);
   });
+
+  it("creates and resolves linked commitment goals only from delivered typed vote evidence", () => {
+    const actor = new WerewolfAgentActor(agentState("observer"));
+    const commitmentMessage = withObserverDelivery(socialMessage({
+      id: "msg-production-commitment",
+      seq: 20,
+      senderId: "voter",
+      visibility: "public",
+      content: "free text is not interpreted",
+      speechActs: [{
+        id: "act-production-commitment",
+        kind: "commitment",
+        subjectId: "voter",
+        targetId: "target-a",
+        value: "vote.cast",
+        confidence: 0.9,
+        evidenceRefs: [],
+        metadata: {
+          commitmentId: "commit-production-voter-target-a",
+          promisedAction: "vote.cast",
+          deadlinePhase: "day_vote",
+          deadlineDay: 3
+        }
+      }],
+      metadata: { kind: "public-speech", day: 3 }
+    }));
+
+    actor.observe(viewFor("observer", [commitmentMessage]), { traceId: "trace-production-commitment", turnIndex: 30 });
+
+    expect(actor.state.social?.commitments?.records["commit-production-voter-target-a"]).toMatchObject({
+      actorId: "voter",
+      promisedAction: "vote.cast",
+      targetId: "target-a",
+      deadlinePhase: "day_vote",
+      deadlineDay: 3,
+      status: "active",
+      metadata: expect.objectContaining({ linkedGoalId: "commit-production-voter-target-a:goal" })
+    });
+    expect(actor.state.social?.goals.goals.find((goal) => goal.id === "commit-production-voter-target-a:goal")).toMatchObject({
+      kind: "commitment",
+      status: "active"
+    });
+
+    const committedVote = withObserverDelivery(socialMessage({
+      id: "msg-production-vote",
+      seq: 21,
+      senderId: "voter",
+      visibility: "public",
+      content: "this text is not used to resolve the commitment",
+      speechActs: [{
+        id: "act-production-vote",
+        kind: "vote_intent",
+        subjectId: "voter",
+        targetId: "target-a",
+        value: "vote.cast",
+        confidence: 1,
+        evidenceRefs: [],
+        metadata: { source: "metadata.targetId", abstain: false }
+      }],
+      metadata: { kind: "public-vote", day: 3, targetId: "target-a", abstain: false }
+    }));
+    actor.observe(viewFor("observer", [commitmentMessage, committedVote]), {
+      traceId: "trace-production-vote",
+      turnIndex: 31
+    });
+
+    expect(actor.state.social?.commitments?.records["commit-production-voter-target-a"]?.status).toBe("fulfilled");
+    expect(actor.state.social?.goals.goals.find((goal) => goal.id === "commit-production-voter-target-a:goal")?.status).toBe("completed");
+    expect(actor.state.social?.commitments?.records["commit-production-voter-target-a"]?.evidenceRefs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ artifact: "message", id: committedVote.id }),
+        expect.objectContaining({ artifact: "delivery_receipt", id: `${committedVote.id}:delivery:observer` })
+      ])
+    );
+  });
+
+  it("does not create linked goals or resolve commitments from free text or missing delivery receipts", () => {
+    const actor = new WerewolfAgentActor(agentState("observer"));
+    const naturalLanguageOnly = socialMessage({
+      id: "msg-production-free-text",
+      seq: 22,
+      senderId: "voter",
+      visibility: "public",
+      content: "I promise to vote for target-a.",
+      metadata: { kind: "public-speech", day: 3 }
+    });
+    const typedWithoutReceipt = socialMessage({
+      id: "msg-production-no-receipt",
+      seq: 23,
+      senderId: "voter",
+      visibility: "public",
+      content: "typed but not receipt-bound",
+      speechActs: [{
+        id: "act-production-no-receipt",
+        kind: "commitment",
+        subjectId: "voter",
+        targetId: "target-a",
+        value: "vote.cast",
+        confidence: 1,
+        evidenceRefs: [],
+        metadata: {
+          commitmentId: "commit-production-no-receipt",
+          promisedAction: "vote.cast",
+          deadlinePhase: "day_vote",
+          deadlineDay: 3
+        }
+      }],
+      metadata: { kind: "public-speech", day: 3 }
+    });
+    const voteWithoutReceipt = socialMessage({
+      id: "msg-production-vote-no-receipt",
+      seq: 24,
+      senderId: "voter",
+      visibility: "public",
+      content: "voter voted for target-a",
+      speechActs: [{
+        id: "act-production-vote-no-receipt",
+        kind: "vote_intent",
+        subjectId: "voter",
+        targetId: "target-a",
+        value: "vote.cast",
+        confidence: 1,
+        evidenceRefs: [],
+        metadata: { source: "metadata.targetId", abstain: false }
+      }],
+      metadata: { kind: "public-vote", day: 3, targetId: "target-a", abstain: false }
+    });
+
+    actor.observe(viewFor("observer", [naturalLanguageOnly, typedWithoutReceipt, voteWithoutReceipt]), {
+      traceId: "trace-production-no-receipt",
+      turnIndex: 32
+    });
+
+    expect(actor.state.social?.goals.goals.some((goal) => goal.id === "commit-production-no-receipt:goal")).toBe(false);
+    expect(actor.state.social?.commitments?.records["commit-production-no-receipt"]?.status).toBe("active");
+    expect(Object.values(actor.state.social?.commitments?.records ?? {})).toHaveLength(1);
+  });
+
+  it("records reputation consequences only after an observed public role claim is publicly disproved", () => {
+    const actor = new WerewolfAgentActor(agentState("observer"));
+    const claimMessage = withObserverDelivery(socialMessage({
+      id: "msg-production-role-claim",
+      seq: 25,
+      senderId: "voter",
+      visibility: "public",
+      content: "content is not parsed",
+      speechActs: [{
+        id: "act-production-role-claim",
+        kind: "role_claim",
+        subjectId: "voter",
+        value: "seer",
+        confidence: 1,
+        evidenceRefs: [],
+        metadata: { source: "reasoner.social-intent" }
+      }],
+      metadata: { kind: "public-speech", day: 3 }
+    }));
+    actor.observe(viewFor("observer", [claimMessage]), { traceId: "trace-role-claim-before-reveal", turnIndex: 33 });
+
+    expect(Object.keys(actor.state.social?.betrayals?.records ?? {})).toEqual([]);
+    expect(actor.state.social?.reputation.records["voter"]).toBeUndefined();
+
+    const revealedView = viewFor("observer", []);
+    revealedView.publicPlayers = revealedView.publicPlayers.map((player) =>
+      player.id === "voter" ? { ...player, alive: false, revealedRole: "villager" } : player
+    );
+    actor.observe(revealedView, { traceId: "trace-role-claim-public-reveal", turnIndex: 34 });
+
+    expect(actor.state.social?.betrayals?.records["observer:false-public-role-claim:msg-production-role-claim"]).toMatchObject({
+      actorId: "voter",
+      targetId: "observer",
+      kind: "deception",
+      status: "confirmed",
+      metadata: expect.objectContaining({ claimedRole: "seer", revealedRole: "villager" })
+    });
+    expect(actor.state.social?.reputation.records["voter"]).toMatchObject({ honesty: -0.25 });
+
+    actor.observe(revealedView, { traceId: "trace-role-claim-public-reveal-repeat", turnIndex: 35 });
+    expect(actor.state.social?.reputation.records["voter"]?.honesty).toBe(-0.25);
+
+    const hiddenTruthOnlyActor = new WerewolfAgentActor(agentState("observer"));
+    const hiddenTruthView = viewFor("observer", [claimMessage]);
+    hiddenTruthView.privateInfo.werewolfAllies = ["voter"];
+    hiddenTruthOnlyActor.observe(hiddenTruthView, { traceId: "trace-role-claim-hidden-truth", turnIndex: 36 });
+    expect(Object.keys(hiddenTruthOnlyActor.state.social?.betrayals?.records ?? {})).toEqual([]);
+    expect(hiddenTruthOnlyActor.state.social?.reputation.records["voter"]).toBeUndefined();
+  });
+
+  it("reduces committed typed action receipts and leaves rejected receipts mutation-free", () => {
+    const actor = new WerewolfAgentActor(agentState("voter"));
+    if (!actor.state.social) throw new Error("Expected initialized social state.");
+    const declarationReceipt: SocialActorStepReceipt<unknown, AgentPendingAction, GameCommand> = {
+      id: "receipt-production-declaration",
+      status: "committed",
+      traceId: "trace-production-declaration",
+      turnIndex: 40,
+      actorId: "voter",
+      pendingAction: { kind: "speech", phase: "day_speech", actorId: "voter", legalPressureTargetIds: ["target-a"] },
+      action: {
+        actorId: "voter",
+        kind: "speech.submit",
+        traceId: "trace-production-declaration",
+        command: { type: "speech.submit", actorId: "voter", text: "not parsed" },
+        messages: [{
+          channelId: "table",
+          senderId: "voter",
+          recipientIds: ["observer"],
+          visibility: "public",
+          content: "not parsed",
+          speechActs: [{
+            id: "act-receipt-commitment",
+            kind: "commitment",
+            subjectId: "voter",
+            targetId: "target-a",
+            value: "vote.cast",
+            confidence: 1,
+            evidenceRefs: [],
+            metadata: {
+              commitmentId: "commit-receipt-voter-target-a",
+              promisedAction: "vote.cast",
+              deadlinePhase: "day_vote",
+              deadlineDay: 3
+            }
+          }],
+          metadata: { kind: "public-speech", day: 3 }
+        }]
+      },
+      messageSeqRange: [30, 30]
+    };
+    reduceCommittedWerewolfSocialAction(actor.state.social, declarationReceipt);
+    expect(actor.state.social.commitments?.records["commit-receipt-voter-target-a"]?.status).toBe("active");
+
+    const beforeRejected = JSON.stringify(actor.state.social);
+    reduceCommittedWerewolfSocialAction(actor.state.social, {
+      ...declarationReceipt,
+      id: "receipt-production-rejected",
+      status: "rejected",
+      traceId: "trace-production-rejected"
+    });
+    expect(JSON.stringify(actor.state.social)).toBe(beforeRejected);
+
+    reduceCommittedWerewolfSocialAction(actor.state.social, {
+      id: "receipt-production-vote",
+      status: "committed",
+      traceId: "trace-production-vote-receipt",
+      turnIndex: 41,
+      actorId: "voter",
+      pendingAction: { kind: "vote", phase: "day_vote", actorId: "voter", legalTargetIds: ["target-a", "target-b"] },
+      action: {
+        actorId: "voter",
+        kind: "vote.cast",
+        traceId: "trace-production-vote-receipt",
+        command: { type: "vote.cast", actorId: "voter", targetId: "target-b" },
+        messages: [{
+          channelId: "table",
+          senderId: "voter",
+          recipientIds: ["observer"],
+          visibility: "public",
+          content: "text claims a different target and is ignored",
+          speechActs: [{
+            id: "act-receipt-vote",
+            kind: "vote_intent",
+            subjectId: "voter",
+            targetId: "target-b",
+            value: "vote.cast",
+            confidence: 1,
+            evidenceRefs: [],
+            metadata: { source: "metadata.targetId", abstain: false }
+          }],
+          metadata: { kind: "public-vote", day: 3, targetId: "target-b", abstain: false }
+        }]
+      },
+      messageSeqRange: [31, 31]
+    });
+    expect(actor.state.social.commitments?.records["commit-receipt-voter-target-a"]?.status).toBe("broken");
+    expect(actor.state.social.goals.goals.find((goal) => goal.id === "commit-receipt-voter-target-a:goal")?.status).toBe("failed");
+  });
 });
 
 function agentState(playerId: string): AgentHarnessState {
@@ -2013,6 +2312,7 @@ function socialMessage(input: {
   channelId?: string;
   recipientIds?: string[];
   speechActs?: SocialMessage["speechActs"];
+  deliveryReceipts?: SocialMessage["deliveryReceipts"];
   metadata?: Record<string, unknown>;
 }): SocialMessage {
   return {
@@ -2024,8 +2324,26 @@ function socialMessage(input: {
     visibility: input.visibility,
     content: input.content,
     speechActs: input.speechActs,
+    deliveryReceipts: input.deliveryReceipts,
     createdAt: new Date(input.seq * 1000).toISOString(),
     metadata: input.metadata
+  };
+}
+
+function withObserverDelivery(message: SocialMessage, observerId = "observer"): SocialMessage {
+  return {
+    ...message,
+    deliveryReceipts: [{
+      id: `${message.id}:delivery:${observerId}`,
+      messageId: message.id,
+      messageSeq: message.seq,
+      channelId: message.channelId,
+      senderId: message.senderId,
+      observerId,
+      visibility: message.visibility,
+      deliveredAtTurn: message.seq,
+      redactionPolicy: `runtime-visible:${message.visibility}`
+    }]
   };
 }
 

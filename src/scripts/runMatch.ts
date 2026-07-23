@@ -94,7 +94,7 @@ async function main(): Promise<void> {
     const result = await runHarnessMatch({
       initialState,
       agents,
-      reasoner: new OpenAIHarnessReasoner(
+      reasoner: OpenAIHarnessReasoner.forLiveProvider(
         modelClientFromEnv(process.env, {
           abortSignal: timeoutController.signal
         })
@@ -107,7 +107,10 @@ async function main(): Promise<void> {
 
     const summary = {
       kind: "match",
-      ok: result.status !== "failed" && result.metrics.harnessErrorCount === 0,
+      ok:
+        result.status === "completed" &&
+        result.state.phase === "game_over" &&
+        result.metrics.harnessErrorCount === 0,
       provider: providerDiagnosticSummaryFromEnv(),
       seed: options.seed,
       models: options.models,
@@ -139,6 +142,8 @@ async function main(): Promise<void> {
       failureReason:
         result.status === "failed"
           ? "Harness match failed; inspect validated failure records."
+          : result.status === "truncated" || result.state.phase !== "game_over"
+            ? "Harness match stopped before game_over; the artifact is retained for diagnosis but is not a completed live run."
           : harnessErrors.length
             ? "Harness recorded one or more failures; inspect validated failure records."
             : null,
@@ -189,7 +194,7 @@ async function main(): Promise<void> {
     if (options.exportJsonl) {
       await writeFile(options.exportJsonl, toTrajectoryJsonl(artifact), "utf8");
     }
-    if (result.status === "failed") {
+    if (result.status !== "completed" || result.state.phase !== "game_over" || result.metrics.harnessErrorCount > 0) {
       process.exitCode = 1;
     }
 

@@ -108,6 +108,11 @@ describe("agent profile assignment resolver", () => {
       teams: { werewolves: ["wolf"], village: "village" },
       fallback: "error"
     });
+    expect(assignmentFromUnknown({ strategy: "role", roles: { werewolf: "wolf" } })).toEqual({
+      strategy: "role",
+      roles: { werewolf: "wolf" },
+      fallback: "error"
+    });
     expect(() => assignmentFromUnknown('{"strategy":"role","roles":{"sorcerer":"wolf"}}')).toThrow(/not supported/);
 
     const state = createGame({ id: "resolver-errors", seed: "resolver-errors" });
@@ -117,6 +122,12 @@ describe("agent profile assignment resolver", () => {
         seats: { "1": "missing-profile" }
       })
     ).toThrow(/unknown profile/);
+    expect(() =>
+      resolveAgentConfigs(state.players, profiles, 0, 0.7, {
+        strategy: "role",
+        roles: { werewolf: "wolf" }
+      })
+    ).toThrow(/No Agent profile assignment/);
     expect(() =>
       resolveAgentConfigs(
         [

@@ -44,7 +44,28 @@ const socialSpeechActDraftSchema = z
 const socialSpeechActDraftsSchema = z.array(socialSpeechActDraftSchema).max(4);
 
 export class OpenAIHarnessReasoner implements HarnessReasoner {
-  constructor(private readonly client: ModelClient) {}
+  readonly executionClass: HarnessReasoner["executionClass"];
+
+  /**
+   * Direct construction is intentionally unverified. This is the safe default
+   * for fixture clients and ordinary injected test reasoners, even when their
+   * returned telemetry resembles a completed provider stream.
+   */
+  constructor(private readonly client: ModelClient) {
+    this.executionClass = "injected-unverified";
+  }
+
+  /** Explicit production construction boundary used by server/CLI registries. */
+  static forLiveProvider(client: ModelClient): OpenAIHarnessReasoner {
+    const reasoner = new OpenAIHarnessReasoner(client);
+    Object.defineProperty(reasoner, "executionClass", {
+      value: "live-provider",
+      enumerable: true,
+      configurable: false,
+      writable: false
+    });
+    return reasoner;
+  }
 
   async think(input: ReasonerInput): Promise<ReasonerOutput> {
     const completion = await this.client.complete({

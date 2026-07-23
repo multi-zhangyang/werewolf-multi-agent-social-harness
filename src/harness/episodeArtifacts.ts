@@ -1,5 +1,7 @@
 import { hashStableJsonValue, hashStableState } from "./hash";
 import {
+  GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION,
+  GENERIC_EXPERIMENT_PROVENANCE_VERSION,
   createGenericExperimentForkLineage,
   validateGenericExperimentExecutionAttestation,
   validateGenericExperimentExecutionEvidence,
@@ -473,6 +475,32 @@ export function auditRecordedSocialAgentSnapshots<TState, TObservation, TPending
   let checkedSnapshots = 0;
   let previousHash: string | undefined;
   const parallelHashesByBatch = new Map<string, Set<string>>();
+  const snapshotFramesById = new Map((options.snapshotFrames ?? []).map((frame) => [frame.frameId, frame]));
+  const verifiedFramePayloadHashes = new Map<string, string>();
+
+  const resolveFrame = (
+    step: SocialHarnessStep<TObservation, TPending, TCommand>
+  ): { agents: TAgentState[]; agentsHash: string; actualHash: string } | undefined => {
+    const frameId = step.actorSnapshotFrameIdAfterStep;
+    const agentsHash = step.actorSnapshotsHashAfterStep;
+    if (!frameId || !agentsHash) return undefined;
+    const frame = snapshotFramesById.get(frameId);
+    if (!frame || frame.agentsHash !== agentsHash) return undefined;
+    let actualHash = verifiedFramePayloadHashes.get(frameId);
+    if (!actualHash) {
+      actualHash = hashStableState(frame.agents);
+      verifiedFramePayloadHashes.set(frameId, actualHash);
+    }
+    return {
+      // Audit callbacks already receive caller-owned inline arrays directly.
+      // Reading the canonical frame payload here avoids cloning a potentially
+      // multi-megabyte actor table once per native step; the audit never
+      // mutates it or returns it.
+      agents: frame.agents as TAgentState[],
+      agentsHash: frame.agentsHash,
+      actualHash
+    };
+  };
 
   for (const [stepIndex, step] of options.episode.steps.entries()) {
     const committed = isSocialStepCommitted(step);
@@ -503,10 +531,10 @@ export function auditRecordedSocialAgentSnapshots<TState, TObservation, TPending
           mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame id does not match its hash.`);
         }
         if (options.snapshotFrames) {
-          const resolved = resolveHarnessAgentSnapshotFrame({ frames: options.snapshotFrames, step });
+          const resolved = resolveFrame(step);
           if (!resolved) {
             mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame reference cannot be resolved.`);
-          } else if (resolved.agentsHash !== actualHash || hashStableState(resolved.agents) !== actualHash) {
+          } else if (resolved.agentsHash !== actualHash || resolved.actualHash !== actualHash) {
             mismatches.push(`Native step ${stepIndex} ${step.traceId}: inline actor snapshot does not match its frame payload.`);
           }
         }
@@ -517,14 +545,14 @@ export function auditRecordedSocialAgentSnapshots<TState, TObservation, TPending
       } else if (!options.snapshotFrames) {
         mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame reference requires an external frame registry.`);
       } else {
-        const resolved = resolveHarnessAgentSnapshotFrame({ frames: options.snapshotFrames, step });
+        const resolved = resolveFrame(step);
         if (!resolved) {
           mismatches.push(`Native step ${stepIndex} ${step.traceId}: actor snapshot frame reference cannot be resolved.`);
         } else {
           agents = resolved.agents;
           resolvedHash = resolved.agentsHash;
           checkedSnapshots += 1;
-          const actualHash = hashStableState(agents);
+          const actualHash = resolved.actualHash;
           if (actualHash !== resolvedHash) {
             mismatches.push(`Native step ${stepIndex} ${step.traceId}: resolved actor snapshot hash mismatch ${actualHash} !== ${resolvedHash}.`);
           }
@@ -1250,6 +1278,14 @@ export function validateHarnessEpisodeArtifactEnvelope<
         // runner-bound attestation; legacy bare social artifacts remain valid.
         errors.push("executionAttestation is required by experiment provenance.");
       } else {
+        if (
+          artifact.experiment.schemaVersion === GENERIC_EXPERIMENT_PROVENANCE_VERSION &&
+          artifact.executionAttestation.schemaVersion !== GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION
+        ) {
+          errors.push(
+            `executionAttestation.schemaVersion must be ${GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION} for ${GENERIC_EXPERIMENT_PROVENANCE_VERSION}.`
+          );
+        }
         errors.push(...validateGenericExperimentExecutionAttestation(
           artifact.executionAttestation,
           artifact.experiment.spec,
@@ -1422,7 +1458,11 @@ export function validateHarnessCheckpointEnvelope<
       errors.push(...validateGenericExperimentExecutionEvidence(
         checkpoint.source.experiment.spec,
         checkpoint.executionPrefix,
-        "executionPrefix"
+        "executionPrefix",
+        {
+          requireAssignmentResolution:
+            checkpoint.source.experiment.schemaVersion === GENERIC_EXPERIMENT_PROVENANCE_VERSION
+        }
       ));
     }
   }

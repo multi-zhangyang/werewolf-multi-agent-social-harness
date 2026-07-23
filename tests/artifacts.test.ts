@@ -973,6 +973,8 @@ describe("match artifact JSONL export", () => {
       reasoner: stubReasoner,
       maxTransitions: 4
     });
+    const sourceTrajectoryHash = hashStableState(result.trajectory);
+    const sourceSocialEpisodeHash = hashStableState(result.socialEpisode);
     const artifact = buildMatchArtifact({
       runId: "artifact-jsonl-snapshot-frames",
       matchId: "artifact-jsonl-snapshot-frames-match",
@@ -983,6 +985,14 @@ describe("match artifact JSONL export", () => {
       result
     });
 
+    expect(hashStableState(result.trajectory)).toBe(sourceTrajectoryHash);
+    expect(hashStableState(result.socialEpisode)).toBe(sourceSocialEpisodeHash);
+    expect(result.trajectory.every((step) => Array.isArray(step.agentSnapshotsAfterStep))).toBe(true);
+    expect(
+      result.socialEpisode.steps
+        .filter((step) => isSocialStepCommitted(step))
+        .every((step) => Array.isArray(step.actorSnapshotsAfterStep))
+    ).toBe(true);
     expect(validateMatchArtifactIntegrity(artifact)).toEqual([]);
     expect(artifact.agentSnapshotFrames?.length).toBeGreaterThan(0);
     expect(artifact.trajectory.every((step) => !step.agentSnapshotsAfterStep && step.agentSnapshotFrameIdAfterStep)).toBe(true);

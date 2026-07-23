@@ -533,6 +533,7 @@ describe("public match API redaction", () => {
     expect(projected.body.trajectory.every((step: any) => step.turnTrace.cognitionSource === "policy")).toBe(true);
     expect(projected.body.trajectory.every((step: any) => step.reasonerOutput.content === "[REDACTED deterministic policy memo]")).toBe(true);
     expect(JSON.stringify(projected.body.trajectory)).not.toContain("[REDACTED model reasoning output]");
+    expect(projected.body.socialEpisode.execution.reasonerExecutionClass).toBe("policy-only");
   });
 
   it("serves a truth-redacted artifact projection without postgame role team night or winner truth", async () => {
@@ -580,6 +581,7 @@ describe("public match API redaction", () => {
     expect(projected.body.socialEpisode).not.toHaveProperty("runtimeActorIds");
     expect(projected.body.socialEpisode).not.toHaveProperty("runtimeActors");
     expect(projected.body.socialEpisode.steps).toEqual([]);
+    expect(projected.body.socialEpisode.execution.reasonerExecutionClass).toBe("injected-unverified");
     expect(projected.body.socialEpisode.exposureRecords).toEqual([]);
     expect(projected.body.evaluationReport).toEqual({});
     const projectedJson = JSON.stringify(projected.body);
@@ -1294,6 +1296,7 @@ describe("public match API redaction", () => {
 	      truncationReason: expect.stringContaining("maxTransitions")
 	    });
 	    expect(run.body.summary).toMatchObject({
+	      ok: false,
 	      status: "truncated",
 	      truncationReason: expect.stringContaining("maxTransitions"),
 	      provider: {

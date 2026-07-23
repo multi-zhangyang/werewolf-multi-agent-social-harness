@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
+import type { ModelClient } from "../src/agents/modelClient";
 import {
   createGenericExperimentExecutionAttestation,
   normalizeGenericExperimentSpec,
   validateGenericExperimentExecutionEvidence
 } from "../src/harness/experimentSpec";
 import { hashStableState } from "../src/harness/hash";
+import { OpenAIHarnessReasoner } from "../src/harness/reasoner";
+import { runHarnessEpisode } from "../src/harness/runner";
 import {
-  runSocialEpisode,
   validateSocialEpisodeArtifact,
   type SocialActor,
   type SocialAgentProfile,
@@ -109,7 +111,7 @@ function spec(reasoner: boolean, decisionTimeoutMs = 1_000) {
       policyId: "counter.policy",
       ...(reasoner ? { reasonerId: "counter.reasoner" } : {})
     }],
-    modelAssignments: [{ profileId: "counter-profile", modelId: "opaque-test-model" }],
+    modelAssignments: reasoner ? [{ profileId: "counter-profile", modelId: "opaque-test-model" }] : [],
     assignmentPolicy: { id: "counter.assignment", version: "1" },
     maxTransitions: 1,
     timeoutPolicy: { id: "counter.timeout", version: "1", decisionTimeoutMs },
@@ -117,14 +119,25 @@ function spec(reasoner: boolean, decisionTimeoutMs = 1_000) {
     evaluatorIds: [],
     artifactPolicy: { id: "counter.artifact", version: "1", visibility: "research-full" },
     checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "none" },
-    providerPolicy: { id: "counter.streaming", version: "1", stream: true },
+    ...(reasoner ? { providerPolicy: { id: "counter.streaming", version: "1", stream: true as const } } : {}),
     continueOnError: false,
     domainConfig: {}
   });
 }
 
-async function episode(input: { reasoner: boolean; report?: SocialReasonerCallReport }) {
-  return runSocialEpisode({
+const unusedFixtureClient: ModelClient = {
+  async complete() {
+    throw new Error("Provider client is not invoked by the counter actor fixture.");
+  }
+};
+
+async function episode(input: { reasoner: boolean; report?: SocialReasonerCallReport; live?: boolean }) {
+  const reasoner = input.reasoner
+    ? input.live === false
+      ? new OpenAIHarnessReasoner(unusedFixtureClient)
+      : OpenAIHarnessReasoner.forLiveProvider(unusedFixtureClient)
+    : undefined;
+  return runHarnessEpisode({
     id: `counter-episode-${input.reasoner ? "reasoner" : "policy"}`,
     domainId: adapter.domainId,
     domainAdapter: adapter,
@@ -136,6 +149,7 @@ async function episode(input: { reasoner: boolean; report?: SocialReasonerCallRe
       policyId: "counter.policy",
       ...(input.reasoner ? { reasonerId: "counter.reasoner" } : {})
     }, input.report)],
+    reasoner,
     schedulerMode: "aec",
     maxTransitions: 1,
     executionLimits: { decisionTimeoutMs: 1_000 }
@@ -157,6 +171,7 @@ describe("generic provider/reasoner execution evidence", () => {
     const normalized = spec(true);
 
     expect(validateSocialEpisodeArtifact(socialEpisode)).toEqual([]);
+    expect(socialEpisode.execution?.reasonerExecutionClass).toBe("live-provider");
     expect(validateGenericExperimentExecutionEvidence(normalized, socialEpisode)).toEqual([]);
     const attestation = createGenericExperimentExecutionAttestation(normalized, socialEpisode);
     expect(attestation.reasonerCalls).toEqual([
@@ -172,6 +187,7 @@ describe("generic provider/reasoner execution evidence", () => {
         stream: { enabled: true, completed: true, completedBy: "provider_stop_event" }
       })
     ]);
+    expect(attestation.reasonerExecutionClass).toBe("live-provider");
     expect(JSON.stringify(attestation)).not.toMatch(/endpoint|apiKey|authorization|providerRequestId|requestBody/i);
   });
 
@@ -180,8 +196,22 @@ describe("generic provider/reasoner execution evidence", () => {
     const normalized = spec(false);
 
     expect(socialEpisode.steps[0]!.reasonerCalls).toBeUndefined();
+    expect(socialEpisode.execution?.reasonerExecutionClass).toBe("policy-only");
     expect(validateGenericExperimentExecutionEvidence(normalized, socialEpisode)).toEqual([]);
     expect(createGenericExperimentExecutionAttestation(normalized, socialEpisode)).not.toHaveProperty("reasonerCalls");
+  });
+
+  it("rejects fixture stream telemetry when the injected reasoner was not explicitly constructed as live", async () => {
+    const socialEpisode = await episode({ reasoner: true, report: completedStream, live: false });
+    const errors = validateGenericExperimentExecutionEvidence(spec(true), socialEpisode);
+
+    expect(socialEpisode.execution?.reasonerExecutionClass).toBe("injected-unverified");
+    expect(errors).toContain(
+      "socialEpisode.execution.reasonerExecutionClass must be live-provider when experiment.spec.providerPolicy is present."
+    );
+    expect(() => createGenericExperimentExecutionAttestation(spec(true), socialEpisode)).toThrow(
+      /reasonerExecutionClass must be live-provider/
+    );
   });
 
   it("fails closed when a provider-backed reasoner decision omits call evidence", async () => {
@@ -228,12 +258,13 @@ describe("generic provider/reasoner execution evidence", () => {
       observe() {},
       decide: () => new Promise(() => undefined)
     };
-    const socialEpisode = await runSocialEpisode({
+    const socialEpisode = await runHarnessEpisode({
       id: "counter-reasoner-timeout",
       domainId: adapter.domainId,
       domainAdapter: adapter,
       environment: new CounterEnvironment(),
       actors: [actor],
+      reasoner: OpenAIHarnessReasoner.forLiveProvider(unusedFixtureClient),
       maxTransitions: 1,
       executionLimits: { decisionTimeoutMs: 1 }
     });
@@ -265,12 +296,13 @@ describe("generic provider/reasoner execution evidence", () => {
         return new Promise(() => undefined);
       }
     };
-    const socialEpisode = await runSocialEpisode({
+    const socialEpisode = await runHarnessEpisode({
       id: "counter-reasoner-abort",
       domainId: adapter.domainId,
       domainAdapter: adapter,
       environment: new CounterEnvironment(),
       actors: [actor],
+      reasoner: OpenAIHarnessReasoner.forLiveProvider(unusedFixtureClient),
       maxTransitions: 1,
       executionLimits: { abortSignal: controller.signal, decisionTimeoutMs: 1_000 }
     });

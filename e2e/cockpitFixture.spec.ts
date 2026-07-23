@@ -317,7 +317,7 @@ test("creates a replay-prefix checkpoint and opens its real fork comparison", as
 
   await expect(page.getByRole("region", { name: "对比 工作区内容" })).toBeVisible();
   await expect(page.getByText("对比已就绪")).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("checkpoint fork 已完成");
+  await expect(page.getByRole("status")).toContainText("checkpoint fork 已记录 truncated child");
   expect(pageErrors).toEqual([]);
 });
 
@@ -793,6 +793,10 @@ test("submits a heterogeneous Agent roster through the existing harness control 
   await wolvesTeam.click();
   await wolvesTeam.press("ArrowDown");
   await wolvesTeam.press("Enter");
+  const villageTeam = composer.getByRole("combobox", { name: "Agent assignment team village" });
+  await villageTeam.click();
+  await villageTeam.press("ArrowDown");
+  await villageTeam.press("Enter");
   await composer.getByRole("button", { name: "完成编排" }).click();
 
   const submittedRequest = page.waitForRequest((request) => {
@@ -819,11 +823,14 @@ test("submits a heterogeneous Agent roster through the existing harness control 
   ]);
   expect(body.assignment).toMatchObject({
     strategy: "team",
-    fallback: "profile-rotation",
+    fallback: "error",
     // Ant Design's keyboard navigation starts at an implementation-dependent
     // option offset for an empty Select. The contract under test is that the
     // selected profile id is carried to the server, not visual option order.
-    teams: { werewolves: expect.stringMatching(/^(wolves|village)$/) }
+    teams: {
+      werewolves: expect.stringMatching(/^(wolves|village)$/),
+      village: expect.stringMatching(/^(wolves|village)$/)
+    }
   });
   expect(body).not.toHaveProperty("resolvedAssignments");
   expect(body).not.toHaveProperty("artifact");

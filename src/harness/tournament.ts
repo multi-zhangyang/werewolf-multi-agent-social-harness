@@ -41,7 +41,11 @@ import type {
   PolicyName,
   WerewolfJointPhaseScheduler
 } from "./types";
-import { DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER, WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS } from "./types";
+import {
+  classifyHarnessReasonerExecution,
+  DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER,
+  WEREWOLF_PARALLEL_MIN_MAX_TRANSITIONS
+} from "./types";
 import { countSocialStepCommitsByActor, isSocialStepCommitted, type SocialEpisodeArtifact } from "./social";
 import type { SocialExecutionLimits } from "./social";
 import { runTournamentEpisodes } from "./tournamentRunner";
@@ -431,6 +435,22 @@ async function runDurableTournament(options: TournamentOptions): Promise<Tournam
           result: episode.result
         });
       },
+      assignmentResolutionForEpisode(episode) {
+        return episode.resolvedAssignments.map((assignment) => {
+          if (!assignment.profileId) {
+            throw new Error(`Werewolf assignment resolution is missing profileId for actor ${assignment.playerId}.`);
+          }
+          return {
+            actorId: assignment.playerId,
+            profileId: assignment.profileId,
+            model: assignment.model,
+            seat: assignment.seat,
+            ...(assignment.role === undefined ? {} : { role: assignment.role }),
+            ...(assignment.team === undefined ? {} : { team: assignment.team }),
+            ...(assignment.policyName === undefined ? {} : { domain: { policyName: assignment.policyName } })
+          };
+        });
+      },
       checkpointing: {
         finalCheckpointForArtifact(artifact) {
           return buildFinalHarnessCheckpoint({
@@ -574,7 +594,9 @@ function buildWerewolfGenericExperimentSpec(input: {
     checkpointPolicy: (input.options.maxTransitions ?? 320) === 0
       ? { id: "harness.checkpoint.none.zero-transition", version: "1", mode: "none" }
       : { id: "harness.final-checkpoint", version: "1", mode: "final" },
-    providerPolicy: { id: "openai-compatible.streaming", version: "1", stream: true },
+    ...(classifyHarnessReasonerExecution(input.options.reasoner) === "live-provider"
+      ? { providerPolicy: { id: "openai-compatible.streaming", version: "1", stream: true as const } }
+      : {}),
     continueOnError: input.options.continueOnError ?? false,
     domainConfig: portableJsonObject({
       gameConfig: structuredClone(probe.config),

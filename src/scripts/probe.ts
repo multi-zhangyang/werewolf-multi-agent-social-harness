@@ -76,7 +76,7 @@ async function main(): Promise<void> {
   timeout?.unref();
 
   const startedAt = performance.now();
-  const reasoner = new OpenAIHarnessReasoner(
+  const reasoner = OpenAIHarnessReasoner.forLiveProvider(
     modelClientFromEnv(process.env, {
       abortSignal: timeoutController.signal
     })

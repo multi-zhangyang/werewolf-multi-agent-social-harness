@@ -78,6 +78,17 @@ describe("standard provider protocol adapters", () => {
     ).toThrow(/ANTHROPIC_MAX_TOKENS/);
   });
 
+  it("fails closed when a production env-backed provider disables streaming", () => {
+    expect(() =>
+      modelClientFromEnv({
+        LLM_CHAT_COMPLETIONS_URL: "https://provider.test/v1/chat/completions",
+        LLM_API_KEY: "unit-test-key",
+        LLM_MODELS: "model-a",
+        LLM_STREAM: "false"
+      } as NodeJS.ProcessEnv)
+    ).toThrow(/LLM_STREAM=false is not allowed/);
+  });
+
   it("threads configured and explicit bounded retry policy through non-Chat provider registry clients", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock

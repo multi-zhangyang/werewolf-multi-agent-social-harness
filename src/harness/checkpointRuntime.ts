@@ -5,14 +5,13 @@ import {
   type GenericForkProvenance,
   type HarnessCheckpointEnvelope
 } from "./episodeArtifacts";
-import { runHarnessEpisode } from "./runner";
+import { runHarnessEpisode, type HarnessEpisodeOptions } from "./runner";
 import {
   isSocialStepCommitted,
   type SocialActor,
   type SocialChannel,
   type SocialEnvironment,
   type SocialEpisodeArtifact,
-  type SocialEpisodeOptions,
   type SocialMessage
 } from "./social";
 import { compareSocialDomainAdapterManifests, type SocialDomainAdapterManifest } from "./domainAdapter";
@@ -86,7 +85,10 @@ export interface RunForkedHarnessEpisodeOptions<TState, TAgentState, TObservatio
    * All normal scheduler, observation, validation, and trace hooks remain
    * domain-owned.  The fork seed owns only state, actors, and social history.
    */
-  episode: Omit<SocialEpisodeOptions<TState, TObservation, TPending, TCommand>, "environment" | "actors" | "channels" | "initialMessages">;
+  episode: Omit<
+    HarnessEpisodeOptions<TState, TObservation, TPending, TCommand, TAgentState>,
+    "environment" | "actors" | "channels" | "initialMessages" | "captureAgentSnapshots"
+  >;
   /** Add domain-specific checkpoint semantics (roles, evidence, etc.) without coupling generic runtime to a domain. */
   validateCheckpoint?: (
     checkpoint: HarnessCheckpointEnvelope<TState, TAgentState, TObservation, TPending, TCommand>

@@ -218,7 +218,14 @@ function fallbackProfile(
   episodeIndex: number,
   assignment: HarnessAssignmentConfig
 ): HarnessAgentProfile | undefined {
-  if ((assignment.fallback ?? "profile-rotation") === "error") return undefined;
+  if (assignment.strategy === "profile-rotation") {
+    return profiles[(seatIndex + episodeIndex) % profiles.length];
+  }
+  // Unmatched explicit seat/role/team assignments fail closed by default.
+  // Profile rotation remains a primary strategy, and is available as an
+  // explicit legacy fallback, but must never silently replace a missing
+  // production assignment.
+  if ((assignment.fallback ?? "error") === "error") return undefined;
   return profiles[(seatIndex + episodeIndex) % profiles.length];
 }
 
@@ -254,7 +261,7 @@ function normalizeAssignment(value: unknown): HarnessAssignmentConfig {
   if (strategy !== "profile-rotation" && strategy !== "seat" && strategy !== "role" && strategy !== "team") {
     throw new Error("assignment.strategy must be profile-rotation, seat, role, or team.");
   }
-  const fallback = value.fallback ?? "profile-rotation";
+  const fallback = value.fallback ?? "error";
   if (fallback !== "profile-rotation" && fallback !== "error") {
     throw new Error("assignment.fallback must be profile-rotation or error.");
   }

@@ -118,6 +118,19 @@ describe("generic normalized experiment spec", () => {
     expect(normalized.kind).toBe("episode");
   });
 
+  it("keeps opaque model assignment separate from live-provider authority", () => {
+    const spec = tournamentSpec();
+    const normalized = normalizeGenericExperimentSpec({
+      ...spec,
+      providerPolicy: undefined
+    });
+
+    expect(normalized.modelAssignments).toEqual([
+      { profileId: "analyst", modelId: "provider/model:research" }
+    ]);
+    expect(normalized).not.toHaveProperty("providerPolicy");
+  });
+
   it("binds normalized specs to stable hashes and caller-declared fork changes", () => {
     const parent = createGenericExperimentProvenance(tournamentSpec());
     expect(validateGenericExperimentProvenance(parent)).toEqual([]);

@@ -373,6 +373,17 @@ describe("harness trajectory replay", () => {
       hashMessages: hashStableState
     });
     expect(initialReplay.ok).toBe(false);
+
+    const executionClassTamper = cloneJson(initialPrefixEpisode);
+    (executionClassTamper.execution as { reasonerExecutionClass?: string }).reasonerExecutionClass = "fixture-live";
+    const executionClassReplay = replaySocialEpisode({
+      episode: executionClassTamper,
+      environment: counterEnvironment(),
+      hashState: hashStableState,
+      hashMessages: hashStableState
+    });
+    expect(executionClassReplay.ok).toBe(false);
+    expect(executionClassReplay.mismatches.join(" ")).toMatch(/Execution classification.*reasonerExecutionClass/);
     expect(initialReplay.mismatches.join("\n")).toMatch(/Initial messages hash mismatch/);
   });
 
@@ -796,6 +807,10 @@ describe("harness trajectory replay", () => {
     const prefixTamper = cloneJson(checkpoint);
     prefixTamper.executionPrefix.steps[0].postStateHash = "tampered-native-hash";
     expect(validateHarnessCheckpoint(prefixTamper).join(" ")).toMatch(/executionPrefixHash mismatch|replay/);
+
+    const executionClassTamper = cloneJson(checkpoint);
+    executionClassTamper.executionPrefix.execution!.reasonerExecutionClass = "policy-only";
+    expect(validateHarnessCheckpoint(executionClassTamper).join(" ")).toMatch(/executionPrefixHash mismatch/);
 
     const countTamper = cloneJson(checkpoint);
     countTamper.source.nativeStepCount += 1;

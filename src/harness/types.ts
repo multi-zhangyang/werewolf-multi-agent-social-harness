@@ -12,7 +12,13 @@ import type {
 import type { AgentPendingAction } from "../core/pending";
 import type { ModelCompletionResult } from "../agents/modelClient";
 import type { ProviderFailureKind, ProviderFailureStage, ProviderRetryHistoryEntry, ProviderStreamTelemetry } from "../agents/schema";
-import type { SocialChannel, SocialEpisodeArtifact, SocialExecutionLimits, SocialMessage } from "./social";
+import type {
+  SocialChannel,
+  SocialEpisodeArtifact,
+  SocialExecutionLimits,
+  SocialMessage,
+  SocialReasonerExecutionClass
+} from "./social";
 import type { AgentSocialState, EvidenceRef, MemoryRetrievalRecord, MemoryVisibility } from "./socialState";
 import type { GenericForkProvenance } from "./episodeArtifacts";
 import type { AgentActionArbitrationSummary } from "./scaffold";
@@ -178,7 +184,19 @@ export interface HarnessForkProvenance extends GenericForkProvenance<"harness.ch
 }
 
 export interface HarnessReasoner {
+  /**
+   * Runtime provenance classification. Implementations that omit it are
+   * deliberately treated as injected-unverified, never as a live provider.
+   */
+  readonly executionClass?: SocialReasonerExecutionClass;
   think(input: ReasonerInput): Promise<ReasonerOutput>;
+}
+
+export function classifyHarnessReasonerExecution(
+  reasoner: HarnessReasoner | null | undefined
+): SocialReasonerExecutionClass {
+  if (!reasoner) return "policy-only";
+  return reasoner.executionClass === "live-provider" ? "live-provider" : "injected-unverified";
 }
 
 export interface ReasonerInput {

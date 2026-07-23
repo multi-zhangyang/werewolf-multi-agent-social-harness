@@ -363,6 +363,25 @@ assignment, observations, memory, beliefs, relationships, reputation, norms,
 goals, policy, arbitration, and committed decision state. Its serializable
 state supports audit, checkpoint/fork work, and postgame comparison.
 
+Werewolf actors retain a rolling window of at most 64 memory entries and 64
+social-state journal entries. Sequence counters remain monotonic across
+trimming and serialization/restore, so retained entries keep stable evidence
+identities. The exact scoped observation remains in the native step artifact;
+actor memory stores a compact `werewolf.memory-core.v1` projection rather than
+recursively embedding every prior speech, vote, event, and social message.
+The journal is therefore a recent private mutation window, not a replacement
+for the canonical episode message/receipt/step history.
+
+Committed boundaries still record the complete actor table needed for replay,
+checkpoint, and fork. `buildMatchArtifact()` clones trajectory and native
+episode steps while moving inline tables directly into one content-addressed
+`harness.agent-snapshot-frame.v1` registry. Both projections retain the same
+hash/frame reference, while each distinct payload is cloned once. Secret
+redaction is followed by frame rehashing, reference rewriting, and deduplication.
+Validation uses indexed read-only frame access and does not deep-clone the same
+multi-megabyte table for every step; public resolvers continue returning
+isolated copies to callers.
+
 The current reasoner receives scoped visible context and a policy plan through
 one streaming cognition request. It may produce public speech for a speech
 action or a private tactical memo plus an optional internal

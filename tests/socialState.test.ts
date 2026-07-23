@@ -92,6 +92,44 @@ describe("agent social state stores", () => {
     expect(JSON.parse(JSON.stringify(state))).toEqual(state);
   });
 
+  it("bounds memory and mutation journals without resetting monotonic sequence identities after restore", () => {
+    const state = createAgentSocialState({
+      agentId: "bounded-agent",
+      profile: { id: "bounded-profile", model: "stub-model" },
+      maxMemoryEntries: 2,
+      maxJournalEntries: 2
+    });
+
+    for (let seq = 1; seq <= 3; seq += 1) {
+      appendSocialMemory(state, {
+        kind: "message",
+        source: "speaker",
+        visibility: "public",
+        content: `bounded message ${seq}`,
+        evidenceRefs: [{ artifact: "message", id: `bounded-message-${seq}`, seq }]
+      });
+    }
+
+    expect(state.memory.entries.map((entry) => entry.seq)).toEqual([2, 3]);
+    expect(state.memory.nextSeq).toBe(4);
+    expect(state.journal?.entries.map((entry) => entry.journalSeq)).toEqual([2, 3]);
+    expect(state.journal?.nextSeq).toBe(4);
+
+    const restored = JSON.parse(JSON.stringify(state)) as typeof state;
+    appendSocialMemory(restored, {
+      kind: "message",
+      source: "speaker",
+      visibility: "public",
+      content: "bounded message 4",
+      evidenceRefs: [{ artifact: "message", id: "bounded-message-4", seq: 4 }]
+    });
+
+    expect(restored.memory.entries.map((entry) => entry.seq)).toEqual([3, 4]);
+    expect(restored.memory.nextSeq).toBe(5);
+    expect(restored.journal?.entries.map((entry) => entry.journalSeq)).toEqual([3, 4]);
+    expect(restored.journal?.nextSeq).toBe(5);
+  });
+
   it("keeps evidence-backed statement attributions distinct from first-order beliefs", () => {
     const state = createAgentSocialState({
       agentId: "a",

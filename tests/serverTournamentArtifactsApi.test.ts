@@ -79,7 +79,7 @@ describe("tournament artifact server API", () => {
 
     expect(exported.status, JSON.stringify(exported.body)).toBe(200);
     expect(exported.body.summary).toMatchObject({
-      ok: true,
+      ok: false,
       status: "truncated",
       gamesRequested: 1,
       gamesCompleted: 0,

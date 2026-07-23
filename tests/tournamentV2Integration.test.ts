@@ -84,6 +84,32 @@ describe("production Werewolf tournament V2 orchestration", () => {
     expect(first.artifacts).toHaveLength(1);
     expect(first.episodes.every((episode) => episode.artifact?.experiment?.specId === "production-v2")).toBe(true);
     for (const episode of first.episodes) {
+      const artifact = episode.artifact!;
+      expect(artifact.experiment).toMatchObject({
+        schemaVersion: "harness.experiment-provenance.v3",
+        assignmentResolutionRequired: true
+      });
+      expect(artifact.executionAttestation?.schemaVersion).toBe("harness.experiment-execution-attestation.v2");
+      expect(artifact.executionAttestation?.assignmentResolution).toEqual(artifact.socialEpisode.assignmentResolution);
+      expect(artifact.socialEpisode.assignmentResolution?.actors.map(({ actorId, profileId, model, seat, role, team }) => ({
+        actorId,
+        profileId,
+        model,
+        seat,
+        role,
+        team
+      }))).toEqual(
+        artifact.resolvedAssignments
+          .map((assignment) => ({
+            actorId: assignment.playerId,
+            profileId: assignment.profileId,
+            model: assignment.model,
+            seat: assignment.seat,
+            role: assignment.role,
+            team: assignment.team
+          }))
+          .sort((left, right) => String(left.actorId).localeCompare(String(right.actorId)))
+      );
       expect(episode.runId).toBeTruthy();
       await expect(firstAuthority.artifactStore.getEvaluationReport(episode.runId!))
         .resolves.toMatchObject({ id: episode.evaluationReport?.id });
@@ -96,6 +122,9 @@ describe("production Werewolf tournament V2 orchestration", () => {
       expect(checkpoint).toBeDefined();
       expect(checkpoint?.source.nativeStepCount).toBe(episode.artifact?.socialEpisode.steps.length);
       expect(checkpoint?.source.experiment?.specId).toBe("production-v2");
+      expect(checkpoint?.executionPrefix.assignmentResolution).toEqual(
+        episode.artifact?.socialEpisode.assignmentResolution
+      );
       expect(validateHarnessCheckpoint(checkpoint!)).toEqual([]);
     }
 

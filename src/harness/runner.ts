@@ -1,5 +1,6 @@
 import { hashStableState } from "./hash";
 import { runSocialEpisode, type SocialEpisodeArtifact, type SocialEpisodeOptions } from "./social";
+import { classifyHarnessReasonerExecution, type HarnessReasoner } from "./types";
 
 /**
  * Optional durable-state capture for generic harness artifacts.  It is called
@@ -13,6 +14,12 @@ export type HarnessAgentSnapshotProvider<TAgentState> = () => TAgentState[] | un
 export interface HarnessEpisodeOptions<TState, TObservation, TPending extends { actorId?: string }, TCommand, TAgentState = unknown>
   extends SocialEpisodeOptions<TState, TObservation, TPending, TCommand> {
   captureAgentSnapshots?: HarnessAgentSnapshotProvider<TAgentState>;
+  /**
+   * Optional cognition component used by the restored/domain actors. The
+   * generic runner never invokes it; it records only its closed execution
+   * classification. Omission means a policy-only episode.
+   */
+  reasoner?: HarnessReasoner | null;
 }
 
 /**
@@ -29,11 +36,24 @@ export async function runHarnessEpisode<
 >(
   options: HarnessEpisodeOptions<TState, TObservation, TPending, TCommand, TAgentState>
 ): Promise<SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>> {
-  const { captureAgentSnapshots, afterEnvironmentStep, ...socialOptions } = options;
+  const { captureAgentSnapshots, afterEnvironmentStep, reasoner, ...socialOptions } = options;
+  const reasonerExecutionClass = classifyHarnessReasonerExecution(reasoner);
+  const bindExecutionClass = (
+    episode: SocialEpisodeArtifact<TState, TObservation, TPending, TCommand>
+  ): SocialEpisodeArtifact<TState, TObservation, TPending, TCommand> => {
+    if (!episode.execution) throw new Error("Harness episode is missing runner-authored execution metadata.");
+    episode.execution.reasonerExecutionClass = reasonerExecutionClass;
+    return episode;
+  };
   // Preserve the direct social runner path byte-for-byte when generic snapshot
   // capture is not requested.  Several domain adapters already use the
   // post-commit hook for their richer frame registries.
-  if (!captureAgentSnapshots) return runSocialEpisode(options);
+  if (!captureAgentSnapshots) {
+    return bindExecutionClass(await runSocialEpisode({
+      ...socialOptions,
+      afterEnvironmentStep
+    }));
+  }
 
   const snapshotsByTraceId = new Map<string, { agents: TAgentState[]; agentsHash: string }>();
   const episode = await runSocialEpisode({
@@ -60,5 +80,5 @@ export async function runHarnessEpisode<
     step.actorSnapshotsAfterStep = structuredClone(snapshot.agents);
     step.actorSnapshotsHashAfterStep = snapshot.agentsHash;
   }
-  return episode;
+  return bindExecutionClass(episode);
 }
