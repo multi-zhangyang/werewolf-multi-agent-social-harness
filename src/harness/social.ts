@@ -1401,7 +1401,10 @@ export async function runSocialEpisode<TState, TObservation, TPending extends { 
   }
 
   while (!options.environment.done() && turnIndex <= maxTransitions && !executionLimits.abortSignal?.aborted) {
-    const pendingActions = options.environment.pendingActions();
+    // Pending actions are scheduler input owned by the harness. Detach them at
+    // the environment boundary so actor/adapter callbacks cannot rewrite the
+    // environment's own pending registry or another actor's joint decision.
+    const pendingActions = cloneJson(options.environment.pendingActions());
     const stateForScheduler = options.environment.snapshot();
     const schedulerMode = resolveSchedulerMode({
       optionsId: options.id,
@@ -2084,25 +2087,26 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       batchSize: input.batchSize,
       schedulerMode: input.schedulerMode
     };
-    actorTurnIndex = input.actorTurnIndexForDecision?.(decisionIdentityContext);
-    traceId = input.traceIdForDecision?.({
+    actorTurnIndex = input.actorTurnIndexForDecision?.(cloneJson(decisionIdentityContext));
+    traceId = input.traceIdForDecision?.(cloneJson({
       ...decisionIdentityContext,
       actorTurnIndex
-    }) ?? `${input.optionsId}:social:${input.turnIndex}:${actorId}`;
+    })) ?? `${input.optionsId}:social:${input.turnIndex}:${actorId}`;
     failureStage = "environment_observe";
-    const environmentObservation = input.environment.observe(actorId, input.pending);
-    const visibleSocial = input.bus.observe(actorId);
+    const environmentObservation = cloneJson(input.environment.observe(actorId, cloneJson(input.pending)));
+    const visibleSocial = cloneJson(input.bus.observe(actorId));
     failureStage = "observation_assembly";
-    observation = input.assembleObservation
+    const assembledObservation = input.assembleObservation
       ? input.assembleObservation({
           agentId: actorId,
           pendingAction: cloneJson(input.pending),
-          environmentObservation,
-          visibleSocial
+          environmentObservation: cloneJson(environmentObservation),
+          visibleSocial: cloneJson(visibleSocial)
         })
       : environmentObservation;
+    observation = cloneJson(assembledObservation);
     failureStage = "actor_observe";
-    actor.observe(observation, {
+    actor.observe(cloneJson(observation), {
       traceId,
       transactionId,
       transactional: true,
@@ -2115,10 +2119,10 @@ async function collectDecision<TState, TObservation, TPending extends { actorId?
       pendingAction: cloneJson(input.pending)
     });
     failureStage = "actor_decide";
-    const action = await awaitActorDecisionWithinExecutionLimits(
-      () => actor.decide(input.pending),
+    const action = cloneJson(await awaitActorDecisionWithinExecutionLimits(
+      () => actor.decide(cloneJson(input.pending)),
       input.executionLimits
-    );
+    ));
     const actionWithTraceId = action.traceId ? action : { ...action, traceId };
     return {
       ok: true,
@@ -2290,7 +2294,8 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
   const preStateHash = input.hashState?.(preState);
   const beforeEventSeq = input.eventSeq?.(preState);
   const beforeSeq = input.bus.listMessages().at(-1)?.seq ?? 0;
-  const messages = transition.action.messages ?? [];
+  const action = cloneJson({ ...transition.action, traceId: input.traceId });
+  const messages = action.messages ?? [];
   const base = {
     traceId: input.traceId,
     turnIndex: input.turnIndex,
@@ -2304,7 +2309,7 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
     resolutionPolicy: "system-transition",
     pendingAction: cloneJson(transition.pendingAction),
     observation: cloneJson(transition.observation),
-    action: cloneJson(transition.action),
+    action: cloneJson(action),
     decisionStateHash: preStateHash,
     preStateHash
   } satisfies SocialHarnessStep<TObservation, TPending, TCommand>;
@@ -2312,14 +2317,14 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
   let environmentCommitted = false;
   let feedback: SocialStepFeedback<TState, TObservation> | undefined;
   try {
-    assertSocialActionOwnership(transition.action, actorId);
-    assertSocialActionValid(input.environment, transition.action.command, transition.pendingAction);
-    input.bus.validateMessages(messages);
+    assertSocialActionOwnership(action, actorId);
+    assertSocialActionValid(input.environment, action.command, transition.pendingAction);
+    input.bus.validateMessages(cloneJson(messages));
     environmentStepStarted = true;
-    const result = input.environment.step(transition.action.command);
+    const result = input.environment.step(cloneJson(action.command));
     environmentCommitted = true;
     feedback = normalizeStepFeedback(result, input.environment);
-    input.bus.publishMany(messages);
+    input.bus.publishMany(cloneJson(messages));
     const afterEventSeq = input.eventSeq?.(feedback.state);
     const afterSeq = input.bus.listMessages().at(-1)?.seq ?? beforeSeq;
     const postStateHash = input.hashState?.(feedback.state);
@@ -2338,7 +2343,7 @@ function applyOptionalSystemTransition<TState, TObservation, TPending extends { 
       resolutionPolicy: "system-transition",
       pendingAction: cloneJson(transition.pendingAction),
       observation: cloneJson(transition.observation),
-      action: cloneJson(transition.action),
+      action: cloneJson(action),
       preState: cloneJson(preState),
       preStateHash,
       decisionStateHash: preStateHash,
@@ -2455,12 +2460,12 @@ function applySequentialDecision<TState, TObservation, TPending extends { actorI
   try {
     assertSocialActionOwnership(input.decision.action, input.decision.actorId);
     assertSocialActionValid(input.environment, input.decision.action.command, input.decision.pending);
-    input.bus.validateMessages(messages);
+    input.bus.validateMessages(cloneJson(messages));
     environmentStepStarted = true;
-    const result = input.environment.step(input.decision.action.command);
+    const result = input.environment.step(cloneJson(input.decision.action.command));
     environmentCommitted = true;
     feedback = normalizeStepFeedback(result, input.environment);
-    input.bus.publishMany(messages);
+    input.bus.publishMany(cloneJson(messages));
     const afterEventSeq = input.eventSeq?.(feedback.state);
     const afterSeq = input.bus.listMessages().at(-1)?.seq ?? beforeSeq;
     const postStateHash = input.hashState?.(feedback.state);
@@ -2697,10 +2702,12 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
       assertSocialActionValid(input.environment, decision.action.command, decision.pending);
     }
     assertParallelActorIdsUnique(input.decisions);
-    input.bus.validateMessages(messages);
-    const commandsByAgent = Object.fromEntries(input.decisions.map((decision) => [decision.actorId, decision.action.command]));
+    input.bus.validateMessages(cloneJson(messages));
+    const commandsByAgent = Object.fromEntries(
+      input.decisions.map((decision) => [decision.actorId, cloneJson(decision.action.command)])
+    );
     environmentStepStarted = true;
-    const result = input.environment.stepBatch(commandsByAgent);
+    const result = input.environment.stepBatch(cloneJson(commandsByAgent));
     environmentCommitted = true;
     feedback = normalizeStepFeedback(result, input.environment);
     // Publish in decision order and retain per-actor seq ranges so integrity can
@@ -2711,7 +2718,7 @@ function applyParallelBatch<TState, TObservation, TPending extends { actorId?: s
         messageSeqRangeByActor.set(decision.actorId, undefined);
         continue;
       }
-      const published = input.bus.publishMany(actorMessages);
+      const published = input.bus.publishMany(cloneJson(actorMessages));
       const firstSeq = published[0]?.seq;
       const lastSeq = published.at(-1)?.seq;
       messageSeqRangeByActor.set(
@@ -3350,7 +3357,7 @@ function assertSocialActionValid<TState, TObservation, TPending, TCommand>(
 ): void {
   if (!environment.validateAction) return;
   const beforeFingerprint = fingerprintState(environment.snapshot());
-  const result = environment.validateAction(command, cloneJson(pending));
+  const result = environment.validateAction(cloneJson(command), cloneJson(pending));
   const afterFingerprint = fingerprintState(environment.snapshot());
   if (beforeFingerprint !== afterFingerprint) {
     throw new SocialPreflightMutationError(beforeFingerprint, afterFingerprint);

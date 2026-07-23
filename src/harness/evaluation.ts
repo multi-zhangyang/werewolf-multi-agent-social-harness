@@ -83,9 +83,16 @@ export function runEvaluationRegistry<
   createdAt?: string;
   promotionPolicy?: MetricPromotionPolicy;
 }): HarnessEvaluationReport {
-  const promotionPolicy = options.promotionPolicy ?? DEFAULT_METRIC_PROMOTION_POLICY;
+  // Evaluation inputs are recorded harness truth, not evaluator-owned working
+  // memory. Reject non-portable/cyclic values up front so every module can be
+  // given an independent immutable snapshot with deterministic clone semantics.
+  assertStrictJsonData(options.context);
+  const canonicalContext = cloneFrozenEvaluationContext(options.context);
+  const promotionPolicy = createMetricPromotionPolicy(
+    options.promotionPolicy ?? DEFAULT_METRIC_PROMOTION_POLICY
+  );
   const moduleResults: Array<{
-    evaluator: HarnessEvaluator<TState, TMetrics, TSocialEpisode, unknown, TAgent, TTrajectory>;
+    evaluator: EvaluatorManifestSource;
     result: HarnessEvaluationModuleResult;
     metrics: HarnessMetricRecord[];
     manifest: HarnessEvaluatorManifestEntry;
@@ -94,16 +101,29 @@ export function runEvaluationRegistry<
   const failures: HarnessEvaluatorFailure[] = [];
 
   for (const evaluator of options.evaluators) {
-    let result: HarnessEvaluationModuleResult;
+    let evaluatorSource: EvaluatorManifestSource;
     try {
-      result = evaluator.evaluate(options.context);
+      evaluatorSource = cloneEvaluatorManifestSource(evaluator);
     } catch {
-      failures.push(evaluatorFailure(evaluator, "evaluate"));
-      evaluatorRegistry.push(evaluatorManifestEntry(evaluator, evaluatorFallbackModuleResult(evaluator), []));
+      const fallback = evaluatorIdentitySource(evaluator);
+      failures.push(evaluatorFailure(fallback, "result_normalization"));
+      evaluatorRegistry.push(evaluatorManifestEntry(fallback, evaluatorFallbackModuleResult(fallback), []));
+      continue;
+    }
+    let rawResult: HarnessEvaluationModuleResult;
+    try {
+      rawResult = evaluator.evaluate(cloneFrozenEvaluationContext(canonicalContext));
+    } catch {
+      failures.push(evaluatorFailure(evaluatorSource, "evaluate"));
+      evaluatorRegistry.push(evaluatorManifestEntry(evaluatorSource, evaluatorFallbackModuleResult(evaluatorSource), []));
       continue;
     }
 
     try {
+      // A module may return a reference also reachable through plugin closure
+      // state. Detach it immediately so a later evaluator cannot retroactively
+      // rewrite an earlier module's evidence or manifest.
+      const result = structuredClone(rawResult);
       assertEvaluationModuleResult(result);
       const metrics = result.metrics.map((item) => {
         if (!isPlainRecord(item)) throw new Error("invalid evaluator metric");
@@ -117,12 +137,12 @@ export function runEvaluationRegistry<
           promotionPolicy
         );
       });
-      const manifest = evaluatorManifestEntry(evaluator, result, metrics);
+      const manifest = evaluatorManifestEntry(evaluatorSource, result, metrics);
       evaluatorRegistry.push(manifest);
-      moduleResults.push({ evaluator, result, metrics, manifest });
+      moduleResults.push({ evaluator: evaluatorSource, result, metrics, manifest });
     } catch {
-      failures.push(evaluatorFailure(evaluator, "result_normalization"));
-      evaluatorRegistry.push(evaluatorManifestEntry(evaluator, evaluatorFallbackModuleResult(evaluator), []));
+      failures.push(evaluatorFailure(evaluatorSource, "result_normalization"));
+      evaluatorRegistry.push(evaluatorManifestEntry(evaluatorSource, evaluatorFallbackModuleResult(evaluatorSource), []));
     }
   }
   const metrics = moduleResults.flatMap((moduleResult) => moduleResult.metrics);
@@ -140,7 +160,46 @@ export function runEvaluationRegistry<
     warnings: collectEvaluationWarnings(moduleRuns, promotionPolicy),
     summary: summarizeMetrics(metrics, promotionPolicy)
   };
-  return JSON.parse(JSON.stringify(report)) as HarnessEvaluationReport;
+  const normalizedReport: HarnessEvaluationReport = {
+    ...report,
+    metrics: report.metrics.map(normalizeMetricNumericFields)
+  };
+  // Invalid top-level numeric metric fields have already contributed explicit
+  // diagnostics and are normalized above. Any remaining non-JSON value is a
+  // registry bug, not something JSON.stringify may silently coerce.
+  assertStrictJsonData(normalizedReport);
+  return JSON.parse(JSON.stringify(normalizedReport)) as HarnessEvaluationReport;
+}
+
+function cloneFrozenEvaluationContext<
+  TState,
+  TMetrics,
+  TSocialEpisode,
+  TAgent,
+  TTrajectory
+>(
+  context: HarnessEvaluationContext<TState, TMetrics, TSocialEpisode, TAgent, TTrajectory>
+): HarnessEvaluationContext<TState, TMetrics, TSocialEpisode, TAgent, TTrajectory> {
+  return deepFreezeEvaluationValue(structuredClone(context));
+}
+
+function deepFreezeEvaluationValue<T>(value: T): T {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    deepFreezeEvaluationValue(child);
+  }
+  return Object.freeze(value);
+}
+
+function evaluatorIdentitySource(evaluator: EvaluatorManifestSource): EvaluatorManifestSource {
+  return { id: evaluator.id, label: evaluator.label, version: evaluator.version };
+}
+
+function cloneEvaluatorManifestSource(evaluator: EvaluatorManifestSource): EvaluatorManifestSource {
+  const identity = evaluatorIdentitySource(evaluator);
+  if (evaluator.manifest === undefined) return identity;
+  assertStrictJsonData(evaluator.manifest);
+  return { ...identity, manifest: structuredClone(evaluator.manifest) };
 }
 
 function evaluatorFallbackModuleResult(evaluator: EvaluatorManifestSource): HarnessEvaluationModuleResult {
@@ -169,8 +228,35 @@ function assertEvaluationModuleResult(value: unknown): asserts value is HarnessE
     throw new Error("invalid evaluator module identity");
   }
   if (!Array.isArray(value.metrics)) throw new Error("invalid evaluator metrics");
+  for (const metric of value.metrics) assertEvaluatorMetricData(metric);
   if (value.output !== undefined) assertStrictJsonData(value.output);
   if (value.manifest !== undefined) assertStrictJsonData(value.manifest);
+}
+
+function assertEvaluatorMetricData(value: unknown): void {
+  if (!isPlainRecord(value)) throw new Error("invalid evaluator metric object");
+  const diagnosedNumericFields = new Set(["value", "weight", "denominator", "confidence"]);
+  for (const [key, item] of Object.entries(value)) {
+    if (item === undefined) continue;
+    // Historical evaluator contracts diagnose these four fields after module
+    // execution. Preserve that behavior while rejecting non-finite numbers in
+    // metadata, subjects, evidence, and every other nested location.
+    if (diagnosedNumericFields.has(key) && typeof item === "number") continue;
+    assertStrictJsonData(item);
+  }
+}
+
+function normalizeMetricNumericFields(metric: HarnessMetricRecord): HarnessMetricRecord {
+  const normalized = { ...metric };
+  if (typeof normalized.value === "number" && !Number.isFinite(normalized.value)) {
+    normalized.value = null;
+  }
+  for (const field of ["weight", "denominator", "confidence"] as const) {
+    if (typeof normalized[field] === "number" && !Number.isFinite(normalized[field])) {
+      delete normalized[field];
+    }
+  }
+  return normalized;
 }
 
 function assertStrictJsonData(value: unknown, seen = new Set<object>()): void {
