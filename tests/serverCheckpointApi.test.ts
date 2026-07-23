@@ -1760,6 +1760,11 @@ function assertPublicCheckpointResponse(body: any): void {
 
 function firstSafeNativePrefixLength(artifact: MatchArtifact): number {
   for (const [index, step] of artifact.socialEpisode.steps.entries()) {
+    // This regression compares the selected native boundary against the
+    // compatibility trajectory, which intentionally contains actor decisions
+    // but not runner-owned system transitions. System boundaries are now
+    // independently checkpointable and covered by tournament V2 integration.
+    if (step.actorId === "system") continue;
     const nextStep = artifact.socialEpisode.steps[index + 1];
     if (!step.actorSnapshotFrameIdAfterStep || !step.actorSnapshotsHashAfterStep) continue;
     if (step.batchId && nextStep?.batchId === step.batchId && (step.schedulerMode !== "aec" || step.atomic)) continue;

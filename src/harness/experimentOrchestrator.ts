@@ -1,5 +1,6 @@
 import { compareSocialDomainAdapterManifests } from "./domainAdapter";
 import type { HarnessEpisodeArtifactEnvelope } from "./episodeArtifacts";
+import type { HarnessCheckpointEnvelope } from "./episodeArtifacts";
 import {
   createGenericExperimentExecutionAttestation,
   createGenericExperimentProvenance,
@@ -34,6 +35,7 @@ import {
 import type { HarnessEvaluationReport } from "./types";
 
 type GenericEpisodeEnvelope = HarnessEpisodeArtifactEnvelope<unknown, unknown, unknown, unknown, unknown>;
+type GenericCheckpointEnvelope = HarnessCheckpointEnvelope<unknown, unknown, unknown, unknown, unknown>;
 const RUN_LEASE_HELD = Symbol("generic-experiment-run-lease-held");
 
 export interface GenericExperimentEpisodeContext extends TournamentEpisodeContext {
@@ -43,12 +45,19 @@ export interface GenericExperimentEpisodeContext extends TournamentEpisodeContex
   abortSignal: AbortSignal;
 }
 
-export interface GenericExperimentArtifactStore<TArtifact extends GenericEpisodeEnvelope> {
+export interface GenericExperimentArtifactStore<
+  TArtifact extends GenericEpisodeEnvelope,
+  TCheckpoint extends GenericCheckpointEnvelope = GenericCheckpointEnvelope
+> {
   put(artifact: TArtifact, options?: { evaluationReport?: HarnessEvaluationReport }): Promise<unknown>;
   /** Canonical, integrity-checking read path used to hydrate durable prefixes. */
   get(runId: string): Promise<TArtifact | undefined>;
   /** Canonical evaluation sidecar read path; absence is part of immutable identity. */
   getEvaluationReport(runId: string): Promise<HarnessEvaluationReport | undefined>;
+  /** Optional canonical checkpoint authority, required when the selected
+   * experiment checkpoint policy is executable. */
+  putCheckpoint?(runId: string, checkpoint: TCheckpoint): Promise<unknown>;
+  getCheckpoint?(runId: string, checkpointId: string): Promise<TCheckpoint | undefined>;
 }
 
 /**
@@ -129,13 +138,21 @@ export interface GenericExperimentExecutionAdapter<
   TMetrics = unknown,
   TSocialEpisode = unknown,
   TAgent = unknown,
-  TTrajectory = unknown
+  TTrajectory = unknown,
+  TCheckpoint extends GenericCheckpointEnvelope = GenericCheckpointEnvelope
 > {
   domainId: string;
   prepareEpisode(context: GenericExperimentEpisodeContext): TPrepared | Promise<TPrepared>;
   runEpisode(prepared: TPrepared, context: GenericExperimentEpisodeContext): TResult | Promise<TResult>;
   lifecycleOf(result: TResult): TournamentEpisodeLifecycle;
   artifactForEpisode(result: TResult, context: GenericExperimentEpisodeContext): TArtifact | Promise<TArtifact>;
+  checkpointing?: {
+    /** Deterministic, model-free derivation from an immutable canonical episode. */
+    finalCheckpointForArtifact(
+      artifact: TArtifact,
+      context: GenericExperimentEpisodeContext
+    ): TCheckpoint | Promise<TCheckpoint>;
+  };
   evaluation?: GenericExperimentEvaluationAdapter<
     TResult,
     TArtifact,
@@ -161,7 +178,8 @@ export interface RunGenericExperimentOptions<
   TMetrics = unknown,
   TSocialEpisode = unknown,
   TAgent = unknown,
-  TTrajectory = unknown
+  TTrajectory = unknown,
+  TCheckpoint extends GenericCheckpointEnvelope = GenericCheckpointEnvelope
 > {
   spec: GenericExperimentSpecV1 | NormalizedGenericExperimentSpecV1;
   adapter: GenericExperimentExecutionAdapter<
@@ -172,9 +190,10 @@ export interface RunGenericExperimentOptions<
     TMetrics,
     TSocialEpisode,
     TAgent,
-    TTrajectory
+    TTrajectory,
+    TCheckpoint
   >;
-  artifactStore: GenericExperimentArtifactStore<TArtifact>;
+  artifactStore: GenericExperimentArtifactStore<TArtifact, TCheckpoint>;
   runStore: GenericExperimentRunStore<TArtifact>;
   abortSignal?: AbortSignal;
   now?: () => string;
@@ -205,7 +224,8 @@ export async function runGenericExperiment<
   TMetrics = unknown,
   TSocialEpisode = unknown,
   TAgent = unknown,
-  TTrajectory = unknown
+  TTrajectory = unknown,
+  TCheckpoint extends GenericCheckpointEnvelope = GenericCheckpointEnvelope
 >(
   options: RunGenericExperimentOptions<
     TPrepared,
@@ -215,7 +235,8 @@ export async function runGenericExperiment<
     TMetrics,
     TSocialEpisode,
     TAgent,
-    TTrajectory
+    TTrajectory,
+    TCheckpoint
   >
 ): Promise<GenericExperimentExecutionResult<TArtifact>> {
   const normalizedSpec = normalizeGenericExperimentSpec(options.spec);
@@ -249,6 +270,8 @@ export async function runGenericExperiment<
   const specHash = experiment.specHash;
   const now = options.now ?? (() => new Date().toISOString());
   const runSetId = options.runSetId ?? normalizedSpec.id;
+  assertCheckpointPolicyRuntime(options, normalizedSpec);
+  assertControlPolicyRuntime(normalizedSpec);
   const internalOptions = options as typeof options & { [RUN_LEASE_HELD]?: true };
   if (options.runStore.withRunLease && !internalOptions[RUN_LEASE_HELD]) {
     return options.runStore.withRunLease(runSetId, () => runGenericExperiment({
@@ -256,38 +279,53 @@ export async function runGenericExperiment<
       [RUN_LEASE_HELD]: true
     } as typeof internalOptions));
   }
-  const resumed = await options.runStore.beginOrResume({ runSetId, experiment });
-  assertResumedExperiment(resumed.record, runSetId, experiment);
-  let durableRecord = resumed.record;
-  if (
-    durableRecord.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 &&
-    durableRecord.state === "active" &&
-    durableRecord.currentEpisode
-  ) {
-    durableRecord = (await options.runStore.recoverCurrentEpisode(runSetId)).record;
-  }
-  const initialEpisodes = await hydrateCommittedEpisodes(
-    durableRecord,
-    normalizedSpec,
-    options.artifactStore
+  // One deadline owns canonical-prefix hydration, final-checkpoint repair, and
+  // any executable suffix. In particular, a finalized resume must not hold the
+  // run lease forever when a deterministic checkpoint builder stalls.
+  const deadline = createExperimentDeadline(
+    options.abortSignal,
+    normalizedSpec.timeoutPolicy.runTimeoutMs
   );
-  const stoppedByFailure =
-    !normalizedSpec.continueOnError && initialEpisodes.at(-1)?.status === "failed";
-  const hasExecutableSuffix =
-    durableRecord.state === "active" &&
-    initialEpisodes.length < normalizedSpec.episodeCount &&
-    !stoppedByFailure &&
-    !options.abortSignal?.aborted;
-  const evaluationAdapter = options.adapter.evaluation;
-  if (hasExecutableSuffix) assertEvaluationAdapter(evaluationAdapter, normalizedSpec);
-  const selectedEvaluators = hasExecutableSuffix && !evaluationAdapter?.reportForEpisode
-    ? resolveEvaluators(normalizedSpec, evaluationAdapter?.evaluators ?? [])
-    : [];
-  const runSetCreatedAt = durableRecord.createdAt;
-  const deadline = hasExecutableSuffix
-    ? createExperimentDeadline(options.abortSignal, normalizedSpec.timeoutPolicy.runTimeoutMs)
-    : inertExperimentDeadline(options.abortSignal);
   try {
+    throwIfAborted(deadline.signal);
+    const resumed = await options.runStore.beginOrResume({ runSetId, experiment });
+    throwIfAborted(deadline.signal);
+    assertResumedExperiment(resumed.record, runSetId, experiment);
+    let durableRecord = resumed.record;
+    if (
+      durableRecord.schemaVersion === HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2 &&
+      durableRecord.state === "active" &&
+      durableRecord.currentEpisode
+    ) {
+      durableRecord = (await options.runStore.recoverCurrentEpisode(runSetId)).record;
+      throwIfAborted(deadline.signal);
+    }
+    const initialEpisodes = await hydrateCommittedEpisodes(
+      durableRecord,
+      normalizedSpec,
+      options.artifactStore,
+      deadline.signal
+    );
+    await ensureFinalCheckpointsForEpisodes({
+      episodes: initialEpisodes,
+      options,
+      spec: normalizedSpec,
+      experiment,
+      abortSignal: deadline.signal
+    });
+    const stoppedByFailure =
+      !normalizedSpec.continueOnError && initialEpisodes.at(-1)?.status === "failed";
+    const hasExecutableSuffix =
+      durableRecord.state === "active" &&
+      initialEpisodes.length < normalizedSpec.episodeCount &&
+      !stoppedByFailure &&
+      !deadline.signal.aborted;
+    const evaluationAdapter = options.adapter.evaluation;
+    if (hasExecutableSuffix) assertEvaluationAdapter(evaluationAdapter, normalizedSpec);
+    const selectedEvaluators = hasExecutableSuffix && !evaluationAdapter?.reportForEpisode
+      ? resolveEvaluators(normalizedSpec, evaluationAdapter?.evaluators ?? [])
+      : [];
+    const runSetCreatedAt = durableRecord.createdAt;
     const tournament = durableRecord.state === "finalized"
       ? tournamentFromDurableRecord(durableRecord, initialEpisodes)
       : await runTournamentEpisodes<
@@ -406,6 +444,12 @@ export async function runGenericExperiment<
               ? undefined
               : { evaluationReport: result.evaluationReport }
           );
+          await ensureFinalCheckpoint({
+            artifact: result.artifact,
+            context: createEpisodeContext(episode, normalizedSpec, experiment, deadline.signal),
+            options,
+            spec: normalizedSpec
+          });
         }
         await options.runStore.recordEpisode({
           runSetId,
@@ -456,6 +500,205 @@ export async function runGenericExperiment<
   } finally {
     deadline.dispose();
   }
+}
+
+function assertControlPolicyRuntime(spec: NormalizedGenericExperimentSpecV1): void {
+  // Retry identity is already portable, but this orchestrator does not yet
+  // have a durable multi-attempt episode record. Silently treating maxAttempts
+  // > 1 as one attempt would make the persisted experiment claim behavior the
+  // runtime never executed.
+  if (spec.retryPolicy.maxAttempts !== 1) {
+    throw new Error(
+      "Generic experiment retryPolicy currently supports exactly one durable episode attempt."
+    );
+  }
+  // Canonical episode persistence is research-full. Redacted/public artifacts
+  // are derived projections owned by reviewed exporters and server routes; the
+  // control plane must not pretend those projections are its canonical write.
+  if (spec.artifactPolicy.visibility !== "research-full") {
+    throw new Error(
+      "Generic experiment artifactPolicy currently requires research-full canonical episode authority; redacted and public views must use a reviewed projection boundary."
+    );
+  }
+}
+
+function assertCheckpointPolicyRuntime<
+  TArtifact extends GenericEpisodeEnvelope,
+  TCheckpoint extends GenericCheckpointEnvelope
+>(
+  options: {
+    adapter: { checkpointing?: { finalCheckpointForArtifact(artifact: TArtifact, context: GenericExperimentEpisodeContext): TCheckpoint | Promise<TCheckpoint> } };
+    artifactStore: GenericExperimentArtifactStore<TArtifact, TCheckpoint>;
+  },
+  spec: NormalizedGenericExperimentSpecV1
+): void {
+  if (spec.checkpointPolicy.mode === "none") return;
+  if (spec.checkpointPolicy.mode === "native-boundaries") {
+    throw new Error(
+      "Generic experiment checkpointPolicy native-boundaries requires an explicit runtime boundary publisher and is not supported by this orchestrator."
+    );
+  }
+  if (!options.adapter.checkpointing?.finalCheckpointForArtifact) {
+    throw new Error("Generic experiment checkpointPolicy final requires a deterministic final checkpoint builder.");
+  }
+  if (
+    typeof options.artifactStore.putCheckpoint !== "function" ||
+    typeof options.artifactStore.getCheckpoint !== "function"
+  ) {
+    throw new Error("Generic experiment checkpointPolicy final requires canonical checkpoint read/write authority.");
+  }
+}
+
+async function ensureFinalCheckpointsForEpisodes<
+  TArtifact extends GenericEpisodeEnvelope,
+  TCheckpoint extends GenericCheckpointEnvelope
+>(input: {
+  episodes: Array<{
+    index: number;
+    seed: string;
+    result?: ExecutedGenericExperimentEpisode<TArtifact>;
+  }>;
+  options: {
+    adapter: { checkpointing?: { finalCheckpointForArtifact(artifact: TArtifact, context: GenericExperimentEpisodeContext): TCheckpoint | Promise<TCheckpoint> } };
+    artifactStore: GenericExperimentArtifactStore<TArtifact, TCheckpoint>;
+  };
+  spec: NormalizedGenericExperimentSpecV1;
+  experiment: GenericExperimentProvenanceV1;
+  abortSignal: AbortSignal;
+}): Promise<void> {
+  if (input.spec.checkpointPolicy.mode !== "final") return;
+  for (const episode of input.episodes) {
+    if (!episode.result) continue;
+    await ensureFinalCheckpoint({
+      artifact: episode.result.artifact,
+      context: createEpisodeContext(episode, input.spec, input.experiment, input.abortSignal),
+      options: input.options,
+      spec: input.spec
+    });
+  }
+}
+
+async function ensureFinalCheckpoint<
+  TArtifact extends GenericEpisodeEnvelope,
+  TCheckpoint extends GenericCheckpointEnvelope
+>(input: {
+  artifact: TArtifact;
+  context: GenericExperimentEpisodeContext;
+  options: {
+    adapter: { checkpointing?: { finalCheckpointForArtifact(artifact: TArtifact, context: GenericExperimentEpisodeContext): TCheckpoint | Promise<TCheckpoint> } };
+    artifactStore: GenericExperimentArtifactStore<TArtifact, TCheckpoint>;
+  };
+  spec: NormalizedGenericExperimentSpecV1;
+}): Promise<void> {
+  if (input.spec.checkpointPolicy.mode !== "final") return;
+  const builder = input.options.adapter.checkpointing?.finalCheckpointForArtifact;
+  const getCheckpoint = input.options.artifactStore.getCheckpoint?.bind(input.options.artifactStore);
+  const putCheckpoint = input.options.artifactStore.putCheckpoint?.bind(input.options.artifactStore);
+  if (!builder || !getCheckpoint || !putCheckpoint) {
+    throw new Error("Generic experiment final checkpoint runtime disappeared after preflight validation.");
+  }
+  const expectedExperiment = structuredClone(input.context.experiment);
+  const checkpointContext: GenericExperimentEpisodeContext = {
+    ...input.context,
+    spec: structuredClone(input.context.spec),
+    experiment: structuredClone(expectedExperiment)
+  };
+  const checkpoint = structuredClone(await awaitWithAbort(
+    () => builder(structuredClone(input.artifact), checkpointContext),
+    input.context.abortSignal
+  ));
+  assertFinalCheckpointBinding(checkpoint, input.artifact, expectedExperiment);
+  const candidateHash = hashStableJsonValue(checkpoint);
+  const existing = await awaitWithAbort(
+    () => getCheckpoint(input.artifact.runId, checkpoint.checkpointId),
+    input.context.abortSignal
+  );
+  if (existing !== undefined) {
+    assertFinalCheckpointBinding(existing, input.artifact, expectedExperiment);
+    if (hashStableJsonValue(existing) !== candidateHash) {
+      throw new Error("Canonical final checkpoint identity conflicts with the deterministic checkpoint candidate.");
+    }
+    return;
+  }
+  throwIfAborted(input.context.abortSignal);
+  // Canonical mutation is deliberately awaited to completion while the run
+  // lease is held. Racing an irreversible store write against abort could
+  // release the lease while publication is still in flight.
+  await putCheckpoint(input.artifact.runId, checkpoint);
+  const published = await awaitWithAbort(
+    () => getCheckpoint(input.artifact.runId, checkpoint.checkpointId),
+    input.context.abortSignal
+  );
+  if (published === undefined || hashStableJsonValue(published) !== candidateHash) {
+    throw new Error("Canonical final checkpoint publication could not be verified.");
+  }
+  assertFinalCheckpointBinding(published, input.artifact, expectedExperiment);
+}
+
+function assertFinalCheckpointBinding(
+  checkpoint: GenericCheckpointEnvelope,
+  artifact: GenericEpisodeEnvelope,
+  experiment: GenericExperimentProvenanceV1
+): void {
+  if (!checkpoint || typeof checkpoint !== "object") {
+    throw new Error("Final checkpoint builder must return a checkpoint envelope.");
+  }
+  if (!checkpoint.checkpointId?.trim() || !checkpoint.createdAt?.trim()) {
+    throw new Error("Final checkpoint identity and createdAt are required.");
+  }
+  if (
+    checkpoint.source.runId !== artifact.runId ||
+    checkpoint.source.sourceArtifactVersion !== artifact.artifactVersion ||
+    checkpoint.source.status !== artifact.status
+  ) {
+    throw new Error("Final checkpoint source identity does not match its canonical episode artifact.");
+  }
+  if (
+    checkpoint.source.nativeStepCount !== artifact.socialEpisode.steps.length ||
+    checkpoint.executionPrefix.steps.length !== artifact.socialEpisode.steps.length ||
+    checkpoint.source.messageCount !== artifact.socialEpisode.messages.length ||
+    checkpoint.executionPrefix.messages.length !== artifact.socialEpisode.messages.length
+  ) {
+    throw new Error("Final checkpoint is not the complete native episode boundary.");
+  }
+  if (
+    hashStableState(checkpoint.executionPrefix.steps) !== hashStableState(artifact.socialEpisode.steps) ||
+    hashStableState(checkpoint.executionPrefix.messages) !== hashStableState(artifact.socialEpisode.messages) ||
+    hashStableState(checkpoint.state) !== hashStableState(artifact.finalState) ||
+    hashStableState(checkpoint.agents) !== hashStableState(artifact.agents) ||
+    hashStableState(checkpoint.executionPrefix.initialState) !== hashStableState(artifact.socialEpisode.initialState) ||
+    hashStableState(checkpoint.executionPrefix.finalState) !== hashStableState(artifact.socialEpisode.finalState) ||
+    hashStableState(checkpoint.executionPrefix.channels) !== hashStableState(artifact.socialEpisode.channels) ||
+    hashStableState(checkpoint.executionPrefix.runtimeActorIds) !== hashStableState(artifact.socialEpisode.runtimeActorIds) ||
+    checkpoint.executionPrefix.domainId !== artifact.socialEpisode.domainId ||
+    checkpoint.executionPrefix.schedulerMode !== artifact.socialEpisode.schedulerMode
+  ) {
+    throw new Error("Final checkpoint state or execution prefix does not match its canonical episode artifact.");
+  }
+  if (
+    hashStableState(normalizeFinalCheckpointPrefix(checkpoint.executionPrefix)) !==
+    hashStableState(normalizeFinalCheckpointPrefix(artifact.socialEpisode))
+  ) {
+    throw new Error("Final checkpoint execution prefix is not an exact canonical episode projection.");
+  }
+  if (
+    artifact.experiment === undefined ||
+    hashStableJsonValue(artifact.experiment) !== hashStableJsonValue(experiment) ||
+    checkpoint.source.experiment === undefined ||
+    hashStableJsonValue(checkpoint.source.experiment) !== hashStableJsonValue(experiment)
+  ) {
+    throw new Error("Final checkpoint experiment provenance does not match its canonical episode artifact.");
+  }
+}
+
+function normalizeFinalCheckpointPrefix(prefix: unknown): unknown {
+  const normalized = structuredClone(prefix) as Record<string, unknown>;
+  // Werewolf keeps exposure evidence in the immutable episode artifact while
+  // the generic checkpoint envelope intentionally carries only replay/fork
+  // execution authority. These are the only permitted projection omissions.
+  delete normalized.exposureRecords;
+  delete normalized.exposureSummary;
+  return normalized;
 }
 
 function tournamentFromDurableRecord<TArtifact>(
@@ -509,7 +752,8 @@ function assertResumedExperiment(
 async function hydrateCommittedEpisodes<TArtifact extends GenericEpisodeEnvelope>(
   record: HarnessExperimentRunRecord,
   spec: NormalizedGenericExperimentSpecV1,
-  artifactStore: GenericExperimentArtifactStore<TArtifact>
+  artifactStore: GenericExperimentArtifactStore<TArtifact>,
+  abortSignal: AbortSignal
 ): Promise<Array<{
   index: number;
   seed: string;
@@ -539,23 +783,30 @@ async function hydrateCommittedEpisodes<TArtifact extends GenericEpisodeEnvelope
       });
       continue;
     }
-    if (runIds.has(reference.runId)) {
+    const runId = reference.runId;
+    if (runIds.has(runId)) {
       throw new Error("Durable experiment episode prefix contains a duplicate runId.");
     }
-    runIds.add(reference.runId);
-    const artifact = await artifactStore.get(reference.runId);
-    if (!artifact) throw new Error(`Canonical episode ${reference.runId} is missing during experiment resume.`);
+    runIds.add(runId);
+    const artifact = await awaitWithAbort(
+      () => artifactStore.get(runId),
+      abortSignal
+    );
+    if (!artifact) throw new Error(`Canonical episode ${runId} is missing during experiment resume.`);
     if (
-      artifact.runId !== reference.runId ||
+      artifact.runId !== runId ||
       artifact.status !== reference.status ||
       hashStableJsonValue(artifact) !== reference.artifactSha256 ||
       !artifact.experiment ||
       hashStableJsonValue(artifact.experiment) !== hashStableJsonValue(record.experiment)
     ) {
-      throw new Error(`Canonical episode ${reference.runId} drifted from durable experiment membership.`);
+      throw new Error(`Canonical episode ${runId} drifted from durable experiment membership.`);
     }
     assertArtifactBinding(artifact, spec, reference.status, { index, seed: reference.seed });
-    const evaluationReport = await artifactStore.getEvaluationReport(reference.runId);
+    const evaluationReport = await awaitWithAbort(
+      () => artifactStore.getEvaluationReport(runId),
+      abortSignal
+    );
     if (
       (evaluationReport === undefined) !== (reference.evaluationReportId === undefined) ||
       (evaluationReport !== undefined && (
@@ -563,7 +814,7 @@ async function hydrateCommittedEpisodes<TArtifact extends GenericEpisodeEnvelope
         hashStableJsonValue(evaluationReport) !== reference.evaluationReportSha256
       ))
     ) {
-      throw new Error(`Canonical episode ${reference.runId} evaluation report drifted during experiment resume.`);
+      throw new Error(`Canonical episode ${runId} evaluation report drifted during experiment resume.`);
     }
     hydrated.push({
       index,
@@ -851,15 +1102,5 @@ function createExperimentDeadline(external: AbortSignal | undefined, timeoutMs: 
       if (timer !== undefined) clearTimeout(timer);
       external?.removeEventListener("abort", abortFromExternal);
     }
-  };
-}
-
-function inertExperimentDeadline(external: AbortSignal | undefined): {
-  signal: AbortSignal;
-  dispose(): void;
-} {
-  return {
-    signal: external ?? new AbortController().signal,
-    dispose() {}
   };
 }

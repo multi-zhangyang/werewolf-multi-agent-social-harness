@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SocialDomainAdapterManifest } from "../src/harness/domainAdapter";
-import type { HarnessEpisodeArtifactEnvelope } from "../src/harness/episodeArtifacts";
+import {
+  validateHarnessCheckpointEnvelope,
+  type HarnessCheckpointEnvelope,
+  type HarnessEpisodeArtifactEnvelope
+} from "../src/harness/episodeArtifacts";
 import { HarnessEpisodeArtifactStore } from "../src/harness/episodeArtifactStore";
 import {
   runGenericExperiment,
@@ -46,6 +50,7 @@ interface Command {
 }
 
 type Artifact = HarnessEpisodeArtifactEnvelope<State, Observation, Pending, Command, never>;
+type Checkpoint = HarnessCheckpointEnvelope<State, never, Observation, Pending, Command>;
 
 const adapterManifest: SocialDomainAdapterManifest = {
   schemaVersion: "harness.domain-adapter.v1",
@@ -819,6 +824,331 @@ describe("generic normalized experiment orchestration", () => {
     ).rejects.toThrow(/domainId must match/i);
     expect(preparations).toBe(0);
   });
+
+  it("fails closed on checkpoint policies that lack executable runtime authority", async () => {
+    let preparations = 0;
+    let begins = 0;
+    const runStore = {
+      ...memoryRunStore<Artifact>(),
+      async beginOrResume(input: Parameters<GenericExperimentRunStore<Artifact>["beginOrResume"]>[0]) {
+        begins += 1;
+        return memoryRunStore<Artifact>().beginOrResume(input);
+      }
+    };
+    const adapter = {
+      domainId: "counter-orchestration",
+      prepareEpisode() {
+        preparations += 1;
+        return {};
+      },
+      runEpisode: async () => {
+        throw new Error("must not run");
+      },
+      lifecycleOf: () => "failed" as const,
+      artifactForEpisode: async () => {
+        throw new Error("must not materialize");
+      },
+      evaluation: {
+        evaluators: [counterEvaluator],
+        contextForEpisode() {
+          throw new Error("must not evaluate");
+        }
+      }
+    };
+
+    await expect(runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "final" }
+      },
+      artifactStore: memoryArtifactStore<Artifact>(),
+      runStore,
+      adapter
+    })).rejects.toThrow(/requires a deterministic final checkpoint builder/i);
+
+    await expect(runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "native-boundaries" }
+      },
+      artifactStore: memoryArtifactStore<Artifact>(),
+      runStore,
+      adapter
+    })).rejects.toThrow(/native-boundaries.*not supported/i);
+
+    await expect(runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        retryPolicy: { id: "counter.retry", version: "1", maxAttempts: 2 }
+      },
+      artifactStore: memoryArtifactStore<Artifact>(),
+      runStore,
+      adapter
+    })).rejects.toThrow(/supports exactly one durable episode attempt/i);
+
+    await expect(runGenericExperiment({
+      spec: {
+        ...experimentSpec(),
+        artifactPolicy: { id: "counter.artifact", version: "1", visibility: "public" }
+      },
+      artifactStore: memoryArtifactStore<Artifact>(),
+      runStore,
+      adapter
+    })).rejects.toThrow(/requires research-full canonical episode authority/i);
+
+    expect(begins).toBe(0);
+    expect(preparations).toBe(0);
+  });
+
+  it("rejects final checkpoints that drift from canonical agent or execution-prefix authority before publication", async () => {
+    const cases: Array<{
+      name: string;
+      mutate(checkpoint: Checkpoint): void;
+    }> = [
+      {
+        name: "agents",
+        mutate(checkpoint) {
+          checkpoint.agents = [{} as never];
+          checkpoint.source.agentsHash = hashStableState(checkpoint.agents);
+        }
+      },
+      {
+        name: "executionPrefix.status",
+        mutate(checkpoint) {
+          checkpoint.executionPrefix.status = "failed";
+          checkpoint.executionPrefix.failureReason = "forged checkpoint lifecycle";
+          checkpoint.executionPrefix.error = "forged checkpoint lifecycle";
+          checkpoint.source.executionPrefixHash = hashStableState(checkpoint.executionPrefix);
+        }
+      },
+      {
+        name: "executionPrefix.initialState",
+        mutate(checkpoint) {
+          checkpoint.executionPrefix.initialState = { value: 99, done: false };
+          checkpoint.source.executionPrefixHash = hashStableState(checkpoint.executionPrefix);
+        }
+      },
+      {
+        name: "executionPrefix.channels",
+        mutate(checkpoint) {
+          checkpoint.executionPrefix.channels.push({
+            id: "forged-public-channel",
+            kind: "public",
+            participantIds: ["a"],
+            readableBy: "all"
+          });
+          checkpoint.source.channelsHash = hashStableState(checkpoint.executionPrefix.channels);
+          checkpoint.source.executionPrefixHash = hashStableState(checkpoint.executionPrefix);
+        }
+      }
+    ];
+
+    for (const testCase of cases) {
+      let checkpointPuts = 0;
+      const artifactAuthority = memoryArtifactStore<Artifact>();
+      const checkpointAuthority = new Map<string, Checkpoint>();
+      const artifactStore: GenericExperimentArtifactStore<Artifact, Checkpoint> = {
+        ...artifactAuthority,
+        async putCheckpoint(_runId, checkpoint) {
+          checkpointPuts += 1;
+          checkpointAuthority.set(checkpoint.checkpointId, structuredClone(checkpoint));
+        },
+        async getCheckpoint(_runId, checkpointId) {
+          const checkpoint = checkpointAuthority.get(checkpointId);
+          return checkpoint ? structuredClone(checkpoint) : undefined;
+        }
+      };
+
+      await expect(runGenericExperiment({
+        spec: {
+          ...experimentSpec(),
+          episodeCount: 1,
+          evaluatorIds: [],
+          checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "final" }
+        },
+        artifactStore,
+        runStore: memoryRunStore(),
+        adapter: {
+          domainId: "counter-orchestration",
+          prepareEpisode: (context) => ({ runId: `${context.spec.id}:${context.seed}` }),
+          runEpisode: (prepared) => counterEpisode(prepared.runId, () => undefined),
+          lifecycleOf: (episode) => episode.status,
+          artifactForEpisode: (episode) => artifactFromEpisode(episode),
+          checkpointing: {
+            finalCheckpointForArtifact(artifact) {
+              const checkpoint = buildCounterFinalCheckpoint(artifact);
+              testCase.mutate(checkpoint);
+              return checkpoint;
+            }
+          }
+        }
+      }), testCase.name).rejects.toThrow(/final checkpoint/i);
+      expect(checkpointPuts, testCase.name).toBe(0);
+    }
+  });
+
+  it("bounds a non-resolving final checkpoint builder by the experiment deadline", async () => {
+    let builderCalls = 0;
+    let checkpointPuts = 0;
+    const artifactAuthority = memoryArtifactStore<Artifact>();
+    const artifactStore: GenericExperimentArtifactStore<Artifact, Checkpoint> = {
+      ...artifactAuthority,
+      async putCheckpoint() {
+        checkpointPuts += 1;
+      },
+      async getCheckpoint() {
+        return undefined;
+      }
+    };
+    const startedAt = Date.now();
+    let guard: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      runGenericExperiment({
+        spec: {
+          ...experimentSpec(),
+          episodeCount: 1,
+          evaluatorIds: [],
+          timeoutPolicy: {
+            id: "counter.timeout",
+            version: "1",
+            runTimeoutMs: 500,
+            decisionTimeoutMs: 100
+          },
+          checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "final" }
+        },
+        artifactStore,
+        runStore: memoryRunStore(),
+        adapter: {
+          domainId: "counter-orchestration",
+          prepareEpisode: (context) => ({ runId: `${context.spec.id}:${context.seed}` }),
+          runEpisode: (prepared, context) => counterEpisode(prepared.runId, () => undefined, {
+            maxTransitions: context.spec.maxTransitions,
+            decisionTimeoutMs: context.spec.timeoutPolicy.decisionTimeoutMs
+          }),
+          lifecycleOf: (episode) => episode.status,
+          artifactForEpisode: (episode) => artifactFromEpisode(episode),
+          checkpointing: {
+            finalCheckpointForArtifact() {
+              builderCalls += 1;
+              return new Promise<Checkpoint>(() => undefined);
+            }
+          }
+        }
+      }).then(
+        (result) => ({ kind: "resolved" as const, result }),
+        (error: unknown) => ({ kind: "rejected" as const, error })
+      ),
+      new Promise<{ kind: "guard" }>((resolve) => {
+        guard = setTimeout(() => resolve({ kind: "guard" }), 1_500);
+      })
+    ]);
+    if (guard) clearTimeout(guard);
+
+    expect(builderCalls).toBe(1);
+    expect(outcome).toMatchObject({ kind: "rejected" });
+    if (outcome.kind === "rejected") {
+      expect(outcome.error).toBeInstanceOf(Error);
+      expect((outcome.error as Error).message).toMatch(/aborted|deadline|timeout/i);
+    }
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(checkpointPuts).toBe(0);
+  }, 3_000);
+
+  it("repairs the artifact-to-checkpoint crash window before scheduling the remaining suffix", async () => {
+    const root = await temporaryRoot();
+    let decisions = 0;
+    let failCheckpointPublication = true;
+    const openAuthorities = async () => {
+      const store = await HarnessEpisodeArtifactStore.open<Artifact, Checkpoint>({
+        baseDirectory: path.join(root, "episodes"),
+        verifyArtifact,
+        verifyCheckpoint(checkpoint) {
+          const mismatches = validateHarnessCheckpointEnvelope(checkpoint);
+          return { ok: mismatches.length === 0, mismatches };
+        }
+      });
+      const runStore = await HarnessExperimentRunStore.open({
+        baseDirectory: path.join(root, "experiment-runs"),
+        episodeStore: store,
+        now: () => "2026-07-22T14:00:00.000Z"
+      });
+      return { store, runStore };
+    };
+    const adapter = {
+      domainId: "counter-orchestration",
+      prepareEpisode(context: { index: number; seed: string; spec: { id: string } }) {
+        return { runId: `${context.spec.id}:${context.seed}` };
+      },
+      runEpisode(prepared: { runId: string }) {
+        return counterEpisode(prepared.runId, () => { decisions += 1; });
+      },
+      lifecycleOf: (episode: SocialEpisodeArtifact<State, Observation, Pending, Command>) => episode.status,
+      artifactForEpisode(episode: SocialEpisodeArtifact<State, Observation, Pending, Command>) {
+        return artifactFromEpisode(episode);
+      },
+      checkpointing: {
+        finalCheckpointForArtifact: buildCounterFinalCheckpoint
+      },
+      evaluation: {
+        evaluators: [counterEvaluator],
+        contextForEpisode(
+          episode: SocialEpisodeArtifact<State, Observation, Pending, Command>,
+          artifact: Artifact
+        ) {
+          return {
+            id: artifact.runId,
+            status: artifact.status,
+            initialState: artifact.initialState,
+            finalState: artifact.finalState,
+            agents: [] as never[],
+            trajectory: [] as never[],
+            socialEpisode: episode
+          };
+        }
+      }
+    };
+    const spec = {
+      ...experimentSpec(),
+      checkpointPolicy: { id: "counter.checkpoint", version: "1", mode: "final" as const }
+    };
+    const first = await openAuthorities();
+    await expect(runGenericExperiment({
+      spec,
+      artifactStore: {
+        put: (artifact, options) => first.store.put(artifact, options),
+        get: (runId) => first.store.get(runId),
+        getEvaluationReport: (runId) => first.store.getEvaluationReport(runId),
+        getCheckpoint: (runId, checkpointId) => first.store.getCheckpoint(runId, checkpointId),
+        async putCheckpoint(runId, checkpoint) {
+          if (failCheckpointPublication) {
+            failCheckpointPublication = false;
+            throw new Error("injected checkpoint publication failure");
+          }
+          return first.store.putCheckpoint(runId, checkpoint);
+        }
+      },
+      runStore: first.runStore,
+      adapter,
+      now: () => "2026-07-22T14:00:00.000Z"
+    })).rejects.toThrow(/injected checkpoint publication failure/i);
+    expect(decisions).toBe(1);
+
+    const restarted = await openAuthorities();
+    const result = await runGenericExperiment({
+      spec,
+      artifactStore: restarted.store,
+      runStore: restarted.runStore,
+      adapter,
+      now: () => "2026-07-22T14:00:00.000Z"
+    });
+
+    expect(decisions).toBe(2);
+    expect(result.runSet.episodes).toHaveLength(2);
+    for (const episode of result.runSet.episodes) {
+      expect(episode.runId).toBeTruthy();
+      await expect(restarted.store.listCheckpoints(episode.runId!)).resolves.toHaveLength(1);
+    }
+  });
 });
 
 function experimentSpec(): GenericExperimentSpecV1 {
@@ -862,6 +1192,41 @@ function artifactFromEpisode(
   };
 }
 
+function buildCounterFinalCheckpoint(artifact: Artifact): Checkpoint {
+  const executionPrefix = structuredClone(artifact.socialEpisode);
+  const boundary = executionPrefix.steps.at(-1);
+  return {
+    artifactVersion: "counter-orchestration.checkpoint.v1",
+    kind: "checkpoint",
+    checkpointId: `${artifact.runId}:checkpoint:final`,
+    createdAt: artifact.createdAt,
+    reason: "experiment checkpointPolicy final",
+    source: {
+      sourceArtifactVersion: artifact.artifactVersion,
+      runId: artifact.runId,
+      status: artifact.status,
+      boundaryTraceId: boundary?.traceId,
+      boundaryTurnIndex: boundary?.turnIndex,
+      boundaryBatchId: boundary?.batchId,
+      boundaryBatchIndex: boundary?.batchIndex,
+      boundarySchedulerMode: boundary?.schedulerMode,
+      nativeStepCount: executionPrefix.steps.length,
+      messageCount: executionPrefix.messages.length,
+      lastMessageSeq: executionPrefix.messages.at(-1)?.seq,
+      stateHash: hashStableState(artifact.finalState),
+      executionPrefixHash: hashStableState(executionPrefix),
+      agentsHash: hashStableState([]),
+      channelsHash: hashStableState(executionPrefix.channels),
+      messagesHash: hashStableState(executionPrefix.messages),
+      domainAdapter: structuredClone(executionPrefix.domainAdapter),
+      experiment: structuredClone(artifact.experiment)
+    },
+    state: structuredClone(artifact.finalState),
+    agents: [],
+    executionPrefix
+  };
+}
+
 function counterEpisode(
   runId: string,
   onDecision: () => void,
@@ -891,6 +1256,7 @@ function counterEpisode(
     environment: new Environment(),
     actors: [actor],
     channels: [],
+    captureAgentSnapshots: () => [],
     schedulerMode: "aec",
     ...(control.maxTransitions === undefined ? {} : { maxTransitions: control.maxTransitions }),
     ...(control.decisionTimeoutMs === undefined
@@ -912,7 +1278,7 @@ function verifyArtifact(artifact: Artifact) {
       validateRecordedStep(step, context) {
         return context.pendingActions[0]?.actorId === step.actorId ? [] : ["pending actor mismatch"];
       },
-      recordedAgentState: { mode: "none", reason: "counter fixture has no durable actor-state snapshot" }
+      recordedAgentState: { mode: "validate", validator: () => [] }
     }
   });
 }
