@@ -10,6 +10,7 @@ import {
   runEvaluationRegistry,
   summarizeResearchMetricPromotionRows
 } from "../src/harness/evaluation";
+import type { MetricPromotionPolicy } from "../src/harness/evaluation";
 import { SOCIAL_METRIC_PROMOTION_POLICY } from "../src/harness/socialMetricPromotion";
 import {
   WEREWOLF_METRIC_PROMOTION_CATALOG_ID,
@@ -224,6 +225,300 @@ describe("generic evaluation registry", () => {
     expect(report.outputs["generic.social-test"]).toEqual({ checked: true });
     expect(report.summary.episodeScore).toBe(1);
     expect(report.summary.agentScores.a1).toBe(0.65);
+  });
+
+  it("isolates every evaluator behind an independent immutable snapshot of recorded truth", () => {
+    const context = genericContext("immutable-evaluator-input");
+    const receivedContexts: unknown[] = [];
+    const mutatingEvaluator: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.mutating-evaluator",
+      label: "Mutating evaluator",
+      version: "1.0.0",
+      evaluate(received) {
+        receivedContexts.push(received);
+        received.finalState.ok = false;
+        return {
+          evaluatorId: "generic.mutating-evaluator",
+          label: "Mutating evaluator",
+          version: "1.0.0",
+          metrics: []
+        };
+      }
+    };
+    const observingEvaluator: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.observing-evaluator",
+      label: "Observing evaluator",
+      version: "1.0.0",
+      evaluate(received) {
+        receivedContexts.push(received);
+        expect(Object.isFrozen(received)).toBe(true);
+        expect(Object.isFrozen(received.finalState)).toBe(true);
+        return {
+          evaluatorId: "generic.observing-evaluator",
+          label: "Observing evaluator",
+          version: "1.0.0",
+          metrics: [
+            metric({
+              id: "episode.observed_recorded_truth",
+              label: "Observed recorded truth",
+              scope: "episode",
+              value: received.finalState.ok ? 1 : 0,
+              source: "generic.observing-evaluator"
+            })
+          ]
+        };
+      }
+    };
+
+    const report = runEvaluationRegistry({
+      id: "immutable-evaluator-input",
+      createdAt: new Date(0).toISOString(),
+      context,
+      evaluators: [mutatingEvaluator, observingEvaluator]
+    });
+
+    expect(report.status).toBe("incomplete");
+    expect(report.failures).toEqual([
+      expect.objectContaining({
+        evaluatorId: "generic.mutating-evaluator",
+        stage: "evaluate",
+        code: "evaluator_exception"
+      })
+    ]);
+    expect(report.metrics).toEqual([
+      expect.objectContaining({ id: "episode.observed_recorded_truth", value: 1 })
+    ]);
+    expect(context.finalState.ok).toBe(true);
+    expect(receivedContexts).toHaveLength(2);
+    expect(receivedContexts[0]).not.toBe(receivedContexts[1]);
+    expect(receivedContexts[0]).not.toBe(context);
+    expect(receivedContexts[1]).not.toBe(context);
+  });
+
+  it("anchors evaluator inputs and prior outputs to runner-owned snapshots", () => {
+    const context = genericContext("snapshot-anchored-evaluator-input");
+    const sharedResult = {
+      evaluatorId: "generic.shared-result",
+      label: "Shared result evaluator",
+      version: "1.0.0",
+      metrics: [
+        metric({
+          id: "episode.shared_result_truth",
+          label: "Shared result truth",
+          scope: "episode" as const,
+          value: 1,
+          source: "generic.shared-result"
+        })
+      ],
+      output: { verdict: "original" }
+    };
+    const first: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.shared-result",
+      label: "Shared result evaluator",
+      version: "1.0.0",
+      evaluate() {
+        return sharedResult;
+      }
+    };
+    const second: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.snapshot-observer",
+      label: "Snapshot observer",
+      version: "1.0.0",
+      evaluate(received) {
+        // Simulate plugin closure state changing both caller-owned input and a
+        // previously returned object. Neither may rewrite registry authority.
+        context.finalState.ok = false;
+        sharedResult.metrics[0]!.value = 0;
+        sharedResult.output.verdict = "tampered";
+        return {
+          evaluatorId: "generic.snapshot-observer",
+          label: "Snapshot observer",
+          version: "1.0.0",
+          metrics: [
+            metric({
+              id: "episode.snapshot_observed_truth",
+              label: "Snapshot observed truth",
+              scope: "episode",
+              value: received.finalState.ok ? 1 : 0,
+              source: "generic.snapshot-observer"
+            })
+          ]
+        };
+      }
+    };
+
+    const report = runEvaluationRegistry({
+      id: "snapshot-anchored-evaluator-input",
+      createdAt: new Date(0).toISOString(),
+      context,
+      evaluators: [first, second]
+    });
+
+    expect(report.metrics.map(({ id, value }) => [id, value])).toEqual([
+      ["episode.shared_result_truth", 1],
+      ["episode.snapshot_observed_truth", 1]
+    ]);
+    expect(report.outputs["generic.shared-result"]).toEqual({ verdict: "original" });
+    expect(context.finalState.ok).toBe(false);
+  });
+
+  it("anchors metric-promotion authority before evaluator closure code can mutate the caller policy", () => {
+    const policy: MetricPromotionPolicy = {
+      id: "evaluation.test-policy",
+      version: "1",
+      catalog: {
+        id: "evaluation.test-catalog",
+        version: "1",
+        domainId: "test",
+        entries: [{
+          metricId: "episode.policy_anchored",
+          promotionClass: "diagnostic",
+          decisionId: "evaluation.test-catalog#episode.policy_anchored",
+          rationale: "Remain diagnostic during this registry run."
+        }],
+        rules: []
+      }
+    };
+    const evaluator: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.policy-mutator",
+      label: "Policy mutator",
+      version: "1.0.0",
+      evaluate() {
+        (policy.catalog.entries[0] as { promotionClass: string }).promotionClass = "scorecard";
+        return {
+          evaluatorId: "generic.policy-mutator",
+          label: "Policy mutator",
+          version: "1.0.0",
+          metrics: [
+            metric({
+              id: "episode.policy_anchored",
+              label: "Policy anchored",
+              scope: "episode",
+              value: 1,
+              weight: 1,
+              source: "generic.policy-mutator",
+              evidenceRefs: [{ artifact: "trace", traceId: "policy-anchor" }]
+            })
+          ]
+        };
+      }
+    };
+
+    const report = runEvaluationRegistry({
+      id: "policy-authority-anchor",
+      createdAt: new Date(0).toISOString(),
+      context: genericContext("policy-authority-anchor"),
+      evaluators: [evaluator],
+      promotionPolicy: policy
+    });
+
+    expect(policy.catalog.entries[0]?.promotionClass).toBe("scorecard");
+    expect(report.metrics[0]?.promotionDecision).toMatchObject({
+      policyId: "evaluation.test-policy",
+      catalogId: "evaluation.test-catalog",
+      promotionClass: "diagnostic",
+      eligibleForScorecard: false,
+      reasons: ["catalog_diagnostic"]
+    });
+    expect(report.summary.episodeScore).toBeUndefined();
+  });
+
+  it("contains non-portable nested metrics and cyclic evaluator manifests as module failures", () => {
+    const cyclicMetric: Record<string, unknown> = {
+      id: "episode.cyclic",
+      label: "Cyclic metric",
+      scope: "episode",
+      value: 1,
+      weight: 1,
+      source: "generic.cyclic-result",
+      evidenceRefs: []
+    };
+    cyclicMetric.metadata = { cyclicMetric };
+    const cyclicManifest: Record<string, unknown> = { mode: "deterministic" };
+    cyclicManifest.dependencies = { cyclicManifest };
+    const invalidResult: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.cyclic-result",
+      label: "Cyclic result",
+      version: "1.0.0",
+      evaluate() {
+        return {
+          evaluatorId: "generic.cyclic-result",
+          label: "Cyclic result",
+          version: "1.0.0",
+          metrics: [cyclicMetric]
+        } as never;
+      }
+    };
+    const invalidManifest: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.cyclic-manifest",
+      label: "Cyclic manifest",
+      version: "1.0.0",
+      manifest: cyclicManifest as never,
+      evaluate() {
+        throw new Error("must not execute with an invalid manifest");
+      }
+    };
+    const invalidNestedNumber: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.nonfinite-nested",
+      label: "Non-finite nested metric",
+      version: "1.0.0",
+      evaluate() {
+        return {
+          evaluatorId: "generic.nonfinite-nested",
+          label: "Non-finite nested metric",
+          version: "1.0.0",
+          metrics: [
+            metric({
+              id: "episode.nonfinite_nested",
+              label: "Non-finite nested metric",
+              scope: "episode",
+              value: 1,
+              source: "generic.nonfinite-nested",
+              metadata: { invalidNestedValue: Number.POSITIVE_INFINITY }
+            })
+          ]
+        };
+      }
+    };
+    const healthy: HarnessEvaluator<{ ok: boolean }> = {
+      id: "generic.healthy-after-invalid",
+      label: "Healthy after invalid",
+      version: "1.0.0",
+      evaluate() {
+        return {
+          evaluatorId: "generic.healthy-after-invalid",
+          label: "Healthy after invalid",
+          version: "1.0.0",
+          metrics: [
+            metric({
+              id: "episode.healthy_after_invalid",
+              label: "Healthy after invalid",
+              scope: "episode",
+              value: 1,
+              source: "generic.healthy-after-invalid"
+            })
+          ]
+        };
+      }
+    };
+
+    const report = runEvaluationRegistry({
+      id: "invalid-evaluator-data-isolation",
+      createdAt: new Date(0).toISOString(),
+      context: genericContext("invalid-evaluator-data-isolation"),
+      evaluators: [invalidResult, invalidManifest, invalidNestedNumber, healthy]
+    });
+
+    expect(report.status).toBe("incomplete");
+    expect(report.failures).toEqual([
+      expect.objectContaining({ evaluatorId: "generic.cyclic-result", stage: "result_normalization" }),
+      expect.objectContaining({ evaluatorId: "generic.cyclic-manifest", stage: "result_normalization" }),
+      expect.objectContaining({ evaluatorId: "generic.nonfinite-nested", stage: "result_normalization" })
+    ]);
+    expect(report.evaluatorIds).toEqual(["generic.healthy-after-invalid"]);
+    expect(report.metrics).toEqual([
+      expect.objectContaining({ id: "episode.healthy_after_invalid", value: 1 })
+    ]);
   });
 
   it("isolates evaluator exceptions, preserves successful modules, and never persists raw exception text", () => {
@@ -1088,6 +1383,7 @@ describe("generic evaluation registry", () => {
     expect(report.summary.episodeScore).toBe(0.75);
     expect(Number.isFinite(report.summary.episodeScore)).toBe(true);
     expect(report.summary.agentScores.a1).toBeUndefined();
+    expect(report.metrics.find((item) => item.id === "episode.invalid_nan")?.value).toBeNull();
     expect(report.summary.promotion).toMatchObject({
       policyId: DEFAULT_METRIC_PROMOTION_POLICY.id,
       catalogId: DEFAULT_METRIC_PROMOTION_POLICY.catalog.id,
