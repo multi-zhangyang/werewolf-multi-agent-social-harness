@@ -1309,7 +1309,12 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
     hashMessages: hashStableState,
     eventSeq: werewolfEventSeq,
     afterEnvironmentStep: (context) => {
-      if (recordAgentSnapshots && context.actorId !== WEREWOLF_SYSTEM_ACTOR_ID) {
+      // Every committed native boundary, including deterministic system
+      // transitions, must carry the durable actor-state snapshot needed by
+      // checkpoint/replay authority. Agent state is unchanged by a system
+      // transition, but omitting the snapshot made a run truncated exactly at
+      // that boundary impossible to checkpoint.
+      if (recordAgentSnapshots) {
         const traceId = context.action.traceId;
         if (traceId) {
           const agents = snapshotAgentStates(actors);

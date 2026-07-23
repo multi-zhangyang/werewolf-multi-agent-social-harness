@@ -11,7 +11,14 @@ import {
   type HarnessAssignmentConfig,
   type ResolvedAgentAssignment
 } from "./profiles";
-import { buildMatchArtifact, validateMatchArtifactIntegrity, type MatchArtifact } from "./artifacts";
+import {
+  buildFinalHarnessCheckpoint,
+  buildMatchArtifact,
+  validateHarnessCheckpoint,
+  validateMatchArtifactIntegrity,
+  type HarnessCheckpoint,
+  type MatchArtifact
+} from "./artifacts";
 import { HarnessEpisodeArtifactStore } from "./episodeArtifactStore";
 import { HarnessExperimentRunStore } from "./experimentRunStore";
 import {
@@ -44,14 +51,14 @@ import {
 import { createWerewolfResultEvaluationSuite } from "./werewolfResult";
 
 export interface TournamentOrchestrationOptions {
-  artifactStore: GenericExperimentArtifactStore<MatchArtifact>;
+  artifactStore: GenericExperimentArtifactStore<MatchArtifact, HarnessCheckpoint>;
   runStore: GenericExperimentRunStore<MatchArtifact>;
   /** Stable durable run authority. Defaults to the normalized experiment id. */
   runSetId?: string;
 }
 
 export interface OpenedTournamentOrchestrationOptions extends TournamentOrchestrationOptions {
-  artifactStore: HarnessEpisodeArtifactStore<MatchArtifact>;
+  artifactStore: HarnessEpisodeArtifactStore<MatchArtifact, HarnessCheckpoint>;
   runStore: HarnessExperimentRunStore<MatchArtifact>;
 }
 
@@ -60,10 +67,14 @@ export async function openTournamentOrchestration(options: {
   runSetId?: string;
 }): Promise<OpenedTournamentOrchestrationOptions> {
   const root = path.resolve(options.baseDirectory);
-  const artifactStore = await HarnessEpisodeArtifactStore.open<MatchArtifact>({
+  const artifactStore = await HarnessEpisodeArtifactStore.open<MatchArtifact, HarnessCheckpoint>({
     baseDirectory: path.join(root, "episodes"),
     verifyArtifact: (artifact) => {
       const mismatches = validateMatchArtifactIntegrity(artifact);
+      return { ok: mismatches.length === 0, mismatches };
+    },
+    verifyCheckpoint: (checkpoint) => {
+      const mismatches = validateHarnessCheckpoint(checkpoint);
       return { ok: mismatches.length === 0, mismatches };
     }
   });
@@ -419,6 +430,16 @@ async function runDurableTournament(options: TournamentOptions): Promise<Tournam
           result: episode.result
         });
       },
+      checkpointing: {
+        finalCheckpointForArtifact(artifact) {
+          return buildFinalHarnessCheckpoint({
+            artifact,
+            checkpointId: `${artifact.runId}:checkpoint:native:${artifact.socialEpisode.steps.length}`,
+            createdAt: artifact.createdAt,
+            reason: "experiment checkpointPolicy final"
+          });
+        }
+      },
       evaluation: {
         reportForEpisode: (episode) => episode.result.evaluationReport
       }
@@ -535,7 +556,13 @@ function buildWerewolfGenericExperimentSpec(input: {
     retryPolicy: { id: "harness.episode-attempt", version: "1", maxAttempts: 1 },
     evaluatorIds,
     artifactPolicy: { id: "harness.canonical-episode", version: "1", visibility: "research-full" },
-    checkpointPolicy: { id: "harness.final-checkpoint", version: "1", mode: "final" },
+    // A zero-transition probe has no committed native boundary and therefore
+    // cannot satisfy the checkpoint envelope's durable actor-snapshot proof.
+    // Record that truth explicitly instead of claiming a final checkpoint the
+    // runtime cannot lawfully publish.
+    checkpointPolicy: (input.options.maxTransitions ?? 320) === 0
+      ? { id: "harness.checkpoint.none.zero-transition", version: "1", mode: "none" }
+      : { id: "harness.final-checkpoint", version: "1", mode: "final" },
     providerPolicy: { id: "openai-compatible.streaming", version: "1", stream: true },
     continueOnError: input.options.continueOnError ?? false,
     domainConfig: portableJsonObject({
