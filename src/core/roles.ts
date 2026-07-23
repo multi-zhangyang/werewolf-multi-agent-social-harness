@@ -14,6 +14,22 @@ import {
  */
 export const SUPPORTED_WEREWOLF_RULESET_IDS = [WEREWOLF_CLASSIC_9_SEAT_RULESET_ID] as const;
 
+/**
+ * Versioned semantic authority for the current proof ruleset. These values
+ * describe engine behavior; they are not caller-selectable knobs within v1.
+ * Changing one requires a new ruleset id so recorded replays keep their
+ * original meaning.
+ */
+export const WEREWOLF_CLASSIC_9_SEAT_RULESET_MANIFEST = {
+  id: WEREWOLF_CLASSIC_9_SEAT_RULESET_ID,
+  wolfKillVoteTieBreak: "first_committed_target_vote"
+} as const;
+
+export function werewolfRulesetManifest(rulesetId: WerewolfRulesetId): typeof WEREWOLF_CLASSIC_9_SEAT_RULESET_MANIFEST {
+  assertSupportedWerewolfRulesetId(rulesetId);
+  return WEREWOLF_CLASSIC_9_SEAT_RULESET_MANIFEST;
+}
+
 export function isSupportedWerewolfRulesetId(value: unknown): value is WerewolfRulesetId {
   return value === WEREWOLF_CLASSIC_9_SEAT_RULESET_ID;
 }

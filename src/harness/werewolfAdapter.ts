@@ -28,6 +28,8 @@ import type {
   SocialHarnessStep,
   SocialMessage,
   SocialObservationAssembler,
+  SocialReasonerCallCollectionContext,
+  SocialReasonerCallReport,
   SocialSchedulerResolver,
   SocialSpeechAct,
   SocialSystemTransition,
@@ -50,7 +52,12 @@ import {
   type ScaffoldedSocialActor
 } from "./scaffold";
 import { createAgentSocialState } from "./socialState";
-import { describeError, providerFailureFromError, safeProviderFailureMessage } from "./providerFailure";
+import {
+  describeError,
+  providerFailureFromError,
+  safeProviderFailureMessage,
+  sanitizePersistedProviderDiagnostics
+} from "./providerFailure";
 import {
   WEREWOLF_HARNESS_TURN_METADATA_KIND,
   parseWerewolfHarnessTurnActionMetadata,
@@ -265,6 +272,17 @@ export interface WerewolfHarnessTurnProbeOptions {
   reasoner?: HarnessReasoner;
 }
 
+interface ReasonerCallTransaction {
+  traceId: string;
+  state: "open" | "closed";
+  reports: SocialReasonerCallReport[];
+}
+
+interface ReasonerCallTransactionContext {
+  transactionId: string;
+  traceId: string;
+}
+
 class WerewolfSocialTurnError extends Error {
   constructor(
     message: string,
@@ -286,6 +304,11 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
     ReasonerOutput
   >;
   private readonly turnTraces = new Map<string, HarnessTurnTrace>();
+  /** Provider evidence is owned by the exact runner transaction that opened
+   * it. Closed transactions remain as small tombstones so a provider promise
+   * resolving after a decision timeout cannot populate a later turn. */
+  private readonly reasonerCallTransactions = new Map<string, ReasonerCallTransaction>();
+  private latestReasonerCallContext?: ReasonerCallTransactionContext;
   private readonly pendingProposals = new Map<
     string,
     {
@@ -321,7 +344,8 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       version: "1",
       model: options.actor.state.model,
       temperature: options.actor.state.temperature,
-      policyId: WEREWOLF_PROFILE_POLICY_SELECTOR_ID
+      policyId: WEREWOLF_PROFILE_POLICY_SELECTOR_ID,
+      ...(options.reasoner ? { reasonerId: "werewolf-harness-reasoner" } : {})
     };
     if (options.executionMode === "scaffold") {
       if (options.tracePrefix) {
@@ -343,6 +367,9 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
 
   observe(observation: WerewolfSocialObservation, context?: SocialActorObservationContext<WerewolfSocialPendingAction>): void {
     if (this.scaffolded) {
+      if (context?.transactionId && context.traceId) {
+        this.openReasonerCallTransaction({ transactionId: context.transactionId, traceId: context.traceId });
+      }
       this.scaffolded.observe(observation, context);
       return;
     }
@@ -359,6 +386,12 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       ? `${this.options.tracePrefix}:social-adapter:${turnIndex}:${this.id}:${observation.view.phase}`
       : context?.traceId ?? `werewolf:social-adapter:${turnIndex}:${this.id}:${observation.view.phase}`;
     const transactionId = context?.transactionId ?? context?.traceId ?? traceId;
+    if (context?.transactionId && context.traceId) {
+      // A failed decision remains bound to the runner's observation trace. A
+      // successful legacy tracePrefix action switches this open transaction to
+      // its final action trace immediately before decide() returns.
+      this.openReasonerCallTransaction({ transactionId, traceId: context.traceId });
+    }
     this.localTurnIndex = Math.max(this.localTurnIndex, turnIndex);
     const stagedActor = context?.transactional === true ? new WerewolfAgentActor(cloneJson(this.options.actor.state)) : this.options.actor;
     stagedActor.observe(observation.view, { traceId, turnIndex });
@@ -374,13 +407,19 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
   }
 
   async decide(pending: WerewolfSocialPendingAction): Promise<SocialAction<GameCommand>> {
+    // Capture before the first await. A timed-out decision may still settle
+    // after the runner has observed a later turn on this actor instance.
+    const reasonerCallContext = this.captureReasonerCallContext();
     if (this.scaffolded) {
       try {
         const action = await this.scaffolded.decide(pending);
+        this.assertReasonerCallTransactionOpen(reasonerCallContext);
         const metadata = parseWerewolfHarnessTurnActionMetadata(action.metadata, action.traceId ?? `${this.id}:missing-trace`);
         this.turnTraces.set(metadata.turnTrace.traceId, cloneJson(metadata.turnTrace));
+        this.recordCompletedReasonerCall(reasonerCallContext, metadata.reasonerOutput);
         return action;
       } catch (error) {
+        this.recordFailedReasonerCall(reasonerCallContext, error);
         throw new WerewolfSocialTurnError(
           `Harness turn failed for ${this.id}/${this.state.model}/${pending.kind}: ${describeError(error)}`,
           error
@@ -397,13 +436,14 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       throw new Error(`Werewolf social actor ${this.id} cannot decide before observing.`);
     }
 
-    const stagedActor = this.latest.actor;
+    const latest = this.latest;
+    const stagedActor = latest.actor;
     let plan = stagedActor.plan(pending);
     try {
       const reasonerOutput = this.options.reasoner
         ? await this.options.reasoner.think({
-            traceId: this.latest.traceId,
-            view: cloneJson(this.latest.observation.view),
+            traceId: latest.traceId,
+            view: cloneJson(latest.observation.view),
             action: cloneJson(pending),
             agent: toReasonerAgentContext(stagedActor.state),
             policyPlan: cloneJson(plan),
@@ -411,6 +451,7 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
             recalledMemory: stagedActor.reasonerMemoryEntries(plan.memoryRetrieval)
           })
         : undefined;
+      this.assertReasonerCallTransactionOpen(reasonerCallContext);
       const actionProposal = reasonerOutput?.actionProposal;
       if (reasonerOutput) {
         plan = stagedActor.applyReasonerProposal(plan, pending, actionProposal);
@@ -425,15 +466,15 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       const command = stagedActor.act(plan);
       const publicSpeech = command.type === "speech.submit" || command.type === "lastWords.submit" ? command.text : undefined;
       const commitContext = {
-        traceId: this.latest.traceId,
-        turnIndex: this.latest.receiptTurnIndex,
+        traceId: latest.traceId,
+        turnIndex: latest.receiptTurnIndex,
         pendingAction: cloneJson(pending)
       };
       const preview = cloneJson(stagedActor.state);
       commitWerewolfAgentTurn({
         state: preview,
-        view: this.latest.observation.view,
-        observeContext: { traceId: this.latest.traceId, turnIndex: this.latest.turnIndex },
+        view: latest.observation.view,
+        observeContext: { traceId: latest.traceId, turnIndex: latest.turnIndex },
         plan: cloneJson(plan),
         privateMemo,
         context: commitContext
@@ -442,7 +483,7 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       const expectedAgentStateHash = preview.socialStateHash;
       if (!expectedAgentStateHash) throw new Error(`Werewolf social actor ${this.id} did not produce an agent state hash.`);
       const trace: HarnessTurnTrace = {
-        traceId: this.latest.traceId,
+        traceId: latest.traceId,
         playerId: this.id,
         profileId: stagedActor.state.profileId,
         model: stagedActor.state.model,
@@ -462,6 +503,7 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         latencyMs: reasonerOutput?.completion.latencyMs ?? 0,
         promptTokens: reasonerOutput?.completion.usage.promptTokens,
         completionTokens: reasonerOutput?.completion.usage.completionTokens,
+        totalTokens: reasonerOutput?.completion.usage.totalTokens,
         attempts: reasonerOutput?.completion.attempts,
         retryHistory: cloneJson(reasonerOutput?.completion.retryHistory),
         stream: cloneJson(reasonerOutput?.completion.stream),
@@ -477,48 +519,167 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         : summarizePolicyOnlyOutput(privateMemo);
       const metadata: WerewolfSocialActionMetadata = {
         kind: WEREWOLF_HARNESS_TURN_METADATA_KIND,
-        turnIndex: this.latest.turnIndex,
+        turnIndex: latest.turnIndex,
         policyPlan: cloneJson(plan),
         reasonerOutput: cloneJson(reasonerSummary),
         turnTrace: cloneJson(trace),
         agentStateHash: expectedAgentStateHash
       };
-      this.turnTraces.set(this.latest.traceId, trace);
+      this.turnTraces.set(latest.traceId, trace);
       // Private turn state is transaction-scoped, never action-trace-scoped.
       // In particular, a scheduler-level rejection can deliver a unique
       // runner trace id that differs from the policy-provided trace id.
-      this.pendingProposals.set(this.latest.transactionId, {
-        traceId: this.latest.traceId,
+      this.pendingProposals.set(latest.transactionId, {
+        traceId: latest.traceId,
         plan: cloneJson(plan),
         privateMemo,
         cognitionSource,
         pendingAction: cloneJson(pending),
         expectedAgentStateHash
       });
-      return {
+      const action: SocialAction<GameCommand> = {
         actorId: this.id,
         kind: command.type,
-        traceId: this.latest.traceId,
+        traceId: latest.traceId,
         command,
         metadata: metadata as unknown as Record<string, unknown>,
         messages: createWerewolfMessageDrafts({
           players: this.options.players,
-          traceId: this.latest.traceId,
-          turnIndex: this.latest.turnIndex,
+          traceId: latest.traceId,
+          turnIndex: latest.turnIndex,
           actorId: this.id,
           pendingAction: pending,
           command,
           policyPlan: plan,
-          observation: this.latest.observation.view,
+          observation: latest.observation.view,
           reasonerOutput: reasonerSummary
         })
       };
+      if (reasonerOutput) this.recordCompletedReasonerCall(reasonerCallContext, reasonerSummary);
+      this.rebindOpenReasonerCallTransaction(reasonerCallContext, action.traceId ?? latest.traceId);
+      return action;
     } catch (error) {
+      this.recordFailedReasonerCall(reasonerCallContext, error);
       throw new WerewolfSocialTurnError(
         `Harness turn failed for ${this.id}/${this.options.actor.state.model}/${pending.kind}: ${describeError(error)}`,
         error
       );
     }
+  }
+
+  takeReasonerCallReports(context: SocialReasonerCallCollectionContext): SocialReasonerCallReport[] {
+    const transaction = this.reasonerCallTransactions.get(context.transactionId);
+    if (!transaction) {
+      this.reasonerCallTransactions.set(context.transactionId, {
+        traceId: context.traceId,
+        state: "closed",
+        reports: []
+      });
+      if (this.latestReasonerCallContext?.transactionId === context.transactionId) {
+        this.latestReasonerCallContext = undefined;
+      }
+      return [];
+    }
+    if (transaction.traceId !== context.traceId) {
+      throw new Error("Reasoner call report trace does not match its runner transaction.");
+    }
+    if (transaction.state === "closed") return [];
+    const reports = cloneJson(transaction.reports);
+    transaction.state = "closed";
+    transaction.reports = [];
+    if (this.latestReasonerCallContext?.transactionId === context.transactionId) this.latestReasonerCallContext = undefined;
+    return reports;
+  }
+
+  private openReasonerCallTransaction(context: ReasonerCallTransactionContext): void {
+    const existing = this.reasonerCallTransactions.get(context.transactionId);
+    if (existing?.state === "closed") {
+      throw new Error("Closed reasoner call transaction cannot be reopened.");
+    }
+    if (existing && existing.traceId !== context.traceId) {
+      throw new Error("Reasoner call transaction cannot change trace identity.");
+    }
+    if (!existing) {
+      this.reasonerCallTransactions.set(context.transactionId, {
+        traceId: context.traceId,
+        state: "open",
+        reports: []
+      });
+    }
+    this.latestReasonerCallContext = cloneJson(context);
+  }
+
+  private captureReasonerCallContext(): ReasonerCallTransactionContext | undefined {
+    const context = this.latestReasonerCallContext;
+    if (!context) return undefined;
+    const transaction = this.reasonerCallTransactions.get(context.transactionId);
+    if (!transaction || transaction.state !== "open" || transaction.traceId !== context.traceId) return undefined;
+    return cloneJson(context);
+  }
+
+  private assertReasonerCallTransactionOpen(context: ReasonerCallTransactionContext | undefined): void {
+    if (!context) return;
+    const transaction = this.reasonerCallTransactions.get(context.transactionId);
+    if (!transaction || transaction.state !== "open" || transaction.traceId !== context.traceId) {
+      throw new Error("Reasoner decision completed after its runner transaction closed.");
+    }
+  }
+
+  private rebindOpenReasonerCallTransaction(
+    context: ReasonerCallTransactionContext | undefined,
+    traceId: string
+  ): void {
+    if (!context || context.traceId === traceId) return;
+    const transaction = this.reasonerCallTransactions.get(context.transactionId);
+    if (!transaction || transaction.state !== "open" || transaction.traceId !== context.traceId) {
+      throw new Error("Reasoner call transaction closed before final action trace binding.");
+    }
+    transaction.traceId = traceId;
+    context.traceId = traceId;
+    if (this.latestReasonerCallContext?.transactionId === context.transactionId) {
+      this.latestReasonerCallContext.traceId = traceId;
+    }
+  }
+
+  private recordCompletedReasonerCall(
+    context: ReasonerCallTransactionContext | undefined,
+    summary: ReasonerOutputSummary
+  ): void {
+    if (summary.cognitionSource === "policy" || !summary.stream) return;
+    const report: SocialReasonerCallReport = {
+      outcome: "completed",
+      latencyMs: summary.latencyMs,
+      attempts: summary.attempts ?? 1,
+      usage: {
+        ...(summary.promptTokens === undefined ? {} : { promptTokens: summary.promptTokens }),
+        ...(summary.completionTokens === undefined ? {} : { completionTokens: summary.completionTokens }),
+        ...(summary.totalTokens === undefined ? {} : { totalTokens: summary.totalTokens })
+      },
+      retryHistory: cloneJson(summary.retryHistory),
+      stream: cloneJson(summary.stream)
+    };
+    this.writeReasonerCallReports(context, [sanitizePersistedProviderDiagnostics(report)]);
+  }
+
+  private recordFailedReasonerCall(context: ReasonerCallTransactionContext | undefined, error: unknown): void {
+    const failure = providerFailureFromError(error);
+    if (!failure) return;
+    this.writeReasonerCallReports(context, [{
+      outcome: failure.failureKind === "abort" || failure.aborted === true ? "aborted" : "failed",
+      attempts: failure.attempts,
+      stream: { enabled: true, completed: false },
+      failure: cloneJson(failure)
+    }]);
+  }
+
+  private writeReasonerCallReports(
+    context: ReasonerCallTransactionContext | undefined,
+    reports: SocialReasonerCallReport[]
+  ): void {
+    if (!context) return;
+    const transaction = this.reasonerCallTransactions.get(context.transactionId);
+    if (!transaction || transaction.state !== "open" || transaction.traceId !== context.traceId) return;
+    transaction.reports = cloneJson(reports);
   }
 
   onStepResult(receipt: SocialActorStepReceipt<WerewolfSocialObservation, WerewolfSocialPendingAction, GameCommand>): void {
@@ -876,6 +1037,7 @@ function buildScaffoldedWerewolfActionForPlan(input: {
     latencyMs: reasonerOutput?.completion.latencyMs ?? 0,
     promptTokens: reasonerOutput?.completion.usage.promptTokens,
     completionTokens: reasonerOutput?.completion.usage.completionTokens,
+    totalTokens: reasonerOutput?.completion.usage.totalTokens,
     attempts: reasonerOutput?.completion.attempts,
     retryHistory: cloneJson(reasonerOutput?.completion.retryHistory),
     stream: cloneJson(reasonerOutput?.completion.stream),
@@ -2368,7 +2530,7 @@ function summarizeReasonerOutput(
   content: string,
   completion: {
     latencyMs: number;
-    usage?: { promptTokens?: number; completionTokens?: number };
+    usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
     attempts?: number;
     retryHistory?: ReasonerOutputSummary["retryHistory"];
     stream?: ReasonerOutputSummary["stream"];
@@ -2382,6 +2544,7 @@ function summarizeReasonerOutput(
     latencyMs: completion.latencyMs,
     promptTokens: completion.usage?.promptTokens,
     completionTokens: completion.usage?.completionTokens,
+    totalTokens: completion.usage?.totalTokens,
     attempts: completion.attempts,
     retryHistory: cloneJson(completion.retryHistory),
     stream: cloneJson(completion.stream),

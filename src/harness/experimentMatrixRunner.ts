@@ -4,6 +4,27 @@
  * own cell normalization, execution, artifacts, metrics, and conclusions.
  */
 export const GENERIC_EXPERIMENT_MATRIX_VERSION = "harness.generic-experiment-matrix.v1";
+export const GENERIC_EXPERIMENT_MATRIX_AUTHORITY_VERSION = "harness.generic-experiment-matrix-authority.v1";
+
+export interface GenericExperimentMatrixAuthorityCellV1 {
+  id: string;
+  label: string;
+  group: string;
+  /** Content identity only. Domain input remains behind the adapter boundary. */
+  inputHash: string;
+}
+
+/**
+ * Portable parent-store header. `sourceSpecHash` binds the complete normalized
+ * domain spec without teaching the generic control plane its schema.
+ */
+export interface GenericExperimentMatrixAuthoritySpecV1 {
+  version: typeof GENERIC_EXPERIMENT_MATRIX_AUTHORITY_VERSION;
+  id: string;
+  continueOnError: boolean;
+  sourceSpecHash: string;
+  cells: GenericExperimentMatrixAuthorityCellV1[];
+}
 
 /**
  * A matrix cell may execute untrusted domain/provider code. Keep the generic
@@ -26,6 +47,57 @@ export interface GenericExperimentMatrixSpec<TInput> {
   id: string;
   continueOnError?: boolean;
   cells: Array<GenericExperimentMatrixCell<TInput>>;
+}
+
+export function createGenericExperimentMatrixAuthoritySpec<TInput>(input: {
+  experiment: GenericExperimentMatrixSpec<TInput>;
+  sourceSpecHash: string;
+  inputHashOf: (cellInput: TInput, index: number) => string;
+}): GenericExperimentMatrixAuthoritySpecV1 {
+  validateGenericExperimentMatrixSpec(input.experiment);
+  assertSha256(input.sourceSpecHash, "Generic experiment matrix sourceSpecHash");
+  const authority: GenericExperimentMatrixAuthoritySpecV1 = {
+    version: GENERIC_EXPERIMENT_MATRIX_AUTHORITY_VERSION,
+    id: input.experiment.id,
+    continueOnError: input.experiment.continueOnError ?? false,
+    sourceSpecHash: input.sourceSpecHash,
+    cells: input.experiment.cells.map((cell, index) => {
+      const inputHash = input.inputHashOf(cell.input, index);
+      assertSha256(inputHash, `Generic experiment matrix cell ${index} inputHash`);
+      return {
+        id: cell.id,
+        label: cell.label ?? cell.id,
+        group: cell.group ?? "default",
+        inputHash
+      };
+    })
+  };
+  validateGenericExperimentMatrixAuthoritySpec(authority);
+  return authority;
+}
+
+export function validateGenericExperimentMatrixAuthoritySpec(
+  authority: GenericExperimentMatrixAuthoritySpecV1
+): void {
+  if (!isRecord(authority)) throw new Error("Generic experiment matrix authority must be an object.");
+  assertExactKeys(authority, ["version", "id", "continueOnError", "sourceSpecHash", "cells"], "Generic experiment matrix authority");
+  if (authority.version !== GENERIC_EXPERIMENT_MATRIX_AUTHORITY_VERSION) {
+    throw new Error(`Generic experiment matrix authority version must be ${GENERIC_EXPERIMENT_MATRIX_AUTHORITY_VERSION}.`);
+  }
+  if (typeof authority.id !== "string" || !authority.id.trim()) throw new Error("Generic experiment matrix authority id is required.");
+  if (typeof authority.continueOnError !== "boolean") throw new Error("Generic experiment matrix authority continueOnError is required.");
+  assertSha256(authority.sourceSpecHash, "Generic experiment matrix authority sourceSpecHash");
+  if (!Array.isArray(authority.cells) || !authority.cells.length) throw new Error("Generic experiment matrix authority requires cells.");
+  const ids = new Set<string>();
+  for (const [index, cell] of authority.cells.entries()) {
+    if (!isRecord(cell) || typeof cell.id !== "string" || !cell.id.trim()) throw new Error(`Generic experiment matrix authority cell ${index} id is required.`);
+    assertExactKeys(cell, ["id", "label", "group", "inputHash"], `Generic experiment matrix authority cell ${index}`);
+    if (typeof cell.label !== "string" || !cell.label.trim()) throw new Error(`Generic experiment matrix authority cell ${index} label is required.`);
+    if (typeof cell.group !== "string" || !cell.group.trim()) throw new Error(`Generic experiment matrix authority cell ${index} group is required.`);
+    assertSha256(cell.inputHash, `Generic experiment matrix authority cell ${index} inputHash`);
+    if (ids.has(cell.id)) throw new Error(`Generic experiment matrix authority has duplicate cell id ${cell.id}.`);
+    ids.add(cell.id);
+  }
 }
 
 export interface GenericExperimentMatrixCellResult<TResult> {
@@ -94,6 +166,7 @@ export async function runGenericExperimentMatrix<TInput, TResult>(
   const describeError = options.describeError ?? defaultErrorText;
   const cells = validateInitialMatrixCells(options.experiment, options.initialCells ?? []);
   for (let index = cells.length; index < options.experiment.cells.length; index += 1) {
+    if (cells.at(-1)?.status === "failed" && !options.experiment.continueOnError) break;
     if (options.abortSignal?.aborted) break;
     const cell = options.experiment.cells[index]!;
     const label = cell.label ?? cell.id;
@@ -238,4 +311,15 @@ function assertMatrixCellStatus(status: unknown): asserts status is GenericExper
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertSha256(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) throw new Error(`${label} must be a SHA-256 digest.`);
+}
+
+function assertExactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const allowedKeys = new Set(allowed);
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.has(key)) throw new Error(`${label} contains unsupported field ${key}.`);
+  }
 }

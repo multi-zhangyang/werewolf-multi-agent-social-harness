@@ -13,6 +13,7 @@ import {
 } from "./profiles";
 import {
   buildFinalHarnessCheckpoint,
+  buildHarnessCheckpointAtPrefix,
   buildMatchArtifact,
   validateHarnessCheckpoint,
   validateMatchArtifactIntegrity,
@@ -438,6 +439,15 @@ async function runDurableTournament(options: TournamentOptions): Promise<Tournam
             createdAt: artifact.createdAt,
             reason: "experiment checkpointPolicy final"
           });
+        },
+        nativeCheckpointForArtifactBoundary(artifact, boundary) {
+          return buildHarnessCheckpointAtPrefix({
+            artifact,
+            selector: { nativeStepCount: boundary.nativeStepCount },
+            checkpointId: `${artifact.runId}:checkpoint:native:${boundary.nativeStepCount}`,
+            createdAt: artifact.createdAt,
+            reason: "experiment checkpointPolicy native-boundaries"
+          });
         }
       },
       evaluation: {
@@ -536,6 +546,7 @@ function buildWerewolfGenericExperimentSpec(input: {
       id: profile.id,
       version: "1",
       policyId: WEREWOLF_PROFILE_POLICY_SELECTOR_ID,
+      reasonerId: "werewolf-harness-reasoner",
       temperature: profile.temperature ?? input.defaultTemperature
     })),
     modelAssignments: input.profiles.map((profile) => ({ profileId: profile.id, modelId: profile.model })),

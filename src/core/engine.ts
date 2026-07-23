@@ -3,7 +3,8 @@ import {
   assertSupportedWerewolfRulesetId,
   normalizeWerewolfGameConfig,
   ROLE_DEFINITIONS,
-  teamForRole
+  teamForRole,
+  werewolfRulesetManifest
 } from "./roles";
 import type {
   CastSheriffVoteCommand,
@@ -766,6 +767,7 @@ function eligibleLastWords(state: GameState): string[] {
 }
 
 export function selectWolfTarget(state: GameState): string | undefined {
+  const ruleset = werewolfRulesetManifest(state.config.rulesetId);
   const entries = Object.entries(state.night.wolfVotes);
   if (entries.length === 0) return undefined;
   const tally = new Map<string, { count: number; firstIndex: number }>();
@@ -776,6 +778,13 @@ export function selectWolfTarget(state: GameState): string | undefined {
       firstIndex: current?.firstIndex ?? index
     });
   });
+  // classic-9-seat.v1 resolves equal tallies in committed ballot insertion
+  // order: the target whose first supporting vote committed earliest wins.
+  // Keep the manifest check adjacent to the implementation so this cannot be
+  // changed as an undocumented scheduler detail under the same ruleset id.
+  if (ruleset.wolfKillVoteTieBreak !== "first_committed_target_vote") {
+    throw new Error(`Unsupported wolf kill vote tie-break semantics for ${ruleset.id}.`);
+  }
   return [...tally.entries()].sort((a, b) => b[1].count - a[1].count || a[1].firstIndex - b[1].firstIndex)[0]?.[0];
 }
 

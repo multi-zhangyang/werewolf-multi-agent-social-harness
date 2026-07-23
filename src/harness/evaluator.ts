@@ -1,5 +1,10 @@
 import type { GameEvent, GameState, Role, Team } from "../core/types";
-import { metric, type HarnessEvaluator, type HarnessEvaluationContext } from "./evaluation";
+import {
+  metric,
+  type HarnessEvaluator,
+  type HarnessEvaluationContext,
+  type HarnessEvaluationStatus
+} from "./evaluation";
 import { harnessFailureEvidenceFromEpisode } from "./executionEvidence";
 import { werewolfHarnessTurnEvidenceFromEpisode } from "./werewolfExecutionEvidence";
 import { deriveSocialExposureRecords, isSocialStepCommitted, type SocialEpisodeArtifact, type SocialExposureRecord, type SocialMessage } from "./social";
@@ -278,7 +283,13 @@ export function createWerewolfOutcomeEvaluator(): WerewolfEvaluator<WerewolfOutc
         evaluatorId: WEREWOLF_OUTCOME_EVALUATOR_ID,
         label: "Werewolf outcome and reward evaluator",
         version: "1.0.0",
-        metrics: metricsFromWerewolfOutcomeEvaluation(evaluation, context.finalState, context.agents, context.socialEpisode),
+        metrics: metricsFromWerewolfOutcomeEvaluation(
+          evaluation,
+          context.finalState,
+          context.agents,
+          context.socialEpisode,
+          context.status
+        ),
         output: {
           winner: evaluation.winner,
           teamRewards: evaluation.teamRewards,
@@ -586,10 +597,11 @@ export function metricsFromAdversarialEvaluation(
   evaluation: AdversarialEvaluation,
   state: GameState,
   agents: AgentHarnessState[] = [],
-  socialEpisode?: unknown
+  socialEpisode?: unknown,
+  status: HarnessEvaluationStatus = "completed"
 ): HarnessMetricRecord[] {
   return [
-    ...metricsFromWerewolfOutcomeEvaluation(evaluation, state, agents, socialEpisode),
+    ...metricsFromWerewolfOutcomeEvaluation(evaluation, state, agents, socialEpisode, status),
     ...metricsFromWerewolfVoteAccuracyEvaluation(evaluation, state),
     ...metricsFromWerewolfRoleSurvivalEvaluation(evaluateRoleSurvival(state), state, agents),
     ...metricsFromWerewolfInfluenceEvaluation(evaluation, state),
@@ -601,7 +613,8 @@ export function metricsFromWerewolfOutcomeEvaluation(
   evaluation: AdversarialEvaluation,
   state: GameState,
   agents: AgentHarnessState[] = [],
-  socialEpisode?: unknown
+  socialEpisode?: unknown,
+  status: HarnessEvaluationStatus = "completed"
 ): HarnessMetricRecord[] {
   const metrics: HarnessMetricRecord[] = [];
   const source = WEREWOLF_OUTCOME_EVALUATOR_ID;
@@ -620,9 +633,16 @@ export function metricsFromWerewolfOutcomeEvaluation(
       confidence: 1,
       aggregation: "weighted_average",
       evidenceRefs: eventEvidence,
-      metadata: { winner: evaluation.winner ?? null, phase: state.phase, day: state.day }
+      metadata: { winner: evaluation.winner ?? null, phase: state.phase, day: state.day, status }
     })
   );
+
+  // Partial lifecycle artifacts retain deterministic diagnostic and execution
+  // evidence, but they are not wins or losses. Suppress every reward-bearing
+  // sample unless the harness completed with a legal domain winner so raw
+  // metric consumers cannot accidentally aggregate a truncation/failure as a
+  // defeat. The completion metric above remains available for coverage.
+  if (status !== "completed" || !evaluation.winner) return metrics;
 
   for (const [team, value] of Object.entries(evaluation.teamRewards)) {
     const teamPlayers = state.players.filter((player) => player.team === team);

@@ -6,13 +6,26 @@ import {
   type NormalizedTournamentExperiment,
   type TournamentExperimentSpecV1
 } from "./experiment";
-import { runGenericExperimentMatrix } from "./experimentMatrixRunner";
-import { hashStableState } from "./hash";
+import {
+  createGenericExperimentMatrixAuthoritySpec,
+  runGenericExperimentMatrix,
+  type GenericExperimentMatrixSpec
+} from "./experimentMatrixRunner";
+import {
+  HarnessExperimentMatrixRunStore,
+  type HarnessExperimentMatrixRunRecordV1
+} from "./experimentMatrixRunStore";
+import { hashStableJsonValue, hashStableState } from "./hash";
 import { safeProviderFailureMessage } from "./providerFailure";
 import type { HarnessAssignmentConfig } from "./profiles";
 import { redactSecrets } from "./redaction";
 import type { SocialExecutionLimits } from "./social";
-import { openTournamentOrchestration, runTournament, type TournamentResult } from "./tournament";
+import {
+  openTournamentOrchestration,
+  runTournament,
+  type OpenedTournamentOrchestrationOptions,
+  type TournamentResult
+} from "./tournament";
 import { writeTournamentArtifactDirectory } from "./tournamentArtifacts";
 import { publishNewLocalArtifactDirectory } from "./localArtifactDirectory";
 import type { HarnessAgentProfile, HarnessReasoner, WerewolfJointPhaseScheduler } from "./types";
@@ -261,13 +274,41 @@ export function mergeMatrixExperimentOverrides(
 }
 
 export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): Promise<ExperimentMatrixResult> {
-  const elapsedMsByExecutionId = new Map<string, number>();
   // Open durable authority before entering the generic cell error boundary.
   // Store/provenance/integrity failures must abort the matrix, never become a
   // misleading ordinary failed cell under continueOnError.
   const sharedOrchestration = options.orchestrationBaseDirectory
     ? await openTournamentOrchestration({ baseDirectory: options.orchestrationBaseDirectory })
     : undefined;
+  if (!sharedOrchestration || !options.orchestrationBaseDirectory) {
+    return runExperimentMatrixWithAuthority(options, undefined, undefined);
+  }
+  const matrixStore = await HarnessExperimentMatrixRunStore.open({
+    baseDirectory: path.join(path.resolve(options.orchestrationBaseDirectory), "matrix-runs"),
+    childRunStore: {
+      async getFinalized(runSetId) {
+        const child = await sharedOrchestration.runStore.get(runSetId);
+        if (!child || child.state !== "finalized") return undefined;
+        return {
+          runSetId: child.runSetId,
+          status: lifecycleForChildRunRecord(child),
+          completedAt: child.updatedAt,
+          canonicalHash: hashStableJsonValue(child)
+        };
+      }
+    }
+  });
+  return matrixStore.withMatrixLease(options.experiment.id, () =>
+    runExperimentMatrixWithAuthority(options, sharedOrchestration, matrixStore)
+  );
+}
+
+async function runExperimentMatrixWithAuthority(
+  options: ExperimentMatrixRunOptions,
+  sharedOrchestration: OpenedTournamentOrchestrationOptions | undefined,
+  matrixStore: HarnessExperimentMatrixRunStore | undefined
+): Promise<ExperimentMatrixResult> {
+  const elapsedMsByExecutionId = new Map<string, number>();
   const executeTournamentCell = (
     tournament: NormalizedTournamentExperiment,
     cellId: string
@@ -304,38 +345,80 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
     status: "completed" | "truncated" | "failed";
     result: TournamentResult;
   }>;
-  if (sharedOrchestration) {
-    for (const [index, cell] of options.experiment.cells.entries()) {
-      const durable = await sharedOrchestration.runStore.get(`${options.experiment.id}:${cell.id}`);
-      if (!durable || durable.state !== "finalized") break;
+  const genericExperiment: GenericExperimentMatrixSpec<NormalizedTournamentExperiment> = {
+    id: options.experiment.id,
+    continueOnError: options.experiment.continueOnError,
+    cells: options.experiment.cells.map((cell) => ({
+      id: cell.id,
+      label: cell.label,
+      group: cell.group,
+      input: cell.tournament
+    }))
+  };
+  const matrixAuthority = createGenericExperimentMatrixAuthoritySpec({
+    experiment: genericExperiment,
+    sourceSpecHash: hashStableJsonValue(options.experiment),
+    inputHashOf: (tournament) => hashStableJsonValue(tournament)
+  });
+  let parentRecord: HarnessExperimentMatrixRunRecordV1 | undefined;
+  if (matrixStore) {
+    const resume = await matrixStore.beginOrResume({
+      matrixId: options.experiment.id,
+      authority: matrixAuthority
+    });
+    parentRecord = resume.record;
+    // A crash may leave a started parent cell whose child run-set is absent,
+    // active, or already finalized. Re-entering the existing child orchestrator
+    // recovers that exact child without granting it parent membership authority.
+    if (parentRecord.state === "active" && parentRecord.currentCell) {
+      const current = parentRecord.currentCell;
+      const expected = options.experiment.cells[current.index]!;
+      await executeTournamentCell(expected.tournament, expected.id);
+      parentRecord = await matrixStore.adoptCurrentCell(options.experiment.id);
+    }
+    for (const reference of parentRecord.cells) {
+      const cell = options.experiment.cells[reference.index]!;
       const tournament = await executeTournamentCell(cell.tournament, cell.id);
       const status = statusOfTournament(tournament);
+      if (status !== reference.status) {
+        throw new Error(`Matrix child ${reference.childRunSetId} lifecycle conflicts with parent authority.`);
+      }
+      elapsedMsByExecutionId.set(reference.executionId, reference.elapsedMs);
       initialCells.push({
-        index,
-        id: cell.id,
-        label: cell.label,
-        group: cell.group,
-        executionId: `${options.experiment.id}:cell:${cell.id}:${index}`,
-        status,
+        index: reference.index,
+        id: reference.id,
+        label: reference.label,
+        group: reference.group,
+        executionId: reference.executionId,
+        status: reference.status,
         result: tournament
       });
-      if (status === "failed" && !options.experiment.continueOnError) break;
     }
   }
+  const matrixAbortSignal = parentRecord?.state === "finalized"
+    ? AbortSignal.abort("matrix already finalized")
+    : options.executionLimits?.abortSignal;
   const generic = await runGenericExperimentMatrix({
-    experiment: {
-      id: options.experiment.id,
-      continueOnError: options.experiment.continueOnError,
-      cells: options.experiment.cells.map((cell) => ({
-        id: cell.id,
-        label: cell.label,
-        group: cell.group,
-        input: cell.tournament
-      }))
-    },
-    abortSignal: options.executionLimits?.abortSignal,
+    experiment: genericExperiment,
+    abortSignal: matrixAbortSignal,
     initialCells,
+    createdAt: parentRecord?.createdAt,
     captureCellErrors: sharedOrchestration ? false : true,
+    onCellStarting: matrixStore
+      ? async (context) => {
+          await matrixStore.startCell({ matrixId: options.experiment.id, index: context.index });
+        }
+      : undefined,
+    onCellSettled: matrixStore
+      ? async (settled) => {
+          const record = await matrixStore.adoptCurrentCell(options.experiment.id);
+          const adopted = record.cells[settled.index];
+          if (!adopted || adopted.status !== settled.status) {
+            throw new Error(`Matrix child ${settled.id} lifecycle conflicts with its adopted parent reference.`);
+          }
+          elapsedMsByExecutionId.set(settled.executionId, adopted.elapsedMs);
+        }
+      : undefined,
     runCell: async (tournament, context) => {
       const started = performance.now();
       try {
@@ -353,6 +436,7 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
     },
     describeError: (error) => safeProviderFailureMessage(error, "Experiment matrix cell failed before its tournament result was recorded.")
   });
+  if (matrixStore) parentRecord = await matrixStore.finalize(options.experiment.id);
   const cells: ExperimentMatrixCellResult[] = generic.cells.map((cell) => ({
     index: cell.index,
     id: cell.id,
@@ -368,8 +452,8 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
     artifactVersion: MATRIX_ARTIFACT_VERSION,
     kind: "experiment-matrix-result",
     experiment: options.experiment,
-    createdAt: generic.createdAt,
-    completedAt: generic.completedAt,
+    createdAt: parentRecord?.createdAt ?? generic.createdAt,
+    completedAt: parentRecord?.completedAt ?? generic.completedAt,
     status: generic.status,
     cellsRequested: generic.cellsRequested,
     cellsUnstarted: generic.cellsUnstarted,
@@ -384,6 +468,15 @@ export async function runExperimentMatrix(options: ExperimentMatrixRunOptions): 
     cells,
     statistics
   };
+}
+
+function lifecycleForChildRunRecord(child: {
+  gamesFailed: number;
+  gamesTruncated: number;
+  gamesUnstarted: number;
+}): "completed" | "truncated" | "failed" {
+  if (child.gamesFailed > 0 || child.gamesUnstarted > 0) return "failed";
+  return child.gamesTruncated > 0 ? "truncated" : "completed";
 }
 
 export function buildExperimentMatrixStatistics(

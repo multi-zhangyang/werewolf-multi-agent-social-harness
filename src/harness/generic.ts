@@ -24,10 +24,12 @@ export {
   compactRecordedSocialAgentSnapshots,
   createGenericForkProvenance,
   createHarnessAgentSnapshotFrameResolver,
+  HARNESS_EPISODE_PROJECTION_VERSION,
   validateHarnessAgentSnapshotFrameRegistry,
   validateHarnessCheckpointEnvelope,
   validateHarnessCheckpointReplay,
-  validateHarnessEpisodeArtifactEnvelope
+  validateHarnessEpisodeArtifactEnvelope,
+  validateHarnessEpisodeProjectionEnvelope
 } from "./episodeArtifacts";
 export type {
   BuildReplayableSocialPrefixOptions,
@@ -37,6 +39,8 @@ export type {
   HarnessCheckpointEnvelope,
   HarnessCheckpointSource,
   HarnessEpisodeArtifactEnvelope,
+  HarnessEpisodeProjectionEnvelope,
+  HarnessEpisodeProjectionVisibility,
   ReplayableSocialPrefix
 } from "./episodeArtifacts";
 export { buildSocialCheckpointForkSeed, runForkedHarnessEpisode } from "./checkpointRuntime";
@@ -62,6 +66,8 @@ export {
   countSocialStepCommitsByActor,
   deriveSocialExposureRecords,
   runSocialEpisode,
+  SOCIAL_REASONER_CALL_EVIDENCE_VERSION,
+  validateSocialReasonerCallEvidence,
   validateSocialEpisodeArtifact
 } from "./social";
 export type {
@@ -72,6 +78,11 @@ export type {
   SocialEpisodeArtifact,
   SocialEpisodeOptions,
   SocialMessage,
+  SocialReasonerCallCollectionContext,
+  SocialReasonerCallEvidence,
+  SocialReasonerCallFailure,
+  SocialReasonerCallOutcome,
+  SocialReasonerCallReport,
   SocialRuntimeActorBinding
 } from "./social";
 export {
@@ -126,6 +137,7 @@ export {
   HARNESS_EPISODE_TRAJECTORY_MESSAGE_VERSION,
   HARNESS_EPISODE_TRAJECTORY_STEP_VERSION,
   HarnessEpisodeArtifactStore,
+  deriveHarnessEpisodeArtifactSha256,
   deriveHarnessEpisodeTrajectoryJsonl,
   openHarnessEpisodeArtifactStore
 } from "./episodeArtifactStore";
@@ -145,14 +157,26 @@ export type {
   HarnessEpisodeStoreManifest,
   HarnessEpisodeStorePutOptions
 } from "./episodeArtifactStore";
-export { runGenericExperiment } from "./experimentOrchestrator";
+export {
+  GENERIC_EXPERIMENT_PUBLICATION_RUN_SET_VERSION,
+  GENERIC_EXPERIMENT_PUBLICATION_VERSION,
+  runGenericExperiment
+} from "./experimentOrchestrator";
 export type {
   ExecutedGenericExperimentEpisode,
+  GenericExperimentAttemptErrorClassification,
+  GenericExperimentAttemptErrorContext,
+  GenericExperimentAttemptIdentity,
   GenericExperimentArtifactStore,
   GenericExperimentEpisodeContext,
   GenericExperimentEvaluationAdapter,
   GenericExperimentExecutionAdapter,
   GenericExperimentExecutionResult,
+  GenericExperimentPublicationEpisode,
+  GenericExperimentPublicationResult,
+  GenericExperimentPublicationRunSet,
+  GenericExperimentPublicationTournament,
+  GenericExperimentRestrictedExecutionResult,
   GenericExperimentRunStore,
   RunGenericExperimentOptions
 } from "./experimentOrchestrator";
@@ -160,22 +184,34 @@ export {
   HARNESS_EXPERIMENT_RUN_INDEX_VERSION,
   HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION,
   HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V2,
+  HARNESS_EXPERIMENT_RUN_MANIFEST_VERSION_V3,
   HARNESS_EXPERIMENT_RUN_RECORD_VERSION,
   HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V2,
+  HARNESS_EXPERIMENT_RUN_RECORD_VERSION_V3,
   HarnessExperimentRunStore
 } from "./experimentRunStore";
 export type {
   GenericExperimentEpisodeAuthority,
   HarnessExperimentRunEpisodeReferenceV1,
+  HarnessExperimentRunEpisodeReferenceV3,
+  HarnessExperimentEpisodeRetryCode,
   HarnessExperimentRunManifestV1,
   HarnessExperimentRunManifestV2,
+  HarnessExperimentRunManifestV3,
   HarnessExperimentRunManifest,
   HarnessExperimentRunCurrentEpisodeV2,
+  HarnessExperimentRunCurrentEpisodeV3,
+  HarnessExperimentRunRetriedAttemptV3,
+  HarnessExperimentRunRetryWaitEpisodeV3,
+  HarnessExperimentRunStartedEpisodeV3,
+  HarnessExperimentRunStagedEpisodeV3,
+  HarnessExperimentRunTerminalAttemptV3,
   HarnessExperimentRunRecovery,
   HarnessExperimentRunResume,
   HarnessExperimentRunRecord,
   HarnessExperimentRunRecordV1,
   HarnessExperimentRunRecordV2,
+  HarnessExperimentRunRecordV3,
   HarnessExperimentRunStoreEntry,
   HarnessExperimentRunStoreIndexV1,
   HarnessExperimentRunStoreOptions
@@ -197,6 +233,40 @@ export {
   validateGenericTournamentRunSetArtifact,
   writeGenericTournamentRunSetArtifact
 } from "./genericTournamentArtifacts";
+export {
+  GENERIC_EXPERIMENT_MATRIX_AUTHORITY_VERSION,
+  GENERIC_EXPERIMENT_MATRIX_CELL_FAILURE_MESSAGE,
+  GENERIC_EXPERIMENT_MATRIX_VERSION,
+  createGenericExperimentMatrixAuthoritySpec,
+  runGenericExperimentMatrix,
+  validateGenericExperimentMatrixAuthoritySpec,
+  validateGenericExperimentMatrixSpec
+} from "./experimentMatrixRunner";
+export type {
+  GenericExperimentMatrixAuthorityCellV1,
+  GenericExperimentMatrixAuthoritySpecV1,
+  GenericExperimentMatrixCell,
+  GenericExperimentMatrixCellLifecycle,
+  GenericExperimentMatrixCellResult,
+  GenericExperimentMatrixResult,
+  GenericExperimentMatrixSpec,
+  RunGenericExperimentMatrixOptions
+} from "./experimentMatrixRunner";
+export {
+  HARNESS_EXPERIMENT_MATRIX_RUN_MANIFEST_VERSION,
+  HARNESS_EXPERIMENT_MATRIX_RUN_RECORD_VERSION,
+  HarnessExperimentMatrixRunStore
+} from "./experimentMatrixRunStore";
+export type {
+  ExperimentMatrixChildRunAuthority,
+  GenericExperimentMatrixFinalizedChildV1,
+  HarnessExperimentMatrixCellReferenceV1,
+  HarnessExperimentMatrixCurrentCellV1,
+  HarnessExperimentMatrixRunManifestV1,
+  HarnessExperimentMatrixRunRecordV1,
+  HarnessExperimentMatrixRunResume,
+  HarnessExperimentMatrixRunStoreOptions
+} from "./experimentMatrixRunStore";
 export type {
   BuildGenericTournamentRunSetOptions,
   GenericTournamentArtifactAdapter,

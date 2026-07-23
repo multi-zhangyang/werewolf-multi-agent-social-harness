@@ -1,4 +1,4 @@
-import { hashStableState } from "./hash";
+import { hashStableJsonValue, hashStableState } from "./hash";
 import {
   createGenericExperimentForkLineage,
   validateGenericExperimentExecutionAttestation,
@@ -34,6 +34,7 @@ import {
  * execution envelope shared by replayable social experiments.
  */
 export const HARNESS_EPISODE_ENVELOPE_VERSION = "harness.episode-envelope.v1";
+export const HARNESS_EPISODE_PROJECTION_VERSION = "harness.episode-projection.v1";
 export const HARNESS_CHECKPOINT_ENVELOPE_VERSION = "harness.checkpoint-envelope.v1";
 export const HARNESS_FORK_PROVENANCE_VERSION = "harness.fork-provenance.v2";
 export const HARNESS_AGENT_SNAPSHOT_FRAME_VERSION = "harness.agent-snapshot-frame.v1";
@@ -91,6 +92,69 @@ export interface HarnessEpisodeArtifactEnvelope<
   /** Central binding from the normalized spec to runner-authored execution facts. */
   executionAttestation?: GenericExperimentExecutionAttestationV1;
   forkOf?: TForkProvenance;
+}
+
+export type HarnessEpisodeProjectionVisibility = "postgame-redacted" | "public";
+
+/**
+ * A derived display/export sidecar bound to one immutable canonical episode.
+ * It is intentionally not replay, checkpoint, evaluator, or environment
+ * authority. The closed envelope has no generatedAt field, so exact retries
+ * remain stable across processes and restarts.
+ */
+export interface HarnessEpisodeProjectionEnvelope<TPayload = unknown> {
+  schemaVersion: typeof HARNESS_EPISODE_PROJECTION_VERSION;
+  kind: "episode-projection";
+  source: {
+    runId: string;
+    artifactSha256: string;
+    visibility: HarnessEpisodeProjectionVisibility;
+    policyId: string;
+    policyVersion: string;
+  };
+  payloadSha256: string;
+  payload: TPayload;
+}
+
+/** Validate the complete closed projection envelope and portable JSON payload. */
+export function validateHarnessEpisodeProjectionEnvelope(value: unknown): string[] {
+  if (!isRecord(value)) return ["Episode projection must be an object."];
+  const errors: string[] = [];
+  assertClosedProjectionKeys(value, ["schemaVersion", "kind", "source", "payloadSha256", "payload"], "projection", errors);
+  if (value.schemaVersion !== HARNESS_EPISODE_PROJECTION_VERSION) {
+    errors.push(`projection.schemaVersion must be ${HARNESS_EPISODE_PROJECTION_VERSION}.`);
+  }
+  if (value.kind !== "episode-projection") errors.push("projection.kind must be episode-projection.");
+  if (!isRecord(value.source)) {
+    errors.push("projection.source must be an object.");
+  } else {
+    assertClosedProjectionKeys(
+      value.source,
+      ["runId", "artifactSha256", "visibility", "policyId", "policyVersion"],
+      "projection.source",
+      errors
+    );
+    if (!isNonemptyString(value.source.runId)) errors.push("projection.source.runId is required.");
+    if (!isSha256(value.source.artifactSha256)) errors.push("projection.source.artifactSha256 must be a SHA-256 digest.");
+    if (value.source.visibility !== "postgame-redacted" && value.source.visibility !== "public") {
+      errors.push("projection.source.visibility must be postgame-redacted or public.");
+    }
+    if (!isNonemptyString(value.source.policyId)) errors.push("projection.source.policyId is required.");
+    if (!isNonemptyString(value.source.policyVersion)) errors.push("projection.source.policyVersion is required.");
+  }
+  if (!isSha256(value.payloadSha256)) errors.push("projection.payloadSha256 must be a SHA-256 digest.");
+  const payloadErrors = validatePortableProjectionJson(value.payload, "projection.payload");
+  errors.push(...payloadErrors);
+  if (!payloadErrors.length && isSha256(value.payloadSha256)) {
+    try {
+      if (hashStableJsonValue(value.payload) !== value.payloadSha256) {
+        errors.push("projection.payloadSha256 does not match projection.payload.");
+      }
+    } catch {
+      errors.push("projection.payload could not be hashed as portable JSON.");
+    }
+  }
+  return errors;
 }
 
 /**
@@ -1561,6 +1625,48 @@ function isNonemptyString(value: unknown): value is string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function assertClosedProjectionKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+  errors: string[]
+): void {
+  const allowedKeys = new Set(allowed);
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.has(key)) errors.push(`${label} contains unsupported field ${key}.`);
+  }
+}
+
+function validatePortableProjectionJson(value: unknown, path: string, seen = new Set<object>()): string[] {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return [];
+  if (typeof value === "number") return Number.isFinite(value) ? [] : [`${path} contains a non-finite number.`];
+  if (typeof value !== "object") return [`${path} contains unsupported non-JSON data.`];
+  if (seen.has(value)) return [`${path} contains a cycle.`];
+  seen.add(value);
+  const errors: string[] = [];
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      errors.push(...validatePortableProjectionJson(item, `${path}[${index}]`, seen));
+    }
+  } else {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      errors.push(`${path} contains a non-JSON object.`);
+    } else {
+      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        if (item === undefined) errors.push(`${path}.${key} is undefined.`);
+        else errors.push(...validatePortableProjectionJson(item, `${path}.${key}`, seen));
+      }
+    }
+  }
+  seen.delete(value);
+  return errors;
 }
 
 function assertCanonicalHarnessAgentSnapshotFrame<TAgentState>(frame: HarnessAgentSnapshotFrame<TAgentState>, label: string): void {
