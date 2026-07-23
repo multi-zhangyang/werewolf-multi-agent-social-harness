@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -37,6 +37,36 @@ afterEach(async () => {
 });
 
 describe("experiment matrix server API", () => {
+  it("does not recover a manifest-only partial matrix artifact tree", async () => {
+    const artifactBaseDir = await makeTempDir();
+    const partialId = "11111111-1111-4111-8111-111111111111";
+    const partialDirectory = path.join(artifactBaseDir, partialId);
+    await mkdir(partialDirectory);
+    await writeFile(path.join(partialDirectory, "manifest.json"), `${JSON.stringify({
+      artifactVersion: "harness.experiment-matrix-artifact.v1",
+      kind: "experiment-matrix",
+      createdAt: "2026-07-22T00:00:00.000Z",
+      matrixId: "partial-matrix",
+      files: {
+        manifest: "manifest.json",
+        specNormalized: "spec.normalized.json",
+        cells: "cells.jsonl",
+        statistics: "statistics.json",
+        summaryMarkdown: "summary.md",
+        modelStatsCsv: "model_stats.csv",
+        profileStatsCsv: "profile_stats.csv",
+        pairwiseModelComparisonsCsv: "pairwise_model_comparisons.csv",
+        tournaments: []
+      }
+    }, null, 2)}\n`, "utf8");
+
+    const baseUrl = await startServer({ matrixArtifactBaseDir: artifactBaseDir });
+    const listed = await requestJson(baseUrl, "GET", "/api/experiments/matrix/artifacts");
+
+    expect(listed.status).toBe(200);
+    expect(listed.body.artifactSets).toEqual([]);
+  });
+
   it("exports matrix artifacts under a configured base dir and downloads registered files only", async () => {
     const artifactBaseDir = await makeTempDir();
     const baseUrl = await startServer({ matrixArtifactBaseDir: artifactBaseDir });

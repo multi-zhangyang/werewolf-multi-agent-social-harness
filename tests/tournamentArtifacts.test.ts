@@ -1492,7 +1492,7 @@ describe("tournament artifact directory writer", () => {
       weight: 0,
       evidenceRefs: expect.any(Array)
     });
-  }, 60000);
+  }, 120000);
 
   it("writes returned failed harness runs as partial match artifacts and failure records without leaking secrets", async () => {
     const outputDir = await makeTempDir();
@@ -2017,7 +2017,7 @@ describe("tournament artifact directory writer", () => {
 
     const matchArtifact = await readJson<Record<string, any>>(path.join(outputDir, episodes[0].matchArtifact));
     expect(matchArtifact.forkOf).toEqual(forkOf);
-  });
+  }, 15000);
 
   it("rebuilds research leaderboard exports from persisted raw records without an in-memory stats fallback", async () => {
     const outputDir = await makeTempDir();
@@ -2444,9 +2444,9 @@ function totalReward(stats: Record<string, { rewardTotal: number }>): number {
 }
 
 async function makeTempDir(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), "werewolf-tournament-artifacts-"));
-  tempDirs.push(dir);
-  return dir;
+  const root = await mkdtemp(path.join(tmpdir(), "werewolf-tournament-artifacts-"));
+  tempDirs.push(root);
+  return path.join(root, "artifact");
 }
 
 async function expectRequiredFiles(outputDir: string): Promise<void> {

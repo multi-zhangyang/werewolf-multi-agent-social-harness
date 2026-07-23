@@ -31,6 +31,7 @@ import type {
 } from "./types";
 import { sanitizePersistedProviderDiagnostics } from "./providerFailure";
 import { redactSecrets } from "./redaction";
+import { publishNewLocalArtifactDirectory } from "./localArtifactDirectory";
 import { countSocialStepCommits, countSocialStepCommitsByActor, isSocialStepCommitted } from "./social";
 import {
   rebuildTournamentLeaderboardFromRawRecords,
@@ -477,6 +478,27 @@ export async function writeTournamentArtifactDirectory(
   result: TournamentResult,
   options: TournamentArtifactWriteOptions
 ): Promise<TournamentArtifactWriteResult> {
+  const outputDir = path.resolve(options.outputDir);
+  if (options.overwrite) {
+    // Mutable overwrite remains a legacy CLI compatibility path. Canonical
+    // server exports and matrix nesting use immutable publication below.
+    return writeTournamentArtifactDirectoryDirect(result, { ...options, outputDir });
+  }
+  const stagedResult = await publishNewLocalArtifactDirectory({
+    finalDirectory: outputDir,
+    populate: (stagingDirectory) => writeTournamentArtifactDirectoryDirect(result, {
+      ...options,
+      outputDir: stagingDirectory,
+      overwrite: false
+    })
+  });
+  return remapArtifactDirectoryResult(stagedResult, stagedResult.outputDir, outputDir);
+}
+
+async function writeTournamentArtifactDirectoryDirect(
+  result: TournamentResult,
+  options: TournamentArtifactWriteOptions
+): Promise<TournamentArtifactWriteResult> {
   const visibility = tournamentArtifactVisibilityForOptions(options);
   if (visibility === "public") {
     return writePublicTournamentArtifactDirectory(result, options);
@@ -607,6 +629,31 @@ export async function writeTournamentArtifactDirectory(
   await writeText(files.leaderboardCsv, leaderboardCsv, overwrite);
 
   return filesResult(outputDir, files);
+}
+
+function remapArtifactDirectoryResult(
+  result: TournamentArtifactWriteResult,
+  stagingDirectory: string,
+  finalDirectory: string
+): TournamentArtifactWriteResult {
+  const stagingRoot = path.resolve(stagingDirectory);
+  const finalRoot = path.resolve(finalDirectory);
+  const remap = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      const candidate = path.resolve(value);
+      if (candidate === stagingRoot) return finalRoot;
+      if (candidate.startsWith(`${stagingRoot}${path.sep}`)) {
+        return path.join(finalRoot, path.relative(stagingRoot, candidate));
+      }
+      return value;
+    }
+    if (Array.isArray(value)) return value.map(remap);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, remap(item)]));
+    }
+    return value;
+  };
+  return remap(result) as TournamentArtifactWriteResult;
 }
 
 /**

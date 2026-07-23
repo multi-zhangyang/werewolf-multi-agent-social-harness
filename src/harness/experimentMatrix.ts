@@ -14,6 +14,7 @@ import { redactSecrets } from "./redaction";
 import type { SocialExecutionLimits } from "./social";
 import { openTournamentOrchestration, runTournament, type TournamentResult } from "./tournament";
 import { writeTournamentArtifactDirectory } from "./tournamentArtifacts";
+import { publishNewLocalArtifactDirectory } from "./localArtifactDirectory";
 import type { HarnessAgentProfile, HarnessReasoner, WerewolfJointPhaseScheduler } from "./types";
 
 export const MATRIX_EXPERIMENT_VERSION = "harness.experiment-matrix.v1";
@@ -434,6 +435,25 @@ export async function writeExperimentMatrixArtifactDirectory(
   const outputDir = path.resolve(options.outputDir);
   const overwrite = options.overwrite ?? false;
   const createdAt = options.createdAt ?? result.createdAt;
+  if (overwrite) {
+    // Legacy mutable export retained for CLI compatibility. Server-owned
+    // artifact publication always uses the immutable path below.
+    return writeExperimentMatrixTree(result, outputDir, createdAt, true);
+  }
+  const tournamentFiles = await publishNewLocalArtifactDirectory({
+    finalDirectory: outputDir,
+    populate: (stagingDirectory) => writeExperimentMatrixTree(result, stagingDirectory, createdAt, false)
+      .then((written) => written.files.tournaments)
+  });
+  return matrixArtifactWriteResult(outputDir, tournamentFiles);
+}
+
+async function writeExperimentMatrixTree(
+  result: ExperimentMatrixResult,
+  outputDir: string,
+  createdAt: string,
+  overwrite: boolean
+): Promise<ExperimentMatrixArtifactWriteResult> {
   await mkdir(outputDir, { recursive: true });
   const tournamentsDir = path.join(outputDir, "tournaments");
   await mkdir(tournamentsDir, { recursive: true });
@@ -454,18 +474,7 @@ export async function writeExperimentMatrixArtifactDirectory(
     });
   }
 
-  const files = {
-    manifest: path.join(outputDir, "manifest.json"),
-    specNormalized: path.join(outputDir, "spec.normalized.json"),
-    cells: path.join(outputDir, "cells.jsonl"),
-    statistics: path.join(outputDir, "statistics.json"),
-    summaryMarkdown: path.join(outputDir, "summary.md"),
-    modelStatsCsv: path.join(outputDir, "model_stats.csv"),
-    profileStatsCsv: path.join(outputDir, "profile_stats.csv"),
-    pairwiseModelComparisonsCsv: path.join(outputDir, "pairwise_model_comparisons.csv"),
-    tournamentsDir,
-    tournaments: tournamentFiles
-  };
+  const files = matrixArtifactWriteResult(outputDir, tournamentFiles).files;
   const manifest = {
     artifactVersion: MATRIX_ARTIFACT_VERSION,
     kind: "experiment-matrix",
@@ -495,7 +504,9 @@ export async function writeExperimentMatrixArtifactDirectory(
       tournaments: tournamentFiles
     }
   };
-  await writeJson(files.manifest, manifest, overwrite);
+  // The manifest is written last. It is not the atomicity mechanism—the
+  // sibling directory rename is—but this also keeps legacy overwrite readers
+  // from observing a new manifest before its registered files exist.
   await writeJson(files.specNormalized, result.experiment, overwrite);
   await writeJsonl(files.cells, result.cells.map(matrixCellRecord), overwrite);
   await writeJson(files.statistics, result.statistics, overwrite);
@@ -507,6 +518,27 @@ export async function writeExperimentMatrixArtifactDirectory(
     buildCsv(PAIRWISE_HEADERS, result.statistics.pairwiseModelComparisons.map(pairwiseCsvRow)),
     overwrite
   );
+  await writeJson(files.manifest, manifest, overwrite);
+  return { outputDir, files };
+}
+
+function matrixArtifactWriteResult(
+  outputDir: string,
+  tournamentFiles: ExperimentMatrixArtifactWriteResult["files"]["tournaments"]
+): ExperimentMatrixArtifactWriteResult {
+  const tournamentsDir = path.join(outputDir, "tournaments");
+  const files = {
+    manifest: path.join(outputDir, "manifest.json"),
+    specNormalized: path.join(outputDir, "spec.normalized.json"),
+    cells: path.join(outputDir, "cells.jsonl"),
+    statistics: path.join(outputDir, "statistics.json"),
+    summaryMarkdown: path.join(outputDir, "summary.md"),
+    modelStatsCsv: path.join(outputDir, "model_stats.csv"),
+    profileStatsCsv: path.join(outputDir, "profile_stats.csv"),
+    pairwiseModelComparisonsCsv: path.join(outputDir, "pairwise_model_comparisons.csv"),
+    tournamentsDir,
+    tournaments: tournamentFiles
+  };
   return { outputDir, files };
 }
 

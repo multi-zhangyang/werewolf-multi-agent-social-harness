@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -454,6 +454,13 @@ describe("experiment matrix harness", () => {
     });
 
     await expect(writeExperimentMatrixArtifactDirectory(result, { outputDir })).rejects.toThrow();
+    const failedOutputDir = path.join(outputDir, "failed-publication");
+    const invalidResult = structuredClone(result);
+    (invalidResult.statistics as unknown as Record<string, unknown>).cycle = invalidResult.statistics;
+    await expect(writeExperimentMatrixArtifactDirectory(invalidResult, { outputDir: failedOutputDir }))
+      .rejects.toThrow();
+    await expect(readdir(failedOutputDir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await readdir(outputDir)).some((entry) => entry.startsWith(".tmp-failed-publication-"))).toBe(false);
     expect(path.resolve(written.outputDir)).toBe(outputDir);
     expect(written.files.manifest).toBe(path.join(outputDir, "manifest.json"));
     expect(written.files.specNormalized).toBe(path.join(outputDir, "spec.normalized.json"));
@@ -563,9 +570,9 @@ describe("experiment matrix harness", () => {
 });
 
 async function makeTempDir(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), "werewolf-matrix-test-"));
-  tempDirs.push(dir);
-  return dir;
+  const root = await mkdtemp(path.join(tmpdir(), "werewolf-matrix-test-"));
+  tempDirs.push(root);
+  return path.join(root, "artifact");
 }
 
 async function readJson<T>(filePath: string): Promise<T> {
