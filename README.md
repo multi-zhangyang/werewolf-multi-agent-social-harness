@@ -4,6 +4,7 @@
 ![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111827)
+[![License](https://img.shields.io/badge/License-Apache%202.0-D22128.svg)](LICENSE)
 
 一个可重放、可评测、可分叉的多 Agent 对抗社会运行时。它统一管理有状态
 Agent、隐藏信息、分级通信、合法动作、确定性环境转换、运行工件、重放、
@@ -296,5 +297,5 @@ Issue 中发布凭据、私有工件或漏洞利用细节。
 
 ## 许可证
 
-仓库目前尚未声明软件许可证。公开仓库本身不会自动授予复制、修改或再分发权限；
-维护者需要在允许下游复用前选择并添加明确许可证。
+本项目采用 [Apache License 2.0](LICENSE)。你可以在遵守许可证条款的前提下
+使用、修改和分发本项目；Apache-2.0 同时提供明确的贡献者专利授权。
