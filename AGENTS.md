@@ -28438,3 +28438,147 @@ faster in the direct comparison. The complete suite was then rerun with a wider
 outer test/hook timeout but unchanged assertions and passed all 576 tests. No
 provider/model call was required because this pass did not change reasoner or
 provider behavior.
+
+## 13.299 Evaluator Isolation, Final-Checkpoint Authority, And Immutable Export Lock
+
+Timestamp: `2026-07-23`
+
+This lock records the final harness-first hardening pass in this work session.
+It extends existing contracts instead of adding a parallel Agent, runner,
+checkpoint, evaluator, or artifact API. Concrete provider/model ids remain
+opaque runtime configuration and no model-name branch was added.
+
+### 13.299.1 Evaluator And Social Callback Ownership
+
+`runEvaluationRegistry()` now captures one portable canonical evaluation
+context and gives every evaluator an independent deep-frozen clone. Evaluator
+manifest input, returned module results, and the caller-owned metric-promotion
+policy are detached before untrusted evaluator execution can mutate them.
+Cycles, non-JSON objects, and nested non-finite evidence/metadata fail only the
+offending evaluator module. The four legacy top-level numeric metric fields
+retain their explicit diagnostics and are normalized without relying on
+`JSON.stringify()` to silently change evidence.
+
+The generic social runner now detaches pending actions, identity contexts,
+environment observations, assembled observations, actor inputs/proposals,
+validator inputs, transition commands, and message publication inputs at their
+ownership boundaries. A callback may mutate its private copy but cannot rewrite
+runner-owned artifact evidence or another actor's joint decision. Runner-owned
+system transitions now carry their real trace id, and Werewolf records durable
+actor-state snapshots for committed system boundaries as well as player
+boundaries.
+
+### 13.299.2 Executable Final-Checkpoint Policy
+
+`checkpointPolicy.mode = final` is now runtime authority rather than metadata:
+
+```text
+stage candidate
+  -> publish canonical episode/evaluation
+  -> derive deterministic model-free final checkpoint
+  -> exact-adopt or publish and re-read canonical checkpoint
+  -> record terminal episode membership
+```
+
+Preflight requires the existing deterministic checkpoint builder plus canonical
+checkpoint read/write authority. `native-boundaries` fails closed until an
+explicit boundary publisher exists. A zero-transition Werewolf run records
+`checkpointPolicy.mode = none`, because it has no committed native boundary and
+must not fabricate fork authority.
+
+Final checkpoint binding includes run/artifact/status identity, complete step
+and message counts, state, agents, initial/final state, channels, runtime actor
+roster, scheduler/domain identity, normalized complete execution prefix, and
+experiment provenance. Werewolf's execution prefix may omit only the exposure
+record/summary projections retained by the canonical episode artifact. Forged
+agents or prefix lifecycle/state/channel data fail before `putCheckpoint()`.
+
+Canonical-prefix hydration, checkpoint repair, and suffix execution share one
+experiment deadline. A non-resolving deterministic checkpoint builder cannot
+hold the run lease forever. Canonical checkpoint mutation itself remains fully
+awaited under the lease instead of being raced against abort and continuing in
+the background.
+
+Current generic policy execution is honest and fail-closed:
+
+- retry policy supports exactly one durable attempt until a versioned
+  multi-attempt ledger exists;
+- canonical episode persistence requires `research-full` authority;
+- public and postgame-redacted artifacts remain reviewed derived projections;
+- native-boundary automatic checkpoint publication is not claimed.
+
+### 13.299.3 Immutable Local Artifact Publication
+
+Generic tournament, Werewolf tournament/public pack, and matrix immutable
+exports now populate a random same-filesystem sibling staging directory and
+publish the complete tree with one directory rename. The final child path must
+not already exist. Matrix manifests are written after their registered nested
+files, and server matrix recovery verifies every registered file is a regular
+file contained by the artifact root, including realpath/symlink checks.
+
+The guarantee is deliberately narrow:
+
+```text
+proved:
+  process-crash/concurrent-reader atomic visibility on the local filesystem
+  no final half-tree on handled populate failure
+  staging cleanup and same-path retry after handled failure
+
+not claimed:
+  fsync or power-loss durability
+  distributed/network-filesystem consensus
+  cross-host exactly-once publication
+  mutable overwrite atomic replacement
+```
+
+`overwrite=true` remains an explicitly legacy mutable CLI compatibility path.
+
+### 13.299.4 Validation Recorded
+
+The first final full-suite run exposed two real test-contract issues rather
+than production assertion failures: one integration test had a fixed 20-second
+local timeout under full host load, and one prefix-checkpoint helper assumed the
+first snapshot-bearing boundary could never be a system transition. The timeout
+was raised only for that heavy test. The helper now deliberately selects a
+player boundary because it compares against the player-only legacy trajectory;
+system-boundary checkpoint validity has its own strong V2 integration test.
+
+Final validation after those corrections:
+
+```text
+npm run typecheck
+  passed
+
+complete deterministic suite
+  54 files / 590 tests passed
+  684.93s
+  invoked with testTimeout=120000 and hookTimeout=120000
+
+npm run build
+  passed
+  existing 1,264.51 kB minified / 388.95 kB gzip warning only
+
+npx playwright test --config=playwright.config.ts
+  15 passed
+  3.2m
+
+real configured-provider streaming probe
+  model=cohere/north-mini-code:free
+  1 succeeded / 0 failed
+  stream.completed=true
+  stream.completedBy=provider_stop_event
+  local environment validation passed
+
+bounded real match
+  model=cohere/north-mini-code:free
+  model calls=3
+  native steps=4
+  committed=4
+  rejected=0
+  harness errors=0
+  every call stream.completed=true
+  every call stream.completedBy=provider_stop_event
+```
+
+No max-token field, model-specific parser, prompt, fallback, retry path, action
+path, or provider-name branch was added. The live commands exited normally.
