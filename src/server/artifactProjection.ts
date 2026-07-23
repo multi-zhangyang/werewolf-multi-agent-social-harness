@@ -167,10 +167,11 @@ export type RedactedSocialStepDto = Omit<
 
 export type RedactedSocialEpisodeDto = Omit<
   SocialEpisodeArtifact<GameState, unknown, unknown, unknown>,
-  "steps" | "messages"
+  "steps" | "messages" | "assignmentResolution"
 > & {
   steps: RedactedSocialStepDto[];
   messages: RedactedSocialMessageDto[];
+  assignmentResolution?: never;
 };
 
 type AgentSocialStateSource = NonNullable<AgentHarnessState["social"]>;

@@ -591,6 +591,7 @@ export function createAgentSocialState<TObservation, TPending, TCommand>(options
   agentId: string;
   profile: SocialAgentProfile;
   maxMemoryEntries?: number;
+  maxJournalEntries?: number;
 }): AgentSocialState<TObservation, TPending, TCommand> {
   return {
     agentId: options.agentId,
@@ -601,7 +602,10 @@ export function createAgentSocialState<TObservation, TPending, TCommand>(options
     relationships: createRelationshipGraph(),
     norms: createNormState(),
     reputation: createReputationLedger(),
-    goals: createGoalStack()
+    goals: createGoalStack(),
+    ...(options.maxJournalEntries === undefined
+      ? {}
+      : { journal: createSocialStateMutationJournal(options.maxJournalEntries) })
   };
 }
 

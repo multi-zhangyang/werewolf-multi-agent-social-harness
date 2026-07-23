@@ -465,20 +465,6 @@ interface TournamentPublicShareSummary {
     committedSteps?: number | null;
     rejectedSteps?: number | null;
   } | null;
-  packMetricPromotion?: {
-    metricCount?: number | null;
-    scorecardEligibleMetricCount?: number | null;
-    metricPromotionClassCounts?: {
-      scorecard?: number;
-      diagnostic?: number;
-      benchmark_only?: number;
-    } | null;
-    scorecardEligibleMetricClassCounts?: {
-      scorecard?: number;
-      diagnostic?: number;
-      benchmark_only?: number;
-    } | null;
-  } | null;
 }
 
 interface TournamentPublicShareInventory {
@@ -2798,11 +2784,14 @@ export function App() {
         setBranchTree(branchResponse.summary);
         setSelectedCheckpointId(checkpoint.checkpointId);
         setWorkspace("compare");
-        const childFailed = forked.summary.ok === false || forked.harnessStatus === "failed";
+        const childFailed = forked.harnessStatus === "failed";
+        const childCompleted = forked.harnessStatus === "completed" && forked.summary.ok !== false;
         setActionStatus(
           childFailed
             ? `checkpoint fork 已记录失败 child：parent=${shortId(parentMatchId)} · child=${shortId(forked.id)} · comparison 已打开`
-            : `checkpoint fork 已完成：parent=${shortId(parentMatchId)} · child=${shortId(forked.id)} · boundary=native #${checkpoint.source.nativeStepCount} · comparison 已打开`,
+            : childCompleted
+              ? `checkpoint fork 已完成：parent=${shortId(parentMatchId)} · child=${shortId(forked.id)} · boundary=native #${checkpoint.source.nativeStepCount} · comparison 已打开`
+              : `checkpoint fork 已记录 ${forked.harnessStatus ?? "incomplete"} child：parent=${shortId(parentMatchId)} · child=${shortId(forked.id)} · boundary=native #${checkpoint.source.nativeStepCount} · comparison 已打开`,
           childFailed ? forked.summary.failureReason ?? "fork child harness reported failure" : null
         );
       } catch (nextError) {
@@ -3200,14 +3189,6 @@ export function App() {
                     nativeSteps: share.packDensity?.nativeSteps,
                     committedSteps: share.packDensity?.committedSteps,
                     rejectedSteps: share.packDensity?.rejectedSteps
-                  })
-                ],
-                [
-                  "packMetricPromotion",
-                  formatPackMetricPromotion({
-                    metricCount: share.packMetricPromotion?.metricCount,
-                    scorecardEligibleMetricCount: share.packMetricPromotion?.scorecardEligibleMetricCount,
-                    metricPromotionClassCounts: share.packMetricPromotion?.metricPromotionClassCounts
                   })
                 ],
                 ["detail", share.urls?.detail ?? "n/a"],
@@ -4161,10 +4142,10 @@ function ExperimentRosterComposer({
               <Form.Item label="unmatched fallback">
                 <Select
                   aria-label="Agent assignment fallback"
-                  value={draft.assignment.fallback ?? "profile-rotation"}
+                  value={draft.assignment.fallback ?? "error"}
                   options={[
-                    { value: "profile-rotation", label: "profile rotation" },
-                    { value: "error", label: "error（服务端拒绝）" }
+                    { value: "error", label: "error（服务端拒绝）" },
+                    { value: "profile-rotation", label: "profile rotation（显式兼容）" }
                   ]}
                   disabled={disabled}
                   onChange={(value) => setAssignment({ fallback: value as "profile-rotation" | "error" })}
@@ -6658,18 +6639,6 @@ function PacksWorkspace({
       )
     },
     {
-      title: "promotion",
-      render: (_, share) => (
-        <Text type="secondary">
-          {formatPackMetricPromotion({
-            metricCount: share.packMetricPromotion?.metricCount,
-            scorecardEligibleMetricCount: share.packMetricPromotion?.scorecardEligibleMetricCount,
-            metricPromotionClassCounts: share.packMetricPromotion?.metricPromotionClassCounts
-          })}
-        </Text>
-      )
-    },
-    {
       title: "density",
       render: (_, share) => (
         <Text type="secondary">
@@ -7049,18 +7018,6 @@ function PacksWorkspace({
                     </Space>
                   );
                 }
-              },
-              {
-                title: "promotion",
-                render: (_: unknown, share: TournamentPublicShareSummary) => (
-                  <Text type="secondary">
-                    {formatPackMetricPromotion({
-                      metricCount: share.packMetricPromotion?.metricCount,
-                      scorecardEligibleMetricCount: share.packMetricPromotion?.scorecardEligibleMetricCount,
-                      metricPromotionClassCounts: share.packMetricPromotion?.metricPromotionClassCounts
-                    })}
-                  </Text>
-                )
               },
               {
                 title: "density",

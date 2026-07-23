@@ -4,8 +4,11 @@ import type { AgentPendingAction } from "../core/pending";
 import type { GameCommand, GameState, PendingAction, Phase, PlayerState, PlayerView } from "../core/types";
 import {
   WerewolfAgentActor,
+  WEREWOLF_AGENT_JOURNAL_MAX_ENTRIES,
+  WEREWOLF_AGENT_MEMORY_MAX_ENTRIES,
   applyWerewolfReasonerProposal,
   commitWerewolfAgentTurn,
+  reduceCommittedWerewolfSocialAction,
   type WerewolfAgentObserveContext
 } from "./actor";
 import { hashStableState } from "./hash";
@@ -66,6 +69,7 @@ import {
 } from "./werewolfExecutionEvidence";
 import {
   DEFAULT_WEREWOLF_JOINT_PHASE_SCHEDULER,
+  classifyHarnessReasonerExecution,
   type AgentHarnessState,
   type HarnessAgentConfig,
   type HarnessErrorPayload,
@@ -356,7 +360,19 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         profile: this.profile,
         initialState: options.actor.state,
         reasoner: options.reasoner,
-        players: options.players
+        players: options.players,
+        captureReasonerCallContext: () => this.captureReasonerCallContext(),
+        onReasonerCompleted: (context, output) => {
+          this.recordCompletedReasonerCall(
+            context,
+            summarizeReasonerOutput(
+              output.content,
+              output.completion,
+              output.actionProposal,
+              output.speechActDrafts
+            )
+          );
+        }
       });
     }
   }
@@ -416,7 +432,6 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
         this.assertReasonerCallTransactionOpen(reasonerCallContext);
         const metadata = parseWerewolfHarnessTurnActionMetadata(action.metadata, action.traceId ?? `${this.id}:missing-trace`);
         this.turnTraces.set(metadata.turnTrace.traceId, cloneJson(metadata.turnTrace));
-        this.recordCompletedReasonerCall(reasonerCallContext, metadata.reasonerOutput);
         return action;
       } catch (error) {
         this.recordFailedReasonerCall(reasonerCallContext, error);
@@ -454,6 +469,18 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
       this.assertReasonerCallTransactionOpen(reasonerCallContext);
       const actionProposal = reasonerOutput?.actionProposal;
       if (reasonerOutput) {
+        // Persist the completed provider lifecycle before any domain parsing or
+        // candidate validation. A malformed completion is an explicit failed
+        // decision with completed-call evidence, never a policy fallback.
+        this.recordCompletedReasonerCall(
+          reasonerCallContext,
+          summarizeReasonerOutput(
+            reasonerOutput.content,
+            reasonerOutput.completion,
+            actionProposal,
+            reasonerOutput.speechActDrafts
+          )
+        );
         plan = stagedActor.applyReasonerProposal(plan, pending, actionProposal);
         if (requiresWerewolfSpeech(pending)) {
           plan = attachSpeech(plan, normalizeSpeech(reasonerOutput.content));
@@ -555,7 +582,6 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
           reasonerOutput: reasonerSummary
         })
       };
-      if (reasonerOutput) this.recordCompletedReasonerCall(reasonerCallContext, reasonerSummary);
       this.rebindOpenReasonerCallTransaction(reasonerCallContext, action.traceId ?? latest.traceId);
       return action;
     } catch (error) {
@@ -730,6 +756,7 @@ export class WerewolfSocialActorAdapter implements SocialActor<WerewolfSocialObs
     // final durable actor snapshot.
     if (!stagedActor.state.social) throw new Error(`Werewolf social actor ${this.id} is missing social state after commit.`);
     recordCommittedReceiptOutcome(stagedActor.state.social, receipt);
+    reduceCommittedWerewolfSocialAction(stagedActor.state.social, receipt);
     recordCommittedReceiptReflection({
       agentId: this.id,
       state: stagedActor.state,
@@ -765,6 +792,8 @@ function createScaffoldedWerewolfActor(input: {
   initialState: AgentHarnessState;
   reasoner?: HarnessReasoner;
   players: PlayerState[];
+  captureReasonerCallContext?: () => ReasonerCallTransactionContext | undefined;
+  onReasonerCompleted?: (context: ReasonerCallTransactionContext | undefined, output: ReasonerOutput) => void;
 }): ScaffoldedSocialActor<
   WerewolfSocialObservation,
   WerewolfSocialPendingAction,
@@ -822,8 +851,9 @@ function createScaffoldedWerewolfActor(input: {
     // The generic scaffold writes receipt-gated environment outcome memory
     // immediately before this hook. The domain state owns the compatibility
     // hash, so refresh it after that committed private-state reduction.
-    afterStepResult: ({ state }) => {
+    afterStepResult: ({ state, receipt }) => {
       if (!state.social) throw new Error(`Scaffolded Werewolf actor ${state.playerId} is missing social state after receipt.`);
+      reduceCommittedWerewolfSocialAction(state.social, receipt);
       state.socialStateHash = hashStableState(state.social);
     }
   };
@@ -849,6 +879,10 @@ function createScaffoldedWerewolfActor(input: {
     ? {
         id: "werewolf-harness-reasoner",
         async reflect(decision) {
+          // Capture before awaiting the provider. A timed-out completion may
+          // settle after a later turn has opened, but its telemetry must stay
+          // bound to the original runner transaction.
+          const reasonerCallContext = input.captureReasonerCallContext?.();
           const playerTurn = requireScaffoldedWerewolfPlayerTurn({
             observation: decision.observation,
             pending: decision.pendingAction,
@@ -864,6 +898,7 @@ function createScaffoldedWerewolfActor(input: {
             memoryRetrieval: cloneJson(decision.memoryRetrieval),
             recalledMemory: scaffoldReasonerMemoryEntries(decision)
           });
+          input.onReasonerCompleted?.(reasonerCallContext, cloneJson(output));
           return {
             memo: output.content,
             advice: cloneJson(output)
@@ -930,13 +965,7 @@ function generateScaffoldedWerewolfCandidates(input: {
     reasonerOutput.actionProposal
   );
   if (requiresWerewolfSpeech(playerTurn.pending)) {
-    let speech: string;
-    try {
-      speech = normalizeSpeech(reasonerOutput.content);
-    } catch {
-      return candidates;
-    }
-    reasonerPlan = attachSpeech(reasonerPlan, speech);
+    reasonerPlan = attachSpeech(reasonerPlan, normalizeSpeech(reasonerOutput.content));
   }
   const reasonerAction = buildScaffoldedWerewolfActionForPlan({
     decision: input.decision,
@@ -957,9 +986,9 @@ function generateScaffoldedWerewolfCandidates(input: {
       plan: reasonerPlan,
       action: reasonerAction,
       source: "reasoner",
-      // On communicative turns the reasoner-authored language is the primary
-      // candidate and deterministic text is a fallback. Other action families
-      // require an explicit confidence advantage to displace policy authority.
+      // On communicative turns the validated reasoner-authored language is the
+      // primary candidate. The deterministic policy candidate remains an
+      // explicitly named arbitration alternative, not a provider fallback.
       scoreAdjustment: requiresWerewolfSpeech(playerTurn.pending) ? 0.001 : 0
     })
   );
@@ -1432,7 +1461,12 @@ export function initializeWerewolfAgentActors(
               role: player.role,
               team: player.team,
               policyId: policyName
-            }
+            },
+            // Werewolf snapshots are recorded at native boundaries. Bound
+            // actor-local history so a long real match does not duplicate an
+            // ever-growing journal/transcript prefix into every frame.
+            maxMemoryEntries: WEREWOLF_AGENT_MEMORY_MAX_ENTRIES,
+            maxJournalEntries: WEREWOLF_AGENT_JOURNAL_MAX_ENTRIES
           })
         } satisfies AgentHarnessState)
       ];
@@ -1462,6 +1496,7 @@ export async function runWerewolfSocialHarnessPrefix(options: WerewolfSocialHarn
     domainAdapter: createWerewolfSocialDomainAdapterManifest(initialState.config.rulesetId),
     environment: WerewolfSocialEnvironment.fromState(initialState),
     actors,
+    reasoner: options.reasoner,
     channels,
     initialMessages: cloneJson(options.initialSocialMessages ?? []),
     schedulerMode: options.schedulerMode ?? "aec",
@@ -1651,7 +1686,8 @@ function tryBuildWerewolfInitializationFailureResult(
           started: false,
           notStartedStage: "agent-initialization",
           initialMessageCount: socialBus.listMessages().length,
-          initialMessagesHash: hashStableState(socialBus.listMessages())
+          initialMessagesHash: hashStableState(socialBus.listMessages()),
+          reasonerExecutionClass: classifyHarnessReasonerExecution(options.reasoner)
         },
         schedulerMode: "aec",
         profiles: [],
@@ -2091,7 +2127,17 @@ function validateReasonerSocialSpeechActDrafts(input: WerewolfMessageDraftInput)
           : "public-speech"
     };
     if (draft.kind === "claim") metadata.topic = "reasoner_claim";
-    if (draft.kind === "commitment") metadata.promisedAction = value;
+    if (draft.kind === "commitment") {
+      metadata.promisedAction = value;
+      metadata.commitmentId = `${input.traceId}:reasoner-social-intent:${accepted.length + 1}:commitment`;
+      if (value === "vote.cast" || value === "vote.abstain") {
+        metadata.deadlinePhase = "day_vote";
+        metadata.deadlineDay = input.observation.day;
+      } else if (value === "sheriff.vote" || value === "sheriff.vote.abstain") {
+        metadata.deadlinePhase = "sheriff_vote";
+        metadata.deadlineDay = input.observation.day;
+      }
+    }
     if (draft.kind === "coalition_signal") {
       metadata.memberIds = normalizedMembers;
       metadata.sharedGoal = value;
@@ -2155,8 +2201,6 @@ export function toWerewolfSocialStep(step: HarnessStepRecord, metadata: Werewolf
     decisionStateHash: step.decisionStateHash,
     preStateHash: step.preStateHash,
     postStateHash: step.postStateHash,
-    actorSnapshotsAfterStep: cloneJson(step.agentSnapshotsAfterStep),
-    actorSnapshotsHashAfterStep: step.agentSnapshotsHashAfterStep,
     eventSeqRange: step.eventSeqRange,
     messageSeqRange: step.messageSeqRange
   };

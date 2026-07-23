@@ -255,20 +255,6 @@ export function optionalChatCompletionsBaseUrlFromEnv(env: NodeJS.ProcessEnv = p
   return normalizeSdkBaseUrl(env.LLM_BASE_URL, "LLM_BASE_URL");
 }
 
-export function clientFromEnv(
-  env: NodeJS.ProcessEnv = process.env,
-  overrides: Pick<OpenAICompatibleClientOptions, "timeoutMs" | "maxRetries" | "abortSignal"> = {}
-): OpenAICompatibleClient {
-  return new OpenAICompatibleClient({
-    baseURL: chatCompletionsBaseUrlFromEnv(env),
-    apiKey: env.LLM_API_KEY ?? "",
-    timeoutMs: overrides.timeoutMs ?? parseOptionalIntegerEnv(env.LLM_TIMEOUT_MS, "LLM_TIMEOUT_MS"),
-    maxRetries: overrides.maxRetries ?? parseOptionalIntegerEnv(env.LLM_RETRY_COUNT, "LLM_RETRY_COUNT"),
-    abortSignal: overrides.abortSignal,
-    stream: env.LLM_STREAM === undefined ? true : env.LLM_STREAM !== "false"
-  });
-}
-
 function openAIChatMessages(messages: ChatMessage[]): ChatCompletionMessageParam[] {
   return messages.map((message) => ({ role: message.role, content: message.content }));
 }

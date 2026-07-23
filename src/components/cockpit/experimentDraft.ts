@@ -47,7 +47,7 @@ export function createCockpitExperimentDraft(input: {
       ];
   return {
     profiles,
-    assignment: { strategy: "profile-rotation", fallback: "profile-rotation" }
+    assignment: { strategy: "profile-rotation", fallback: "error" }
   };
 }
 
@@ -115,7 +115,7 @@ function cloneAssignment(assignment: HarnessAssignmentConfig): HarnessAssignment
     : "profile-rotation";
   return {
     strategy,
-    ...(assignment.fallback === "error" ? { fallback: "error" } : { fallback: "profile-rotation" }),
+    ...(assignment.fallback === "profile-rotation" ? { fallback: "profile-rotation" } : { fallback: "error" }),
     ...(strategy === "seat" && assignment.seats ? { seats: cloneStringMap(assignment.seats) } : {}),
     ...(strategy === "role" && assignment.roles ? { roles: cloneRoleMap(assignment.roles) } : {}),
     ...(strategy === "team" && assignment.teams ? { teams: cloneTeamMap(assignment.teams) } : {})

@@ -34,6 +34,11 @@ export interface ProviderDiagnosticSummary {
 }
 
 export function modelClientFromEnv(env: NodeJS.ProcessEnv = process.env, overrides: ProviderClientOverrides = {}): ModelClient {
+  if (env.LLM_STREAM?.trim().toLowerCase() === "false") {
+    throw new Error(
+      "LLM_STREAM=false is not allowed by the live runtime provider factory; use an explicitly constructed client only in isolated non-live tests."
+    );
+  }
   const protocol = providerProtocolFromEnv(env);
   if (protocol === "openai-chat-completions") {
     return new OpenAICompatibleClient({

@@ -13,7 +13,7 @@ export default defineConfig({
     screenshot: "only-on-failure"
   },
   webServer: {
-    command: "npm run e2e:fixture-server",
+    command: "npm run test:e2e:fixture-server",
     url: "http://127.0.0.1:4173/api/health",
     timeout: 90_000,
     reuseExistingServer: false

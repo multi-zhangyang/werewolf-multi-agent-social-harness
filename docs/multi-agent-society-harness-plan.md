@@ -668,8 +668,12 @@ The next control-plane milestone is implemented and validated:
 - WCAG A/AA automation, 320px reflow, reduced-motion, keyboard-scrollable
   tables, and Drawer focus restoration.
 
-Validation evidence is now 57 deterministic test files / 629 tests, production
-typecheck/build, 24 Playwright tests, and a real streaming probe, bounded match,
-and bounded tournament through the configured opaque model. The bounded match
-and tournament were deliberately truncated at four native transitions and were
-not admitted into completed-outcome leaderboard denominators.
+Current validation evidence is 57 deterministic test files / 638 tests,
+production typecheck/build, and 24 Playwright desktop/mobile/accessibility
+tests. A real OpenAI-compatible streaming match also completed without a
+transition cap: `completed + game_over`, 59 native / 59 committed / 0 rejected
+steps, 58 provider-backed reasoner calls, and 0 Harness errors. Model-free
+replay consumed all 59 recorded native steps and matched both final-state and
+message hashes. Older four-transition match/tournament records are retained
+only as bounded execution-path diagnostics; they are not complete match or
+tournament evidence and never enter completed-outcome denominators.

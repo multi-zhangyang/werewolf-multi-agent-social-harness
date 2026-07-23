@@ -22,7 +22,6 @@ import { redactSecrets } from "./redaction";
 import { sanitizePersistedProviderDiagnostics } from "./providerFailure";
 import {
   HARNESS_AGENT_SNAPSHOT_FRAME_VERSION,
-  compactRecordedSocialAgentSnapshots,
   createGenericForkProvenance,
   harnessAgentSnapshotFrameId,
   validateHarnessCheckpointEnvelope,
@@ -198,11 +197,9 @@ export function buildMatchArtifact(options: {
   resolvedAssignments: ResolvedAgentAssignment[];
   result: HarnessRunResult;
 }): MatchArtifact {
-  const trajectory = cloneJson(options.result.trajectory);
-  const socialEpisode = cloneJson(options.result.socialEpisode);
-  const agentSnapshotFrames = extractAgentSnapshotFrames({
-    trajectory,
-    socialEpisode
+  const compactedSnapshots = cloneAndCompactAgentSnapshots({
+    trajectory: options.result.trajectory,
+    socialEpisode: options.result.socialEpisode
   });
   const artifact: MatchArtifact = {
     artifactVersion: MATCH_ARTIFACT_VERSION,
@@ -224,14 +221,14 @@ export function buildMatchArtifact(options: {
     forkOf: cloneJson(options.result.forkOf),
     initialState: cloneJson(options.result.initialState),
     finalState: cloneJson(options.result.state),
-    trajectory,
-    socialEpisode,
+    trajectory: compactedSnapshots.trajectory,
+    socialEpisode: compactedSnapshots.socialEpisode,
     events: cloneJson(options.result.state.events),
     evaluation: cloneJson(options.result.evaluation),
     evaluationReport: cloneJson(options.result.evaluationReport),
     metrics: cloneJson(options.result.metrics),
     agents: cloneJson(options.result.agents),
-    agentSnapshotFrames: agentSnapshotFrames.length ? agentSnapshotFrames : undefined
+    agentSnapshotFrames: compactedSnapshots.frames.length ? compactedSnapshots.frames : undefined
   };
   const redacted = sanitizePersistedProviderDiagnostics(redactSecrets(artifact));
   normalizeAgentSnapshotFramesAfterRedaction(redacted);
@@ -244,17 +241,39 @@ export function resolveAgentSnapshotsAfterStep(artifact: MatchArtifact, step: Ha
   return frame ? cloneJson(frame.agents) : undefined;
 }
 
-function extractAgentSnapshotFrames(options: {
+/**
+ * Clone the two replay-authority projections while moving inline actor state
+ * directly into a shared frame registry. Cloning each snapshot-heavy
+ * projection in full before compaction made artifact construction retain
+ * several complete copies of the same growing actor history at once.
+ *
+ * The caller-owned run result remains untouched: ordinary step fields are
+ * cloned, every inline snapshot is hash-checked, and each distinct snapshot is
+ * cloned exactly once into the returned frame registry.
+ */
+function cloneAndCompactAgentSnapshots(options: {
+  trajectory: readonly HarnessStepRecord[];
+  socialEpisode: SocialEpisodeArtifact<GameState, unknown, unknown, unknown>;
+}): {
   trajectory: HarnessStepRecord[];
-  socialEpisode: SocialEpisodeArtifact;
-}): AgentSnapshotFrame[] {
+  socialEpisode: SocialEpisodeArtifact<GameState, unknown, unknown, unknown>;
+  frames: AgentSnapshotFrame[];
+} {
   const framesById = new Map<string, AgentSnapshotFrame>();
-  const frameFor = (agents: AgentHarnessState[], providedHash: string): AgentSnapshotFrame => {
+  const frameFor = (
+    agents: AgentHarnessState[],
+    providedHash: string,
+    label: string,
+    providedFrameId?: string
+  ): AgentSnapshotFrame => {
     const agentsHash = hashStableState(agents);
     if (agentsHash !== providedHash) {
-      throw new Error(`Agent snapshot hash mismatch: expected ${agentsHash}, received ${providedHash}.`);
+      throw new Error(`${label}: agent snapshot hash mismatch: expected ${agentsHash}, received ${providedHash}.`);
     }
     const frameId = harnessAgentSnapshotFrameId(agentsHash);
+    if (providedFrameId !== undefined && providedFrameId !== frameId) {
+      throw new Error(`${label}: agent snapshot frame id does not match its hash.`);
+    }
     const existing = framesById.get(frameId);
     if (existing) return existing;
     const frame: AgentSnapshotFrame = {
@@ -268,29 +287,75 @@ function extractAgentSnapshotFrames(options: {
     return frame;
   };
 
-  for (const step of options.trajectory) {
-    if (!step.agentSnapshotsAfterStep || !step.agentSnapshotsHashAfterStep) continue;
-    const frame = frameFor(step.agentSnapshotsAfterStep, step.agentSnapshotsHashAfterStep);
-    step.agentSnapshotFrameIdAfterStep = frame.frameId;
-    delete step.agentSnapshotsAfterStep;
-  }
-
-  const compacted = compactRecordedSocialAgentSnapshots({
-    episode: options.socialEpisode,
-    existingFrames: [...framesById.values()]
+  const trajectory = options.trajectory.map((step, stepIndex) => {
+    const agents = step.agentSnapshotsAfterStep;
+    const agentsHash = step.agentSnapshotsHashAfterStep;
+    if (agents === undefined && agentsHash === undefined) return cloneJson(step);
+    if (!Array.isArray(agents) || typeof agentsHash !== "string") {
+      throw new Error(`Trajectory step ${stepIndex} ${step.traceId}: agent snapshot payload/hash must be recorded together.`);
+    }
+    const frame = frameFor(
+      agents,
+      agentsHash,
+      `Trajectory step ${stepIndex} ${step.traceId}`,
+      step.agentSnapshotFrameIdAfterStep
+    );
+    const { agentSnapshotsAfterStep: _inlineAgents, ...stepWithoutInlineAgents } = step;
+    return cloneJson({
+      ...stepWithoutInlineAgents,
+      agentSnapshotsHashAfterStep: frame.agentsHash,
+      agentSnapshotFrameIdAfterStep: frame.frameId
+    });
   });
-  Object.assign(options.socialEpisode, compacted.episode);
-  return compacted.frames
-    .map(
-      (frame): AgentSnapshotFrame => ({
-        artifactVersion: AGENT_SNAPSHOT_FRAME_VERSION,
-        kind: "agent-snapshot-frame",
-        frameId: frame.frameId,
-        agentsHash: frame.agentsHash,
-        agents: cloneJson(frame.agents)
-      })
-    )
-    .sort((left, right) => left.frameId.localeCompare(right.frameId));
+
+  const socialSteps = options.socialEpisode.steps.map((step, stepIndex) => {
+    const hasAgents = Array.isArray(step.actorSnapshotsAfterStep);
+    const hasHash = typeof step.actorSnapshotsHashAfterStep === "string";
+    const hasFrameId = typeof step.actorSnapshotFrameIdAfterStep === "string";
+    const label = `Native step ${stepIndex} ${step.traceId}`;
+    if (hasAgents !== hasHash) {
+      throw new Error(`${label}: actor snapshot payload/hash must be recorded together.`);
+    }
+    if (hasFrameId && !hasHash) {
+      throw new Error(`${label}: actor snapshot frame id requires a snapshot hash.`);
+    }
+    if (hasAgents) {
+      const frame = frameFor(
+        step.actorSnapshotsAfterStep as AgentHarnessState[],
+        step.actorSnapshotsHashAfterStep!,
+        label,
+        step.actorSnapshotFrameIdAfterStep
+      );
+      const { actorSnapshotsAfterStep: _inlineAgents, ...stepWithoutInlineAgents } = step;
+      return cloneJson({
+        ...stepWithoutInlineAgents,
+        actorSnapshotsHashAfterStep: frame.agentsHash,
+        actorSnapshotFrameIdAfterStep: frame.frameId
+      });
+    }
+    if (hasHash) {
+      const frameId = step.actorSnapshotFrameIdAfterStep!;
+      if (frameId !== harnessAgentSnapshotFrameId(step.actorSnapshotsHashAfterStep!)) {
+        throw new Error(`${label}: actor snapshot frame id does not match its hash.`);
+      }
+      const frame = framesById.get(frameId);
+      if (!frame || frame.agentsHash !== step.actorSnapshotsHashAfterStep) {
+        throw new Error(`${label}: actor snapshot frame reference cannot be resolved.`);
+      }
+    }
+    return cloneJson(step);
+  });
+  const { steps: _inlineSnapshotSteps, ...episodeWithoutSteps } = options.socialEpisode;
+  const socialEpisode = {
+    ...cloneJson(episodeWithoutSteps),
+    steps: socialSteps
+  } as SocialEpisodeArtifact<GameState, unknown, unknown, unknown>;
+
+  return {
+    trajectory,
+    socialEpisode,
+    frames: [...framesById.values()].sort((left, right) => left.frameId.localeCompare(right.frameId))
+  };
 }
 
 function normalizeAgentSnapshotFramesAfterRedaction(artifact: MatchArtifact): void {
@@ -609,6 +674,7 @@ export function toTrajectoryJsonl(artifact: TrajectoryJsonlSource): string {
 
 export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[] {
   const errors = validateHarnessEpisodeArtifactEnvelope(artifact);
+  const snapshotFramesById = new Map((artifact.agentSnapshotFrames ?? []).map((frame) => [frame.frameId, frame]));
   if (artifact.artifactVersion !== MATCH_ARTIFACT_VERSION) errors.push(`artifactVersion must be ${MATCH_ARTIFACT_VERSION}.`);
   if (artifact.kind !== "match") errors.push("kind must be match.");
   if (artifact.forkOf) {
@@ -655,7 +721,7 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
     validateEventSeqRange(step.eventSeqRange, eventSeqs, `trajectory[${index}].eventSeqRange`, errors);
     validateMessageSeqRange(step.messageSeqRange, messageSeqs, `trajectory[${index}].messageSeqRange`, errors);
     validateAgentSnapshotFrameReference({
-      frames: artifact.agentSnapshotFrames ?? [],
+      framesById: snapshotFramesById,
       frameId: step.agentSnapshotFrameIdAfterStep,
       snapshotHash: step.agentSnapshotsHashAfterStep,
       label: `trajectory[${index}]`,
@@ -663,7 +729,7 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
       hashFieldName: "agentSnapshotsHashAfterStep",
       errors
     });
-    const snapshots = resolveAgentSnapshotsAfterStep(artifact, step);
+    const snapshots = resolveAgentSnapshotsForValidation(step, snapshotFramesById);
     validateStepAgentSnapshots({
       snapshots,
       snapshotHash: step.agentSnapshotsHashAfterStep,
@@ -671,6 +737,7 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
       actorId: step.actorId,
       label: `trajectory[${index}]`,
       required: hasStepAgentSnapshots,
+      snapshotPayloadAlreadyValidated: Boolean(step.agentSnapshotFrameIdAfterStep),
       errors
     });
     const socialStep = socialStepByTrace.get(step.traceId);
@@ -697,7 +764,7 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
       errors.push(`trajectory[${index}] agentSnapshotFrameIdAfterStep mismatch with socialEpisode step ${step.traceId}.`);
     }
     validateAgentSnapshotFrameReference({
-      frames: artifact.agentSnapshotFrames ?? [],
+      framesById: snapshotFramesById,
       frameId: socialStep.actorSnapshotFrameIdAfterStep,
       snapshotHash: socialStep.actorSnapshotsHashAfterStep,
       label: `socialEpisode step ${step.traceId}`,
@@ -710,14 +777,12 @@ export function validateMatchArtifactIntegrity(artifact: MatchArtifact): string[
       errors.push(`trajectory[${index}] command type mismatch with socialEpisode step ${step.traceId}: ${socialCommandType} !== ${step.command.type}.`);
     }
   }
-  validateRecordedMemoryRetrieval(artifact, errors);
-  validateRecordedReceiptReflections(artifact, errors);
+  validateRecordedMemoryRetrieval(artifact, snapshotFramesById, errors);
+  validateRecordedReceiptReflections(artifact, snapshotFramesById, errors);
   const lastSuccessfulStep = artifact.trajectory.at(-1);
-  const lastSuccessfulSnapshot = lastSuccessfulStep ? resolveAgentSnapshotsAfterStep(artifact, lastSuccessfulStep) : undefined;
-  if (artifact.status !== "failed" && lastSuccessfulSnapshot) {
+  if (artifact.status !== "failed" && lastSuccessfulStep?.agentSnapshotsHashAfterStep) {
     const finalAgentsHash = hashStableState(artifact.agents);
-    const lastSnapshotHash = hashStableState(lastSuccessfulSnapshot);
-    if (lastSnapshotHash !== finalAgentsHash) {
+    if (lastSuccessfulStep.agentSnapshotsHashAfterStep !== finalAgentsHash) {
       errors.push(`Last trajectory agentSnapshotsAfterStep does not match final artifact agents.`);
     }
   }
@@ -857,7 +922,11 @@ function validateEvaluationFailureIntegrity(report: HarnessEvaluationReport, err
  * metadata binding without reconstructing an actor, rerunning selection, or
  * exposing memory content from a private snapshot.
  */
-function validateRecordedMemoryRetrieval(artifact: MatchArtifact, errors: string[]): void {
+function validateRecordedMemoryRetrieval(
+  artifact: MatchArtifact,
+  snapshotFramesById: ReadonlyMap<string, AgentSnapshotFrame>,
+  errors: string[]
+): void {
   const socialStepByTrace = new Map(artifact.socialEpisode.steps.map((step) => [step.traceId, step]));
   for (const [index, step] of artifact.trajectory.entries()) {
     const retrieval = step.policyPlan.memoryRetrieval;
@@ -880,7 +949,7 @@ function validateRecordedMemoryRetrieval(artifact: MatchArtifact, errors: string
       errors.push(`${label} does not match socialEpisode action turnTrace evidence.`);
     }
 
-    const snapshots = resolveAgentSnapshotsAfterStep(artifact, step);
+    const snapshots = resolveAgentSnapshotsForValidation(step, snapshotFramesById);
     const actor = snapshots?.find((candidate) => candidate.playerId === step.actorId);
     if (!actor) continue;
     const decision = actor.social?.memory.entries.find(
@@ -904,7 +973,11 @@ function validateRecordedMemoryRetrieval(artifact: MatchArtifact, errors: string
  * typed record, its committed receipt ownership, content-free recall evidence,
  * and the memory/journal binding present at each recorded snapshot boundary.
  */
-function validateRecordedReceiptReflections(artifact: MatchArtifact, errors: string[]): void {
+function validateRecordedReceiptReflections(
+  artifact: MatchArtifact,
+  snapshotFramesById: ReadonlyMap<string, AgentSnapshotFrame>,
+  errors: string[]
+): void {
   const nativeStepByTrace = new Map(artifact.socialEpisode.steps.map((step) => [step.traceId, step]));
   const lastTrajectoryIndexBySnapshot = new Map<string, number>();
   const seenReflectionHashes = new Map<string, string>();
@@ -915,7 +988,7 @@ function validateRecordedReceiptReflections(artifact: MatchArtifact, errors: str
   for (const [index, step] of artifact.trajectory.entries()) {
     const key = step.agentSnapshotsHashAfterStep ?? step.agentSnapshotFrameIdAfterStep;
     if (!key || lastTrajectoryIndexBySnapshot.get(key) !== index) continue;
-    const snapshots = resolveAgentSnapshotsAfterStep(artifact, step);
+    const snapshots = resolveAgentSnapshotsForValidation(step, snapshotFramesById);
     if (!snapshots) continue;
     let boundaryStart = index;
     while (boundaryStart > 0) {
@@ -1216,6 +1289,7 @@ function validateEvaluationPromotionIntegrity(report: HarnessEvaluationReport, e
 
 function validateNativeSocialExecution(artifact: MatchArtifact, errors: string[], options: { replay?: boolean } = {}): void {
   const execution = artifact.socialEpisode;
+  const snapshotFramesById = new Map((artifact.agentSnapshotFrames ?? []).map((frame) => [frame.frameId, frame]));
   if (!execution.execution) {
     errors.push("socialEpisode.execution metadata is required for harness.match.v2.");
   } else {
@@ -1273,7 +1347,7 @@ function validateNativeSocialExecution(artifact: MatchArtifact, errors: string[]
       errors.push(`socialEpisode.steps[${index}] rejected step cannot reference committed messages.`);
     }
     validateAgentSnapshotFrameReference({
-      frames: artifact.agentSnapshotFrames ?? [],
+      framesById: snapshotFramesById,
       frameId: step.actorSnapshotFrameIdAfterStep,
       snapshotHash: step.actorSnapshotsHashAfterStep,
       label: `socialEpisode.steps[${index}]`,
@@ -1286,7 +1360,13 @@ function validateNativeSocialExecution(artifact: MatchArtifact, errors: string[]
   if (options.replay !== false) {
     const replay = replayWerewolfSocialEpisode(execution as SocialEpisodeArtifact<GameState, unknown, unknown, GameCommand>, {
       stopOnMismatch: false,
-      agentSnapshotFrames: artifact.agentSnapshotFrames
+      agentSnapshotFrames: artifact.agentSnapshotFrames,
+      // The generic artifact-envelope validation above already audits the
+      // canonical actor-state frame registry. Repeating that full payload
+      // audit inside deterministic environment replay multiplied startup
+      // memory for large completed matches without adding an independent
+      // integrity boundary.
+      auditAgentSnapshots: false
     });
     for (const mismatch of replay.mismatches) errors.push(`socialEpisode replay: ${mismatch}`);
   }
@@ -1833,9 +1913,8 @@ function validateAgentSnapshotFrames(artifact: MatchArtifact, playerIds: Set<str
       errors.push(`Duplicate agent snapshot frame id ${frame.frameId}.`);
     }
     seen.add(frame.frameId);
-    if (frame.agentsHash !== hashStableState(frame.agents)) {
-      errors.push(`${label}.agentsHash mismatch.`);
-    }
+    // The domain-neutral envelope validator has already bound agentsHash to
+    // the canonical frame payload. This pass adds Werewolf roster semantics.
     if (frame.frameId !== harnessAgentSnapshotFrameId(frame.agentsHash)) {
       errors.push(`${label}.frameId mismatch for agentsHash.`);
     }
@@ -1849,6 +1928,7 @@ function validateAgentSnapshotFrames(artifact: MatchArtifact, playerIds: Set<str
       actorId: "",
       label,
       required: true,
+      snapshotPayloadAlreadyValidated: true,
       errors
     });
   }
@@ -1881,6 +1961,7 @@ function validateStepAgentSnapshots(input: {
   actorId: string;
   label: string;
   required: boolean;
+  snapshotPayloadAlreadyValidated?: boolean;
   errors: string[];
 }): void {
   if (!input.snapshots || !input.snapshotHash) {
@@ -1889,9 +1970,11 @@ function validateStepAgentSnapshots(input: {
     }
     return;
   }
-  const actualHash = hashStableState(input.snapshots);
-  if (actualHash !== input.snapshotHash) {
-    input.errors.push(`${input.label}.agentSnapshotsHashAfterStep mismatch: expected ${actualHash}, received ${input.snapshotHash}.`);
+  if (!input.snapshotPayloadAlreadyValidated) {
+    const actualHash = hashStableState(input.snapshots);
+    if (actualHash !== input.snapshotHash) {
+      input.errors.push(`${input.label}.agentSnapshotsHashAfterStep mismatch: expected ${actualHash}, received ${input.snapshotHash}.`);
+    }
   }
   const seen = new Set<string>();
   for (const [index, agent] of input.snapshots.entries()) {
@@ -1917,7 +2000,7 @@ function validateStepAgentSnapshots(input: {
 }
 
 function validateAgentSnapshotFrameReference(input: {
-  frames: AgentSnapshotFrame[];
+  framesById: ReadonlyMap<string, AgentSnapshotFrame>;
   frameId: string | undefined;
   snapshotHash: string | undefined;
   label: string;
@@ -1926,7 +2009,7 @@ function validateAgentSnapshotFrameReference(input: {
   errors: string[];
 }): void {
   if (!input.frameId) return;
-  const frame = input.frames.find((candidate) => candidate.frameId === input.frameId);
+  const frame = input.framesById.get(input.frameId);
   if (!frame) {
     input.errors.push(`${input.label}.${input.fieldName} references missing agent snapshot frame ${input.frameId}.`);
     return;
@@ -1936,6 +2019,18 @@ function validateAgentSnapshotFrameReference(input: {
       `${input.label}.${input.fieldName} hash mismatch: ${input.hashFieldName}=${input.snapshotHash}, frame.agentsHash=${frame.agentsHash}.`
     );
   }
+}
+
+function resolveAgentSnapshotsForValidation(
+  step: HarnessStepRecord,
+  framesById: ReadonlyMap<string, AgentSnapshotFrame>
+): AgentHarnessState[] | undefined {
+  if (step.agentSnapshotsAfterStep) return step.agentSnapshotsAfterStep;
+  const frameId = step.agentSnapshotFrameIdAfterStep;
+  const snapshotHash = step.agentSnapshotsHashAfterStep;
+  if (!frameId || !snapshotHash) return undefined;
+  const frame = framesById.get(frameId);
+  return frame?.agentsHash === snapshotHash ? frame.agents : undefined;
 }
 
 function validateMutationRange(

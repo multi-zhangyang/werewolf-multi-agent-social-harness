@@ -79,6 +79,53 @@ export interface SocialRuntimeActorBinding {
   personaId?: string;
 }
 
+/**
+ * Runner-authored classification of the cognition path available to an
+ * episode. Provider telemetry describes what a reported call looked like; it
+ * does not by itself prove that the episode used a production provider
+ * reasoner. Legacy artifacts may omit this field.
+ */
+export type SocialReasonerExecutionClass = "live-provider" | "policy-only" | "injected-unverified";
+
+export const SOCIAL_ASSIGNMENT_RESOLUTION_VERSION = "harness.assignment-resolution.v1" as const;
+
+export type SocialAssignmentJsonPrimitive = string | number | boolean | null;
+export type SocialAssignmentJsonValue =
+  | SocialAssignmentJsonPrimitive
+  | SocialAssignmentJsonValue[]
+  | { [key: string]: SocialAssignmentJsonValue };
+
+/**
+ * Domain-authored output of one reviewed assignment resolver. The generic
+ * control plane stamps policy/configuration and episode identity around these
+ * rows, then binds the closed record to the actual runtime actor roster.
+ * `seat`, `role`, and `team` are optional because not every social domain has
+ * those concepts; `domain` carries other portable assignment coordinates.
+ */
+export interface SocialAssignmentActorResolution {
+  actorId: string;
+  profileId: string;
+  model: string;
+  seat?: string | number;
+  role?: string;
+  team?: string;
+  domain?: { [key: string]: SocialAssignmentJsonValue };
+}
+
+export interface SocialAssignmentResolutionEvidence {
+  schemaVersion: typeof SOCIAL_ASSIGNMENT_RESOLUTION_VERSION;
+  policy: {
+    id: string;
+    version: string;
+    configurationHash: string;
+  };
+  episode: {
+    index: number;
+    seed: string;
+  };
+  actors: SocialAssignmentActorResolution[];
+}
+
 export interface SocialChannel {
   id: string;
   kind: SocialChannelKind;
@@ -625,6 +672,8 @@ export interface SocialEpisodeArtifact<TState = unknown, TObservation = unknown,
     maxTransitions?: number;
     /** Configured generic runner budget; runtime AbortSignal itself is never serialized. */
     decisionTimeoutMs?: number;
+    /** Machine-readable cognition provenance; absent only on legacy/direct social artifacts. */
+    reasonerExecutionClass?: SocialReasonerExecutionClass;
   };
   schedulerMode: SocialResolvedSchedulerMode;
   /** Immutable actor registry for this live execution. It bounds `readableBy:
@@ -633,6 +682,8 @@ export interface SocialEpisodeArtifact<TState = unknown, TObservation = unknown,
   runtimeActorIds?: string[];
   /** Exact actor/profile/model composition for this run; absent only on legacy artifacts. */
   runtimeActors?: SocialRuntimeActorBinding[];
+  /** Versioned experiment assignment output; absent on legacy/unbound artifacts. */
+  assignmentResolution?: SocialAssignmentResolutionEvidence;
   profiles: SocialAgentProfile[];
   channels: SocialChannel[];
   initialState: TState;
@@ -871,6 +922,7 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
     | "messages"
     | "runtimeActorIds"
     | "runtimeActors"
+    | "assignmentResolution"
     | "profiles"
     | "execution"
     | "exposureRecords"
@@ -892,6 +944,17 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
   if (maxTransitions !== undefined && (!Number.isInteger(maxTransitions) || maxTransitions < 0)) {
     errors.push("execution.maxTransitions must be a nonnegative integer when recorded.");
   }
+  const reasonerExecutionClass = episode.execution?.reasonerExecutionClass;
+  if (
+    reasonerExecutionClass !== undefined &&
+    reasonerExecutionClass !== "live-provider" &&
+    reasonerExecutionClass !== "policy-only" &&
+    reasonerExecutionClass !== "injected-unverified"
+  ) {
+    errors.push(
+      "execution.reasonerExecutionClass must be live-provider, policy-only, or injected-unverified when recorded."
+    );
+  }
   const runtimeActorIds = normalizeRuntimeActorIds(episode.runtimeActorIds, errors, "runtimeActorIds");
   const runtimeActorIdSet = runtimeActorIds ? new Set(runtimeActorIds) : undefined;
   const runtimeActors = normalizeRuntimeActorBindings(episode.runtimeActors, errors, "runtimeActors");
@@ -907,6 +970,9 @@ export function validateSocialEpisodeArtifact<TState, TObservation, TPending, TC
     if (hashStableState(boundProfiles) !== hashStableState(recordedProfiles)) {
       errors.push("runtimeActors profile identities must exactly match profiles.");
     }
+  }
+  if (episode.assignmentResolution !== undefined) {
+    validateSocialAssignmentResolutionEvidence(episode.assignmentResolution, errors, "assignmentResolution");
   }
   const channelsById = new Map<string, SocialChannel>();
   for (const [index, channel] of episode.channels.entries()) {
@@ -4346,6 +4412,103 @@ function normalizeRuntimeActorBindings(
     errors.push(`${label} must be sorted by actorId for canonical artifact identity.`);
   }
   return runtimeActors.map(cloneJson);
+}
+
+function validateSocialAssignmentResolutionEvidence(
+  value: SocialAssignmentResolutionEvidence,
+  errors: string[],
+  label: string
+): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(`${label} must be an object.`);
+    return;
+  }
+  const record = value as unknown as Record<string, unknown>;
+  const unknownFields = Object.keys(record).filter((key) => !["schemaVersion", "policy", "episode", "actors"].includes(key));
+  if (unknownFields.length) errors.push(`${label} contains unknown field(s): ${unknownFields.sort().join(", ")}.`);
+  if (record.schemaVersion !== SOCIAL_ASSIGNMENT_RESOLUTION_VERSION) {
+    errors.push(`${label}.schemaVersion must be ${SOCIAL_ASSIGNMENT_RESOLUTION_VERSION}.`);
+  }
+  const policy = record.policy && typeof record.policy === "object" && !Array.isArray(record.policy)
+    ? record.policy as Record<string, unknown>
+    : undefined;
+  if (!policy) {
+    errors.push(`${label}.policy must be an object.`);
+  } else {
+    const policyUnknown = Object.keys(policy).filter((key) => !["id", "version", "configurationHash"].includes(key));
+    if (policyUnknown.length) errors.push(`${label}.policy contains unknown field(s): ${policyUnknown.sort().join(", ")}.`);
+    for (const field of ["id", "version", "configurationHash"] as const) {
+      if (typeof policy[field] !== "string" || !policy[field].trim()) errors.push(`${label}.policy.${field} is required.`);
+    }
+  }
+  const episode = record.episode && typeof record.episode === "object" && !Array.isArray(record.episode)
+    ? record.episode as Record<string, unknown>
+    : undefined;
+  if (!episode) {
+    errors.push(`${label}.episode must be an object.`);
+  } else {
+    const episodeUnknown = Object.keys(episode).filter((key) => !["index", "seed"].includes(key));
+    if (episodeUnknown.length) errors.push(`${label}.episode contains unknown field(s): ${episodeUnknown.sort().join(", ")}.`);
+    if (!Number.isInteger(episode.index) || (episode.index as number) < 0) {
+      errors.push(`${label}.episode.index must be a nonnegative integer.`);
+    }
+    if (typeof episode.seed !== "string" || !episode.seed.trim()) errors.push(`${label}.episode.seed is required.`);
+  }
+  if (!Array.isArray(record.actors)) {
+    errors.push(`${label}.actors must be an array.`);
+    return;
+  }
+  const seen = new Set<string>();
+  for (const [index, rawActor] of record.actors.entries()) {
+    const actorLabel = `${label}.actors[${index}]`;
+    if (!rawActor || typeof rawActor !== "object" || Array.isArray(rawActor)) {
+      errors.push(`${actorLabel} must be an object.`);
+      continue;
+    }
+    const actor = rawActor as Record<string, unknown>;
+    const actorUnknown = Object.keys(actor).filter(
+      (key) => !["actorId", "profileId", "model", "seat", "role", "team", "domain"].includes(key)
+    );
+    if (actorUnknown.length) errors.push(`${actorLabel} contains unknown field(s): ${actorUnknown.sort().join(", ")}.`);
+    for (const field of ["actorId", "profileId", "model"] as const) {
+      if (typeof actor[field] !== "string" || !(actor[field] as string).trim()) errors.push(`${actorLabel}.${field} is required.`);
+    }
+    if (typeof actor.actorId === "string") {
+      if (seen.has(actor.actorId)) errors.push(`${actorLabel}.actorId duplicates ${actor.actorId}.`);
+      seen.add(actor.actorId);
+    }
+    if (actor.seat !== undefined && !(
+      (typeof actor.seat === "string" && actor.seat.trim()) ||
+      (typeof actor.seat === "number" && Number.isFinite(actor.seat))
+    )) errors.push(`${actorLabel}.seat must be a nonempty string or finite number when present.`);
+    for (const field of ["role", "team"] as const) {
+      if (actor[field] !== undefined && (typeof actor[field] !== "string" || !(actor[field] as string).trim())) {
+        errors.push(`${actorLabel}.${field} must be nonempty when present.`);
+      }
+    }
+    if (actor.domain !== undefined && !isPortableAssignmentJson(actor.domain)) {
+      errors.push(`${actorLabel}.domain must be a portable JSON object when present.`);
+    }
+  }
+  const actorIds = (record.actors as Array<Record<string, unknown>>)
+    .map((actor) => actor?.actorId)
+    .filter((actorId): actorId is string => typeof actorId === "string");
+  const sorted = [...actorIds].sort((left, right) => left.localeCompare(right));
+  if (sorted.some((actorId, index) => actorId !== actorIds[index])) {
+    errors.push(`${label}.actors must be sorted by actorId for canonical artifact identity.`);
+  }
+}
+
+function isPortableAssignmentJson(value: unknown, seen = new Set<object>()): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.every((entry) => isPortableAssignmentJson(entry, seen));
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  return Object.values(value as Record<string, unknown>).every((entry) => isPortableAssignmentJson(entry, seen));
 }
 
 function runtimeActorProfileIdentityHash(binding: SocialRuntimeActorBinding): string {

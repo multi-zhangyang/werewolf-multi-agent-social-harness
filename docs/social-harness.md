@@ -675,6 +675,22 @@ closed tombstones. Collection is one-shot. Late completion after timeout is
 dropped before trace/proposal/message side effects and cannot contaminate the
 next turn.
 
+Werewolf actor memory and the private mutation journal use 64-entry rolling
+windows. Trimming never reuses `seq` or `journalSeq`; `nextSeq` remains monotonic
+after JSON restore. Exact message-ingestion ids remain separate so an evicted
+message-memory entry cannot be applied twice. These windows bound per-frame
+growth, but they are not described as an episode-complete journal: full
+messages, delivery receipts, exposure records, native steps, and historical
+snapshot frames remain in the canonical artifact plane.
+
+Snapshot-heavy match construction compacts while cloning. Inline actor tables
+are verified and moved into a shared content-addressed frame registry before a
+second full projection copy can exist. The public non-mutating generic
+compactor contract remains unchanged. Server recovery and replay validation
+reuse indexed, read-only frame payloads inside one integrity pipeline; public
+resolution APIs still clone returned state so callers cannot mutate canonical
+frames.
+
 Artifact visibility is now an orchestration policy rather than a UI convention.
 Non-`research-full` runs require a domain projector, domain validator, and
 projection-aware store. The outward result is a safe publication DTO read back

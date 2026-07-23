@@ -5,12 +5,15 @@ import {
 } from "./domainAdapter";
 import { hashStableJsonValue } from "./hash";
 import type {
+  SocialAssignmentActorResolution,
+  SocialAssignmentResolutionEvidence,
   SocialEpisodeArtifact,
   SocialReasonerCallEvidence,
+  SocialReasonerExecutionClass,
   SocialResolvedSchedulerMode,
   SocialRuntimeActorBinding
 } from "./social";
-import { validateSocialReasonerCallEvidence } from "./social";
+import { SOCIAL_ASSIGNMENT_RESOLUTION_VERSION, validateSocialReasonerCallEvidence } from "./social";
 
 /**
  * Portable, domain-neutral experiment control-plane input.
@@ -22,9 +25,11 @@ import { validateSocialReasonerCallEvidence } from "./social";
  */
 export const GENERIC_EXPERIMENT_SPEC_VERSION = "harness.experiment.v1" as const;
 export const LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION = "harness.experiment-provenance.v1" as const;
-export const GENERIC_EXPERIMENT_PROVENANCE_VERSION = "harness.experiment-provenance.v2" as const;
+export const LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION_V2 = "harness.experiment-provenance.v2" as const;
+export const GENERIC_EXPERIMENT_PROVENANCE_VERSION = "harness.experiment-provenance.v3" as const;
 export const GENERIC_EXPERIMENT_FORK_LINEAGE_VERSION = "harness.experiment-fork-lineage.v1" as const;
-export const GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION = "harness.experiment-execution-attestation.v1" as const;
+export const LEGACY_GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION = "harness.experiment-execution-attestation.v1" as const;
+export const GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION = "harness.experiment-execution-attestation.v2" as const;
 
 export type GenericExperimentKind = "episode" | "tournament";
 
@@ -145,6 +150,7 @@ export interface NormalizedGenericExperimentSpecV1 {
 export interface GenericExperimentProvenanceV1 {
   schemaVersion:
     | typeof GENERIC_EXPERIMENT_PROVENANCE_VERSION
+    | typeof LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION_V2
     | typeof LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION;
   specVersion: typeof GENERIC_EXPERIMENT_SPEC_VERSION;
   specId: string;
@@ -152,6 +158,8 @@ export interface GenericExperimentProvenanceV1 {
   spec: NormalizedGenericExperimentSpecV1;
   /** Required by v2 provenance; v1 remains parseable only as legacy metadata. */
   executionAttestationRequired?: true;
+  /** Required by v3 provenance; older schemas remain parseable legacy authority. */
+  assignmentResolutionRequired?: true;
 }
 
 export interface GenericExperimentExecutionActorAttestationV1 {
@@ -165,12 +173,18 @@ export interface GenericExperimentExecutionActorAttestationV1 {
  * execution facts. The adapter cannot supply this record directly.
  */
 export interface GenericExperimentExecutionAttestationV1 {
-  schemaVersion: typeof GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION;
+  schemaVersion:
+    | typeof GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION
+    | typeof LEGACY_GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION;
   specHash: string;
   schedulerMode: SocialResolvedSchedulerMode;
   maxTransitions: number;
   decisionTimeoutMs?: number;
+  /** Exact episode-level cognition provenance authored by runHarnessEpisode. */
+  reasonerExecutionClass?: SocialReasonerExecutionClass;
   actors: GenericExperimentExecutionActorAttestationV1[];
+  /** Required by v2 attestation; absent only on legacy v1 records. */
+  assignmentResolution?: SocialAssignmentResolutionEvidence;
   /** Exact runner-bound provider/reasoner calls, in native step/call order. */
   reasonerCalls?: SocialReasonerCallEvidence[];
 }
@@ -299,7 +313,12 @@ export function normalizeGenericExperimentSpec(
   const domainAdapter = normalizeDomainAdapter(merged.domainAdapter, domainId);
   const profiles = normalizeProfiles(merged.profiles);
   const modelAssignments = normalizeModelAssignments(merged.modelAssignments, profiles);
-  const providerPolicy = normalizeProviderPolicy(merged.providerPolicy, modelAssignments.length > 0);
+  // A model assignment identifies the opaque model bound to an actor. It does
+  // not by itself prove that execution used a live provider: deterministic
+  // fixtures and embedded reasoners must be representable as
+  // `injected-unverified`. Only an explicit providerPolicy claims live
+  // streaming requirements, which execution attestation then enforces.
+  const providerPolicy = normalizeProviderPolicy(merged.providerPolicy);
   const episodeCount = positiveInteger(merged.episodeCount ?? 1, "episodeCount");
   if (kind === "episode" && episodeCount !== 1) {
     throw new Error("An episode experiment must have episodeCount equal to 1.");
@@ -340,15 +359,22 @@ export function validateGenericExperimentSpec(input: unknown): string[] {
 }
 
 /** Normalize once, then bind the complete portable spec to a stable identity. */
-export function createGenericExperimentProvenance(input: unknown): GenericExperimentProvenanceV1 {
+export function createGenericExperimentProvenance(
+  input: unknown,
+  options: { assignmentResolutionRequired?: boolean } = {}
+): GenericExperimentProvenanceV1 {
   const spec = normalizeGenericExperimentSpec(input);
+  const assignmentResolutionRequired = options.assignmentResolutionRequired ?? false;
   return {
-    schemaVersion: GENERIC_EXPERIMENT_PROVENANCE_VERSION,
+    schemaVersion: assignmentResolutionRequired
+      ? GENERIC_EXPERIMENT_PROVENANCE_VERSION
+      : LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION_V2,
     specVersion: GENERIC_EXPERIMENT_SPEC_VERSION,
     specId: spec.id,
     specHash: hashStableJsonValue(spec),
     spec,
-    executionAttestationRequired: true
+    executionAttestationRequired: true,
+    ...(assignmentResolutionRequired ? { assignmentResolutionRequired: true as const } : {})
   };
 }
 
@@ -356,15 +382,24 @@ export function validateGenericExperimentProvenance(input: unknown, path = "expe
   if (!isRecord(input)) return [`${path} must be an object.`];
   const errors: string[] = [];
   const unknownFields = Object.keys(input).filter(
-    (key) => !["schemaVersion", "specVersion", "specId", "specHash", "spec", "executionAttestationRequired"].includes(key)
+    (key) => ![
+      "schemaVersion",
+      "specVersion",
+      "specId",
+      "specHash",
+      "spec",
+      "executionAttestationRequired",
+      "assignmentResolutionRequired"
+    ].includes(key)
   );
   if (unknownFields.length) errors.push(`${path} contains unknown field(s): ${unknownFields.sort().join(", ")}.`);
   if (
     input.schemaVersion !== GENERIC_EXPERIMENT_PROVENANCE_VERSION &&
+    input.schemaVersion !== LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION_V2 &&
     input.schemaVersion !== LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION
   ) {
     errors.push(
-      `${path}.schemaVersion must be ${GENERIC_EXPERIMENT_PROVENANCE_VERSION} or legacy ${LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION}.`
+      `${path}.schemaVersion must be ${GENERIC_EXPERIMENT_PROVENANCE_VERSION} or legacy ${LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION_V2}/${LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION}.`
     );
   }
   if (input.specVersion !== GENERIC_EXPERIMENT_SPEC_VERSION) {
@@ -373,11 +408,26 @@ export function validateGenericExperimentProvenance(input: unknown, path = "expe
   if (input.executionAttestationRequired !== undefined && input.executionAttestationRequired !== true) {
     errors.push(`${path}.executionAttestationRequired must be true when present.`);
   }
+  if (input.assignmentResolutionRequired !== undefined && input.assignmentResolutionRequired !== true) {
+    errors.push(`${path}.assignmentResolutionRequired must be true when present.`);
+  }
   if (
     input.schemaVersion === GENERIC_EXPERIMENT_PROVENANCE_VERSION &&
     input.executionAttestationRequired !== true
   ) {
     errors.push(`${path}.executionAttestationRequired is required by ${GENERIC_EXPERIMENT_PROVENANCE_VERSION}.`);
+  }
+  if (
+    input.schemaVersion === LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION_V2 &&
+    input.executionAttestationRequired !== true
+  ) {
+    errors.push(`${path}.executionAttestationRequired is required by ${LEGACY_GENERIC_EXPERIMENT_PROVENANCE_VERSION_V2}.`);
+  }
+  if (
+    input.schemaVersion === GENERIC_EXPERIMENT_PROVENANCE_VERSION &&
+    input.assignmentResolutionRequired !== true
+  ) {
+    errors.push(`${path}.assignmentResolutionRequired is required by ${GENERIC_EXPERIMENT_PROVENANCE_VERSION}.`);
   }
   let normalized: NormalizedGenericExperimentSpecV1 | undefined;
   try {
@@ -395,14 +445,44 @@ export function validateGenericExperimentProvenance(input: unknown, path = "expe
   return errors;
 }
 
+/**
+ * Stamp domain-resolved assignment rows with control-plane policy/configuration
+ * and deterministic episode identity. The adapter supplies only the resolved
+ * rows; it cannot choose the policy, seed, index, or evidence schema.
+ */
+export function createGenericExperimentAssignmentResolution(
+  spec: NormalizedGenericExperimentSpecV1,
+  episode: { index: number; seed: string },
+  actors: readonly SocialAssignmentActorResolution[]
+): SocialAssignmentResolutionEvidence {
+  const canonicalActors = [...clonePortable(actors)].sort((left, right) => left.actorId.localeCompare(right.actorId));
+  return {
+    schemaVersion: SOCIAL_ASSIGNMENT_RESOLUTION_VERSION,
+    policy: {
+      id: spec.assignmentPolicy.id,
+      version: spec.assignmentPolicy.version,
+      configurationHash: hashStableJsonValue(spec.assignmentPolicy.configuration ?? {})
+    },
+    episode: {
+      index: episode.index,
+      seed: episode.seed
+    },
+    actors: canonicalActors
+  };
+}
+
 export function createGenericExperimentExecutionAttestation(
   spec: NormalizedGenericExperimentSpecV1,
   episode: Pick<
     SocialEpisodeArtifact,
-    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "schedulerMode" | "steps"
-  >
+    "assignmentResolution" | "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "schedulerMode" | "steps"
+  >,
+  options: { assignmentResolutionRequired?: boolean } = {}
 ): GenericExperimentExecutionAttestationV1 {
-  const evidenceErrors = validateGenericExperimentExecutionEvidence(spec, episode);
+  const assignmentResolutionRequired = options.assignmentResolutionRequired ?? false;
+  const evidenceErrors = validateGenericExperimentExecutionEvidence(spec, episode, "socialEpisode", {
+    requireAssignmentResolution: assignmentResolutionRequired
+  });
   if (evidenceErrors.length) {
     throw new Error(`Generic experiment execution evidence is invalid: ${evidenceErrors.join(" ")}`);
   }
@@ -413,13 +493,18 @@ export function createGenericExperimentExecutionAttestation(
     (profile) => profile.reasonerId !== undefined && modelByProfileId.has(profile.id)
   );
   return {
-    schemaVersion: GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION,
+    schemaVersion: assignmentResolutionRequired
+      ? GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION
+      : LEGACY_GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION,
     specHash: hashStableJsonValue(spec),
     schedulerMode: episode.schedulerMode,
     maxTransitions: episode.execution!.maxTransitions!,
     ...(episode.execution?.decisionTimeoutMs === undefined
       ? {}
       : { decisionTimeoutMs: episode.execution.decisionTimeoutMs }),
+    ...(episode.execution?.reasonerExecutionClass === undefined
+      ? {}
+      : { reasonerExecutionClass: episode.execution.reasonerExecutionClass }),
     actors: episode.runtimeActors!.map((binding) => {
       const profile = profileById.get(binding.profileId)!;
       const modelAssignment = modelByProfileId.get(binding.profileId);
@@ -429,6 +514,9 @@ export function createGenericExperimentExecutionAttestation(
         ...(modelAssignment === undefined ? {} : { modelAssignment: clonePortable(modelAssignment) })
       };
     }),
+    ...(assignmentResolutionRequired
+      ? { assignmentResolution: clonePortable(episode.assignmentResolution!) }
+      : {}),
     ...(bindsProviderBackedReasoners ? { reasonerCalls: clonePortable(reasonerCalls) } : {})
   };
 }
@@ -438,19 +526,33 @@ export function validateGenericExperimentExecutionAttestation(
   spec: NormalizedGenericExperimentSpecV1,
   episode: Pick<
     SocialEpisodeArtifact,
-    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "schedulerMode" | "steps"
+    "assignmentResolution" | "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "schedulerMode" | "steps"
   >,
   path = "executionAttestation"
 ): string[] {
   if (!isRecord(input)) return [`${path} must be an object.`];
   let expected: GenericExperimentExecutionAttestationV1;
   try {
-    expected = createGenericExperimentExecutionAttestation(spec, episode);
+    const current = createGenericExperimentExecutionAttestation(spec, episode, {
+      assignmentResolutionRequired:
+        input.schemaVersion !== LEGACY_GENERIC_EXPERIMENT_EXECUTION_ATTESTATION_VERSION
+    });
+    expected = current;
   } catch (error) {
     return [`${path} cannot be validated: ${error instanceof Error ? error.message : "invalid execution evidence"}`];
   }
   const unknownFields = Object.keys(input).filter(
-    (key) => !["schemaVersion", "specHash", "schedulerMode", "maxTransitions", "decisionTimeoutMs", "actors", "reasonerCalls"].includes(key)
+    (key) => ![
+      "schemaVersion",
+      "specHash",
+      "schedulerMode",
+      "maxTransitions",
+      "decisionTimeoutMs",
+      "reasonerExecutionClass",
+      "actors",
+      "assignmentResolution",
+      "reasonerCalls"
+    ].includes(key)
   );
   const errors = unknownFields.length
     ? [`${path} contains unknown field(s): ${unknownFields.sort().join(", ")}.`]
@@ -476,9 +578,10 @@ export function validateGenericExperimentExecutionEvidence(
   spec: NormalizedGenericExperimentSpecV1,
   episode: Pick<
     SocialEpisodeArtifact,
-    "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "steps"
+    "assignmentResolution" | "execution" | "runtimeActorIds" | "runtimeActors" | "profiles" | "steps"
   >,
-  path = "socialEpisode"
+  path = "socialEpisode",
+  options: { requireAssignmentResolution?: boolean } = {}
 ): string[] {
   const errors: string[] = [];
   if (episode.execution?.maxTransitions !== spec.maxTransitions) {
@@ -486,6 +589,11 @@ export function validateGenericExperimentExecutionEvidence(
   }
   if (episode.execution?.decisionTimeoutMs !== spec.timeoutPolicy.decisionTimeoutMs) {
     errors.push(`${path}.execution.decisionTimeoutMs must match experiment.spec.timeoutPolicy.decisionTimeoutMs.`);
+  }
+  if (spec.providerPolicy && episode.execution?.reasonerExecutionClass !== "live-provider") {
+    errors.push(
+      `${path}.execution.reasonerExecutionClass must be live-provider when experiment.spec.providerPolicy is present.`
+    );
   }
   if (!Array.isArray(episode.runtimeActorIds) || episode.runtimeActorIds.length !== spec.actorCount) {
     errors.push(`${path}.runtimeActorIds must contain experiment.spec.actorCount actors.`);
@@ -519,8 +627,90 @@ export function validateGenericExperimentExecutionEvidence(
       errors
     });
   }
+  validateExperimentAssignmentResolution({
+    spec,
+    resolution: episode.assignmentResolution,
+    runtimeActors,
+    path,
+    errors,
+    required: options.requireAssignmentResolution ?? false
+  });
   validateExperimentReasonerCallEvidence({ spec, episode, runtimeActors, path, errors });
   return errors;
+}
+
+function validateExperimentAssignmentResolution(input: {
+  spec: NormalizedGenericExperimentSpecV1;
+  resolution: SocialAssignmentResolutionEvidence | undefined;
+  runtimeActors: SocialRuntimeActorBinding[];
+  path: string;
+  errors: string[];
+  required: boolean;
+}): void {
+  const label = `${input.path}.assignmentResolution`;
+  if (!input.resolution) {
+    if (input.required) input.errors.push(`${label} is required by experiment assignment policy execution authority.`);
+    return;
+  }
+  const resolution = input.resolution;
+  if (resolution.schemaVersion !== SOCIAL_ASSIGNMENT_RESOLUTION_VERSION) {
+    input.errors.push(`${label}.schemaVersion must be ${SOCIAL_ASSIGNMENT_RESOLUTION_VERSION}.`);
+  }
+  if (
+    resolution.policy?.id !== input.spec.assignmentPolicy.id ||
+    resolution.policy?.version !== input.spec.assignmentPolicy.version
+  ) {
+    input.errors.push(`${label}.policy must match experiment.spec.assignmentPolicy identity.`);
+  }
+  const expectedConfigurationHash = hashStableJsonValue(input.spec.assignmentPolicy.configuration ?? {});
+  if (resolution.policy?.configurationHash !== expectedConfigurationHash) {
+    input.errors.push(`${label}.policy.configurationHash must match experiment.spec.assignmentPolicy.configuration.`);
+  }
+  if (!Number.isInteger(resolution.episode?.index) || resolution.episode.index < 0) {
+    input.errors.push(`${label}.episode.index must be a nonnegative integer.`);
+  } else {
+    const expectedSeed = `${input.spec.seed}:g${resolution.episode.index + 1}`;
+    if (resolution.episode.seed !== expectedSeed) {
+      input.errors.push(`${label}.episode.seed must match the deterministic experiment episode schedule.`);
+    }
+  }
+  if (!Array.isArray(resolution.actors)) {
+    input.errors.push(`${label}.actors must be an array.`);
+    return;
+  }
+  if (resolution.actors.length !== input.runtimeActors.length) {
+    input.errors.push(`${label}.actors must contain exactly the runtime actor roster.`);
+    return;
+  }
+  const expectedByActor = new Map(input.runtimeActors.map((binding) => [binding.actorId, binding]));
+  const actorIds = resolution.actors.map((actor) =>
+    actor && typeof actor === "object" ? (actor as Partial<SocialAssignmentActorResolution>).actorId : undefined
+  );
+  if (new Set(actorIds).size !== actorIds.length) {
+    input.errors.push(`${label}.actors must not contain duplicate actor ids.`);
+  }
+  const sorted = [...actorIds].sort((left, right) => String(left).localeCompare(String(right)));
+  if (sorted.some((actorId, index) => actorId !== actorIds[index])) {
+    input.errors.push(`${label}.actors must be sorted by actorId.`);
+  }
+  for (const [index, actor] of resolution.actors.entries()) {
+    if (!actor || typeof actor !== "object") {
+      input.errors.push(`${label}.actors[${index}] must be an object.`);
+      continue;
+    }
+    const row = actor as Partial<SocialAssignmentActorResolution>;
+    const binding = typeof row.actorId === "string" ? expectedByActor.get(row.actorId) : undefined;
+    if (!binding) {
+      input.errors.push(`${label}.actors[${index}].actorId must reference the exact runtime actor roster.`);
+      continue;
+    }
+    if (row.profileId !== binding.profileId) {
+      input.errors.push(`${label}.actors[${index}].profileId must match the runtime actor binding.`);
+    }
+    if (row.model !== binding.model) {
+      input.errors.push(`${label}.actors[${index}].model must match the runtime actor binding.`);
+    }
+  }
 }
 
 function validateExperimentReasonerCallEvidence(input: {
@@ -576,10 +766,10 @@ function validateExperimentReasonerCallEvidence(input: {
       const stream = call && typeof call === "object" && call.stream && typeof call.stream === "object"
         ? call.stream
         : undefined;
-      if (call?.outcome !== "aborted" && stream?.enabled !== true) {
+      if (input.spec.providerPolicy && call?.outcome !== "aborted" && stream?.enabled !== true) {
         input.errors.push(`${label}.stream.enabled must be true under experiment.spec.providerPolicy.`);
       }
-      if (call?.outcome === "completed" && stream?.completed !== true) {
+      if (input.spec.providerPolicy && call?.outcome === "completed" && stream?.completed !== true) {
         input.errors.push(`${label} did not complete its provider stream.`);
       }
       if (binding && assignedModels.get(binding.profileId) !== call?.model) {
@@ -873,11 +1063,8 @@ function normalizeCheckpointPolicy(value: unknown): GenericExperimentCheckpointP
   return { ...normalizePolicyRef(record, "checkpointPolicy"), mode };
 }
 
-function normalizeProviderPolicy(value: unknown, required: boolean): GenericExperimentProviderPolicyV1 | undefined {
-  if (value === undefined) {
-    if (required) throw new Error("providerPolicy is required when modelAssignments are present.");
-    return undefined;
-  }
+function normalizeProviderPolicy(value: unknown): GenericExperimentProviderPolicyV1 | undefined {
+  if (value === undefined) return undefined;
   const record = requireRecord(value, "providerPolicy");
   assertKnownFields(record, new Set(["id", "version", "stream"]), "providerPolicy");
   if (record.stream !== true) throw new Error("providerPolicy.stream must be true.");
