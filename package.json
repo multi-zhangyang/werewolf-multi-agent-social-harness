@@ -2,6 +2,7 @@
   "name": "werewolf-multi-agent-arena",
   "private": true,
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "description": "Replayable and evaluable multi-agent adversarial society harness with Werewolf as the first domain adapter.",
   "homepage": "https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness#readme",
   "repository": {
