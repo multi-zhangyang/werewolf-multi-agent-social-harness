@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { HarnessEvaluationReport, HarnessMetricRecord } from "./types";
 import type {
   GenericTournamentEpisode,
@@ -13,6 +13,7 @@ import {
   type GenericExperimentProvenanceV1
 } from "./experimentSpec";
 import { hashStableJsonValue } from "./hash";
+import { publishNewLocalArtifactDirectory } from "./localArtifactDirectory";
 
 /**
  * A small, domain-neutral research artifact set.  This intentionally stops at
@@ -126,11 +127,28 @@ export async function writeGenericTournamentRunSetArtifact<TArtifact>(options: {
   const errors = validateGenericTournamentRunSetArtifact(artifact);
   if (errors.length) throw new Error(`Invalid generic tournament run set ${artifact.runSetId}: ${errors.join(" ")}`);
   const directory = resolve(options.directory);
-  await mkdir(directory, { recursive: false });
+  const episodeFiles = await publishNewLocalArtifactDirectory({
+    finalDirectory: directory,
+    populate: (stagingDirectory) => writeGenericTournamentRunSetTree(stagingDirectory, artifact)
+  });
+  const episodePaths = episodeFiles.map((file) => resolve(directory, file));
+  return {
+    directory,
+    manifestPath: join(directory, "manifest.json"),
+    episodesJsonlPath: join(directory, "episodes.jsonl"),
+    metricsJsonlPath: join(directory, "metrics.jsonl"),
+    episodePaths
+  };
+}
+
+async function writeGenericTournamentRunSetTree<TArtifact>(
+  directory: string,
+  artifact: GenericTournamentRunSetArtifact<TArtifact>
+): Promise<string[]> {
   const episodesDirectory = join(directory, "episodes");
   await mkdir(episodesDirectory, { recursive: false });
 
-  const episodePaths: string[] = [];
+  const episodeFiles: string[] = [];
   const episodeRows: Array<Record<string, unknown>> = [];
   const metricRows: Array<Record<string, unknown>> = [];
   for (const episode of artifact.episodes) {
@@ -139,7 +157,7 @@ export async function writeGenericTournamentRunSetArtifact<TArtifact>(options: {
       const filePath = resolve(directory, artifactFile);
       assertOwnedArtifactPath(directory, filePath);
       await writeJson(filePath, episode.artifact);
-      episodePaths.push(filePath);
+      episodeFiles.push(artifactFile);
     }
     episodeRows.push({
       index: episode.index,
@@ -160,11 +178,11 @@ export async function writeGenericTournamentRunSetArtifact<TArtifact>(options: {
   await writeJson(manifestPath, {
     ...artifact,
     episodes: episodeRows,
-    files: ["manifest.json", "episodes.jsonl", "metrics.jsonl", ...episodePaths.map((path) => `episodes/${basename(path)}`)]
+    files: ["manifest.json", "episodes.jsonl", "metrics.jsonl", ...episodeFiles]
   });
   await writeJsonLines(episodesJsonlPath, episodeRows);
   await writeJsonLines(metricsJsonlPath, metricRows);
-  return { directory, manifestPath, episodesJsonlPath, metricsJsonlPath, episodePaths };
+  return episodeFiles;
 }
 
 /** Validate lifecycle accounting and the domain-neutral persistent shape. */

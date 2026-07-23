@@ -6212,6 +6212,17 @@ async function storedExperimentMatrixArtifactSetFromManifestDirectory(
     const matrixId = stringField(manifest, "matrixId");
     const relativeFiles = experimentMatrixArtifactFilesFromUnknown(manifest.files);
     if (!createdAt || !matrixId || !relativeFiles) return null;
+    for (const relativeFile of flattenExperimentMatrixArtifactFiles(relativeFiles)) {
+      const absolutePath = resolveUnderDirectory(
+        outputDir,
+        normalizeRequestedArtifactPath(relativeFile)
+      );
+      await assertRegularFileInsideArtifactSet({
+        baseDir: root,
+        outputDir,
+        absolutePath
+      });
+    }
     return {
       id,
       createdAt,
