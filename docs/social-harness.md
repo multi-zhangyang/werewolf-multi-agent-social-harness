@@ -659,6 +659,30 @@ Focused validation recorded for this DTO slice passed the public-view suite
 typecheck. Those focused results do not imply a new full-suite, E2E, or live
 provider validation run.
 
+## Execution evidence and publication boundary (2026-07-23)
+
+`SocialHarnessStep.reasonerCalls` is runner-bound execution evidence, not model
+prose and not remote cryptographic attestation. It records safe call outcome,
+latency, attempts, usage, retry classification, and stream terminal state while
+excluding endpoints, credentials, request bodies, provider ids, and raw error
+details. A reasoner-backed actor that reaches a normal decision must provide
+the report; policy-only actors produce none. A harness decision timeout or
+execution-control abort may legitimately have no provider report and must not
+invent one.
+
+Werewolf actor reports are held in exact transaction-id/trace-id stores with
+closed tombstones. Collection is one-shot. Late completion after timeout is
+dropped before trace/proposal/message side effects and cannot contaminate the
+next turn.
+
+Artifact visibility is now an orchestration policy rather than a UI convention.
+Non-`research-full` runs require a domain projector, domain validator, and
+projection-aware store. The outward result is a safe publication DTO read back
+from the canonical sidecar; full experiment seed, domain artifact, evaluation
+report, and run-set authority remain internal. Evaluators run on full truth
+before publication, while outcome rewards are emitted only for a terminal
+completed episode with a winner.
+
 ## Next Engineering Steps
 
 - Extend the implemented `evaluation.social-fact-ingest-evidence.v1` coverage

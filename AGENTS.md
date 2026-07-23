@@ -28582,3 +28582,97 @@ bounded real match
 
 No max-token field, model-specific parser, prompt, fallback, retry path, action
 path, or provider-name branch was added. The live commands exited normally.
+
+## 13.300 Latest Execution Lock: Durable Control Plane, Safe Publication, UI Budget, And Final Validation (2026-07-23)
+
+This section supersedes older status counts while preserving every stricter
+harness-first rule above.
+
+### 13.300.1 Bottom-layer authority completed
+
+- Added domain-neutral parent matrix run authority with source/authority/input
+  hashes, numeric revision CAS, same-host flock lease, finalized child adoption,
+  crash recovery, stable timestamps, and real cross-process convergence tests.
+- Added episode run-record V3 multi-attempt provenance. Only domain-classified
+  `prepare`/`run` failures may retry; ambiguous started crashes fail closed and
+  staged canonical artifacts are adopted without re-execution.
+- Implemented `checkpointPolicy.native-boundaries`: the harness selects safe
+  committed boundaries, adapters build deterministic checkpoints, parallel
+  batches checkpoint only at the complete joint boundary, and finalized restart
+  repairs missing checkpoints from canonical truth without provider calls.
+- Added an atomic projection sidecar bound to canonical artifact SHA, run id,
+  policy/version, visibility, and payload SHA. Full artifact, JSONL, evaluation,
+  projection, checkpoints, and manifest publish in one immutable sibling rename.
+- Restricted-visibility orchestration returns a projection publication DTO, not
+  the canonical artifact, experiment seed, evaluation report, or full run set.
+- Outcome reward metrics now require `status=completed` and a winner. Truncated,
+  failed, or winnerless runs retain diagnostics but do not enter reward rows.
+
+### 13.300.2 Provider execution evidence corrected
+
+- Native social steps and experiment attestations record runner-bound,
+  content-free reasoner call evidence for stream completion/failure, attempts,
+  latency, usage, and safe retry history.
+- Harness decision timeouts and control-plane aborts never synthesize a provider
+  call report.
+- Werewolf actor reports are scoped to exact transaction id and trace id,
+  one-shot consumed, and closed with tombstones. A late provider promise after
+  timeout cannot enter a later turn or emit proposal/message side effects.
+- The configured model remains opaque. No model/provider-specific parser,
+  protocol, prompt, fallback, retry, or action branch exists.
+
+### 13.300.3 Cockpit and API boundary
+
+- `/api/config` publishes request-scoped operator, postgame, replay, checkpoint,
+  and export capabilities based on the actual socket boundary. React handlers
+  fail closed themselves; disabled buttons are not the security boundary.
+- The evaluation workspace and heavy evidence/board components use real async
+  module boundaries. Build budgets are derived from Vite's manifest and cover
+  the initial static graph, every async closure, individual chunks, total JS,
+  and fonts.
+- The cockpit has one responsive navigation surface, capability-safe public
+  bootstrap, WCAG contrast tokens, accessible progress names, keyboard-focusable
+  evidence tables, reduced motion, 320px reflow, and deterministic Drawer focus
+  restoration including Inspector -> Raw transitions.
+
+### 13.300.4 Final validation evidence
+
+```text
+npm run typecheck
+  passed
+
+full deterministic suite
+  57 files / 629 tests passed
+  705.32s
+
+npm run build
+  passed
+  initial static graph: 359.7 KiB gzip (limit 360 KiB)
+  total JS: 386.5 KiB gzip (limit 600 KiB)
+  fonts: 0 KiB
+
+complete Playwright fixture/accessibility suite
+  24 / 24 passed
+  includes desktop/mobile axe A/AA, Drawer focus, 320px reflow,
+  matrix, parallel tournament, live projection, replay, checkpoint, and fork
+
+real configured-provider streaming probe
+  one initial upstream empty-content stream was rejected as stream_empty
+  repeat completed successfully through provider_stop_event
+  environment validation passed
+
+bounded real match
+  model calls=3, native steps=4, committed=4, rejected=0
+  harness errors=0, every call completed by provider_stop_event
+  lifecycle=truncated only because maxTransitions=4
+
+bounded one-game real tournament
+  model calls=3, native steps=4, committed=4, rejected=0
+  provider failures=0, stream aborts=0, harness errors=0
+  lifecycle=truncated; completed-outcome leaderboard denominator remains zero
+```
+
+All real Chat Completions requests used `stream: true`. No `max_tokens`,
+`max_completion_tokens`, or equivalent max-token field was sent. The live model
+was used only as a test configuration value. No secret, endpoint detail, raw
+provider payload, or provider request id is recorded here.

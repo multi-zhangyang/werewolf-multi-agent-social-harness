@@ -74,6 +74,11 @@ The engine, not a model or the React cockpit, owns the following rules:
 - Witch save must target the actual selected wolf-night victim, and poison
   must target a living non-self player. These checks exist in the core engine
   as well as the harness adapter.
+- Equal wolf-night kill tallies use the versioned
+  `first_committed_target_vote` rule: the target whose first supporting ballot
+  was committed earliest wins. This is recorded ruleset semantics, not a
+  scheduler accident; a no-kill, revote, random, or consensus variant requires
+  a new ruleset id.
 - `wolfDiscussion: "one_turn"` enables one serialized, wolf-team-only
   `werewolf.whisper` per living wolf before the night kill-vote batch. It is
   off by default so existing experiment specifications retain their previous
@@ -554,6 +559,18 @@ transitive parser; focused engine/harness tests cover sheriff election, last
 words, role cardinality, core witch legality, and day-vote separation. A
 bounded real streaming probe is required whenever the provider/reasoner path
 changes and is reported only through its safe summary.
+
+Current validation on 2026-07-23 uses the configured model only as an opaque,
+configuration-driven test input. No model/provider-specific branch was added.
+The streaming probe completed through `provider_stop_event`; a bounded match
+and one-game tournament each recorded three streamed model calls, four native
+steps, four commits, zero rejected steps, zero harness errors, zero provider
+failures, and zero stream aborts. Both multi-step runs intentionally stopped at
+`maxTransitions=4`, so their lifecycle is `truncated` rather than falsely
+promoted to completed outcome data. The full deterministic suite passed 57
+files / 629 tests, the production build passed the manifest-derived bundle
+budgets, and the complete Playwright cockpit suite passed 24/24. Live Chat
+Completions requests include `stream: true` and omit max-token fields.
 
 Useful CLI limits:
 

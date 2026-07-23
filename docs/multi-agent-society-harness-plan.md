@@ -652,3 +652,24 @@ Current observed results after `agent.scaffold-visible-social-observation-ingest
   33 tests.
 - Typecheck passed.
 - Full deterministic Vitest suite passed: 23 files / 240 tests.
+
+## 2026-07-23 execution-lock status
+
+The next control-plane milestone is implemented and validated:
+
+- durable parent matrix authority with true cross-process CAS/lease tests;
+- durable episode retry V3 with classified safe retry and attempt provenance;
+- harness-selected native-boundary checkpoints and restart repair;
+- atomic canonical artifact plus visibility projection publication;
+- projection-only outward results for restricted visibility;
+- runner-bound, transaction-scoped reasoner call evidence;
+- request-scoped server capabilities and capability-gated cockpit handlers;
+- manifest-derived initial/async/single/total bundle budgets;
+- WCAG A/AA automation, 320px reflow, reduced-motion, keyboard-scrollable
+  tables, and Drawer focus restoration.
+
+Validation evidence is now 57 deterministic test files / 629 tests, production
+typecheck/build, 24 Playwright tests, and a real streaming probe, bounded match,
+and bounded tournament through the configured opaque model. The bounded match
+and tournament were deliberately truncated at four native transitions and were
+not admitted into completed-outcome leaderboard denominators.
