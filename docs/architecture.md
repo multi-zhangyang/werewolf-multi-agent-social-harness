@@ -478,3 +478,33 @@ playback of recorded truth.
 - Do not let model output or UI state bypass typed command validation.
 - Do not compute authoritative metrics from unverified model claims.
 - Do not call a provider during deterministic playback.
+
+## Durable control-plane additions (2026-07-23)
+
+The generic control plane now owns a durable parent matrix authority in
+`experimentMatrixRunStore.ts`, including source/authority/cell-input hashes,
+numeric revision CAS, same-host file leases, crash recovery, exact child
+adoption, and stop-on-error suffix suppression. These are local-filesystem,
+single-host guarantees; they are not distributed consensus or fsync/power-loss
+durability claims.
+
+Episode orchestration now supports a V3 multi-attempt ledger for explicitly
+classified safe retries. `started -> retry-wait -> started -> staged ->
+terminal` transitions preserve stable attempt identities and refuse ambiguous
+post-crash re-execution. Native-boundary checkpoint publication is harness
+selected, adapter constructed, canonical-artifact gated, and restart
+repairable without model or evaluator reruns.
+
+Canonical full artifacts and visibility projections are published atomically in
+one immutable directory tree. The projection sidecar is bound to run id,
+canonical artifact SHA, policy/version, visibility, and payload SHA. Public and
+postgame-redacted execution results expose only publication summaries and the
+manifest-bound projection; replay, evaluator, checkpoint, and fork authority
+continue to use the server-owned full artifact.
+
+Provider-call evidence is attached to native social steps by the runner, which
+binds call identity to actor/profile/model/trace. Actors return only closed,
+content-free reports. Reports are transaction scoped; a timed-out provider
+promise cannot later write into or be rebound as the next actor transaction.
+Harness timeouts and control aborts never synthesize a provider call that did
+not produce a report.
