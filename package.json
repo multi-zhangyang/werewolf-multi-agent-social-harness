@@ -14,11 +14,22 @@
   },
   "keywords": [
     "multi-agent",
+    "multi-agent-systems",
     "agent-harness",
+    "agent-based-modeling",
+    "ai-agents",
+    "llm-agents",
     "social-simulation",
-    "werewolf",
+    "social-deduction",
+    "adversarial-agents",
+    "hidden-information",
+    "werewolf-game",
     "llm-evaluation",
-    "deterministic-replay"
+    "agent-evaluation",
+    "deterministic-replay",
+    "typescript",
+    "react",
+    "research-tool"
   ],
   "engines": {
     "node": ">=22"
