@@ -2,6 +2,26 @@
   "name": "werewolf-multi-agent-arena",
   "private": true,
   "version": "0.1.0",
+  "description": "Replayable and evaluable multi-agent adversarial society harness with Werewolf as the first domain adapter.",
+  "homepage": "https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness.git"
+  },
+  "bugs": {
+    "url": "https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness/issues"
+  },
+  "keywords": [
+    "multi-agent",
+    "agent-harness",
+    "social-simulation",
+    "werewolf",
+    "llm-evaluation",
+    "deterministic-replay"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:api\" \"npm:dev:web\"",
