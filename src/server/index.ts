@@ -390,8 +390,9 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-app.get("/api/config", (_req, res) => {
+app.get("/api/config", (req, res) => {
   const provider = providerConfigSummaryFromEnv();
+  const localResearchAccess = hasLocalResearchArtifactAccess(req, artifactAccessBindHost);
   res.json({
     defaultConfig: DEFAULT_CONFIG,
     models: provider.models,
@@ -403,6 +404,20 @@ app.get("/api/config", (_req, res) => {
       matrixConfigured: Boolean(matrixArtifactBaseDir),
       checkpointConfigured: Boolean(checkpointArtifactBaseDir),
       matchConfigured: Boolean(matchArtifactBaseDir)
+    },
+    capabilities: {
+      operatorRegistry: localResearchAccess,
+      postgameArtifact: localResearchAccess,
+      postgameReplay: localResearchAccess,
+      checkpointCreate: localResearchAccess,
+      checkpointFork: localResearchAccess,
+      artifactExport: {
+        // Match artifacts can be downloaded from the canonical in-process
+        // registry even when an optional disk export directory is absent.
+        match: localResearchAccess,
+        tournament: localResearchAccess && Boolean(tournamentArtifactBaseDir),
+        matrix: localResearchAccess && Boolean(matrixArtifactBaseDir)
+      }
     }
   });
 });

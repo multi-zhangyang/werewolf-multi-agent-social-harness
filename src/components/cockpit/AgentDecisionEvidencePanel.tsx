@@ -1,5 +1,10 @@
 import { Alert, Card, Descriptions, Flex, Steps, Tag, Typography } from "antd";
 import type { RedactedHarnessStepDto, RedactedSocialStepDto } from "../../server/artifactProjection";
+import type { SocialStateMutationJournalEntry } from "../../harness/socialState";
+import { buildDecisionJournalEvidence } from "./decisionJournalEvidence";
+
+export { buildDecisionJournalEvidence } from "./decisionJournalEvidence";
+export type { DecisionJournalEvidence } from "./decisionJournalEvidence";
 
 const { Text } = Typography;
 
@@ -80,49 +85,6 @@ export interface AgentDecisionEvidenceView {
   };
 }
 
-/** A content-free journal row associated with this exact actor trace. */
-export interface DecisionJournalEvidence {
-  journalSeq: number;
-  turnIndex?: number;
-  store: string;
-  mutationKind: string;
-  subjectId?: string;
-  evidenceCount: number;
-  messageSeqRange?: [number, number];
-  eventSeqRange?: [number, number];
-}
-
-/**
- * Build a trace-local journal projection from server-projected agent state.
- * The input is intentionally `unknown`: this helper must whitelist the
- * redaction-safe identity fields and discard all mutation summaries, metadata,
- * raw evidence descriptions, beliefs, and memory content.
- */
-export function buildDecisionJournalEvidence(entries: unknown, actorId: string, traceId: string): DecisionJournalEvidence[] {
-  if (!Array.isArray(entries)) return [];
-  return entries
-    .flatMap((entry) => {
-      if (!isRecord(entry) || entry.agentId !== actorId || entry.traceId !== traceId) return [];
-      const journalSeq = finiteNumber(entry.journalSeq);
-      const store = boundedString(entry.store);
-      const mutationKind = boundedString(entry.mutationKind);
-      if (journalSeq === undefined || !store || !mutationKind) return [];
-      return [
-        {
-          journalSeq,
-          turnIndex: finiteNumber(entry.turnIndex),
-          store,
-          mutationKind,
-          subjectId: boundedString(entry.subjectId),
-          evidenceCount: Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs.length : 0,
-          messageSeqRange: integerRange(entry.messageSeqRange),
-          eventSeqRange: integerRange(entry.eventSeqRange)
-        }
-      ];
-    })
-    .sort((left, right) => left.journalSeq - right.journalSeq);
-}
-
 export function buildAgentDecisionEvidenceView(
   nativeStep: RedactedSocialStepDto,
   legacyStep: RedactedHarnessStepDto | null | undefined
@@ -170,13 +132,13 @@ export function AgentDecisionEvidencePanel({
   nativeStep,
   legacyStep,
   view,
-  journal = [],
+  journalEntries = [],
   shortId
 }: {
   nativeStep: RedactedSocialStepDto;
   legacyStep?: RedactedHarnessStepDto | null;
   view: "postgame-redacted" | "truth-redacted";
-  journal?: readonly DecisionJournalEvidence[];
+  journalEntries?: readonly SocialStateMutationJournalEntry[];
   shortId: (value?: string | null) => string;
 }) {
   if (view !== "postgame-redacted") {
@@ -192,6 +154,7 @@ export function AgentDecisionEvidencePanel({
     );
   }
   const evidence = buildAgentDecisionEvidenceView(nativeStep, legacyStep);
+  const journal = buildDecisionJournalEvidence(journalEntries, nativeStep.actorId, nativeStep.traceId);
   const hasLinkedCompatibilityEvidence = evidence.availability === "trace-linked-compatibility";
   const receiptColor = evidence.receipt.status === "committed" ? "success" : "error";
 

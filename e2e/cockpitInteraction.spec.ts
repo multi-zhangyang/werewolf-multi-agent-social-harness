@@ -37,13 +37,12 @@ async function selectComboboxOption(
 }
 
 /**
- * The primary sidebar and the horizontal tab strip invoke the same workspace
- * state transition. Prefer the sidebar in E2E so rc-tabs overflow/scroll
- * mechanics never decide whether a live harness/API assertion is exercised.
+ * The primary sidebar is the single desktop workspace navigation authority.
+ * Compact layouts expose the same menu through the bounded context drawer.
  */
 async function navigateWorkspace(page: Page, name: string): Promise<void> {
   await page.getByRole("menuitem", { name: new RegExp(name) }).click();
-  await expect(page.getByRole("tabpanel", { name })).toBeVisible();
+  await expect(page.getByRole("region", { name: `${name} 工作区内容` })).toBeVisible();
 }
 
 type E2EMatchRecord = {

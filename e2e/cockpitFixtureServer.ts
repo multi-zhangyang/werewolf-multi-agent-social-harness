@@ -26,7 +26,8 @@ const fixtureReasoner: HarnessReasoner = {
         latencyMs: 1,
         usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 },
         providerRequestId: `fixture-${input.traceId}`,
-        attempts: 1
+        attempts: 1,
+        stream: { enabled: true, completed: true, completedBy: "provider_stop_event" }
       }
     };
   }

@@ -2,7 +2,7 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: "cockpitFixture.spec.ts",
+  testMatch: ["cockpitFixture.spec.ts", "cockpitAccessibility.spec.ts"],
   fullyParallel: false,
   workers: 1,
   timeout: 45_000,
