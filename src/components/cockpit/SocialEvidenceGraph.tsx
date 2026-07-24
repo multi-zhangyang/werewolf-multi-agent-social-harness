@@ -1,229 +1,337 @@
-import { Card, Empty, Flex, Tag, Typography } from "antd";
-import type { KeyboardEvent } from "react";
-import type { SocialGraph, SocialGraphExposureEdge } from "../../App";
+import { Alert, Button, Empty, Flex, Segmented, Select, Tag, Typography } from "antd";
+import { useMemo, useState } from "react";
+import type { CSSProperties } from "react";
+import type {
+  SocialNetworkCommunicationEdgeDto,
+  SocialNetworkExposureEdgeDto,
+  SocialNetworkProjectionDto,
+  SocialNetworkRelationshipEdgeDto
+} from "../../server/artifactProjection";
 
-const { Text } = Typography;
+const { Text, Title } = Typography;
 
-const VIEWBOX_WIDTH = 720;
-const VIEWBOX_HEIGHT = 430;
-const CENTER_X = VIEWBOX_WIDTH / 2;
-const CENTER_Y = VIEWBOX_HEIGHT / 2;
-const NODE_RING_RADIUS = 148;
+type EvidenceMode = "relationships" | "exposure" | "communication";
+type RelationshipDimension =
+  | "trust"
+  | "suspicion"
+  | "affinity"
+  | "influence"
+  | "debt"
+  | "respect"
+  | "threat";
 
-export interface SocialEvidenceGraphNodePosition {
-  id: string;
-  x: number;
-  y: number;
-  activity: number;
-}
-
-/**
- * Stable ring placement suits the fixed, small Werewolf roster and keeps a
- * recorded social graph readable without inventing client-side graph state or
- * a force-layout simulation. The graph inputs remain server-projected facts.
- */
-export function layoutSocialEvidenceGraph(graph: SocialGraph): SocialEvidenceGraphNodePosition[] {
-  const nodes = [...graph.nodes].sort((left, right) => left.id.localeCompare(right.id));
-  if (!nodes.length) return [];
-  return nodes.map((node, index) => {
-    const angle = -Math.PI / 2 + (index / nodes.length) * Math.PI * 2;
-    return {
-      id: node.id,
-      x: CENTER_X + Math.cos(angle) * NODE_RING_RADIUS,
-      y: CENTER_Y + Math.sin(angle) * NODE_RING_RADIUS,
-      activity: node.sent + node.received + node.observed
-    };
-  });
-}
+const relationshipDimensions: Array<{ value: RelationshipDimension; label: string }> = [
+  { value: "trust", label: "信任" },
+  { value: "suspicion", label: "怀疑" },
+  { value: "affinity", label: "亲和" },
+  { value: "influence", label: "影响" },
+  { value: "respect", label: "尊重" },
+  { value: "threat", label: "威胁" },
+  { value: "debt", label: "关系债务" }
+];
 
 export function SocialEvidenceGraph({
-  graph,
+  network,
   selectedAgentId,
   onSelectAgent,
-  onSelectExposure
+  onSelectRelationship,
+  onSelectExposure,
+  onSelectCommunication
 }: {
-  graph: SocialGraph;
+  network: SocialNetworkProjectionDto | null;
   selectedAgentId?: string;
   onSelectAgent?: (agentId: string) => void;
-  onSelectExposure?: (edge: SocialGraphExposureEdge) => void;
+  onSelectRelationship?: (edge: SocialNetworkRelationshipEdgeDto) => void;
+  onSelectExposure?: (edges: readonly SocialNetworkExposureEdgeDto[]) => void;
+  onSelectCommunication?: (edges: readonly SocialNetworkCommunicationEdgeDto[]) => void;
 }) {
-  const positions = layoutSocialEvidenceGraph(graph);
-  const positionById = new Map(positions.map((position) => [position.id, position]));
-  const maxActivity = Math.max(1, ...positions.map((position) => position.activity));
-  const exposureEdges = [...graph.exposureEdges].sort(compareExposureEdges);
-  const messageEdges = [...graph.messageEdges].sort((left, right) => edgeKey(left.sourceId, left.targetId).localeCompare(edgeKey(right.sourceId, right.targetId)));
-
-  if (!positions.length) {
-    return (
-      <Card title="社会证据图" extra={<Tag>server projection</Tag>} data-testid="social-evidence-graph">
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前 artifact 不包含可视化的 agent 社会证据。" />
-      </Card>
-    );
-  }
+  const [mode, setMode] = useState<EvidenceMode>("relationships");
+  const [dimension, setDimension] = useState<RelationshipDimension>("trust");
+  const nodes = network?.nodes ?? [];
+  const activeAvailability = network?.modes[mode];
+  const relationshipByPair = useMemo(
+    () => new Map((network?.relationshipEdges ?? []).map((edge) => [pairKey(edge.sourceId, edge.targetId), edge])),
+    [network?.relationshipEdges]
+  );
+  const exposureByPair = useMemo(
+    () => groupExposureByPair(network?.exposureEdges ?? []),
+    [network?.exposureEdges]
+  );
+  const communicationByPair = useMemo(
+    () => groupCommunicationByPair(network?.communicationEdges ?? []),
+    [network?.communicationEdges]
+  );
 
   return (
-    <Card
-      title="社会证据图"
-      extra={
-        <Flex gap={4} wrap="wrap" justify="end">
-          <Tag color="success">public</Tag>
-          <Tag color="processing">team</Tag>
-          <Tag color="warning">private</Tag>
-        </Flex>
-      }
-      data-testid="social-evidence-graph"
-    >
-      <Flex vertical gap="small">
-        <div className="social-evidence-graph__canvas" aria-label="Agent 社会可见性与通信证据图">
-          <svg
-            viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
-            role="group"
-            aria-labelledby="social-evidence-graph-title social-evidence-graph-description"
-          >
-            <title id="social-evidence-graph-title">Agent 社会可见性与通信证据图</title>
-            <desc id="social-evidence-graph-description">
-              节点和边都是可键盘操作的 server-projected 通信与可见性证据；按 Enter 或空格查看对应的既有检查器。
-            </desc>
-            <defs>
-              <marker id="social-evidence-graph-arrow-public" markerWidth="7" markerHeight="7" refX="7" refY="3.5" orient="auto">
-                <path d="M0,0 L7,3.5 L0,7 z" className="social-evidence-graph__arrow social-evidence-graph__arrow--public" />
-              </marker>
-              <marker id="social-evidence-graph-arrow-team" markerWidth="7" markerHeight="7" refX="7" refY="3.5" orient="auto">
-                <path d="M0,0 L7,3.5 L0,7 z" className="social-evidence-graph__arrow social-evidence-graph__arrow--team" />
-              </marker>
-              <marker id="social-evidence-graph-arrow-private" markerWidth="7" markerHeight="7" refX="7" refY="3.5" orient="auto">
-                <path d="M0,0 L7,3.5 L0,7 z" className="social-evidence-graph__arrow social-evidence-graph__arrow--private" />
-              </marker>
-            </defs>
-
-            <circle className="social-evidence-graph__ring" cx={CENTER_X} cy={CENTER_Y} r={NODE_RING_RADIUS} />
-
-            {messageEdges.map((edge, index) => {
-              const source = positionById.get(edge.sourceId);
-              const target = positionById.get(edge.targetId);
-              if (!source || !target) return null;
-              return (
-                <path
-                  key={`message-${edgeKey(edge.sourceId, edge.targetId)}`}
-                  className="social-evidence-graph__message-edge"
-                  d={curvedPath(source, target, index, messageEdges.length)}
-                  strokeWidth={1 + Math.min(3, edge.messages)}
-                >
-                  <title>{`${edge.sourceId} 向 ${edge.targetId} 发送 ${edge.messages} 条已记录消息`}</title>
-                </path>
-              );
-            })}
-
-            {exposureEdges.map((edge, index) => {
-              const source = positionById.get(edge.sourceId);
-              const target = positionById.get(edge.targetId);
-              if (!source || !target || source.id === target.id) return null;
-              const className = `social-evidence-graph__exposure-edge social-evidence-graph__exposure-edge--${edge.visibility}`;
-              const select = () => onSelectExposure?.(edge);
-              return (
-                <g
-                  key={`exposure-${exposureKey(edge)}`}
-                  className="social-evidence-graph__interactive-edge"
-                  role={onSelectExposure ? "button" : undefined}
-                  tabIndex={onSelectExposure ? 0 : undefined}
-                  aria-label={onSelectExposure ? exposureLabel(edge) : undefined}
-                  onClick={select}
-                  onKeyDown={(event) => activateWithKeyboard(event, select)}
-                >
-                  <path
-                    className={className}
-                    d={curvedPath(source, target, index + messageEdges.length, exposureEdges.length + messageEdges.length)}
-                    strokeWidth={1.5 + Math.min(4, edge.observations)}
-                    markerEnd={`url(#social-evidence-graph-arrow-${edge.visibility})`}
-                  >
-                    <title>{exposureLabel(edge)}</title>
-                  </path>
-                </g>
-              );
-            })}
-
-            {positions.map((position) => {
-              const selected = position.id === selectedAgentId;
-              const select = () => onSelectAgent?.(position.id);
-              const radius = 20 + Math.round((position.activity / maxActivity) * 8);
-              return (
-                <g
-                  key={position.id}
-                  className={`social-evidence-graph__node${selected ? " is-selected" : ""}`}
-                  role={onSelectAgent ? "button" : undefined}
-                  tabIndex={onSelectAgent ? 0 : undefined}
-                  aria-label={onSelectAgent ? `查看 agent ${position.id} 的社会证据` : position.id}
-                  aria-pressed={onSelectAgent ? selected : undefined}
-                  onClick={select}
-                  onKeyDown={(event) => activateWithKeyboard(event, select)}
-                >
-                  <circle cx={position.x} cy={position.y} r={radius} />
-                  <text x={position.x} y={position.y - 1} textAnchor="middle" className="social-evidence-graph__node-label">
-                    {position.id}
-                  </text>
-                  <text x={position.x} y={position.y + 13} textAnchor="middle" className="social-evidence-graph__node-meta">
-                    {`S${nodeMetric(graph, position.id, "sent")} · R${nodeMetric(graph, position.id, "received")} · O${nodeMetric(graph, position.id, "observed")}`}
-                  </text>
-                  <title>{`${position.id}: sent ${nodeMetric(graph, position.id, "sent")}, received ${nodeMetric(graph, position.id, "received")}, observed ${nodeMetric(graph, position.id, "observed")}`}</title>
-                </g>
-              );
-            })}
-          </svg>
+    <section className="social-matrix" data-testid="social-evidence-graph" aria-labelledby="social-matrix-title">
+      <div className="social-matrix__header">
+        <div>
+          <Flex align="center" gap={8} wrap>
+            <Title level={3} id="social-matrix-title" className="cockpit-section-title">
+              社会证据矩阵
+            </Title>
+            <Tag color="processing">服务端投影</Tag>
+            <Tag>{network?.scope === "final-agent-snapshot" ? "最终 Agent 快照" : "未加载"}</Tag>
+          </Flex>
+          <Text type="secondary">方向固定为行 → 列；关系、观察与投递是三种独立事实，不做客户端推断。</Text>
         </div>
-        <Flex wrap="wrap" gap="small" align="center">
-          <Tag>细虚线：已记录 message envelope</Tag>
-          <Tag color="success">实线箭头：public exposure</Tag>
-          <Tag color="processing">实线箭头：team exposure</Tag>
-          <Tag color="warning">实线箭头：private exposure</Tag>
+        <Flex gap={8} align="center" wrap>
+          <Segmented<EvidenceMode>
+            aria-label="社会证据视图"
+            value={mode}
+            onChange={setMode}
+            options={[
+              { value: "relationships", label: "关系认知" },
+              { value: "exposure", label: "实际观察" },
+              { value: "communication", label: "通信投递" }
+            ]}
+          />
+          {mode === "relationships" ? (
+            <Select<RelationshipDimension>
+              aria-label="关系维度"
+              value={dimension}
+              options={relationshipDimensions}
+              onChange={setDimension}
+              popupMatchSelectWidth={false}
+            />
+          ) : null}
         </Flex>
-        <Text type="secondary">
-          节点和边只来自 server-projected message / exposure evidence；点击节点查看既有 Agent Inspector，点击边查看可追溯的 trace 与可见性证据。
-        </Text>
-      </Flex>
-    </Card>
+      </div>
+
+      {!network ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="加载赛后工件后查看社会证据。" />
+      ) : activeAvailability?.available === false ? (
+        <Alert
+          type="info"
+          showIcon
+          message="当前投影不提供此类社会证据"
+          description={activeAvailability.reason ?? "服务端没有发布该证据面。"}
+        />
+      ) : nodes.length === 0 ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务端投影中没有 Agent 节点。" />
+      ) : (
+        <div
+          className="social-matrix__viewport"
+          role="group"
+          aria-label="Agent 社会证据矩阵"
+          tabIndex={0}
+        >
+          <div
+            className="social-matrix__grid"
+            style={{ gridTemplateColumns: `minmax(112px, 1.4fr) repeat(${nodes.length}, minmax(74px, 1fr))` }}
+          >
+            <div className="social-matrix__corner" aria-hidden="true">
+              行 → 列
+            </div>
+            {nodes.map((node) => (
+              <Button
+                key={`column-${node.id}`}
+                type="text"
+                className={`social-matrix__axis social-matrix__axis--column${node.id === selectedAgentId ? " is-selected" : ""}`}
+                aria-label={`查看列 agent ${node.id} 的社会证据`}
+                onClick={() => onSelectAgent?.(node.id)}
+              >
+                {node.id}
+              </Button>
+            ))}
+
+            {nodes.flatMap((source) => [
+              <Button
+                key={`row-${source.id}`}
+                type="text"
+                className={`social-matrix__axis social-matrix__axis--row${source.id === selectedAgentId ? " is-selected" : ""}`}
+                aria-label={`查看行 agent ${source.id} 的社会证据`}
+                onClick={() => onSelectAgent?.(source.id)}
+              >
+                <span>{source.id}</span>
+                <small>{nodeActivityLabel(source)}</small>
+              </Button>,
+              ...nodes.map((target) => (
+                <EvidenceCell
+                  key={`${mode}-${source.id}-${target.id}`}
+                  mode={mode}
+                  dimension={dimension}
+                  sourceId={source.id}
+                  targetId={target.id}
+                  relationship={relationshipByPair.get(pairKey(source.id, target.id))}
+                  exposure={exposureByPair.get(pairKey(source.id, target.id))}
+                  communication={communicationByPair.get(pairKey(source.id, target.id))}
+                  onSelectRelationship={onSelectRelationship}
+                  onSelectExposure={onSelectExposure}
+                  onSelectCommunication={onSelectCommunication}
+                />
+              ))
+            ])}
+          </div>
+        </div>
+      )}
+
+      <MatrixLegend mode={mode} dimension={dimension} network={network} />
+    </section>
   );
 }
 
-function nodeMetric(graph: SocialGraph, id: string, field: "sent" | "received" | "observed"): number {
-  return graph.nodes.find((node) => node.id === id)?.[field] ?? 0;
+function EvidenceCell({
+  mode,
+  dimension,
+  sourceId,
+  targetId,
+  relationship,
+  exposure,
+  communication,
+  onSelectRelationship,
+  onSelectExposure,
+  onSelectCommunication
+}: {
+  mode: EvidenceMode;
+  dimension: RelationshipDimension;
+  sourceId: string;
+  targetId: string;
+  relationship?: SocialNetworkRelationshipEdgeDto;
+  exposure?: readonly SocialNetworkExposureEdgeDto[];
+  communication?: readonly SocialNetworkCommunicationEdgeDto[];
+  onSelectRelationship?: (edge: SocialNetworkRelationshipEdgeDto) => void;
+  onSelectExposure?: (edges: readonly SocialNetworkExposureEdgeDto[]) => void;
+  onSelectCommunication?: (edges: readonly SocialNetworkCommunicationEdgeDto[]) => void;
+}) {
+  if (sourceId === targetId) {
+    return <div className="social-matrix__cell social-matrix__cell--self" aria-hidden="true" />;
+  }
+
+  if (mode === "relationships") {
+    if (!relationship) return <EmptyCell sourceId={sourceId} targetId={targetId} label="未记录关系" />;
+    const value = relationship[dimension];
+    const dimensionLabel = relationshipDimensions.find((item) => item.value === dimension)?.label ?? dimension;
+    return (
+      <button
+        type="button"
+        className={`social-matrix__cell social-matrix__cell--relationship ${relationTone(value)}`}
+        style={{ "--cell-strength": Math.min(1, Math.abs(value)) } as CSSProperties}
+        aria-label={`${sourceId} 对 ${targetId} 的${dimensionLabel} ${formatScore(value)}，${relationship.evidenceRefs.length} 条证据`}
+        onClick={() => onSelectRelationship?.(relationship)}
+      >
+        <strong>{formatScore(value)}</strong>
+        <small>{relationship.evidenceRefs.length} 证据</small>
+      </button>
+    );
+  }
+
+  if (mode === "exposure") {
+    if (!exposure?.length) return <EmptyCell sourceId={sourceId} targetId={targetId} label="无实际观察" />;
+    const observationCount = exposure.reduce((sum, edge) => sum + edge.observationCount, 0);
+    const uniqueMessageCount = new Set(exposure.flatMap((edge) => edge.messageRefs.map((ref) => ref.id))).size;
+    return (
+      <button
+        type="button"
+        className={`social-matrix__cell social-matrix__cell--count visibility-${visibilityTone(exposure)}`}
+        aria-label={`${sourceId} 的消息被 ${targetId} 实际观察 ${observationCount} 次，来自 ${exposure.length} 条服务端边`}
+        onClick={() => onSelectExposure?.(exposure)}
+      >
+        <strong>{observationCount}</strong>
+        <small>{uniqueMessageCount} 条消息</small>
+      </button>
+    );
+  }
+
+  if (!communication?.length) return <EmptyCell sourceId={sourceId} targetId={targetId} label="无投递记录" />;
+  const messageCount = new Set(communication.flatMap((edge) => edge.messageSeqs)).size;
+  return (
+    <button
+      type="button"
+      className={`social-matrix__cell social-matrix__cell--count visibility-${visibilityTone(communication)}`}
+      aria-label={`${sourceId} 向 ${targetId} 投递 ${messageCount} 条消息，来自 ${communication.length} 条服务端边`}
+      onClick={() => onSelectCommunication?.(communication)}
+    >
+      <strong>{messageCount}</strong>
+      <small>{channelLabel(communication)}</small>
+    </button>
+  );
 }
 
-function curvedPath(
-  source: SocialEvidenceGraphNodePosition,
-  target: SocialEvidenceGraphNodePosition,
-  index: number,
-  total: number
-): string {
-  const midpointX = (source.x + target.x) / 2;
-  const midpointY = (source.y + target.y) / 2;
-  const vectorX = target.x - source.x;
-  const vectorY = target.y - source.y;
-  const magnitude = Math.max(1, Math.hypot(vectorX, vectorY));
-  const direction = index % 2 === 0 ? 1 : -1;
-  const offset = 18 + ((index + total) % 3) * 10;
-  const controlX = midpointX + (-vectorY / magnitude) * offset * direction;
-  const controlY = midpointY + (vectorX / magnitude) * offset * direction;
-  return `M ${source.x} ${source.y} Q ${controlX.toFixed(2)} ${controlY.toFixed(2)} ${target.x} ${target.y}`;
+function EmptyCell({ sourceId, targetId, label }: { sourceId: string; targetId: string; label: string }) {
+  return (
+    <div className="social-matrix__cell social-matrix__cell--empty" role="img" aria-label={`${sourceId} 到 ${targetId}：${label}`}>
+      —
+    </div>
+  );
 }
 
-function activateWithKeyboard(event: KeyboardEvent<SVGGElement>, action: () => void): void {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  event.preventDefault();
-  action();
+function MatrixLegend({
+  mode,
+  dimension,
+  network
+}: {
+  mode: EvidenceMode;
+  dimension: RelationshipDimension;
+  network: SocialNetworkProjectionDto | null;
+}) {
+  if (!network) return null;
+  if (mode === "relationships") {
+    const label = relationshipDimensions.find((item) => item.value === dimension)?.label ?? dimension;
+    return (
+      <Flex className="social-matrix__legend" gap={8} wrap align="center">
+        <Tag color="success">正向 {label}</Tag>
+        <Tag color="error">负向 {label}</Tag>
+        <Text type="secondary">数值来自 Agent 最终关系快照；方向为主观判断者 → 目标。</Text>
+      </Flex>
+    );
+  }
+  return (
+    <Flex className="social-matrix__legend" gap={8} wrap align="center">
+      <Tag color="success">public</Tag>
+      <Tag color="processing">team</Tag>
+      <Tag color="warning">private</Tag>
+      <Text type="secondary">
+        {mode === "exposure"
+          ? "只统计服务端从已提交 scoped observation 推导的实际观察。"
+          : "只统计消息 envelope 中声明的投递，不代表已阅读、信任或影响。"}
+      </Text>
+    </Flex>
+  );
 }
 
-function compareExposureEdges(left: SocialGraphExposureEdge, right: SocialGraphExposureEdge): number {
-  return exposureKey(left).localeCompare(exposureKey(right));
+function groupExposureByPair(edges: SocialNetworkExposureEdgeDto[]): Map<string, SocialNetworkExposureEdgeDto[]> {
+  return groupByPair(edges);
 }
 
-function exposureKey(edge: SocialGraphExposureEdge): string {
-  return [edge.sourceId, edge.targetId, edge.channelId, edge.visibility, edge.kind ?? ""].join("::");
+function groupCommunicationByPair(edges: SocialNetworkCommunicationEdgeDto[]): Map<string, SocialNetworkCommunicationEdgeDto[]> {
+  return groupByPair(edges);
 }
 
-function edgeKey(sourceId: string, targetId: string): string {
-  return `${sourceId}::${targetId}`;
+function groupByPair<T extends { sourceId: string; targetId: string }>(edges: T[]): Map<string, T[]> {
+  const grouped = new Map<string, T[]>();
+  for (const edge of edges) {
+    const key = pairKey(edge.sourceId, edge.targetId);
+    grouped.set(key, [...(grouped.get(key) ?? []), edge]);
+  }
+  return grouped;
 }
 
-function exposureLabel(edge: SocialGraphExposureEdge): string {
-  return `${edge.sourceId} → ${edge.targetId} · ${edge.visibility}/${edge.channelId} · ${edge.observations} 次观察 · ${edge.traceIds.length} 条 trace 证据`;
+function visibilityTone(edges: readonly { visibility: string }[]): string {
+  const values = new Set(edges.map((edge) => edge.visibility));
+  return values.size === 1 ? edges[0]!.visibility : "mixed";
+}
+
+function channelLabel(edges: readonly { channelId: string }[]): string {
+  const channels = new Set(edges.map((edge) => edge.channelId));
+  return channels.size === 1 ? edges[0]!.channelId : `${channels.size} 通道`;
+}
+
+function pairKey(sourceId: string, targetId: string): string {
+  return JSON.stringify([sourceId, targetId]);
+}
+
+function relationTone(value: number): string {
+  if (value > 0) return "is-positive";
+  if (value < 0) return "is-negative";
+  return "is-neutral";
+}
+
+function formatScore(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  return value > 0 ? `+${value.toFixed(2)}` : value.toFixed(2);
+}
+
+function nodeActivityLabel(node: SocialNetworkProjectionDto["nodes"][number]): string {
+  return `${node.sentMessageCount} 发 · ${node.observedMessageCount} 见`;
 }

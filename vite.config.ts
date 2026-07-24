@@ -5,7 +5,20 @@ import { defineConfig } from "vite";
 export default defineConfig({
   plugins: [react()],
   build: {
-    manifest: true
+    manifest: true,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: "ui-icons",
+              test: /node_modules[\\/]@ant-design[\\/]icons/,
+              entriesAware: true
+            }
+          ]
+        }
+      }
+    }
   },
   resolve: {
     alias: {

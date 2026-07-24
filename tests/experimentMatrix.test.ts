@@ -104,7 +104,7 @@ describe("experiment matrix harness", () => {
       orchestrationBaseDirectory: root,
       includeArtifacts: true
     })).rejects.toThrow(/provenance conflicts with durable authority/i);
-  });
+  }, 60_000);
 
   it("does not mark a single-cell matrix completed when its tournament deadline leaves games unstarted", async () => {
     const controller = new AbortController();

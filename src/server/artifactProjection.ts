@@ -272,6 +272,92 @@ export type RedactedAgentStateDto = Omit<AgentHarnessState, "beliefs" | "private
   social?: RedactedAgentSocialStateDto;
 };
 
+export interface SocialNetworkNodeDto {
+  id: string;
+  profileId?: string;
+  policyName?: string;
+  sentMessageCount: number;
+  deliveryCount: number;
+  receivedMessageCount: number;
+  observedMessageCount: number;
+  observationCount: number;
+  relationshipCount: number;
+}
+
+export interface SocialNetworkRelationshipEdgeDto {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  trust: number;
+  suspicion: number;
+  affinity: number;
+  influence: number;
+  debt: number;
+  respect: number;
+  threat: number;
+  evidenceRefs: Array<{
+    artifact: string;
+    id?: string;
+    seq?: number;
+    traceId?: string;
+  }>;
+  updatedAt: string;
+}
+
+export interface SocialNetworkCommunicationEdgeDto {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  channelId: string;
+  visibility: SocialMessage["visibility"];
+  messageCount: number;
+  messageSeqs: number[];
+}
+
+export interface SocialNetworkExposureEdgeDto {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  channelId: string;
+  visibility: SocialMessage["visibility"];
+  kind?: string;
+  uniqueMessageCount: number;
+  observationCount: number;
+  messageRefs: Array<{ id: string; seq: number }>;
+  actionKinds: string[];
+  traceIds: string[];
+  turnIndexes: number[];
+  evidenceCount: number;
+}
+
+export interface SocialNetworkModeAvailabilityDto {
+  available: boolean;
+  recordCount: number;
+  reason?: string;
+}
+
+/**
+ * Server-owned, content-free social-network view model for the cockpit.
+ * Relationship state, message routing, and recorded observation exposure stay
+ * separate so the UI cannot present delivery or visibility as social belief.
+ */
+export interface SocialNetworkProjectionDto {
+  artifactVersion: "server.social-network-projection.v1";
+  kind: "social-network-projection";
+  authority: "server-owned-match-artifact";
+  scope: "final-agent-snapshot";
+  projection: PostgameMatchProjectionDto["projection"];
+  modes: {
+    relationships: SocialNetworkModeAvailabilityDto;
+    communication: SocialNetworkModeAvailabilityDto;
+    exposure: SocialNetworkModeAvailabilityDto;
+  };
+  nodes: SocialNetworkNodeDto[];
+  relationshipEdges: SocialNetworkRelationshipEdgeDto[];
+  communicationEdges: SocialNetworkCommunicationEdgeDto[];
+  exposureEdges: SocialNetworkExposureEdgeDto[];
+}
+
 export type RedactedAgentSnapshotFrameDto = Omit<AgentSnapshotFrame, "agents"> & {
   agents: RedactedAgentStateDto[];
 };
@@ -345,6 +431,8 @@ export interface PostgameMatchProjectionDto
   metrics: Partial<MatchArtifact["metrics"]>;
   agents: RedactedAgentStateDto[];
   agentSnapshotFrames?: RedactedAgentSnapshotFrameDto[];
+  /** Server-owned social graph contract; the browser never derives relationship facts. */
+  socialNetwork: SocialNetworkProjectionDto;
   /** Server-owned postgame narrative source for the React review timeline. */
   werewolfReviewLedger: WerewolfPostgameEventLedgerDto;
 }
@@ -383,3 +471,206 @@ export interface PostgameReplayFrameDto {
 }
 
 export type MatchArtifactViewDto = MatchArtifact | PostgameMatchProjectionDto;
+
+export function projectSocialNetwork(source: {
+  projection: PostgameMatchProjectionDto["projection"];
+  agents: RedactedAgentStateDto[];
+  socialEpisode: Pick<RedactedSocialEpisodeDto, "messages" | "exposureRecords">;
+}): SocialNetworkProjectionDto {
+  const nodes = new Map<string, SocialNetworkNodeDto>();
+  const sentMessageIds = new Map<string, Set<string>>();
+  const receivedMessageIds = new Map<string, Set<string>>();
+  const observedMessageIds = new Map<string, Set<string>>();
+  const ensureNode = (id: string, agent?: RedactedAgentStateDto): SocialNetworkNodeDto => {
+    const existing = nodes.get(id);
+    if (existing) return existing;
+    const node: SocialNetworkNodeDto = {
+      id,
+      profileId: agent?.profileId,
+      policyName: agent?.policyName,
+      sentMessageCount: 0,
+      deliveryCount: 0,
+      receivedMessageCount: 0,
+      observedMessageCount: 0,
+      observationCount: 0,
+      relationshipCount: 0
+    };
+    nodes.set(id, node);
+    return node;
+  };
+
+  const relationshipEdges: SocialNetworkRelationshipEdgeDto[] = [];
+  for (const agent of source.agents) {
+    const owner = ensureNode(agent.playerId, agent);
+    const edges = agent.social?.relationships.edges ?? {};
+    for (const [targetKey, edge] of Object.entries(edges)) {
+      const targetId = edge.targetId || targetKey;
+      ensureNode(targetId);
+      owner.relationshipCount += 1;
+      relationshipEdges.push({
+        id: socialNetworkEdgeKey("relationship", [agent.playerId, targetId]),
+        sourceId: agent.playerId,
+        targetId,
+        trust: edge.trust,
+        suspicion: edge.suspicion,
+        affinity: edge.affinity,
+        influence: edge.influence,
+        debt: edge.debt,
+        respect: edge.respect,
+        threat: edge.threat,
+        evidenceRefs: edge.evidenceRefs.map((ref) => ({
+          artifact: ref.artifact,
+          id: ref.id,
+          seq: ref.seq,
+          traceId: ref.traceId
+        })),
+        updatedAt: edge.updatedAt
+      });
+    }
+  }
+
+  const communication = new Map<
+    string,
+    SocialNetworkCommunicationEdgeDto & { messageSeqSet: Set<number> }
+  >();
+  for (const message of source.socialEpisode.messages) {
+    const sender = ensureNode(message.senderId);
+    const senderMessages = sentMessageIds.get(message.senderId) ?? new Set<string>();
+    senderMessages.add(message.id);
+    sentMessageIds.set(message.senderId, senderMessages);
+    const recipientIds = [...new Set(message.recipientIds.filter((recipientId) => recipientId !== message.senderId))];
+    sender.deliveryCount += recipientIds.length;
+    for (const recipientId of recipientIds) {
+      ensureNode(recipientId);
+      const recipientMessages = receivedMessageIds.get(recipientId) ?? new Set<string>();
+      recipientMessages.add(message.id);
+      receivedMessageIds.set(recipientId, recipientMessages);
+      const key = socialNetworkEdgeKey("communication", [message.senderId, recipientId, message.channelId, message.visibility]);
+      const edge = communication.get(key) ?? {
+        id: key,
+        sourceId: message.senderId,
+        targetId: recipientId,
+        channelId: message.channelId,
+        visibility: message.visibility,
+        messageCount: 0,
+        messageSeqs: [],
+        messageSeqSet: new Set<number>()
+      };
+      edge.messageSeqSet.add(message.seq);
+      communication.set(key, edge);
+    }
+  }
+
+  const exposure = new Map<
+    string,
+    SocialNetworkExposureEdgeDto & {
+      messageRefMap: Map<string, { id: string; seq: number }>;
+      actionKindSet: Set<string>;
+      traceIdSet: Set<string>;
+      turnIndexSet: Set<number>;
+    }
+  >();
+  for (const record of source.socialEpisode.exposureRecords ?? []) {
+    ensureNode(record.sourceId);
+    const observer = ensureNode(record.observerId);
+    observer.observationCount += 1;
+    const observerMessages = observedMessageIds.get(record.observerId) ?? new Set<string>();
+    observerMessages.add(record.messageId);
+    observedMessageIds.set(record.observerId, observerMessages);
+    const key = socialNetworkEdgeKey("exposure", [record.sourceId, record.observerId, record.channelId, record.visibility, record.kind ?? ""]);
+    const edge = exposure.get(key) ?? {
+      id: key,
+      sourceId: record.sourceId,
+      targetId: record.observerId,
+      channelId: record.channelId,
+      visibility: record.visibility,
+      kind: record.kind,
+      uniqueMessageCount: 0,
+      observationCount: 0,
+      messageRefs: [],
+      actionKinds: [],
+      traceIds: [],
+      turnIndexes: [],
+      evidenceCount: 0,
+      messageRefMap: new Map<string, { id: string; seq: number }>(),
+      actionKindSet: new Set<string>(),
+      traceIdSet: new Set<string>(),
+      turnIndexSet: new Set<number>()
+    };
+    edge.messageRefMap.set(record.messageId, { id: record.messageId, seq: record.messageSeq });
+    edge.actionKindSet.add(record.observedAtActionKind);
+    edge.traceIdSet.add(record.observedAtTraceId);
+    edge.turnIndexSet.add(record.observedAtTurnIndex);
+    edge.observationCount += 1;
+    edge.evidenceCount += record.evidenceRefs.length;
+    exposure.set(key, edge);
+  }
+
+  for (const node of nodes.values()) {
+    node.sentMessageCount = sentMessageIds.get(node.id)?.size ?? 0;
+    node.receivedMessageCount = receivedMessageIds.get(node.id)?.size ?? 0;
+    node.observedMessageCount = observedMessageIds.get(node.id)?.size ?? 0;
+  }
+
+  const communicationEdges = [...communication.values()].map((edge) => ({
+    id: edge.id,
+    sourceId: edge.sourceId,
+    targetId: edge.targetId,
+    channelId: edge.channelId,
+    visibility: edge.visibility,
+    messageCount: edge.messageSeqSet.size,
+    messageSeqs: [...edge.messageSeqSet].sort((left, right) => left - right)
+  }));
+  const exposureEdges = [...exposure.values()].map((edge) => ({
+    id: edge.id,
+    sourceId: edge.sourceId,
+    targetId: edge.targetId,
+    channelId: edge.channelId,
+    visibility: edge.visibility,
+    kind: edge.kind,
+    uniqueMessageCount: edge.messageRefMap.size,
+    observationCount: edge.observationCount,
+    messageRefs: [...edge.messageRefMap.values()].sort((left, right) => left.seq - right.seq),
+    actionKinds: [...edge.actionKindSet].sort(),
+    traceIds: [...edge.traceIdSet].sort(),
+    turnIndexes: [...edge.turnIndexSet].sort((left, right) => left - right),
+    evidenceCount: edge.evidenceCount
+  }));
+
+  const truthRedacted = source.projection.view === "truth-redacted";
+  return {
+    artifactVersion: "server.social-network-projection.v1",
+    kind: "social-network-projection",
+    authority: "server-owned-match-artifact",
+    scope: "final-agent-snapshot",
+    projection: { ...source.projection },
+    modes: {
+      relationships: {
+        available: !truthRedacted && source.agents.length > 0,
+        recordCount: relationshipEdges.length,
+        reason: truthRedacted ? "当前公开投影不提供 Agent 主观关系状态。" : undefined
+      },
+      communication: {
+        available: !truthRedacted,
+        recordCount: communicationEdges.length,
+        reason:
+          truthRedacted && communicationEdges.length === 0
+            ? "当前公开投影不提供消息收件路由。"
+            : undefined
+      },
+      exposure: {
+        available: !truthRedacted && Array.isArray(source.socialEpisode.exposureRecords),
+        recordCount: exposureEdges.length,
+        reason: truthRedacted ? "当前公开投影不提供 scoped observation 证据。" : undefined
+      }
+    },
+    nodes: [...nodes.values()].sort((left, right) => left.id.localeCompare(right.id)),
+    relationshipEdges: relationshipEdges.sort((left, right) => left.id.localeCompare(right.id)),
+    communicationEdges: communicationEdges.sort((left, right) => left.id.localeCompare(right.id)),
+    exposureEdges: exposureEdges.sort((left, right) => left.id.localeCompare(right.id))
+  };
+}
+
+function socialNetworkEdgeKey(kind: "relationship" | "communication" | "exposure", parts: readonly string[]): string {
+  return JSON.stringify([kind, ...parts]);
+}

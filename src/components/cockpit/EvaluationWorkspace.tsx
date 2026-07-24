@@ -1,17 +1,13 @@
 import {
   Button,
   Card,
-  Col,
   Empty,
-  Row,
   Space,
-  Statistic,
   Table,
   Tag,
   Typography,
   type TableProps
 } from "antd";
-import { BarChartOutlined, DatabaseOutlined, SafetyCertificateOutlined, WarningOutlined } from "@ant-design/icons";
 import type {
   HarnessEvaluationWarning,
   HarnessMetricPromotionDecision,
@@ -116,45 +112,24 @@ export function EvaluationWorkspace({
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title="episode score" value={summary?.episodeScore !== undefined ? formatNumber(summary.episodeScore, 2) : "n/a"} prefix={<BarChartOutlined />} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic
-              title="scorecard metrics"
-              value={promotion?.scorecardMetricCount ?? metrics.filter((metric) => resolvePromotion(metric).eligibleForScorecard).length}
-              prefix={<SafetyCertificateOutlined />}
-              suffix={<Text type="secondary">of {metrics.length}</Text>}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic
-              title="diagnostic metrics"
-              value={promotion?.diagnosticMetricCount ?? metrics.filter((metric) => !resolvePromotion(metric).eligibleForScorecard).length}
-              prefix={<DatabaseOutlined />}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic
-              title="excluded weighted"
-              value={promotion?.excludedWeightedMetricCount ?? 0}
-              prefix={<WarningOutlined />}
-              suffix={<Text type="secondary">warnings {warnings.length}</Text>}
-            />
-          </Card>
-        </Col>
-      </Row>
+      <div className="cockpit-kpi-strip" aria-label="评测摘要">
+        <SummaryMetric label="局分" value={summary?.episodeScore !== undefined ? formatNumber(summary.episodeScore, 2) : "n/a"} detail="episode score" />
+        <SummaryMetric
+          label="计分指标"
+          value={String(promotion?.scorecardMetricCount ?? metrics.filter((metric) => resolvePromotion(metric).eligibleForScorecard).length)}
+          detail={`共 ${metrics.length} 项`}
+        />
+        <SummaryMetric
+          label="诊断指标"
+          value={String(promotion?.diagnosticMetricCount ?? metrics.filter((metric) => !resolvePromotion(metric).eligibleForScorecard).length)}
+          detail="不进入主计分"
+        />
+        <SummaryMetric label="排除加权项" value={String(promotion?.excludedWeightedMetricCount ?? 0)} detail={`告警 ${warnings.length}`} />
+      </div>
 
       {promotion ? (
-        <Card size="small" title="metric promotion policy">
+        <section className="workspace-tool-block" aria-label="metric promotion policy">
+          <Text strong>Metric promotion policy</Text>
           <Space wrap>
             <Tag color="processing">{promotion.policyId}</Tag>
             <Tag color="blue">{promotion.catalogId}</Tag>
@@ -169,7 +144,7 @@ export function EvaluationWorkspace({
               <Tag color="success">no weighted exclusions</Tag>
             )}
           </Space>
-        </Card>
+        </section>
       ) : null}
 
       <Card title="指标表">
@@ -180,7 +155,7 @@ export function EvaluationWorkspace({
         <Table
           rowKey={(metric) => `${metric.id}-${metric.subjectId ?? "episode"}`}
           size="small"
-          bordered
+          bordered={false}
           scroll={TABLE_SCROLL}
           columns={metricColumns}
           dataSource={metrics}
@@ -195,7 +170,7 @@ export function EvaluationWorkspace({
         <Table
           rowKey={(warning, index) => `${warning.code}-${index}`}
           size="small"
-          bordered
+          bordered={false}
           scroll={TABLE_SCROLL}
           columns={warningColumns}
           dataSource={warnings}
@@ -205,5 +180,15 @@ export function EvaluationWorkspace({
         />
       </Card>
     </Space>
+  );
+}
+
+function SummaryMetric({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <div className="cockpit-kpi-strip__item">
+      <Text type="secondary" className="cockpit-kpi-strip__label">{label}</Text>
+      <Text strong className="cockpit-kpi-strip__value">{value}</Text>
+      <Text type="secondary" className="cockpit-kpi-strip__detail">{detail}</Text>
+    </div>
   );
 }

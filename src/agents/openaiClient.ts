@@ -26,6 +26,8 @@ import {
 } from "./providerUrls";
 
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
+const DEFAULT_MAX_RESPONSE_CHARS = 64 * 1024;
+const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
 
 export interface OpenAICompatibleClientOptions {
   baseURL: string;
@@ -34,6 +36,8 @@ export interface OpenAICompatibleClientOptions {
   maxRetries?: number;
   abortSignal?: AbortSignal;
   stream?: boolean;
+  maxResponseChars?: number;
+  maxResponseBytes?: number;
   fetch?: typeof fetch;
 }
 
@@ -95,6 +99,7 @@ export class OpenAICompatibleClient implements ModelClient {
   private readonly maxRetries: number;
   private readonly abortSignal?: AbortSignal;
   private readonly stream: boolean;
+  private readonly maxResponseChars: number;
 
   constructor(options: OpenAICompatibleClientOptions) {
     if (!options.baseURL) throw new Error("OpenAI-compatible SDK baseURL is required.");
@@ -104,12 +109,20 @@ export class OpenAICompatibleClient implements ModelClient {
     this.maxRetries = validateNonNegativeInteger(options.maxRetries ?? 2, "LLM retry count");
     this.abortSignal = options.abortSignal;
     this.stream = options.stream ?? true;
+    this.maxResponseChars = validatePositiveInteger(
+      options.maxResponseChars ?? DEFAULT_MAX_RESPONSE_CHARS,
+      "LLM response character limit"
+    );
+    const maxResponseBytes = validatePositiveInteger(
+      options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+      "LLM response byte limit"
+    );
     this.client = new OpenAI({
       apiKey: options.apiKey,
       baseURL,
       timeout: this.timeoutMs,
       maxRetries: 0,
-      fetch: options.fetch
+      fetch: responseSizeLimitedFetch(options.fetch ?? globalThis.fetch, maxResponseBytes)
     });
   }
 
@@ -198,7 +211,11 @@ export class OpenAICompatibleClient implements ModelClient {
         providerRequestId = chunk.id ?? providerRequestId;
         usage = sdkChatUsage(chunk.usage) ?? usage;
         for (const choice of chunk.choices ?? []) {
-          content += choice.delta?.content ?? "";
+          const delta = choice.delta?.content ?? "";
+          if (content.length + delta.length > this.maxResponseChars) {
+            throw responseSizeLimitModelCallError(this.maxResponseChars);
+          }
+          content += delta;
           if (choice.finish_reason) sawProviderStop = true;
         }
       }
@@ -338,6 +355,52 @@ function incompleteStreamModelCallError(): ModelCallError {
     providerStage: "stream_finish",
     retryable: true
   });
+}
+
+function responseSizeLimitModelCallError(maxResponseChars: number): ModelCallError {
+  return new ModelCallError(`LLM API stream exceeded the local ${maxResponseChars}-character response limit.`, {
+    failureKind: "stream_incomplete",
+    providerStage: "during_stream",
+    retryable: true
+  });
+}
+
+function responseSizeLimitedFetch(delegate: typeof fetch, maxResponseBytes: number): typeof fetch {
+  return async (input, init) => {
+    const response = await delegate(input, init);
+    if (!response.body) return response;
+
+    let receivedBytes = 0;
+    const reader = response.body.getReader();
+    const boundedBody = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const result = await reader.read();
+          if (result.done) {
+            controller.close();
+            return;
+          }
+          receivedBytes += result.value.byteLength;
+          if (receivedBytes > maxResponseBytes) {
+            await reader.cancel();
+            controller.error(new Error(`LLM API response exceeded the local ${maxResponseBytes}-byte limit.`));
+            return;
+          }
+          controller.enqueue(result.value);
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        await reader.cancel(reason);
+      }
+    });
+    return new Response(boundedBody, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers
+    });
+  };
 }
 
 function openAISdkModelCallError(error: unknown, stage: ProviderFailureStage, timeoutMs: number): ModelCallError | undefined {
@@ -493,7 +556,7 @@ function networkModelCallError(error: unknown, stage: ProviderFailureStage): Mod
   return new ModelCallError(`LLM API request failed ${providerStageLabel(stage)}: ${message}`, {
     failureKind: "network",
     providerStage: stage,
-    retryable: /fetch failed|ECONNRESET|ETIMEDOUT|Server disconnected/i.test(message),
+    retryable: /fetch failed|ECONNRESET|ETIMEDOUT|Server disconnected|exceeded the local \d+-byte limit/i.test(message),
     causeName: error instanceof Error ? error.name : undefined,
     causeMessage: message
   });

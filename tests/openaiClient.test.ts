@@ -201,6 +201,59 @@ describe("OpenAI-compatible client provider telemetry", () => {
     });
   });
 
+  it("bounds streamed response content locally without sending a provider token limit", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock.mockResolvedValueOnce(
+      streamResponse([
+        chunk({ id: "oversized", choices: [{ delta: { content: "hello" } }] }),
+        chunk({ id: "oversized", choices: [{ delta: { content: "!" } }] }),
+        completionChunk({ id: "oversized", finishReason: "stop" }),
+        doneChunk()
+      ])
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await captureModelCallError(() =>
+      client({ maxRetries: 0, maxResponseChars: 5 }).complete(request())
+    );
+
+    expect(error.message).toContain("5-character response limit");
+    expect(error.raw).toMatchObject({
+      failureKind: "stream_incomplete",
+      providerStage: "during_stream",
+      retryable: true,
+      attempts: 1,
+      maxAttempts: 1
+    });
+    expect(Object.keys(requestBody(fetchMock, 0)).sort()).toEqual(["messages", "model", "stream", "temperature"]);
+  });
+
+  it("bounds the raw provider stream before ignored fields can exhaust memory", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock.mockResolvedValueOnce(
+      streamResponse([
+        chunk({ id: "oversized-raw", choices: [{ delta: { reasoning_content: "x".repeat(256) } }] }),
+        completionChunk({ id: "oversized-raw", finishReason: "stop" }),
+        doneChunk()
+      ])
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await captureModelCallError(() =>
+      client({ maxRetries: 0, maxResponseBytes: 128 }).complete(request())
+    );
+
+    expect(error.message).toContain("128-byte limit");
+    expect(error.raw).toMatchObject({
+      failureKind: "network",
+      providerStage: "during_stream",
+      retryable: true,
+      attempts: 1,
+      maxAttempts: 1
+    });
+    expect(Object.keys(requestBody(fetchMock, 0)).sort()).toEqual(["messages", "model", "stream", "temperature"]);
+  });
+
   it("classifies invalid streaming JSON without retrying unsafe parse failures", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock.mockResolvedValueOnce(streamResponse(["data: {not-json}\n\n"]));

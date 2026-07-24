@@ -228,9 +228,14 @@ function readVote(value: unknown): WerewolfLivePublicStateView["votes"][number] 
   if (!isRecord(value)) return null;
   const day = readFiniteNumber(value.day);
   const voterId = readString(value.voterId);
-  if (day === undefined || !voterId || typeof value.abstain !== "boolean") return null;
+  if (day === undefined || !voterId) return null;
+  // Server live projection omits `abstain: false` (sparse encoding). Only an
+  // explicit boolean true is abstention; missing/false both mean a cast vote.
+  if (value.abstain !== undefined && typeof value.abstain !== "boolean") return null;
+  const abstain = value.abstain === true;
   const targetId = readString(value.targetId);
-  return { day, voterId, abstain: value.abstain, ...(targetId ? { targetId } : {}) };
+  if (!abstain && !targetId) return null;
+  return { day, voterId, abstain, ...(targetId ? { targetId } : {}) };
 }
 
 function readDeath(value: unknown): WerewolfLivePublicStateView["deaths"][number] | null {

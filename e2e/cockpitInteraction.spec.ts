@@ -233,7 +233,7 @@ test("harness cockpit uses real API-backed interactions", async ({ page }) => {
   expect((await startupConfig).ok()).toBeTruthy();
   expect((await startupMatches).ok()).toBeTruthy();
 
-  await expect(page.getByText("多 Agent 社会 Harness Cockpit")).toBeVisible();
+  await expect(page.getByText("多 Agent 社会实验台")).toBeVisible();
   await expect(page.getByText("postgame-redacted").first()).toBeVisible();
   await expect(page.getByText("运行注册表")).toBeVisible();
 

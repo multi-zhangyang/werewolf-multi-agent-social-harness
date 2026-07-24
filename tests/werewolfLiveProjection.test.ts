@@ -149,6 +149,61 @@ describe("Werewolf live-public Cockpit projection", () => {
     }
   });
 
+  it("accepts sparse live votes that omit abstain:false", () => {
+    const projection = readLiveMatchProjection(
+      {
+        artifactVersion: "server.match-live-projection.v1",
+        kind: "match-live-projection",
+        matchId: "live-ui-votes",
+        lifecycle: "running",
+        artifactAvailable: false,
+        projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true },
+        publicState: {
+          phase: "day",
+          day: 1,
+          players: [{ id: "p1", seat: 1, name: "1号", alive: true, isSheriff: false }],
+          speeches: [],
+          // Server omits abstain:false; only true is sparse-encoded.
+          votes: [
+            { day: 1, voterId: "p1", targetId: "p2" },
+            { day: 1, voterId: "p3", abstain: true }
+          ],
+          deaths: []
+        }
+      },
+      "live-ui-votes"
+    );
+    if (projection.lifecycle !== "running" || !projection.publicState) throw new Error("Expected running projection with publicState.");
+    expect(projection.publicState.votes).toEqual([
+      { day: 1, voterId: "p1", targetId: "p2", abstain: false },
+      { day: 1, voterId: "p3", abstain: true }
+    ]);
+  });
+
+  it("rejects live votes with neither abstain nor target", () => {
+    const projection = readLiveMatchProjection(
+      {
+        artifactVersion: "server.match-live-projection.v1",
+        kind: "match-live-projection",
+        matchId: "live-ui-bad-vote",
+        lifecycle: "running",
+        artifactAvailable: false,
+        projection: { view: "live-public", privateEvidenceRedacted: true, postgameTruthRedacted: true },
+        publicState: {
+          phase: "day",
+          day: 1,
+          players: [],
+          speeches: [],
+          votes: [{ day: 1, voterId: "p1" }],
+          deaths: []
+        }
+      },
+      "live-ui-bad-vote"
+    );
+    if (projection.lifecycle !== "running" || !projection.publicState) throw new Error("Expected running projection with publicState.");
+    expect(projection.publicState.votes).toEqual([]);
+  });
+
   it("accepts an honest process-restart running marker without inventing a table", () => {
     const projection = readLiveMatchProjection({
       artifactVersion: "server.match-live-projection.v1",

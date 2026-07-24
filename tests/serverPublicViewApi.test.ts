@@ -309,6 +309,23 @@ describe("public match API redaction", () => {
       byVisibility: expect.any(Object)
     });
     expect(projected.body.socialEpisode.exposureRecords.every((exposure: any) => exposure.deliveryReceipt === undefined)).toBe(true);
+    expect(projected.body.socialNetwork).toMatchObject({
+      artifactVersion: "server.social-network-projection.v1",
+      kind: "social-network-projection",
+      authority: "server-owned-match-artifact",
+      scope: "final-agent-snapshot",
+      projection: { view: "postgame-redacted", privateEvidenceRedacted: true, postgameTruthRedacted: false },
+      modes: {
+        relationships: { available: true, recordCount: expect.any(Number) },
+        communication: { available: true, recordCount: expect.any(Number) },
+        exposure: { available: true, recordCount: expect.any(Number) }
+      },
+      nodes: expect.any(Array),
+      relationshipEdges: expect.any(Array),
+      communicationEdges: expect.any(Array),
+      exposureEdges: expect.any(Array)
+    });
+    expect(projected.body.socialNetwork.relationshipEdges.every((edge: any) => Array.isArray(edge.evidenceRefs))).toBe(true);
     expect(projected.body.werewolfReviewLedger).toMatchObject({
       artifactVersion: "server.werewolf-postgame-event-ledger.v1",
       kind: "werewolf-postgame-event-ledger",
@@ -583,6 +600,19 @@ describe("public match API redaction", () => {
     expect(projected.body.socialEpisode.steps).toEqual([]);
     expect(projected.body.socialEpisode.execution.reasonerExecutionClass).toBe("injected-unverified");
     expect(projected.body.socialEpisode.exposureRecords).toEqual([]);
+    expect(projected.body.socialNetwork).toMatchObject({
+      artifactVersion: "server.social-network-projection.v1",
+      projection: { view: "truth-redacted", postgameTruthRedacted: true },
+      modes: {
+        relationships: { available: false, reason: expect.any(String) },
+        communication: { available: false, reason: expect.any(String) },
+        exposure: { available: false, reason: expect.any(String) }
+      },
+      relationshipEdges: [],
+      communicationEdges: [],
+      exposureEdges: []
+    });
+    expect(projected.body.socialNetwork.nodes.every((node: any) => !("profileId" in node) && !("policyName" in node))).toBe(true);
     expect(projected.body.evaluationReport).toEqual({});
     const projectedJson = JSON.stringify(projected.body);
     expect(projectedJson).not.toContain("resultTeam");
@@ -700,6 +730,7 @@ describe("public match API redaction", () => {
         changedRowCount: expect.any(Number),
         numericDeltaCount: expect.any(Number),
         promotionChangedMetricCount: expect.any(Number),
+        promotionProvenanceChangedMetricCount: expect.any(Number),
         scorecardMetricDelta: expect.any(Number),
         diagnosticMetricDelta: expect.any(Number),
         benchmarkOnlyMetricDelta: expect.any(Number),
@@ -835,6 +866,7 @@ describe("public match API redaction", () => {
             changedRowCount: compared.body.summary.changedRowCount,
             numericDeltaCount: compared.body.summary.numericDeltaCount,
             promotionChangedMetricCount: compared.body.summary.promotionChangedMetricCount,
+            promotionProvenanceChangedMetricCount: compared.body.summary.promotionProvenanceChangedMetricCount,
             scorecardMetricDelta: compared.body.summary.scorecardMetricDelta,
             diagnosticMetricDelta: compared.body.summary.diagnosticMetricDelta,
             benchmarkOnlyMetricDelta: compared.body.summary.benchmarkOnlyMetricDelta,
