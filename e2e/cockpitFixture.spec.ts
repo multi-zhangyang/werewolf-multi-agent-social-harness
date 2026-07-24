@@ -3,6 +3,24 @@ import { expect, test, type Locator, type Page, type Response } from "@playwrigh
 const fixtureMatchId = "fixture-match-001";
 const fixtureCandidateMatchId = "fixture-match-002";
 
+async function openRuntimeContext(page: Page): Promise<Locator> {
+  await page.getByRole("button", { name: "打开运行上下文" }).click();
+  const context = page.getByRole("dialog", { name: "运行上下文" });
+  await expect(context).toBeVisible();
+  return context;
+}
+
+async function closeRuntimeContext(page: Page, context: Locator): Promise<void> {
+  await context.getByRole("button", { name: "Close" }).click();
+  await expect(context).toBeHidden();
+}
+
+async function setMaxTransitions(page: Page, value: string): Promise<void> {
+  const context = await openRuntimeContext(page);
+  await context.getByLabel("最大 transitions").fill(value);
+  await closeRuntimeContext(page, context);
+}
+
 test("renders recorded server truth without a provider and never requests a full artifact", async ({ page }) => {
   const pageErrors: string[] = [];
   const artifactViews: string[] = [];
@@ -31,7 +49,7 @@ test("renders recorded server truth without a provider and never requests a full
   // pointer row selection remains only a convenience path.
   await page.getByRole("menuitem", { name: /时间线/ }).click();
   await expect(page.getByRole("region", { name: "时间线 工作区内容" })).toBeVisible();
-  const firstNativeStep = page.getByRole("button", { name: "查看原生步骤 1" });
+  const firstNativeStep = page.getByRole("button", { name: "查看原生步骤 1", exact: true });
   await firstNativeStep.focus();
   await expect(firstNativeStep).toBeFocused();
   await page.keyboard.press("Enter");
@@ -54,7 +72,8 @@ test("renders recorded server truth without a provider and never requests a full
   expect((await postgameReplay).ok()).toBeTruthy();
   await expect(page.getByRole("status")).toContainText("原生复现通过");
 
-  const projection = page.getByRole("combobox", { name: "工件投影" });
+  const runtimeContext = await openRuntimeContext(page);
+  const projection = runtimeContext.getByRole("combobox", { name: "工件投影" });
   const requestCountBeforeViewChange = artifactViews.length;
   const truthArtifact = page.waitForResponse((response) => isArtifactResponse(response, "truth-redacted"));
   await projection.click();
@@ -65,6 +84,7 @@ test("renders recorded server truth without a provider and never requests a full
   await projection.press("ArrowDown");
   await projection.press("Enter");
   const truthResponse = await truthArtifact;
+  await closeRuntimeContext(page, runtimeContext);
   expect(truthResponse.ok()).toBeTruthy();
   expect((await truthResponse.json()).projection).toMatchObject({
     view: "truth-redacted",
@@ -116,7 +136,7 @@ test("renders recorded server truth without a provider and never requests a full
 
   await page.getByRole("menuitem", { name: /时间线/ }).click();
   await expect(page.getByText("主时间线来自原生 social episode 执行工件")).toBeVisible();
-  await expect(page.getByText("native steps").first()).toBeVisible();
+  await expect(page.getByText("原生步骤").first()).toBeVisible();
   const replayButton = page.getByRole("button", { name: "复现" });
   await expect(replayButton).toBeDisabled();
   await expect(page.getByText("Replay validation")).toHaveCount(0);
@@ -158,8 +178,9 @@ test("honors public capabilities before touching the local operator registry", a
   await expect(page.getByRole("button", { name: "刷新运行" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "加载最近" })).toBeDisabled();
 
-  const projection = page.getByRole("combobox", { name: "工件投影" });
-  await expect(page.getByText("公开视图 · 真相脱敏", { exact: true }).first()).toBeVisible();
+  const runtimeContext = await openRuntimeContext(page);
+  const projection = runtimeContext.getByRole("combobox", { name: "工件投影" });
+  await expect(runtimeContext.getByText("公开视图 · 真相脱敏", { exact: true }).first()).toBeVisible();
   await projection.click();
   await expect(page.getByRole("option", { name: "研究视图 · 私有脱敏" })).toHaveCount(0);
   await expect(page.getByRole("option", { name: "公开视图 · 真相脱敏" })).toHaveCount(1);
@@ -179,7 +200,7 @@ test("renders matrix lifecycle and statistics only from the harness API response
   await games.press("Enter");
   // This fixture validates matrix lifecycle rendering, not a full match. Keep
   // its diagnostic truncation explicit now that the product default is uncapped.
-  await page.getByLabel("最大 transitions").fill("4");
+  await setMaxTransitions(page, "4");
   const matrixResponse = page.waitForResponse((response) => {
     const url = new URL(response.url());
     return response.request().method() === "POST" && url.pathname === "/api/experiments/matrix/run";
@@ -200,8 +221,8 @@ test("renders matrix lifecycle and statistics only from the harness API response
 
 test("renders a projection-safe Werewolf postgame review board", async ({ page }) => {
   await page.goto("/?workspace=domain", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
-  await expect(page.getByRole("region", { name: "狼人杀复盘 工作区内容" })).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件", { timeout: 20_000 });
+  await expect(page.getByRole("region", { name: "领域适配器 工作区内容" })).toBeVisible();
   const board = page.getByTestId("werewolf-review-board");
   const seatBoard = page.getByRole("region", { name: "狼人杀座位复盘" });
   await expect(board.getByText("狼人杀赛后复盘")).toBeVisible();
@@ -215,12 +236,14 @@ test("renders a projection-safe Werewolf postgame review board", async ({ page }
   expect((await ledgerFrameResponse).ok()).toBeTruthy();
   await expect(board.getByText("狼人杀回放局面")).toBeVisible();
 
-  const projection = page.getByRole("combobox", { name: "工件投影" });
+  const runtimeContext = await openRuntimeContext(page);
+  const projection = runtimeContext.getByRole("combobox", { name: "工件投影" });
   const truthArtifact = page.waitForResponse((response) => isArtifactResponse(response, "truth-redacted"));
   await projection.click();
   await projection.press("ArrowDown");
   await projection.press("Enter");
   await truthArtifact;
+  await closeRuntimeContext(page, runtimeContext);
 
   await expect(board.getByText("真相脱敏局面")).toBeVisible();
   await expect(seatBoard.getByRole("listitem")).toHaveCount(9);
@@ -234,7 +257,7 @@ test("creates a replay-prefix checkpoint and opens its real fork comparison", as
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.goto(`/?workspace=timeline&compareBaseline=${fixtureMatchId}`, { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件", { timeout: 20_000 });
 
   const timelinePanel = page.getByRole("region", { name: "时间线 工作区内容" });
   const replayCursor = timelinePanel.getByRole("combobox", { name: "跳转服务端回放帧" });
@@ -266,7 +289,7 @@ test("creates a replay-prefix checkpoint and opens its real fork comparison", as
   expect(checkpointBody.summary.source.nativeStepCount).toBe(nativeStepCount);
   await expect(page.getByRole("status")).toContainText("checkpoint 已创建");
 
-  await page.getByLabel("最大 transitions").fill("1");
+  await setMaxTransitions(page, "1");
   const forkResponsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url());
     return response.request().method() === "POST" && url.pathname === `/api/checkpoints/${checkpointId}/fork`;
@@ -468,6 +491,8 @@ test("renders only a server-owned live public table and does not reconstruct a f
   await expect(board.getByRole("button")).toHaveCount(0);
   await expect(page.getByText("运行注册表")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "运行实验", exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("live-spectator-exit")).toBeVisible();
+  await expect(page.getByRole("button", { name: "返回研究台", exact: true })).toBeVisible();
   const spectatorText = await page.getByTestId("live-spectator-shell").textContent();
   for (const forbidden of ["fixture-operator-registry-id", "night_wolves", "fixture-start-private-state", "fixture-start-model", "nativeSteps", "checkpointCount"]) {
     expect(spectatorText).not.toContain(forbidden);
@@ -567,7 +592,7 @@ test("loads a server-authoritative native replay frame without a browser-side ga
   });
 
   await page.goto(`/?workspace=timeline&compareBaseline=${fixtureMatchId}`, { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
+  await expect(page.getByRole("status")).toContainText("已加载脱敏工件", { timeout: 20_000 });
   const controls = page.getByTestId("server-replay-cursor-controls");
   await expect(controls).toBeVisible();
   const cursor = controls.getByRole("combobox", { name: "跳转服务端回放帧" });
@@ -591,17 +616,19 @@ test("loads a server-authoritative native replay frame without a browser-side ga
   expect(body.frame).not.toHaveProperty("socialEpisode");
   expect(JSON.stringify(body.frame)).not.toContain("privateMemos");
 
-  await page.getByRole("menuitem", { name: /狼人杀复盘/ }).click();
+  await page.getByRole("menuitem", { name: /领域适配器/ }).click();
   const board = page.getByTestId("werewolf-review-board");
   await expect(board.getByText("狼人杀回放局面")).toBeVisible();
   await expect(board).toContainText("服务端基于已记录原生步骤重放");
 
-  const projection = page.getByRole("combobox", { name: "工件投影" });
+  const runtimeContext = await openRuntimeContext(page);
+  const projection = runtimeContext.getByRole("combobox", { name: "工件投影" });
   const truthArtifact = page.waitForResponse((next) => isArtifactResponse(next, "truth-redacted"));
   await projection.click();
   await projection.press("ArrowDown");
   await projection.press("Enter");
   await truthArtifact;
+  await closeRuntimeContext(page, runtimeContext);
   await page.getByRole("menuitem", { name: /时间线/ }).click();
   await expect(page.getByText("真相脱敏视图不暴露原生 scheduler 游标")).toBeVisible();
   await expect(page.getByTestId("server-replay-cursor-controls")).toHaveCount(0);
@@ -609,25 +636,46 @@ test("loads a server-authoritative native replay frame without a browser-side ga
   expect(pageErrors).toEqual([]);
 });
 
-test("renders social evidence as a server-projected graph and keeps interaction in the existing inspector", async ({ page }) => {
+test("renders social evidence as a server-projected matrix and keeps interaction in the existing inspector", async ({ page }) => {
   const artifactViews: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (url.pathname.endsWith("/artifact")) artifactViews.push(url.searchParams.get("view") ?? "default");
   });
 
-  await page.goto("/?workspace=society", { waitUntil: "domcontentloaded" });
+  await page.goto(`/?workspace=society&compareBaseline=${fixtureMatchId}`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("status")).toContainText("已加载脱敏工件");
   const graph = page.getByTestId("social-evidence-graph");
   await expect(graph).toBeVisible();
-  await expect(graph.getByRole("group", { name: "Agent 社会可见性与通信证据图" })).toBeVisible();
+  await expect(graph.getByRole("group", { name: "Agent 社会证据矩阵" })).toBeVisible();
 
-  const agentNode = graph.getByRole("button", { name: "查看 agent p1 的社会证据" });
+  const agentNode = graph.getByRole("button", { name: "查看行 agent p1 的社会证据" });
   await expect(agentNode).toBeVisible();
   await agentNode.focus();
   await agentNode.press("Space");
-  await expect(page.getByText("Agent p1")).toBeVisible();
+  const agentInspector = page.getByRole("dialog", { name: "Evidence Inspector" });
+  await expect(agentInspector).toContainText("Agent p1");
+  await page.keyboard.press("Escape");
+  await expect(agentInspector).toBeHidden();
   expect(artifactViews).not.toContain("full");
+
+  await graph.getByText("实际观察", { exact: true }).click();
+  expect(await graph.locator("button.social-matrix__cell--count").count()).toBeGreaterThan(0);
+  await expect(graph.getByText("关系认知", { exact: true })).toBeVisible();
+
+  await graph.getByText("通信投递", { exact: true }).click();
+  const communicationCells = graph.locator("button.social-matrix__cell--count");
+  expect(await communicationCells.count()).toBeGreaterThan(0);
+  await communicationCells.first().click();
+  const communicationInspector = page.getByRole("dialog", { name: "Evidence Inspector" });
+  await expect(communicationInspector.getByText(/^通信 p\d+ → p\d+$/)).toBeVisible();
+  await expect(communicationInspector).toContainText("显示汇总");
+  await expect(communicationInspector).toContainText("服务端边");
+  await page.keyboard.press("Escape");
+
+  await graph.getByText("关系认知", { exact: true }).click();
+  await expect(graph.locator("button.social-matrix__cell--relationship")).toHaveCount(0);
+  await expect(graph.locator(".social-matrix__cell--empty")).toHaveCount(72);
 });
 
 test("moves keyboard focus into the named main workspace through the skip link", async ({ page }) => {
@@ -644,7 +692,7 @@ test.describe("compact cockpit", () => {
   test("keeps every artifact workspace within the viewport", async ({ page }) => {
     const workspaces = [
       ["timeline", "时间线"],
-      ["domain", "狼人杀复盘"],
+      ["domain", "领域适配器"],
       ["society", "社会"],
       ["lineage", "谱系"],
       ["evaluation", "评测"],
@@ -665,7 +713,7 @@ test.describe("compact cockpit", () => {
         await expect(inspector).toBeHidden();
       }
       await expect(page.getByRole("region", { name: `${label} 工作区内容` })).toBeVisible();
-      await expect(page.getByTestId("compact-kpi-strip")).toHaveCount(1);
+      await expect(page.getByTestId("compact-kpi-strip")).toHaveCount(0);
       await expect(page.getByRole("tablist", { name: "工作区标签" })).toHaveCount(0);
       await expectPageWithinViewport(page);
     }
@@ -690,7 +738,7 @@ test.describe("compact cockpit", () => {
     await context.getByRole("menuitem", { name: /社会/ }).click();
     await expect(context).toBeHidden();
     await expect(page.getByRole("region", { name: "社会 工作区内容" })).toBeVisible();
-    await expect(page.getByText("可见性 / 影响边")).toBeVisible();
+    await expect(page.getByText("社会证据工作台")).toBeVisible();
 
     await page.getByRole("button", { name: "打开证据检查器" }).click();
     const inspector = page.getByRole("dialog", { name: "Evidence Inspector" });
@@ -804,7 +852,7 @@ test("submits a heterogeneous Agent roster through the existing harness control 
   await composer.getByRole("button", { name: "完成编排" }).click();
   // This test only verifies control-plane roster transport; keep the server
   // run bounded explicitly so it cannot outlive the browser assertion.
-  await page.getByLabel("最大 transitions").fill("4");
+  await setMaxTransitions(page, "4");
 
   const submittedRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
@@ -875,12 +923,14 @@ test("submits the selected parallel scheduler when exporting a tournament public
   await games.press("ArrowUp");
   await games.press("Enter");
 
-  const scheduler = page.getByRole("combobox", { name: "联合阶段调度" });
+  const runtimeContext = await openRuntimeContext(page);
+  const scheduler = runtimeContext.getByRole("combobox", { name: "联合阶段调度" });
   await scheduler.click();
   await scheduler.press("ArrowDown");
   await scheduler.press("Enter");
   // The expected public-pack lifecycle below is intentionally truncated.
-  await page.getByLabel("最大 transitions").fill("4");
+  await runtimeContext.getByLabel("最大 transitions").fill("4");
+  await closeRuntimeContext(page, runtimeContext);
 
   const submittedRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());

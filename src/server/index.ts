@@ -172,6 +172,7 @@ import {
   type TournamentPublicShareEventRetentionPolicy
 } from "./store";
 import {
+  projectSocialNetwork,
   REDACTED_DELIVERY_POLICY,
   REDACTED_PRIVATE_OBSERVATION,
   REDACTED_PRIVATE_SOCIAL_OBSERVATION,
@@ -639,6 +640,7 @@ app.get("/api/comparisons", async (req, res, next) => {
         changedRowCount: comparison.summary.changedRowCount,
         numericDeltaCount: comparison.summary.numericDeltaCount,
         promotionChangedMetricCount: comparison.summary.promotionChangedMetricCount,
+        promotionProvenanceChangedMetricCount: comparison.summary.promotionProvenanceChangedMetricCount,
         scorecardMetricDelta: comparison.summary.scorecardMetricDelta,
         diagnosticMetricDelta: comparison.summary.diagnosticMetricDelta,
         benchmarkOnlyMetricDelta: comparison.summary.benchmarkOnlyMetricDelta,
@@ -4358,15 +4360,17 @@ function projectPostgameRedactedArtifact(artifact: MatchArtifact): PostgameMatch
     view: "postgame-redacted",
     authority: "server-owned-match-artifact"
   });
+  const projection: PostgameMatchProjectionDto["projection"] = {
+    view: "postgame-redacted",
+    privateEvidenceRedacted: true,
+    postgameTruthRedacted: false,
+    generatedAt: new Date(0).toISOString()
+  };
+  const agents = source.agents.map(redactAgentPrivateEvidence);
   return {
     ...source,
     failureReason: source.failureReason ? "[REDACTED harness failure detail]" : undefined,
-    projection: {
-      view: "postgame-redacted",
-      privateEvidenceRedacted: true,
-      postgameTruthRedacted: false,
-      generatedAt: new Date(0).toISOString()
-    },
+    projection,
     trajectory: source.trajectory.map(redactHarnessStepPrivateEvidence),
     socialEpisode,
     initialState: redactStatePrivateEvents(source.initialState),
@@ -4380,11 +4384,12 @@ function projectPostgameRedactedArtifact(artifact: MatchArtifact): PostgameMatch
         targetId: undefined
       }))
     },
-    agents: source.agents.map(redactAgentPrivateEvidence),
+    agents,
     agentSnapshotFrames: source.agentSnapshotFrames?.map((frame) => ({
       ...frame,
       agents: frame.agents.map(redactAgentPrivateEvidence)
     })),
+    socialNetwork: projectSocialNetwork({ projection, agents, socialEpisode }),
     werewolfReviewLedger
   };
 }
@@ -4405,6 +4410,12 @@ function projectTruthRedactedArtifact(artifact: PostgameMatchProjectionDto): Pos
     initialState: redactPostgameTruthFromState(source.socialEpisode.initialState as MatchArtifact["finalState"]) as RedactedSocialEpisodeDto["initialState"],
     finalState: redactPostgameTruthFromState(source.socialEpisode.finalState as MatchArtifact["finalState"]) as RedactedSocialEpisodeDto["finalState"]
   });
+  const projection: PostgameMatchProjectionDto["projection"] = {
+    view: "truth-redacted",
+    privateEvidenceRedacted: true,
+    postgameTruthRedacted: true,
+    generatedAt: new Date(0).toISOString()
+  };
   // This is a public observation DTO, not a replay/fork record.  Omit ids and
   // deterministic seeds rather than replacing them with stable aliases: the
   // current Werewolf run ids are derived from the seed and can reconstruct a
@@ -4436,13 +4447,9 @@ function projectTruthRedactedArtifact(artifact: PostgameMatchProjectionDto): Pos
     metrics: {} as MatchArtifact["metrics"],
     agents: [],
     agentSnapshotFrames: undefined,
+    socialNetwork: projectSocialNetwork({ projection, agents: [], socialEpisode }),
     werewolfReviewLedger,
-    projection: {
-      view: "truth-redacted",
-      privateEvidenceRedacted: true,
-      postgameTruthRedacted: true,
-      generatedAt: new Date(0).toISOString()
-    }
+    projection
   } as unknown as PostgameMatchProjectionDto;
 }
 

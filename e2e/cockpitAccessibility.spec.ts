@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 const criticalWorkspaces = [
   { id: "runs", label: "运行" },
-  { id: "domain", label: "狼人杀复盘" },
+  { id: "domain", label: "领域适配器" },
   { id: "society", label: "社会" }
 ] as const;
 

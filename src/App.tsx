@@ -74,7 +74,16 @@ import {
   type MatchComparisonRowGroup,
   type ResolvePackSeededComparisonSource
 } from "./harness/matchComparisonView";
-import type { PostgameMatchProjectionDto, PostgameReplayFrameDto, RedactedHarnessStepDto, RedactedSocialStepDto } from "./server/artifactProjection";
+import type {
+  PostgameMatchProjectionDto,
+  PostgameReplayFrameDto,
+  RedactedHarnessStepDto,
+  RedactedSocialStepDto,
+  SocialNetworkCommunicationEdgeDto,
+  SocialNetworkExposureEdgeDto,
+  SocialNetworkProjectionDto,
+  SocialNetworkRelationshipEdgeDto
+} from "./server/artifactProjection";
 import type {
   AgentHarnessState,
   HarnessAgentProfile,
@@ -92,15 +101,13 @@ import {
   validateCockpitExperimentDraft,
   type CockpitExperimentDraft
 } from "./components/cockpit/experimentDraft";
-import { countSocialStepCommits, isSocialStepCommitted, type SocialChannel, type SocialExposureRecord, type SocialMessage } from "./harness/social";
+import { countSocialStepCommits, isSocialStepCommitted, type SocialChannel, type SocialMessage } from "./harness/social";
 import { isSafeHarnessCheckpointBoundary } from "./harness/episodeArtifacts";
-import type { SocialStateMutationJournalEntry } from "./harness/socialState";
 import { readLiveMatchProjection, readLiveMatchStart, type LiveMatchProjection } from "./components/cockpit/werewolfLiveProjection";
 import { buildWerewolfReviewModel } from "./components/cockpit/werewolfReviewProjection";
-
-const SocialEvidenceGraph = lazy(async () => {
-  const module = await import("./components/cockpit/SocialEvidenceGraph");
-  return { default: module.SocialEvidenceGraph };
+const SocietyEvidenceWorkspace = lazy(async () => {
+  const module = await import("./components/cockpit/SocietyEvidenceWorkspace");
+  return { default: module.SocietyEvidenceWorkspace };
 });
 const AgentDecisionEvidencePanel = lazy(async () => {
   const module = await import("./components/cockpit/AgentDecisionEvidencePanel");
@@ -181,48 +188,7 @@ interface ComparisonRequestContext {
  * accepting it here would make a future caller accidentally rederive scoped
  * exposure evidence from private observations.
  */
-type SocialGraphArtifact = Pick<PostgameMatchProjectionDto, "agents" | "socialEpisode" | "projection">;
 type ProjectedSocialStep = RedactedSocialStepDto;
-
-export interface SocialGraphNode {
-  id: string;
-  sent: number;
-  received: number;
-  observed: number;
-}
-
-export interface SocialGraphMessageEdge {
-  sourceId: string;
-  targetId: string;
-  messages: number;
-}
-
-export interface SocialGraphExposureEdge {
-  sourceId: string;
-  targetId: string;
-  channelId: string;
-  visibility: SocialMessage["visibility"];
-  kind?: string;
-  messages: number;
-  observations: number;
-  actionKinds: string[];
-  traceIds: string[];
-  turnIndexes: number[];
-  evidenceCount: number;
-  evidenceLabels: string[];
-}
-
-export interface SocialGraph {
-  nodes: SocialGraphNode[];
-  messageEdges: SocialGraphMessageEdge[];
-  exposureEdges: SocialGraphExposureEdge[];
-}
-
-interface SocialJournalRow extends SocialStateMutationJournalEntry {
-  key: string;
-  owner: string;
-  evidenceCount: number;
-}
 
 interface ConfigResponse {
   models?: string[];
@@ -968,7 +934,7 @@ const workspaceItems: Array<{
 }> = [
   { id: "runs", label: "运行", description: "实验注册表与真实执行", icon: <DatabaseOutlined /> },
   { id: "timeline", label: "时间线", description: "step / trace / action debugger", icon: <BranchesOutlined /> },
-  { id: "domain", label: "狼人杀复盘", description: "赛后局面、公开发言与投票", icon: <RobotOutlined /> },
+  { id: "domain", label: "领域适配器", description: "首个证明域（Werewolf）公开局面与赛后复盘", icon: <RobotOutlined /> },
   { id: "society", label: "社会", description: "agent、消息、关系证据", icon: <TeamOutlined /> },
   { id: "lineage", label: "谱系", description: "checkpoint、fork、branch tree", icon: <ApiOutlined /> },
   { id: "evaluation", label: "评测", description: "指标、证据、告警", icon: <SafetyCertificateOutlined /> },
@@ -1081,7 +1047,6 @@ export function App() {
   const agents = artifact?.agents ?? [];
   const selectedAgent = selectedAgentId ? agents.find((agent) => agent.playerId === selectedAgentId) ?? null : agents[0] ?? null;
   const messages = artifact?.socialEpisode?.messages ?? [];
-  const channels = artifact?.socialEpisode?.channels ?? [];
   const metrics = artifact?.evaluationReport?.metrics ?? [];
   const warnings = artifact?.evaluationReport?.warnings ?? [];
   const werewolfReviewSource = useMemo(
@@ -1199,7 +1164,7 @@ export function App() {
         if (requestSeq !== comparisonLoadSeqRef.current) {
           return false;
         }
-        assertServerProjectedArtifact(candidate, "candidate artifact");
+        await assertServerProjectedArtifact(candidate, "candidate artifact");
         assertArtifactMatchesId(candidate, candidateId, "candidate artifact");
         assertServerProjectedComparison(nextComparison);
         assertComparisonMatchesIds(nextComparison, baselineId, candidateId);
@@ -1266,7 +1231,7 @@ export function App() {
       try {
         const nextArtifact = await apiJson<ProjectedMatchArtifact>(`/api/matches/${encodeURIComponent(matchId)}/artifact?view=${view}`);
         if (requestSeq !== artifactLoadSeqRef.current) return;
-        assertServerProjectedArtifact(nextArtifact, "match artifact");
+        await assertServerProjectedArtifact(nextArtifact, "match artifact");
         assertArtifactMatchesId(nextArtifact, matchId, "match artifact");
         setLiveMatchId(null);
         setLiveProjection(null);
@@ -1726,7 +1691,7 @@ export function App() {
             if (requestSeq !== comparisonLoadSeqRef.current) {
               return false;
             }
-            assertServerProjectedArtifact(candidate, "candidate artifact");
+            await assertServerProjectedArtifact(candidate, "candidate artifact");
             assertArtifactMatchesId(candidate, nextCandidateId, "candidate artifact");
             setCandidateArtifact(candidate);
             candidateHydrated = true;
@@ -1751,7 +1716,7 @@ export function App() {
               if (requestSeq !== comparisonLoadSeqRef.current) {
                 return false;
               }
-              assertServerProjectedArtifact(baseline, "baseline artifact");
+              await assertServerProjectedArtifact(baseline, "baseline artifact");
               assertArtifactMatchesId(baseline, nextBaselineId, "baseline artifact");
               setArtifact(baseline);
               setArtifactView(nextView);
@@ -2921,16 +2886,33 @@ export function App() {
     window.history.replaceState(window.history.state, "", nextUrl);
   }, [workspace]);
 
-  const menuItems: MenuProps["items"] = workspaceItems.map((item) => ({
+  const menuItem = (item: (typeof workspaceItems)[number]) => ({
     key: item.id,
     icon: item.icon,
-    label: (
-      <Flex vertical>
-        <Text>{item.label}</Text>
-        <Text type="secondary">{item.description}</Text>
-      </Flex>
-    )
-  }));
+    label: item.label,
+    title: item.description
+  });
+  const menuItems: MenuProps["items"] = [
+    {
+      type: "group",
+      label: "执行",
+      children: workspaceItems.filter((item) => item.id === "runs").map(menuItem)
+    },
+    {
+      type: "group",
+      label: "单局分析",
+      children: workspaceItems
+        .filter((item) => ["domain", "timeline", "society", "evaluation", "lineage"].includes(item.id))
+        .map(menuItem)
+    },
+    {
+      type: "group",
+      label: "研究",
+      children: workspaceItems
+        .filter((item) => ["experiments", "compare", "packs"].includes(item.id))
+        .map(menuItem)
+    }
+  ];
 
   const workspacePanels: Array<{ key: Workspace; label: string; children: ReactNode }> = [
     {
@@ -2974,7 +2956,7 @@ export function App() {
     },
     {
       key: "domain",
-      label: "狼人杀复盘",
+      label: "领域适配器",
       children: (
         liveProjection ? (
           <Suspense fallback={<CockpitChunkFallback label="正在加载实时公开桌面…" />}>
@@ -2990,7 +2972,7 @@ export function App() {
             />
           </Card>
         ) : (
-          <Suspense fallback={<CockpitChunkFallback label="正在加载狼人杀复盘…" />}>
+          <Suspense fallback={<CockpitChunkFallback label="正在加载领域适配器复盘…" />}>
             <WerewolfReviewBoard
               review={werewolfReview}
               source={
@@ -3014,16 +2996,19 @@ export function App() {
       key: "society",
       label: "社会",
       children: (
-        <SocietyWorkspace
-          artifact={artifact}
-          agents={agents}
-          selectedAgent={selectedAgent}
-          messages={messages}
-          channels={channels}
-          onSelectAgent={handleSelectAgent}
-          onSelectMessage={handleSelectMessage}
-          onInspectExposure={(edge) => revealInspector(inspectorFromSocialExposure(edge))}
-        />
+        <Suspense fallback={<CockpitChunkFallback label="正在加载社会证据工作台…" />}>
+          <SocietyEvidenceWorkspace
+            artifact={artifact}
+            agents={agents}
+            selectedAgent={selectedAgent}
+            messages={messages}
+            onSelectAgent={handleSelectAgent}
+            onSelectMessage={handleSelectMessage}
+            onInspectExposure={(edge) => revealInspector(inspectorFromSocialExposure(edge))}
+            onInspectRelationship={(edge) => revealInspector(inspectorFromSocialRelationship(edge))}
+            onInspectCommunication={(edge) => revealInspector(inspectorFromSocialCommunication(edge))}
+          />
+        </Suspense>
       )
     },
     {
@@ -3218,37 +3203,37 @@ export function App() {
     <ConfigProvider
       theme={{
         token: {
-          borderRadius: 8,
-          colorPrimary: "#1455d9",
-          colorInfo: "#1455d9",
-          colorSuccess: "#157a58",
-          colorWarning: "#b86b00",
-          colorError: "#c43d4f",
-          colorBgLayout: "#f4f6fa",
+          borderRadius: 6,
+          colorPrimary: "#3158c8",
+          colorInfo: "#3158c8",
+          colorSuccess: "#087443",
+          colorWarning: "#b54708",
+          colorError: "#b42318",
+          colorBgLayout: "#f5f6f8",
           colorBgContainer: "#ffffff",
-          colorBorderSecondary: "#e4e8f0",
-          colorText: "#182334",
-          colorTextSecondary: "#667085",
-          controlHeight: 34,
+          colorBorderSecondary: "#d9dee8",
+          colorText: "#101828",
+          colorTextSecondary: "#475467",
+          controlHeight: 32,
           fontFamily:
             "-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", \"Source Han Sans SC\", Arial, sans-serif"
         },
         components: {
           Layout: {
-            bodyBg: "#f4f6fa",
+            bodyBg: "#f5f6f8",
             headerBg: "#ffffff",
             siderBg: "#ffffff"
           },
           Card: {
             headerBg: "#ffffff",
-            bodyPadding: 16,
+            bodyPadding: 14,
             headerFontSize: 14
           },
           Menu: {
             itemBorderRadius: 6,
             itemMarginInline: 0,
             itemMarginBlock: 2,
-            itemSelectedBg: "#eaf1ff"
+            itemSelectedBg: "#eef2ff"
           },
           Table: {
             headerBg: "#f7f9fc",
@@ -3260,7 +3245,17 @@ export function App() {
       }}
     >
       {liveSpectatorPresentationActive ? (
-        <LiveSpectatorShell projection={liveProjection} pollError={livePollError} />
+        <LiveSpectatorShell
+          projection={liveProjection}
+          pollError={livePollError}
+          onExit={() => {
+            livePollSeqRef.current += 1;
+            setLiveMatchId(null);
+            setLiveProjection(null);
+            setLivePollError(null);
+            setActionStatus("已返回研究台 · 服务端 live 局如仍在运行则继续，本机仅停止观战投影。");
+          }}
+        />
       ) : (
         <>
       <a
@@ -3272,33 +3267,18 @@ export function App() {
       >
         跳至工作区内容
       </a>
-      <Layout style={{ minWidth: 0, minHeight: "100vh" }}>
+      <Layout className="cockpit-shell" style={{ minWidth: 0, minHeight: "100vh" }}>
         {!isNarrowLayout ? (
           <Sider
-            width={292}
+            width={232}
             trigger={null}
-            style={{ borderInlineEnd: "1px solid #e4e8f0", height: "100vh", overflow: "auto", position: "sticky", insetBlockStart: 0 }}
+            className="cockpit-sidebar"
           >
-            <Flex vertical gap="middle" style={{ minHeight: "100%", padding: 16 }}>
-              <Space align="start">
-                <ExperimentOutlined style={{ fontSize: 28, color: "#1455d9" }} />
-                <Flex vertical gap={4}>
-                  <Title level={1} style={{ margin: 0, fontSize: 20, lineHeight: 1.35 }}>
-                    多 Agent 社会实验台
-                  </Title>
-                  <Space size={4} wrap>
-                    <Tag color="blue">服务端事实</Tag>
-                    <Tag color={artifactView === "truth-redacted" ? "warning" : "processing"}>{artifactView}</Tag>
-                    {!artifact ? (
-                      <Tag>no artifact</Tag>
-                    ) : artifact.projection?.postgameTruthRedacted ? (
-                      <Tag color="gold">truth redacted</Tag>
-                    ) : (
-                      <Tag>truth visible</Tag>
-                    )}
-                  </Space>
-                </Flex>
-              </Space>
+            <Flex vertical className="cockpit-sidebar__inner">
+              <div className="cockpit-brand">
+                <span className="cockpit-brand__mark" aria-hidden="true"><ExperimentOutlined /></span>
+                <span><strong>多 Agent 社会实验台</strong><small>HARNESS COCKPIT</small></span>
+              </div>
 
               <nav aria-label="工作区导航">
                 <Menu
@@ -3308,38 +3288,30 @@ export function App() {
                   onClick={({ key }) => handleWorkspaceChange(key as Workspace)}
                 />
               </nav>
-              <RunContextPanel
-                artifactView={artifactView}
-                postgameArtifactEnabled={canUsePostgameArtifact}
-                onArtifactViewChange={(value) => void handleArtifactViewChange(value)}
-                busy={busyAny}
-                currentMatchId={currentMatchId}
-                artifact={artifact}
-                selectedMatch={selectedMatch}
-                messageCount={artifact ? messages.length : null}
-                metricCount={artifact ? metrics.length : null}
-                maxTransitions={maxTransitions}
-                onMaxTransitionsChange={setMaxTransitions}
-                timeoutSeconds={timeoutSeconds}
-                onTimeoutSecondsChange={setTimeoutSeconds}
-                jointPhaseScheduler={jointPhaseScheduler}
-                onJointPhaseSchedulerChange={setJointPhaseScheduler}
-                rosterSummary={formatExperimentRosterSummary(experimentRequest)}
-                rosterInvalidReason={experimentDraftError}
-                onOpenRosterComposer={() => setRosterComposerOpen(true)}
-              />
+              <div className="cockpit-sidebar__footer">
+                <div><span>当前 Run</span><Text code>{currentMatchId ? shortId(currentMatchId) : "未选择"}</Text></div>
+                <div><span>投影视图</span><Tag color={artifactView === "truth-redacted" ? "gold" : "processing"}>{artifactView}</Tag></div>
+                <Button
+                  ref={mobileContextTriggerRef}
+                  block
+                  icon={decorativeIcon(<SettingOutlined />)}
+                  onClick={() => setMobileContextOpen(true)}
+                >
+                  运行上下文
+                </Button>
+              </div>
             </Flex>
           </Sider>
         ) : null}
 
         <Layout style={{ minWidth: 0 }}>
-          <Header style={{ borderBlockEnd: "1px solid #e4e8f0", height: "auto", padding: isCompactLayout ? "12px" : "14px 20px" }}>
-            <Flex gap="middle" justify="space-between" align="center" wrap="wrap">
-              <Flex vertical gap={4}>
+          <Header className="cockpit-header">
+            <Flex gap="middle" justify="space-between" align="center" wrap={isNarrowLayout}>
+              <Flex vertical gap={2} className="cockpit-header__identity">
                 {isNarrowLayout ? (
                   <Space size={6}>
-                    <ExperimentOutlined style={{ color: "#1455d9" }} />
-                    <Title level={1} style={{ margin: 0, fontSize: 16, lineHeight: 1.35 }}>
+                    <ExperimentOutlined style={{ color: "#3158c8" }} />
+                    <Title level={1} className="cockpit-header__mobile-title">
                       多 Agent 社会实验台
                     </Title>
                   </Space>
@@ -3351,8 +3323,8 @@ export function App() {
                     { title: currentMatchId ? shortId(currentMatchId) : "未选择 run" }
                   ]}
                 />
-                <Space size={8} wrap>
-                  <Title level={2} style={{ margin: 0 }}>
+                <Space size={8} wrap className="cockpit-header__title-row">
+                  <Title level={2} className="cockpit-header__title">
                     {activeWorkspace.label}
                   </Title>
                   <Tag color={liveProjection?.lifecycle === "running" || liveMatchId ? "processing" : artifact ? "processing" : "default"}>
@@ -3360,17 +3332,15 @@ export function App() {
                   </Tag>
                 </Space>
               </Flex>
-              <Space wrap>
-                {isNarrowLayout ? (
-                  <Tooltip title="运行上下文">
-                    <Button
-                      ref={mobileContextTriggerRef}
-                      aria-label="打开运行上下文"
-                      icon={decorativeIcon(<SettingOutlined />)}
-                      onClick={() => setMobileContextOpen(true)}
-                    />
-                  </Tooltip>
-                ) : null}
+              <Space wrap className="cockpit-header__actions">
+                <Tooltip title="运行上下文">
+                  <Button
+                    ref={isNarrowLayout ? mobileContextTriggerRef : undefined}
+                    aria-label="打开运行上下文"
+                    icon={decorativeIcon(<SettingOutlined />)}
+                    onClick={() => setMobileContextOpen(true)}
+                  />
+                </Tooltip>
                 {isCompactLayout ? (
                   <Tooltip title="证据检查器">
                     <Button
@@ -3381,61 +3351,50 @@ export function App() {
                     />
                   </Tooltip>
                 ) : null}
-                <Tooltip title="新建 Agent Profile 的默认模型；不会改写当前 roster 中已有 profile。">
-                  <Select
-                    aria-label="新建 Profile 默认模型"
-                    value={selectedModel}
-                    style={{ width: isCompactLayout ? 156 : 184 }}
-                    options={(models.length ? models : selectedModel ? [selectedModel] : []).map((model) => ({ value: model, label: model }))}
-                    onChange={setSelectedModel}
-                    placeholder="未检测到模型"
-                    disabled={busyAny || (!models.length && !selectedModel)}
-                  />
+                <Tooltip title="实验编排">
+                  <Button aria-label="实验编排" icon={decorativeIcon(<TeamOutlined />)} onClick={() => setRosterComposerOpen(true)} disabled={busyAny}>
+                    实验编排
+                  </Button>
                 </Tooltip>
-                <Button icon={decorativeIcon(<TeamOutlined />)} onClick={() => setRosterComposerOpen(true)} disabled={busyAny}>
-                  实验编排
-                </Button>
-                <Button icon={decorativeIcon(<ReloadOutlined />)} onClick={handleRefresh} disabled={busyAny || !operatorRegistryEnabled}>
-                  刷新运行
-                </Button>
-                <Button icon={decorativeIcon(<EyeOutlined />)} onClick={handleLoadLatest} disabled={busyAny || !operatorRegistryEnabled}>
-                  加载最近
-                </Button>
-                <Button type="primary" icon={decorativeIcon(<PlayCircleOutlined />)} loading={busy === "run"} onClick={handleRunExperiment} disabled={busyAny}>
-                  运行实验
-                </Button>
+                <Tooltip title="刷新运行注册表"><Button aria-label="刷新运行" icon={decorativeIcon(<ReloadOutlined />)} onClick={handleRefresh} disabled={busyAny || !operatorRegistryEnabled} /></Tooltip>
+                <Tooltip title="加载最近工件"><Button aria-label="加载最近" icon={decorativeIcon(<EyeOutlined />)} onClick={handleLoadLatest} disabled={busyAny || !operatorRegistryEnabled} /></Tooltip>
+                <Tooltip title="运行实验">
+                  <Button aria-label="运行实验" type="primary" icon={decorativeIcon(<PlayCircleOutlined />)} loading={busy === "run"} onClick={handleRunExperiment} disabled={busyAny}>
+                    运行实验
+                  </Button>
+                </Tooltip>
               </Space>
             </Flex>
           </Header>
 
           <Layout style={{ minWidth: 0 }}>
-            <main id="workspace-main" tabIndex={-1} aria-label={`${activeWorkspace.label} 工作区`} style={{ minWidth: 0, padding: isCompactLayout ? 12 : 20 }}>
+            <main id="workspace-main" tabIndex={-1} aria-label={`${activeWorkspace.label} 工作区`} className="cockpit-main">
               <StatusBanner status={status} error={error} busy={busy} />
 
-              <KpiGrid
-                matches={matches}
-                artifact={artifact}
-                comparison={comparison}
-                replay={replay}
-                compact={isNarrowLayout || workspace !== "runs"}
-              />
+              {workspace === "runs" ? (
+                <KpiGrid
+                  matches={matches}
+                  artifact={artifact}
+                  comparison={comparison}
+                  replay={replay}
+                />
+              ) : null}
 
-              <Card style={{ marginTop: 16 }}>
-                <section
-                  role="region"
-                  aria-label={`${activeWorkspace.label} 工作区内容`}
-                  data-testid={`workspace-${workspace}`}
-                >
-                  {activeWorkspacePanel?.children ?? null}
-                </section>
-              </Card>
+              <section
+                role="region"
+                aria-label={`${activeWorkspace.label} 工作区内容`}
+                data-testid={`workspace-${workspace}`}
+                className="cockpit-workspace"
+              >
+                {activeWorkspacePanel?.children ?? null}
+              </section>
             </main>
 
-            {!isCompactLayout ? (
+            {!isCompactLayout && inspector ? (
               <Sider
-                width={384}
+                width={320}
                 trigger={null}
-                style={{ borderInlineStart: "1px solid #e4e8f0", background: "#ffffff", height: "100vh", overflow: "auto", position: "sticky", insetBlockStart: 0 }}
+                className="cockpit-inspector"
               >
                 <InspectorPanel item={inspector} onOpenRaw={() => setRawOpen(true)} artifactView={artifactView} />
               </Sider>
@@ -3582,9 +3541,18 @@ export function App() {
  * Separate running-match presentation for a public spectator. It intentionally
  * receives neither MatchRecord nor artifact/operator controls: an ephemeral
  * live table is not a replay, checkpoint, config, model roster, or execution
- * progress authority.
+ * progress authority. Operators may exit back to the research cockpit without
+ * cancelling the server-side harness run.
  */
-function LiveSpectatorShell({ projection, pollError }: { projection: LiveMatchProjection | null; pollError: string | null }) {
+function LiveSpectatorShell({
+  projection,
+  pollError,
+  onExit
+}: {
+  projection: LiveMatchProjection | null;
+  pollError: string | null;
+  onExit: () => void;
+}) {
   return (
     <>
       <a
@@ -3603,20 +3571,29 @@ function LiveSpectatorShell({ projection, pollError }: { projection: LiveMatchPr
               <Space size={8}>
                 <EyeInvisibleOutlined style={{ color: "#1455d9" }} />
                 <Title level={1} style={{ margin: 0, fontSize: 20 }}>
-                  狼人杀 · 实时公开观战
+                  实时公开观战
                 </Title>
               </Space>
-              <Text type="secondary">只消费服务端已提交边界的严格公开投影；终局后才切换到记录工件。</Text>
+              <Text type="secondary">
+                领域适配器公开投影 · 只消费服务端已提交边界；终局后才切换到记录工件。浏览器不是执行权威。
+              </Text>
             </Flex>
             <Space size={6} wrap>
               <Tag color="blue">spectator view</Tag>
               <Tag color={projection?.lifecycle === "running" ? "processing" : projection?.lifecycle === "failed" ? "error" : "default"}>
                 {projection?.lifecycle === "running" ? "live" : projection?.lifecycle ?? "connecting"}
               </Tag>
+              <Button
+                data-testid="live-spectator-exit"
+                onClick={onExit}
+                icon={decorativeIcon(<ExperimentOutlined />)}
+              >
+                返回研究台
+              </Button>
             </Space>
           </Flex>
         </Header>
-        <Content id="workspace-main" tabIndex={-1} aria-label="狼人杀实时公开观战" style={{ minWidth: 0, maxWidth: 1500, width: "100%", margin: "0 auto", padding: "20px" }}>
+        <Content id="workspace-main" tabIndex={-1} aria-label="实时公开观战" style={{ minWidth: 0, maxWidth: 1500, width: "100%", margin: "0 auto", padding: "20px" }}>
           {projection ? (
             <Suspense fallback={<CockpitChunkFallback label="正在加载实时公开桌面…" />}>
               <WerewolfLiveBoard projection={projection} pollError={pollError} />
@@ -3673,105 +3650,42 @@ function KpiGrid({
   matches,
   artifact,
   comparison,
-  replay,
-  compact
+  replay
 }: {
   matches: MatchRecord[];
   artifact: ProjectedMatchArtifact | null;
   comparison: MatchComparisonArtifact | null;
   replay: ReplayResponse | null;
-  compact: boolean;
 }) {
   const completed = matches.filter((match) => (match.harnessStatus ?? match.status) === "completed").length;
   const truncated = matches.filter((match) => (match.harnessStatus ?? match.status) === "truncated").length;
   const failed = matches.filter((match) => (match.harnessStatus ?? match.status) === "failed").length;
   const replayOk = replay?.summary?.ok;
   const stepCounts = artifact ? countSocialStepCommits(artifact.socialEpisode.steps) : null;
-  if (compact) {
-    return (
-      <Card className="cockpit-kpi-strip-card" size="small" style={{ marginTop: 12 }} data-testid="compact-kpi-strip">
-        <div className="cockpit-kpi-strip" aria-label="当前运行摘要">
-          <CompactKpi
-            label="运行"
-            value={`${completed}/${matches.length}`}
-            detail={`截断 ${truncated} · 失败 ${failed}`}
-          />
-          <CompactKpi
-            label="原生步骤"
-            value={String(stepCounts?.nativeSteps ?? "—")}
-            detail={artifact ? `提交 ${stepCounts?.committedSteps ?? 0} · 拒绝 ${stepCounts?.rejectedSteps ?? 0}` : "未加载工件"}
-          />
-          <CompactKpi
-            label="社会消息"
-            value={String(artifact?.socialEpisode.messages.length ?? "—")}
-            detail={artifact ? `${artifact.socialEpisode.channels.length} 个通道` : "未加载工件"}
-          />
-          <CompactKpi
-            label="对比 / 复现"
-            value={comparison ? `${comparison.summary.changedRowCount}/${comparison.summary.rowCount}` : replayOk ? "通过" : "待运行"}
-            detail={comparison ? "变化行 / 总行" : replay ? `不匹配 ${replay.summary?.mismatchCount ?? 0}` : "尚无结果"}
-          />
-        </div>
-      </Card>
-    );
-  }
+  const hasRuns = matches.length > 0;
   return (
-    <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-      <Col xs={24} sm={12} xl={6}>
-        <Card>
-          <Statistic
-            title="runs"
-            value={`${completed}/${matches.length}`}
-            prefix={<DatabaseOutlined />}
-            suffix={<Text type="secondary">truncated {truncated} · failed {failed}</Text>}
-          />
-        </Card>
-      </Col>
-      <Col xs={24} sm={12} xl={6}>
-        <Card>
-          <Statistic
-            title="native execution steps"
-            value={stepCounts?.nativeSteps ?? "n/a"}
-            prefix={<BranchesOutlined />}
-            suffix={
-              <Text type="secondary">
-                {artifact
-                  ? `${shortId(artifact.runId)} · c${stepCounts?.committedSteps ?? 0}/r${stepCounts?.rejectedSteps ?? 0}`
-                  : "未加载"}
-              </Text>
-            }
-          />
-        </Card>
-      </Col>
-      <Col xs={24} sm={12} xl={6}>
-        <Card>
-          <Statistic
-            title="social evidence"
-            value={artifact ? artifact.socialEpisode.messages.length : "n/a"}
-            prefix={<MessageOutlined />}
-            suffix={<Text type="secondary">{artifact ? `${artifact.socialEpisode.channels.length} channels` : "未加载工件"}</Text>}
-          />
-        </Card>
-      </Col>
-      <Col xs={24} sm={12} xl={6}>
-        <Card>
-          <Statistic
-            title="compare / replay"
-            value={comparison ? `${comparison.summary.changedRowCount}/${comparison.summary.rowCount}` : replayOk ? "replay ok" : "pending"}
-            prefix={<SwapOutlined />}
-            suffix={
-              <Text type="secondary">
-                {comparison
-                  ? `changed · cΔ${comparison.summary.committedStepsDelta}/rΔ${comparison.summary.rejectedStepsDelta}`
-                  : replay
-                    ? `mismatch ${replay.summary?.mismatchCount ?? 0}`
-                    : "未运行"}
-              </Text>
-            }
-          />
-        </Card>
-      </Col>
-    </Row>
+    <div className="cockpit-kpi-strip cockpit-kpi-strip--wide" style={{ marginTop: 16 }} data-testid="compact-kpi-strip" aria-label="当前运行摘要">
+      <CompactKpi
+        label="运行"
+        value={hasRuns ? `${completed}/${matches.length}` : "—"}
+        detail={hasRuns ? `截断 ${truncated} · 失败 ${failed}` : "注册表为空 · 无运行证据"}
+      />
+      <CompactKpi
+        label="原生步骤"
+        value={stepCounts ? String(stepCounts.nativeSteps) : "—"}
+        detail={artifact ? `${shortId(artifact.runId)} · 提交 ${stepCounts?.committedSteps ?? 0} · 拒绝 ${stepCounts?.rejectedSteps ?? 0}` : "未加载工件 · 无执行证据"}
+      />
+      <CompactKpi
+        label="社会消息"
+        value={artifact ? String(artifact.socialEpisode.messages.length) : "—"}
+        detail={artifact ? `${artifact.socialEpisode.channels.length} 个通道` : "未加载工件 · 无消息证据"}
+      />
+      <CompactKpi
+        label="对比 / 复现"
+        value={comparison ? `${comparison.summary.changedRowCount}/${comparison.summary.rowCount}` : replay ? (replayOk ? "通过" : "未通过") : "—"}
+        detail={comparison ? "变化行 / 总行" : replay ? `不匹配 ${replay.summary?.mismatchCount ?? 0}` : "尚无对比或复现证据"}
+      />
+    </div>
   );
 }
 
@@ -4302,7 +4216,7 @@ function RunsWorkspace({
           placeholder="run / model / phase"
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
-          style={{ width: 280 }}
+          style={{ width: "min(280px, 100%)" }}
         />
       </Flex>
       <Table
@@ -4434,12 +4348,12 @@ function TimelineWorkspace({
 
   return (
     <Row gutter={[16, 16]}>
-      <Col xs={24} xl={15}>
-        <Card
-          title="时间线"
-          extra={
-            <Space wrap>
+      <Col xs={24} xxl={15}>
+        <Card title="时间线">
+          <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+            <Flex className="workspace-actions" justify="space-between" align="center" gap="small" wrap="wrap">
               <Tag>{artifactView}</Tag>
+              <Space wrap>
               <Button
                 icon={decorativeIcon(<CloudDownloadOutlined />)}
                 onClick={onDownloadMatch}
@@ -4465,16 +4379,15 @@ function TimelineWorkspace({
               >
                 复现
               </Button>
-            </Space>
-          }
-        >
-          <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+              </Space>
+            </Flex>
             <Text type="secondary">
               主时间线来自原生 social episode 执行工件；system、committed 与 rejected 步骤均为可选择、可审计证据，确定性 replay 不重新调用模型。
             </Text>
             {artifactView === "postgame-redacted" && replayEnabled ? (
-              <Card size="small" title="服务端回放游标" data-testid="server-replay-cursor-controls">
+              <section className="workspace-tool-block" data-testid="server-replay-cursor-controls" aria-label="服务端回放游标">
                 <Space direction="vertical" size="small" style={{ width: "100%" }}>
+                  <Text strong>服务端回放游标</Text>
                   <Text type="secondary">
                     游标只接受完整原生 scheduler 边界。浏览器不会应用命令或推断状态；每次跳转都由服务端从 canonical artifact 无模型重放。
                   </Text>
@@ -4526,7 +4439,7 @@ function TimelineWorkspace({
                     </Tag>
                   </Space>
                 </Space>
-              </Card>
+              </section>
             ) : (
               <Alert
                 type="warning"
@@ -4543,20 +4456,12 @@ function TimelineWorkspace({
                 }
               />
             )}
-            <Row gutter={[12, 12]}>
-              <Col xs={24} sm={12} xl={6}>
-                <Statistic title="native steps" value={steps.length} prefix={<ApiOutlined />} />
-              </Col>
-              <Col xs={24} sm={12} xl={6}>
-                <Statistic title="committed" value={committedSteps} prefix={<CheckCircleOutlined />} />
-              </Col>
-              <Col xs={24} sm={12} xl={6}>
-                <Statistic title="rejected" value={rejectedSteps} prefix={<WarningOutlined />} />
-              </Col>
-              <Col xs={24} sm={12} xl={6}>
-                <Statistic title="messages emitted" value={artifact?.socialEpisode.messages.length ?? 0} prefix={<MessageOutlined />} />
-              </Col>
-            </Row>
+            <div className="cockpit-kpi-strip" aria-label="时间线执行摘要">
+              <CompactKpi label="原生步骤" value={String(steps.length)} detail={`已选 #${selectedStepIndex + 1}`} />
+              <CompactKpi label="已提交" value={String(committedSteps)} detail="环境已确认" />
+              <CompactKpi label="已拒绝" value={String(rejectedSteps)} detail="保留失败证据" />
+              <CompactKpi label="社会消息" value={String(artifact?.socialEpisode.messages.length ?? 0)} detail="服务端记录" />
+            </div>
             <Space wrap>
               <Tag>AEC {schedulerCounts.aec}</Tag>
               <Tag color="processing">batched {schedulerCounts["aec-batched-decision"]}</Tag>
@@ -4579,11 +4484,11 @@ function TimelineWorkspace({
               onRow={(_, index) => ({ onClick: () => onSelectStep(index ?? 0) })}
               locale={{ emptyText: <Empty description="尚未加载原生 social episode steps。先从运行注册表或顶部加载最近 artifact。" /> }}
             />
-            <Card
-              size="small"
-              title="Legacy trajectory projection"
-              extra={<Tag color="warning">migration/debug only</Tag>}
-            >
+            <details className="workspace-details">
+              <summary>
+                <Text strong>Legacy trajectory projection</Text>
+                <Tag color="warning">migration/debug only</Tag>
+              </summary>
               <Space direction="vertical" size="small" style={{ width: "100%" }}>
                 <Text type="secondary">
                   这是旧 checkpoint/迁移兼容投影，只包含成功的 player steps；它不是 system、失败步骤或执行顺序的真相源。
@@ -4609,11 +4514,11 @@ function TimelineWorkspace({
                   locale={{ emptyText: <Empty description="当前 artifact 没有 legacy trajectory projection。" /> }}
                 />
               </Space>
-            </Card>
+            </details>
           </Space>
         </Card>
       </Col>
-      <Col xs={24} xl={9}>
+      <Col xs={24} xxl={9}>
         <Card title="Step 详情">
           {selectedStep ? (
             <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -4679,20 +4584,25 @@ function TimelineWorkspace({
                 />
               ) : null}
               {selectedLegacyStep ? (
-                <Card size="small" title="Legacy committed projection" extra={<Tag color="warning">migration/debug only</Tag>}>
+                <details className="workspace-details" open>
+                  <summary>
+                    <Text strong>Legacy committed projection</Text>
+                    <Tag color="warning">migration/debug only</Tag>
+                  </summary>
                   <Space direction="vertical" size="middle" style={{ width: "100%" }}>
                     <Descriptions
                       size="small"
                       column={1}
                       items={descriptionItems(selectedLegacyDetails)}
                     />
-                    <Card size="small" title="Policy arbitration">
+                    <section className="workspace-tool-block">
+                      <Text strong>Policy arbitration</Text>
                       <Space direction="vertical" size="small" style={{ width: "100%" }}>
                         <Text strong>{selectedLegacyStep.policyPlan.intent}</Text>
                         <Text type="secondary">{selectedLegacyStep.policyPlan.strategyTags.join(" · ") || "no strategy tags"}</Text>
                         <Tag color="warning">private arbitration evidence redacted</Tag>
                       </Space>
-                    </Card>
+                    </section>
                     {selectedLegacyPolicyOnly ? (
                       <Alert
                         type="info"
@@ -4701,7 +4611,8 @@ function TimelineWorkspace({
                         description="本行由受 harness 管理的 policy 生成；没有 provider/model telemetry 可以或应当显示。"
                       />
                     ) : (
-                      <Card size="small" title="Reasoner telemetry">
+                      <section className="workspace-tool-block">
+                        <Text strong>Reasoner telemetry</Text>
                         <Descriptions
                           size="small"
                           column={1}
@@ -4712,10 +4623,10 @@ function TimelineWorkspace({
                             ["attempts", selectedLegacyStep.reasonerOutput.attempts ?? "n/a"]
                           ])}
                         />
-                      </Card>
+                      </section>
                     )}
                   </Space>
-                </Card>
+                </details>
               ) : (
                 <Alert
                   showIcon
@@ -4725,7 +4636,8 @@ function TimelineWorkspace({
                 />
               )}
               {artifactView === "postgame-redacted" && replay ? (
-                <Card size="small" title="Replay validation">
+                <details className="workspace-details" open>
+                  <summary><Text strong>Replay validation</Text></summary>
                   <Descriptions
                     size="small"
                     column={1}
@@ -4741,7 +4653,7 @@ function TimelineWorkspace({
                       ["mismatches", replay.summary?.mismatchCount ?? 0]
                     ])}
                   />
-                </Card>
+                </details>
               ) : null}
             </Space>
           ) : (
@@ -4750,349 +4662,6 @@ function TimelineWorkspace({
         </Card>
       </Col>
     </Row>
-  );
-}
-
-function SocietyWorkspace({
-  artifact,
-  agents,
-  selectedAgent,
-  messages,
-  channels,
-  onSelectAgent,
-  onSelectMessage,
-  onInspectExposure
-}: {
-  artifact: ProjectedMatchArtifact | null;
-  agents: AgentHarnessState[];
-  selectedAgent: AgentHarnessState | null;
-  messages: SocialMessage[];
-  channels: SocialChannel[];
-  onSelectAgent: (agent: AgentHarnessState) => void;
-  onSelectMessage: (message: SocialMessage) => void;
-  onInspectExposure: (edge: SocialGraphExposureEdge) => void;
-}) {
-  const socialGraph = useMemo(
-    () => (artifact ? buildSocialGraph(artifact) : { nodes: [], messageEdges: [], exposureEdges: [] }),
-    [artifact]
-  );
-  const relationshipEdges = useMemo(() => agents.flatMap(readRelationshipRows), [agents]);
-  const socialJournalRows = useMemo(() => readSocialJournalRows(agents), [agents]);
-  const visibilityCounts = useMemo(() => countMessagesByVisibility(messages), [messages]);
-  const agentActivityRows = useMemo(
-    () =>
-      socialGraph.nodes.map((node) => ({
-        key: node.id,
-        node,
-        agent: agents.find((candidate) => candidate.playerId === node.id) ?? null,
-        total: node.sent + node.received + node.observed
-      })),
-    [agents, socialGraph.nodes]
-  );
-  const maxAgentActivity = Math.max(1, ...agentActivityRows.map((row) => row.total));
-  const totalExposureObservations = socialGraph.exposureEdges.reduce((sum, edge) => sum + edge.observations, 0);
-  const speechActCount = messages.reduce((sum, message) => sum + (message.speechActs?.length ?? 0), 0);
-  const deliveryReceiptCount = messages.reduce((sum, message) => sum + (message.deliveryReceipts?.length ?? 0), 0);
-  const agentColumns: TableProps<AgentHarnessState>["columns"] = [
-    { title: "agent", dataIndex: "playerId", render: (playerId: string) => <Text code>{playerId}</Text> },
-    { title: "profile", dataIndex: "profileId", render: (value?: string) => value ?? "n/a" },
-    { title: "policy", dataIndex: "policyName" },
-    { title: "turns", dataIndex: "turns" },
-    { title: "beliefs", render: (_, agent) => Object.keys(agent.beliefs ?? {}).length },
-    {
-      title: "查看",
-      fixed: "right",
-      width: 72,
-      render: (_, agent) => (
-        <Button type="link" size="small" aria-label={`查看 agent ${agent.playerId}`} onClick={() => onSelectAgent(agent)}>
-          查看
-        </Button>
-      )
-    }
-  ];
-  const agentActivityColumns: TableProps<(typeof agentActivityRows)[number]>["columns"] = [
-    {
-      title: "agent",
-      render: (_, row) => (
-        <Space size={4} wrap>
-          <Text code>{row.node.id}</Text>
-          {row.agent ? <Tag>{row.agent.policyName}</Tag> : null}
-        </Space>
-      )
-    },
-    { title: "flow", render: (_, row) => `${row.node.sent}/${row.node.received}/${row.node.observed}`, width: 92 },
-    {
-      title: "activity",
-      render: (_, row) => (
-        <Progress
-          aria-label={`${row.node.id} 社交活动占比`}
-          percent={Math.round((row.total / maxAgentActivity) * 100)}
-          showInfo={false}
-        />
-      ),
-      width: 120
-    },
-    {
-      title: "",
-      align: "right",
-      render: (_, row) =>
-        row.agent ? (
-          <Button type="link" size="small" aria-label={`查看 agent ${row.node.id}`} onClick={() => onSelectAgent(row.agent!)}>
-            查看
-          </Button>
-        ) : null
-    }
-  ];
-  const exposureColumns: TableProps<SocialGraphExposureEdge>["columns"] = [
-    { title: "source", dataIndex: "sourceId", render: (sourceId: string) => <Text code>{sourceId}</Text> },
-    { title: "observer", dataIndex: "targetId", render: (targetId: string) => <Text code>{targetId}</Text> },
-    { title: "channel", dataIndex: "channelId" },
-    { title: "visibility", dataIndex: "visibility", render: (visibility: SocialMessage["visibility"]) => <VisibilityTag visibility={visibility} /> },
-    { title: "kind", dataIndex: "kind", render: (kind?: string) => kind ?? "message" },
-    { title: "observed", dataIndex: "observations", sorter: (a, b) => a.observations - b.observations },
-    { title: "traces", render: (_, edge) => edge.traceIds.map(shortId).join(", ") || "n/a" }
-  ];
-  const channelColumns: TableProps<SocialChannel>["columns"] = [
-    { title: "channel", dataIndex: "id", render: (channelId: string) => <Text code>{channelId}</Text> },
-    { title: "kind", dataIndex: "kind", render: (kind: SocialChannel["kind"]) => <Tag>{kind}</Tag> },
-    { title: "readable", dataIndex: "readableBy" },
-    { title: "participants", render: (_, channel) => channel.participantIds.length },
-    { title: "messages", render: (_, channel) => messages.filter((message) => message.channelId === channel.id).length }
-  ];
-  const messageColumns: TableProps<SocialMessage>["columns"] = [
-    { title: "#", dataIndex: "seq", width: 72 },
-    { title: "channel", dataIndex: "channelId" },
-    { title: "sender", dataIndex: "senderId", render: (senderId: string) => <Text code>{senderId}</Text> },
-    { title: "visibility", dataIndex: "visibility", render: (visibility: SocialMessage["visibility"]) => <VisibilityTag visibility={visibility} /> },
-    { title: "acts", width: 72, render: (_, message) => message.speechActs?.length ?? 0 },
-    { title: "receipts", width: 92, render: (_, message) => message.deliveryReceipts?.length ?? 0 },
-    { title: "content", dataIndex: "content", ellipsis: true },
-    {
-      title: "查看",
-      fixed: "right",
-      width: 72,
-      render: (_, message) => (
-        <Button type="link" size="small" aria-label={`查看消息 ${message.seq}`} onClick={() => onSelectMessage(message)}>
-          查看
-        </Button>
-      )
-    }
-  ];
-  const relationshipColumns: TableProps<ReturnType<typeof readRelationshipRows>[number]>["columns"] = [
-    { title: "owner", dataIndex: "owner", render: (owner: string) => <Text code>{owner}</Text> },
-    { title: "target", dataIndex: "target", render: (target: string) => <Text code>{target}</Text> },
-    { title: "trust", dataIndex: "trust" },
-    { title: "suspicion", dataIndex: "suspicion" },
-    { title: "evidence", dataIndex: "evidence" }
-  ];
-  const journalColumns: TableProps<SocialJournalRow>["columns"] = [
-    { title: "#", dataIndex: "journalSeq", width: 72 },
-    { title: "agent", dataIndex: "owner", render: (owner: string) => <Text code>{owner}</Text> },
-    { title: "store", dataIndex: "store", render: (store: string) => <Tag>{store}</Tag> },
-    { title: "mutation", dataIndex: "mutationKind" },
-    { title: "subject", dataIndex: "subjectId", render: (subjectId?: string) => subjectId ?? "n/a" },
-    { title: "trace", dataIndex: "traceId", render: (traceId?: string) => (traceId ? <Text code>{shortId(traceId)}</Text> : "n/a") },
-    { title: "hidden truth", dataIndex: "hiddenTruthUsed", render: (value: false) => <Tag color={value ? "error" : "success"}>{String(value)}</Tag> },
-    { title: "evidence", dataIndex: "evidenceCount" }
-  ];
-
-  return (
-    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title="agents" value={agents.length} prefix={<TeamOutlined />} suffix={<Text type="secondary">social actors</Text>} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title="messages" value={messages.length} prefix={<MessageOutlined />} suffix={<Text type="secondary">{channels.length} channels</Text>} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title="observed exposure" value={totalExposureObservations} prefix={<EyeOutlined />} suffix={<Text type="secondary">{socialGraph.exposureEdges.length} edges</Text>} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title="relationship evidence" value={relationshipEdges.length} prefix={<BranchesOutlined />} suffix={<Text type="secondary">{socialJournalRows.length} journal rows</Text>} />
-          </Card>
-        </Col>
-      </Row>
-
-      <Suspense fallback={<CockpitChunkFallback label="正在加载社会证据图…" />}>
-        <SocialEvidenceGraph
-          graph={socialGraph}
-          selectedAgentId={selectedAgent?.playerId}
-          onSelectAgent={(agentId) => {
-            const agent = agents.find((candidate) => candidate.playerId === agentId);
-            if (agent) onSelectAgent(agent);
-          }}
-          onSelectExposure={onInspectExposure}
-        />
-      </Suspense>
-
-      <Row gutter={[16, 16]}>
-        <Col xs={24} xl={8}>
-          <Card
-            title="Agent 活动画像"
-            extra={
-              <Space size={4} wrap>
-                <Tag color="success">public {visibilityCounts.public}</Tag>
-                <Tag color="processing">team {visibilityCounts.team}</Tag>
-                <Tag color="warning">private {visibilityCounts.private}</Tag>
-              </Space>
-            }
-          >
-            <Table
-              rowKey="key"
-              size="small"
-              bordered
-              columns={agentActivityColumns}
-              dataSource={agentActivityRows}
-              pagination={{ pageSize: 5 }}
-              locale={{ emptyText: <Empty description="当前 artifact 不包含 agent 社会状态。" /> }}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} xl={16}>
-          <Card title="可见性 / 影响边" extra={<Tag>server exposure projection</Tag>}>
-            <Table
-              rowKey={(edge) => `${edge.sourceId}-${edge.targetId}-${edge.channelId}-${edge.kind ?? "message"}`}
-              size="small"
-              bordered
-              columns={exposureColumns}
-              dataSource={socialGraph.exposureEdges}
-              pagination={{ pageSize: 6 }}
-              expandable={{
-                expandedRowRender: (edge) => (
-                  <Space direction="vertical" size={4}>
-                    <Text type="secondary">这些边来自服务端投影的 scoped exposure records，而不是 recipient envelope 猜测。</Text>
-                    {edge.evidenceLabels.map((label) => (
-                      <Text key={label} code>
-                        {label}
-                      </Text>
-                    ))}
-                  </Space>
-                )
-              }}
-              locale={{ emptyText: <Empty description="当前 artifact 没有可见性 exposure 记录。" /> }}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      <Row gutter={[16, 16]}>
-        <Col xs={24} xxl={10}>
-          <Card title="Agent 社会状态" extra={<Tag>artifact agents</Tag>}>
-            <Table
-              rowKey="playerId"
-              size="small"
-              bordered
-              columns={agentColumns}
-              dataSource={agents}
-              pagination={{ pageSize: 6 }}
-              rowSelection={{ type: "radio", selectedRowKeys: selectedAgent?.playerId ? [selectedAgent.playerId] : [] }}
-              onRow={(agent) => ({ onClick: () => onSelectAgent(agent) })}
-              locale={{ emptyText: <Empty description="当前 artifact 不包含 agent 社会状态。" /> }}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} xl={12} xxl={7}>
-          <Card title="选中 Agent" extra={<RobotOutlined />}>
-            {selectedAgent ? (
-              <Descriptions
-                size="small"
-                bordered
-                column={1}
-                items={descriptionItems([
-                  ["agent", selectedAgent.playerId],
-                  ["model", selectedAgent.model],
-                  ["policy", selectedAgent.policyName],
-                  ["observations", selectedAgent.observations],
-                  ["memos", selectedAgent.privateMemos.length],
-                  ["relationships", Object.keys(selectedAgent.social?.relationships?.edges ?? {}).length],
-                  ["journal", selectedAgent.social?.journal?.entries.length ?? 0],
-                  ["last intent", selectedAgent.lastIntent ?? "n/a"],
-                  ["social hash", selectedAgent.socialStateHash ? shortId(selectedAgent.socialStateHash) : "n/a"]
-                ])}
-              />
-            ) : (
-              <Empty description="点击 agent 行查看证据。" />
-            )}
-          </Card>
-        </Col>
-        <Col xs={24} xl={12} xxl={7}>
-          <Card title="通道拓扑" extra={<Tag>{artifact ? `${channels.length} channels` : "尚未加载 artifact"}</Tag>}>
-            <Table
-              rowKey="id"
-              size="small"
-              bordered
-              columns={channelColumns}
-              dataSource={channels}
-              pagination={{ pageSize: 6 }}
-              locale={{ emptyText: <Empty description="当前 artifact 没有 channel。" /> }}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      <Row gutter={[16, 16]}>
-        <Col xs={24} xxl={13}>
-          <Card
-            title="通信消息"
-            extra={
-              artifact ? (
-                <Space size={4} wrap>
-                  <Tag>{messages.length} messages</Tag>
-                  <Tag color="processing">{speechActCount} acts</Tag>
-                  <Tag color="success">{deliveryReceiptCount} receipts</Tag>
-                </Space>
-              ) : (
-                <Tag>尚未加载 artifact</Tag>
-              )
-            }
-          >
-            <Table
-              rowKey="id"
-              size="small"
-              bordered
-              columns={messageColumns}
-              dataSource={messages}
-              pagination={{ pageSize: 8 }}
-              onRow={(message) => ({ onClick: () => onSelectMessage(message) })}
-              locale={{ emptyText: <Empty description="当前 artifact 没有记录 public/team/private message。" /> }}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} xxl={11}>
-          <Card title="关系 / 声誉边" extra={<Tag>evidence only</Tag>}>
-            <Table
-              rowKey={(edge) => `${edge.owner}-${edge.target}`}
-              size="small"
-              bordered
-              columns={relationshipColumns}
-              dataSource={relationshipEdges}
-              pagination={{ pageSize: 6 }}
-              locale={{ emptyText: <Empty description="artifact 中未记录 relationships.edges。" /> }}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      <Card title="社会状态变更日志" extra={<Tag>journal</Tag>}>
-        <Table
-          rowKey="key"
-          size="small"
-          bordered
-          columns={journalColumns}
-          dataSource={socialJournalRows}
-          pagination={{ pageSize: 8 }}
-          locale={{ emptyText: <Empty description="artifact 中未记录 social-state journal entries。" /> }}
-        />
-      </Card>
-    </Space>
   );
 }
 
@@ -5269,28 +4838,12 @@ function LineageWorkspace({
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title="checkpoints" value={checkpoints.length} prefix={<DatabaseOutlined />} suffix={<Text type="secondary">{currentMatchId ? shortId(currentMatchId) : "未选择"}</Text>} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title="selected prefix" value={selectedCheckpoint?.counts.nativeSteps ?? 0} prefix={<BranchesOutlined />} suffix={<Text type="secondary">native steps</Text>} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title="fork lineage" value={forkLineage ? (forkLineage.isFork ? "fork" : "root") : "pending"} prefix={<ApiOutlined />} suffix={<Text type="secondary">{forkLineage?.boundary?.status ?? "未加载"}</Text>} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title="branch tree" value={branchTree?.counts?.edges ?? 0} prefix={<BranchesOutlined />} suffix={<Text type="secondary">{branchTree?.counts?.matches ?? 0} matches / {branchTree?.counts?.attempts ?? 0} attempts</Text>} />
-          </Card>
-        </Col>
-      </Row>
+      <div className="cockpit-kpi-strip" aria-label="谱系摘要">
+        <CompactKpi label="Checkpoint" value={String(checkpoints.length)} detail={currentMatchId ? shortId(currentMatchId) : "未选择 run"} />
+        <CompactKpi label="Selected prefix" value={String(selectedCheckpoint?.counts.nativeSteps ?? 0)} detail="native steps" />
+        <CompactKpi label="Fork lineage" value={forkLineage ? (forkLineage.isFork ? "fork" : "root") : "待加载"} detail={forkLineage?.boundary?.status ?? "未加载"} />
+        <CompactKpi label="Branch tree" value={String(branchTree?.counts?.edges ?? 0)} detail={`${branchTree?.counts?.matches ?? 0} matches · ${branchTree?.counts?.attempts ?? 0} attempts`} />
+      </div>
 
       <Card
         title="Checkpoint Registry"
@@ -5329,7 +4882,7 @@ function LineageWorkspace({
           ) : null}
           <Text type="secondary">
             {replayBoundaryNativeStepCount === null
-              ? "当前 selector：artifact 最终边界。先在回放或狼人杀事件账本定位服务端帧，可创建 prefix checkpoint。"
+              ? "当前 selector：artifact 最终边界。先在回放或领域事件账本定位服务端帧，可创建 prefix checkpoint。"
               : `当前 selector：服务端 replay native #${replayBoundaryNativeStepCount}；创建时会提交该 nativeStepCount。`}
           </Text>
           <Text type="secondary">列表来自 `/api/checkpoints?matchId=...`，只展示 summary，不读取 full checkpoint artifact。</Text>
@@ -5352,7 +4905,7 @@ function LineageWorkspace({
       </Card>
 
       <Row gutter={[16, 16]}>
-        <Col xs={24} xl={10}>
+        <Col xs={24} xxl={10}>
           <Card
             title="Fork Lineage"
             extra={
@@ -5394,7 +4947,7 @@ function LineageWorkspace({
             )}
           </Card>
         </Col>
-        <Col xs={24} xl={14}>
+        <Col xs={24} xxl={14}>
           <Card
             title="Branch Tree Summary"
             extra={
@@ -7258,26 +6811,9 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-function assertServerProjectedArtifact(artifact: ProjectedMatchArtifact, label: string): void {
-  if (
-    (artifact.projection?.view !== "postgame-redacted" && artifact.projection?.view !== "truth-redacted") ||
-    artifact.projection.privateEvidenceRedacted !== true
-  ) {
-    throw new Error(`${label} must be a postgame-redacted or truth-redacted projection.`);
-  }
-  if (artifact.projection.view === "truth-redacted" && artifact.projection.postgameTruthRedacted !== true) {
-    throw new Error(`${label} truth-redacted projection must set postgameTruthRedacted=true.`);
-  }
-  if (artifact.projection.view === "postgame-redacted" && artifact.projection.postgameTruthRedacted === true) {
-    throw new Error(`${label} postgame-redacted projection must keep postgame truth.`);
-  }
-  if (
-    artifact.socialEpisode.exposureSummary?.schemaVersion !== "server.social-exposure-summary.v1" ||
-    artifact.socialEpisode.exposureSummary.privateEvidenceRedacted !== true ||
-    artifact.socialEpisode.exposureSummary.source !== "scoped_observation"
-  ) {
-    throw new Error(`${label} must include a redacted server social exposure summary.`);
-  }
+async function assertServerProjectedArtifact(artifact: ProjectedMatchArtifact, label: string): Promise<void> {
+  const { assertServerProjectedArtifactContract } = await import("./components/cockpit/socialNetworkContract");
+  assertServerProjectedArtifactContract(artifact, label);
 }
 
 function assertArtifactMatchesId(artifact: ProjectedMatchArtifact, id: string, label: string): void {
@@ -7794,25 +7330,86 @@ function inspectorFromMessage(message: SocialMessage): InspectorItem {
   };
 }
 
-function inspectorFromSocialExposure(edge: SocialGraphExposureEdge): InspectorItem {
+function inspectorFromSocialExposure(edges: readonly SocialNetworkExposureEdgeDto[]): InspectorItem {
+  const edge = edges[0]!;
+  const channels = Array.from(new Set(edges.map((item) => item.channelId))).sort();
+  const visibilities = Array.from(new Set(edges.map((item) => item.visibility))).sort();
+  const kinds = Array.from(new Set(edges.map((item) => item.kind ?? "message"))).sort();
+  const messageRefs = new Map(edges.flatMap((item) => item.messageRefs).map((ref) => [ref.id, ref]));
+  const actionKinds = Array.from(new Set(edges.flatMap((item) => item.actionKinds))).sort();
+  const traceIds = Array.from(new Set(edges.flatMap((item) => item.traceIds))).sort();
+  const turnIndexes = Array.from(new Set(edges.flatMap((item) => item.turnIndexes))).sort((left, right) => left - right);
   return {
     kind: "social-exposure",
     title: `Exposure ${edge.sourceId} → ${edge.targetId}`,
-    subtitle: `${edge.visibility} · ${edge.channelId}`,
+    subtitle: `显示汇总 · ${edges.length} 条服务端投影边`,
     fields: [
       ["source", edge.sourceId],
       ["observer", edge.targetId],
-      ["channel", edge.channelId],
-      ["visibility", edge.visibility],
-      ["kind", edge.kind ?? "message"],
-      ["messages", edge.messages],
-      ["observations", edge.observations],
-      ["evidence", edge.evidenceCount],
-      ["action kinds", edge.actionKinds.join(", ") || "n/a"],
-      ["traces", edge.traceIds.map(shortId).join(", ") || "n/a"],
-      ["turns", edge.turnIndexes.join(", ") || "n/a"]
+      ["server edges", edges.length],
+      ["channels", channels.join(", ")],
+      ["visibilities", visibilities.join(", ")],
+      ["kinds", kinds.join(", ")],
+      ["messages", messageRefs.size],
+      ["observations", edges.reduce((sum, item) => sum + item.observationCount, 0)],
+      ["evidence", edges.reduce((sum, item) => sum + item.evidenceCount, 0)],
+      ["action kinds", actionKinds.join(", ") || "n/a"],
+      ["traces", traceIds.map(shortId).join(", ") || "n/a"],
+      ["turns", turnIndexes.join(", ") || "n/a"]
+    ],
+    json: {
+      kind: "social-exposure-display-summary",
+      source: "server.social-network-projection.v1",
+      serverEdges: edges
+    }
+  };
+}
+
+function inspectorFromSocialRelationship(edge: SocialNetworkRelationshipEdgeDto): InspectorItem {
+  return {
+    kind: "social-relationship",
+    title: `关系 ${edge.sourceId} → ${edge.targetId}`,
+    subtitle: `最终 Agent 快照 · ${edge.evidenceRefs.length} 条证据`,
+    fields: [
+      ["观察者", edge.sourceId],
+      ["目标", edge.targetId],
+      ["信任", edge.trust],
+      ["怀疑", edge.suspicion],
+      ["亲和", edge.affinity],
+      ["影响", edge.influence],
+      ["尊重", edge.respect],
+      ["威胁", edge.threat],
+      ["关系债务", edge.debt],
+      ["更新", edge.updatedAt],
+      ["证据 refs", edge.evidenceRefs.length]
     ],
     json: edge
+  };
+}
+
+function inspectorFromSocialCommunication(edges: readonly SocialNetworkCommunicationEdgeDto[]): InspectorItem {
+  const edge = edges[0]!;
+  const channels = Array.from(new Set(edges.map((item) => item.channelId))).sort();
+  const visibilities = Array.from(new Set(edges.map((item) => item.visibility))).sort();
+  const messageSeqs = Array.from(new Set(edges.flatMap((item) => item.messageSeqs))).sort((left, right) => left - right);
+  return {
+    kind: "social-communication",
+    title: `通信 ${edge.sourceId} → ${edge.targetId}`,
+    subtitle: `显示汇总 · ${edges.length} 条服务端投影边`,
+    fields: [
+      ["来源", edge.sourceId],
+      ["目标", edge.targetId],
+      ["服务端边", edges.length],
+      ["通道", channels.join(", ")],
+      ["可见性", visibilities.join(", ")],
+      ["消息数", messageSeqs.length],
+      ["消息序号", messageSeqs.join(", ") || "n/a"]
+    ],
+    json: {
+      kind: "social-communication-display-summary",
+      source: "server.social-network-projection.v1",
+      serverEdges: edges
+    }
   };
 }
 
@@ -8166,48 +7763,6 @@ function inspectorFromBranchTree(tree: BranchTreeSummary): InspectorItem {
   };
 }
 
-function readRelationshipRows(agent: AgentHarnessState): Array<{
-  owner: string;
-  target: string;
-  trust: string;
-  suspicion: string;
-  evidence: number;
-}> {
-  const edges = agent.social?.relationships?.edges;
-  if (!edges || typeof edges !== "object") return [];
-  return Object.entries(edges as Record<string, unknown>).map(([target, raw]) => {
-    const edge = isRecord(raw) ? raw : {};
-    return {
-      owner: agent.playerId,
-      target,
-      trust: edge.trust !== undefined ? String(edge.trust) : "n/a",
-      suspicion: edge.suspicion !== undefined ? String(edge.suspicion) : "n/a",
-      evidence: Array.isArray(edge.evidenceRefs) ? edge.evidenceRefs.length : 0
-    };
-  });
-}
-
-function readSocialJournalRows(agents: AgentHarnessState[]): SocialJournalRow[] {
-  return agents.flatMap((agent) =>
-    (agent.social?.journal?.entries ?? []).map((entry) => ({
-      ...entry,
-      key: `${agent.playerId}-${entry.journalSeq}`,
-      owner: agent.playerId,
-      evidenceCount: entry.evidenceRefs.length
-    }))
-  );
-}
-
-function countMessagesByVisibility(messages: SocialMessage[]): Record<SocialMessage["visibility"], number> {
-  return messages.reduce<Record<SocialMessage["visibility"], number>>(
-    (counts, message) => {
-      counts[message.visibility] += 1;
-      return counts;
-    },
-    { private: 0, team: 0, public: 0, postgame: 0 }
-  );
-}
-
 function countSocialSchedulerModes(steps: ProjectedSocialStep[]): Record<ProjectedSocialStep["schedulerMode"], number> {
   return steps.reduce<Record<ProjectedSocialStep["schedulerMode"], number>>(
     (counts, step) => {
@@ -8311,116 +7866,4 @@ function summarizeSpeechActKinds(message: SocialMessage): string {
 
 function uniqueStrings(values: unknown[]): string[] {
   return Array.from(new Set(values.filter((value): value is string => typeof value === "string" && value.trim().length > 0))).sort();
-}
-
-export function buildSocialGraph(artifact: SocialGraphArtifact): SocialGraph {
-  const nodes = new Map<string, SocialGraphNode>();
-  const ensureNode = (id: string): SocialGraphNode => {
-    const existing = nodes.get(id);
-    if (existing) return existing;
-    const node: SocialGraphNode = { id, sent: 0, received: 0, observed: 0 };
-    nodes.set(id, node);
-    return node;
-  };
-
-  for (const agent of artifact.agents) ensureNode(agent.playerId);
-
-  const messageEdges = new Map<string, SocialGraphMessageEdge>();
-  for (const message of artifact.socialEpisode.messages) {
-    ensureNode(message.senderId);
-    for (const recipientId of message.recipientIds) {
-      ensureNode(recipientId);
-      if (recipientId === message.senderId) continue;
-      ensureNode(message.senderId).sent += 1;
-      ensureNode(recipientId).received += 1;
-      const key = `${message.senderId}->${recipientId}`;
-      const edge = messageEdges.get(key) ?? {
-        sourceId: message.senderId,
-        targetId: recipientId,
-        messages: 0
-      };
-      edge.messages += 1;
-      messageEdges.set(key, edge);
-    }
-  }
-
-  const exposureEdges = new Map<
-    string,
-    SocialGraphExposureEdge & {
-      messageIds: Set<string>;
-      actionKindSet: Set<string>;
-      traceIdSet: Set<string>;
-      turnIndexSet: Set<number>;
-    }
-  >();
-  for (const exposure of readSocialGraphExposureRecords(artifact)) {
-    ensureNode(exposure.sourceId);
-    ensureNode(exposure.observerId).observed += 1;
-    const key = [
-      exposure.sourceId,
-      exposure.observerId,
-      exposure.channelId,
-      exposure.visibility,
-      exposure.kind ?? ""
-    ].join("::");
-    const edge = exposureEdges.get(key) ?? {
-      sourceId: exposure.sourceId,
-      targetId: exposure.observerId,
-      channelId: exposure.channelId,
-      visibility: exposure.visibility,
-      kind: exposure.kind,
-      messages: 0,
-      observations: 0,
-      actionKinds: [],
-      traceIds: [],
-      turnIndexes: [],
-      evidenceCount: 0,
-      evidenceLabels: [],
-      messageIds: new Set<string>(),
-      actionKindSet: new Set<string>(),
-      traceIdSet: new Set<string>(),
-      turnIndexSet: new Set<number>()
-    };
-    edge.messageIds.add(exposure.messageId);
-    edge.actionKindSet.add(exposure.observedAtActionKind);
-    edge.traceIdSet.add(exposure.observedAtTraceId);
-    edge.turnIndexSet.add(exposure.observedAtTurnIndex);
-    edge.observations += 1;
-    edge.evidenceCount += 1;
-    edge.evidenceLabels.push(
-      `msg#${exposure.messageSeq} observed@turn${exposure.observedAtTurnIndex} ${exposure.observedAtActionKind} ${exposure.observedAtTraceId}`
-    );
-    exposureEdges.set(key, edge);
-  }
-
-  const materializedExposureEdges = [...exposureEdges.values()].map((edge) => ({
-    sourceId: edge.sourceId,
-    targetId: edge.targetId,
-    channelId: edge.channelId,
-    visibility: edge.visibility,
-    kind: edge.kind,
-    messages: edge.messageIds.size,
-    observations: edge.observations,
-    actionKinds: [...edge.actionKindSet],
-    traceIds: [...edge.traceIdSet],
-    turnIndexes: [...edge.turnIndexSet],
-    evidenceCount: edge.evidenceCount,
-    evidenceLabels: edge.evidenceLabels
-  }));
-
-  return {
-    nodes: [...nodes.values()].sort((a, b) => a.id.localeCompare(b.id)),
-    messageEdges: [...messageEdges.values()],
-    exposureEdges: materializedExposureEdges
-  };
-}
-
-function readSocialGraphExposureRecords(artifact: SocialGraphArtifact): SocialExposureRecord[] {
-  if (Array.isArray(artifact.socialEpisode.exposureRecords)) {
-    return artifact.socialEpisode.exposureRecords;
-  }
-  // Message recipient envelopes are not evidence that an actor received an
-  // observation. Absence of server-projected exposure records must remain an
-  // absence of graph exposure edges rather than a browser-side reconstruction.
-  return [];
 }

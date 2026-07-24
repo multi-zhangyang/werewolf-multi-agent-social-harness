@@ -36,49 +36,54 @@ export function WerewolfReviewBoard({
 }) {
   if (loading) {
     return (
-      <Card bordered={false} data-testid="werewolf-review-board">
+      <section data-testid="werewolf-review-board">
         <Flex vertical align="center" gap="middle" style={{ minHeight: 180, justifyContent: "center" }}>
           <Spin />
           <Text type="secondary">正在从服务端的已记录原生步骤重建回放局面…</Text>
         </Flex>
-      </Card>
+      </section>
     );
   }
   if (error) {
     return (
-      <Card bordered={false} data-testid="werewolf-review-board">
+      <section data-testid="werewolf-review-board">
         <Alert
           type="error"
           showIcon
           message="服务端回放帧不可用"
           description={error}
         />
-      </Card>
+      </section>
     );
   }
   if (!review) {
     return (
-      <Card bordered={false} data-testid="werewolf-review-board">
+      <section data-testid="werewolf-review-board">
         <Empty description="请选择一份服务端记录的狼人杀工件以查看赛后复盘。" />
-      </Card>
+      </section>
     );
   }
 
   const truthRedacted = review.visibility === "truth-redacted";
   return (
     <Flex vertical gap="middle" data-testid="werewolf-review-board">
-      <Alert
-        type={truthRedacted ? "warning" : "info"}
-        showIcon
-        message={truthRedacted ? "真相脱敏局面" : source.kind === "replay-frame" ? "狼人杀回放局面" : "狼人杀赛后复盘"}
-        description={
-          truthRedacted
-            ? "仅显示服务端投影中的公开局面、公开发言、公开投票和公开事件；座位身份不会由浏览器推断。"
-            : source.kind === "replay-frame"
-              ? `这是服务端基于已记录原生步骤重放的第 ${source.nativeStepCount ?? "?"} 帧，不是浏览器推演或 live state。state hash：${source.stateHash ?? "n/a"}`
-              : "这是本地赛后复盘工件，不是 live public state。私有推理和证据已脱敏；本面板不显示夜间私密动作或阵营关系。"
-        }
-      />
+      {truthRedacted ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="真相脱敏局面"
+          description="仅显示服务端投影中的公开局面、公开发言、公开投票和公开事件；座位身份不会由浏览器推断。"
+        />
+      ) : (
+        <div className="domain-provenance" role="note" aria-label="狼人杀复盘来源">
+          <Text strong>{source.kind === "replay-frame" ? "狼人杀回放局面" : "狼人杀赛后复盘"}</Text>
+          <Text type="secondary">
+            {source.kind === "replay-frame"
+              ? `服务端基于已记录原生步骤重放的 native #${source.nativeStepCount ?? "?"} · state ${source.stateHash ?? "n/a"}`
+              : "来源是本地赛后记录工件，不是 live state；私有推理和夜间动作已脱敏。"}
+          </Text>
+        </div>
+      )}
 
       <Card title="局面概览" bordered={false}>
         <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }}>
@@ -90,26 +95,24 @@ export function WerewolfReviewBoard({
       </Card>
 
       <section aria-label="狼人杀座位复盘">
-        <Card
-          title="九人座位"
-          extra={
+        <Flex className="workspace-section-heading" justify="space-between" align="center" gap="small" wrap="wrap">
+          <Text strong>九人座位</Text>
+          {
             <Tag color={truthRedacted ? "gold" : "blue"} icon={truthRedacted ? <EyeInvisibleOutlined /> : undefined}>
               {truthRedacted ? "身份隐藏" : "赛后角色可见"}
             </Tag>
           }
-          bordered={false}
-        >
+        </Flex>
           <div role="list">
             <Row gutter={[12, 12]}>
               {review.seats.map((seat) => (
-                <Col key={seat.id} xs={24} sm={12} lg={8} xl={6}>
+                <Col key={seat.id} xs={24} sm={12} lg={8}>
                   <SeatCard seat={seat} truthRedacted={truthRedacted} />
                 </Col>
               ))}
             </Row>
           </div>
           {!review.seats.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="工件未提供可显示的座位记录。" /> : null}
-        </Card>
       </section>
 
       <Row gutter={[16, 16]}>
@@ -189,9 +192,9 @@ function SeatCard({ seat, truthRedacted }: { seat: WerewolfReviewSeat; truthReda
 function PublicSpeechFeed({ speeches }: { speeches: WerewolfReviewSpeech[] }) {
   if (!speeches.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无公开发言。" />;
   return (
-    <Flex vertical gap="small">
+    <div className="evidence-list" role="list">
       {speeches.map((speech, index) => (
-        <Card key={`${speech.day}-${speech.playerId}-${index}`} size="small" style={{ background: "#fafcff" }}>
+        <div key={`${speech.day}-${speech.playerId}-${index}`} className="evidence-list__item" role="listitem">
           <Flex vertical gap={4}>
             <Space wrap size={4}>
               <Tag>第 {speech.day} 天</Tag>
@@ -203,9 +206,9 @@ function PublicSpeechFeed({ speeches }: { speeches: WerewolfReviewSpeech[] }) {
             <Text>{speech.text}</Text>
             {speech.strategyTags.length ? <Text type="secondary">标签：{speech.strategyTags.join(" · ")}</Text> : null}
           </Flex>
-        </Card>
+        </div>
       ))}
-    </Flex>
+    </div>
   );
 }
 
