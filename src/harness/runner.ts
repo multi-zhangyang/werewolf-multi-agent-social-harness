@@ -77,7 +77,10 @@ export async function runHarnessEpisode<
   for (const step of episode.steps) {
     const snapshot = snapshotsByTraceId.get(step.traceId);
     if (!snapshot) continue;
-    step.actorSnapshotsAfterStep = structuredClone(snapshot.agents);
+    // The capture map is discarded once snapshots are attached, and trace ids
+    // are runner-owned and unique per committed step, so the step takes
+    // ownership of the captured snapshot without a second full clone.
+    step.actorSnapshotsAfterStep = snapshot.agents;
     step.actorSnapshotsHashAfterStep = snapshot.agentsHash;
   }
   return bindExecutionClass(episode);
