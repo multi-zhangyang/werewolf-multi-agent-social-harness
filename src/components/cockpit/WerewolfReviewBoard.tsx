@@ -1,16 +1,28 @@
 import { Alert, Badge, Button, Card, Col, Descriptions, Empty, Flex, Row, Space, Spin, Table, Tag, Timeline, Typography } from "antd";
-import { CrownOutlined, EyeInvisibleOutlined, UserOutlined } from "@ant-design/icons";
+import {
+  CheckSquareOutlined,
+  CommentOutlined,
+  CrownOutlined,
+  DashboardOutlined,
+  EyeInvisibleOutlined,
+  HistoryOutlined,
+  UserDeleteOutlined,
+  UserOutlined
+} from "@ant-design/icons";
+import { memo, useMemo } from "react";
+import type { ReactNode } from "react";
 import type { ColumnsType } from "antd/es/table";
 import type { Role } from "../../core/types";
+import { buildWerewolfReviewModel } from "./werewolfReviewProjection";
 import type {
-  WerewolfReviewModel,
   WerewolfReviewLedgerEvent,
   WerewolfReviewSeat,
+  WerewolfReviewSource,
   WerewolfReviewSpeech,
   WerewolfReviewVote
 } from "./werewolfReviewProjection";
 
-const { Paragraph, Text, Title } = Typography;
+const { Paragraph, Text } = Typography;
 
 const ROLE_LABELS: Record<Role, string> = {
   villager: "村民",
@@ -20,24 +32,47 @@ const ROLE_LABELS: Record<Role, string> = {
   hunter: "猎人"
 };
 
-export function WerewolfReviewBoard({
-  review,
+function cardTitle(icon: ReactNode, text: string) {
+  return (
+    <Space size={6}>
+      <span aria-hidden="true" style={{ color: "#3558d6" }}>{icon}</span>
+      <span>{text}</span>
+    </Space>
+  );
+}
+
+const numericCell = () => ({ style: { fontVariantNumeric: "tabular-nums" as const } });
+
+const VOTE_LEDGER_COLUMNS: ColumnsType<WerewolfReviewVote> = [
+  { title: "日", dataIndex: "day", width: 58, onCell: numericCell },
+  { title: "票种", dataIndex: "kind", render: (kind) => (kind === "sheriff" ? "警长" : "放逐") },
+  { title: "投票者", dataIndex: "voterId" },
+  { title: "目标", render: (_, row) => (row.abstain ? "弃票" : row.targetId ?? "—") },
+  { title: "权重", dataIndex: "weight", width: 68, onCell: numericCell }
+];
+const VOTE_LEDGER_SCROLL = { x: "max-content" } as const;
+
+export const WerewolfReviewBoard = memo(function WerewolfReviewBoard({
+  reviewSource,
   source = { kind: "artifact-final" },
   onSelectReplayBoundary,
   loading = false,
   error = null
 }: {
-  review: WerewolfReviewModel | null;
+  reviewSource: WerewolfReviewSource | null;
   source?: { kind: "artifact-final" | "replay-frame"; nativeStepCount?: number; stateHash?: string };
   /** Requests an existing server replay frame; it never performs browser replay. */
   onSelectReplayBoundary?: (nativeStepCount: number) => void;
   loading?: boolean;
   error?: string | null;
 }) {
+  // Built inside the lazy board chunk so the cockpit shell neither bundles
+  // nor recomputes the review projection while this board is unmounted.
+  const review = useMemo(() => buildWerewolfReviewModel(reviewSource), [reviewSource]);
   if (loading) {
     return (
       <section data-testid="werewolf-review-board">
-        <Flex vertical align="center" gap="middle" style={{ minHeight: 180, justifyContent: "center" }}>
+        <Flex vertical align="center" justify="center" gap="middle" style={{ minHeight: 180 }}>
           <Spin />
           <Text type="secondary">正在从服务端的已记录原生步骤重建回放局面…</Text>
         </Flex>
@@ -50,7 +85,7 @@ export function WerewolfReviewBoard({
         <Alert
           type="error"
           showIcon
-          message="服务端回放帧不可用"
+          title="服务端回放帧不可用"
           description={error}
         />
       </section>
@@ -71,7 +106,7 @@ export function WerewolfReviewBoard({
         <Alert
           type="warning"
           showIcon
-          message="真相脱敏局面"
+          title="真相脱敏局面"
           description="仅显示服务端投影中的公开局面、公开发言、公开投票和公开事件；座位身份不会由浏览器推断。"
         />
       ) : (
@@ -85,23 +120,25 @@ export function WerewolfReviewBoard({
         </div>
       )}
 
-      <Card title="局面概览" bordered={false}>
-        <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }}>
-          <Descriptions.Item label="第几天">{review.day ?? "—"}</Descriptions.Item>
-          <Descriptions.Item label="阶段">{review.phase ?? "—"}</Descriptions.Item>
-          <Descriptions.Item label="当前发言座位">{review.currentSpeakerSeat ?? "—"}</Descriptions.Item>
-          <Descriptions.Item label="待处理动作">{review.pendingActionCount ?? "—"}</Descriptions.Item>
-        </Descriptions>
+      <Card title={cardTitle(<DashboardOutlined />, "局面概览")} variant="borderless">
+        <Descriptions
+          size="small"
+          column={{ xs: 1, sm: 2, lg: 4 }}
+          items={[
+            { key: "day", label: "第几天", children: review.day ?? "—" },
+            { key: "phase", label: "阶段", children: review.phase ?? "—" },
+            { key: "speaker", label: "当前发言座位", children: review.currentSpeakerSeat ?? "—" },
+            { key: "pending", label: "待处理动作", children: review.pendingActionCount ?? "—" }
+          ]}
+        />
       </Card>
 
       <section aria-label="狼人杀座位复盘">
         <Flex className="workspace-section-heading" justify="space-between" align="center" gap="small" wrap="wrap">
           <Text strong>九人座位</Text>
-          {
-            <Tag color={truthRedacted ? "gold" : "blue"} icon={truthRedacted ? <EyeInvisibleOutlined /> : undefined}>
-              {truthRedacted ? "身份隐藏" : "赛后角色可见"}
-            </Tag>
-          }
+          <Tag color={truthRedacted ? "gold" : "blue"} icon={truthRedacted ? <EyeInvisibleOutlined /> : undefined}>
+            {truthRedacted ? "身份隐藏" : "赛后角色可见"}
+          </Tag>
         </Flex>
           <div role="list">
             <Row gutter={[12, 12]}>
@@ -117,12 +154,12 @@ export function WerewolfReviewBoard({
 
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={14}>
-          <Card title="公开发言" bordered={false}>
+          <Card title={cardTitle(<CommentOutlined />, "公开发言")} variant="borderless">
             <PublicSpeechFeed speeches={review.speeches} />
           </Card>
         </Col>
         <Col xs={24} xl={10}>
-          <Card title="公开投票账本" bordered={false}>
+          <Card title={cardTitle(<CheckSquareOutlined />, "公开投票账本")} variant="borderless">
             <VoteLedger votes={review.votes} />
           </Card>
         </Col>
@@ -130,12 +167,12 @@ export function WerewolfReviewBoard({
 
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={10}>
-          <Card title="死亡记录" bordered={false}>
+          <Card title={cardTitle(<UserDeleteOutlined />, "死亡记录")} variant="borderless">
             {review.deaths.length ? (
               <Timeline
                 items={review.deaths.map((death, index) => ({
                   color: "red",
-                  children: `第 ${death.day} 天 · ${death.playerId} · ${death.reason}`,
+                  content: `第 ${death.day} 天 · ${death.playerId} · ${death.reason}`,
                   key: `${death.playerId}-${index}`
                 }))}
               />
@@ -145,14 +182,14 @@ export function WerewolfReviewBoard({
           </Card>
         </Col>
         <Col xs={24} xl={14}>
-          <Card title="服务端事件账本" bordered={false}>
+          <Card title={cardTitle(<HistoryOutlined />, "服务端事件账本")} variant="borderless">
             <PublicEventTimeline events={review.eventLedger} onSelectReplayBoundary={onSelectReplayBoundary} />
           </Card>
         </Col>
       </Row>
     </Flex>
   );
-}
+});
 
 function SeatCard({ seat, truthRedacted }: { seat: WerewolfReviewSeat; truthRedacted: boolean }) {
   const elimination = seat.eliminatedAt
@@ -160,9 +197,9 @@ function SeatCard({ seat, truthRedacted }: { seat: WerewolfReviewSeat; truthReda
     : "仍在场上";
   return (
     <article role="listitem" data-testid={`werewolf-seat-${seat.seat}`}>
-      <Card size="small" style={{ height: "100%", borderColor: seat.alive ? "#c8d8ff" : "#f0d3d8" }}>
+      <Card size="small" style={{ height: "100%", borderColor: seat.alive ? "#ccd5f4" : "#ecc8c5" }}>
         <Flex justify="space-between" align="start" gap="small">
-          <Space direction="vertical" size={2}>
+          <Space orientation="vertical" size={2}>
             <Text strong>
               <UserOutlined /> {seat.seat} 号 · {seat.name}
             </Text>
@@ -213,21 +250,14 @@ function PublicSpeechFeed({ speeches }: { speeches: WerewolfReviewSpeech[] }) {
 }
 
 function VoteLedger({ votes }: { votes: WerewolfReviewVote[] }) {
-  const columns: ColumnsType<WerewolfReviewVote> = [
-    { title: "日", dataIndex: "day", width: 58 },
-    { title: "票种", dataIndex: "kind", render: (kind) => (kind === "sheriff" ? "警长" : "放逐") },
-    { title: "投票者", dataIndex: "voterId" },
-    { title: "目标", render: (_, row) => (row.abstain ? "弃票" : row.targetId ?? "—") },
-    { title: "权重", dataIndex: "weight", width: 68 }
-  ];
   return votes.length ? (
     <Table<WerewolfReviewVote>
       size="small"
       rowKey={(row, index) => `${row.day}-${row.kind}-${row.voterId}-${index}`}
       pagination={false}
-      columns={columns}
+      columns={VOTE_LEDGER_COLUMNS}
       dataSource={votes}
-      scroll={{ x: "max-content" }}
+      scroll={VOTE_LEDGER_SCROLL}
     />
   ) : (
     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无公开投票。" />
@@ -247,7 +277,7 @@ function PublicEventTimeline({
       items={events.map((event) => ({
         color: "blue",
         key: event.id,
-        children: <PublicEventRow event={event} onSelectReplayBoundary={onSelectReplayBoundary} />
+        content: <PublicEventRow event={event} onSelectReplayBoundary={onSelectReplayBoundary} />
       }))}
     />
   );

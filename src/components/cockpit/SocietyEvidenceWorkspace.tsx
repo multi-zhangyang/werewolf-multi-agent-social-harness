@@ -1,9 +1,9 @@
-import { Button, Empty, Flex, Table as AntTable, Tag, Typography } from "antd";
+import { Button, Empty, Flex, Spin, Table as AntTable, Tag, Tooltip, Typography } from "antd";
 import type { TableProps } from "antd";
 import { EyeOutlined, MessageOutlined, NodeIndexOutlined, TeamOutlined } from "@ant-design/icons";
-import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
 import type { ReactNode } from "react";
-import type { PostgameMatchProjectionDto, SocialNetworkCommunicationEdgeDto, SocialNetworkExposureEdgeDto, SocialNetworkProjectionDto, SocialNetworkRelationshipEdgeDto } from "../../server/artifactProjection";
+import type { PostgameMatchProjectionDto, SocialNetworkCommunicationEdgeDto, SocialNetworkExposureEdgeDto, SocialNetworkRelationshipEdgeDto } from "../../server/artifactProjection";
 import type { AgentHarnessState } from "../../harness/types";
 import type { SocialMessage } from "../../harness/social";
 import { socialStateRetentionWindow } from "../../harness/socialState";
@@ -16,6 +16,13 @@ const SocialEvidenceGraph = lazy(async () => {
 const { Text, Title } = Typography;
 
 type Artifact = Pick<PostgameMatchProjectionDto, "projection" | "socialNetwork">;
+
+const numericCell = () => ({ style: { fontVariantNumeric: "tabular-nums" as const } });
+
+const AGENT_TABLE_PAGINATION = { pageSize: 7, size: "small" } as const;
+const EVIDENCE_TABLE_PAGINATION = { pageSize: 6 } as const;
+const JOURNAL_TABLE_PAGINATION = { pageSize: 8 } as const;
+const AGENT_TABLE_SCROLL = { x: 248 } as const;
 
 function EvidenceTable<RecordType extends object>(props: TableProps<RecordType>) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -33,7 +40,7 @@ function EvidenceTable<RecordType extends object>(props: TableProps<RecordType>)
   );
 }
 
-export function SocietyEvidenceWorkspace({
+export const SocietyEvidenceWorkspace = memo(function SocietyEvidenceWorkspace({
   artifact,
   agents,
   selectedAgent,
@@ -64,17 +71,18 @@ export function SocietyEvidenceWorkspace({
   const deliveryCount = network?.nodes.reduce((sum, node) => sum + node.deliveryCount, 0) ?? 0;
   const journalWindow = useMemo(() => summarizeJournalWindows(agents), [agents]);
 
-  const agentColumns: TableProps<AgentHarnessState>["columns"] = [
+  const agentColumns: TableProps<AgentHarnessState>["columns"] = useMemo(() => [
     { title: "Agent", dataIndex: "playerId", width: 62, render: (id: string) => <Text code>{id}</Text> },
     { title: "策略", dataIndex: "policyName", ellipsis: true },
     {
       title: "观察 / 关系",
       width: 76,
+      onCell: numericCell,
       render: (_, row) => `${row.observations} / ${network?.nodes.find((node) => node.id === row.playerId)?.relationshipCount ?? 0}`
     }
-  ];
-  const messageColumns: TableProps<SocialMessage>["columns"] = [
-    { title: "序号", dataIndex: "seq", width: 72 },
+  ], [network]);
+  const messageColumns: TableProps<SocialMessage>["columns"] = useMemo(() => [
+    { title: "序号", dataIndex: "seq", width: 72, onCell: numericCell },
     { title: "发送者", dataIndex: "senderId", render: (id: string) => <Text code>{id}</Text> },
     { title: "通道", dataIndex: "channelId" },
     { title: "可见性", dataIndex: "visibility", render: (visibility: SocialMessage["visibility"]) => <VisibilityTag visibility={visibility} /> },
@@ -84,30 +92,47 @@ export function SocietyEvidenceWorkspace({
       width: 72,
       render: (_, row) => <Button type="link" size="small" aria-label={`查看消息 ${row.seq}`} onClick={() => onSelectMessage(row)}>查看</Button>
     }
-  ];
-  const exposureColumns: TableProps<SocialNetworkExposureEdgeDto>["columns"] = [
+  ], [onSelectMessage]);
+  const exposureColumns: TableProps<SocialNetworkExposureEdgeDto>["columns"] = useMemo(() => [
     { title: "来源", dataIndex: "sourceId", render: (id: string) => <Text code>{id}</Text> },
     { title: "观察者", dataIndex: "targetId", render: (id: string) => <Text code>{id}</Text> },
-    { title: "观察次数", dataIndex: "observationCount" },
-    { title: "消息数", dataIndex: "uniqueMessageCount" },
-    { title: "证据", dataIndex: "evidenceCount" },
-    { title: "trace", render: (_, row) => row.traceIds.map(shortId).join(", ") || "—" },
+    { title: "观察次数", dataIndex: "observationCount", onCell: numericCell },
+    { title: "消息数", dataIndex: "uniqueMessageCount", onCell: numericCell },
+    { title: "证据", dataIndex: "evidenceCount", onCell: numericCell },
+    {
+      title: "trace",
+      render: (_, row) =>
+        row.traceIds.length ? (
+          <Tooltip title={row.traceIds.join(", ")}>
+            <Text code>{row.traceIds.map(shortId).join(", ")}</Text>
+          </Tooltip>
+        ) : (
+          "—"
+        )
+    },
     {
       title: "查看",
       width: 72,
       render: (_, row) => <Button type="link" size="small" aria-label={`查看观察证据 ${row.sourceId} ${row.targetId}`} onClick={() => onInspectExposure([row])}>打开</Button>
     }
-  ];
-  const relationshipColumns: TableProps<SocialNetworkRelationshipEdgeDto>["columns"] = [
+  ], [onInspectExposure]);
+  const relationshipColumns: TableProps<SocialNetworkRelationshipEdgeDto>["columns"] = useMemo(() => [
     { title: "观察者 → 目标", render: (_, row) => <Text code>{row.sourceId} → {row.targetId}</Text> },
-    { title: "信任", dataIndex: "trust", render: formatScore },
-    { title: "怀疑", dataIndex: "suspicion", render: formatScore },
-    { title: "影响", dataIndex: "influence", render: formatScore },
-    { title: "威胁", dataIndex: "threat", render: formatScore },
-    { title: "证据", render: (_, row) => row.evidenceRefs.length },
+    { title: "信任", dataIndex: "trust", onCell: numericCell, render: formatScore },
+    { title: "怀疑", dataIndex: "suspicion", onCell: numericCell, render: formatScore },
+    { title: "影响", dataIndex: "influence", onCell: numericCell, render: formatScore },
+    { title: "威胁", dataIndex: "threat", onCell: numericCell, render: formatScore },
+    { title: "证据", onCell: numericCell, render: (_, row) => row.evidenceRefs.length },
     { title: "更新", dataIndex: "updatedAt", render: (value: string) => formatDate(value) },
     { title: "查看", width: 72, render: (_, row) => <Button type="link" size="small" aria-label={`查看关系证据 ${row.sourceId} ${row.targetId}`} onClick={() => onInspectRelationship(row)}>打开</Button> }
-  ];
+  ], [onInspectRelationship]);
+  const handleSelectAgentById = useCallback(
+    (id: string) => {
+      const agent = agents.find((candidate) => candidate.playerId === id);
+      if (agent) onSelectAgent(agent);
+    },
+    [agents, onSelectAgent]
+  );
 
   return (
     <div className="society-workspace">
@@ -144,9 +169,9 @@ export function SocietyEvidenceWorkspace({
             size="small"
             bordered={false}
             columns={agentColumns}
-            scroll={{ x: 248 }}
+            scroll={AGENT_TABLE_SCROLL}
             dataSource={agents}
-            pagination={{ pageSize: 7, size: "small" }}
+            pagination={AGENT_TABLE_PAGINATION}
             rowSelection={{
               type: "radio",
               selectedRowKeys: selectedAgent?.playerId ? [selectedAgent.playerId] : [],
@@ -158,14 +183,20 @@ export function SocietyEvidenceWorkspace({
         </section>
 
         <section className="society-panel society-panel--matrix" aria-labelledby="society-matrix-title">
-          <Suspense fallback={<div className="workspace-loading">正在加载社会证据矩阵…</div>}>
+          <Suspense
+            fallback={
+              <div className="workspace-loading">
+                <Flex vertical align="center" gap="small">
+                  <Spin />
+                  <Text type="secondary">正在加载社会证据矩阵…</Text>
+                </Flex>
+              </div>
+            }
+          >
             <SocialEvidenceGraph
               network={network}
               selectedAgentId={selectedAgent?.playerId}
-              onSelectAgent={(id) => {
-                const agent = agents.find((candidate) => candidate.playerId === id);
-                if (agent) onSelectAgent(agent);
-              }}
+              onSelectAgent={handleSelectAgentById}
               onSelectExposure={onInspectExposure}
               onSelectRelationship={onInspectRelationship}
               onSelectCommunication={onInspectCommunication}
@@ -190,17 +221,17 @@ export function SocietyEvidenceWorkspace({
 
       <section className="society-panel society-panel--evidence" aria-labelledby="society-relationship-title">
         <div className="society-panel__heading"><div><Title level={4} id="society-relationship-title">关系认知</Title><Text type="secondary">每一行都是一个有向主观判断，数值和 evidence refs 直接来自 Agent 社会状态。</Text></div><Tag>{relationshipEdges.length} edges</Tag></div>
-        <EvidenceTable rowKey="id" size="small" bordered={false} columns={relationshipColumns} dataSource={relationshipEdges} locale={{ emptyText: network?.modes.relationships.reason ?? "当前工件没有关系边。" }} />
+        <EvidenceTable rowKey="id" size="small" bordered={false} columns={relationshipColumns} dataSource={relationshipEdges} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={network?.modes.relationships.reason ?? "当前工件没有关系边。"} /> }} />
       </section>
 
       <div className="society-evidence-grid">
         <section className="society-panel" aria-labelledby="society-exposure-title">
           <div className="society-panel__heading"><div><Title level={4} id="society-exposure-title">实际观察证据</Title><Text type="secondary">实际被某个 Agent 在某个提交边界观察到的消息。</Text></div><Tag>{exposureEdges.length} edges</Tag></div>
-          <EvidenceTable rowKey="id" size="small" bordered={false} columns={exposureColumns} dataSource={exposureEdges} pagination={{ pageSize: 6 }} locale={{ emptyText: network?.modes.exposure.reason ?? "没有 scoped observation 记录。" }} />
+          <EvidenceTable rowKey="id" size="small" bordered={false} columns={exposureColumns} dataSource={exposureEdges} pagination={EVIDENCE_TABLE_PAGINATION} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={network?.modes.exposure.reason ?? "没有 scoped observation 记录。"} /> }} />
         </section>
         <section className="society-panel" aria-labelledby="society-messages-title">
           <div className="society-panel__heading"><div><Title level={4} id="society-messages-title">通信记录</Title><Text type="secondary">投递声明不是阅读或影响的证明。</Text></div><Tag>{messages.length} messages</Tag></div>
-          <EvidenceTable rowKey="id" size="small" bordered={false} columns={messageColumns} dataSource={messages} pagination={{ pageSize: 6 }} locale={{ emptyText: "当前工件没有通信记录。" }} />
+          <EvidenceTable rowKey="id" size="small" bordered={false} columns={messageColumns} dataSource={messages} pagination={EVIDENCE_TABLE_PAGINATION} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工件没有通信记录。" /> }} />
         </section>
       </div>
 
@@ -209,14 +240,14 @@ export function SocietyEvidenceWorkspace({
           <div><Title level={4} id="society-journal-title">关系变更保留窗口</Title><Text type="secondary">仅列出当前保留的 relationships mutation；不把窗口外事实解释为未发生。</Text></div>
           <Flex gap={6} wrap><Tag>{socialJournalRows.length} rows</Tag><Tag color={journalWindow.tone}>{journalWindow.label}</Tag></Flex>
         </div>
-        <EvidenceTable rowKey="key" size="small" bordered={false} columns={journalColumns()} dataSource={socialJournalRows} pagination={{ pageSize: 8 }} locale={{ emptyText: journalWindow.emptyText }} />
+        <EvidenceTable rowKey="key" size="small" bordered={false} columns={JOURNAL_COLUMNS} dataSource={socialJournalRows} pagination={JOURNAL_TABLE_PAGINATION} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={journalWindow.emptyText} /> }} />
       </section>
     </div>
   );
-}
+});
 
 function SummaryItem({ icon, label, value, detail }: { icon: ReactNode; label: string; value: number; detail: string }) {
-  return <div className="society-summary-item"><span className="society-summary-item__icon">{icon}</span><span><small>{label}</small><strong>{value}</strong><em>{detail}</em></span></div>;
+  return <div className="society-summary-item"><span className="society-summary-item__icon" aria-hidden="true">{icon}</span><span><small>{label}</small><strong style={{ fontVariantNumeric: "tabular-nums" }}>{value}</strong><em>{detail}</em></span></div>;
 }
 
 function DetailRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
@@ -284,13 +315,20 @@ function summarizeJournalWindows(agents: AgentHarnessState[]): { label: string; 
   return { label: "窗口完整", emptyText: "完整保留窗口中没有关系变更记录。" };
 }
 
-function journalColumns(): TableProps<Record<string, unknown> & { key: string }>["columns"] {
-  return [
-    { title: "#", dataIndex: "journalSeq", width: 64 },
-    { title: "Agent", dataIndex: "owner", render: (value: string) => <Text code>{value}</Text> },
-    { title: "变更", dataIndex: "mutationKind" },
-    { title: "目标", dataIndex: "subjectId" },
-    { title: "trace", dataIndex: "traceId", render: (value: string) => <Text code>{shortId(value)}</Text> },
-    { title: "证据", dataIndex: "evidenceCount" }
-  ];
-}
+const JOURNAL_COLUMNS: TableProps<Record<string, unknown> & { key: string }>["columns"] = [
+  { title: "#", dataIndex: "journalSeq", width: 64, onCell: numericCell },
+  { title: "Agent", dataIndex: "owner", render: (value: string) => <Text code>{value}</Text> },
+  { title: "变更", dataIndex: "mutationKind" },
+  { title: "目标", dataIndex: "subjectId" },
+  {
+    title: "trace",
+    dataIndex: "traceId",
+    render: (value: string) =>
+      value === "—" ? value : (
+        <Tooltip title={value}>
+          <Text code>{shortId(value)}</Text>
+        </Tooltip>
+      )
+  },
+  { title: "证据", dataIndex: "evidenceCount", onCell: numericCell }
+];
