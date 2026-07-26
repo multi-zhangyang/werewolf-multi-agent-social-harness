@@ -1,4 +1,6 @@
-import { Alert, Card, Descriptions, Flex, Steps, Tag, Typography } from "antd";
+import { Alert, Card, Descriptions, Flex, Space, Steps, Tag, Typography } from "antd";
+import { DisconnectOutlined, LinkOutlined, PartitionOutlined } from "@ant-design/icons";
+import { isValidElement, memo } from "react";
 import type { RedactedHarnessStepDto, RedactedSocialStepDto } from "../../server/artifactProjection";
 import type { SocialStateMutationJournalEntry } from "../../harness/socialState";
 import { buildDecisionJournalEvidence } from "./decisionJournalEvidence";
@@ -7,6 +9,15 @@ export { buildDecisionJournalEvidence } from "./decisionJournalEvidence";
 export type { DecisionJournalEvidence } from "./decisionJournalEvidence";
 
 const { Text } = Typography;
+
+const PANEL_TITLE = (
+  <Space size={6}>
+    <span aria-hidden="true" style={{ color: "#3558d6" }}><PartitionOutlined /></span>
+    <span>Agent 决策证据链</span>
+  </Space>
+);
+
+const TABULAR_NUMS = { fontVariantNumeric: "tabular-nums" } as const;
 
 export type AgentDecisionEvidenceAvailability = "trace-linked-compatibility" | "native-only";
 
@@ -128,7 +139,7 @@ export function buildAgentDecisionEvidenceView(
   };
 }
 
-export function AgentDecisionEvidencePanel({
+export const AgentDecisionEvidencePanel = memo(function AgentDecisionEvidencePanel({
   nativeStep,
   legacyStep,
   view,
@@ -143,11 +154,11 @@ export function AgentDecisionEvidencePanel({
 }) {
   if (view !== "postgame-redacted") {
     return (
-      <Card size="small" className="agent-decision-evidence-panel" data-testid="agent-decision-evidence-panel" title="Agent 决策证据链">
+      <Card size="small" className="agent-decision-evidence-panel" data-testid="agent-decision-evidence-panel" title={PANEL_TITLE}>
         <Alert
           type="info"
           showIcon
-          message="公开真相脱敏视图不暴露 agent 决策链"
+          title="公开真相脱敏视图不暴露 agent 决策链"
           description="该视图不从消息、收件人或 scheduler cadence 推断 private observation、reasoner、policy、memory 或隐藏角色信息。"
         />
       </Card>
@@ -163,8 +174,15 @@ export function AgentDecisionEvidencePanel({
       size="small"
       className="agent-decision-evidence-panel"
       data-testid="agent-decision-evidence-panel"
-      title="Agent 决策证据链"
-      extra={<Tag color={hasLinkedCompatibilityEvidence ? "processing" : "default"}>{hasLinkedCompatibilityEvidence ? "trace-linked evidence" : "native-only"}</Tag>}
+      title={PANEL_TITLE}
+      extra={
+        <Tag
+          color={hasLinkedCompatibilityEvidence ? "processing" : "default"}
+          icon={hasLinkedCompatibilityEvidence ? <LinkOutlined aria-hidden="true" /> : <DisconnectOutlined aria-hidden="true" />}
+        >
+          {hasLinkedCompatibilityEvidence ? "trace-linked evidence" : "native-only"}
+        </Tag>
+      }
     >
       <Flex vertical gap="middle">
         <Text type="secondary">
@@ -175,19 +193,19 @@ export function AgentDecisionEvidencePanel({
           <Alert
             type="info"
             showIcon
-            message="没有可链接的 compatibility decision evidence"
+            title="没有可链接的 compatibility decision evidence"
             description="system 或 rejected native step 不会伪造 policy / reasoner 记录。请不要从缺失记录推断模型是否思考、记忆了什么或选择了目标。"
           />
         ) : null}
 
         <Steps
           size="small"
-          direction="vertical"
+          orientation="vertical"
           className="agent-decision-evidence-panel__steps"
           items={[
             {
               title: "1. Scoped observation",
-              description: (
+              content: (
                 <Descriptions
                   size="small"
                   column={1}
@@ -195,14 +213,14 @@ export function AgentDecisionEvidencePanel({
                     ["pending action", evidence.pendingKind],
                     ["native action", evidence.actionKind],
                     ["scheduler", evidence.schedulerMode],
-                    ["trace", shortId(evidence.traceId)]
+                    ["trace", <Text code>{shortId(evidence.traceId)}</Text>]
                   ])}
                 />
               )
             },
             {
               title: "2. Private state & memory boundary",
-              description: (
+              content: (
                 <Text type="secondary">
                   观察内容、beliefs、关系原始证据、memory retrieval 和记忆摘录均属于 private actor state；当前服务端投影只证明此阶段受 harness 管理，故意不在浏览器展示或重算。
                 </Text>
@@ -210,7 +228,7 @@ export function AgentDecisionEvidencePanel({
             },
             {
               title: "3. Optional reasoner advisory",
-              description: evidence.cognition?.source === "policy" ? (
+              content: evidence.cognition?.source === "policy" ? (
                 <Text type="secondary">
                   Deterministic policy narration · no model call。此 actor 没有调用 optional model reasoner；policy 仍由 harness 管理，并且环境 receipt 才能提交结果。
                 </Text>
@@ -232,7 +250,7 @@ export function AgentDecisionEvidencePanel({
             },
             {
               title: "4. Policy & arbitration boundary",
-              description: evidence.policy || evidence.arbitration ? (
+              content: evidence.policy || evidence.arbitration ? (
                 <Flex vertical gap="small">
                   {evidence.policy ? (
                     <>
@@ -274,9 +292,9 @@ export function AgentDecisionEvidencePanel({
                                 <Tag>{candidate.kind}</Tag>
                                 {candidate.selected ? <Tag color="success">selected</Tag> : null}
                               </Flex>
-                              <Text strong>final {formatCandidateScore(candidate.finalScore)}</Text>
+                              <Text strong style={TABULAR_NUMS}>final {formatCandidateScore(candidate.finalScore)}</Text>
                             </Flex>
-                            <Text type="secondary" className="agent-decision-evidence-panel__candidate-metrics">
+                            <Text type="secondary" className="agent-decision-evidence-panel__candidate-metrics" style={TABULAR_NUMS}>
                               base {formatCandidateScore(candidate.baseScore)} · utility {formatCandidateScore(candidate.utilityScore)} · social {formatCandidateScore(candidate.socialScore)} · legality {formatCandidateScore(candidate.legalityScore)} · risk {formatCandidateScore(candidate.riskPenalty)}
                             </Text>
                             <Text type="secondary">
@@ -296,7 +314,7 @@ export function AgentDecisionEvidencePanel({
             },
             {
               title: "5. Proposed social action",
-              description: (
+              content: (
                 <Descriptions
                   size="small"
                   column={1}
@@ -310,7 +328,7 @@ export function AgentDecisionEvidencePanel({
             },
             {
               title: "6. Environment receipt",
-              description: (
+              content: (
                 <Flex vertical gap="small">
                   <Tag color={receiptColor}>{evidence.receipt.status}</Tag>
                   <Descriptions
@@ -318,10 +336,10 @@ export function AgentDecisionEvidencePanel({
                     column={1}
                     items={descriptionItems([
                       ["failure stage", evidence.receipt.failureStage ?? "none"],
-                      ["decision hash", shortId(evidence.receipt.decisionStateHash)],
-                      ["pre-state hash", shortId(evidence.receipt.preStateHash)],
-                      ["post-state hash", shortId(evidence.receipt.postStateHash)],
-                      ["actor snapshot hash", shortId(evidence.receipt.actorSnapshotsHashAfterStep)]
+                      ["decision hash", <Text code>{shortId(evidence.receipt.decisionStateHash)}</Text>],
+                      ["pre-state hash", <Text code>{shortId(evidence.receipt.preStateHash)}</Text>],
+                      ["post-state hash", <Text code>{shortId(evidence.receipt.postStateHash)}</Text>],
+                      ["actor snapshot hash", <Text code>{shortId(evidence.receipt.actorSnapshotsHashAfterStep)}</Text>]
                     ])}
                   />
                   <Text type="secondary">
@@ -334,7 +352,7 @@ export function AgentDecisionEvidencePanel({
             },
             {
               title: "7. Post-receipt durable social state",
-              description:
+              content:
                 evidence.receipt.status !== "committed" ? (
                   <Text type="secondary">拒绝 receipt 不能写入 durable journal；UI 不会把 staged policy、reasoner 或 private state 伪装为已提交的社会状态。</Text>
                 ) : journal.length ? (
@@ -357,10 +375,14 @@ export function AgentDecisionEvidencePanel({
       </Flex>
     </Card>
   );
-}
+});
 
 function descriptionItems(values: Array<[string, unknown]>) {
-  return values.map(([label, value]) => ({ key: label, label, children: String(value) }));
+  return values.map(([label, value]) => ({
+    key: label,
+    label,
+    children: isValidElement(value) ? value : String(value)
+  }));
 }
 
 function formatBatch(
@@ -463,11 +485,4 @@ function nonNegativeInteger(value: unknown): number | undefined {
 
 function boundedString(value: unknown): string | undefined {
   return typeof value === "string" && value.length <= 160 ? value : undefined;
-}
-
-function integerRange(value: unknown): [number, number] | undefined {
-  if (!Array.isArray(value) || value.length !== 2) return undefined;
-  const start = finiteNumber(value[0]);
-  const end = finiteNumber(value[1]);
-  return start !== undefined && end !== undefined && Number.isInteger(start) && Number.isInteger(end) ? [start, end] : undefined;
 }

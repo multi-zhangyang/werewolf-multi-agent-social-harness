@@ -1,8 +1,26 @@
 import { Alert, Badge, Card, Col, Descriptions, Empty, Flex, Row, Space, Tag, Timeline, Typography } from "antd";
-import { CrownOutlined, EyeInvisibleOutlined, UserOutlined } from "@ant-design/icons";
+import {
+  CheckSquareOutlined,
+  CommentOutlined,
+  CrownOutlined,
+  DashboardOutlined,
+  EyeInvisibleOutlined,
+  UserDeleteOutlined,
+  UserOutlined
+} from "@ant-design/icons";
+import type { ReactNode } from "react";
 import type { LiveMatchProjection, WerewolfLivePublicStateView } from "./werewolfLiveProjection";
 
 const { Paragraph, Text } = Typography;
+
+function cardTitle(icon: ReactNode, text: string) {
+  return (
+    <Space size={6}>
+      <span aria-hidden="true" style={{ color: "#3558d6" }}>{icon}</span>
+      <span>{text}</span>
+    </Space>
+  );
+}
 
 /**
  * A running table is deliberately less capable than the postgame review
@@ -18,7 +36,7 @@ export function WerewolfLiveBoard({ projection, pollError = null }: { projection
         <Alert
           type={projection.lifecycle === "failed" ? "error" : "info"}
           showIcon
-          message={`实时公开局已${terminalLabel}`}
+          title={`实时公开局已${terminalLabel}`}
           description={
             projection.artifactAvailable
               ? "服务端已生成赛后脱敏工件，Cockpit 正在切换到记录工件。"
@@ -35,7 +53,7 @@ export function WerewolfLiveBoard({ projection, pollError = null }: { projection
         <Alert
           type="info"
           showIcon
-          message="实时公开局正在启动"
+          title="实时公开局正在启动"
           description="等待服务端第一个已提交边界的公开投影；浏览器不会自行推进游戏状态。"
         />
       </section>
@@ -50,15 +68,19 @@ export function WerewolfLiveBoard({ projection, pollError = null }: { projection
         <Text strong>实时公开局面 · 服务端权威</Text>
         <Text type="secondary">只呈现已提交边界的公开事实；私密行动、角色与 Agent 私有状态不在此视图中。</Text>
       </div>
-      {pollError ? <Alert type="warning" showIcon message="实时公开视图暂时不可用" description={pollError} /> : null}
+      {pollError ? <Alert type="warning" showIcon title="实时公开视图暂时不可用" description={pollError} /> : null}
 
-      <Card title="公开局面概览" bordered={false}>
-        <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }}>
-          <Descriptions.Item label="第几天">{state.day}</Descriptions.Item>
-          <Descriptions.Item label="公开阶段">{livePhaseLabel(state.phase)}</Descriptions.Item>
-          <Descriptions.Item label="当前公开发言座位">{state.currentSpeakerSeat ?? "—"}</Descriptions.Item>
-          <Descriptions.Item label="存活人数">{state.players.filter((player) => player.alive).length}</Descriptions.Item>
-        </Descriptions>
+      <Card title={cardTitle(<DashboardOutlined />, "公开局面概览")} variant="borderless">
+        <Descriptions
+          size="small"
+          column={{ xs: 1, sm: 2, lg: 4 }}
+          items={[
+            { key: "day", label: "第几天", children: state.day },
+            { key: "phase", label: "公开阶段", children: livePhaseLabel(state.phase) },
+            { key: "speaker", label: "当前公开发言座位", children: state.currentSpeakerSeat ?? "—" },
+            { key: "alive", label: "存活人数", children: state.players.filter((player) => player.alive).length }
+          ]}
+        />
       </Card>
 
       <section aria-label="狼人杀实时公开座位">
@@ -80,24 +102,24 @@ export function WerewolfLiveBoard({ projection, pollError = null }: { projection
 
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={14}>
-          <Card title="公开发言" bordered={false}>
+          <Card title={cardTitle(<CommentOutlined />, "公开发言")} variant="borderless">
             <PublicSpeechFeed speeches={state.speeches} />
           </Card>
         </Col>
         <Col xs={24} xl={10}>
-          <Card title="公开投票" bordered={false}>
+          <Card title={cardTitle(<CheckSquareOutlined />, "公开投票")} variant="borderless">
             <PublicVoteFeed votes={state.votes} />
           </Card>
         </Col>
       </Row>
 
-      <Card title="公开死亡记录" bordered={false}>
+      <Card title={cardTitle(<UserDeleteOutlined />, "公开死亡记录")} variant="borderless">
         {state.deaths.length ? (
           <Timeline
             items={state.deaths.map((death, index) => ({
               color: "red",
               key: `${death.day}-${death.playerId}-${index}`,
-              children: `第 ${death.day} 天 · ${death.playerId} · ${death.reason}`
+              content: `第 ${death.day} 天 · ${death.playerId} · ${death.reason}`
             }))}
           />
         ) : (
@@ -112,9 +134,9 @@ function LiveSeatCard({ player }: { player: WerewolfLivePublicStateView["players
   const elimination = player.eliminatedAt ? `第 ${player.eliminatedAt.day} 天 · ${player.eliminatedAt.reason}` : "仍在场上";
   return (
     <article role="listitem" data-testid={`werewolf-live-seat-${player.seat}`}>
-      <Card size="small" style={{ height: "100%", borderColor: player.alive ? "#c8d8ff" : "#f0d3d8" }}>
+      <Card size="small" style={{ height: "100%", borderColor: player.alive ? "#ccd5f4" : "#ecc8c5" }}>
         <Flex justify="space-between" align="start" gap="small">
-          <Space direction="vertical" size={2}>
+          <Space orientation="vertical" size={2}>
             <Text strong>
               <UserOutlined /> {player.seat} 号 · {player.name}
             </Text>

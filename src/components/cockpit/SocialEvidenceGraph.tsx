@@ -1,5 +1,6 @@
 import { Alert, Button, Empty, Flex, Segmented, Select, Tag, Typography } from "antd";
-import { useMemo, useState } from "react";
+import { HeatMapOutlined } from "@ant-design/icons";
+import { memo, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import type {
   SocialNetworkCommunicationEdgeDto,
@@ -30,7 +31,13 @@ const relationshipDimensions: Array<{ value: RelationshipDimension; label: strin
   { value: "debt", label: "关系债务" }
 ];
 
-export function SocialEvidenceGraph({
+const evidenceModeOptions = [
+  { value: "relationships" as const, label: "关系认知" },
+  { value: "exposure" as const, label: "实际观察" },
+  { value: "communication" as const, label: "通信投递" }
+];
+
+export const SocialEvidenceGraph = memo(function SocialEvidenceGraph({
   network,
   selectedAgentId,
   onSelectAgent,
@@ -67,6 +74,9 @@ export function SocialEvidenceGraph({
       <div className="social-matrix__header">
         <div>
           <Flex align="center" gap={8} wrap>
+            <span aria-hidden="true" style={{ color: "#3558d6", fontSize: 16, lineHeight: 1 }}>
+              <HeatMapOutlined />
+            </span>
             <Title level={3} id="social-matrix-title" className="cockpit-section-title">
               社会证据矩阵
             </Title>
@@ -80,11 +90,7 @@ export function SocialEvidenceGraph({
             aria-label="社会证据视图"
             value={mode}
             onChange={setMode}
-            options={[
-              { value: "relationships", label: "关系认知" },
-              { value: "exposure", label: "实际观察" },
-              { value: "communication", label: "通信投递" }
-            ]}
+            options={evidenceModeOptions}
           />
           {mode === "relationships" ? (
             <Select<RelationshipDimension>
@@ -104,7 +110,7 @@ export function SocialEvidenceGraph({
         <Alert
           type="info"
           showIcon
-          message="当前投影不提供此类社会证据"
+          title="当前投影不提供此类社会证据"
           description={activeAvailability.reason ?? "服务端没有发布该证据面。"}
         />
       ) : nodes.length === 0 ? (
@@ -169,9 +175,9 @@ export function SocialEvidenceGraph({
       <MatrixLegend mode={mode} dimension={dimension} network={network} />
     </section>
   );
-}
+});
 
-function EvidenceCell({
+const EvidenceCell = memo(function EvidenceCell({
   mode,
   dimension,
   sourceId,
@@ -246,7 +252,7 @@ function EvidenceCell({
       <small>{channelLabel(communication)}</small>
     </button>
   );
-}
+});
 
 function EmptyCell({ sourceId, targetId, label }: { sourceId: string; targetId: string; label: string }) {
   return (
@@ -272,6 +278,18 @@ function MatrixLegend({
       <Flex className="social-matrix__legend" gap={8} wrap align="center">
         <Tag color="success">正向 {label}</Tag>
         <Tag color="error">负向 {label}</Tag>
+        <span
+          aria-hidden="true"
+          style={{
+            display: "inline-block",
+            width: 84,
+            height: 8,
+            borderRadius: 999,
+            border: "1px solid rgba(102, 112, 133, 0.28)",
+            background:
+              "linear-gradient(90deg, rgba(180, 35, 24, 0.24), rgba(180, 35, 24, 0.06) 38%, #f8fafc 50%, rgba(8, 116, 67, 0.06) 62%, rgba(8, 116, 67, 0.24))"
+          }}
+        />
         <Text type="secondary">数值来自 Agent 最终关系快照；方向为主观判断者 → 目标。</Text>
       </Flex>
     );
