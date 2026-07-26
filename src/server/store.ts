@@ -286,6 +286,24 @@ export function listMatches(): StoredMatch[] {
   return [...matches.values()].map(materializeStoredMatch).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+/**
+ * Read-only materialization for request/serialization paths that never mutate
+ * the returned record. Finished entries alias the canonical stored artifact so
+ * hot GET routes avoid a full deep clone per request, and so projection caches
+ * can key on the stable canonical artifact object (a `saveMatch()` always
+ * replaces that object, which is what invalidates those caches).
+ * Callers MUST NOT mutate the result; mutation flows use getMatch()/saveMatch().
+ */
+export function getMatchForRead(id: string): StoredMatch | undefined {
+  const entry = matches.get(id);
+  return entry ? materializeStoredMatchForRead(entry) : undefined;
+}
+
+/** Read-only variant of listMatches(); see getMatchForRead() for the contract. */
+export function listMatchesForRead(): StoredMatch[] {
+  return [...matches.values()].map(materializeStoredMatchForRead).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
 export function saveCheckpointForkAttempt(attempt: StoredCheckpointForkAttempt): void {
   const existing = checkpointForkAttempts.get(attempt.childRunId);
   if (existing && existing.updatedAt > attempt.updatedAt) return;
@@ -338,6 +356,26 @@ export function listCheckpoints(matchId?: string): HarnessCheckpoint[] {
       return checkpoint.source.matchId === matchId || checkpoint.source.runId === matchId;
     })
     .map((checkpoint) => cloneJson(checkpoint))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/**
+ * Read-only variants for GET/summary paths. Checkpoints embed their full
+ * execution prefix, so the defensive clone in listCheckpoints()/getCheckpoint()
+ * dominates list/detail requests that only read summary fields. Callers MUST
+ * NOT mutate the result; fork execution keeps using getCheckpoint().
+ */
+export function getCheckpointForRead(id: string): HarnessCheckpoint | undefined {
+  return checkpoints.get(id);
+}
+
+/** Read-only variant of listCheckpoints(); see getCheckpointForRead(). */
+export function listCheckpointsForRead(matchId?: string): HarnessCheckpoint[] {
+  return [...checkpoints.values()]
+    .filter((checkpoint) => {
+      if (!matchId) return true;
+      return checkpoint.source.matchId === matchId || checkpoint.source.runId === matchId;
+    })
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
@@ -403,7 +441,12 @@ export function listComparisons(options?: {
 
 
 export function countCheckpointsForMatch(matchId: string): number {
-  return listCheckpoints(matchId).length;
+  // Counting must not pay the per-checkpoint defensive clone of listCheckpoints().
+  let count = 0;
+  for (const checkpoint of checkpoints.values()) {
+    if (checkpoint.source.matchId === matchId || checkpoint.source.runId === matchId) count += 1;
+  }
+  return count;
 }
 
 export function saveTournamentArtifactSet(set: StoredTournamentArtifactSet): void {
@@ -632,6 +675,18 @@ export function listArtifactRecoveryAuditRecords(): StoredArtifactRecoveryAuditR
   return [...artifactRecoveryAudits.values()].map((record) => cloneJson(record)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+const storeResetHooks: Array<() => void> = [];
+
+/**
+ * Register a callback that runs whenever the in-memory store is cleared.
+ * Disk-backed loaders memoize their one-time recovery per base directory; a
+ * store clear is the only in-process event that makes memory diverge from
+ * disk, so it must also drop those memoizations to force a fresh rescan.
+ */
+export function registerServerStoreResetHook(hook: () => void): void {
+  storeResetHooks.push(hook);
+}
+
 export function clearServerStoreForTests(): void {
   matches.clear();
   checkpointForkAttempts.clear();
@@ -641,6 +696,7 @@ export function clearServerStoreForTests(): void {
   experimentMatrixArtifactSets.clear();
   tournamentPublicShares.clear();
   artifactRecoveryAudits.clear();
+  for (const hook of storeResetHooks) hook();
 }
 
 function artifactRecoveryAuditId(record: Omit<StoredArtifactRecoveryAuditRecord, "id" | "createdAt">): string {
@@ -666,7 +722,18 @@ function cloneJson<T>(value: T): T {
 
 function materializeStoredMatch(entry: StoredMatchEntry): StoredMatch {
   if (entry.lifecycle === "pre-artifact") return cloneJson(entry.record);
-  const artifact = cloneJson(entry.artifact);
+  return storedMatchViewFromArtifact(cloneJson(entry.artifact));
+}
+
+function materializeStoredMatchForRead(entry: StoredMatchEntry): StoredMatch {
+  // Pre-artifact records are mutated through run flows, so a defensive clone
+  // stays; they are small. Finished artifacts are immutable once stored, so
+  // the read view aliases the canonical object instead of deep-cloning it.
+  if (entry.lifecycle === "pre-artifact") return cloneJson(entry.record);
+  return storedMatchViewFromArtifact(entry.artifact);
+}
+
+function storedMatchViewFromArtifact(artifact: MatchArtifact): StoredMatch {
   return {
     id: artifact.matchId ?? artifact.runId,
     createdAt: artifact.createdAt,
