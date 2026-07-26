@@ -35,8 +35,12 @@ export function projectWerewolfPostgameEventLedger(input: {
   view: LedgerView;
   authority: WerewolfPostgameEventLedgerDto["authority"];
 }): WerewolfPostgameEventLedgerDto {
+  const resolveNativeBoundary =
+    input.view === "postgame-redacted" && input.episode
+      ? createNativeBoundaryResolver(input.episode.steps)
+      : undefined;
   const entries = input.events
-    .map((event) => projectEntry(event, input))
+    .map((event) => projectEntry(event, input.view, resolveNativeBoundary))
     .filter((entry): entry is WerewolfPostgameEventLedgerEntryDto => entry !== null)
     .sort((left, right) => left.seq - right.seq || left.id.localeCompare(right.id));
 
@@ -55,18 +59,13 @@ export function projectWerewolfPostgameEventLedger(input: {
 
 function projectEntry(
   event: GameEvent,
-  input: {
-    episode?: Pick<SocialEpisodeArtifact, "steps">;
-    view: LedgerView;
-  }
+  view: LedgerView,
+  resolveNativeBoundary: ((eventSeq: number) => WerewolfPostgameEventLedgerEntryDto["nativeBoundary"] | undefined) | undefined
 ): WerewolfPostgameEventLedgerEntryDto | null {
   const safeLabel = event.visibility === "public" ? SAFE_PUBLIC_EVENT_LABELS[event.type] : undefined;
   if (!safeLabel) return null;
 
-  const nativeBoundary =
-    input.view === "postgame-redacted" && input.episode
-      ? nativeBoundaryForEventSeq(input.episode.steps, event.seq)
-      : undefined;
+  const nativeBoundary = view === "postgame-redacted" && resolveNativeBoundary ? resolveNativeBoundary(event.seq) : undefined;
 
   return {
     id: event.id,
@@ -85,28 +84,82 @@ function projectEntry(
  * A parallel batch has several rows but one atomic environment transition;
  * pointing at an intermediate row would create a prefix the replay endpoint
  * is forbidden to build.
+ *
+ * The resolver preserves the exact first-matching-step semantics of the
+ * previous per-event `steps.findIndex(...)` scan, but pre-indexes the
+ * committed event-seq ranges once so ledger projection is O(steps + events)
+ * instead of O(events x steps).
  */
-function nativeBoundaryForEventSeq(
-  steps: readonly SocialHarnessStep[],
-  eventSeq: number
-): WerewolfPostgameEventLedgerEntryDto["nativeBoundary"] | undefined {
-  const sourceIndex = steps.findIndex(
-    (step) =>
-      isSocialStepCommitted(step) &&
-      step.eventSeqRange !== undefined &&
-      step.eventSeqRange[0] <= eventSeq &&
-      eventSeq <= step.eventSeqRange[1]
-  );
-  if (sourceIndex < 0) return undefined;
-
-  const source = steps[sourceIndex];
-  if (!source) return undefined;
-  let boundaryIndex = sourceIndex;
-  if (source.batchId) {
-    while (steps[boundaryIndex + 1]?.batchId === source.batchId) {
-      boundaryIndex += 1;
-    }
+function createNativeBoundaryResolver(
+  steps: readonly SocialHarnessStep[]
+): (eventSeq: number) => WerewolfPostgameEventLedgerEntryDto["nativeBoundary"] | undefined {
+  interface CommittedInterval {
+    start: number;
+    end: number;
+    stepIndex: number;
   }
-  if (!isSafeHarnessCheckpointBoundary(steps, boundaryIndex)) return undefined;
-  return { nativeStepCount: boundaryIndex + 1 };
+  const intervals: CommittedInterval[] = [];
+  for (const [stepIndex, step] of steps.entries()) {
+    if (!isSocialStepCommitted(step) || step.eventSeqRange === undefined) continue;
+    intervals.push({ start: step.eventSeqRange[0], end: step.eventSeqRange[1], stepIndex });
+  }
+  // Sort by range start, keeping the original step order for equal starts so
+  // an overlapping range still resolves to the first matching step.
+  const byStart = intervals
+    .map((interval, order) => ({ ...interval, order }))
+    .sort((left, right) => left.start - right.start || left.order - right.order);
+  // Prefix maximum of range ends: lets a lookup stop scanning left as soon as
+  // no earlier-starting interval can still contain the queried seq.
+  const maxEndUpTo: number[] = new Array<number>(byStart.length);
+  let runningMaxEnd = Number.NEGATIVE_INFINITY;
+  for (const [index, interval] of byStart.entries()) {
+    if (interval.end > runningMaxEnd) runningMaxEnd = interval.end;
+    maxEndUpTo[index] = runningMaxEnd;
+  }
+  const boundaryByStepIndex = new Map<number, WerewolfPostgameEventLedgerEntryDto["nativeBoundary"] | undefined>();
+
+  const boundaryForStepIndex = (sourceIndex: number): WerewolfPostgameEventLedgerEntryDto["nativeBoundary"] | undefined => {
+    if (boundaryByStepIndex.has(sourceIndex)) return boundaryByStepIndex.get(sourceIndex);
+    const source = steps[sourceIndex];
+    let boundary: WerewolfPostgameEventLedgerEntryDto["nativeBoundary"] | undefined;
+    if (source) {
+      let boundaryIndex = sourceIndex;
+      if (source.batchId) {
+        while (steps[boundaryIndex + 1]?.batchId === source.batchId) {
+          boundaryIndex += 1;
+        }
+      }
+      boundary = isSafeHarnessCheckpointBoundary(steps, boundaryIndex) ? { nativeStepCount: boundaryIndex + 1 } : undefined;
+    }
+    boundaryByStepIndex.set(sourceIndex, boundary);
+    return boundary;
+  };
+
+  return (eventSeq: number) => {
+    // Binary search for the last interval with start <= eventSeq, then walk
+    // left across any preceding intervals that also contain the seq to find
+    // the first matching step (identical to the original findIndex result).
+    let low = 0;
+    let high = byStart.length - 1;
+    let candidate = -1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (byStart[mid]!.start <= eventSeq) {
+        candidate = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    let bestStepIndex = -1;
+    for (let index = candidate; index >= 0; index -= 1) {
+      if (maxEndUpTo[index]! < eventSeq) break;
+      const interval = byStart[index]!;
+      if (interval.end >= eventSeq && (bestStepIndex === -1 || interval.stepIndex < bestStepIndex)) {
+        bestStepIndex = interval.stepIndex;
+      }
+    }
+    if (bestStepIndex < 0) return undefined;
+    return boundaryForStepIndex(bestStepIndex);
+  };
 }
