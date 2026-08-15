@@ -143,14 +143,15 @@ export abstract class SocialWorldBase implements SocialWorld {
     summary: string;
     details: Record<string, unknown>;
   }): WorldSnapshot {
+    const finished = this.status === "finished";
     return {
       roomId: this.roomId,
       scenarioId: this.scenario.id,
       title: input.title,
       status: this.status,
-      turn: input.turn,
+      turn: finished ? Math.min(input.turn, input.totalTurns) : input.turn,
       totalTurns: input.totalTurns,
-      phase: input.phase,
+      phase: finished ? "已结束" : input.phase,
       summary: input.summary,
       agents: this.agentSnapshots(),
       messages: structuredClone(this.messages.slice(-120)),

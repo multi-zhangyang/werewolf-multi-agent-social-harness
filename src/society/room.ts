@@ -283,6 +283,10 @@ export class SocietyRoom {
   }
 
   private onWorldUpdate(snapshot: ReturnType<SocialWorld["snapshot"]>): void {
+    for (const worldAgent of snapshot.agents) {
+      const card = this.cards.get(worldAgent.id);
+      if (card) card.status = worldAgent.status;
+    }
     this.updatedAt = now();
     this.emit({ type: "world.updated", roomId: this.id, snapshot: structuredClone(snapshot) });
   }
