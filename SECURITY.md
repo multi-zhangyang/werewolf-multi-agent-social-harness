@@ -1,41 +1,22 @@
 # Security Policy
 
-## Supported branch
+Security fixes target the current `main` branch. Use GitHub private vulnerability
+reporting for credentials, private or team-message disclosure, hidden-role
+leaks, unauthorized world actions, path traversal or denial of service.
 
-Security fixes are applied to the current `main` branch.
-
-## Reporting a vulnerability
-
-Do not open a public issue for vulnerabilities involving:
-
-- credentials or provider authentication;
-- access to full/private artifacts;
-- hidden-role or scoped-observation disclosure;
-- checkpoint, fork, replay, or artifact-integrity bypasses;
-- public capability escalation;
-- path traversal, symlink, or local artifact-store isolation;
-- denial of service against model-backed execution.
-
-Use GitHub private vulnerability reporting for this repository when available.
-If private reporting is unavailable, contact the repository maintainers through
-a private channel and provide only the minimum information needed to establish
-contact before sending exploit details.
-
-Include:
-
-- affected commit and component;
-- reproduction steps;
-- expected and observed security boundary;
-- impact on canonical artifacts, private projections, or environment authority;
-- a suggested remediation, if known.
-
-Never include real API keys, provider request payloads, private model output, or
-unredacted research artifacts in a report.
+Include the affected commit, reproduction steps, expected visibility boundary
+and impact. Never place a real API key, provider request, private observation or
+unredacted model output in a public report.
 
 ## Deployment notice
 
-The bundled Express server is a local research and development service. Its
-loopback defaults and request-scoped capability gates are not a substitute for
-authentication in an Internet-facing deployment. Remote deployments need an
-authenticated and rate-limited reverse proxy, transport security, secret
-management, storage isolation, and an explicit artifact-retention policy.
+The bundled Express service is local by default and has no authentication. It
+keeps rooms and event histories in process memory, and its observer APIs can
+include private channels, Agent mind state and hidden roles. Do not expose it
+directly to the Internet.
+
+A remote deployment needs authentication, authorization for observer data,
+rate limiting, transport security, managed secrets, bounded room creation and
+an explicit retention policy. Keep `OPENAI_API_KEY` in the process environment
+or a local ignored file; it must never enter a room snapshot, SSE event, log or
+commit.

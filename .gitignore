@@ -8,22 +8,20 @@ node_modules/
 .npm/
 .pnpm-store/
 
-# Build, coverage, and test output
+# Build output
 dist/
 build/
-coverage/
-playwright-report/
-test-results/
 .vite/
 
 # Local run artifacts and screenshots
 artifacts/
 /.artifacts/
-# Historical root-level CLI example names. Keep the precise patterns rather
-# than ignoring every JSON/JSONL file, because experiment specs are source.
 /match-artifact.json
 /trajectory.jsonl
 /tournament-artifacts.json
+
+# Environment-provided skill instructions
+.agents/
 
 # Logs and process files
 *.log

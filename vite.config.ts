@@ -1,25 +1,11 @@
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  plugins: [react()],
-  build: {
-    manifest: true,
-    rolldownOptions: {
-      output: {
-        codeSplitting: {
-          groups: [
-            {
-              name: "ui-icons",
-              test: /node_modules[\\/]@ant-design[\\/]icons/,
-              entriesAware: true
-            }
-          ]
-        }
-      }
-    }
-  },
+  plugins: [react(), tailwindcss()],
+  build: { manifest: true },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src")
@@ -28,7 +14,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:8787"
+      "/api": "http://127.0.0.1:8787"
     }
   },
   preview: {

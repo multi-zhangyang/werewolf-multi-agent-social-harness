@@ -20,7 +20,7 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "types": ["node", "vite/client", "vitest/globals"]
+    "types": ["node", "vite/client"]
   },
-  "include": ["src", "tests", "e2e", "vite.config.ts", "playwright.config.ts", "playwright.live.config.ts"]
+  "include": ["src", "vite.config.ts"]
 }

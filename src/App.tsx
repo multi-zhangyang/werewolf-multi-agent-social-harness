@@ -1,1024 +1,320 @@
-import { Suspense, useCallback, useMemo, useState, type ReactNode } from "react";
-import {
-  Alert,
-  Breadcrumb,
-  Button,
-  Card,
-  ConfigProvider,
-  Drawer,
-  Flex,
-  Grid,
-  Input,
-  Layout,
-  Menu,
-  Space,
-  Tag,
-  Tooltip
-} from "antd";
-import {
-  EyeOutlined,
-  ExperimentOutlined,
-  FileSearchOutlined,
-  PlayCircleOutlined,
-  ReloadOutlined,
-  SettingOutlined,
-  TeamOutlined
-} from "@ant-design/icons";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ArrowRight, Braces, Menu, Plus, Radio, Users, X } from "lucide-react";
+import { AgentInspector } from "./components/society/agent-inspector";
+import { CreateRoomDialog } from "./components/society/create-room-dialog";
+import { RoomView } from "./components/society/room-view";
+import { RoomSidebar } from "./components/society/sidebar";
+import { ScenarioIcon, StatusBadge } from "./components/society/shared";
+import type { ModelOption } from "./components/society/types";
+import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
+import { Badge } from "./components/ui/badge";
+import { Button } from "./components/ui/button";
+import { Card } from "./components/ui/card";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "./components/ui/sheet";
+import { Skeleton } from "./components/ui/skeleton";
+import { cn } from "./lib/utils";
+import type { AgentRuntimeEvent, ScenarioId, ScenarioSummary } from "./society/contracts";
+import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "./society/room";
 
-import { parseMatchComparisonDeepLinkSelection } from "./harness/matchComparisonView";
-import type { PolicyName } from "./harness/types";
-import { POLICY_NAMES } from "./harness/profiles";
-import {
-  createCockpitExperimentDraft,
-  validateCockpitExperimentDraft
-} from "./components/cockpit/experimentDraft";
-import { cockpitTheme } from "./components/cockpit/cockpitTheme";
-import {
-  SocietyEvidenceWorkspace,
-  WerewolfLiveBoard,
-  WerewolfReviewBoard,
-  EvaluationWorkspace,
-  Header,
-  Sider,
-  Text,
-  Title,
-  Paragraph,
-  workspaceMenuItems,
-  type Workspace,
-  type ArtifactView,
-  type MatchRecord
-} from "./components/cockpit/appShared";
-import {
-  InspectorPanel,
-  decorativeIcon,
-  formatExperimentRosterSummary,
-  shortId,
-  inspectorFromMatch,
-  inspectorFromPackShare,
-  inspectorFromSocialExposure,
-  inspectorFromSocialRelationship,
-  inspectorFromSocialCommunication,
-  inspectorFromMetric,
-  inspectorFromWarning,
-  inspectorFromComparisonRow,
-  inspectorFromFilteredComparison,
-  inspectorFromCheckpoint,
-  inspectorFromForkLineage,
-  inspectorFromBranchTree
-} from "./components/cockpit/appInspectors";
-import {
-  LiveSpectatorShell,
-  StatusBanner,
-  CockpitChunkFallback,
-  KpiGrid,
-  RunContextPanel
-} from "./components/cockpit/cockpitPanels";
-import { ExperimentRosterComposer } from "./components/cockpit/ExperimentRosterComposer";
-import { RunsWorkspace } from "./components/cockpit/RunsWorkspace";
-import { TimelineWorkspace } from "./components/cockpit/TimelineWorkspace";
-import { LineageWorkspace } from "./components/cockpit/LineageWorkspace";
-import { CompareWorkspace } from "./components/cockpit/CompareWorkspace";
-import { ExperimentsWorkspace } from "./components/cockpit/ExperimentsWorkspace";
-import { PacksWorkspace } from "./components/cockpit/PacksWorkspace";
-import { useCockpitStatus } from "./components/cockpit/hooks/useCockpitStatus";
-import { useEvidenceInspector } from "./components/cockpit/hooks/useEvidenceInspector";
-import { useWorkspaceRouting } from "./components/cockpit/hooks/useWorkspaceRouting";
-import { useExperimentDraft } from "./components/cockpit/hooks/useExperimentDraft";
-import { useCockpitConfig } from "./components/cockpit/hooks/useCockpitConfig";
-import { useLiveProjectionState, useLiveMatchPolling } from "./components/cockpit/hooks/useLiveProjection";
-import { useReplayState, useReplayActions } from "./components/cockpit/hooks/useReplay";
-import { useComparisonState, useComparisonActions } from "./components/cockpit/hooks/useComparison";
-import { useCheckpointState, useCheckpointActions } from "./components/cockpit/hooks/useCheckpoints";
-import { useMatchArtifact } from "./components/cockpit/hooks/useMatchArtifact";
-import { useEvidenceSelection } from "./components/cockpit/hooks/useEvidenceSelection";
-import { useExperimentMatrix } from "./components/cockpit/hooks/useExperimentMatrix";
-import { useTournamentPacks } from "./components/cockpit/hooks/useTournamentPacks";
+interface CatalogResponse {
+  scenarios: ScenarioSummary[];
+  models: ModelOption[];
+}
 
-export function App() {
-  const screens = Grid.useBreakpoint();
-  const initialCompareSelection = useMemo(
-    () =>
-      typeof window === "undefined"
-        ? {}
-        : parseMatchComparisonDeepLinkSelection(window.location.search),
-    []
-  );
-  const [artifactView, setArtifactView] = useState<ArtifactView>(
-    initialCompareSelection.view ?? "postgame-redacted"
-  );
-  // Keep only one fixed side rail on ordinary desktop widths. Mounting both
-  // the 292px run-context rail and 384px evidence inspector at Ant's 1200px
-  // `xl` breakpoint left the actual workspace only 524px wide. The existing
-  // bounded evidence Drawer remains the inspector surface until `xxl`.
-  const isCompactLayout = !screens.xxl;
-  const isNarrowLayout = !screens.xl;
+export function App(): ReactNode {
+  const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [rooms, setRooms] = useState<SocietyRoomSnapshot[]>([]);
+  const [room, setRoom] = useState<SocietyRoomSnapshot | null>(null);
+  const [events, setEvents] = useState<SocietyRoomEventEnvelope[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [initialScenarioId, setInitialScenarioId] = useState<ScenarioId>();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string>();
+  const [connection, setConnection] = useState<"connected" | "reconnecting" | "closed">("closed");
+  const sourceRef = useRef<EventSource | null>(null);
 
-  const { status, error, busy, setBusy, setActionStatus } = useCockpitStatus();
+  const upsertRoom = useCallback((next: SocietyRoomSnapshot) => {
+    setRoom(next);
+    setRooms((current) => [next, ...current.filter((candidate) => candidate.id !== next.id)].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
+  }, []);
 
-  const {
-    inspector,
-    setInspector,
-    revealInspector,
-    rawOpen,
-    setRawOpen,
-    mobileContextOpen,
-    setMobileContextOpen,
-    mobileInspectorOpen,
-    setMobileInspectorOpen,
-    mobileContextTriggerRef,
-    mobileInspectorTriggerRef,
-    rawReturnFocusRef
-  } = useEvidenceInspector({ isCompactLayout });
+  useEffect(() => {
+    let active = true;
+    void Promise.all([
+      getJson<CatalogResponse>("/api/scenarios"),
+      getJson<{ rooms: SocietyRoomSnapshot[] }>("/api/rooms")
+    ]).then(([catalog, roomList]) => {
+      if (!active) return;
+      setScenarios(catalog.scenarios);
+      setModels(catalog.models);
+      setRooms(roomList.rooms);
+      if (roomList.rooms[0]) {
+        setRoom(roomList.rooms[0]);
+        setEvents(roomList.rooms[0].recentEvents);
+        setSelectedAgentId(roomList.rooms[0].agents[0]?.profile.id);
+      }
+    }).catch((cause) => {
+      if (active) setError(errorMessage(cause));
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, []);
 
-  const { workspace, setWorkspace, handleWorkspaceChange, activeWorkspace } = useWorkspaceRouting({ setActionStatus });
-
-  const {
-    experimentDraft,
-    setExperimentDraft,
-    rosterComposerOpen,
-    setRosterComposerOpen,
-    maxTransitions,
-    setMaxTransitions,
-    timeoutSeconds,
-    setTimeoutSeconds,
-    jointPhaseScheduler,
-    setJointPhaseScheduler,
-    experimentRequest
-  } = useExperimentDraft();
-
-  const {
-    config,
-    models,
-    selectedModel,
-    operatorRegistryEnabled,
-    canUsePostgameArtifact,
-    canUsePostgameReplay,
-    canExportMatchArtifacts,
-    canUseCheckpointControls,
-    loadConfig
-  } = useCockpitConfig({ artifactView, setArtifactView, setExperimentDraft });
-
-  const experimentDraftError = useMemo(
-    () => validateCockpitExperimentDraft(experimentDraft, models),
-    [experimentDraft, models]
-  );
-
-  const {
-    liveMatchId,
-    setLiveMatchId,
-    liveProjection,
-    setLiveProjection,
-    livePollError,
-    setLivePollError,
-    livePollSeqRef
-  } = useLiveProjectionState();
-
-  const {
-    replay,
-    setReplay,
-    replayFrame,
-    setReplayFrame,
-    replayFrameCursorIndex,
-    setReplayFrameCursorIndex,
-    replayFrameLoadState,
-    setReplayFrameLoadState,
-    replayFrameError,
-    setReplayFrameError,
-    replayFrameLoadSeqRef
-  } = useReplayState();
-
-  const {
-    candidateArtifact,
-    setCandidateArtifact,
-    comparison,
-    setComparison,
-    comparisonRequestContext,
-    setComparisonRequestContext,
-    comparisonRegistry,
-    setComparisonRegistry,
-    selectedComparisonId,
-    setSelectedComparisonId,
-    comparisonLoadSeqRef,
-    candidateId,
-    setCandidateId,
-    loadComparisonPair
-  } = useComparisonState({
-    initialCandidateId: initialCompareSelection.candidateId,
-    setInspector,
-    setActionStatus,
-    setBusy
-  });
-
-  const {
-    checkpoints,
-    setCheckpoints,
-    selectedCheckpointId,
-    setSelectedCheckpointId,
-    forkLineage,
-    setForkLineage,
-    branchTree,
-    setBranchTree
-  } = useCheckpointState();
-
-  const {
-    matches,
-    setMatches,
-    selectedMatch,
-    setSelectedMatch,
-    artifact,
-    setArtifact,
-    selectedStepIndex,
-    setSelectedStepIndex,
-    selectedAgentId,
-    setSelectedAgentId,
-    query,
-    setQuery,
-    artifactBackedMatches,
-    currentMatchId,
-    filteredMatches,
-    refreshMatches,
-    loadArtifact,
-    handleArtifactViewChange,
-    handleRefresh,
-    handleLoadLatest,
-    handleRunExperiment,
-    handleDownloadArtifact,
-    handleDownloadMatchArtifact
-  } = useMatchArtifact({
-    initialCompareSelection,
-    artifactView,
-    setArtifactView,
-    loadConfig,
-    canUsePostgameArtifact,
-    operatorRegistryEnabled,
-    canExportMatchArtifacts,
-    experimentRequest,
-    experimentDraftError,
-    jointPhaseScheduler,
-    maxTransitions,
-    timeoutSeconds,
-    liveMatchId,
-    setLiveMatchId,
-    setLiveProjection,
-    setLivePollError,
-    livePollSeqRef,
-    setReplay,
-    replayFrameLoadSeqRef,
-    setReplayFrame,
-    setReplayFrameCursorIndex,
-    setReplayFrameLoadState,
-    setReplayFrameError,
-    candidateId,
-    setCandidateArtifact,
-    setComparison,
-    setComparisonRequestContext,
-    loadComparisonPair,
-    setCheckpoints,
-    setSelectedCheckpointId,
-    setForkLineage,
-    setBranchTree,
-    setWorkspace,
-    setInspector,
-    setActionStatus,
-    setBusy
-  });
-
-  useLiveMatchPolling({
-    liveMatchId,
-    livePollSeqRef,
-    setLiveProjection,
-    setLivePollError,
-    loadArtifact,
-    canUsePostgameArtifact,
-    candidateId,
-    setActionStatus
-  });
-
-  const { handleReplay, handleLoadReplayFrame } = useReplayActions({
-    artifact,
-    currentMatchId,
-    artifactView,
-    canUsePostgameReplay,
-    setReplay,
-    replayFrameLoadSeqRef,
-    setReplayFrame,
-    setReplayFrameCursorIndex,
-    setReplayFrameLoadState,
-    setReplayFrameError,
-    setInspector,
-    setActionStatus,
-    setBusy
-  });
-
-  const {
-    compareCandidates,
-    handleCandidateChange,
-    handleLoadComparison,
-    refreshComparisonRegistry,
-    loadSavedComparisonById,
-    handleLoadSavedComparison,
-    handleDownloadComparison,
-    handleDownloadFilteredComparison
-  } = useComparisonActions({
-    artifact,
-    selectedMatch,
-    matches,
-    artifactBackedMatches,
-    artifactView,
-    setArtifact,
-    setArtifactView,
-    setMatches,
-    setSelectedMatch,
-    candidateId,
-    setCandidateId,
-    setCandidateArtifact,
-    comparison,
-    comparisonRequestContext,
-    setComparison,
-    setComparisonRequestContext,
-    selectedComparisonId,
-    setSelectedComparisonId,
-    setComparisonRegistry,
-    comparisonLoadSeqRef,
-    loadComparisonPair,
-    loadArtifact,
-    setWorkspace,
-    setInspector,
-    setActionStatus,
-    setBusy
-  });
-
-  const {
-    handleRefreshCheckpoints,
-    handleCreateCheckpoint,
-    handleForkCheckpoint,
-    handleLoadForkLineage,
-    handleSelectCheckpoint,
-    handleLoadBranchTree
-  } = useCheckpointActions({
-    canUseCheckpointControls,
-    currentMatchId,
-    artifactView,
-    replayFrame,
-    maxTransitions,
-    timeoutSeconds,
-    selectedCheckpointId,
-    setCheckpoints,
-    setSelectedCheckpointId,
-    setForkLineage,
-    setBranchTree,
-    setCandidateId,
-    loadComparisonPair,
-    refreshMatches,
-    setWorkspace,
-    setInspector,
-    setActionStatus,
-    setBusy
-  });
-
-  const {
-    selectedStep,
-    agents,
-    selectedAgent,
-    messages,
-    metrics,
-    warnings,
-    handleSelectStep,
-    handleSelectAgent,
-    handleSelectMessage
-  } = useEvidenceSelection({
-    artifact,
-    selectedStepIndex,
-    setSelectedStepIndex,
-    selectedAgentId,
-    setSelectedAgentId,
-    revealInspector,
-    setActionStatus
-  });
-
-  const {
-    matrixResult,
-    matrixArtifactSets,
-    matrixGames,
-    setMatrixGames,
-    matrixExportArtifacts,
-    setMatrixExportArtifacts,
-    handleRefreshMatrixArtifacts,
-    handleRunMatrixExperiment
-  } = useExperimentMatrix({
-    experimentRequest,
-    experimentDraftError,
-    jointPhaseScheduler,
-    maxTransitions,
-    timeoutSeconds,
-    matrixExportCapability: config?.capabilities?.artifactExport?.matrix,
-    setActionStatus,
-    setBusy
-  });
-
-  const {
-    tournamentPacks,
-    tournamentExecutionTelemetry,
-    selectedPackId,
-    packShares,
-    shareInventory,
-    shareLabel,
-    setShareLabel,
-    packGames,
-    setPackGames,
-    shareExpiresInHours,
-    setShareExpiresInHours,
-    shareAllowlist,
-    setShareAllowlist,
-    handleRefreshTournamentPacks,
-    handleRefreshShareInventory,
-    handleDownloadShareAnalyticsSummary,
-    handleExportTournamentPack,
-    handleSelectTournamentPack,
-    handleInspectTournamentComparison,
-    handleCreateTournamentShare,
-    handleCopyShareUrl,
-    handleRevokeTournamentShare,
-    handleRevokeAllActiveShares
-  } = useTournamentPacks({
-    experimentRequest,
-    experimentDraftError,
-    jointPhaseScheduler,
-    maxTransitions,
-    timeoutSeconds,
-    refreshMatches,
-    loadSavedComparisonById,
-    setComparisonRegistry,
-    setSelectedComparisonId,
-    setWorkspace,
-    setInspector,
-    setActionStatus,
-    setBusy
-  });
-
-  const werewolfReviewSource = useMemo(
-    () =>
-      replayFrame
-        ? {
-            projection: replayFrame.projection,
-            finalState: replayFrame.state,
-            werewolfReviewLedger: replayFrame.werewolfReviewLedger
-          }
-        : artifact,
-    [artifact, replayFrame]
-  );
-  // Referentially stable values/handlers for the memoized workspace
-  // components. Every underlying hook handler is already useCallback-stable;
-  // these wrappers only close over the additional route context they need.
-  const rosterSummary = useMemo(() => formatExperimentRosterSummary(experimentRequest), [experimentRequest]);
-  const handleLoadArtifactFromRegistry = useCallback(
-    (match: MatchRecord) => void loadArtifact(match, artifactView, candidateId),
-    [artifactView, candidateId, loadArtifact]
-  );
-  const inspect = useMemo(() => {
-    const bind =
-      <A extends unknown[]>(build: (...args: A) => Parameters<typeof revealInspector>[0]) =>
-      (...args: A) =>
-        revealInspector(build(...args));
-    return {
-      match: bind(inspectorFromMatch),
-      socialExposure: bind(inspectorFromSocialExposure),
-      socialRelationship: bind(inspectorFromSocialRelationship),
-      socialCommunication: bind(inspectorFromSocialCommunication),
-      checkpoint: bind(inspectorFromCheckpoint),
-      metric: bind(inspectorFromMetric),
-      warning: bind(inspectorFromWarning),
-      comparisonRow: bind(inspectorFromComparisonRow),
-      filteredComparison: bind(inspectorFromFilteredComparison),
-      packShare: bind(inspectorFromPackShare)
+  useEffect(() => {
+    sourceRef.current?.close();
+    setConnection("closed");
+    if (!room?.id) return;
+    const source = new EventSource(`/api/rooms/${encodeURIComponent(room.id)}/events`);
+    sourceRef.current = source;
+    source.onopen = () => setConnection("connected");
+    source.addEventListener("snapshot", (event) => {
+      const next = JSON.parse((event as MessageEvent).data) as SocietyRoomSnapshot;
+      upsertRoom(next);
+      setEvents(next.recentEvents);
+      setSelectedAgentId((current) => current && next.agents.some((agent) => agent.profile.id === current) ? current : next.agents[0]?.profile.id);
+    });
+    source.addEventListener("room", (event) => {
+      const envelope = JSON.parse((event as MessageEvent).data) as SocietyRoomEventEnvelope;
+      setEvents((current) => appendEvent(current, envelope));
+      setRoom((current) => {
+        if (!current || current.id !== envelope.event.roomId) return current;
+        const next = reduceRoom(current, envelope.event);
+        setRooms((list) => [next, ...list.filter((candidate) => candidate.id !== next.id)]);
+        return next;
+      });
+    });
+    source.onerror = () => setConnection("reconnecting");
+    return () => {
+      source.close();
+      if (sourceRef.current === source) sourceRef.current = null;
     };
-  }, [revealInspector]);
-  const handleSelectReplayBoundary = useCallback(
-    (nativeStepCount: number) => void handleLoadReplayFrame(nativeStepCount - 1),
-    [handleLoadReplayFrame]
-  );
-  const handleInspectForkLineageEvidence = useCallback(() => {
-    if (forkLineage) revealInspector(inspectorFromForkLineage(forkLineage));
-  }, [forkLineage, revealInspector]);
-  const handleInspectBranchTreeEvidence = useCallback(() => {
-    if (branchTree) revealInspector(inspectorFromBranchTree(branchTree));
-  }, [branchTree, revealInspector]);
-  const openRawEvidence = useCallback(() => setRawOpen(true), [setRawOpen]);
-  const openRawEvidenceFromMobileInspector = useCallback(() => {
-    rawReturnFocusRef.current = mobileInspectorTriggerRef.current;
-    setMobileInspectorOpen(false);
-    setRawOpen(true);
-  }, [mobileInspectorTriggerRef, rawReturnFocusRef, setMobileInspectorOpen, setRawOpen]);
-  const werewolfReviewBoardSource = useMemo(
-    () =>
-      replayFrame
-        ? {
-            kind: "replay-frame" as const,
-            nativeStepCount: replayFrame.cursor.nativeStepCount,
-            stateHash: replayFrame.cursor.stateHash ?? replayFrame.cursor.recordedPostStateHash
-          }
-        : { kind: "artifact-final" as const },
-    [replayFrame]
-  );
+  }, [room?.id, upsertRoom]);
 
-  // Only the active workspace's element is built; the other panels do not
-  // exist as element trees, so switching workspaces stays cheap and the
-  // memoized workspace components only diff their own props.
-  let workspacePanel: ReactNode;
-  switch (workspace) {
-    case "timeline":
-      workspacePanel = (
-        <TimelineWorkspace
-          artifact={artifact}
-          selectedStepIndex={selectedStepIndex}
-          selectedStep={selectedStep}
-          onSelectStep={handleSelectStep}
-          onSelectReplayFrame={handleLoadReplayFrame}
-          onReplay={handleReplay}
-          onDownloadJsonl={handleDownloadArtifact}
-          onDownloadMatch={handleDownloadMatchArtifact}
-          artifactView={artifactView}
-          replay={replay}
-          replayFrame={replayFrame}
-          replayFrameCursorIndex={replayFrameCursorIndex}
-          replayFrameLoadState={replayFrameLoadState}
-          replayEnabled={canUsePostgameReplay}
-          artifactDownloadEnabled={canExportMatchArtifacts}
-          busy={busy}
-        />
-      );
-      break;
-    case "domain":
-      workspacePanel = liveProjection ? (
-        <Suspense fallback={<CockpitChunkFallback label="正在加载实时公开桌面…" />}>
-          <WerewolfLiveBoard projection={liveProjection} pollError={livePollError} />
-        </Suspense>
-      ) : liveMatchId ? (
-        <Card bordered={false} data-testid="werewolf-live-board">
-          <Alert
-            type="info"
-            showIcon
-            title="实时公开局正在连接"
-            description="等待服务端的公开投影；浏览器不会从旧工件或本地状态构造实时局面。"
-          />
-        </Card>
-      ) : (
-        <Suspense fallback={<CockpitChunkFallback label="正在加载领域适配器复盘…" />}>
-          <WerewolfReviewBoard
-            reviewSource={werewolfReviewSource}
-            source={werewolfReviewBoardSource}
-            onSelectReplayBoundary={handleSelectReplayBoundary}
-            loading={replayFrameLoadState === "loading"}
-            error={replayFrameLoadState === "error" ? replayFrameError : null}
-          />
-        </Suspense>
-      );
-      break;
-    case "society":
-      workspacePanel = (
-        <Suspense fallback={<CockpitChunkFallback label="正在加载社会证据工作台…" />}>
-          <SocietyEvidenceWorkspace
-            artifact={artifact}
-            agents={agents}
-            selectedAgent={selectedAgent}
-            messages={messages}
-            onSelectAgent={handleSelectAgent}
-            onSelectMessage={handleSelectMessage}
-            onInspectExposure={inspect.socialExposure}
-            onInspectRelationship={inspect.socialRelationship}
-            onInspectCommunication={inspect.socialCommunication}
-          />
-        </Suspense>
-      );
-      break;
-    case "lineage":
-      workspacePanel = (
-        <LineageWorkspace
-          currentMatchId={currentMatchId}
-          checkpoints={checkpoints}
-          selectedCheckpointId={selectedCheckpointId}
-          forkLineage={forkLineage}
-          branchTree={branchTree}
-          replayBoundaryNativeStepCount={replayFrame?.cursor.nativeStepCount ?? null}
-          operatorEnabled={canUseCheckpointControls}
-          busy={busy}
-          onRefreshCheckpoints={handleRefreshCheckpoints}
-          onCreateCheckpoint={handleCreateCheckpoint}
-          onForkCheckpoint={handleForkCheckpoint}
-          onLoadForkLineage={handleLoadForkLineage}
-          onSelectCheckpoint={handleSelectCheckpoint}
-          onLoadBranchTree={handleLoadBranchTree}
-          onInspectCheckpoint={inspect.checkpoint}
-          onInspectForkLineage={handleInspectForkLineageEvidence}
-          onInspectBranchTree={handleInspectBranchTreeEvidence}
-        />
-      );
-      break;
-    case "evaluation":
-      workspacePanel = (
-        <Suspense fallback={<CockpitChunkFallback label="正在加载评测工作区…" />}>
-          <EvaluationWorkspace
-            artifact={artifact}
-            metrics={metrics}
-            warnings={warnings}
-            onInspectMetric={inspect.metric}
-            onInspectWarning={inspect.warning}
-          />
-        </Suspense>
-      );
-      break;
-    case "experiments":
-      workspacePanel = (
-        <ExperimentsWorkspace
-          result={matrixResult}
-          artifactSets={matrixArtifactSets}
-          games={matrixGames}
-          exportArtifacts={matrixExportArtifacts}
-          exportAvailable={config?.capabilities?.artifactExport?.matrix === true}
-          rosterSummary={rosterSummary}
-          experimentReady={!experimentDraftError}
-          maxTransitions={maxTransitions}
-          timeoutSeconds={timeoutSeconds}
-          busy={busy}
-          onGamesChange={setMatrixGames}
-          onExportArtifactsChange={setMatrixExportArtifacts}
-          onRun={handleRunMatrixExperiment}
-          onRefreshArtifacts={handleRefreshMatrixArtifacts}
-        />
-      );
-      break;
-    case "compare":
-      workspacePanel = (
-        <CompareWorkspace
-          artifact={artifact}
-          candidateArtifact={candidateArtifact}
-          comparison={comparison}
-          comparisonContext={comparisonRequestContext}
-          baselineId={currentMatchId}
-          candidates={compareCandidates}
-          candidateId={candidateId}
-          artifactView={artifactView}
-          comparisonRegistry={comparisonRegistry}
-          selectedComparisonId={selectedComparisonId}
-          onCandidateChange={handleCandidateChange}
-          onLoadComparison={handleLoadComparison}
-          onRefreshComparisonRegistry={refreshComparisonRegistry}
-          onSelectComparisonId={setSelectedComparisonId}
-          onLoadSavedComparison={handleLoadSavedComparison}
-          onDownloadComparison={handleDownloadComparison}
-          onDownloadFilteredComparison={handleDownloadFilteredComparison}
-          busy={busy}
-          onInspectRow={inspect.comparisonRow}
-          onInspectFilteredProjection={inspect.filteredComparison}
-        />
-      );
-      break;
-    case "packs":
-      workspacePanel = (
-        <PacksWorkspace
-          packs={tournamentPacks}
-          executionTelemetry={tournamentExecutionTelemetry}
-          selectedPackId={selectedPackId}
-          shares={packShares}
-          shareInventory={shareInventory}
-          shareLabel={shareLabel}
-          packGames={packGames}
-          shareExpiresInHours={shareExpiresInHours}
-          shareAllowlist={shareAllowlist}
-          busy={busy}
-          rosterSummary={rosterSummary}
-          experimentReady={!experimentDraftError}
-          maxTransitions={maxTransitions}
-          timeoutSeconds={timeoutSeconds}
-          onRefresh={handleRefreshTournamentPacks}
-          onRefreshShareInventory={handleRefreshShareInventory}
-          onDownloadShareAnalyticsSummary={handleDownloadShareAnalyticsSummary}
-          onExport={handleExportTournamentPack}
-          onSelectPack={handleSelectTournamentPack}
-          onInspectTournamentComparison={handleInspectTournamentComparison}
-          onShareLabelChange={setShareLabel}
-          onPackGamesChange={setPackGames}
-          onShareExpiresInHoursChange={setShareExpiresInHours}
-          onShareAllowlistChange={setShareAllowlist}
-          onCreateShare={handleCreateTournamentShare}
-          onCopyShare={handleCopyShareUrl}
-          onRevokeShare={handleRevokeTournamentShare}
-          onRevokeAllActiveShares={handleRevokeAllActiveShares}
-          onInspectShare={inspect.packShare}
-        />
-      );
-      break;
-    case "runs":
-    default:
-      workspacePanel = (
-        <RunsWorkspace
-          matches={filteredMatches}
-          selectedMatchId={currentMatchId}
-          query={query}
-          onQueryChange={setQuery}
-          onLoadArtifact={handleLoadArtifactFromRegistry}
-          onInspect={inspect.match}
-          busy={busy}
-        />
-      );
-      break;
-  }
-  const busyAny = Boolean(busy);
-  // A live spectator is a distinct audience from the local research
-  // operator. While this is true, no registry, model/profile, phase-detail,
-  // scheduler, replay, checkpoint, comparison, or inspector UI is mounted.
-  // The only current-match truth rendered by the browser is the narrow
-  // `/api/matches/:id/live` DTO parsed above.
-  const liveSpectatorPresentationActive = Boolean(liveMatchId || liveProjection);
+  const openCreate = useCallback((scenarioId?: ScenarioId) => {
+    setInitialScenarioId(scenarioId);
+    setCreateOpen(true);
+    setSidebarOpen(false);
+  }, []);
+
+  const selectRoom = useCallback((next: SocietyRoomSnapshot) => {
+    setRoom(next);
+    setEvents(next.recentEvents);
+    setSelectedAgentId(next.agents[0]?.profile.id);
+    setSidebarOpen(false);
+  }, []);
+
+  const createRoom = async (input: { scenarioId: ScenarioId; models: string[]; rounds: number }): Promise<void> => {
+    setCreating(true);
+    setError(undefined);
+    try {
+      const response = await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input)
+      });
+      const payload = await response.json() as SocietyRoomSnapshot & { message?: string };
+      if (!response.ok) throw new Error(payload.message ?? `创建失败 (${response.status})`);
+      upsertRoom(payload);
+      setEvents(payload.recentEvents);
+      setSelectedAgentId(payload.agents[0]?.profile.id);
+      setCreateOpen(false);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const pauseRoom = async (): Promise<void> => {
+    if (!room) return;
+    try {
+      const response = await fetch(`/api/rooms/${encodeURIComponent(room.id)}/pause`, { method: "POST" });
+      const payload = await response.json() as SocietyRoomSnapshot & { message?: string };
+      if (!response.ok) throw new Error(payload.message ?? `暂停失败 (${response.status})`);
+      upsertRoom(payload);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  };
+
+  const sidebar = (
+    <RoomSidebar
+      scenarios={scenarios}
+      rooms={rooms}
+      activeRoomId={room?.id}
+      onSelectRoom={selectRoom}
+      onCreate={openCreate}
+    />
+  );
 
   return (
-    <ConfigProvider theme={cockpitTheme}>
-      {liveSpectatorPresentationActive ? (
-        <LiveSpectatorShell
-          projection={liveProjection}
-          pollError={livePollError}
-          onExit={() => {
-            livePollSeqRef.current += 1;
-            setLiveMatchId(null);
-            setLiveProjection(null);
-            setLivePollError(null);
-            setActionStatus("已返回研究台 · 服务端 live 局如仍在运行则继续，本机仅停止观战投影。");
-          }}
-        />
-      ) : (
-        <>
-      <a
-        className="skip-to-workspace"
-        href="#workspace-main"
-        onClick={() => {
-          window.requestAnimationFrame(() => document.getElementById("workspace-main")?.focus());
-        }}
-      >
-        跳至工作区内容
-      </a>
-      <Layout className="cockpit-shell" style={{ minWidth: 0, minHeight: "100vh" }}>
-        {!isNarrowLayout ? (
-          <Sider
-            width={232}
-            trigger={null}
-            className="cockpit-sidebar"
-          >
-            <Flex vertical className="cockpit-sidebar__inner">
-              <div className="cockpit-brand">
-                <span className="cockpit-brand__mark" aria-hidden="true"><ExperimentOutlined /></span>
-                <span><strong>多 Agent 社会实验台</strong><small>HARNESS COCKPIT</small></span>
-              </div>
+    <div className="flex h-screen min-h-[620px] flex-col overflow-hidden bg-background">
+      <Topbar room={room} onMenu={() => setSidebarOpen(true)} onCreate={() => openCreate()} />
+      <div className="flex min-h-0 flex-1">
+        <aside className="hidden w-60 shrink-0 border-r border-sidebar-border lg:block">{sidebar}</aside>
+        <main className="flex min-w-0 flex-1">
+          {loading ? <LoadingView /> : room ? (
+            <RoomView room={room} events={events} connection={connection} onPause={() => void pauseRoom()} onOpenAgents={() => setAgentsOpen(true)} />
+          ) : (
+            <HomeView scenarios={scenarios} error={error} onCreate={openCreate} />
+          )}
+          {room ? (
+            <div className="hidden w-[360px] shrink-0 xl:block">
+              <AgentInspector room={room} events={events} selectedAgentId={selectedAgentId} onSelectAgent={setSelectedAgentId} />
+            </div>
+          ) : null}
+        </main>
+      </div>
 
-              <nav aria-label="工作区导航">
-                <Menu
-                  mode="inline"
-                  theme="dark"
-                  selectedKeys={[workspace]}
-                  items={workspaceMenuItems}
-                  onClick={({ key }) => handleWorkspaceChange(key as Workspace)}
-                />
-              </nav>
-              <div className="cockpit-sidebar__footer">
-                <div><span>当前 Run</span><Text code>{currentMatchId ? shortId(currentMatchId) : "未选择"}</Text></div>
-                <div><span>投影视图</span><Tag color={artifactView === "truth-redacted" ? "gold" : "processing"}>{artifactView}</Tag></div>
-                <Button
-                  ref={mobileContextTriggerRef}
-                  block
-                  icon={decorativeIcon(<SettingOutlined />)}
-                  onClick={() => setMobileContextOpen(true)}
-                >
-                  运行上下文
-                </Button>
-              </div>
-            </Flex>
-          </Sider>
-        ) : null}
+      {error && room ? (
+        <div className="fixed bottom-4 left-1/2 z-40 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-lg border border-red-500/20 bg-zinc-950 px-3 py-2.5 shadow-2xl">
+          <span className="size-1.5 rounded-full bg-red-400" />
+          <span className="max-w-[70vw] truncate text-xs text-zinc-300">{error}</span>
+          <Button variant="ghost" size="icon-xs" onClick={() => setError(undefined)}><X /></Button>
+        </div>
+      ) : null}
 
-        <Layout style={{ minWidth: 0 }}>
-          <Header className="cockpit-header">
-            <Flex gap="middle" justify="space-between" align="center" wrap={isNarrowLayout}>
-              <Flex vertical gap={2} className="cockpit-header__identity">
-                {isNarrowLayout ? (
-                  <Space size={6}>
-                    <ExperimentOutlined style={{ color: "#3558d6" }} />
-                    <Title level={1} className="cockpit-header__mobile-title">
-                      多 Agent 社会实验台
-                    </Title>
-                  </Space>
-                ) : null}
-                <Breadcrumb
-                  items={[
-                    { title: "Harness" },
-                    { title: activeWorkspace.label },
-                    { title: currentMatchId ? shortId(currentMatchId) : "未选择 run" }
-                  ]}
-                />
-                <Space size={8} wrap className="cockpit-header__title-row">
-                  <Title level={2} className="cockpit-header__title">
-                    {activeWorkspace.label}
-                  </Title>
-                  <Tag color={liveProjection?.lifecycle === "running" || liveMatchId ? "processing" : artifact ? "processing" : "default"}>
-                    {liveProjection?.lifecycle === "running" || liveMatchId ? "服务端公开观战" : artifact ? "工件已加载" : "未加载工件"}
-                  </Tag>
-                </Space>
-              </Flex>
-              <Space wrap className="cockpit-header__actions">
-                <Tooltip title="运行上下文">
-                  <Button
-                    ref={isNarrowLayout ? mobileContextTriggerRef : undefined}
-                    aria-label="打开运行上下文"
-                    icon={decorativeIcon(<SettingOutlined />)}
-                    onClick={() => setMobileContextOpen(true)}
-                  />
-                </Tooltip>
-                {isCompactLayout ? (
-                  <Tooltip title="证据检查器">
-                    <Button
-                      ref={mobileInspectorTriggerRef}
-                      aria-label="打开证据检查器"
-                      icon={decorativeIcon(<FileSearchOutlined />)}
-                      onClick={() => setMobileInspectorOpen(true)}
-                    />
-                  </Tooltip>
-                ) : null}
-                <Tooltip title="实验编排">
-                  <Button aria-label="实验编排" icon={decorativeIcon(<TeamOutlined />)} onClick={() => setRosterComposerOpen(true)} disabled={busyAny}>
-                    实验编排
-                  </Button>
-                </Tooltip>
-                <Tooltip title="刷新运行注册表"><Button aria-label="刷新运行" icon={decorativeIcon(<ReloadOutlined />)} onClick={handleRefresh} disabled={busyAny || !operatorRegistryEnabled} /></Tooltip>
-                <Tooltip title="加载最近工件"><Button aria-label="加载最近" icon={decorativeIcon(<EyeOutlined />)} onClick={handleLoadLatest} disabled={busyAny || !operatorRegistryEnabled} /></Tooltip>
-                <Tooltip title="运行实验">
-                  <Button aria-label="运行实验" type="primary" icon={decorativeIcon(<PlayCircleOutlined />)} loading={busy === "run"} onClick={handleRunExperiment} disabled={busyAny}>
-                    运行实验
-                  </Button>
-                </Tooltip>
-              </Space>
-            </Flex>
-          </Header>
+      <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
+        <SheetContent side="left" className="w-72 border-white/10 p-0" showCloseButton={false}>
+          <SheetHeader className="sr-only"><SheetTitle>导航</SheetTitle></SheetHeader>
+          {sidebar}
+        </SheetContent>
+      </Sheet>
 
-          <Layout style={{ minWidth: 0 }}>
-            <main id="workspace-main" tabIndex={-1} aria-label={`${activeWorkspace.label} 工作区`} className="cockpit-main">
-              <StatusBanner status={status} error={error} busy={busy} />
+      <Sheet open={agentsOpen} onOpenChange={setAgentsOpen}>
+        <SheetContent side="right" className="w-[min(92vw,380px)] border-white/10 p-0" showCloseButton={false}>
+          <SheetHeader className="sr-only"><SheetTitle>参与者</SheetTitle></SheetHeader>
+          {room ? <AgentInspector room={room} events={events} selectedAgentId={selectedAgentId} onSelectAgent={setSelectedAgentId} /> : null}
+        </SheetContent>
+      </Sheet>
 
-              {workspace === "runs" ? (
-                <KpiGrid
-                  matches={matches}
-                  artifact={artifact}
-                  comparison={comparison}
-                  replay={replay}
-                />
-              ) : null}
-
-              <section
-                role="region"
-                aria-label={`${activeWorkspace.label} 工作区内容`}
-                data-testid={`workspace-${workspace}`}
-                className="cockpit-workspace"
-              >
-                {workspacePanel}
-              </section>
-            </main>
-
-            {!isCompactLayout && inspector ? (
-              <Sider
-                width={320}
-                trigger={null}
-                className="cockpit-inspector"
-              >
-                <InspectorPanel item={inspector} onOpenRaw={openRawEvidence} artifactView={artifactView} />
-              </Sider>
-            ) : null}
-          </Layout>
-        </Layout>
-
-        <Drawer
-          title="实验编排 · Agent Roster"
-          placement="left"
-          width={screens.md ? 620 : "100vw"}
-          open={rosterComposerOpen}
-          onClose={() => setRosterComposerOpen(false)}
-          destroyOnHidden
-        >
-          <ExperimentRosterComposer
-            draft={experimentDraft}
-            models={models}
-            selectedModel={selectedModel}
-            policyNames={(config?.policyNames?.filter((value): value is PolicyName => POLICY_NAMES.includes(value as PolicyName)) ?? POLICY_NAMES)}
-            invalidReason={experimentDraftError}
-            disabled={busyAny}
-            onChange={setExperimentDraft}
-            onReset={() =>
-              setExperimentDraft(
-                createCockpitExperimentDraft({
-                  defaultProfiles: config?.defaultProfiles,
-                  models,
-                  selectedModel
-                })
-              )
-            }
-            onClose={() => setRosterComposerOpen(false)}
-          />
-        </Drawer>
-
-        <Drawer
-          title="运行上下文"
-          placement="left"
-          width={screens.sm ? 360 : "100vw"}
-          open={mobileContextOpen}
-          onClose={() => {
-            setMobileContextOpen(false);
-            window.requestAnimationFrame(() => {
-              window.requestAnimationFrame(() => mobileContextTriggerRef.current?.focus());
-            });
-          }}
-          afterOpenChange={(open) => {
-            if (!open) mobileContextTriggerRef.current?.focus();
-          }}
-          destroyOnHidden
-        >
-          <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-            <Menu
-              mode="inline"
-              selectedKeys={[workspace]}
-              items={workspaceMenuItems}
-              onClick={({ key }) => {
-                handleWorkspaceChange(key as Workspace);
-                setMobileContextOpen(false);
-              }}
-            />
-            <RunContextPanel
-              artifactView={artifactView}
-              postgameArtifactEnabled={canUsePostgameArtifact}
-              onArtifactViewChange={(value) => void handleArtifactViewChange(value)}
-              busy={busyAny}
-              currentMatchId={currentMatchId}
-              artifact={artifact}
-              selectedMatch={selectedMatch}
-              messageCount={artifact ? messages.length : null}
-              metricCount={artifact ? metrics.length : null}
-              maxTransitions={maxTransitions}
-              onMaxTransitionsChange={setMaxTransitions}
-              timeoutSeconds={timeoutSeconds}
-              onTimeoutSecondsChange={setTimeoutSeconds}
-              jointPhaseScheduler={jointPhaseScheduler}
-              onJointPhaseSchedulerChange={setJointPhaseScheduler}
-              rosterSummary={rosterSummary}
-              rosterInvalidReason={experimentDraftError}
-              onOpenRosterComposer={() => setRosterComposerOpen(true)}
-            />
-          </Space>
-        </Drawer>
-
-        <Drawer
-          title="Evidence Inspector"
-          placement="right"
-          width={screens.sm ? 440 : "100vw"}
-          open={mobileInspectorOpen}
-          onClose={() => {
-            setMobileInspectorOpen(false);
-            if (!rawOpen) {
-              window.requestAnimationFrame(() => {
-                window.requestAnimationFrame(() => mobileInspectorTriggerRef.current?.focus());
-              });
-            }
-          }}
-          afterOpenChange={(open) => {
-            if (!open && !rawOpen) mobileInspectorTriggerRef.current?.focus();
-          }}
-          destroyOnHidden
-          styles={{ body: { padding: 0 } }}
-        >
-          <InspectorPanel
-            item={inspector}
-            onOpenRaw={openRawEvidenceFromMobileInspector}
-            artifactView={artifactView}
-          />
-        </Drawer>
-
-        <Drawer
-          title={inspector?.title ?? "原始证据片段"}
-          width={screens.md ? 760 : "100vw"}
-          open={rawOpen}
-          onClose={() => setRawOpen(false)}
-          afterOpenChange={(open) => {
-            if (open) return;
-            const target = rawReturnFocusRef.current;
-            rawReturnFocusRef.current = null;
-            if (target?.isConnected) target.focus();
-            else document.getElementById("workspace-main")?.focus();
-          }}
-          extra={<Tag color="processing">{artifactView}</Tag>}
-        >
-          <Paragraph type="secondary">
-            只读片段来自当前服务端投影。private evidence redacted；
-            {artifactView === "truth-redacted" ? " postgame truth redacted。" : " postgame truth visible。"}
-          </Paragraph>
-          <Input.TextArea readOnly value={JSON.stringify(inspector?.json ?? inspector ?? null, null, 2)} autoSize={{ minRows: 24, maxRows: 40 }} />
-        </Drawer>
-      </Layout>
-        </>
-      )}
-    </ConfigProvider>
+      <CreateRoomDialog
+        open={createOpen}
+        scenarios={scenarios}
+        models={models}
+        initialScenarioId={initialScenarioId}
+        loading={creating}
+        onOpenChange={setCreateOpen}
+        onSubmit={createRoom}
+      />
+    </div>
   );
+}
+
+function Topbar({ room, onMenu, onCreate }: { room: SocietyRoomSnapshot | null; onMenu(): void; onCreate(): void }): ReactNode {
+  return (
+    <header className="relative z-30 flex h-14 shrink-0 items-center border-b border-white/10 bg-background/85 px-3 backdrop-blur-xl sm:px-4">
+      <Button variant="ghost" size="icon-sm" className="mr-2 lg:hidden" onClick={onMenu}><Menu /></Button>
+      <div className="flex items-center gap-2.5">
+        <span className="grid size-7 grid-cols-2 gap-0.5 rounded-md border border-white/20 bg-white p-1.5">
+          <i className="rounded-[1px] bg-black" /><i className="rounded-[1px] bg-black/45" /><i className="rounded-[1px] bg-black/45" /><i className="rounded-[1px] bg-black" />
+        </span>
+        <span className="text-sm font-semibold tracking-tight">Society</span>
+        <Badge variant="outline" className="hidden h-5 border-white/10 px-1.5 font-mono text-[9px] font-normal text-zinc-600 sm:inline-flex">AGENTS SDK</Badge>
+      </div>
+      <div className="ml-5 hidden min-w-0 flex-1 items-center gap-2 border-l border-white/10 pl-5 text-xs text-muted-foreground md:flex">
+        {room ? <><ScenarioIcon id={room.scenarioId} className="size-3.5" /><span className="truncate">{room.title}</span><span className="text-zinc-700">/</span><span className="truncate text-zinc-500">{room.world.phase}</span></> : <span>Multi-agent social worlds</span>}
+      </div>
+      <div className="ml-auto flex items-center gap-2">
+        {room ? <StatusBadge status={room.status} compact /> : null}
+        <Button size="sm" onClick={onCreate}><Plus />新建</Button>
+      </div>
+    </header>
+  );
+}
+
+function HomeView({ scenarios, error, onCreate }: { scenarios: ScenarioSummary[]; error?: string; onCreate(scenarioId?: ScenarioId): void }): ReactNode {
+  return (
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className="mx-auto max-w-6xl px-5 py-14 sm:px-8 lg:py-20">
+        {error ? (
+          <Alert variant="destructive" className="mb-8 border-red-500/20 bg-red-500/[0.05]"><AlertTitle>无法连接服务</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>
+        ) : null}
+        <div className="max-w-3xl">
+          <Badge variant="outline" className="mb-5 gap-2 border-white/10 bg-white/[0.025] px-2.5 py-1 font-normal text-muted-foreground"><Radio className="size-3 text-emerald-400" />实时多 Agent 世界</Badge>
+          <h1 className="text-balance text-4xl font-semibold tracking-[-0.045em] sm:text-5xl lg:text-6xl">观察 Agents 如何协商、结盟与背叛</h1>
+          <p className="mt-5 max-w-2xl text-balance text-sm leading-7 text-muted-foreground sm:text-base">每名参与者由独立模型、session、记忆和工具驱动。发言、私聊、决策与行动实时呈现在同一个世界中。</p>
+          <Button size="lg" className="mt-7" onClick={() => onCreate()}>创建房间<ArrowRight /></Button>
+        </div>
+
+        <div className="mt-14 grid gap-px overflow-hidden rounded-xl border border-white/10 bg-white/10 sm:grid-cols-2">
+          {scenarios.map((scenario) => (
+            <button key={scenario.id} className="group bg-background p-5 text-left transition-colors hover:bg-zinc-900/90" onClick={() => onCreate(scenario.id)}>
+              <div className="flex items-start justify-between gap-4">
+                <span className="flex size-10 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03]"><ScenarioIcon id={scenario.id} className="size-4" /></span>
+                <ArrowRight className="size-4 text-zinc-700 transition-transform group-hover:translate-x-0.5 group-hover:text-zinc-300" />
+              </div>
+              <h2 className="mt-5 text-sm font-semibold">{scenario.name}</h2>
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">{scenario.description}</p>
+              <div className="mt-4 flex flex-wrap gap-1.5">{scenario.capabilities.map((capability) => <Badge key={capability} variant="outline" className="border-white/10 bg-white/[0.02] text-[10px] font-normal text-zinc-500">{capability}</Badge>)}</div>
+              <div className="mt-5 flex items-center gap-4 font-mono text-[10px] text-zinc-600"><span className="flex items-center gap-1.5"><Users className="size-3" />{scenario.players} 名 Agent</span><span>{scenario.defaultRounds} 回合</span></div>
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-10 grid gap-3 sm:grid-cols-3">
+          <Feature icon={<Braces />} title="OpenAI Agents SDK" detail="真实工具循环与独立会话" />
+          <Feature icon={<Radio />} title="实时交互" detail="SSE 推送发言、工具与行动" />
+          <Feature icon={<Users />} title="持续心智" detail="目标、信念、关系与记忆" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Feature({ icon, title, detail }: { icon: ReactNode; title: string; detail: string }): ReactNode {
+  return <Card className="gap-0 border-white/10 bg-white/[0.02] p-4 shadow-none"><span className="text-muted-foreground [&_svg]:size-4">{icon}</span><p className="mt-4 text-xs font-medium">{title}</p><p className="mt-1 text-[11px] text-muted-foreground">{detail}</p></Card>;
+}
+
+function LoadingView(): ReactNode {
+  return (
+    <div className="flex min-w-0 flex-1 flex-col p-6">
+      <div className="flex items-center gap-3"><Skeleton className="size-10 rounded-xl" /><div><Skeleton className="h-4 w-40" /><Skeleton className="mt-2 h-3 w-64" /></div></div>
+      <div className="mt-8 grid flex-1 gap-4 xl:grid-cols-[1.4fr_.7fr]"><Skeleton className="min-h-[480px] rounded-xl" /><Skeleton className="min-h-[480px] rounded-xl" /></div>
+    </div>
+  );
+}
+
+function appendEvent(events: SocietyRoomEventEnvelope[], event: SocietyRoomEventEnvelope): SocietyRoomEventEnvelope[] {
+  if (events.some((candidate) => candidate.seq === event.seq)) return events;
+  return [...events, event].slice(-600);
+}
+
+function reduceRoom(room: SocietyRoomSnapshot, event: AgentRuntimeEvent): SocietyRoomSnapshot {
+  const updatedAt = "at" in event && typeof event.at === "string" ? event.at : new Date().toISOString();
+  if (event.type === "world.updated") return { ...room, world: event.snapshot, updatedAt };
+  if (event.type === "room.status") return { ...room, status: event.status, updatedAt, ...(event.status === "error" && event.detail ? { error: event.detail } : {}) };
+  if (event.type === "agent.status") return { ...room, updatedAt, agents: room.agents.map((agent) => agent.profile.id === event.actorId ? { ...agent, status: event.status } : agent) };
+  if (event.type === "agent.updated") {
+    return {
+      ...room,
+      updatedAt,
+      agents: room.agents.map((agent) => agent.profile.id === event.actorId
+        ? { ...agent, status: event.status, mind: event.mind, turnCount: event.turnCount, totalTokens: event.totalTokens, ...(event.lastOutput === undefined ? {} : { lastOutput: event.lastOutput }) }
+        : agent)
+    };
+  }
+  if (event.type === "agent.note") return { ...room, updatedAt, agents: room.agents.map((agent) => agent.profile.id === event.actorId ? { ...agent, latestNote: event } : agent) };
+  if (event.type === "agent.tool") return { ...room, updatedAt, agents: room.agents.map((agent) => agent.profile.id === event.actorId ? { ...agent, latestTool: event } : agent) };
+  if (event.type === "agent.message" && !room.world.messages.some((message) => message.id === event.message.id)) {
+    return { ...room, updatedAt, world: { ...room.world, messages: [...room.world.messages, event.message] } };
+  }
+  return { ...room, updatedAt };
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  const payload = await response.json() as T & { message?: string };
+  if (!response.ok) throw new Error(payload.message ?? `请求失败 (${response.status})`);
+  return payload;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
