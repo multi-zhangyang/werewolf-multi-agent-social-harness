@@ -168,13 +168,14 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       instructions: ({ context }) => participantInstructions(context, true),
       tools: [...social.all, ...council, ...worldTools]
     });
-    // Speaking agent: same character, same session, but no council — a
-    // discussion turn is expression, not deliberation. Faster, cheaper, and
-    // immune to council-tool turn overflow.
+    // Speaking agent: same character, same session, but only social tools —
+    // no council, no domain tools. A discussion turn is expression, not
+    // deliberation: speak, recall, update inner state. Domain actions belong
+    // to their own phases, where the full agent is used.
     this.discussionAgent = new Agent<SocietyAgentContext>({
       ...baseConfig,
       instructions: ({ context }) => participantInstructions(context, false),
-      tools: [...social.all, ...worldTools]
+      tools: [...social.all]
     });
   }
 

@@ -384,7 +384,7 @@ export class SocietyRoom {
       // Speaking waves run the discussion variant of the agent (no council,
       // light budget); binding domain actions get the full agent and budget.
       const maxTurns = isDiscussion
-        ? positiveIntegerFromEnv("SOCIETY_DISCUSSION_MAX_TURNS", 6)
+        ? positiveIntegerFromEnv("SOCIETY_DISCUSSION_MAX_TURNS", 8)
         : undefined;
       let result: AgentTurnResult;
       try {
