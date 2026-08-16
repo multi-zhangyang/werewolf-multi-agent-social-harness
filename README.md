@@ -22,6 +22,9 @@ Most "multi-agent" demos are prompt wrappers or JSON parsers in disguise. Societ
 - **Live interaction, not a lab bench**  
   The UI is designed for watching agents think, speak, act and react in real time — through a clean three-panel workspace with live activity, conversation, world state and history.
 
+- **Agent Mind Inspector**  
+  Click any participant to inspect their live inner world: mood, needs, energy, goals, beliefs, relationships and memory stream.
+
 - **Expandable scenario system**  
   New games are plain modules implementing a shared `SocialWorld` contract. No need to duplicate agent runtime, server routes or UI.
 
