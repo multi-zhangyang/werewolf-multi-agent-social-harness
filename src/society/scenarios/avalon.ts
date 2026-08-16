@@ -14,7 +14,7 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
-import { contextFromRunContext, SocialWorldBase } from "../world";
+import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
 import { DiscussionDirector } from "../conversation";
 import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, emitAction } from "./helpers";
@@ -149,7 +149,7 @@ export class AvalonWorld extends SocialWorldBase {
         reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async ({ memberIds, reason }, runContext) => {
-        const context = contextFromRunContext(runContext);
+        const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "propose_team", { memberIds, reason });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -164,7 +164,7 @@ export class AvalonWorld extends SocialWorldBase {
         reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async ({ accept, reason }, runContext) => {
-        const context = contextFromRunContext(runContext);
+        const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "cast_team_vote", { accept, reason });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -179,7 +179,7 @@ export class AvalonWorld extends SocialWorldBase {
         reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async ({ choice, reason }, runContext) => {
-        const context = contextFromRunContext(runContext);
+        const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "cast_quest_vote", { choice, reason });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -195,7 +195,7 @@ export class AvalonWorld extends SocialWorldBase {
           reason: z.string().min(1).max(2_000)
         }).strict(),
         execute: async ({ targetId, reason }, runContext) => {
-          const context = contextFromRunContext(runContext);
+          const context = scopedContext(runContext, actorId);
           const commit = await this.performAction(actorId, "assassinate_merlin", { targetId, reason });
           emitAction(context, commit.action, commit.detail);
           return commit.result;

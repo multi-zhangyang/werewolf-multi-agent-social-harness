@@ -14,7 +14,7 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
-import { contextFromRunContext, SocialWorldBase } from "../world";
+import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
 import { DiscussionDirector } from "../conversation";
 import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, emitAction } from "./helpers";
@@ -129,7 +129,7 @@ export class WerewolfWorld extends SocialWorldBase {
       description: "Cast your binding daytime vote against one living participant. Votes remain hidden until every living participant commits and cannot be changed.",
       parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(2_000) }).strict(),
       execute: async ({ targetId, reason }, runContext) => {
-        const context = contextFromRunContext(runContext);
+        const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "cast_day_vote", { targetId, reason });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -142,7 +142,7 @@ export class WerewolfWorld extends SocialWorldBase {
         description: "As a living wolf at night, nominate one living non-wolf participant for elimination. Each wolf submits a target; the pack's majority decides.",
         parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(2_000) }).strict(),
         execute: async ({ targetId, reason }, runContext) => {
-          const context = contextFromRunContext(runContext);
+          const context = scopedContext(runContext, actorId);
           const commit = await this.performAction(actorId, "choose_night_target", { targetId, reason });
           emitAction(context, commit.action, commit.detail);
           return commit.result;
@@ -156,7 +156,7 @@ export class WerewolfWorld extends SocialWorldBase {
         description: "As the living seer at night, inspect one other living participant. The exact hidden role is returned privately and remains available in future observations.",
         parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(2_000) }).strict(),
         execute: async ({ targetId, reason }, runContext) => {
-          const context = contextFromRunContext(runContext);
+          const context = scopedContext(runContext, actorId);
           const commit = await this.performAction(actorId, "investigate_identity", { targetId, reason });
           emitAction(context, commit.action, commit.detail);
           return commit.result;

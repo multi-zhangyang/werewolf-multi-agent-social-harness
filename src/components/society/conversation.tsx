@@ -185,6 +185,12 @@ function LiveAgents({ room, activity, names }: {
                 <p className="stream-caret line-clamp-3 text-xs leading-5 text-zinc-600">{state.text}</p>
               </div>
             ) : null}
+            {state?.compacted ? (
+              <div className="mx-4 mb-3 rounded-lg border border-amber-200 bg-amber-50/60 px-3.5 py-2">
+                <p className="font-mono text-[10px] uppercase tracking-widest text-amber-600">记忆压缩</p>
+                <p className="mt-0.5 text-xs leading-5 text-amber-800">{state.compacted}</p>
+              </div>
+            ) : null}
           </div>
         );
       })}

@@ -342,3 +342,21 @@ export function contextFromRunContext(
   }
   return value as SocietyAgentContext;
 }
+
+/**
+ * Resolve the tool's execution context and verify it belongs to the agent
+ * that owns the tool. Every tool is created bound to one participant; if the
+ * SDK ever hands it a run context for a different actor (a cross-agent
+ * context mix), the tool must refuse instead of acting as someone else.
+ */
+export function scopedContext(
+  runContext: { context?: unknown } | undefined,
+  expectedActorId: string,
+  fallback?: SocietyAgentContext
+): SocietyAgentContext {
+  const value = contextFromRunContext(runContext, fallback);
+  if (value.actorId !== expectedActorId) {
+    throw new Error(`CROSS_AGENT_CONTEXT_DETECTED: tool bound to '${expectedActorId}' was invoked with context for '${value.actorId}'. Refusing to act.`);
+  }
+  return value;
+}

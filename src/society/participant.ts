@@ -34,8 +34,10 @@ import type {
 } from "./contracts";
 import { clampUnit, decayMood, describeEmotions, describeNeeds, describeSocialEmotions, initialMood, refreshMood } from "./affect";
 import { appraiseEvents } from "./appraisal";
+import { SessionContextManager, contextLimitForModel } from "./context-manager";
 import { AssociativeMemory } from "./memory";
 import { createDeliberationTools, createSocialTools, formatObservation } from "./cognition";
+import { createInjectionShield } from "./guardrails";
 
 const providerRetrySettings = {
   retry: {
@@ -62,8 +64,9 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
   readonly session: MemorySession;
   readonly mind: AgentMindState;
 
-  private readonly context: SocietyAgentContext;
+  readonly context: SocietyAgentContext;
   private readonly runner: Runner;
+  private readonly contextManager: SessionContextManager;
   private readonly maxTurns: number;
   private deltaBuffer = "";
   private lastDeltaAt = 0;
@@ -88,7 +91,46 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       baseURL: options.baseURL ?? baseUrlFromEnv(),
       useResponses: false
     });
-    this.runner = new Runner({ modelProvider: provider, tracingDisabled: true });
+    // Strict context management: the manager rewrites session history through
+    // the SDK's sessionInputCallback, compressing old turns into a digest once
+    // the estimated input crosses the model's budget.
+    this.contextManager = new SessionContextManager({
+      provider,
+      model: this.profile.model,
+      contextLimit: contextLimitForModel(this.profile.model),
+      actorLabel: this.profile.displayName,
+      onCompacted: (digest, estimatedTokens, threshold) => {
+        this.context.emit({
+          type: "agent.compacted",
+          roomId: this.context.roomId,
+          actorId: this.profile.id,
+          estimatedTokens,
+          threshold,
+          digest: digest.slice(0, 600),
+          at: new Date().toISOString()
+        });
+      }
+    });
+    this.runner = new Runner({
+      modelProvider: provider,
+      tracingDisabled: true,
+      sessionInputCallback: this.contextManager.sessionInputCallback
+    });
+    // SDK lifecycle: surface agent-to-agent handoffs to the observer when a
+    // participant delegates to another agent (currently the council runs as
+    // tools; handoffs are a first-class SDK mechanism we watch for).
+    this.runner.on("agent_handoff", (runContext, _fromAgent, toAgent) => {
+      const ctx = (runContext.context ?? this.context) as SocietyAgentContext;
+      this.context.emit({
+        type: "agent.tool",
+        roomId: ctx.roomId,
+        actorId: ctx.actorId,
+        toolName: "handoff",
+        phase: "started",
+        summary: `把控制权交给 ${String((toAgent as { name?: string }).name ?? "另一 Agent")}`,
+        at: new Date().toISOString()
+      });
+    });
     this.maxTurns = boundedInteger(options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 10), 2, 24);
 
     const social = createSocialTools(this.context);
@@ -99,6 +141,7 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       model: this.profile.model,
       instructions: ({ context }) => participantInstructions(context),
       tools: [...social.all, ...council, ...options.world.toolsFor(this.profile.id)],
+      inputGuardrails: [createInjectionShield(this.context)],
       modelSettings: {
         ...(this.profile.temperature === undefined ? {} : { temperature: this.profile.temperature }),
         // No output token cap: agents are free to speak, reason and write as

@@ -12,7 +12,7 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
-import { contextFromRunContext, SocialWorldBase } from "../world";
+import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
 import { DiscussionDirector } from "../conversation";
 import { boundedRounds, emitAction } from "./helpers";
 
@@ -107,7 +107,7 @@ export class TrustGameWorld extends SocialWorldBase {
       description: `As the current investor, commit an integer from 0 to ${this.endowment}. The amount is multiplied by ${this.multiplier} before the trustee decides what to return.`,
       parameters: z.object({ amount: z.number().int().min(0).max(this.endowment), reason: z.string().min(1).max(2_000) }).strict(),
       execute: async ({ amount, reason }, runContext) => {
-        const context = contextFromRunContext(runContext);
+        const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "make_investment", { amount, reason });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -118,7 +118,7 @@ export class TrustGameWorld extends SocialWorldBase {
       description: "As the current trustee, return an integer amount to the investor from the multiplied investment. You may return none, some, or all of the available amount.",
       parameters: z.object({ amount: z.number().int().min(0), reason: z.string().min(1).max(2_000) }).strict(),
       execute: async ({ amount, reason }, runContext) => {
-        const context = contextFromRunContext(runContext);
+        const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "return_from_trust", { amount, reason });
         emitAction(context, commit.action, commit.detail);
         return commit.result;

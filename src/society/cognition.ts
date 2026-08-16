@@ -27,7 +27,7 @@ import type {
   SocietyAgentContext
 } from "./contracts";
 import { applyEmotionDeltas, applyNeedsDeltas, applyPadDeltas, clampUnit, describeEmotions, describeNeeds, refreshMood } from "./affect";
-import { contextFromRunContext } from "./world";
+import { scopedContext } from "./world";
 
 export interface SocialToolkit {
   all: Tool<SocietyAgentContext>[];
@@ -46,7 +46,7 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
       replyTo: z.string().max(120).optional()
     }).strict(),
     execute: async ({ text, channel, recipientIds, replyTo }, runContext) => {
-      const ctx = contextFromRunContext(runContext, context);
+      const ctx = scopedContext(runContext, context.actorId, context);
       const commit = await ctx.world.performAction(ctx.actorId, "communicate", { text, channel, recipientIds, replyTo });
       emitWorldAction(ctx, commit.action, commit.detail);
       return commit.result;
@@ -63,7 +63,7 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
       valence: z.number().min(-1).max(1).default(0)
     }).strict(),
     execute: async ({ text, tags, salience, valence }, runContext) => {
-      const ctx = contextFromRunContext(runContext, context);
+      const ctx = scopedContext(runContext, context.actorId, context);
       const entry = await ctx.memory.remember({ text, tags, salience, valence, pad: { ...ctx.mind.mood.pad }, turn: ctx.world.snapshot().turn });
       await syncMemories(ctx);
       return { stored: true, memoryId: entry.id };
@@ -78,7 +78,7 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
       limit: z.number().int().min(1).max(12).default(6)
     }).strict(),
     execute: async ({ query, limit }, runContext) => {
-      const ctx = contextFromRunContext(runContext, context);
+      const ctx = scopedContext(runContext, context.actorId, context);
       return ctx.memory.recall(query, limit, ctx.mind.mood.pad);
     }
   }) as Tool<SocietyAgentContext>;
@@ -239,7 +239,7 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
       }).strict().optional()
     }).strict(),
     execute: async ({ emotionDelta, padDelta, needsDelta, energyDelta, attention, relationship, belief, goalProgress }, runContext) => {
-      const ctx = contextFromRunContext(runContext, context);
+      const ctx = scopedContext(runContext, context.actorId, context);
       const turn = ctx.world.snapshot().turn;
       if (emotionDelta) ctx.mind.mood.emotions = applyEmotionDeltas(ctx.mind.mood.emotions, emotionDelta);
       if (padDelta) ctx.mind.mood.pad = applyPadDeltas(ctx.mind.mood.pad, padDelta);

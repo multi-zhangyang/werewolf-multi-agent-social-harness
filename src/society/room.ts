@@ -455,7 +455,8 @@ export class SocietyRoom {
       event.type === "agent.delta" ||
       event.type === "agent.reasoning" ||
       event.type === "agent.tool" ||
-      event.type === "agent.thought"
+      event.type === "agent.thought" ||
+      event.type === "agent.compacted"
     ) {
       this.emit(event);
     }

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { createAgentProfiles, modelCatalogFor } from "../../society/profiles";
 import { ALL_SCENARIOS, SCENARIO_METADATA } from "../../society/scenarios";
 import type { ScenarioId } from "../../society/contracts";
+import { contextLabel, contextLimitForModel } from "../../society/context-manager";
 import type { SocietyRoomSnapshot } from "../../society/room";
 import type { ServerContext } from "../context";
 import { getProviderSettings, publicSettings, saveProviderSettings, testProviderSettings } from "../settings";
@@ -69,7 +70,11 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.get("/api/scenarios", (_request, response) => {
-    response.json({ scenarios: ALL_SCENARIOS, models: modelCatalogFor(getProviderSettings().models) });
+    const models = modelCatalogFor(getProviderSettings().models).map((model) => {
+      const context = contextLimitForModel(model.id);
+      return { ...model, context, contextLabel: contextLabel(context) };
+    });
+    response.json({ scenarios: ALL_SCENARIOS, models });
   });
 
   app.get("/api/rooms", (_request, response) => {

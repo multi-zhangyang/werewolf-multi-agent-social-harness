@@ -11,7 +11,7 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
-import { contextFromRunContext, SocialWorldBase } from "../world";
+import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
 import { boundedRounds, emitAction } from "./helpers";
 
 type Phase = "discussion" | "contribution";
@@ -98,7 +98,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
         reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async ({ amount, reason }, runContext) => {
-        const context = contextFromRunContext(runContext);
+        const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "contribute_to_pool", { amount, reason });
         emitAction(context, commit.action, commit.detail);
         return commit.result;

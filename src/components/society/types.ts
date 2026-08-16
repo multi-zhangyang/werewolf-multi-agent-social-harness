@@ -2,6 +2,10 @@ export interface ModelOption {
   id: string;
   name: string;
   provider: string;
+  /** Context window in tokens, when known. */
+  context?: number;
+  /** Human label for the context window ("1M", "256k"...). */
+  contextLabel?: string;
 }
 
 export interface CreateRoomInput {

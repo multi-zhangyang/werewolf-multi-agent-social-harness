@@ -47,6 +47,29 @@ by the character's Big Five profile. Salient events become memories with
 valence and salience, so a betrayal surfaces again later. Emotions are
 event-driven, never self-reported.
 
+## Context boundary (one character = one agent)
+
+Each participant is a fully isolated SDK agent: its own `Agent` instance, its
+own `MemorySession` (id = room + actor), its own mind, its own associative
+memory store, its own context object and its own nested specialist team. A
+verification script (`npm run verify:isolation`) proves with real SDK objects
+that sessions, minds and memories never cross agents, and that a tool bound to
+one agent refuses to execute with another agent's context
+(`scopedContext` raises `CROSS_AGENT_CONTEXT_DETECTED`).
+
+Context is also budgeted per agent (`src/society/context-manager.ts`): the
+model's context window is resolved by model id (`SOCIETY_MODEL_CONTEXTS`,
+default 256k), and once a turn's estimated input crosses
+`SOCIETY_CONTEXT_COMPACT_RATIO` (default 0.75) of that window, the SDK's
+`sessionInputCallback` compresses the older history into a structured digest
+via the agent's own model, keeping recent exchanges verbatim. The digest is
+persisted by the SDK, so history stays bounded across a long game — and
+different models (1M vs 256k) compact at their own limits.
+
+An SDK input guardrail (`injection-shield`) scans every turn's input for
+manipulation attempts hidden in other players' speech; it never halts a turn,
+but flags the attempt for observers and stores it in the character's memory.
+
 ## Suspicion boundary
 
 `src/society/suspicion.ts` tracks the room's public opinion climate. Every

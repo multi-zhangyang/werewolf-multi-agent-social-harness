@@ -12,7 +12,7 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
-import { contextFromRunContext, SocialWorldBase } from "../world";
+import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
 import { boundedRounds, emitAction } from "./helpers";
 
 type Phase = "discussion" | "bid";
@@ -116,7 +116,7 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
         reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async ({ amount, reason }, runContext) => {
-        const context = contextFromRunContext(runContext);
+        const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "submit_bid", { amount, reason });
         emitAction(context, commit.action, commit.detail);
         return commit.result;

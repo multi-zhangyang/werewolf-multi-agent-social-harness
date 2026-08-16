@@ -11,6 +11,8 @@ export interface LiveAgentActivity {
   thought?: { kind: "reflection" | "mind-read" | "plan"; text: string };
   /** The SDK tool the agent is currently invoking. */
   tool?: string;
+  /** Latest context-compaction digest (the agent's long-term memory was compressed). */
+  compacted?: string;
   /** Last event timestamp for this agent. */
   at: string;
 }
@@ -194,5 +196,16 @@ function reduceEvent(
   }
   if (event.type === "agent.message") {
     setFeed((current) => [...current.slice(-99), event.message]);
+    return;
+  }
+  if (event.type === "agent.compacted") {
+    setActivity((current) => ({
+      ...current,
+      [event.actorId]: {
+        text: current[event.actorId]?.text ?? "",
+        compacted: `上下文已压缩：${event.estimatedTokens.toLocaleString()} → 摘要（阈值 ${event.threshold.toLocaleString()}）`,
+        at: event.at
+      }
+    }));
   }
 }

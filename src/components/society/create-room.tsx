@@ -41,11 +41,11 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
 
   const minRounds = scenario?.minRounds ?? 2;
   const maxRounds = scenario?.maxRounds ?? 10;
-  const visibleModels = useMemo(() => models.slice(0, 6), [models]);
+  const visibleModels = useMemo(() => models.slice(0, 16), [models]);
 
   useEffect(() => {
     if (!open) return;
-    setSelectedModels(visibleModels.slice(0, Math.min(2, visibleModels.length)).map((model) => model.id));
+    setSelectedModels(visibleModels.slice(0, Math.min(4, visibleModels.length)).map((model) => model.id));
     setRounds(scenario?.defaultRounds ?? Math.min(5, maxRounds));
     setMode("ai");
     setPlayerName("");
@@ -114,6 +114,9 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
             <div className="space-y-6 p-6">
               <section>
                 <p className="mb-2.5 text-[13px] font-medium text-zinc-700">模型</p>
+                <p className="mb-3 text-xs leading-5 text-zinc-400">
+                  每个参与者都是一个独立 Agent。选择一个模型 ID 给所有人，或选择多个模型让不同角色使用不同模型同台对决（按顺序轮转分配）。
+                </p>
                 <div className="flex flex-wrap gap-2">
                   {visibleModels.map((model) => {
                     const active = selectedModels.includes(model.id);
@@ -133,6 +136,9 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                           {active ? <span className="size-1.5 rounded-full bg-white" /> : null}
                         </span>
                         <span className="text-[13px] font-medium text-zinc-800">{model.name}</span>
+                        {model.contextLabel ? (
+                          <span className="rounded border border-zinc-200 bg-zinc-50 px-1 font-mono text-[9px] text-zinc-400">{model.contextLabel}</span>
+                        ) : null}
                         <span className="font-mono text-[10px] text-zinc-400">{model.provider}</span>
                       </button>
                     );
@@ -181,6 +187,36 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                   </Select>
                 </div>
               </section>
+
+              {scenario && selectedModels.length > 0 ? (
+                <section>
+                  <p className="mb-2.5 text-[13px] font-medium text-zinc-700">参与者阵容</p>
+                  <div className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-3">
+                    <div className="space-y-1.5">
+                      {Array.from({ length: scenario.players }).map((_, index) => {
+                        const model = selectedModels[index % selectedModels.length];
+                        const option = models.find((candidate) => candidate.id === model);
+                        return (
+                          <div key={index} className="flex items-center justify-between text-xs">
+                            <span className="flex items-center gap-2 text-zinc-600">
+                              <span className="flex size-5 items-center justify-center rounded bg-white font-mono text-[9px] text-zinc-400 ring-1 ring-zinc-200">
+                                {String(index + 1).padStart(2, "0")}
+                              </span>
+                              第 {index + 1} 位参与者
+                            </span>
+                            <span className="flex items-center gap-1.5 font-mono text-[11px] text-zinc-500">
+                              {option?.contextLabel ? (
+                                <span className="rounded border border-zinc-200 bg-white px-1 text-[9px] text-zinc-400">{option.contextLabel}</span>
+                              ) : null}
+                              {option?.name ?? model}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </section>
+              ) : null}
 
               {mode === "human" ? (
                 <section>

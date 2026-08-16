@@ -313,6 +313,8 @@ export type AgentRuntimeEvent =
   | { type: "agent.reasoning"; roomId: string; actorId: string; delta: string; at: string }
   | { type: "agent.tool"; roomId: string; actorId: string; toolName: string; phase: "started" | "completed"; summary?: string; at: string }
   | { type: "agent.thought"; roomId: string; actorId: string; specialist: AgentDeliberation["kind"]; delta: string; at: string }
+  | { type: "agent.compacted"; roomId: string; actorId: string; estimatedTokens: number; threshold: number; digest: string; at: string }
+  | { type: "agent.guardrail"; roomId: string; actorId: string; label: string; snippet: string; at: string }
   | { type: "agent.message"; roomId: string; message: SocialMessage }
   | { type: "world.action"; roomId: string; actorId: string; action: string; detail: string; at: string }
   | { type: "world.updated"; roomId: string; snapshot: WorldSnapshot }
