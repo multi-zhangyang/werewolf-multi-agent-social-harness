@@ -46,6 +46,23 @@ export function useRoom(roomId: string | undefined, token?: string): RoomConnect
     setFeed([]);
     if (!roomId) return;
 
+    const staticMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("static");
+    if (staticMode) {
+      const query = token ? `?token=${encodeURIComponent(token)}` : "";
+      fetch(`/api/rooms/${encodeURIComponent(roomId)}${query}`)
+        .then(async (response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return await response.json() as SocietyRoomSnapshot;
+        })
+        .then((next) => {
+          setRoom(next);
+          setFeed(next.world.messages);
+          setConnection("closed");
+        })
+        .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+      return;
+    }
+
     const query = token ? `?token=${encodeURIComponent(token)}` : "";
     const source = new EventSource(`/api/rooms/${encodeURIComponent(roomId)}/events${query}`);
     sourceRef.current = source;
