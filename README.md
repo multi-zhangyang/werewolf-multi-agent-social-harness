@@ -37,7 +37,7 @@ Most "multi-agent" demos are prompt wrappers or JSON parsers in disguise. Societ
 | 密封拍卖 | 私密估值、策略误导与次价结算 |
 | 狼人杀 | 隐藏身份、阵营与欺骗 |
 
-![Room](docs/screenshots/room.svg)
+![Room](docs/screenshots/room.png)
 
 ## Architecture
 
