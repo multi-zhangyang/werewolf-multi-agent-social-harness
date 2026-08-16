@@ -88,7 +88,7 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       useResponses: false
     });
     this.runner = new Runner({ modelProvider: provider, tracingDisabled: true });
-    this.maxTurns = boundedInteger(options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 12), 2, 24);
+    this.maxTurns = boundedInteger(options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 8), 2, 24);
 
     const common = commonTools(this.context);
 
