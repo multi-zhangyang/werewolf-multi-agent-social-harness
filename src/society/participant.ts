@@ -390,7 +390,7 @@ function textDelta(event: RunStreamEvent): string | undefined {
 }
 
 /**
- * example-model providers stream hidden reasoning through
+ * Reasoning-capable providers stream hidden reasoning through
  * `choices[].delta.reasoning_content`, which the SDK's chat-completions
  * converter does not surface. Read it straight from the raw chunk so the
  * observer can watch the model's private thinking unfold in real time.

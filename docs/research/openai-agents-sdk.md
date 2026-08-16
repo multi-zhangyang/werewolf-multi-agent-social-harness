@@ -1,6 +1,6 @@
 # OpenAI Agents SDK for JS/TS — Reference & Society Refactor Guide
 
-> **Research basis**: inspected `openai/openai-agents-js` at `main` (commit `b93163b`, release **0.16.0**) and npm (`latest` = `0.16.0`). Every snippet below reflects the **0.16.x** surface. Anything that only works on the **Responses API** is marked `[Responses-only]`; anything that works on **Chat Completions** (and therefore on example-model/openai-compatible endpoints) is marked `[ChatCompletions]`.
+> **Research basis**: inspected `openai/openai-agents-js` at `main` (commit `b93163b`, release **0.16.0**) and npm (`latest` = `0.16.0`). Every snippet below reflects the **0.16.x** surface. Anything that only works on the **Responses API** is marked `[Responses-only]`; anything that works on **Chat Completions** (and therefore on OpenAI-compatible endpoints) is marked `[ChatCompletions]`.
 
 ---
 
@@ -71,7 +71,7 @@ const agent = new Agent<MyContext, z.infer<typeof MyOutput>>({
 - `outputType` accepts a **Zod object**, a **Standard-Schema** value (must expose `~standard.jsonSchema`), a **raw JSON Schema**, or `'text'` (default).
 - `agent.clone({ instructions: "…" })` returns a modified copy — cheap per-participant variants of a shared template.
 - `instructions` may be a **function** `(runContext, agent) => string` for dynamic per-run prompts (this is the idiomatic replacement for the Python SDK's optional `context_provider` — this JS SDK has **no `context_provider` class**).
-- There is also a `prompt` prompt-template option, but it is `[Responses-only]`. Ignore it on example-model
+- There is also a `prompt` prompt-template option, but it is `[Responses-only]`. Ignore it on chat-completions endpoints.
 
 ### 1.2 Handoffs vs `Agent.asTool()`
 
@@ -176,7 +176,7 @@ result.finalOutput;   // => { action, message, reasoning } — parsed & validate
 ```
 
 - Missing / invalid structured output raises `ModelBehaviorError`; catch it, or handle via `errorHandlers.invalidFinalOutput` to return a validated fallback **without** retrying the model or replaying tool side effects.
-- Structured output is **provider-agnostic** — works on Chat Completions (the SDK serializes the schema to a tool/JSON-mode contract). Verify your example-model endpoint honors JSON-mode/structured-output; otherwise the SDK will still parse-and-validate the returned JSON, and a refusal becomes `ModelBehaviorError`.
+- Structured output is **provider-agnostic** — works on Chat Completions (the SDK serializes the schema to a tool/JSON-mode contract). Verify your endpoint honors JSON-mode/structured-output; otherwise the SDK will still parse-and-validate the returned JSON, and a refusal becomes `ModelBehaviorError`.
 - On a `tool` (not agent), structured *result* schemas are `outputSchema` (`[Responses-only]` for the wire contract; Zod `outputSchema` adds SDK-side validation).
 
 ### 1.7 Guardrails
@@ -222,9 +222,9 @@ const agent = new Agent({
 });
 ```
 
-- `reasoning.effort` **is forwarded on the Chat Completions path** — appropriate for example-model reasoning models. ✔
+- `reasoning.effort` **is forwarded on the Chat Completions path** — appropriate for reasoning models. ✔
 - `reasoning.mode` and `reasoning.context` are `[Responses-only]`; the Chat Completions model warns-and-ignores them (or throws with `strictFeatureValidation: true`).
-- `reasoning.effort` is **not** a native example-model parameter. If example-model rejects it, drop it or route it through `modelSettings.providerData` glue. Verify against your endpoint.
+- `reasoning.effort` is **not** a native parameter for every provider. If your endpoint rejects it, drop it or route it through `modelSettings.providerData` glue. Verify against your endpoint.
 
 ---
 
@@ -243,7 +243,7 @@ const stream = await runner.run(agent, input, { stream: true });
 
 for await (const event of stream) {
   if (event.type === "raw_model_stream_event") {
-    // low-level provider event (§2.3 for the example-model reasoning_content capture)
+    // low-level provider event (§2.3 for the reasoning_content capture)
   } else if (event.type === "run_item_stream_event") {
     switch (event.name) {
       case "tool_called":   /* event.item = RunToolCallItem */ break;
@@ -299,7 +299,7 @@ for await (const event of stream) {
     const choice = event.data.event.choices?.[0];
     choice?.delta?.content;                             // text delta  ← the SDK-level "delta"
     choice?.delta?.tool_calls;                          // chunked; must be reassembled
-    choice?.delta?.reasoning_content;                   // example-model provider reasoning
+    choice?.delta?.reasoning_content;                   // reasoning-capable provider reasoning
   }
 }
 ```
@@ -307,7 +307,7 @@ for await (const event of stream) {
 - **Responses** raw `data.event.type` values: `response.output_text.delta`, `response.output_item.done`, `response.reasoning_summary_text.delta`, etc.
 - **Chat Completions** raw events are OpenAI chat-completion **chunks**: `{ object: 'chat.completion.chunk', choices: [{ delta: { content?, tool_calls?, … } }] }`. Text deltas are in `choices[0].delta.content` — **not** a top-level `delta` field. Tool-call arguments stream in fragments that must be assembled (the SDK does this for its own `tool_called`/`tool_output` items; raw consumers see fragments).
 
-### 2.4 example-model `reasoning_content` — NOT surfaced natively
+### 2.4 `reasoning_content` from reasoning providers — NOT surfaced natively
 
 From `openaiChatCompletionsStreaming.ts`, the Chat Completions path reads only:
 
@@ -317,10 +317,10 @@ if ("reasoning" in delta && delta.reasoning && typeof delta.reasoning === "strin
 }
 ```
 
-It **does not** read `delta.reasoning_content` (the field example-model providers send). So the model's reasoning is **not** emitted as an SDK `reasoning` item and **not** captured into normalized items. Consequence for production example-model deployment:
+It **does not** read `delta.reasoning_content` (the field reasoning-capable providers send). So the model's reasoning is **not** emitted as an SDK `reasoning` item and **not** captured into normalized items. Consequence for production deployments on such providers:
 
 - The raw chunk **still contains** `reasoning_content` inside `choices[0].delta.reasoning_content` — you must capture it yourself (see the concrete fix in §7.1).
-- `@openai/agents-extensions` (AI SDK adapter) has explicit example-model `reasoning_content` handling — an option if you route through AI SDK models instead of the native `OpenAIProvider`.
+- `@openai/agents-extensions` (AI SDK adapter) has explicit `reasoning_content` handling for these providers — an option if you route through AI SDK models instead of the native `OpenAIProvider`.
 
 ---
 
@@ -399,8 +399,8 @@ const communicate = tool({
 - **Always `await stream.completed`** — it flushes session persistence and compaction; without it you can lose history.
 - **Chat-Completions raw text deltas live in `choices[0].delta.content`**, not a top-level `delta` field. A `textDelta()` helper written for Responses will silently capture nothing under `useResponses: false` (see §7.1).
 - **`[Responses-only]` surfaces** (warn-and-ignore, or throw with `strictFeatureValidation: true`): `prompt`, `conversationId`, `previousResponseId`, `reasoning.mode`, `reasoning.context`, `toolSearchTool`, `deferLoading`, `toolNamespace`, `allowedCallers`, `outputSchema`, hosted tools.
-- **example-model `reasoning_content` is not surfaced** (only `delta.reasoning` is read) — capture it yourself (§7.1).
-- **Default model is `gpt-5.6-luna`** with `reasoning.effort: 'none'` + `text.verbosity: 'low'`. Passing a **non-GPT-5** model name (e.g. example-model) **without** `modelSettings` falls back to empty/generic settings — so **always set `modelSettings` explicitly for example-model** (your code does this ✔).
+- **`reasoning_content` is not surfaced** (only `delta.reasoning` is read) — capture it yourself (§7.1).
+- **Default model is `gpt-5.6-luna`** with `reasoning.effort: 'none'` + `text.verbosity: 'low'`. Passing a **non-GPT-5** model name (e.g. a non-OpenAI model) **without** `modelSettings` falls back to empty/generic settings — so **always set `modelSettings` explicitly for such models** (your code does this ✔).
 - **Input guardrails run only on the first agent** in a chain; output guardrails only on the final-output agent; use **tool guardrails** for per-tool checks.
 - **`asTool()` returns a string** by default (last message or `customOutputExtractor`); structured sub-agent output is `JSON.stringify`d. Use `customOutputExtractor` + `result.agentToolInvocation` for typed results.
 - **Model retries are opt-in** (`modelSettings.retry` + a policy). No automatic retries. See §7.3 for the backoff field-name fix.
@@ -433,7 +433,7 @@ Tracing is **enabled by default in server runtimes**, **disabled in browsers and
 
 Also: `DEBUG=openai-agents*`, `OPENAI_AGENTS__DEBUG_SAVE_SESSION=1`, `OPENAI_AGENTS_DONT_LOG_MODEL_DATA`/`OPENAI_AGENTS_DONT_LOG_TOOL_DATA` (sensitive-data redaction, secure by default).
 
-### 5.3 Production wiring for example-model V4 (OpenAI-compatible)
+### 5.3 Production wiring for an OpenAI-compatible reasoning model
 
 ```ts
 import { Runner, OpenAIProvider, setTracingDisabled } from "@openai/agents";
@@ -441,8 +441,8 @@ import { Runner, OpenAIProvider, setTracingDisabled } from "@openai/agents";
 setTracingDisabled(true);
 
 const provider = new OpenAIProvider({
-  apiKey: process.env.example-model!,
-  baseURL: process.env.example-model!,   // e.g. 'https://api.example.com/v1' — OPENAI_BASE_URL is NOT auto-read
+  apiKey: process.env.MODEL_API_KEY!,
+  baseURL: process.env.MODEL_BASE_URL!,   // e.g. 'https://api.example.com/v1' — OPENAI_BASE_URL is NOT auto-read
   useResponses: false,                       // Chat Completions for OpenAI-compatible endpoints
 });
 
@@ -473,7 +473,7 @@ const result = await runner.run(agent, turnInput, {
 
 1. One `Agent` per participant, **`outputType`** (not `structuredOutput`) for typed decisions, **`asTool()`** (not handoffs) for the 3 specialists, **one `MemorySession` per participant** (swap for a DB-backed `Session` in prod), **one mutable `context` per participant** — *not cloned*, so `update_inner_state` mutates it directly.
 2. `modelSettings.parallelToolCalls` + `tool()` + zod + `strict` for tool schemas.
-3. example-model: `OpenAIProvider({ baseURL, useResponses: false })` (pass `baseURL` explicitly — no env fallback), `modelSettings.reasoning.effort`, and read `reasoning_content` yourself from raw chat-completions chunks (the SDK does not).
+3. For OpenAI-compatible reasoning models: `OpenAIProvider({ baseURL, useResponses: false })` (pass `baseURL` explicitly — no env fallback), `modelSettings.reasoning.effort`, and read `reasoning_content` yourself from raw chat-completions chunks (the SDK does not).
 4. Disable tracing with `setTracingDisabled(true)` / `Runner({ tracingDisabled: true })` — no env var exists.
 
 ---
@@ -508,7 +508,7 @@ import {
 
 function textDelta(event: RunStreamEvent): string | undefined {
   if (isOpenAIChatCompletionsRawModelStreamEvent(event)) {
-    // example-model / openai-compatible: choices[0].delta.content
+    // openai-compatible: choices[0].delta.content
     return event.data.event.choices?.[0]?.delta?.content ?? undefined;
   }
   if (isOpenAIResponsesRawModelStreamEvent(event)) {
@@ -531,7 +531,7 @@ this.deltaBuffer += delta;
 
 Apply the same replacement to the two `textDelta` helpers in `cognition.ts` (the `specialistTool.onStream` one and the module-bottom one).
 
-### 7.2 🆕 Capture example-model `reasoning_content` from the raw stream
+### 7.2 🆕 Capture `reasoning_content` from the raw stream
 
 Add a dedicated branch (kept out of the user-visible text stream so reasoning doesn't leak as speech):
 
@@ -562,7 +562,7 @@ private consumeReasoning(event: RunStreamEvent): void {
 }
 // In consumeEvent():
 if (event.type === "raw_model_stream_event") {
-  this.consumeReasoning(event);              // reasoning_content (example-model)
+  this.consumeReasoning(event);              // reasoning_content
   const delta = textDelta(event);           // visible content
   if (!delta) return;
   this.deltaBuffer += delta;
@@ -648,14 +648,14 @@ if (finalOutput) {
 }
 ```
 
-**Caveat:** because you *also* require the `communicate` tool to do the actual world mutation, a structured `outputType` is a **parallel contract**, not a replacement for tools. Make sure the instructions tell the model "your final structured output mirrors what you already did via tools" so it doesn't announce an action the tool never performed (your prompt already enforces this — extend it to the structured output). If example-model structured-output/JSON-mode is flaky, a `z.object` outputType still works because the SDK parses-and-validates plain JSON and a mismatch becomes `ModelBehaviorError` (handle via `errorHandlers.invalidFinalOutput`).
+**Caveat:** because you *also* require the `communicate` tool to do the actual world mutation, a structured `outputType` is a **parallel contract**, not a replacement for tools. Make sure the instructions tell the model "your final structured output mirrors what you already did via tools" so it doesn't announce an action the tool never performed (your prompt already enforces this — extend it to the structured output). If a provider0027s structured-output/JSON-mode is flaky, a `z.object` outputType still works because the SDK parses-and-validates plain JSON and a mismatch becomes `ModelBehaviorError` (handle via `errorHandlers.invalidFinalOutput`).
 
 ### 7.5 ✅ (Already correct) Confirmations
 
 - `asTool({ onStream, customOutputExtractor })` for the 3 specialists — **idiomatic**, matches docs' "agents as tools" pattern.
 - Per-participant `MemorySession` with `sessionId: ${roomId}:${id}` — **correct**; just swap for a durable `Session` backend before production scale.
 - Passing `context: this.context` with a live mutable object (`this.mind`) — **correct**; context is not cloned, so `update_inner_state` mutations persist.
-- `useResponses: false` + explicit `baseURL`/`apiKey` on `OpenAIProvider` — **correct** for example-model; note `OPENAI_BASE_URL` is *not* auto-read, so your `baseUrlFromEnv` is doing necessary work.
+- `useResponses: false` + explicit `baseURL`/`apiKey` on `OpenAIProvider` — **correct** for OpenAI-compatible endpoints; note `OPENAI_BASE_URL` is *not* auto-read, so your `baseUrlFromEnv` is doing necessary work.
 - `baseUrlFromEnv` stripping trailing `/chat/completions`|`/responses` — sensible; keep it (the SDK does no such normalization).
 - `tracingDisabled: true` on the Runner — correct; there is no env var for this.
 

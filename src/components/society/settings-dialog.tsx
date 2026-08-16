@@ -190,7 +190,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                   value={draftModel}
                   onChange={(event) => setDraftModel(event.target.value)}
                   onKeyDown={(event) => { if (event.key === "Enter") addModel(draftModel); }}
-                  placeholder="模型 ID，例如 example-model"
+                  placeholder="模型 ID，例如 your-model-id"
                   spellCheck={false}
                   className="flex-1"
                 />
