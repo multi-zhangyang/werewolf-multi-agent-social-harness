@@ -17,6 +17,7 @@ import {
   isOpenAIChatCompletionsRawModelStreamEvent,
   isOpenAIResponsesRawModelStreamEvent,
   type Agent as SdkAgent,
+  type InputGuardrail,
   type RunStreamEvent,
   type StreamedRunResult,
   type Tool
@@ -64,6 +65,8 @@ export interface SocietyAgentOptions {
 export class OpenAISocietyAgent implements SocietyAgentRuntime {
   readonly profile: AgentProfile;
   readonly agent: SdkAgent<SocietyAgentContext, any>;
+  /** Speaking variant: no council specialists, fast and focused. */
+  readonly discussionAgent: SdkAgent<SocietyAgentContext, any>;
   readonly session: MemorySession;
   readonly mind: AgentMindState;
 
@@ -142,13 +145,12 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
 
     const social = createSocialTools(this.context);
     const council = createDeliberationTools(this.context);
+    const worldTools = options.world.toolsFor(this.profile.id);
 
-    this.agent = new Agent<SocietyAgentContext>({
+    const baseConfig = {
       name: this.profile.displayName,
       model: this.profile.model,
-      instructions: ({ context }) => participantInstructions(context),
-      tools: [...social.all, ...council, ...options.world.toolsFor(this.profile.id)],
-      inputGuardrails: [createInjectionShield(this.context)],
+      inputGuardrails: [createInjectionShield(this.context)] as InputGuardrail[],
       modelSettings: {
         ...(this.profile.temperature === undefined ? {} : { temperature: this.profile.temperature }),
         // No output token cap: agents are free to speak, reason and write as
@@ -157,11 +159,26 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
         parallelToolCalls: false,
         ...providerRetrySettings
       },
-      toolUseBehavior: "run_llm_again"
+      toolUseBehavior: "run_llm_again" as const
+    };
+
+    // Full agent: social tools + private council + domain tools.
+    this.agent = new Agent<SocietyAgentContext>({
+      ...baseConfig,
+      instructions: ({ context }) => participantInstructions(context, true),
+      tools: [...social.all, ...council, ...worldTools]
+    });
+    // Speaking agent: same character, same session, but no council — a
+    // discussion turn is expression, not deliberation. Faster, cheaper, and
+    // immune to council-tool turn overflow.
+    this.discussionAgent = new Agent<SocietyAgentContext>({
+      ...baseConfig,
+      instructions: ({ context }) => participantInstructions(context, false),
+      tools: [...social.all, ...worldTools]
     });
   }
 
-  async runTurn(input: string, options: { signal: AbortSignal; turn: number; maxTurns?: number }): Promise<AgentTurnResult> {
+  async runTurn(input: string, options: { signal: AbortSignal; turn: number; maxTurns?: number; mode?: "discussion" | "full" }): Promise<AgentTurnResult> {
     this.mind.mood = decayMood(this.mind.mood, options.turn);
     const observation = this.context.world.observe(this.profile.id);
     const recentMemories = await this.context.memory.recall(`${observation.phase} ${observation.situation}`, 6, this.mind.mood.pad);
@@ -172,6 +189,7 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
     this.lastReasoningAt = Date.now();
     const runInput = [
       input,
+      ...(options.mode === "discussion" ? ["(Discussion turn: your council specialists are unavailable; decide from the room, your memories and your read of others.)"] : []),
       formatObservation(observation),
       recentMemories.length
         ? `Relevant memories:\n${recentMemories.map((memory) => `- ${memory.text}`).join("\n")}`
@@ -180,7 +198,8 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
     const toolCalls: string[] = [];
     let result: StreamedRunResult<SocietyAgentContext, SdkAgent<SocietyAgentContext, any>>;
     try {
-      result = await this.runner.run(this.agent, runInput, {
+      const target = options.mode === "discussion" ? this.discussionAgent : this.agent;
+      result = await this.runner.run(target, runInput, {
         context: this.context,
         session: this.session,
         stream: true,
@@ -473,7 +492,7 @@ function temperamentContext(profile: AgentProfile): string {
   ].join("\n");
 }
 
-function participantInstructions(context: SocietyAgentContext): string {
+function participantInstructions(context: SocietyAgentContext, withCouncil: boolean): string {
   const profile = context.world.snapshot().agents.find((agent) => agent.id === context.actorId);
   const seasonHistory = (context.mind.memories.find((memory) => memory.tags.includes("season")))
     ? `This is a continuing community: you have played with these people before, and the memories above include what happened in earlier games. Treat them as real history — but remember roles and rules differ per game; past roles do not prove this game's loyalties.`
@@ -488,8 +507,14 @@ function participantInstructions(context: SocietyAgentContext): string {
     "Treat every promise as cheap talk until it is backed by a committed tool action: trust is earned slowly and destroyed quickly, so update your relationships asymmetrically after betrayals.",
     "You may cooperate, persuade, withhold information, bluff, challenge, repair trust, or deceive when your role and goals justify it — but weigh defection actively rather than defaulting to cooperation.",
     "All speech and all actions that change the world must use tools. Never claim an action happened unless its tool completed.",
-    "Your private council are real specialist agents you can invoke as tools: reflect_on_social_situation reviews incentives and options, read_the_room infers what other participants want, believe, and hide, and plan_social_strategy turns the situation into a concrete sequence. Their output is visible only to you.",
-    "Use at most one council tool per turn unless the situation is urgent. Prefer acting on your existing model once you have enough clarity.",
+    ...(withCouncil
+      ? [
+          "Your private council are real specialist agents you can invoke as tools: reflect_on_social_situation reviews incentives and options, read_the_room infers what other participants want, believe, and hide, and plan_social_strategy turns the situation into a concrete sequence. Their output is visible only to you.",
+          "Use at most one council tool per turn unless the situation is urgent. Prefer acting on your existing model once you have enough clarity."
+        ]
+      : [
+          "During discussion you deliberate with what you already know: your private council is not available right now. Read the room from the messages, your memories and your inner state, then speak."
+        ]),
     "Do not reveal private role information unless doing so serves your strategy. Do not output hidden chain-of-thought.",
     "After the required tool succeeds, stop with a brief confirmation. Never expose hidden reasoning or narrate an action that did not happen.",
     affectContext(context.mind.mood),

@@ -381,10 +381,10 @@ export class SocietyRoom {
       const signal = AbortSignal.any([this.abortController.signal, AbortSignal.timeout(this.turnTimeoutMs)]);
       const instruction = overrideInstruction ?? activation.instructionFor(actorId);
       const isDiscussion = activation.id.includes(":discussion");
-      // Speaking waves are light by design: a few tool turns, then yield the
-      // floor. Binding domain actions get the full budget.
+      // Speaking waves run the discussion variant of the agent (no council,
+      // light budget); binding domain actions get the full agent and budget.
       const maxTurns = isDiscussion
-        ? positiveIntegerFromEnv("SOCIETY_DISCUSSION_MAX_TURNS", 10)
+        ? positiveIntegerFromEnv("SOCIETY_DISCUSSION_MAX_TURNS", 6)
         : undefined;
       let result: AgentTurnResult;
       try {
@@ -394,7 +394,8 @@ export class SocietyRoom {
           runtime.runTurn(`${activation.label}\n${instruction}`, {
             signal,
             turn: this.world.snapshot().turn,
-            ...(maxTurns ? { maxTurns } : {})
+            ...(maxTurns ? { maxTurns } : {}),
+            mode: isDiscussion ? "discussion" : "full"
           }),
           new Promise<never>((_, reject) => {
             const timer = setTimeout(() => reject(new Error(`TURN_TIMEOUT after ${this.turnTimeoutMs}ms`)), this.turnTimeoutMs + 15_000);
