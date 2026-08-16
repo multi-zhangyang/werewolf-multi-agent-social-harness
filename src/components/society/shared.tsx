@@ -128,6 +128,7 @@ export function eventLabel(name: string): string {
     update_inner_state: "更新内在状态",
     reflect_on_social_situation: "策略反思",
     read_the_room: "洞察他人",
+    plan_social_strategy: "制定策略",
     choose_move: "提交选择",
     contribute_to_pool: "投入公共池",
     make_investment: "提交投资",

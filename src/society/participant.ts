@@ -125,11 +125,29 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       runOptions: { maxTurns: 2 }
     });
 
+    const plannerAgent = new Agent<SocietyAgentContext>({
+      name: `${this.profile.displayName} planner`,
+      model: this.profile.model,
+      instructions: ({ context }) => planningInstructions(context),
+      tools: [common.recall, common.innerState],
+      modelSettings: {
+        maxTokens: numberFromEnv("SOCIETY_REFLECTION_TOKENS", 500),
+        reasoning: { effort: this.profile.reasoningEffort ?? "high" },
+        ...providerRetrySettings
+      }
+    });
+    const planner = plannerAgent.asTool({
+      toolName: "plan_social_strategy",
+      toolDescription: "Turn your goals, beliefs, relationships and read of the room into a concrete, sequenced plan for this round. Returns private advice and cannot change the world.",
+      runConfig: { modelProvider: provider, tracingDisabled: true },
+      runOptions: { maxTurns: 2 }
+    });
+
     this.agent = new Agent<SocietyAgentContext>({
       name: this.profile.displayName,
       model: this.profile.model,
       instructions: ({ context }) => participantInstructions(context),
-      tools: [...common.all, reflection, mindReader, ...options.world.toolsFor(this.profile.id)],
+      tools: [...common.all, reflection, mindReader, planner, ...options.world.toolsFor(this.profile.id)],
       modelSettings: {
         ...(this.profile.temperature === undefined ? {} : { temperature: this.profile.temperature }),
         maxTokens: numberFromEnv("SOCIETY_AGENT_MAX_OUTPUT_TOKENS", 900),
@@ -463,7 +481,7 @@ function participantInstructions(context: SocietyAgentContext): string {
     "Maintain your own goals, memory, beliefs about others, emotion, and relationships across turns.",
     "Distinguish cheap talk from committed action. You may cooperate, persuade, withhold information, bluff, challenge, repair trust, or deceive when your role and goals justify it.",
     "All speech and all actions that change the world must use tools. Never claim an action happened unless its tool completed.",
-    "Use reflect_on_social_situation when incentives or other participants' beliefs are unclear. Use update_inner_state when events genuinely change your emotions, needs, beliefs, or relationships.",
+    "Use reflect_on_social_situation when incentives or other participants' beliefs are unclear. Use plan_social_strategy when you need to turn a messy situation into a concrete sequence. Use update_inner_state when events genuinely change your emotions, needs, beliefs, or relationships.",
     "Use read_the_room when another participant's motives or honesty are uncertain, before making commitments, accusations, or trust decisions.",
     "Do not reveal private role information unless doing so serves your strategy. Do not output hidden chain-of-thought.",
     "After the required tool succeeds, stop with a brief confirmation. Never expose hidden reasoning or narrate an action that did not happen.",
@@ -497,6 +515,20 @@ function mindReaderInstructions(context: SocietyAgentContext): string {
     formatObservation(observation),
     `Your relationships: ${context.mind.relationships.map((relationship) => `${relationship.agentId}: trust ${relationship.trust.toFixed(2)}, affinity ${relationship.affinity.toFixed(2)}, tension ${relationship.tension.toFixed(2)} — ${relationship.note}`).join("; ") || "none"}`,
     `Your beliefs: ${context.mind.beliefs.map((belief) => `${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`).join("; ") || "none"}`
+  ].join("\n\n");
+}
+
+function planningInstructions(context: SocietyAgentContext): string {
+  const observation = context.world.observe(context.actorId);
+  return [
+    "You are a private planning specialist serving one social participant.",
+    "Produce a concrete plan for this exact phase: what to say, what to conceal, which tool to call, and what to watch for after the action.",
+    "Ground the plan in goals, beliefs, relationships, emotional state and likely reactions from others.",
+    "Keep it actionable and short. You cannot communicate or act in the world.",
+    formatObservation(observation),
+    `Goals: ${context.mind.goals.map((goal) => `${goal.id}: ${goal.description} (${goal.progress})`).join("; ")}`,
+    `Current beliefs: ${context.mind.beliefs.map((belief) => `${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`).join("; ") || "none"}`,
+    `Emotional state: ${context.mind.mood.label} — ${context.mind.mood.description}`
   ].join("\n\n");
 }
 
