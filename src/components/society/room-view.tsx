@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { ArrowLeft, Pause, RefreshCw } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { ArrowLeft, Check, Copy, Pause, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -67,6 +67,7 @@ export function RoomView({ roomId, token, onBack }: RoomViewProps): ReactNode {
             <div className="hidden items-center rounded-full border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 font-mono text-xs text-zinc-400 md:flex">
               R{room.world.turn}/{room.world.totalTurns}
             </div>
+            <ShareButton roomId={room.id} />
             {room.status === "running" ? (
               <Button variant="outline" size="sm" className="rounded-full border-white/10 bg-white/[0.02] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200" onClick={() => void pause()}>
                 <Pause className="size-3.5" />
@@ -101,6 +102,24 @@ export function RoomView({ roomId, token, onBack }: RoomViewProps): ReactNode {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function ShareButton({ roomId }: { roomId: string }): ReactNode {
+  const [copied, setCopied] = useState(false);
+  const copy = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(`${location.origin}${location.pathname}#/rooms/${encodeURIComponent(roomId)}`);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard can be unavailable in some embedded contexts; ignore.
+    }
+  };
+  return (
+    <Button variant="outline" size="icon-sm" className="rounded-full border-white/10 bg-white/[0.02] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200" onClick={() => void copy()}>
+      {copied ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
+    </Button>
   );
 }
 
