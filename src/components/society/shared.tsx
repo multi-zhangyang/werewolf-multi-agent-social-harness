@@ -13,33 +13,85 @@ import {
   Users,
   Waypoints
 } from "lucide-react";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { AgentStatus, ScenarioId, SocialChannel } from "@/society/contracts";
 
-/** Soft duotone avatar fills — muted enough for a light stage, distinct enough to tell characters apart. */
-const avatarPalette = [
-  "from-zinc-100 to-zinc-300 text-zinc-800",
-  "from-sky-100 to-indigo-200 text-indigo-900",
-  "from-amber-100 to-orange-200 text-orange-900",
-  "from-emerald-100 to-teal-200 text-teal-900",
-  "from-violet-100 to-purple-200 text-purple-900",
-  "from-rose-100 to-pink-200 text-rose-900",
-  "from-cyan-100 to-sky-200 text-cyan-900",
-  "from-lime-100 to-green-200 text-green-900"
+/**
+ * Character avatars are pure geometry: no text, no photos. Each character is
+ * a duotone gradient plus a unique ink mark (ring / diamond / arc / triangle /
+ * dots / chevron) derived from their name, so a crowd of agents stays
+ * readable at a glance and the same character looks the same everywhere —
+ * across games, seasons and panels.
+ */
+
+const AVATAR_GRADIENTS: Array<[string, string, string]> = [
+  ["#e4e4e7", "#a1a1aa", "#3f3f46"],
+  ["#bfdbfe", "#818cf8", "#312e81"],
+  ["#fde68a", "#fdba74", "#78350f"],
+  ["#a7f3d0", "#2dd4bf", "#064e3b"],
+  ["#ddd6fe", "#a78bfa", "#4c1d95"],
+  ["#fecdd3", "#fb7185", "#881337"],
+  ["#a5f3fc", "#38bdf8", "#155e75"],
+  ["#d9f99d", "#a3e635", "#365314"]
 ];
 
+type InkMark = "ring" | "diamond" | "arc" | "triangle" | "dots" | "chevron";
+
+function markFor(seed: number): InkMark {
+  return ["ring", "diamond", "arc", "triangle", "dots", "chevron"][Math.floor(seed / 8) % 6] as InkMark;
+}
+
+function markPath(mark: InkMark, ink: string): ReactNode {
+  const stroke = { stroke: ink, strokeWidth: 2.4, fill: "none", strokeLinecap: "round" as const };
+  switch (mark) {
+    case "ring":
+      return <circle cx="20" cy="20" r="9" {...stroke} />;
+    case "diamond":
+      return <path d="M20 10 L29 20 L20 30 L11 20 Z" {...stroke} />;
+    case "arc":
+      return <path d="M12 26 A 11 11 0 0 1 28 26" {...stroke} />;
+    case "triangle":
+      return <path d="M20 10 L29.5 27 L10.5 27 Z" {...stroke} />;
+    case "dots":
+      return (<g fill={ink}>
+        <circle cx="14" cy="14" r="2.6" /><circle cx="26" cy="14" r="2.6" />
+        <circle cx="14" cy="26" r="2.6" /><circle cx="26" cy="26" r="2.6" />
+      </g>);
+    case "chevron":
+      return <path d="M13 15 L20 20 L13 25 M21 15 L28 20 L21 25" {...stroke} />;
+  }
+}
+
 export function AgentAvatar({ name, index = 0, size = "md" }: { name: string; index?: number; size?: "sm" | "md" | "lg" | "xl" }): ReactNode {
-  const sizes = { sm: "size-6 text-[10px]", md: "size-8 text-xs", lg: "size-10 text-sm", xl: "size-14 text-base" };
+  const sizes = { sm: "size-6", md: "size-8", lg: "size-10", xl: "size-14" };
+  const seed = hashString(name) || index + 1;
+  const [from, to, ink] = AVATAR_GRADIENTS[seed % AVATAR_GRADIENTS.length];
+  const gradientId = `ag-${seed}`;
   return (
-    <Avatar className={cn("rounded-lg", sizes[size])}>
-      <AvatarFallback className={cn("rounded-lg bg-gradient-to-br font-semibold", avatarPalette[index % avatarPalette.length])}>
-        {name.trim().slice(0, 2)}
-      </AvatarFallback>
-    </Avatar>
+    <svg
+      viewBox="0 0 40 40"
+      className={cn("shrink-0 rounded-lg", sizes[size])}
+      aria-label={name}
+      role="img"
+    >
+      <defs>
+        <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor={from} />
+          <stop offset="100%" stopColor={to} />
+        </linearGradient>
+      </defs>
+      <rect width="40" height="40" rx="9" fill={`url(#${gradientId})`} />
+      {markPath(markFor(seed), ink)}
+    </svg>
   );
+}
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (const char of value) hash = (hash * 31 + char.charCodeAt(0)) | 0;
+  return Math.abs(hash);
 }
 
 /** Presence ring: the agent's live state reads off the avatar, no text needed. */
