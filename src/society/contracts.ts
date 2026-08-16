@@ -178,6 +178,8 @@ export interface SocialMessage {
   createdAt: string;
   recipientIds?: string[];
   replyTo?: string;
+  /** Discussion wave this message belongs to, when inside a dynamic discussion. */
+  wave?: number;
 }
 
 export interface AgentObservation {

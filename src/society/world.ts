@@ -157,7 +157,8 @@ export abstract class SocialWorldBase implements SocialWorld {
       phase: this.currentPhase(),
       createdAt: new Date().toISOString(),
       ...(recipientIds.length ? { recipientIds } : {}),
-      ...(input.replyTo ? { replyTo: input.replyTo } : {})
+      ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+      ...(this.messageWave() === undefined ? {} : { wave: this.messageWave() })
     };
     this.messages.push(message);
     if (this.messages.length > 500) this.messages.splice(0, this.messages.length - 500);
@@ -191,6 +192,11 @@ export abstract class SocialWorldBase implements SocialWorld {
 
   protected messageChannelsFor(_actorId: string): SocialChannel[] {
     return ["public", "private"];
+  }
+
+  /** Current discussion wave for message stamping; undefined outside discussions. */
+  protected messageWave(): number | undefined {
+    return undefined;
   }
 
   /** Remove pending/private domain state before a snapshot crosses a boundary. */

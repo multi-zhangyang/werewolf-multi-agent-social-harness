@@ -292,6 +292,10 @@ export class TrustGameWorld extends SocialWorldBase {
     });
   }
 
+  protected messageWave(): number | undefined {
+    return this.discussion?.waveNumber;
+  }
+
   protected currentTurn(): number {
     return this.round;
   }

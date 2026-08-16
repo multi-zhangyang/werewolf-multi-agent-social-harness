@@ -731,6 +731,10 @@ export class AvalonWorld extends SocialWorldBase {
     this.finish();
   }
 
+  protected messageWave(): number | undefined {
+    return this.discussion?.waveNumber;
+  }
+
   private createDiscussion(): DiscussionDirector {
     return new DiscussionDirector({
       actorIds: [...this.profiles.keys()],

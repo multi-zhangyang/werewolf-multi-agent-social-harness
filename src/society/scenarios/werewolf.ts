@@ -642,6 +642,10 @@ export class WerewolfWorld extends SocialWorldBase {
     this.finish();
   }
 
+  protected messageWave(): number | undefined {
+    return this.discussion?.waveNumber;
+  }
+
   private createDiscussion(): DiscussionDirector {
     const aliveIds = [...this.alive];
     return new DiscussionDirector({

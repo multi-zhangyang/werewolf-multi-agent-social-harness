@@ -67,9 +67,18 @@ export function Conversation({ room, activity, onAction }: ConversationProps): R
             {entries.length === 0 ? (
               <CastingSlate room={room} />
             ) : (
-              entries.map((entry, index) => entry.kind === "log"
-                ? <ActDivider key={entry.id} entry={entry} />
-                : <MessageRow key={entry.id} entry={entry} names={names} activity={activity} fresh={index >= entries.length - 3 && entry.message.turn === room.world.turn} />)
+              entries.map((entry, index) => {
+                if (entry.kind === "log") return <ActDivider key={entry.id} entry={entry} />;
+                const previous = entries[index - 1];
+                const waveTurn = previous && previous.kind === "message" && previous.message.wave !== undefined
+                  && entry.message.wave !== undefined && previous.message.wave !== entry.message.wave;
+                return (
+                  <div key={entry.id} className="space-y-5">
+                    {waveTurn ? <WaveDivider wave={entry.message.wave ?? 1} /> : null}
+                    <MessageRow entry={entry} names={names} activity={activity} fresh={index >= entries.length - 3 && entry.message.turn === room.world.turn} />
+                  </div>
+                );
+              })
             )}
           </div>
           <div ref={bottomRef} />
@@ -200,6 +209,18 @@ function LiveAgents({ room, activity, names }: {
 
 function thoughtLabel(kind: "reflection" | "mind-read" | "plan"): string {
   return kind === "reflection" ? "策略反思" : kind === "mind-read" ? "洞察他人" : "谋划行动";
+}
+
+function WaveDivider({ wave }: { wave: number }): ReactNode {
+  return (
+    <div className="flex items-center gap-4 pt-1">
+      <div className="h-px flex-1 bg-zinc-200" />
+      <span className="rounded-full border border-zinc-200 bg-white px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-400">
+        {wave === 1 ? "开场发言" : `回应第 ${wave - 1} 轮`}
+      </span>
+      <div className="h-px flex-1 bg-zinc-200" />
+    </div>
+  );
 }
 
 function ActDivider({ entry }: { entry: Extract<TimelineEntry, { kind: "log" }> }): ReactNode {
