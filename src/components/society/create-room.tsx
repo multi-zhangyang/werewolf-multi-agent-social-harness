@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Loader2, Play } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import { Badge } from "@/components/ui/badge";
@@ -41,17 +41,17 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
 
   const minRounds = scenario?.minRounds ?? 2;
   const maxRounds = scenario?.maxRounds ?? 10;
+  const visibleModels = useMemo(() => models.slice(0, 6), [models]);
 
-  const visibleModels = useMemo(() => models.slice(0, 4), [models]);
-
-  const reset = (): void => {
-    setSelectedModels(visibleModels.slice(0, 2).map((model) => model.id));
+  useEffect(() => {
+    if (!open) return;
+    setSelectedModels(visibleModels.slice(0, Math.min(2, visibleModels.length)).map((model) => model.id));
     setRounds(scenario?.defaultRounds ?? Math.min(5, maxRounds));
     setMode("ai");
     setPlayerName("");
     setReasoningEffort("low");
     setError(undefined);
-  };
+  }, [open, scenario, maxRounds, visibleModels]);
 
   const toggleModel = (id: string): void => {
     setSelectedModels((current) => current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]);
@@ -87,13 +87,13 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next && !submitting) onOpenChange(false); }}>
-      <DialogContent className="max-w-xl rounded-3xl border-white/[0.08] bg-[#0d0d0d] p-0 text-zinc-100 shadow-2xl" showCloseButton={!submitting}>
+      <DialogContent className="max-w-xl rounded-xl border-zinc-200 bg-white p-0 text-foreground shadow-2xl" showCloseButton={!submitting}>
         {scenario ? (
           <div className="max-h-[82vh] overflow-y-auto">
-            <div className="border-b border-white/[0.06] p-6">
+            <div className="border-b border-zinc-100 p-6">
               <DialogHeader className="gap-2 text-left">
                 <div className="flex items-center gap-3">
-                  <span className="flex size-10 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-zinc-200">
+                  <span className="flex size-10 items-center justify-center rounded-lg border border-zinc-200 bg-zinc-50 text-zinc-700">
                     <ScenarioIcon id={scenario.id} className="size-5" />
                   </span>
                   <div>
@@ -102,10 +102,10 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                   </div>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-1.5">
-                  <Badge variant="outline" className="rounded-full border-white/10 bg-white/[0.03] font-normal text-zinc-400">{scenario.players} 名参与者</Badge>
-                  <Badge variant="outline" className="rounded-full border-white/10 bg-white/[0.03] font-normal text-zinc-400">{scenario.minRounds}–{scenario.maxRounds} 轮</Badge>
+                  <Badge variant="outline" className="rounded-full border-zinc-200 bg-zinc-50 font-normal text-zinc-500">{scenario.players} 名参与者</Badge>
+                  <Badge variant="outline" className="rounded-full border-zinc-200 bg-zinc-50 font-normal text-zinc-500">{scenario.minRounds}–{scenario.maxRounds} 轮</Badge>
                   {scenario.capabilities.slice(0, 3).map((capability) => (
-                    <Badge key={capability} variant="outline" className="rounded-full border-white/[0.07] bg-white/[0.02] font-normal text-zinc-500">{capability}</Badge>
+                    <Badge key={capability} variant="outline" className="rounded-full border-zinc-200 bg-white font-normal text-zinc-400">{capability}</Badge>
                   ))}
                 </div>
               </DialogHeader>
@@ -113,7 +113,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
 
             <div className="space-y-6 p-6">
               <section>
-                <p className="mb-2.5 text-[13px] font-medium text-zinc-300">模型</p>
+                <p className="mb-2.5 text-[13px] font-medium text-zinc-700">模型</p>
                 <div className="flex flex-wrap gap-2">
                   {visibleModels.map((model) => {
                     const active = selectedModels.includes(model.id);
@@ -125,15 +125,15 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                         className={cn(
                           "flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors",
                           active
-                            ? "border-zinc-300/40 bg-zinc-100/[0.08]"
-                            : "border-white/[0.08] bg-white/[0.02] hover:border-white/15"
+                            ? "border-zinc-800 bg-zinc-50"
+                            : "border-zinc-200 bg-white hover:border-zinc-300"
                         )}
                       >
-                        <span className={cn("flex size-3.5 items-center justify-center rounded-full border", active ? "border-zinc-100 bg-zinc-100" : "border-zinc-600")}>
-                          {active ? <span className="size-1.5 rounded-full bg-zinc-950" /> : null}
+                        <span className={cn("flex size-3.5 items-center justify-center rounded-full border", active ? "border-zinc-900 bg-zinc-900" : "border-zinc-300")}>
+                          {active ? <span className="size-1.5 rounded-full bg-white" /> : null}
                         </span>
-                        <span className="text-[13px] font-medium text-zinc-200">{model.name}</span>
-                        <span className="font-mono text-[10px] text-zinc-600">{model.provider}</span>
+                        <span className="text-[13px] font-medium text-zinc-800">{model.name}</span>
+                        <span className="font-mono text-[10px] text-zinc-400">{model.provider}</span>
                       </button>
                     );
                   })}
@@ -142,8 +142,8 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
 
               <section>
                 <div className="mb-2.5 flex items-center justify-between">
-                  <p className="text-[13px] font-medium text-zinc-300">回合数</p>
-                  <span className="font-mono text-xs text-zinc-400">{rounds}</span>
+                  <p className="text-[13px] font-medium text-zinc-700">回合数</p>
+                  <span className="nums font-mono text-xs text-zinc-500">{rounds}</span>
                 </div>
                 <Slider
                   min={minRounds}
@@ -153,7 +153,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                   onValueChange={(value) => setRounds(value[0] ?? minRounds)}
                   className="py-1"
                 />
-                <div className="mt-1 flex justify-between font-mono text-[10px] text-zinc-600">
+                <div className="nums mt-1 flex justify-between font-mono text-[10px] text-zinc-400">
                   <span>{minRounds}</span>
                   <span>{maxRounds}</span>
                 </div>
@@ -161,16 +161,16 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
 
               <section className="grid grid-cols-2 gap-4">
                 <div>
-                  <p className="mb-2.5 text-[13px] font-medium text-zinc-300">参与者</p>
-                  <div className="grid grid-cols-2 gap-1 rounded-lg border border-white/[0.08] bg-white/[0.02] p-1">
+                  <p className="mb-2.5 text-[13px] font-medium text-zinc-700">参与者</p>
+                  <div className="grid grid-cols-2 gap-1 rounded-lg border border-zinc-200 bg-zinc-50 p-1">
                     <ModeButton active={mode === "ai"} onClick={() => setMode("ai")}>全 AI</ModeButton>
                     <ModeButton active={mode === "human"} onClick={() => setMode("human")}>真人加入</ModeButton>
                   </div>
                 </div>
                 <div>
-                  <p className="mb-2.5 text-[13px] font-medium text-zinc-300">推理强度</p>
+                  <p className="mb-2.5 text-[13px] font-medium text-zinc-700">推理强度</p>
                   <Select value={reasoningEffort} onValueChange={(value) => setReasoningEffort(value as "low" | "medium" | "high")}>
-                    <SelectTrigger className="rounded-lg border-white/[0.08] bg-white/[0.02] text-zinc-200">
+                    <SelectTrigger className="rounded-lg border-zinc-200 bg-white text-zinc-800">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -184,27 +184,27 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
 
               {mode === "human" ? (
                 <section>
-                  <p className="mb-2.5 text-[13px] font-medium text-zinc-300">你的名字</p>
+                  <p className="mb-2.5 text-[13px] font-medium text-zinc-700">你的名字</p>
                   <input
                     value={playerName}
                     onChange={(event) => setPlayerName(event.target.value)}
                     placeholder="作为第 1 位参与者加入"
                     maxLength={40}
-                    className="h-10 w-full rounded-xl border border-white/[0.08] bg-white/[0.02] px-3.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                    className="h-10 w-full rounded-lg border border-zinc-200 bg-white px-3.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-500 focus:outline-none"
                   />
                 </section>
               ) : null}
 
-              {error ? <p className="text-[13px] text-red-400">{error}</p> : null}
+              {error ? <p className="text-[13px] text-red-500">{error}</p> : null}
 
-              <div className="flex items-center justify-end gap-3 border-t border-white/[0.06] pt-5">
-                <Button variant="ghost" className="text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200" disabled={submitting} onClick={() => onOpenChange(false)}>
+              <div className="flex items-center justify-end gap-3 border-t border-zinc-100 pt-5">
+                <Button variant="ghost" className="text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900" disabled={submitting} onClick={() => onOpenChange(false)}>
                   取消
                 </Button>
                 <Button
                   onClick={submit}
                   disabled={submitting}
-                  className="rounded-full bg-zinc-50 px-6 text-zinc-950 hover:bg-white"
+                  className="rounded-lg bg-foreground px-6 text-background hover:bg-zinc-800"
                 >
                   {submitting ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
                   开始世界
@@ -224,7 +224,7 @@ function ModeButton({ active, onClick, children }: { active: boolean; onClick: (
       onClick={onClick}
       className={cn(
         "h-8 rounded-md text-[13px] font-medium transition-colors",
-        active ? "bg-zinc-100 text-zinc-950" : "text-zinc-500 hover:text-zinc-300"
+        active ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
       )}
     >
       {children}

@@ -318,7 +318,7 @@ export class SocietyRoom {
         this.pause(`行动未完成：${completion.missingActorIds.join(", ")}。房间没有自动代打。`);
         return;
       }
-      await this.rememberNewExperiences();
+      await this.settleAfterActivation();
     }
   }
 
@@ -348,6 +348,7 @@ export class SocietyRoom {
       if (!runtime) throw new Error(`AGENT_RUNTIME_NOT_FOUND: '${actorId}' has no SDK Agent instance.`);
       const signal = AbortSignal.any([this.abortController.signal, AbortSignal.timeout(this.turnTimeoutMs)]);
       const instruction = overrideInstruction ?? activation.instructionFor(actorId);
+      const isDiscussion = activation.id.includes(":discussion");
       let result: AgentTurnResult;
       try {
         result = await runtime.runTurn(`${activation.label}\n${instruction}`, {
@@ -355,7 +356,14 @@ export class SocietyRoom {
           turn: this.world.snapshot().turn
         });
       } catch (error) {
-        throw new Error(`${runtime.profile.displayName} (${runtime.profile.model}) failed: ${errorMessage(error)}`, { cause: error });
+        // Speaking is optional: an agent that fails to produce a coherent turn
+        // simply stays quiet for this wave instead of sinking the whole room.
+        // Binding domain actions (votes, night targets, bids) stay strict.
+        if (!isDiscussion) throw new Error(`${runtime.profile.displayName} (${runtime.profile.model}) failed: ${errorMessage(error)}`, { cause: error });
+        const note = `${runtime.profile.displayName} 本轮未能发言（${errorMessage(error)}）`;
+        this.world.addWorldLog(note);
+        this.emit({ type: "agent.status", roomId: this.id, actorId, status: "idle", at: now() });
+        return;
       }
       card.turnCount += 1;
       this.notify();
@@ -369,7 +377,7 @@ export class SocietyRoom {
 
   private waitForHuman(activation: WorldActivation, actorId: string): Promise<void> {
     if (this.waitingHuman) throw new Error("HUMAN_WAITER_CONFLICT: More than one human turn was opened.");
-    const isDiscussion = activation.id.endsWith(":discussion");
+    const isDiscussion = activation.id.includes(":discussion");
     const domainActions = this.world.playerActions(actorId)
       .map((action) => action.name)
       .filter((name) => name !== "message" && name !== "communicate");
@@ -402,8 +410,15 @@ export class SocietyRoom {
     });
   }
 
-  private async rememberNewExperiences(): Promise<void> {
+  /**
+   * After every resolved activation the world settles social accounts: agents
+   * appraise what happened to them (emotions, relationships, memories), then
+   * store the round's outcome as experience.
+   */
+  private async settleAfterActivation(): Promise<void> {
     await Promise.all([...this.agents].map(async ([actorId, runtime]) => {
+      const events = this.world.eventsFor(actorId);
+      if (events.length) await runtime.appraise(events, this.world.snapshot().turn);
       const experience = this.world.experienceFor(actorId);
       if (!experience || this.rememberedExperiences.get(actorId) === experience) return;
       this.rememberedExperiences.set(actorId, experience);

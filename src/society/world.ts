@@ -7,6 +7,7 @@ import type {
   PlayerActionSpec,
   ScenarioSummary,
   SocialChannel,
+  SocialEvent,
   SocialMessage,
   SocialWorld,
   SocietyAgentContext,
@@ -26,6 +27,7 @@ export abstract class SocialWorldBase implements SocialWorld {
   protected readonly statuses = new Map<string, AgentStatus>();
   protected readonly messages: SocialMessage[] = [];
   protected readonly log: WorldLogEntry[] = [];
+  protected readonly pendingEvents = new Map<string, SocialEvent[]>();
   protected status: WorldSnapshot["status"] = "lobby";
   protected listeners = new Set<(snapshot: WorldSnapshot) => void>();
 
@@ -111,6 +113,27 @@ export abstract class SocialWorldBase implements SocialWorld {
   abstract completeActivation(activation: WorldActivation): ActivationCompletion;
   abstract experienceFor(actorId: string): string | undefined;
 
+  /** Returns and clears the appraisal events queued for one participant. */
+  eventsFor(actorId: string): SocialEvent[] {
+    const pending = this.pendingEvents.get(actorId) ?? [];
+    this.pendingEvents.delete(actorId);
+    return pending;
+  }
+
+  /** Queue a structured social event for one participant's appraisal engine. */
+  protected pushEvent(actorId: string, input: Omit<SocialEvent, "id" | "turn" | "phase">): void {
+    const event: SocialEvent = {
+      ...input,
+      id: randomUUID(),
+      turn: this.currentTurn(),
+      phase: this.currentPhase()
+    };
+    const list = this.pendingEvents.get(actorId) ?? [];
+    list.push(event);
+    if (list.length > 60) list.splice(0, list.length - 60);
+    this.pendingEvents.set(actorId, list);
+  }
+
   async sendMessage(input: {
     senderId: string;
     channel: SocialChannel;
@@ -146,6 +169,10 @@ export abstract class SocialWorldBase implements SocialWorld {
     if (!this.profiles.has(actorId)) return;
     this.statuses.set(actorId, status);
     this.emitUpdate();
+  }
+
+  addWorldLog(text: string): void {
+    this.addLog(text);
   }
 
   onUpdate(listener: (snapshot: WorldSnapshot) => void): () => void {

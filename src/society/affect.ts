@@ -1,4 +1,4 @@
-import type { AgentMoodState, CoreEmotions, PadState } from "./contracts";
+import type { AgentMoodState, CoreEmotions, PadState, SocialEmotions } from "./contracts";
 
 /**
  * Dimensional affect model grounded in Mehrabian's PAD framework: a persistent
@@ -44,7 +44,36 @@ const EMOTION_KEYS = ["joy", "sadness", "anger", "fear", "surprise", "disgust"] 
 /** Turns for a state to decay to half its distance from neutral. */
 const PAD_HALF_LIFE = 8;
 const EMOTION_HALF_LIFE = 5;
+const SOCIAL_HALF_LIFE = 6;
 const ENERGY_HOMEOSTASIS = 0.85;
+
+export const SOCIAL_EMOTION_KEYS = [
+  "gratitude",
+  "guilt",
+  "shame",
+  "embarrassment",
+  "pride",
+  "envy",
+  "jealousy",
+  "contempt",
+  "admiration",
+  "relief"
+] as const;
+
+export function neutralSocialEmotions(): SocialEmotions {
+  return {
+    gratitude: 0.06,
+    guilt: 0.05,
+    shame: 0.05,
+    embarrassment: 0.05,
+    pride: 0.1,
+    envy: 0.05,
+    jealousy: 0.05,
+    contempt: 0.05,
+    admiration: 0.08,
+    relief: 0.08
+  };
+}
 
 export function clampUnit(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -60,6 +89,7 @@ export function initialMood(turn = 0): AgentMoodState {
     description: "心态平稳。",
     pad: { pleasure: 0.08, arousal: 0.15, dominance: 0.1 },
     emotions: { joy: 0.15, sadness: 0.1, anger: 0.08, fear: 0.15, surprise: 0.12, disgust: 0.05 },
+    socialEmotions: neutralSocialEmotions(),
     needs: { security: 0.55, connection: 0.5, status: 0.5, autonomy: 0.6, achievement: 0.55 },
     energy: 0.9,
     updatedAtTurn: turn
@@ -95,6 +125,7 @@ export function decayMood(mood: AgentMoodState, turn: number): AgentMoodState {
   if (steps <= 0) return mood;
   const padFactor = Math.pow(0.5, steps / PAD_HALF_LIFE);
   const emotionFactor = Math.pow(0.5, steps / EMOTION_HALF_LIFE);
+  const socialFactor = Math.pow(0.5, steps / SOCIAL_HALF_LIFE);
   const pad: PadState = {
     pleasure: mood.pad.pleasure * padFactor,
     arousal: mood.pad.arousal * padFactor,
@@ -103,8 +134,11 @@ export function decayMood(mood: AgentMoodState, turn: number): AgentMoodState {
   const emotions = Object.fromEntries(
     EMOTION_KEYS.map((key) => [key, mood.emotions[key] * emotionFactor])
   ) as unknown as CoreEmotions;
+  const socialEmotions = Object.fromEntries(
+    SOCIAL_EMOTION_KEYS.map((key) => [key, mood.socialEmotions[key] * socialFactor])
+  ) as unknown as SocialEmotions;
   const energy = mood.energy + (ENERGY_HOMEOSTASIS - mood.energy) * (1 - Math.pow(0.5, steps / 12));
-  return refreshMood({ ...mood, pad, emotions, energy, updatedAtTurn: turn }, turn);
+  return refreshMood({ ...mood, pad, emotions, socialEmotions, energy, updatedAtTurn: turn }, turn);
 }
 
 export function applyEmotionDeltas(emotions: CoreEmotions, deltas: Partial<CoreEmotions>): CoreEmotions {
@@ -169,4 +203,25 @@ export function describeNeeds(needs: AgentMoodState["needs"]): string {
   return (Object.keys(needs) as Array<keyof AgentMoodState["needs"]>)
     .map((key) => `${labels[key]} ${Math.round(needs[key] * 10)}/10`)
     .join("，");
+}
+
+export function describeSocialEmotions(emotions: SocialEmotions): string {
+  const labels: Record<(typeof SOCIAL_EMOTION_KEYS)[number], string> = {
+    gratitude: "感激",
+    guilt: "内疚",
+    shame: "羞耻",
+    embarrassment: "尴尬",
+    pride: "骄傲",
+    envy: "羡慕",
+    jealousy: "嫉妒",
+    contempt: "蔑视",
+    admiration: "敬佩",
+    relief: "如释重负"
+  };
+  const active = SOCIAL_EMOTION_KEYS
+    .filter((key) => emotions[key] >= 0.35)
+    .sort((left, right) => emotions[right] - emotions[left])
+    .slice(0, 3)
+    .map((key) => `${labels[key]} ${Math.round(emotions[key] * 10)}/10`);
+  return active.length ? active.join("，") : "社会情绪平稳";
 }

@@ -113,7 +113,7 @@ export function App(): ReactNode {
     <>
       {booting ? (
         <div className="flex min-h-screen items-center justify-center">
-          <span className="size-8 animate-spin rounded-full border-2 border-white/10 border-t-zinc-300" />
+          <span className="size-8 animate-spin rounded-full border-2 border-zinc-200 border-t-zinc-700" />
         </div>
       ) : (
         <Landing
@@ -139,7 +139,7 @@ export function App(): ReactNode {
         onSaved={() => { void loadCatalog().catch((cause) => setError(errorMessage(cause))); }}
       />
       {error ? (
-        <div className="fixed inset-x-0 bottom-4 z-30 mx-auto w-fit rounded-lg border border-red-400/20 bg-[#140a0a] px-4 py-2 text-xs text-red-300">
+        <div className="fixed inset-x-0 bottom-4 z-30 mx-auto w-fit rounded-lg border border-red-200 bg-white px-4 py-2 text-xs text-red-600 shadow-lg">
           {error}
         </div>
       ) : null}

@@ -311,3 +311,23 @@ Design rules that maximize interesting dynamics:
 7. **Eval harness:** SOTOPIA-style two-axis social scoring (2310.11667) + Decrypto-style reasoning probes (2506.20664) + pre-registered game distributions (2404.11794).
 
 *All 23 references above were verified live against arXiv (API `id_list` and `/abs/` pages) with title/author/date cross-checked; no ID was taken on faith.*
+
+---
+
+## Part 6 — 2026 追加：对话调度与社会评估的最新依据
+
+在 2026 年 8 月通过 Exa 检索到的三篇与「动态对话导演」和「事件驱动评估」直接相关的前沿工作，均已通过 arXiv 页面核对：
+
+1. **2412.04937 — *Who Speaks Next? Multi-party AI Discussion Leveraging the Systematics of Turn-taking in Murder Mystery Games***（2024）— https://arxiv.org/abs/2412.04937
+   - 把对话分析中的「邻接对 + 话轮转换」系统学应用于多智能体讨论的下一说话人选择与自我选择机制。
+   - **对 Society 的意义**：`src/society/conversation.ts` 的回应紧迫度（被点名、被提问、被指控、回复链）与「有压力才获得话轮」的调度，正是该框架的确定性实现。
+
+2. **2606.03137 — *Think-Before-Speak: From Internal Evaluation to Public Expression in Multi-Agent Social Simulation***（2026）— https://arxiv.org/abs/2606.03137
+   - 把智能体的私密评估（失调评估、感知的意见气候、孤立风险、回应策略、发言意愿）与公开表达分离，由协调器裁决竞争性发言意图。
+   - **对 Society 的意义**：发言意愿 ≈ 讨论导演的紧迫度；私密评估由 `appraisal.ts` 的事件评估引擎承担（恐惧、羞耻、感激等状态先于语言产生）。
+
+3. **2608.07438 — *PsychoAgent: An Affect-Sensitive Cognitive Architecture for Conflict-Aware Memory in LLM Agents***（2026）— https://arxiv.org/abs/2608.07438
+   - 情感显著性 + 未解决冲突决定哪些经历进入上下文，而非仅靠主题相似度；冲突关键记忆的召回显著优于语义/情感基线。
+   - **对 Society 的意义**：`appraisal.ts` 为每次评估事件生成带效价与显著性的记忆，`memory.ts` 的召回分数已包含情绪一致性项——被背叛、被冤枉的记忆会持续浮出水面。
+
+> 以上条目与正文引用同样遵循「必须逐条在 arXiv 核对」的规则；这三篇均已确认存在且标题/摘要相符。

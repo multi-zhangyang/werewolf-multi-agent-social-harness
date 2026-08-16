@@ -79,6 +79,25 @@ export interface CoreEmotions {
   disgust: number;
 }
 
+/**
+ * Social emotions (OCC/EMA style): appraisal-driven feelings that exist
+ * because of other people — what someone did to us, what we owe, what we
+ * caused. Kept as structured intensities so they can modulate attention and
+ * expression without relying on the model to self-report.
+ */
+export interface SocialEmotions {
+  gratitude: number;
+  guilt: number;
+  shame: number;
+  embarrassment: number;
+  pride: number;
+  envy: number;
+  jealousy: number;
+  contempt: number;
+  admiration: number;
+  relief: number;
+}
+
 export interface AgentNeeds {
   security: number;
   connection: number;
@@ -92,6 +111,7 @@ export interface AgentMoodState {
   description: string;
   pad: PadState;
   emotions: CoreEmotions;
+  socialEmotions: SocialEmotions;
   needs: AgentNeeds;
   energy: number;
   updatedAtTurn: number;
@@ -225,6 +245,36 @@ export interface WorldActivation {
   instructionFor(actorId: string): string;
 }
 
+/**
+ * A structured, observer-scoped social event. The world translates raw
+ * happenings (a vote, a kill, an accusation) into the meaning they have for
+ * one specific participant, so appraisal never needs the god's-eye view.
+ */
+export interface SocialEvent {
+  id: string;
+  type:
+    | "accused"          // someone publicly accused this agent
+    | "defended"         // someone publicly stood up for this agent
+    | "vote-against"     // someone voted to eliminate this agent
+    | "vote-cast"        // this agent cast a vote
+    | "voted-with"       // someone voted for the same target as this agent
+    | "eliminated"       // this agent was eliminated
+    | "eliminated-other" // another participant was eliminated
+    | "investigation"    // seer result, private
+    | "night-kill"       // this agent (wolf) helped kill someone at night
+    | "win"              // this agent's faction won
+    | "lose";            // this agent's faction lost
+  turn: number;
+  phase: string;
+  /** The other participant involved, if any (accuser, voter, defender...). */
+  actorId?: string;
+  targetId?: string;
+  /** Extra facts: revealed role, investigation result, involvement flags. */
+  facts?: Record<string, unknown>;
+  /** Human-readable summary; becomes the seed of a personal memory. */
+  detail: string;
+}
+
 export interface PlayerActionSpec {
   name: string;
   label: string;
@@ -293,6 +343,8 @@ export interface SocialWorld {
   activation(): WorldActivation | null;
   completeActivation(activation: WorldActivation): ActivationCompletion;
   experienceFor(actorId: string): string | undefined;
+  /** Pending appraisal events for one participant; returns and clears them. */
+  eventsFor(actorId: string): SocialEvent[];
   sendMessage(input: {
     senderId: string;
     channel: SocialChannel;
@@ -301,6 +353,8 @@ export interface SocialWorld {
     replyTo?: string;
   }): Promise<SocialMessage>;
   setAgentStatus(actorId: string, status: AgentStatus): void;
+  /** Append a public world-log entry (shown in the observer timeline). */
+  addWorldLog(text: string): void;
   onUpdate(listener: (snapshot: WorldSnapshot) => void): () => void;
 }
 
@@ -319,4 +373,6 @@ export interface SocietyAgentRuntime {
   readonly mind: AgentMindState;
   runTurn(input: string, options: { signal: AbortSignal; turn: number }): Promise<AgentTurnResult>;
   rememberOutcome(text: string, turn: number): Promise<void>;
+  /** Process world-appraisal events into emotion, relationship and memory. */
+  appraise(events: SocialEvent[], turn: number): Promise<void>;
 }

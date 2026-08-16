@@ -28,10 +28,12 @@ import type {
   AgentRelationship,
   AgentRuntimeEvent,
   AgentTurnResult,
+  SocialEvent,
   SocietyAgentContext,
   SocietyAgentRuntime
 } from "./contracts";
-import { clampUnit, decayMood, describeEmotions, describeNeeds, initialMood, refreshMood } from "./affect";
+import { clampUnit, decayMood, describeEmotions, describeNeeds, describeSocialEmotions, initialMood, refreshMood } from "./affect";
+import { appraiseEvents } from "./appraisal";
 import { AssociativeMemory } from "./memory";
 import { createDeliberationTools, createSocialTools, formatObservation } from "./cognition";
 
@@ -87,7 +89,7 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       useResponses: false
     });
     this.runner = new Runner({ modelProvider: provider, tracingDisabled: true });
-    this.maxTurns = boundedInteger(options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 8), 2, 24);
+    this.maxTurns = boundedInteger(options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 10), 2, 24);
 
     const social = createSocialTools(this.context);
     const council = createDeliberationTools(this.context);
@@ -191,6 +193,40 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       turn
     });
     await syncMemories(this.context);
+  }
+
+  /**
+   * The world's appraisal events are translated into state changes here: the
+   * deterministic engine updates PAD / core and social emotions / needs /
+   * relationships (personality-modulated), and the salient ones become
+   * memories that shape future turns.
+   */
+  async appraise(events: SocialEvent[], turn: number): Promise<void> {
+    if (!events.length) return;
+    const summary = appraiseEvents(this.mind, this.profile, events, turn);
+    if (!summary.changed) return;
+    this.mind.mood = refreshMood(this.mind.mood, turn);
+    for (const seed of summary.memories) {
+      await this.context.memory.remember({
+        text: seed.text,
+        tags: seed.tags,
+        salience: seed.salience,
+        valence: seed.valence,
+        pad: { ...this.mind.mood.pad },
+        turn
+      });
+    }
+    await syncMemories(this.context);
+    this.context.emit({
+      type: "agent.updated",
+      roomId: this.context.roomId,
+      actorId: this.profile.id,
+      status: "idle",
+      mind: structuredClone(this.mind),
+      turnCount: turn,
+      totalTokens: 0,
+      at: new Date().toISOString()
+    });
   }
 
   private consumeEvent(event: RunStreamEvent, toolCalls: string[]): void {
@@ -298,6 +334,7 @@ function affectContext(mood: AgentMoodState): string {
   return [
     `Emotional state: ${mood.label}（${mood.description}）`,
     `Core emotions: ${describeEmotions(mood.emotions)}.`,
+    `Social emotions: ${describeSocialEmotions(mood.socialEmotions)}.`,
     `Needs: ${describeNeeds(mood.needs)}.`,
     `Energy: ${Math.round(mood.energy * 100)}/100.`
   ].join("\n");

@@ -15,6 +15,7 @@ import type {
   WorldSnapshot
 } from "../contracts";
 import { contextFromRunContext, SocialWorldBase } from "../world";
+import { DiscussionDirector } from "../conversation";
 import { boundedRounds, emitAction } from "./helpers";
 
 type Role = "wolf" | "seer" | "jester" | "villager";
@@ -29,6 +30,9 @@ interface DayRecord {
   nightTargetRole?: Role;
 }
 
+const ACCUSATION_LEXICON = /怀疑|是狼|狼人|铁狼|出局|投|说谎|撒谎|骗|小丑|查杀|金水|装好人|带节奏|站队|伪/;
+const DEFENSE_LEXICON = /相信|支持|担保|信任|不是狼|好人|别投|我信|没问题/;
+
 export class WerewolfWorld extends SocialWorldBase {
   private readonly maxDays: number;
   private readonly roles = new Map<string, Role>();
@@ -39,6 +43,7 @@ export class WerewolfWorld extends SocialWorldBase {
   private readonly seerTargets = new Map<string, string>();
   private readonly history: DayRecord[] = [];
   private readonly lastExperiences = new Map<string, string>();
+  private discussion: DiscussionDirector | null = null;
   private winners: string[] = [];
   private outcome = "";
   private phase: Phase = "day-discussion";
@@ -55,6 +60,7 @@ export class WerewolfWorld extends SocialWorldBase {
       this.alive.add(id);
       if (deck[index] === "seer") this.seerKnowledge.set(id, new Map());
     });
+    this.discussion = this.createDiscussion();
     this.addLog("身份已经分配。公开讨论开始，所有承诺都可能是策略。", 1);
   }
 
@@ -72,7 +78,8 @@ export class WerewolfWorld extends SocialWorldBase {
         pendingNightTargets: Object.fromEntries(this.wolfTargets),
         history: this.history,
         winners: this.winners,
-        outcome: this.outcome
+        outcome: this.outcome,
+        ...(this.discussion ? { discussion: this.discussion.state() } : {})
       }
     });
   }
@@ -249,23 +256,29 @@ export class WerewolfWorld extends SocialWorldBase {
     if (this.status !== "running") return null;
     const aliveIds = [...this.alive];
     if (this.phase === "day-discussion") {
+      // A discussion is not "everyone speaks once": the director opens with a
+      // full round, then keeps activating whoever has response pressure until
+      // the conversation naturally runs out of steam.
+      if (!this.discussion) this.discussion = this.createDiscussion();
+      const actors = this.discussion.nextWave();
+      if (actors.length === 0) {
+        this.discussion = null;
+        this.phase = "day-vote";
+        this.emitUpdate();
+        return this.voteActivation();
+      }
+      const wave = this.discussion.waveNumber;
       return {
-        id: `ww:${this.day}:discussion`,
-        label: `第 ${this.day} 天讨论`,
-        actorIds: aliveIds,
+        id: `ww:${this.day}:discussion:${wave}`,
+        label: wave === 1 ? `第 ${this.day} 天讨论` : `第 ${this.day} 天讨论 · 回应第 ${wave - 1} 轮`,
+        actorIds: actors,
         mode: "sequential",
-        instructionFor: () => "Speak once to the living group. Advance your hidden objective through truthful claims, selective disclosure, questioning, coalition building, or deception. Do not cast a vote yet."
+        instructionFor: (actorId) => wave === 1
+          ? "Opening round of the day. Share your read of the situation: what you observed, who you trust or suspect, what you want to know. Ask questions, test others, or stay reserved — but do not cast a vote yet."
+          : "The discussion is live and people have reacted. Respond to what was actually said: answer questions directed at you, defend yourself if accused, challenge weak claims, support allies, or expose contradictions. You may also stay silent if you have nothing new to add. Do not cast a vote yet."
       };
     }
-    if (this.phase === "day-vote") {
-      return {
-        id: `ww:${this.day}:vote`,
-        label: `第 ${this.day} 天投票`,
-        actorIds: aliveIds,
-        mode: "parallel",
-        instructionFor: () => "The discussion is closed. You must call cast_day_vote exactly once against a living participant. Consider not only hidden roles but how every faction benefits from being suspected or eliminated."
-      };
-    }
+    if (this.phase === "day-vote") return this.voteActivation();
     const wolves = this.wolvesAlive();
     const seers = [...this.alive].filter((id) => this.roles.get(id) === "seer");
     return {
@@ -279,10 +292,21 @@ export class WerewolfWorld extends SocialWorldBase {
     };
   }
 
+  private voteActivation(): WorldActivation {
+    return {
+      id: `ww:${this.day}:vote`,
+      label: `第 ${this.day} 天投票`,
+      actorIds: [...this.alive],
+      mode: "parallel",
+      instructionFor: () => "The discussion is closed. You must call cast_day_vote exactly once against a living participant. Consider not only hidden roles but how every faction benefits from being suspected or eliminated."
+    };
+  }
+
   completeActivation(activation: WorldActivation): ActivationCompletion {
-    if (activation.id.endsWith(":discussion")) {
-      this.phase = "day-vote";
-      this.emitUpdate();
+    if (activation.id.includes(":discussion")) {
+      // Close the wave: pressure decays, then the next activation() decides
+      // whether anyone still has a reason to speak.
+      this.discussion?.endWave();
       return { completed: true, missingActorIds: [] };
     }
     if (activation.id.endsWith(":vote")) {
@@ -325,7 +349,49 @@ export class WerewolfWorld extends SocialWorldBase {
         recipientIds: [...this.alive].filter((id) => id !== input.senderId && this.roles.get(id) === "wolf")
       };
     }
-    return super.sendMessage(input);
+    const message = await super.sendMessage(input);
+    if (message.channel === "public" && this.phase === "day-discussion" && this.discussion) {
+      this.discussion.onMessage({
+        senderId: message.senderId,
+        text: message.text,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {})
+      });
+      this.detectSocialActs(message);
+    }
+    return message;
+  }
+
+  /**
+   * Read public speech for its social meaning: who was accused, who was
+   * defended. These become appraisal events so the target's emotions and
+   * relationships react — an accusation is not just a line of text.
+   */
+  private detectSocialActs(message: SocialMessage): void {
+    for (const id of this.alive) {
+      if (id === message.senderId) continue;
+      const name = this.profiles.get(id)?.displayName ?? id;
+      const atName = message.text.indexOf(name);
+      const atId = message.text.indexOf(id);
+      if (atName === -1 && atId === -1) continue;
+      const at = atName !== -1 ? atName : atId;
+      const window = message.text.slice(Math.max(0, at - 16), at + 40);
+      const snippet = message.text.slice(0, 120);
+      if (ACCUSATION_LEXICON.test(window)) {
+        this.pushEvent(id, {
+          type: "accused",
+          actorId: message.senderId,
+          targetId: id,
+          detail: `Day ${this.day} discussion: ${message.senderName} accused you in public — "${snippet}"`
+        });
+      } else if (DEFENSE_LEXICON.test(window)) {
+        this.pushEvent(id, {
+          type: "defended",
+          actorId: message.senderId,
+          targetId: id,
+          detail: `Day ${this.day} discussion: ${message.senderName} stood up for you in public — "${snippet}"`
+        });
+      }
+    }
   }
 
   protected currentTurn(): number {
@@ -404,6 +470,60 @@ export class WerewolfWorld extends SocialWorldBase {
       : "The vote tied. Nobody was eliminated.";
     for (const id of this.profiles.keys()) this.lastExperiences.set(id, `Day ${this.day} vote: ${voteText} Votes: ${[...this.votes].map(([voter, target]) => `${voter}->${target}`).join(", ")}.`);
     this.addLog(voteText, this.day);
+
+    // Appraisal events: every vote is a social act, every elimination a loss.
+    for (const [voterId, targetId] of this.votes) {
+      const voterName = this.profiles.get(voterId)?.displayName ?? voterId;
+      const targetName = this.profiles.get(targetId)?.displayName ?? targetId;
+      this.pushEvent(voterId, {
+        type: "vote-cast",
+        actorId: voterId,
+        targetId,
+        detail: `Day ${this.day}: you voted to eliminate ${targetName}.`
+      });
+      this.pushEvent(targetId, {
+        type: "vote-against",
+        actorId: voterId,
+        targetId,
+        detail: `Day ${this.day} vote: ${voterName} voted against you.`
+      });
+      for (const [otherVoter, otherTarget] of this.votes) {
+        if (otherVoter !== voterId && otherTarget === targetId) {
+          const allyName = this.profiles.get(otherVoter)?.displayName ?? otherVoter;
+          this.pushEvent(voterId, {
+            type: "voted-with",
+            actorId: otherVoter,
+            targetId,
+            detail: `Day ${this.day} vote: ${allyName} voted for the same target as you.`
+          });
+        }
+      }
+    }
+    if (eliminatedId) {
+      const satisfied = eliminatedRole === "jester";
+      this.pushEvent(eliminatedId, {
+        type: "eliminated",
+        targetId: eliminatedId,
+        facts: { by: "vote", satisfied },
+        detail: satisfied
+          ? `Day ${this.day}: you were eliminated by the village vote — exactly as you planned, and the crowd finally saw the joke.`
+          : `Day ${this.day}: you were eliminated by the village vote and revealed as ${roleLabel(eliminatedRole)}.`
+      });
+      for (const id of this.profiles.keys()) {
+        if (id === eliminatedId) continue;
+        this.pushEvent(id, {
+          type: "eliminated-other",
+          targetId: eliminatedId,
+          facts: {
+            role: roleLabel(eliminatedRole),
+            iVoted: this.votes.get(id) === eliminatedId,
+            ally: this.isVillageFaction(this.roles.get(id)) && eliminatedRole !== "jester" && eliminatedRole !== "wolf"
+          },
+          detail: `Day ${this.day}: ${this.profiles.get(eliminatedId)?.displayName ?? eliminatedId} was eliminated by vote and revealed as ${roleLabel(eliminatedRole)}${this.votes.get(id) === eliminatedId ? " — you voted for them." : ""}`
+        });
+      }
+    }
+
     this.votes.clear();
     if (eliminatedRole === "jester") {
       this.endGame([eliminatedId!], "小丑被白天投票出局，第三阵营获胜。");
@@ -439,6 +559,47 @@ export class WerewolfWorld extends SocialWorldBase {
       this.lastExperiences.set(id, `Night ${this.day}: ${nightText}${privateResult}`);
     }
     this.addLog(nightText, this.day);
+
+    if (targetId) {
+      this.pushEvent(targetId, {
+        type: "eliminated",
+        targetId,
+        facts: { by: "night" },
+        detail: `Night ${this.day}: the wolves took you in the dark. You were revealed as ${roleLabel(this.roles.get(targetId))}.`
+      });
+      for (const id of this.profiles.keys()) {
+        if (id === targetId) continue;
+        if (this.roles.get(id) === "wolf") {
+          this.pushEvent(id, {
+            type: "night-kill",
+            targetId,
+            facts: { role: roleLabel(this.roles.get(targetId)) },
+            detail: `Night ${this.day}: the pack moved as one and eliminated ${this.profiles.get(targetId)?.displayName ?? targetId} (${roleLabel(this.roles.get(targetId))}).`
+          });
+        } else {
+          this.pushEvent(id, {
+            type: "eliminated-other",
+            targetId,
+            facts: {
+              role: roleLabel(this.roles.get(targetId)),
+              iVoted: false,
+              ally: this.isVillageFaction(this.roles.get(id)) && this.isVillageFaction(this.roles.get(targetId))
+            },
+            detail: `Night ${this.day}: ${this.profiles.get(targetId)?.displayName ?? targetId} was eliminated by the wolves and revealed as ${roleLabel(this.roles.get(targetId))}.`
+          });
+        }
+      }
+    }
+    for (const [seerId, target] of this.seerTargets) {
+      this.pushEvent(seerId, {
+        type: "investigation",
+        actorId: seerId,
+        targetId: target,
+        facts: { role: roleLabel(this.roles.get(target)) },
+        detail: `Night ${this.day}: your investigation shows ${this.profiles.get(target)?.displayName ?? target} is ${roleLabel(this.roles.get(target))}.`
+      });
+    }
+
     this.wolfTargets.clear();
     this.seerTargets.clear();
     if (this.wolvesAlive().length === 0) {
@@ -455,6 +616,7 @@ export class WerewolfWorld extends SocialWorldBase {
     }
     this.day += 1;
     this.phase = "day-discussion";
+    this.discussion = this.createDiscussion();
     this.emitUpdate();
   }
 
@@ -462,7 +624,33 @@ export class WerewolfWorld extends SocialWorldBase {
     this.winners = winners;
     this.outcome = outcome;
     this.addLog(outcome, this.day);
+    for (const id of this.profiles.keys()) {
+      const won = winners.includes(id);
+      this.pushEvent(id, {
+        type: won ? "win" : "lose",
+        targetId: id,
+        detail: won ? `Game over: your faction won — ${outcome}` : `Game over: your faction lost — ${outcome}`
+      });
+    }
     this.finish();
+  }
+
+  private createDiscussion(): DiscussionDirector {
+    const aliveIds = [...this.alive];
+    return new DiscussionDirector({
+      actorIds: aliveIds,
+      displayName: (id) => this.profiles.get(id)?.displayName ?? id,
+      talkativeness: (id) => this.profiles.get(id)?.temperament?.extraversion ?? 0.5,
+      dominance: (id) => {
+        const t = this.profiles.get(id)?.temperament;
+        return t ? 0.5 + (t.extraversion - 0.5) * 0.6 + (t.conscientiousness - 0.5) * 0.3 : 0.5;
+      },
+      sensitivity: (id) => this.profiles.get(id)?.temperament?.neuroticism ?? 0.5
+    });
+  }
+
+  private isVillageFaction(role: Role | undefined): boolean {
+    return role === "seer" || role === "villager";
   }
 
   private wolvesAlive(): string[] {

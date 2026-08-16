@@ -19,22 +19,23 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils";
 import type { AgentStatus, ScenarioId, SocialChannel } from "@/society/contracts";
 
+/** Soft duotone avatar fills — muted enough for a light stage, distinct enough to tell characters apart. */
 const avatarPalette = [
-  "from-zinc-200 to-zinc-400 text-zinc-900",
-  "from-blue-300 to-indigo-400 text-blue-950",
-  "from-amber-200 to-orange-300 text-amber-950",
-  "from-emerald-300 to-teal-400 text-emerald-950",
-  "from-violet-300 to-purple-400 text-violet-950",
-  "from-rose-300 to-pink-400 text-rose-950",
-  "from-cyan-300 to-sky-400 text-cyan-950",
-  "from-lime-300 to-green-400 text-lime-950"
+  "from-zinc-100 to-zinc-300 text-zinc-800",
+  "from-sky-100 to-indigo-200 text-indigo-900",
+  "from-amber-100 to-orange-200 text-orange-900",
+  "from-emerald-100 to-teal-200 text-teal-900",
+  "from-violet-100 to-purple-200 text-purple-900",
+  "from-rose-100 to-pink-200 text-rose-900",
+  "from-cyan-100 to-sky-200 text-cyan-900",
+  "from-lime-100 to-green-200 text-green-900"
 ];
 
 export function AgentAvatar({ name, index = 0, size = "md" }: { name: string; index?: number; size?: "sm" | "md" | "lg" | "xl" }): ReactNode {
   const sizes = { sm: "size-6 text-[10px]", md: "size-8 text-xs", lg: "size-10 text-sm", xl: "size-14 text-base" };
   return (
-    <Avatar className={cn("rounded-xl", sizes[size])}>
-      <AvatarFallback className={cn("rounded-xl bg-gradient-to-br font-semibold", avatarPalette[index % avatarPalette.length])}>
+    <Avatar className={cn("rounded-lg", sizes[size])}>
+      <AvatarFallback className={cn("rounded-lg bg-gradient-to-br font-semibold", avatarPalette[index % avatarPalette.length])}>
         {name.trim().slice(0, 2)}
       </AvatarFallback>
     </Avatar>
@@ -50,16 +51,16 @@ export function AgentPresence({ name, index = 0, size = "md", status, className 
   className?: string;
 }): ReactNode {
   const tone = status === "speaking"
-    ? "ring-emerald-400/80"
+    ? "ring-emerald-500/70"
     : status === "thinking"
-      ? "ring-sky-400/60"
+      ? "ring-sky-500/50"
       : status === "acting"
-        ? "ring-amber-400/60"
+        ? "ring-amber-500/60"
         : "ring-transparent";
   const live = status === "speaking" || status === "thinking" || status === "acting";
   return (
-    <span className={cn("relative inline-flex rounded-xl", live && "on-air", className)}>
-      <span className={cn("inline-flex rounded-xl p-px ring-2 ring-offset-2 ring-offset-background transition-all", tone)}>
+    <span className={cn("relative inline-flex rounded-lg", live && "on-air", className)}>
+      <span className={cn("inline-flex rounded-lg p-px ring-2 ring-offset-2 ring-offset-background transition-all", tone)}>
         <AgentAvatar name={name} index={index} size={size} />
       </span>
     </span>
@@ -71,7 +72,7 @@ export function SpeechBars({ className }: { className?: string }): ReactNode {
   return (
     <span className={cn("flex h-3 items-end gap-[3px]", className)} aria-hidden>
       {[0, 1, 2].map((bar) => (
-        <span key={bar} className="wave-bar w-[3px] rounded-full bg-emerald-400" style={{ height: `${[8, 12, 6][bar]}px`, animationDelay: `${bar * 140}ms` }} />
+        <span key={bar} className="wave-bar w-[3px] rounded-full bg-emerald-500" style={{ height: `${[8, 12, 6][bar]}px`, animationDelay: `${bar * 140}ms` }} />
       ))}
     </span>
   );
@@ -80,17 +81,17 @@ export function SpeechBars({ className }: { className?: string }): ReactNode {
 export function StatusDot({ status, className }: { status: AgentStatus | "running" | "paused" | "finished" | "error"; className?: string }): ReactNode {
   const live = status === "running" || status === "thinking" || status === "acting" || status === "speaking";
   const tone = status === "error"
-    ? "bg-red-400"
+    ? "bg-red-500"
     : status === "paused" || status === "lobby"
-      ? "bg-amber-400"
+      ? "bg-amber-500"
       : status === "finished"
-        ? "bg-zinc-500"
+        ? "bg-zinc-400"
         : live
-          ? "bg-emerald-400"
-          : "bg-zinc-600";
+          ? "bg-emerald-500"
+          : "bg-zinc-300";
   return (
     <span className={cn("relative inline-flex size-1.5 rounded-full", tone, className)}>
-      {live ? <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/60" /> : null}
+      {live ? <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-500/50" /> : null}
     </span>
   );
 }
@@ -127,9 +128,9 @@ export function ScenarioIcon({ id, className }: { id: ScenarioId; className?: st
 
 export function ChannelBadge({ channel }: { channel: SocialChannel }): ReactNode {
   const config: Record<SocialChannel, { label: string; className: string }> = {
-    public: { label: "公开", className: "border-white/10 bg-white/[0.04] text-zinc-400" },
-    private: { label: "私聊", className: "border-violet-400/20 bg-violet-400/10 text-violet-300" },
-    team: { label: "阵营", className: "border-rose-400/20 bg-rose-400/10 text-rose-300" }
+    public: { label: "公开", className: "border-zinc-200 bg-zinc-50 text-zinc-500" },
+    private: { label: "私聊", className: "border-violet-200 bg-violet-50 text-violet-600" },
+    team: { label: "阵营", className: "border-rose-200 bg-rose-50 text-rose-600" }
   };
   const entry = config[channel];
   return (
@@ -141,9 +142,9 @@ export function ChannelBadge({ channel }: { channel: SocialChannel }): ReactNode
 
 /** Channel → surface styling so public/private/team reads at a glance. */
 export const channelSurface: Record<SocialChannel, string> = {
-  public: "border-white/[0.06] bg-white/[0.025]",
-  private: "border-violet-400/20 bg-violet-400/[0.05]",
-  team: "border-rose-400/25 bg-rose-400/[0.06]"
+  public: "border-zinc-200 bg-white",
+  private: "border-violet-200 bg-violet-50/60",
+  team: "border-rose-200 bg-rose-50/60"
 };
 
 export function ModelLabel({ model, className }: { model: string; className?: string }): ReactNode {
@@ -151,7 +152,7 @@ export function ModelLabel({ model, className }: { model: string; className?: st
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span data-model className={cn("truncate font-mono text-[10px] text-zinc-500", className)}>{label}</span>
+        <span data-model className={cn("truncate font-mono text-[10px] text-zinc-400", className)}>{label}</span>
       </TooltipTrigger>
       <TooltipContent>{model}</TooltipContent>
     </Tooltip>
@@ -202,7 +203,7 @@ export function eventLabel(name: string): string {
 
 export function SparkleDivider({ children }: { children?: ReactNode }): ReactNode {
   return (
-    <div className="flex items-center gap-2 text-zinc-600">
+    <div className="flex items-center gap-2 text-zinc-400">
       <Sparkles className="size-3" />
       <span className="text-[10px] font-medium uppercase tracking-[0.18em]">{children}</span>
     </div>
