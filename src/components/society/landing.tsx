@@ -16,9 +16,10 @@ interface LandingProps {
   onStart: (scenarioId: string) => void;
   onOpenRoom: (roomId: string) => void;
   onOpenSettings: () => void;
+  onOpenAbout: () => void;
 }
 
-export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenSettings }: LandingProps): ReactNode {
+export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenSettings, onOpenAbout }: LandingProps): ReactNode {
   const ticker = scenarios.map((scenario) => scenario.name).join(" · ");
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#050505]">
@@ -35,6 +36,9 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenS
           <span className="text-sm font-semibold tracking-tight text-zinc-100">Society</span>
         </div>
         <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" className="hidden rounded-full px-4 text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200 sm:inline-flex" onClick={onOpenAbout}>
+            关于
+          </Button>
           {rooms.length ? (
             <Badge variant="outline" className="gap-1.5 rounded-full border-white/10 bg-white/[0.03] px-3 py-1 font-normal text-zinc-400">
               <span className="live-pulse size-1.5 rounded-full bg-emerald-400" />
@@ -150,7 +154,11 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenS
       <footer className="border-t border-white/[0.06] py-10">
         <div className="mx-auto flex w-full max-w-7xl flex-col items-center justify-between gap-3 px-6 text-xs text-zinc-600 sm:flex-row">
           <span>Society · Live Multi-Agent Social Worlds</span>
-          <span className="nums font-mono">{models.length} models · {scenarios.length} scenarios · OpenAI Agents SDK</span>
+          <span className="flex items-center gap-4">
+            <button onClick={onOpenAbout} className="transition-colors hover:text-zinc-300">关于</button>
+            <span className="text-zinc-800">·</span>
+            <span className="nums font-mono">{models.length} models · {scenarios.length} scenarios · OpenAI Agents SDK</span>
+          </span>
         </div>
       </footer>
     </div>

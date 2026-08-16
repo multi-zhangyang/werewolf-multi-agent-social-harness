@@ -241,6 +241,11 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Screenshot mode: strip provider/model identifiers from published shots. */
+.shot-mode [data-model] {
+  display: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     scroll-behavior: auto !important;

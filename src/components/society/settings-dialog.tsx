@@ -140,6 +140,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
             <section>
               <p className="mb-2.5 text-[13px] font-medium text-zinc-300">提供商地址（Base URL）</p>
               <Input
+                data-model
                 value={baseURL}
                 onChange={(event) => setBaseURL(event.target.value)}
                 placeholder="https://api.example.com/v1"
@@ -151,6 +152,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
             <section>
               <p className="mb-2.5 text-[13px] font-medium text-zinc-300">API 密钥</p>
               <Input
+                data-model
                 type="password"
                 value={apiKey}
                 onChange={(event) => setApiKey(event.target.value)}
@@ -170,7 +172,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                 {models.length === 0 ? (
                   <p className="text-xs text-zinc-600">尚未配置模型,请在下方添加。</p>
                 ) : models.map((model) => (
-                  <Badge key={model} variant="outline" className="gap-1.5 rounded-full border-white/10 bg-white/[0.03] py-1.5 pl-3 pr-2 font-mono text-[11px] font-normal text-zinc-300">
+                  <Badge data-model key={model} variant="outline" className="gap-1.5 rounded-full border-white/10 bg-white/[0.03] py-1.5 pl-3 pr-2 font-mono text-[11px] font-normal text-zinc-300">
                     {model}
                     <button
                       type="button"
@@ -209,12 +211,12 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                 </p>
                 {testResult.ok && testResult.modelIds?.length ? (
                   <>
-                    <div className="mt-3 flex flex-wrap gap-1.5">
+                    <div data-model className="mt-3 flex flex-wrap gap-1.5">
                       {testResult.modelIds.slice(0, 12).map((id) => (
                         <span key={id} className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-[10px] text-zinc-400">{id}</span>
                       ))}
                     </div>
-                    <Button variant="ghost" size="sm" className="mt-3 h-8 rounded-full text-xs text-zinc-300 hover:bg-white/[0.06] hover:text-zinc-100" onClick={() => setModels((current) => [...new Set([...current, ...(testResult.modelIds ?? [])])].slice(0, 16))}>
+                    <Button data-model variant="ghost" size="sm" className="mt-3 h-8 rounded-full text-xs text-zinc-300 hover:bg-white/[0.06] hover:text-zinc-100" onClick={() => setModels((current) => [...new Set([...current, ...(testResult.modelIds ?? [])])].slice(0, 16))}>
                       <Plus className="size-3" />
                       把发现的前 {Math.min(12, testResult.modelIds.length)} 个模型加入清单
                     </Button>

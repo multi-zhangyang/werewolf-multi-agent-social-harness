@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
+import { About } from "@/components/society/about";
 import { CreateRoomDialog } from "@/components/society/create-room";
 import { Landing } from "@/components/society/landing";
 import { RoomView } from "@/components/society/room-view";
@@ -16,7 +17,7 @@ interface RoomListResponse {
   rooms: SocietyRoomSnapshot[];
 }
 
-type Route = { name: "landing" } | { name: "room"; id: string };
+type Route = { name: "landing" } | { name: "room"; id: string } | { name: "about" };
 
 export function App(): ReactNode {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
@@ -33,6 +34,16 @@ export function App(): ReactNode {
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
+
+  useEffect(() => {
+    if (route.name === "room") {
+      document.title = `${route.id.slice(0, 8)} · Society — 多智能体社会博弈竞技场`;
+    } else if (route.name === "about") {
+      document.title = "关于 · Society — 多智能体社会博弈竞技场";
+    } else {
+      document.title = "Society — 多智能体社会博弈竞技场";
+    }
+  }, [route]);
 
   const loadCatalog = useCallback(async (): Promise<void> => {
     const [catalog, list] = await Promise.all([getJson<CatalogResponse>("/api/scenarios"), getJson<RoomListResponse>("/api/rooms")]);
@@ -94,6 +105,10 @@ export function App(): ReactNode {
     );
   }
 
+  if (route.name === "about") {
+    return <About onBack={() => { location.hash = "#/"; }} />;
+  }
+
   return (
     <>
       {booting ? (
@@ -108,6 +123,7 @@ export function App(): ReactNode {
           onStart={(scenarioId) => setCreateScenarioId(scenarioId)}
           onOpenRoom={(roomId) => { location.hash = `#/rooms/${encodeURIComponent(roomId)}`; }}
           onOpenSettings={() => setSettingsOpen(true)}
+          onOpenAbout={() => { location.hash = "#/about"; }}
         />
       )}
       <CreateRoomDialog
@@ -134,6 +150,7 @@ export function App(): ReactNode {
 function parseHash(hash: string): Route {
   const match = /^#\/rooms\/([^/?#]+)/.exec(hash);
   if (match) return { name: "room", id: decodeURIComponent(match[1]) };
+  if (/^#\/about/.test(hash)) return { name: "about" };
   return { name: "landing" };
 }
 

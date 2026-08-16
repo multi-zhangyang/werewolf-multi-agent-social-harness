@@ -151,7 +151,7 @@ export function ModelLabel({ model, className }: { model: string; className?: st
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className={cn("truncate font-mono text-[10px] text-zinc-500", className)}>{label}</span>
+        <span data-model className={cn("truncate font-mono text-[10px] text-zinc-500", className)}>{label}</span>
       </TooltipTrigger>
       <TooltipContent>{model}</TooltipContent>
     </Tooltip>

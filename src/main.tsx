@@ -5,6 +5,12 @@ import { App } from "./App";
 import { TooltipProvider } from "./components/ui/tooltip";
 import "./styles.css";
 
+// Screenshot mode: hide provider/model identifiers so published screenshots
+// never disclose the operator's configured models or endpoint.
+if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("shot")) {
+  document.documentElement.classList.add("shot-mode");
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <TooltipProvider delayDuration={250}>

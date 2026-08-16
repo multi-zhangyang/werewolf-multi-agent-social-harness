@@ -120,6 +120,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                     return (
                       <button
                         key={model.id}
+                        data-model
                         onClick={() => toggleModel(model.id)}
                         className={cn(
                           "flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors",
