@@ -103,7 +103,8 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
         profiles,
         rounds: input.rounds,
         apiKey: getProviderSettings().apiKey || undefined,
-        baseURL: getProviderSettings().baseURL || undefined
+        baseURL: getProviderSettings().baseURL || undefined,
+        season: context.season
       });
       void room.start();
       response.status(202).json(room.creationResult());

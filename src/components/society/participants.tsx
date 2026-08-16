@@ -50,6 +50,9 @@ export function ParticipantsRail({ participants, humanActorId }: { participants:
                   {isHuman ? (
                     <span className="rounded bg-zinc-900 px-1.5 py-px text-[9px] font-bold text-white">你</span>
                   ) : null}
+                  {participant.mind?.memories.some((memory) => memory.tags.includes("season")) ? (
+                    <span className="rounded border border-zinc-300 bg-white px-1.5 py-px text-[9px] font-medium text-zinc-500">老面孔</span>
+                  ) : null}
                   {participant.role ? (
                     <span className="rounded border border-zinc-200 bg-zinc-50 px-1.5 py-px text-[9px] text-zinc-500">{participant.role}</span>
                   ) : null}

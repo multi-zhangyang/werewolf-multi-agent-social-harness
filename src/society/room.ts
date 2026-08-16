@@ -6,10 +6,12 @@ import type {
   AgentRuntimeEvent,
   AgentStatus,
   AgentTurnResult,
+  CharacterDossier,
   ParticipantController,
   PlayerActionSpec,
   RoomStatus,
   ScenarioId,
+  SeasonStore,
   SocialWorld,
   WorldActionCommit,
   WorldActivation,
@@ -26,6 +28,9 @@ export interface SocietyRoomCreateOptions {
   provider?: OpenAIProviderType;
   apiKey?: string;
   baseURL?: string;
+  /** Cross-game memory: dossiers are loaded for returning characters and
+   *  saved when the room finishes. */
+  season?: SeasonStore;
 }
 
 export interface SocietyRoomEventEnvelope {
@@ -120,6 +125,7 @@ export class SocietyRoom {
   private readonly provider?: OpenAIProviderType;
   private readonly apiKey?: string;
   private readonly baseURL?: string;
+  private readonly season?: SeasonStore;
   private readonly turnTimeoutMs: number;
   private readonly humanTurnTimeoutMs: number;
   private readonly humanToken?: string;
@@ -139,6 +145,7 @@ export class SocietyRoom {
     this.provider = options.provider;
     this.apiKey = options.apiKey;
     this.baseURL = options.baseURL;
+    this.season = options.season;
     this.turnTimeoutMs = positiveIntegerFromEnv("SOCIETY_AGENT_TURN_TIMEOUT_MS", 300_000);
     this.humanTurnTimeoutMs = positiveIntegerFromEnv("SOCIETY_HUMAN_TURN_TIMEOUT_MS", 1_800_000);
     const humans = options.profiles.filter((profile) => profile.controller === "human");
@@ -283,6 +290,28 @@ export class SocietyRoom {
     }
   }
 
+  /** Distill every character's mind into the season when the room ends. */
+  private saveSeasonDossiers(): void {
+    if (!this.season) return;
+    const details = this.world.snapshot().details ?? {};
+    const winners = Array.isArray(details.winners) ? (details.winners as string[]) : [];
+    const roles = (details.roles ?? {}) as Record<string, string | undefined>;
+    for (const [actorId, runtime] of this.agents) {
+      const card = this.cards.get(actorId);
+      if (!card) continue;
+      const role = roles[actorId] ? String(roles[actorId]) : undefined;
+      // Some worlds (negotiation games) do not declare winners; only record an
+      // outcome when the world actually settled one.
+      const outcome = winners.length > 0 ? (winners.includes(actorId) ? "win" : "lose") : undefined;
+      const previous = this.season.get(card.profile.displayName);
+      const current = runtime.exportDossier(role, outcome);
+      this.season.save({
+        ...current,
+        games: [...(previous?.games ?? []), ...current.games].slice(-20)
+      });
+    }
+  }
+
   private async run(): Promise<void> {
     const provider = this.provider ?? new OpenAIProvider({
       apiKey: this.apiKey ?? apiKeyFromEnv(),
@@ -300,6 +329,7 @@ export class SocietyRoom {
       if (!activation) {
         if (this.world.snapshot().status === "finished") {
           this.status = "finished";
+          this.saveSeasonDossiers();
           this.emit({ type: "room.status", roomId: this.id, status: "finished", at: now() });
         }
         return;
@@ -325,12 +355,14 @@ export class SocietyRoom {
   private createAgents(provider: OpenAIProviderType): void {
     for (const card of this.cards.values()) {
       if (card.profile.controller === "human" || this.agents.has(card.profile.id)) continue;
+      const dossier = this.season?.get(card.profile.displayName);
       const runtime = createSocietyAgent({
         profile: card.profile,
         roomId: this.id,
         world: this.world,
         provider,
-        emit: (event) => this.handleAgentEvent(event)
+        emit: (event) => this.handleAgentEvent(event),
+        ...(dossier ? { dossier } : {})
       });
       this.agents.set(card.profile.id, runtime);
     }
@@ -349,11 +381,17 @@ export class SocietyRoom {
       const signal = AbortSignal.any([this.abortController.signal, AbortSignal.timeout(this.turnTimeoutMs)]);
       const instruction = overrideInstruction ?? activation.instructionFor(actorId);
       const isDiscussion = activation.id.includes(":discussion");
+      // Speaking waves are light by design: a few tool turns, then yield the
+      // floor. Binding domain actions get the full budget.
+      const maxTurns = isDiscussion
+        ? positiveIntegerFromEnv("SOCIETY_DISCUSSION_MAX_TURNS", 5)
+        : undefined;
       let result: AgentTurnResult;
       try {
         result = await runtime.runTurn(`${activation.label}\n${instruction}`, {
           signal,
-          turn: this.world.snapshot().turn
+          turn: this.world.snapshot().turn,
+          ...(maxTurns ? { maxTurns } : {})
         });
       } catch (error) {
         // Speaking is optional: an agent that fails to produce a coherent turn

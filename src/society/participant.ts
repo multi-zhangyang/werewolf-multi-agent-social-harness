@@ -28,6 +28,7 @@ import type {
   AgentRelationship,
   AgentRuntimeEvent,
   AgentTurnResult,
+  CharacterDossier,
   SocialEvent,
   SocietyAgentContext,
   SocietyAgentRuntime
@@ -56,6 +57,8 @@ export interface SocietyAgentOptions {
   apiKey?: string;
   baseURL?: string;
   maxTurns?: number;
+  /** Cross-game history for this character, if the season remembers them. */
+  dossier?: CharacterDossier;
 }
 
 export class OpenAISocietyAgent implements SocietyAgentRuntime {
@@ -75,7 +78,7 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
 
   constructor(options: SocietyAgentOptions) {
     this.profile = structuredClone(options.profile);
-    this.mind = initialMind(options.profile, options.world.snapshot().agents.map((agent) => agent.id));
+    this.mind = initialMind(options.profile, options.world.snapshot().agents.map((agent) => agent.id), options.dossier);
     this.session = new MemorySession({ sessionId: `${options.roomId}:${options.profile.id}` });
     this.context = {
       actorId: options.profile.id,
@@ -154,7 +157,7 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
     });
   }
 
-  async runTurn(input: string, options: { signal: AbortSignal; turn: number }): Promise<AgentTurnResult> {
+  async runTurn(input: string, options: { signal: AbortSignal; turn: number; maxTurns?: number }): Promise<AgentTurnResult> {
     this.mind.mood = decayMood(this.mind.mood, options.turn);
     const observation = this.context.world.observe(this.profile.id);
     const recentMemories = await this.context.memory.recall(`${observation.phase} ${observation.situation}`, 6, this.mind.mood.pad);
@@ -177,7 +180,7 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
         context: this.context,
         session: this.session,
         stream: true,
-        maxTurns: this.maxTurns,
+        maxTurns: options.maxTurns ?? this.maxTurns,
         signal: options.signal
       });
       for await (const event of result) this.consumeEvent(event, toolCalls);
@@ -222,6 +225,35 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       finalOutput,
       toolCalls,
       usage: usageFromResult(result)
+    };
+  }
+
+  exportDossier(role?: string, outcome?: "win" | "lose"): CharacterDossier {
+    const strongest = this.mind.memories
+      .slice()
+      .sort((left, right) => right.salience - left.salience || right.turn - left.turn)
+      .slice(0, 12)
+      .map((entry) => ({ text: entry.text, salience: entry.salience, valence: entry.valence }));
+    return {
+      characterKey: this.profile.displayName,
+      games: outcome
+        ? [{ scenarioId: this.context.world.scenario.id, ...(role ? { role } : {}), outcome, at: new Date().toISOString() }]
+        : [],
+      relationships: this.mind.relationships.map((entry) => ({
+        agentId: entry.agentId,
+        trust: entry.trust,
+        affinity: entry.affinity,
+        respect: entry.respect,
+        tension: entry.tension,
+        note: entry.note
+      })),
+      beliefs: this.mind.beliefs.slice(0, 8).map((entry) => ({
+        subjectId: entry.subjectId,
+        proposition: entry.proposition,
+        confidence: entry.confidence
+      })),
+      memories: strongest,
+      updatedAt: new Date().toISOString()
     };
   }
 
@@ -343,19 +375,46 @@ export function baseUrlFromEnv(env: NodeJS.ProcessEnv = process.env): string | u
   return value ? value.replace(/\/(chat\/completions|responses)\/?$/i, "").replace(/\/$/, "") : undefined;
 }
 
-function initialMind(profile: AgentProfile, participantIds: string[]): AgentMindState {
+function initialMind(profile: AgentProfile, participantIds: string[], dossier?: CharacterDossier): AgentMindState {
   const relationships = participantIds
     .filter((id) => id !== profile.id)
-    .map<AgentRelationship>((agentId) => ({
-      agentId,
-      trust: 0.5,
-      affinity: 0.5,
-      respect: 0.5,
-      tension: 0.15,
-      familiarity: 0.05,
-      updatedAtTurn: 0,
-      note: "No shared history"
-    }));
+    .map<AgentRelationship>((agentId) => {
+      // The season remembers this character's history with the others: trust,
+      // affinity, respect and tension carry over instead of resetting to
+      // neutral. A betrayal last game starts this game as distrust.
+      const past = dossier?.relationships.find((entry) => entry.agentId === agentId);
+      if (!past) {
+        return {
+          agentId,
+          trust: 0.5,
+          affinity: 0.5,
+          respect: 0.5,
+          tension: 0.15,
+          familiarity: 0.05,
+          updatedAtTurn: 0,
+          note: "No shared history"
+        };
+      }
+      return {
+        agentId,
+        trust: clamp(past.trust),
+        affinity: clamp(past.affinity),
+        respect: clamp(past.respect),
+        tension: clamp(past.tension),
+        familiarity: Math.max(0.35, Math.min(1, past.familiarity ?? 0.5)),
+        updatedAtTurn: 0,
+        note: past.note || "Shared history from previous games"
+      };
+    });
+  const memories = (dossier?.memories ?? []).slice(0, 10).map<AgentMindState["memories"][number]>((entry, index) => ({
+    id: `season-${profile.id}-${index}`,
+    text: entry.text,
+    tags: ["season", "history"],
+    salience: entry.salience,
+    valence: entry.valence,
+    turn: -1,
+    createdAt: new Date().toISOString()
+  }));
   return {
     mood: initialMood(),
     attention: profile.goals.slice(0, 3),
@@ -366,9 +425,15 @@ function initialMind(profile: AgentProfile, participantIds: string[]): AgentMind
       progress: "not started",
       status: "active"
     })),
-    beliefs: [],
+    beliefs: (dossier?.beliefs ?? []).slice(0, 6).map((belief) => ({
+      subjectId: belief.subjectId,
+      proposition: belief.proposition,
+      confidence: clamp(belief.confidence),
+      updatedAtTurn: 0,
+      source: "previous games"
+    })),
     relationships,
-    memories: [],
+    memories,
     deliberations: []
   };
 }
@@ -406,6 +471,9 @@ function temperamentContext(profile: AgentProfile): string {
 
 function participantInstructions(context: SocietyAgentContext): string {
   const profile = context.world.snapshot().agents.find((agent) => agent.id === context.actorId);
+  const seasonHistory = (context.mind.memories.find((memory) => memory.tags.includes("season")))
+    ? `This is a continuing community: you have played with these people before, and the memories above include what happened in earlier games. Treat them as real history — but remember roles and rules differ per game; past roles do not prove this game's loyalties.`
+    : "";
   return [
     `You are ${profile?.displayName ?? context.actorId}, an autonomous participant in a continuing social world.`,
     `Identity: ${context.actorId}. Persona: ${context.profile.persona}`,
@@ -422,7 +490,8 @@ function participantInstructions(context: SocietyAgentContext): string {
     "After the required tool succeeds, stop with a brief confirmation. Never expose hidden reasoning or narrate an action that did not happen.",
     affectContext(context.mind.mood),
     `Attention: ${context.mind.attention.join("; ") || "未定"}.`,
-    `Values: ${context.profile.values.join("; ")}`
+    `Values: ${context.profile.values.join("; ")}`,
+    ...(seasonHistory ? [seasonHistory] : [])
   ].filter(Boolean).join("\n");
 }
 

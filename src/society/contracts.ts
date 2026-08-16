@@ -365,6 +365,41 @@ export interface SocialWorld {
   onUpdate(listener: (snapshot: WorldSnapshot) => void): () => void;
 }
 
+/**
+ * A character's cross-game dossier: what the season remembers about them
+ * after a game ends — the roles they played, who they trusted or resented,
+ * their strongest memories, and the reputation they earned.
+ */
+export interface CharacterDossier {
+  /** Stable character key (display name). */
+  characterKey: string;
+  games: Array<{
+    scenarioId: string;
+    role?: string;
+    outcome: "win" | "lose";
+    at: string;
+  }>;
+  relationships: Array<{
+    agentId: string;
+    trust: number;
+    affinity: number;
+    respect: number;
+    tension: number;
+    familiarity?: number;
+    note: string;
+  }>;
+  beliefs: Array<{ subjectId: string; proposition: string; confidence: number }>;
+  memories: Array<{ text: string; salience: number; valence: number }>;
+  updatedAt: string;
+}
+
+/** Cross-game memory: dossiers keyed by character, shared by a season. */
+export interface SeasonStore {
+  get(characterKey: string): CharacterDossier | undefined;
+  save(dossier: CharacterDossier): void;
+  list(): CharacterDossier[];
+}
+
 export interface AgentTurnResult {
   actorId: string;
   turn: number;
@@ -382,4 +417,6 @@ export interface SocietyAgentRuntime {
   rememberOutcome(text: string, turn: number): Promise<void>;
   /** Process world-appraisal events into emotion, relationship and memory. */
   appraise(events: SocialEvent[], turn: number): Promise<void>;
+  /** Distill this character's private mind into a season dossier. */
+  exportDossier(role?: string, outcome?: "win" | "lose"): CharacterDossier;
 }
