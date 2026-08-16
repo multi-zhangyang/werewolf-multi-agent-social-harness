@@ -30,8 +30,10 @@ async function main() {
       console.error(`[demo] unknown scenario: ${scenarioId}`);
       continue;
     }
+    // Every seat gets a model: round-robin through all configured models so a
+    // room can pit different models against each other.
     const modelCount = Math.min(meta.players, MODELS.length);
-    const models = Array.from({ length: modelCount }, (_, index) => MODELS[index]);
+    const models = Array.from({ length: modelCount }, (_, index) => MODELS[index % MODELS.length]);
     console.log(`[demo] starting ${scenarioId} (${models.join(", ")})`);
     const created = await postJson("/api/rooms", {
       scenarioId,
