@@ -384,7 +384,7 @@ export class SocietyRoom {
       // Speaking waves are light by design: a few tool turns, then yield the
       // floor. Binding domain actions get the full budget.
       const maxTurns = isDiscussion
-        ? positiveIntegerFromEnv("SOCIETY_DISCUSSION_MAX_TURNS", 5)
+        ? positiveIntegerFromEnv("SOCIETY_DISCUSSION_MAX_TURNS", 10)
         : undefined;
       let result: AgentTurnResult;
       try {
