@@ -47,6 +47,15 @@ by the character's Big Five profile. Salient events become memories with
 valence and salience, so a betrayal surfaces again later. Emotions are
 event-driven, never self-reported.
 
+## Suspicion boundary
+
+`src/society/suspicion.ts` tracks the room's public opinion climate. Every
+public accusation, vote and quest outcome raises the suspicion score of the
+people it concerns — this is public knowledge by construction, so it can be
+computed deterministically and injected into every agent's observation
+("the table is currently leaning against X") and rendered for observers as
+live suspicion bars and an accusation feed.
+
 ## Conversation boundary
 
 `src/society/conversation.ts` implements turn-taking as response pressure

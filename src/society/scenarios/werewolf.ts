@@ -16,6 +16,7 @@ import type {
 } from "../contracts";
 import { contextFromRunContext, SocialWorldBase } from "../world";
 import { DiscussionDirector } from "../conversation";
+import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, emitAction } from "./helpers";
 
 type Role = "wolf" | "seer" | "jester" | "villager";
@@ -44,6 +45,7 @@ export class WerewolfWorld extends SocialWorldBase {
   private readonly history: DayRecord[] = [];
   private readonly lastExperiences = new Map<string, string>();
   private discussion: DiscussionDirector | null = null;
+  private readonly suspicion = new SuspicionClimate();
   private winners: string[] = [];
   private outcome = "";
   private phase: Phase = "day-discussion";
@@ -79,7 +81,8 @@ export class WerewolfWorld extends SocialWorldBase {
         history: this.history,
         winners: this.winners,
         outcome: this.outcome,
-        ...(this.discussion ? { discussion: this.discussion.state() } : {})
+        ...(this.discussion ? { discussion: this.discussion.state() } : {}),
+        suspicion: this.suspicion.snapshot()
       }
     });
   }
@@ -96,7 +99,7 @@ export class WerewolfWorld extends SocialWorldBase {
       scenarioId: this.scenario.id,
       turn: this.day,
       phase: this.phase,
-      situation: situationFor(this.phase, role, this.alive.size, this.wolvesAlive().length),
+      situation: `${situationFor(this.phase, role, this.alive.size, this.wolvesAlive().length)}\nPublic suspicion climate: ${this.suspicion.climateText((id) => this.profiles.get(id)?.displayName ?? id)}`,
       privateContext: [
         `Your hidden role: ${role}.`,
         `Your objective: ${roleObjective(role)}.`,
@@ -377,6 +380,7 @@ export class WerewolfWorld extends SocialWorldBase {
       const window = message.text.slice(Math.max(0, at - 16), at + 40);
       const snippet = message.text.slice(0, 120);
       if (ACCUSATION_LEXICON.test(window)) {
+        this.suspicion.noteAccusation(this.day, message.senderId, id);
         this.pushEvent(id, {
           type: "accused",
           actorId: message.senderId,
@@ -524,6 +528,8 @@ export class WerewolfWorld extends SocialWorldBase {
       }
     }
 
+    for (const [voterId, targetId] of this.votes) this.suspicion.noteVote(this.day, voterId, targetId);
+    if (eliminatedId) this.suspicion.noteResolved(this.day, eliminatedId);
     this.votes.clear();
     if (eliminatedRole === "jester") {
       this.endGame([eliminatedId!], "小丑被白天投票出局，第三阵营获胜。");
@@ -615,6 +621,7 @@ export class WerewolfWorld extends SocialWorldBase {
       return;
     }
     this.day += 1;
+    this.suspicion.decay(0.75);
     this.phase = "day-discussion";
     this.discussion = this.createDiscussion();
     this.emitUpdate();

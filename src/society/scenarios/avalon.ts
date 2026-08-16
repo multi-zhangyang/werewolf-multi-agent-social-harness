@@ -15,6 +15,8 @@ import type {
   WorldSnapshot
 } from "../contracts";
 import { contextFromRunContext, SocialWorldBase } from "../world";
+import { DiscussionDirector } from "../conversation";
+import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, emitAction } from "./helpers";
 
 type Role = "merlin" | "servant" | "assassin" | "mordred";
@@ -32,6 +34,8 @@ interface QuestRecord {
 
 const TEAM_SIZES = [3, 4, 3, 4, 3];
 const MAX_REJECTIONS = 4;
+const ACCUSATION_LEXICON = /怀疑|是狼|内奸|刺客|莫德雷德|失败|黑票|出局|投|说谎|撒谎|骗|带节奏|站队|装好人|伪/;
+const DEFENSE_LEXICON = /相信|支持|担保|信任|不是内奸|好人|没问题|我信/;
 
 /**
  * Avalon (The Resistance). Six players: four loyal (Merlin + three servants)
@@ -48,6 +52,8 @@ export class AvalonWorld extends SocialWorldBase {
   private readonly questVotes = new Map<string, "succeed" | "fail">();
   private readonly lastExperiences = new Map<string, string>();
   private phase: Phase = "discussion";
+  private discussion: DiscussionDirector | null = null;
+  private readonly suspicion = new SuspicionClimate();
   private quest = 1;
   private leaderId: string;
   private proposedTeam: string[] = [];
@@ -65,6 +71,7 @@ export class AvalonWorld extends SocialWorldBase {
     const deck: Role[] = ["merlin", "servant", "servant", "servant", "assassin", "mordred"];
     ids.forEach((id, index) => this.roles.set(id, deck[index]));
     this.leaderId = profiles[0].id;
+    this.discussion = this.createDiscussion();
     this.addLog("圆桌就座。忠臣要完成任务，内奸要暗中破坏；梅林看得见刺客，但看不见莫德雷德。", 1);
   }
 
@@ -86,7 +93,9 @@ export class AvalonWorld extends SocialWorldBase {
         failures: this.failures,
         history: this.questHistory,
         winners: this.winners,
-        outcome: this.outcome
+        outcome: this.outcome,
+        ...(this.discussion ? { discussion: this.discussion.state() } : {}),
+        suspicion: this.suspicion.snapshot()
       }
     });
   }
@@ -105,7 +114,7 @@ export class AvalonWorld extends SocialWorldBase {
       scenarioId: this.scenario.id,
       turn: this.quest,
       phase: this.phase,
-      situation: situationFor(this.phase, this.quest, this.totalQuests, this.successes, this.failures),
+      situation: `${situationFor(this.phase, this.quest, this.totalQuests, this.successes, this.failures)}\nPublic suspicion climate: ${this.suspicion.climateText((id) => this.profiles.get(id)?.displayName ?? id)}`,
       privateContext: [
         `Your hidden role: ${role}.`,
         `Your objective: ${roleObjective(role)}.`,
@@ -266,6 +275,25 @@ export class AvalonWorld extends SocialWorldBase {
       if (!memberIds.includes(actorId)) throw new Error("TEAM_MUST_INCLUDE_LEADER: Include yourself in the proposed team.");
       for (const id of memberIds) if (!this.profiles.has(id)) throw new Error(`TEAM_MEMBER_NOT_FOUND: '${id}' is not a participant.`);
       this.proposedTeam = [...memberIds];
+      const leaderName = this.profiles.get(actorId)?.displayName ?? actorId;
+      for (const id of this.profiles.keys()) {
+        const memberName = this.profiles.get(id)?.displayName ?? id;
+        if (memberIds.includes(id)) {
+          this.pushEvent(id, {
+            type: "included",
+            actorId,
+            targetId: id,
+            detail: `Quest ${this.quest}: ${leaderName} chose you for the quest team.`
+          });
+        } else {
+          this.pushEvent(id, {
+            type: "excluded",
+            actorId,
+            targetId: id,
+            detail: `Quest ${this.quest}: ${leaderName} left you off the quest team.`
+          });
+        }
+      }
       this.phase = "vote";
       this.emitUpdate();
       return {
@@ -307,6 +335,14 @@ export class AvalonWorld extends SocialWorldBase {
       if (targetRole === "assassin" || targetRole === "mordred") throw new Error("TARGET_MUST_BE_LOYAL: The assassin must target a loyal participant.");
       const correct = targetRole === "merlin";
       this.assassinated = true;
+      this.pushEvent(targetId, {
+        type: "assassinated",
+        targetId,
+        facts: { correct, assassinId: actorId },
+        detail: correct
+          ? `The Assassin found you. Your identity as Merlin was your death — but the loyal cause fell with you.`
+          : `The Assassin pointed at you, and missed. Your identity (${roleLabel(targetRole)}) stays your own.`
+      });
       this.winners = correct ? this.factionMembers(["assassin", "mordred"]) : this.factionMembers(["merlin", "servant"]);
       this.outcome = correct
         ? `${this.profiles.get(actorId)?.displayName} identified ${this.profiles.get(targetId)?.displayName} as Merlin. The loyal cause falls; evil wins.`
@@ -324,25 +360,26 @@ export class AvalonWorld extends SocialWorldBase {
     if (this.status !== "running") return null;
     const ids = [...this.profiles.keys()];
     if (this.phase === "discussion") {
+      if (!this.discussion) this.discussion = this.createDiscussion();
+      const actors = this.discussion.nextWave();
+      if (actors.length === 0) {
+        this.discussion = null;
+        this.phase = "proposal";
+        this.emitUpdate();
+        return this.proposalActivation();
+      }
+      const wave = this.discussion.waveNumber;
       return {
-        id: `av:${this.quest}:discussion`,
-        label: `第 ${this.quest} 次任务讨论`,
-        actorIds: ids,
+        id: `av:${this.quest}:discussion:${wave}`,
+        label: wave === 1 ? `第 ${this.quest} 次任务讨论` : `第 ${this.quest} 次任务讨论 · 回应第 ${wave - 1} 轮`,
+        actorIds: actors,
         mode: "sequential",
-        instructionFor: () => "Speak once to the table. Build trust, question loyalties, or steer suspicion without revealing your hidden role unless it serves your cause. Do not propose or vote yet."
+        instructionFor: (actorId) => wave === 1
+          ? "Opening round at the round table. State your read of loyalties, ask sharp questions, or stay reserved — but do not propose a team or vote yet."
+          : "The table is live and people have reacted. Answer questions directed at you, defend yourself if accused, test anyone dodging specifics, or stay silent if you have nothing new. Do not propose a team or vote yet."
       };
     }
-    if (this.phase === "proposal") {
-      return {
-        id: `av:${this.quest}:proposal`,
-        label: `第 ${this.quest} 次任务组队`,
-        actorIds: [this.leaderId],
-        mode: "sequential",
-        instructionFor: (actorId) => actorId === this.leaderId
-          ? `You are the leader. Call propose_team with exactly ${TEAM_SIZES[(this.quest - 1) % TEAM_SIZES.length]} members including yourself. Consider every player's incentive to fail the quest.`
-          : "The leader is choosing the team. You will vote next."
-      };
-    }
+    if (this.phase === "proposal") return this.proposalActivation();
     if (this.phase === "vote") {
       return {
         id: `av:${this.quest}:vote`,
@@ -372,9 +409,8 @@ export class AvalonWorld extends SocialWorldBase {
   }
 
   completeActivation(activation: WorldActivation): ActivationCompletion {
-    if (activation.id.endsWith(":discussion")) {
-      this.phase = "proposal";
-      this.emitUpdate();
+    if (activation.id.includes(":discussion")) {
+      this.discussion?.endWave();
       return { completed: true, missingActorIds: [] };
     }
     if (activation.id.endsWith(":proposal")) {
@@ -441,7 +477,59 @@ export class AvalonWorld extends SocialWorldBase {
         recipientIds: [...this.roles].filter(([id, role]) => id !== input.senderId && (role === "assassin" || role === "mordred")).map(([id]) => id)
       };
     }
-    return super.sendMessage(input);
+    const message = await super.sendMessage(input);
+    if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
+      this.discussion.onMessage({
+        senderId: message.senderId,
+        text: message.text,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {})
+      });
+      this.detectSocialActs(message);
+    }
+    return message;
+  }
+
+  /**
+   * Read public speech for its social meaning: who was accused, who was
+   * defended. These become appraisal events and suspicion pressure.
+   */
+  private detectSocialActs(message: SocialMessage): void {
+    for (const [id] of this.roles) {
+      if (id === message.senderId) continue;
+      const name = this.profiles.get(id)?.displayName ?? id;
+      const atName = message.text.indexOf(name);
+      const atId = message.text.indexOf(id);
+      if (atName === -1 && atId === -1) continue;
+      const at = atName !== -1 ? atName : atId;
+      const window = message.text.slice(Math.max(0, at - 16), at + 40);
+      const snippet = message.text.slice(0, 120);
+      if (ACCUSATION_LEXICON.test(window)) {
+        this.suspicion.noteAccusation(this.quest, message.senderId, id);
+        this.pushEvent(id, {
+          type: "accused",
+          actorId: message.senderId,
+          targetId: id,
+          detail: `Quest ${this.quest} discussion: ${message.senderName} accused you at the round table — "${snippet}"`
+        });
+      } else if (DEFENSE_LEXICON.test(window)) {
+        this.pushEvent(id, {
+          type: "defended",
+          actorId: message.senderId,
+          targetId: id,
+          detail: `Quest ${this.quest} discussion: ${message.senderName} stood up for you at the round table — "${snippet}"`
+        });
+      }
+    }
+  }
+
+  private proposalActivation(): WorldActivation {
+    return {
+      id: `av:${this.quest}:proposal`,
+      label: `第 ${this.quest} 次任务组队`,
+      actorIds: [this.leaderId],
+      mode: "sequential",
+      instructionFor: () => `You are the leader. Call propose_team with exactly ${TEAM_SIZES[(this.quest - 1) % TEAM_SIZES.length]} members including yourself. Consider every player's incentive to fail the quest and the suspicion climate: ${this.suspicion.climateText((id) => this.profiles.get(id)?.displayName ?? id)}.`
+    };
   }
 
   protected currentTurn(): number {
@@ -567,6 +655,35 @@ export class AvalonWorld extends SocialWorldBase {
     else this.successes += 1;
     for (const id of this.profiles.keys()) {
       this.lastExperiences.set(id, `${text} Quest ${this.quest} team: ${team.join(", ")}.`);
+      const onTeam = team.includes(id);
+      if (outcome === "fail") {
+        if (onTeam) {
+          this.suspicion.noteOutcome(this.quest, "quest", id);
+          this.pushEvent(id, {
+            type: "quest-failed",
+            targetId: id,
+            facts: { onTeam: true, evil: this.roles.get(id) === "assassin" || this.roles.get(id) === "mordred", failCount },
+            detail: `Quest ${this.quest} failed with ${failCount} hidden failure vote(s) — and you were on the team.`
+          });
+        } else {
+          this.pushEvent(id, {
+            type: "quest-failed",
+            targetId: id,
+            facts: { onTeam: false, failCount },
+            detail: `Quest ${this.quest} failed with ${failCount} hidden failure vote(s). The saboteurs are among: ${team.map((member) => this.profiles.get(member)?.displayName ?? member).join(", ")}.`
+          });
+        }
+      } else {
+        if (onTeam) this.suspicion.noteResolved(this.quest, id);
+        this.pushEvent(id, {
+          type: "quest-passed",
+          targetId: id,
+          facts: { onTeam },
+          detail: onTeam
+            ? `Quest ${this.quest} succeeded — you were on the winning team.`
+            : `Quest ${this.quest} succeeded. The table's trust holds for now.`
+        });
+      }
     }
     this.addLog(text, this.quest);
     if (this.failures >= 2) {
@@ -588,8 +705,10 @@ export class AvalonWorld extends SocialWorldBase {
       return;
     }
     this.quest += 1;
+    this.suspicion.decay(0.8);
     this.rotateLeader();
     this.phase = "discussion";
+    this.discussion = this.createDiscussion();
     this.emitUpdate();
   }
 
@@ -601,7 +720,28 @@ export class AvalonWorld extends SocialWorldBase {
 
   private endGame(): void {
     this.addLog(this.outcome, this.quest);
+    for (const id of this.profiles.keys()) {
+      const won = this.winners.includes(id);
+      this.pushEvent(id, {
+        type: won ? "win" : "lose",
+        targetId: id,
+        detail: won ? `Game over: your faction won — ${this.outcome}` : `Game over: your faction lost — ${this.outcome}`
+      });
+    }
     this.finish();
+  }
+
+  private createDiscussion(): DiscussionDirector {
+    return new DiscussionDirector({
+      actorIds: [...this.profiles.keys()],
+      displayName: (id) => this.profiles.get(id)?.displayName ?? id,
+      talkativeness: (id) => this.profiles.get(id)?.temperament?.extraversion ?? 0.5,
+      dominance: (id) => {
+        const t = this.profiles.get(id)?.temperament;
+        return t ? 0.5 + (t.extraversion - 0.5) * 0.6 + (t.conscientiousness - 0.5) * 0.3 : 0.5;
+      },
+      sensitivity: (id) => this.profiles.get(id)?.temperament?.neuroticism ?? 0.5
+    });
   }
 
   private factionMembers(roles: Role[]): string[] {

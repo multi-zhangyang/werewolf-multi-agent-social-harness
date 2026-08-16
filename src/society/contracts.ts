@@ -262,6 +262,11 @@ export interface SocialEvent {
     | "eliminated-other" // another participant was eliminated
     | "investigation"    // seer result, private
     | "night-kill"       // this agent (wolf) helped kill someone at night
+    | "included"         // this agent was chosen for a quest team
+    | "excluded"         // this agent was left out of a quest team
+    | "quest-passed"     // a quest this agent was (or wasn't) on succeeded
+    | "quest-failed"     // a quest this agent was (or wasn't) on failed
+    | "assassinated"     // this agent was killed in the final assassination
     | "win"              // this agent's faction won
     | "lose";            // this agent's faction lost
   turn: number;

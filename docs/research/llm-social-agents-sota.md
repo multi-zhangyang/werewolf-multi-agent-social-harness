@@ -330,4 +330,6 @@ Design rules that maximize interesting dynamics:
    - 情感显著性 + 未解决冲突决定哪些经历进入上下文，而非仅靠主题相似度；冲突关键记忆的召回显著优于语义/情感基线。
    - **对 Society 的意义**：`appraisal.ts` 为每次评估事件生成带效价与显著性的记忆，`memory.ts` 的召回分数已包含情绪一致性项——被背叛、被冤枉的记忆会持续浮出水面。
 
+4. **怀疑氛围（suspicion climate）**：源自 *Think-Before-Speak*（2606.03137）的「感知的意见气候」（perceived opinion climate）概念——参与者不仅持有私人怀疑，还感知群体的整体倾向。`src/society/suspicion.ts` 用确定性规则把公开指控、投票与任务结果汇总为世界级怀疑度（纯公开信息，无私有泄漏），注入每个智能体的观察，并在观察者界面实时呈现「谁在被围攻」。
+
 > 以上条目与正文引用同样遵循「必须逐条在 arXiv 核对」的规则；这三篇均已确认存在且标题/摘要相符。

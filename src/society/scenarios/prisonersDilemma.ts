@@ -7,12 +7,14 @@ import type {
   AgentProfile,
   PlayerActionSpec,
   ScenarioSummary,
+  SocialMessage,
   SocietyAgentContext,
   WorldActionCommit,
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
 import { contextFromRunContext, SocialWorldBase } from "../world";
+import { DiscussionDirector } from "../conversation";
 import { emitAction, boundedRounds } from "./helpers";
 
 type Move = "cooperate" | "defect";
@@ -33,6 +35,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
   private readonly history: RoundResult[] = [];
   private readonly lastExperiences = new Map<string, string>();
   private phase: Phase = "discussion";
+  private discussion: DiscussionDirector | null = null;
   private round = 1;
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
@@ -143,13 +146,24 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     if (this.status !== "running") return null;
     if (this.round > this.totalRounds) return null;
     if (this.phase === "discussion") {
-      return {
-        id: `pd:${this.round}:discussion`,
-        label: `第 ${this.round} 轮谈判`,
-        actorIds: [...this.profiles.keys()],
-        mode: "sequential",
-        instructionFor: () => "Speak once if you want to negotiate, test a promise, or conceal your intended move. Do not use choose_move until the next phase."
-      };
+      if (!this.discussion) this.discussion = this.createDiscussion();
+      const actors = this.discussion.nextWave();
+      if (actors.length === 0) {
+        this.discussion = null;
+        this.phase = "choice";
+        this.emitUpdate();
+      } else {
+        const wave = this.discussion.waveNumber;
+        return {
+          id: `pd:${this.round}:discussion:${wave}`,
+          label: wave === 1 ? `第 ${this.round} 轮谈判` : `第 ${this.round} 轮谈判 · 回应 ${wave - 1}`,
+          actorIds: actors,
+          mode: "sequential",
+          instructionFor: () => wave === 1
+            ? "Opening round of negotiation. Probe the other side, test a promise, or conceal your intended move. Do not use choose_move yet."
+            : "The negotiation is live. React to what the other side actually said: answer their questions, challenge weak promises, or hold your position. You may stay silent. Do not use choose_move yet."
+        };
+      }
     }
     return {
       id: `pd:${this.round}:choice`,
@@ -161,9 +175,8 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
   }
 
   completeActivation(activation: WorldActivation): ActivationCompletion {
-    if (activation.id.endsWith(":discussion")) {
-      this.phase = "choice";
-      this.emitUpdate();
+    if (activation.id.includes(":discussion")) {
+      this.discussion?.endWave();
       return { completed: true, missingActorIds: [] };
     }
     const missingActorIds = activation.actorIds.filter((id) => !this.choices.has(id));
@@ -180,6 +193,33 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
 
   experienceFor(actorId: string): string | undefined {
     return this.lastExperiences.get(actorId);
+  }
+
+  async sendMessage(input: {
+    senderId: string;
+    channel: "public" | "private" | "team";
+    text: string;
+    recipientIds?: string[];
+    replyTo?: string;
+  }): Promise<SocialMessage> {
+    const message = await super.sendMessage(input);
+    if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
+      this.discussion.onMessage({ senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
+    }
+    return message;
+  }
+
+  private createDiscussion(): DiscussionDirector {
+    return new DiscussionDirector({
+      actorIds: [...this.profiles.keys()],
+      displayName: (id) => this.profiles.get(id)?.displayName ?? id,
+      talkativeness: (id) => this.profiles.get(id)?.temperament?.extraversion ?? 0.5,
+      dominance: (id) => {
+        const t = this.profiles.get(id)?.temperament;
+        return t ? 0.5 + (t.extraversion - 0.5) * 0.6 + (t.conscientiousness - 0.5) * 0.3 : 0.5;
+      },
+      sensitivity: (id) => this.profiles.get(id)?.temperament?.neuroticism ?? 0.5
+    });
   }
 
   protected currentTurn(): number {
@@ -214,6 +254,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     }
     this.round += 1;
     this.phase = "discussion";
+    this.discussion = null;
     this.emitUpdate();
   }
 

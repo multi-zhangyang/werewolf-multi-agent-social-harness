@@ -6,12 +6,14 @@ import type {
   AgentProfile,
   PlayerActionSpec,
   ScenarioSummary,
+  SocialMessage,
   SocietyAgentContext,
   WorldActionCommit,
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
 import { contextFromRunContext, SocialWorldBase } from "../world";
+import { DiscussionDirector } from "../conversation";
 import { boundedRounds, emitAction } from "./helpers";
 
 type Phase = "discussion" | "propose" | "respond";
@@ -32,6 +34,7 @@ export class UltimatumWorld extends SocialWorldBase {
   private readonly history: UltimatumRound[] = [];
   private readonly lastExperiences = new Map<string, string>();
   private phase: Phase = "discussion";
+  private discussion: DiscussionDirector | null = null;
   private round = 1;
   private offer?: number;
   private response?: boolean;
@@ -181,13 +184,24 @@ export class UltimatumWorld extends SocialWorldBase {
     if (this.round > this.totalRounds) return null;
     const [proposerId, responderId] = this.rolesForRound();
     if (this.phase === "discussion") {
-      return {
-        id: `round:${this.round}:discussion`,
-        label: `第 ${this.round} 轮谈判`,
-        actorIds: [proposerId, responderId],
-        mode: "parallel",
-        instructionFor: () => "Negotiate openly. Promises are not binding. The proposer decides the split next; the responder can punish unfairness by rejecting."
-      };
+      if (!this.discussion) this.discussion = this.createDiscussion();
+      const actors = this.discussion.nextWave();
+      if (actors.length === 0) {
+        this.discussion = null;
+        this.phase = "propose";
+        this.emitUpdate();
+      } else {
+        const wave = this.discussion.waveNumber;
+        return {
+          id: `round:${this.round}:discussion:${wave}`,
+          label: wave === 1 ? `第 ${this.round} 轮谈判` : `第 ${this.round} 轮谈判 · 回应 ${wave - 1}`,
+          actorIds: actors,
+          mode: "sequential",
+          instructionFor: () => wave === 1
+            ? "Negotiate openly. Promises are not binding. The proposer decides the split next; the responder can punish unfairness by rejecting."
+            : "The negotiation is live. React to what was actually said: answer questions, test promises, or hold your ground. You may stay silent."
+        };
+      }
     }
     if (this.phase === "propose") {
       const proposerName = this.profiles.get(proposerId)?.displayName ?? proposerId;
@@ -213,9 +227,8 @@ export class UltimatumWorld extends SocialWorldBase {
   }
 
   completeActivation(activation: WorldActivation): ActivationCompletion {
-    if (this.phase === "discussion") {
-      this.phase = "propose";
-      this.emitUpdate();
+    if (activation.id.includes(":discussion")) {
+      this.discussion?.endWave();
       return { completed: true, missingActorIds: [] };
     }
     if (this.phase === "propose") {
@@ -238,6 +251,33 @@ export class UltimatumWorld extends SocialWorldBase {
 
   experienceFor(actorId: string): string | undefined {
     return this.lastExperiences.get(actorId);
+  }
+
+  async sendMessage(input: {
+    senderId: string;
+    channel: "public" | "private" | "team";
+    text: string;
+    recipientIds?: string[];
+    replyTo?: string;
+  }): Promise<SocialMessage> {
+    const message = await super.sendMessage(input);
+    if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
+      this.discussion.onMessage({ senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
+    }
+    return message;
+  }
+
+  private createDiscussion(): DiscussionDirector {
+    return new DiscussionDirector({
+      actorIds: this.rolesForRound(),
+      displayName: (id) => this.profiles.get(id)?.displayName ?? id,
+      talkativeness: (id) => this.profiles.get(id)?.temperament?.extraversion ?? 0.5,
+      dominance: (id) => {
+        const t = this.profiles.get(id)?.temperament;
+        return t ? 0.5 + (t.extraversion - 0.5) * 0.6 + (t.conscientiousness - 0.5) * 0.3 : 0.5;
+      },
+      sensitivity: (id) => this.profiles.get(id)?.temperament?.neuroticism ?? 0.5
+    });
   }
 
   protected currentTurn(): number {
@@ -314,6 +354,7 @@ export class UltimatumWorld extends SocialWorldBase {
     }
     this.round += 1;
     this.phase = "discussion";
+    this.discussion = null;
     this.emitUpdate();
   }
 

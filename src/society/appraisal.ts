@@ -209,6 +209,81 @@ function appraisalFor(mind: AgentMindState, event: SocialEvent, t: AgentTemperam
         salience: 0.6
       };
     }
+    case "included": {
+      return {
+        emotions: { joy: 0.06 },
+        social: { pride: mod(0.08, E, 0.8) },
+        pad: { pleasure: 0.06, dominance: 0.04 },
+        needs: { status: 0.08, connection: 0.06 },
+        relationship: { trust: 0.04, affinity: 0.05 },
+        salience: 0.4
+      };
+    }
+    case "excluded": {
+      return {
+        emotions: { sadness: 0.06 },
+        needs: { status: -0.08, connection: -0.05 },
+        relationship: { trust: -0.03, tension: 0.05 },
+        salience: 0.45
+      };
+    }
+    case "quest-passed": {
+      const onTeam = Boolean(event.facts?.onTeam);
+      if (onTeam) {
+        return {
+          emotions: { joy: 0.1 },
+          social: { pride: mod(0.12, E, 0.8), relief: 0.1 },
+          pad: { pleasure: 0.1, dominance: 0.06 },
+          needs: { status: 0.08, achievement: 0.1 },
+          salience: 0.55
+        };
+      }
+      return {
+        emotions: { joy: 0.06 },
+        social: { relief: 0.08 },
+        salience: 0.35
+      };
+    }
+    case "quest-failed": {
+      const onTeam = Boolean(event.facts?.onTeam);
+      const evil = Boolean(event.facts?.evil);
+      if (onTeam && evil) {
+        // The mission succeeded for evil — but exposure risk is real.
+        return {
+          emotions: { fear: mod(0.12, N, 1.2) },
+          social: { relief: 0.12, pride: 0.1 },
+          needs: { security: -0.06 },
+          salience: 0.6
+        };
+      }
+      if (onTeam) {
+        // A loyal member of a failed team: implicated, ashamed, afraid.
+        return {
+          emotions: { fear: mod(0.16, N, 1.2), sadness: 0.1 },
+          social: { shame: mod(0.1, C, 0.8) },
+          pad: { pleasure: -0.12, dominance: -0.08 },
+          needs: { security: -0.12, status: -0.08 },
+          salience: 0.7
+        };
+      }
+      return {
+        emotions: { fear: mod(0.1, N, 1.2), anger: mod(0.08, N, 1) },
+        social: { contempt: mod(0.08, A, -0.6) },
+        pad: { arousal: 0.06 },
+        needs: { security: -0.08 },
+        salience: 0.5
+      };
+    }
+    case "assassinated": {
+      const correct = Boolean(event.facts?.correct);
+      return {
+        emotions: { fear: 0.12, sadness: 0.12 },
+        social: correct ? { relief: 0.2, pride: 0.1 } : { relief: 0.15 },
+        pad: { pleasure: -0.1, dominance: -0.1 },
+        needs: { security: -0.15 },
+        salience: 0.8
+      };
+    }
     case "win": {
       return {
         emotions: { joy: 0.22 },

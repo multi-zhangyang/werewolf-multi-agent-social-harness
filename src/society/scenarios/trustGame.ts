@@ -6,12 +6,14 @@ import type {
   AgentProfile,
   PlayerActionSpec,
   ScenarioSummary,
+  SocialMessage,
   SocietyAgentContext,
   WorldActionCommit,
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
 import { contextFromRunContext, SocialWorldBase } from "../world";
+import { DiscussionDirector } from "../conversation";
 import { boundedRounds, emitAction } from "./helpers";
 
 type Phase = "discussion" | "investment" | "return";
@@ -34,6 +36,7 @@ export class TrustGameWorld extends SocialWorldBase {
   private readonly history: TrustRound[] = [];
   private readonly lastExperiences = new Map<string, string>();
   private phase: Phase = "discussion";
+  private discussion: DiscussionDirector | null = null;
   private round = 1;
   private investment?: number;
   private returnedAmount?: number;
@@ -198,15 +201,26 @@ export class TrustGameWorld extends SocialWorldBase {
     if (this.status !== "running" || this.round > this.totalRounds) return null;
     const [investorId, trusteeId] = this.rolesForRound();
     if (this.phase === "discussion") {
-      return {
-        id: `tg:${this.round}:discussion`,
-        label: `第 ${this.round} 轮协商`,
-        actorIds: [investorId, trusteeId],
-        mode: "sequential",
-        instructionFor: (actorId) => actorId === investorId
-          ? "You are the investor. State or conceal what level of reciprocity would justify a larger investment. Speak once before acting."
-          : "You are the trustee. You may make a non-binding promise, challenge the investor's assumptions, or preserve ambiguity. Speak once."
-      };
+      if (!this.discussion) this.discussion = this.createDiscussion();
+      const actors = this.discussion.nextWave();
+      if (actors.length === 0) {
+        this.discussion = null;
+        this.phase = "investment";
+        this.emitUpdate();
+      } else {
+        const wave = this.discussion.waveNumber;
+        return {
+          id: `tg:${this.round}:discussion:${wave}`,
+          label: wave === 1 ? `第 ${this.round} 轮协商` : `第 ${this.round} 轮协商 · 回应 ${wave - 1}`,
+          actorIds: actors,
+          mode: "sequential",
+          instructionFor: (actorId) => wave === 1
+            ? actorId === investorId
+              ? "You are the investor. State or conceal what level of reciprocity would justify a larger investment. Speak once before acting."
+              : "You are the trustee. You may make a non-binding promise, challenge the investor's assumptions, or preserve ambiguity. Speak once."
+            : "The negotiation is live. React to what was actually said: answer questions, test promises, or hold your ground. You may stay silent."
+        };
+      }
     }
     if (this.phase === "investment") {
       return {
@@ -227,9 +241,8 @@ export class TrustGameWorld extends SocialWorldBase {
   }
 
   completeActivation(activation: WorldActivation): ActivationCompletion {
-    if (activation.id.endsWith(":discussion")) {
-      this.phase = "investment";
-      this.emitUpdate();
+    if (activation.id.includes(":discussion")) {
+      this.discussion?.endWave();
       return { completed: true, missingActorIds: [] };
     }
     if (activation.id.endsWith(":investment")) {
@@ -249,6 +262,33 @@ export class TrustGameWorld extends SocialWorldBase {
 
   experienceFor(actorId: string): string | undefined {
     return this.lastExperiences.get(actorId);
+  }
+
+  async sendMessage(input: {
+    senderId: string;
+    channel: "public" | "private" | "team";
+    text: string;
+    recipientIds?: string[];
+    replyTo?: string;
+  }): Promise<SocialMessage> {
+    const message = await super.sendMessage(input);
+    if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
+      this.discussion.onMessage({ senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
+    }
+    return message;
+  }
+
+  private createDiscussion(): DiscussionDirector {
+    return new DiscussionDirector({
+      actorIds: this.rolesForRound(),
+      displayName: (id) => this.profiles.get(id)?.displayName ?? id,
+      talkativeness: (id) => this.profiles.get(id)?.temperament?.extraversion ?? 0.5,
+      dominance: (id) => {
+        const t = this.profiles.get(id)?.temperament;
+        return t ? 0.5 + (t.extraversion - 0.5) * 0.6 + (t.conscientiousness - 0.5) * 0.3 : 0.5;
+      },
+      sensitivity: (id) => this.profiles.get(id)?.temperament?.neuroticism ?? 0.5
+    });
   }
 
   protected currentTurn(): number {
@@ -335,6 +375,7 @@ export class TrustGameWorld extends SocialWorldBase {
     }
     this.round += 1;
     this.phase = "discussion";
+    this.discussion = null;
     this.emitUpdate();
   }
 

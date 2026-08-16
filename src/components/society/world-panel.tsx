@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Activity, BarChart3, Flame, History, Radio, Sparkles } from "lucide-react";
+import { Activity, BarChart3, Crosshair, Flame, History, Radio, Sparkles } from "lucide-react";
 import type { ScenarioId, WorldSnapshot } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -13,6 +13,11 @@ interface DiscussionState {
   messageCount: number;
   urgency: Record<string, number>;
   spokeCounts: Record<string, number>;
+}
+
+interface SuspicionState {
+  scores: Record<string, number>;
+  entries: Array<{ turn: number; accuser: string; target: string; kind: "speech" | "vote" | "outcome" }>;
 }
 
 export function WorldPanel({ room, toolCalls = [] }: { room: SocietyRoomSnapshot; toolCalls?: RoomConnection["toolCalls"] }): ReactNode {
@@ -43,6 +48,7 @@ export function WorldPanel({ room, toolCalls = [] }: { room: SocietyRoomSnapshot
         </div>
 
         <DiscussionHeat world={world} names={names} />
+        <SuspicionPanel world={world} names={names} />
 
         <Tabs defaultValue="scores">
           <TabsList className="justify-start gap-1 bg-transparent p-0">
@@ -114,6 +120,69 @@ function DiscussionHeat({ world, names }: { world: WorldSnapshot; names: Map<str
       ) : (
         <p className="mt-2 text-[11px] text-zinc-400">没有人被点名，对话趋于平静</p>
       )}
+    </div>
+  );
+}
+
+/**
+ * The room's suspicion climate: who the group is currently leaning against,
+ * derived from public accusations, votes and outcomes. The accusation feed
+ * shows the live chains ("who pointed at whom") for observers.
+ */
+function SuspicionPanel({ world, names }: { world: WorldSnapshot; names: Map<string, string> }): ReactNode {
+  const suspicion = world.details.suspicion as SuspicionState | undefined;
+  if (!suspicion) return null;
+  const ranked = Object.entries(suspicion.scores)
+    .sort((left, right) => right[1] - left[1])
+    .filter(([, value]) => value > 0);
+  const feed = suspicion.entries.slice(-6).reverse();
+  return (
+    <div className="mb-3 rounded-lg border border-zinc-200 bg-white p-3.5">
+      <div className="flex items-center justify-between">
+        <p className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500">
+          <Crosshair className={cn("size-3.5", ranked.length ? "text-rose-500" : "text-zinc-300")} />
+          怀疑氛围
+        </p>
+        <span className="nums font-mono text-[10px] text-zinc-400">
+          {ranked.length ? `${ranked.length} 人被点名` : "风平浪静"}
+        </span>
+      </div>
+      {ranked.length ? (
+        <div className="mt-2.5 space-y-1.5">
+          {ranked.slice(0, 5).map(([id, value]) => (
+            <div key={id} className="flex items-center gap-2">
+              <span className="w-14 truncate text-[11px] text-zinc-500">{names.get(id) ?? id}</span>
+              <div className="h-1 flex-1 overflow-hidden rounded-full bg-zinc-100">
+                <div
+                  className={cn("h-full rounded-full transition-all duration-500", value > 0.55 ? "bg-rose-500" : value > 0.25 ? "bg-orange-400" : "bg-zinc-400")}
+                  style={{ width: `${Math.max(6, value * 100)}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-2 text-[11px] text-zinc-400">还没有公开指控或异常票型</p>
+      )}
+      {feed.length ? (
+        <div className="mt-3 space-y-1 border-t border-zinc-100 pt-2.5">
+          {feed.map((entry, index) => {
+            const accuser = names.get(entry.accuser) ?? entry.accuser;
+            const target = names.get(entry.target) ?? entry.target;
+            const kindLabel = entry.kind === "vote" ? "投票" : entry.kind === "outcome" ? "结果" : "指控";
+            return (
+              <p key={index} className="truncate text-[11px] text-zinc-400">
+                <span className="text-zinc-600">{accuser}</span>
+                <span className="mx-1 text-zinc-300">→</span>
+                <span className="text-rose-500/90">{target}</span>
+                <span className={cn("ml-1.5 rounded px-1 py-px font-mono text-[9px]", entry.kind === "vote" ? "bg-zinc-100 text-zinc-500" : entry.kind === "outcome" ? "bg-orange-50 text-orange-600" : "bg-rose-50 text-rose-500")}>
+                  {kindLabel}
+                </span>
+              </p>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }
