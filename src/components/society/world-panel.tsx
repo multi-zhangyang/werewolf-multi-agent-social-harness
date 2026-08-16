@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Activity, BarChart3, Crosshair, Flame, History, Radio, Sparkles } from "lucide-react";
+import { Activity, BarChart3, Crosshair, Flame, History, Network, Radio, Sparkles } from "lucide-react";
 import type { ScenarioId, WorldSnapshot } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -48,6 +48,7 @@ export function WorldPanel({ room, toolCalls = [] }: { room: SocietyRoomSnapshot
         </div>
 
         <DiscussionHeat world={world} names={names} />
+        <SuspicionGraph world={world} names={names} />
         <SuspicionPanel world={world} names={names} />
 
         <Tabs defaultValue="scores">
@@ -120,6 +121,101 @@ function DiscussionHeat({ world, names }: { world: WorldSnapshot; names: Map<str
       ) : (
         <p className="mt-2 text-[11px] text-zinc-400">没有人被点名，对话趋于平静</p>
       )}
+    </div>
+  );
+}
+
+/**
+ * The accusation web: a directed graph of who pointed at whom. Nodes are the
+ * characters arranged in a circle; edges are the latest public accusations,
+ * votes and outcomes, colored by kind and faded by age — the room's argument
+ * structure at a glance.
+ */
+function SuspicionGraph({ world, names }: { world: WorldSnapshot; names: Map<string, string> }): ReactNode {
+  const suspicion = world.details.suspicion as SuspicionState | undefined;
+  if (!suspicion) return null;
+  const ids = world.agents.map((agent) => agent.id);
+  const n = Math.max(2, ids.length);
+  const cx = 100;
+  const cy = 90;
+  const radius = 62;
+  const position = (id: string): { x: number; y: number } => {
+    const index = ids.indexOf(id);
+    if (index === -1) return { x: cx, y: cy };
+    const angle = -Math.PI / 2 + (index * 2 * Math.PI) / n;
+    return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
+  };
+  const entries = suspicion.entries.slice(-14);
+  const edgeColor: Record<string, string> = { speech: "#f59e0b", vote: "#e11d48", outcome: "#a1a1aa" };
+  return (
+    <div className="mb-3 rounded-lg border border-zinc-200 bg-white p-3.5">
+      <div className="flex items-center justify-between">
+        <p className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500">
+          <Network className="size-3.5 text-zinc-400" />
+          怀疑网络
+        </p>
+        <span className="nums font-mono text-[10px] text-zinc-400">{entries.length} 条指控</span>
+      </div>
+      <svg viewBox="0 0 200 184" className="mt-1 w-full" role="img" aria-label="谁指控谁">
+        <defs>
+          <marker id="arrow-speech" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="#f59e0b" />
+          </marker>
+          <marker id="arrow-vote" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="#e11d48" />
+          </marker>
+        </defs>
+        {entries.map((entry, index) => {
+          if (!ids.includes(entry.accuser)) return null;
+          const from = position(entry.accuser);
+          const to = position(entry.target);
+          const opacity = 0.25 + 0.75 * ((index + 1) / entries.length);
+          return (
+            <line
+              key={index}
+              x1={from.x}
+              y1={from.y}
+              x2={to.x}
+              y2={to.y}
+              stroke={edgeColor[entry.kind] ?? "#a1a1aa"}
+              strokeOpacity={opacity}
+              strokeWidth={1.4}
+              markerEnd={entry.kind === "vote" ? "url(#arrow-vote)" : "url(#arrow-speech)"}
+            />
+          );
+        })}
+        {ids.map((id) => {
+          const point = position(id);
+          const score = suspicion.scores[id] ?? 0;
+          const ring = score > 0.5 ? "#e11d48" : score > 0.25 ? "#f59e0b" : "#d4d4d8";
+          return (
+            <g key={id}>
+              <circle
+                cx={point.x}
+                cy={point.y}
+                r={score > 0 ? 13 : 10.5}
+                fill="#fff"
+                stroke={ring}
+                strokeWidth={score > 0 ? 2.2 : 1.2}
+              />
+              <text
+                x={point.x}
+                y={point.y + 24}
+                textAnchor="middle"
+                fontSize="8.5"
+                className="fill-zinc-500"
+              >
+                {names.get(id) ?? id}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+      <div className="mt-1 flex items-center gap-3 text-[10px] text-zinc-400">
+        <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-amber-500" />指控</span>
+        <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-rose-500" />投票</span>
+        <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-zinc-400" />结果</span>
+      </div>
     </div>
   );
 }
