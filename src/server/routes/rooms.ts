@@ -81,6 +81,21 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     response.json({ rooms: context.rooms.list() });
   });
 
+  app.get("/api/season", (_request, response) => {
+    response.json({
+      dossiers: context.season.list().map((dossier) => ({
+        characterKey: dossier.characterKey,
+        games: dossier.games.slice(-6).map((game) => ({
+          scenarioId: game.scenarioId,
+          ...(game.role ? { role: game.role } : {}),
+          outcome: game.outcome
+        })),
+        memoryCount: dossier.memories.length,
+        updatedAt: dossier.updatedAt
+      }))
+    });
+  });
+
   app.post("/api/rooms", (request, response, next) => {
     try {
       const input = createRoomSchema.parse(request.body);

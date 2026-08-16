@@ -9,10 +9,18 @@ import { AgentAvatar, ScenarioIcon, StatusDot, StatusLabel } from "./shared";
 import type { ModelOption } from "./types";
 import { cn } from "@/lib/utils";
 
+interface SeasonSummary {
+  characterKey: string;
+  games: Array<{ scenarioId: string; role?: string; outcome: "win" | "lose" }>;
+  memoryCount: number;
+  updatedAt: string;
+}
+
 interface LandingProps {
   scenarios: ScenarioSummary[];
   models: ModelOption[];
   rooms: SocietyRoomSnapshot[];
+  season: SeasonSummary[];
   onStart: (scenarioId: string) => void;
   onOpenRoom: (roomId: string) => void;
   onOpenSettings: () => void;
@@ -38,7 +46,7 @@ const FEATURES = [
   }
 ];
 
-export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenSettings, onOpenAbout }: LandingProps): ReactNode {
+export function Landing({ scenarios, models, rooms, season, onStart, onOpenRoom, onOpenSettings, onOpenAbout }: LandingProps): ReactNode {
   const ticker = scenarios.map((scenario) => scenario.name).join(" · ");
   return (
     <div className="min-h-screen bg-background">
@@ -119,6 +127,38 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenS
           </div>
         </section>
 
+        {season.length ? (
+          <section className="mb-20">
+            <div className="mb-4 flex items-end justify-between">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-400">Season</p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-tight">延续的社群</h2>
+              </div>
+              <span className="nums font-mono text-xs text-zinc-400">{season.length} 位角色带着历史回归</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              {season.slice(0, 8).map((entry) => {
+                const wins = entry.games.filter((game) => game.outcome === "win").length;
+                return (
+                  <div key={entry.characterKey} className="rounded-lg border border-zinc-200 bg-white p-4">
+                    <p className="flex items-center gap-2 text-sm font-semibold tracking-tight">
+                      <AgentAvatar name={entry.characterKey} index={hashIndex(entry.characterKey)} size="sm" />
+                      {entry.characterKey}
+                    </p>
+                    <p className="nums mt-2 font-mono text-[11px] text-zinc-400">
+                      {entry.games.length} 局 · 胜 {wins} · 记忆 {entry.memoryCount}
+                    </p>
+                    <p className="mt-1 truncate text-[11px] text-zinc-500">
+                      最近：{entry.games.at(-1)?.scenarioId ?? "—"}
+                      {entry.games.at(-1)?.role ? ` · ${entry.games.at(-1)?.role}` : ""}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
+
         <section className="mb-20 grid grid-cols-1 gap-px overflow-hidden rounded-xl border border-zinc-200 bg-zinc-200 sm:grid-cols-2">
           {FEATURES.map((feature) => (
             <div key={feature.title} className="bg-white p-8">
@@ -194,6 +234,12 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenS
       </footer>
     </div>
   );
+}
+
+function hashIndex(seed: string): number {
+  let hash = 0;
+  for (const char of seed) hash = (hash * 31 + char.charCodeAt(0)) | 0;
+  return Math.abs(hash);
 }
 
 function ScenarioCard({ scenario, index, onStart }: { scenario: ScenarioSummary; index: number; onStart: () => void }): ReactNode {

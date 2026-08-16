@@ -55,7 +55,8 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
       details: {
         scores: Object.fromEntries(this.scores),
         pendingChoices: [...this.profiles.keys()].filter((id) => !this.choices.has(id)),
-        history: this.history
+        history: this.history,
+        ...(this.discussion ? { discussion: this.discussion.state() } : {})
       }
     });
   }

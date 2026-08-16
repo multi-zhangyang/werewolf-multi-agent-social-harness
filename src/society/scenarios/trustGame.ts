@@ -66,7 +66,8 @@ export class TrustGameWorld extends SocialWorldBase {
         multipliedAmount: this.investment === undefined ? undefined : this.investment * this.multiplier,
         returnedAmount: this.returnedAmount,
         scores: Object.fromEntries(this.scores),
-        history: this.history
+        history: this.history,
+        ...(this.discussion ? { discussion: this.discussion.state() } : {})
       }
     });
   }

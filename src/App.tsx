@@ -17,12 +17,22 @@ interface RoomListResponse {
   rooms: SocietyRoomSnapshot[];
 }
 
+interface SeasonResponse {
+  dossiers: Array<{
+    characterKey: string;
+    games: Array<{ scenarioId: string; role?: string; outcome: "win" | "lose" }>;
+    memoryCount: number;
+    updatedAt: string;
+  }>;
+}
+
 type Route = { name: "landing" } | { name: "room"; id: string } | { name: "about" };
 
 export function App(): ReactNode {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [rooms, setRooms] = useState<SocietyRoomSnapshot[]>([]);
+  const [season, setSeason] = useState<SeasonResponse["dossiers"]>([]);
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
   const [createScenarioId, setCreateScenarioId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -46,10 +56,15 @@ export function App(): ReactNode {
   }, [route]);
 
   const loadCatalog = useCallback(async (): Promise<void> => {
-    const [catalog, list] = await Promise.all([getJson<CatalogResponse>("/api/scenarios"), getJson<RoomListResponse>("/api/rooms")]);
+    const [catalog, list, seasonResponse] = await Promise.all([
+      getJson<CatalogResponse>("/api/scenarios"),
+      getJson<RoomListResponse>("/api/rooms"),
+      getJson<SeasonResponse>("/api/season").catch(() => ({ dossiers: [] }))
+    ]);
     setScenarios(catalog.scenarios);
     setModels(catalog.models);
     setRooms(list.rooms);
+    setSeason(seasonResponse.dossiers);
   }, []);
 
   useEffect(() => {
@@ -120,6 +135,7 @@ export function App(): ReactNode {
           scenarios={scenarios}
           models={models}
           rooms={rooms}
+          season={season}
           onStart={(scenarioId) => setCreateScenarioId(scenarioId)}
           onOpenRoom={(roomId) => { location.hash = `#/rooms/${encodeURIComponent(roomId)}`; }}
           onOpenSettings={() => setSettingsOpen(true)}
