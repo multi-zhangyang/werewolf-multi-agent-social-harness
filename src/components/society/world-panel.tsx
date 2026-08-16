@@ -185,6 +185,59 @@ function HistoryRow({ entry, names, scenarioId }: { entry: Record<string, unknow
       </div>
     );
   }
+  if (scenarioId === "sealed-bid-auction") {
+    const winnerId = entry.winnerId as string | undefined;
+    const price = entry.price as number | undefined;
+    const bids = entry.bids as Record<string, number> | undefined;
+    return (
+      <div className="flex items-start gap-2 rounded-lg px-2 py-2 text-xs leading-5 hover:bg-white/[0.02]">
+        <span className="mt-0.5 font-mono text-[10px] text-zinc-600">R{String(entry.round)}</span>
+        <div className="flex-1">
+          <p className="text-zinc-300">
+            {winnerId ? <span className="text-zinc-100">{names.get(winnerId) ?? winnerId}</span> : "无人"} 以 <span className="nums font-mono text-zinc-100">{price}</span> 点拍得
+          </p>
+          {bids ? (
+            <p className="nums mt-0.5 font-mono text-[10px] text-zinc-600">
+              {Object.entries(bids).map(([id, value]) => `${names.get(id) ?? id} ${value}`).join(" · ")}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+  if (scenarioId === "prisoners-dilemma" || scenarioId === "trust-game" || scenarioId === "ultimatum-game" || scenarioId === "chicken-game" || scenarioId === "stag-hunt") {
+    const payoffs = entry.payoffs as Record<string, number> | undefined;
+    const detail = entry.text as string | undefined;
+    return (
+      <div className="flex items-start gap-2 rounded-lg px-2 py-2 text-xs leading-5 hover:bg-white/[0.02]">
+        <span className="mt-0.5 font-mono text-[10px] text-zinc-600">R{String(entry.round)}</span>
+        <div className="flex-1">
+          {detail ? <p className="text-zinc-300">{detail}</p> : null}
+          {payoffs ? (
+            <p className="nums mt-0.5 font-mono text-[10px] text-zinc-600">
+              {Object.entries(payoffs).map(([id, value]) => `${names.get(id) ?? id} ${value}`).join(" · ")}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+  if (scenarioId === "public-goods") {
+    const contributions = entry.contributions as Record<string, number> | undefined;
+    return (
+      <div className="flex items-start gap-2 rounded-lg px-2 py-2 text-xs leading-5 hover:bg-white/[0.02]">
+        <span className="mt-0.5 font-mono text-[10px] text-zinc-600">R{String(entry.round)}</span>
+        <div className="flex-1 text-zinc-300">
+          <p>公共池 {String(entry.pool)} · 每人返还 {String(entry.share)}</p>
+          {contributions ? (
+            <p className="nums mt-0.5 font-mono text-[10px] text-zinc-600">
+              {Object.entries(contributions).map(([id, value]) => `${names.get(id) ?? id} ${value}`).join(" · ")}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
   const text = typeof entry.text === "string" ? entry.text : undefined;
   if (text) {
     return (
