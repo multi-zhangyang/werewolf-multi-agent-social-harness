@@ -16,7 +16,7 @@ interface RoomViewProps {
 }
 
 export function RoomView({ roomId, token, onBack }: RoomViewProps): ReactNode {
-  const { room, connection, error, activity, pause, submitAction } = useRoom(roomId, token);
+  const { room, connection, error, activity, toolCalls, pause, submitAction } = useRoom(roomId, token);
 
   if (!room) {
     return (
@@ -91,7 +91,7 @@ export function RoomView({ roomId, token, onBack }: RoomViewProps): ReactNode {
         </main>
 
         <aside className="order-3 lg:max-h-[calc(100vh-5.5rem)] lg:overflow-y-auto">
-          <WorldPanel room={room} />
+          <WorldPanel room={room} toolCalls={toolCalls} />
         </aside>
       </div>
 

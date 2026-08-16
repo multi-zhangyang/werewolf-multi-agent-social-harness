@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
-import { Activity, BarChart3, History } from "lucide-react";
+import { Activity, BarChart3, History, Radio } from "lucide-react";
 import type { ScenarioId, WorldSnapshot } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import { StatusDot, StatusLabel } from "./shared";
+import type { RoomConnection } from "./use-room";
+import { AgentAvatar, StatusDot, StatusLabel, eventLabel } from "./shared";
 
-export function WorldPanel({ room }: { room: SocietyRoomSnapshot }): ReactNode {
+export function WorldPanel({ room, toolCalls = [] }: { room: SocietyRoomSnapshot; toolCalls?: RoomConnection["toolCalls"] }): ReactNode {
   const world = room.world;
   const names = new Map(world.agents.map((agent) => [agent.id, agent.displayName]));
 
@@ -35,10 +36,14 @@ export function WorldPanel({ room }: { room: SocietyRoomSnapshot }): ReactNode {
         <Tabs defaultValue="scores" className="p-2">
           <TabsList variant="line" className="w-full justify-start px-2">
             <TabsTrigger value="scores" className="flex-1"><BarChart3 className="size-3.5" />战况</TabsTrigger>
+            <TabsTrigger value="activity" className="flex-1"><Radio className="size-3.5" />活动</TabsTrigger>
             <TabsTrigger value="history" className="flex-1"><History className="size-3.5" />进程</TabsTrigger>
           </TabsList>
           <TabsContent value="scores" className="px-3 pb-4 pt-2">
             <ScoreCard world={world} />
+          </TabsContent>
+          <TabsContent value="activity" className="px-3 pb-4 pt-2">
+            <ActivityCard toolCalls={toolCalls} names={names} />
           </TabsContent>
           <TabsContent value="history" className="px-3 pb-4 pt-2">
             <HistoryCard world={world} names={names} scenarioId={room.scenarioId} />
@@ -76,6 +81,35 @@ function ScoreCard({ world }: { world: WorldSnapshot }): ReactNode {
             />
           </div>
           <span className="w-10 text-right font-mono text-sm text-zinc-50">{agent.score}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ActivityCard({ toolCalls, names }: { toolCalls: RoomConnection["toolCalls"]; names: Map<string, string> }): ReactNode {
+  if (!toolCalls.length) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-white/[0.05] bg-white/[0.01] px-4 py-6 text-xs text-zinc-600">
+        <Radio className="size-3.5" />
+        等待智能体活动…
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1.5">
+      {toolCalls.slice(0, 20).map((call, index) => (
+        <div key={`${call.at}-${index}`} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-xs hover:bg-white/[0.02]">
+          <AgentAvatar name={call.actorName || names.get(call.actorId) || call.actorId} index={call.actorId.length} size="sm" />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-zinc-300">
+              <span className="font-medium text-zinc-100">{names.get(call.actorId) ?? call.actorId}</span>
+              <span className="mx-1 text-zinc-600">·</span>
+              {eventLabel(call.toolName)}
+            </p>
+            <p className="truncate font-mono text-[10px] text-zinc-600">{call.toolName}</p>
+          </div>
+          <span className={cn("size-1.5 rounded-full", call.phase === "started" ? "bg-emerald-400" : "bg-zinc-600")} />
         </div>
       ))}
     </div>
