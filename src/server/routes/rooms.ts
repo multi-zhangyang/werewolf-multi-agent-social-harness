@@ -1,12 +1,19 @@
 import express from "express";
 import { z } from "zod";
-import { MODEL_CATALOG, createAgentProfiles } from "../../society/profiles";
+import { createAgentProfiles, modelCatalogFor } from "../../society/profiles";
 import { ALL_SCENARIOS, SCENARIO_METADATA } from "../../society/scenarios";
 import type { ScenarioId } from "../../society/contracts";
 import type { SocietyRoomSnapshot } from "../../society/room";
 import type { ServerContext } from "../context";
+import { getProviderSettings, publicSettings, saveProviderSettings, testProviderSettings } from "../settings";
 
 const scenarioIds = Object.keys(SCENARIO_METADATA) as [ScenarioId, ...ScenarioId[]];
+
+const settingsSchema = z.object({
+  baseURL: z.string().max(500).optional(),
+  apiKey: z.string().max(400).optional(),
+  models: z.array(z.string().min(1).max(180)).min(1).max(16).optional()
+}).strict();
 
 const createRoomSchema = z.object({
   scenarioId: z.enum(scenarioIds),
@@ -33,16 +40,36 @@ const createRoomSchema = z.object({
 
 export function registerRoomRoutes(app: express.Express, context: ServerContext): void {
   app.get("/api/health", (_request, response) => {
+    const settings = getProviderSettings();
     response.json({
       status: "ok",
       runtime: "@openai/agents",
-      providerConfigured: hasProviderKey(),
-      baseURL: process.env.OPENAI_BASE_URL ? "configured" : "default"
+      providerConfigured: Boolean(settings.apiKey),
+      baseURL: settings.baseURL ? "configured" : "default"
     });
   });
 
+  app.get("/api/settings", (_request, response) => {
+    response.json(publicSettings());
+  });
+
+  app.put("/api/settings", (request, response, next) => {
+    try {
+      const input = settingsSchema.parse(request.body ?? {});
+      response.json(saveProviderSettings(input));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/settings/test", (_request, response, next) => {
+    void testProviderSettings()
+      .then((result) => response.json(result))
+      .catch(next);
+  });
+
   app.get("/api/scenarios", (_request, response) => {
-    response.json({ scenarios: ALL_SCENARIOS, models: MODEL_CATALOG });
+    response.json({ scenarios: ALL_SCENARIOS, models: modelCatalogFor(getProviderSettings().models) });
   });
 
   app.get("/api/rooms", (_request, response) => {
@@ -66,7 +93,13 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
           profiles[index].model = input.models[(index - 1) % input.models.length];
         }
       }
-      const room = context.rooms.create({ scenarioId: input.scenarioId, profiles, rounds: input.rounds });
+      const room = context.rooms.create({
+        scenarioId: input.scenarioId,
+        profiles,
+        rounds: input.rounds,
+        apiKey: getProviderSettings().apiKey || undefined,
+        baseURL: getProviderSettings().baseURL || undefined
+      });
       void room.start();
       response.status(202).json(room.creationResult());
     } catch (error) {
@@ -161,11 +194,6 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       unsubscribe();
     });
   });
-}
-
-function hasProviderKey(): boolean {
-  const value = process.env.OPENAI_API_KEY?.trim();
-  return Boolean(value && !value.startsWith("replace-with"));
 }
 
 function queryToken(request: express.Request): string | undefined {

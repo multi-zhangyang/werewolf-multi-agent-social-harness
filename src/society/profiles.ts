@@ -113,7 +113,12 @@ export function createAgentProfiles(models: string[], count: number, temperature
 function modelCatalogFromEnv(value = process.env.SOCIETY_MODELS): Array<{ id: string; name: string; provider: string }> {
   const configured = [...new Set((value ?? "").split(",").map((id) => id.trim()).filter(Boolean))].slice(0, 16);
   if (!configured.length) return DEFAULT_MODEL_CATALOG.map((entry) => ({ ...entry }));
-  return configured.map((id) => {
+  return modelCatalogFor(configured);
+}
+
+/** Catalog entries for a runtime-provided model list (settings UI). */
+export function modelCatalogFor(ids: string[]): Array<{ id: string; name: string; provider: string }> {
+  return ids.map((id) => {
     const known = DEFAULT_MODEL_CATALOG.find((entry) => entry.id === id);
     return known ? { ...known } : { id, name: readableModelName(id), provider: "OpenAI-compatible" };
   });

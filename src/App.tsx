@@ -4,6 +4,7 @@ import type { SocietyRoomSnapshot } from "@/society/room";
 import { CreateRoomDialog } from "@/components/society/create-room";
 import { Landing } from "@/components/society/landing";
 import { RoomView } from "@/components/society/room-view";
+import { SettingsDialog } from "@/components/society/settings-dialog";
 import type { CreateRoomInput, CreateRoomResult, ModelOption } from "@/components/society/types";
 
 interface CatalogResponse {
@@ -23,6 +24,7 @@ export function App(): ReactNode {
   const [rooms, setRooms] = useState<SocietyRoomSnapshot[]>([]);
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
   const [createScenarioId, setCreateScenarioId] = useState<string>();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string>();
   const [booting, setBooting] = useState(true);
 
@@ -32,19 +34,20 @@ export function App(): ReactNode {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
+  const loadCatalog = useCallback(async (): Promise<void> => {
+    const [catalog, list] = await Promise.all([getJson<CatalogResponse>("/api/scenarios"), getJson<RoomListResponse>("/api/rooms")]);
+    setScenarios(catalog.scenarios);
+    setModels(catalog.models);
+    setRooms(list.rooms);
+  }, []);
+
   useEffect(() => {
     let active = true;
-    void Promise.all([getJson<CatalogResponse>("/api/scenarios"), getJson<RoomListResponse>("/api/rooms")])
-      .then(([catalog, list]) => {
-        if (!active) return;
-        setScenarios(catalog.scenarios);
-        setModels(catalog.models);
-        setRooms(list.rooms);
-      })
+    void loadCatalog()
       .catch((cause) => { if (active) setError(errorMessage(cause)); })
       .finally(() => { if (active) setBooting(false); });
     return () => { active = false; };
-  }, []);
+  }, [loadCatalog]);
 
   useEffect(() => {
     const poll = window.setInterval(() => {
@@ -104,6 +107,7 @@ export function App(): ReactNode {
           rooms={rooms}
           onStart={(scenarioId) => setCreateScenarioId(scenarioId)}
           onOpenRoom={(roomId) => { location.hash = `#/rooms/${encodeURIComponent(roomId)}`; }}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
       )}
       <CreateRoomDialog
@@ -112,6 +116,11 @@ export function App(): ReactNode {
         models={models}
         onOpenChange={(open) => { if (!open) setCreateScenarioId(undefined); }}
         onCreated={createRoom}
+      />
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        onSaved={() => { void loadCatalog().catch((cause) => setError(errorMessage(cause))); }}
       />
       {error ? (
         <div className="fixed inset-x-0 bottom-4 z-30 mx-auto w-fit rounded-lg border border-red-400/20 bg-[#140a0a] px-4 py-2 text-xs text-red-300">

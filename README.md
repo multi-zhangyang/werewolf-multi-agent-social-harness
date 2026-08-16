@@ -65,6 +65,10 @@ Most "multi-agent" demos are prompt wrappers or JSON parsers in disguise. Societ
 
 <p align="center"><img src="docs/screenshots/room-finished.png" width="820" alt="Finished room" /></p>
 
+### Provider settings
+
+<p align="center"><img src="docs/screenshots/settings.png" width="820" alt="Provider settings dialog" /></p>
+
 ## Architecture
 
 ```text
@@ -103,6 +107,8 @@ The web app is served at `http://127.0.0.1:5173`; the API is at `http://127.0.0.
 
 `SOCIETY_MODELS` is a comma-separated list of model IDs accepted by your endpoint; agents are assigned models from this list when you create a room. No provider credentials or model IDs live in this repository — they are read exclusively from your local environment.
 
+You can also configure everything from the web app: click the settings icon in the header to set the provider base URL, API key and model list, and to test the connection. Settings are written to your local `.env.local` (gitignored) only — the UI never displays and the API never returns the full key.
+
 Useful checks:
 
 ```bash
@@ -125,6 +131,9 @@ The demo boots live rooms against your configured provider and writes transcript
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/health` | Runtime and provider configuration status |
+| GET | `/api/settings` | Current provider settings (key masked) |
+| PUT | `/api/settings` | Update provider base URL, key or model list |
+| POST | `/api/settings/test` | Test provider connectivity and discover models |
 | GET | `/api/scenarios` | World and model catalog |
 | GET | `/api/rooms` | Rooms held by this server process |
 | POST | `/api/rooms` | Create and start a room |

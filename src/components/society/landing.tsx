@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ArrowRight, Play, Sparkles } from "lucide-react";
+import { ArrowRight, Play, Settings2, Sparkles } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
@@ -15,9 +15,10 @@ interface LandingProps {
   rooms: SocietyRoomSnapshot[];
   onStart: (scenarioId: string) => void;
   onOpenRoom: (roomId: string) => void;
+  onOpenSettings: () => void;
 }
 
-export function Landing({ scenarios, models, rooms, onStart, onOpenRoom }: LandingProps): ReactNode {
+export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenSettings }: LandingProps): ReactNode {
   const ticker = scenarios.map((scenario) => scenario.name).join(" · ");
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#050505]">
@@ -40,6 +41,9 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom }: Landi
               {rooms.length} 个活跃世界
             </Badge>
           ) : null}
+          <Button variant="outline" size="icon-sm" aria-label="模型提供商设置" className="rounded-full border-white/10 bg-white/[0.02] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200" onClick={onOpenSettings}>
+            <Settings2 className="size-3.5" />
+          </Button>
           <Button size="sm" className="rounded-full bg-zinc-50 text-zinc-950 transition-transform hover:bg-white active:scale-[0.98]" onClick={() => onStart(scenarios[0]?.id ?? "werewolf")}>
             <Play className="size-3.5" />
             创建世界
