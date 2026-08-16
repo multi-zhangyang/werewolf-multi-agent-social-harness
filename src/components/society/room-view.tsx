@@ -35,7 +35,7 @@ export function RoomView({ roomId, token, onBack }: RoomViewProps): ReactNode {
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-20 border-b border-white/[0.06] bg-[#0a0a0a]/85 backdrop-blur-xl">
         <div className="mx-auto flex h-16 w-full max-w-7xl items-center gap-3 px-6">
-          <Button variant="ghost" size="icon-sm" className="text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200" onClick={onBack}>
+          <Button variant="ghost" size="icon-sm" aria-label="返回" className="text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200" onClick={onBack}>
             <ArrowLeft className="size-4" />
           </Button>
           <span className="flex size-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-zinc-200">
@@ -69,7 +69,7 @@ export function RoomView({ roomId, token, onBack }: RoomViewProps): ReactNode {
             </div>
             <ShareButton roomId={room.id} />
             {room.status === "running" ? (
-              <Button variant="outline" size="sm" className="rounded-full border-white/10 bg-white/[0.02] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200" onClick={() => void pause()}>
+              <Button variant="outline" size="sm" aria-label="暂停房间" className="rounded-full border-white/10 bg-white/[0.02] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200" onClick={() => void pause()}>
                 <Pause className="size-3.5" />
                 暂停
               </Button>
@@ -117,7 +117,7 @@ function ShareButton({ roomId }: { roomId: string }): ReactNode {
     }
   };
   return (
-    <Button variant="outline" size="icon-sm" className="rounded-full border-white/10 bg-white/[0.02] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200" onClick={() => void copy()}>
+    <Button variant="outline" size="icon-sm" aria-label={copied ? "已复制" : "复制房间链接"} className="rounded-full border-white/10 bg-white/[0.02] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200" onClick={() => void copy()}>
       {copied ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
     </Button>
   );
