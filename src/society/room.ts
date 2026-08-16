@@ -388,11 +388,19 @@ export class SocietyRoom {
         : undefined;
       let result: AgentTurnResult;
       try {
-        result = await runtime.runTurn(`${activation.label}\n${instruction}`, {
-          signal,
-          turn: this.world.snapshot().turn,
-          ...(maxTurns ? { maxTurns } : {})
-        });
+        // Hard timeout guard: abort signals can be swallowed by a stalled
+        // provider stream, so race the turn against a wall clock as well.
+        result = await Promise.race([
+          runtime.runTurn(`${activation.label}\n${instruction}`, {
+            signal,
+            turn: this.world.snapshot().turn,
+            ...(maxTurns ? { maxTurns } : {})
+          }),
+          new Promise<never>((_, reject) => {
+            const timer = setTimeout(() => reject(new Error(`TURN_TIMEOUT after ${this.turnTimeoutMs}ms`)), this.turnTimeoutMs + 15_000);
+            signal.addEventListener("abort", () => { clearTimeout(timer); }, { once: true });
+          })
+        ]);
       } catch (error) {
         // Speaking is optional: an agent that fails to produce a coherent turn
         // simply stays quiet for this wave instead of sinking the whole room.
