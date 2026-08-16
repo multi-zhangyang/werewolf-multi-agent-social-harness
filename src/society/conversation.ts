@@ -91,7 +91,9 @@ export class DiscussionDirector {
     this.talkativeness = options.talkativeness ?? (() => 0.5);
     this.dominance = options.dominance ?? (() => 0.5);
     this.sensitivity = options.sensitivity ?? (() => 0.5);
-    this.maxWaves = options.maxWaves ?? 5;
+    // Fewer players, tighter conversations: a duet settles in 3 waves, a full
+    // table needs up to 5.
+    this.maxWaves = options.maxWaves ?? Math.min(5, 2 + Math.ceil(this.actorIds.length / 2));
     this.maxMessagesPerActor = options.maxMessagesPerActor ?? 3;
     this.totalMessageBudget = options.totalMessageBudget ?? this.actorIds.length * 3 + 6;
     this.urgencyThreshold = options.urgencyThreshold ?? 1.4;

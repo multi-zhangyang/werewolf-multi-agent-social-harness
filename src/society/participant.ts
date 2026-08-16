@@ -80,13 +80,17 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
     this.profile = structuredClone(options.profile);
     this.mind = initialMind(options.profile, options.world.snapshot().agents.map((agent) => agent.id), options.dossier);
     this.session = new MemorySession({ sessionId: `${options.roomId}:${options.profile.id}` });
+    // Season memories start inside the associative store, not just in the
+    // initial mind view, so they survive the first memory sync and can be
+    // recalled by the agent like any other memory.
+    const seasonMemories = this.mind.memories.filter((entry) => entry.tags.includes("season"));
     this.context = {
       actorId: options.profile.id,
       roomId: options.roomId,
       profile: this.profile,
       world: options.world,
       mind: this.mind,
-      memory: new AssociativeMemory(),
+      memory: new AssociativeMemory(seasonMemories),
       emit: options.emit
     };
     const provider = options.provider ?? new OpenAIProvider({
