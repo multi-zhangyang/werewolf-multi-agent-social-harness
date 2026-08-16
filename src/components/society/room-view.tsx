@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { ArrowLeft, Check, Copy, Pause, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { Conversation } from "./conversation";
@@ -117,9 +118,14 @@ function ShareButton({ roomId }: { roomId: string }): ReactNode {
     }
   };
   return (
-    <Button variant="outline" size="icon-sm" aria-label={copied ? "已复制" : "复制房间链接"} className="rounded-full border-white/10 bg-white/[0.02] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200" onClick={() => void copy()}>
-      {copied ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
-    </Button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="outline" size="icon-sm" aria-label={copied ? "已复制" : "复制房间链接"} className="rounded-full border-white/10 bg-white/[0.02] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200" onClick={() => void copy()}>
+          {copied ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{copied ? "已复制" : "复制房间链接"}</TooltipContent>
+    </Tooltip>
   );
 }
 
