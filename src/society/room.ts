@@ -405,11 +405,19 @@ export class SocietyRoom {
       } catch (error) {
         // Speaking is optional: an agent that fails to produce a coherent turn
         // simply stays quiet for this wave instead of sinking the whole room.
-        // Binding domain actions (votes, night targets, bids) stay strict.
-        if (!isDiscussion) throw new Error(`${runtime.profile.displayName} (${runtime.profile.model}) failed: ${errorMessage(error)}`, { cause: error });
-        const note = `${runtime.profile.displayName} 本轮未能发言（${errorMessage(error)}）`;
+        if (isDiscussion) {
+          const note = `${runtime.profile.displayName} 本轮未能发言（${errorMessage(error)}）`;
+          this.world.addWorldLog(note);
+          this.emit({ type: "agent.status", roomId: this.id, actorId, status: "idle", at: now() });
+          return;
+        }
+        // Binding actions (votes, night targets, bids) stay mandatory, but a
+        // single failed turn must not sink the room: report it, let
+        // completeActivation flag the missing action, and the room retries the
+        // actor once. Only a repeated failure pauses the room.
+        const note = `${runtime.profile.displayName} 行动失败（${errorMessage(error)}），稍后重试`;
         this.world.addWorldLog(note);
-        this.emit({ type: "agent.status", roomId: this.id, actorId, status: "idle", at: now() });
+        this.emit({ type: "agent.status", roomId: this.id, actorId, status: "error", at: now() });
         return;
       }
       card.turnCount += 1;
