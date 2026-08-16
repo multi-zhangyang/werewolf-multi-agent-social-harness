@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import {
   BrainCircuit,
   Gavel,
+  HandCoins,
   Handshake,
   MoonStar,
   Scale,
@@ -74,7 +75,8 @@ export function ScenarioIcon({ id, className }: { id: ScenarioId; className?: st
       : id === "public-goods" ? Users
         : id === "trust-game" ? Handshake
           : id === "beauty-contest" ? BrainCircuit
-            : MoonStar;
+            : id === "sealed-bid-auction" ? HandCoins
+              : MoonStar;
   return <Icon className={className} />;
 }
 
@@ -138,7 +140,8 @@ export function eventLabel(name: string): string {
     choose_number: "提交数字",
     cast_day_vote: "白天投票",
     choose_night_target: "夜间目标",
-    investigate_identity: "身份查验"
+    investigate_identity: "身份查验",
+    submit_bid: "提交密封出价"
   };
   return labels[name] ?? name.replaceAll("_", " ");
 }

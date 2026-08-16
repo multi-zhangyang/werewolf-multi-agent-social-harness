@@ -87,7 +87,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next && !submitting) onOpenChange(false); }}>
-      <DialogContent className="max-w-xl rounded-2xl border-white/[0.08] bg-[#0d0d0d] p-0 text-zinc-100 shadow-2xl" showCloseButton={!submitting}>
+      <DialogContent className="max-w-xl rounded-3xl border-white/[0.08] bg-[#0d0d0d] p-0 text-zinc-100 shadow-2xl" showCloseButton={!submitting}>
         {scenario ? (
           <div className="max-h-[82vh] overflow-y-auto">
             <div className="border-b border-white/[0.06] p-6">
@@ -189,7 +189,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                     onChange={(event) => setPlayerName(event.target.value)}
                     placeholder="作为第 1 位参与者加入"
                     maxLength={40}
-                    className="h-9 w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                    className="h-10 w-full rounded-xl border border-white/[0.08] bg-white/[0.02] px-3.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
                   />
                 </section>
               ) : null}
@@ -203,7 +203,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                 <Button
                   onClick={submit}
                   disabled={submitting}
-                  className="rounded-lg bg-zinc-50 px-5 text-zinc-950 hover:bg-white"
+                  className="rounded-full bg-zinc-50 px-6 text-zinc-950 hover:bg-white"
                 >
                   {submitting ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
                   开始世界

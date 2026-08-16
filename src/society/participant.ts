@@ -1,15 +1,17 @@
 /**
  * Society participant runtime.
  *
- * This is built directly on the OpenAI Agents SDK:
+ * Built directly on the OpenAI Agents SDK:
  * - Agent is the real model + harness boundary
  * - Runner executes each agent turn with sessions, streaming and tool calls
  * - MemorySession persists per-participant conversation history
  * - function tools are the only way to change the world
- * - reflection and theory-of-mind are real sub-agents exposed via agent.asTool()
+ * - reflection, theory-of-mind and planning are real SDK Agents reached through
+ *   handoffs, and they return control to the participant after private analysis
  */
 import {
   Agent,
+  handoff,
   MemorySession,
   OpenAIProvider,
   Runner,
@@ -89,65 +91,17 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
     this.maxTurns = boundedInteger(options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 12), 2, 24);
 
     const common = commonTools(this.context);
-    const reflectionAgent = new Agent<SocietyAgentContext>({
-      name: `${this.profile.displayName} reflection`,
-      model: this.profile.model,
-      instructions: ({ context }) => reflectionInstructions(context),
-      tools: [common.recall, common.innerState],
-      modelSettings: {
-        maxTokens: numberFromEnv("SOCIETY_REFLECTION_TOKENS", 500),
-        reasoning: { effort: this.profile.reasoningEffort ?? "low" },
-        ...providerRetrySettings
-      }
-    });
-    const reflection = reflectionAgent.asTool({
-      toolName: "reflect_on_social_situation",
-      toolDescription: "Review current incentives, relevant memories, likely beliefs held by other participants, and strategic options. Returns private advice and cannot change the world.",
-      runConfig: { modelProvider: provider, tracingDisabled: true },
-      runOptions: { maxTurns: 2 }
-    });
 
-    const mindReaderAgent = new Agent<SocietyAgentContext>({
-      name: `${this.profile.displayName} mind reader`,
-      model: this.profile.model,
-      instructions: ({ context }) => mindReaderInstructions(context),
-      tools: [common.recall, common.innerState],
-      modelSettings: {
-        maxTokens: numberFromEnv("SOCIETY_REFLECTION_TOKENS", 500),
-        reasoning: { effort: this.profile.reasoningEffort ?? "low" },
-        ...providerRetrySettings
-      }
-    });
-    const mindReader = mindReaderAgent.asTool({
-      toolName: "read_the_room",
-      toolDescription: "Build a theory of mind about the other participants: what each one most likely wants, how trustworthy their behavior has been, what they probably believe about you, and what they might be hiding. Returns private analysis and cannot change the world.",
-      runConfig: { modelProvider: provider, tracingDisabled: true },
-      runOptions: { maxTurns: 2 }
-    });
-
-    const plannerAgent = new Agent<SocietyAgentContext>({
-      name: `${this.profile.displayName} planner`,
-      model: this.profile.model,
-      instructions: ({ context }) => planningInstructions(context),
-      tools: [common.recall, common.innerState],
-      modelSettings: {
-        maxTokens: numberFromEnv("SOCIETY_REFLECTION_TOKENS", 500),
-        reasoning: { effort: this.profile.reasoningEffort ?? "high" },
-        ...providerRetrySettings
-      }
-    });
-    const planner = plannerAgent.asTool({
-      toolName: "plan_social_strategy",
-      toolDescription: "Turn your goals, beliefs, relationships and read of the room into a concrete, sequenced plan for this round. Returns private advice and cannot change the world.",
-      runConfig: { modelProvider: provider, tracingDisabled: true },
-      runOptions: { maxTurns: 2 }
-    });
-
-    this.agent = new Agent<SocietyAgentContext>({
+    // The participant is the main agent. Cognitive specialists (reflection,
+    // theory-of-mind, planning) are first-class SDK Agents that the participant
+    // can delegate to through handoffs. Each specialist returns control to the
+    // participant after delivering private analysis, so the participant can
+    // still act in the world with full context.
+    const baseMainAgent = new Agent<SocietyAgentContext>({
       name: this.profile.displayName,
       model: this.profile.model,
       instructions: ({ context }) => participantInstructions(context),
-      tools: [...common.all, reflection, mindReader, planner, ...options.world.toolsFor(this.profile.id)],
+      tools: [...common.all, ...options.world.toolsFor(this.profile.id)],
       modelSettings: {
         ...(this.profile.temperature === undefined ? {} : { temperature: this.profile.temperature }),
         maxTokens: numberFromEnv("SOCIETY_AGENT_MAX_OUTPUT_TOKENS", 900),
@@ -156,6 +110,78 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
         ...providerRetrySettings
       },
       toolUseBehavior: "run_llm_again"
+    });
+
+    const reflectionAgent = new Agent<SocietyAgentContext>({
+      name: `${this.profile.displayName} reflection`,
+      model: this.profile.model,
+      instructions: ({ context }) => reflectionInstructions(context),
+      tools: [common.recall, common.innerState],
+      handoffDescription: "Private strategic reflection: review incentives, memories, and likely beliefs, then return to the participant.",
+      modelSettings: {
+        maxTokens: numberFromEnv("SOCIETY_REFLECTION_TOKENS", 500),
+        reasoning: { effort: this.profile.reasoningEffort ?? "low" },
+        ...providerRetrySettings
+      }
+    });
+
+    const mindReaderAgent = new Agent<SocietyAgentContext>({
+      name: `${this.profile.displayName} mind reader`,
+      model: this.profile.model,
+      instructions: ({ context }) => mindReaderInstructions(context),
+      tools: [common.recall, common.innerState],
+      handoffDescription: "Private theory-of-mind analysis: infer what each other participant wants, believes, and hides, then return to the participant.",
+      modelSettings: {
+        maxTokens: numberFromEnv("SOCIETY_REFLECTION_TOKENS", 500),
+        reasoning: { effort: this.profile.reasoningEffort ?? "low" },
+        ...providerRetrySettings
+      }
+    });
+
+    const plannerAgent = new Agent<SocietyAgentContext>({
+      name: `${this.profile.displayName} planner`,
+      model: this.profile.model,
+      instructions: ({ context }) => planningInstructions(context),
+      tools: [common.recall, common.innerState],
+      handoffDescription: "Private strategic planning: turn goals, beliefs, relationships and reads into a concrete sequence, then return to the participant.",
+      modelSettings: {
+        maxTokens: numberFromEnv("SOCIETY_REFLECTION_TOKENS", 500),
+        reasoning: { effort: this.profile.reasoningEffort ?? "high" },
+        ...providerRetrySettings
+      }
+    });
+
+    const returnHandoff = handoff(baseMainAgent, {
+      toolNameOverride: "return_to_participant",
+      toolDescriptionOverride: "Return control to the main participant after delivering your private analysis."
+    });
+
+    const reflectionHandoff = handoff(
+      reflectionAgent.clone({ handoffs: [returnHandoff] }),
+      {
+        toolNameOverride: "reflect_on_social_situation",
+        toolDescriptionOverride: "Review current incentives, relevant memories, likely beliefs held by other participants, and strategic options. Returns private advice and cannot change the world."
+      }
+    );
+
+    const mindReaderHandoff = handoff(
+      mindReaderAgent.clone({ handoffs: [returnHandoff] }),
+      {
+        toolNameOverride: "read_the_room",
+        toolDescriptionOverride: "Build a theory of mind about the other participants: what each one most likely wants, how trustworthy their behavior has been, what they probably believe about you, and what they might be hiding. Returns private analysis and cannot change the world."
+      }
+    );
+
+    const plannerHandoff = handoff(
+      plannerAgent.clone({ handoffs: [returnHandoff] }),
+      {
+        toolNameOverride: "plan_social_strategy",
+        toolDescriptionOverride: "Turn your goals, beliefs, relationships and read of the room into a concrete, sequenced plan for this round. Returns private advice and cannot change the world."
+      }
+    );
+
+    this.agent = baseMainAgent.clone({
+      handoffs: [reflectionHandoff, mindReaderHandoff, plannerHandoff]
     });
   }
 
@@ -360,7 +386,7 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
       "- needsDelta: how your security, connection, status, autonomy and achievement needs shift (0 to 1).",
       "- energyDelta: small change to your stamina, typically negative after hard turns.",
       "- attention: what you are currently watching.",
-      "Also use this tool to update relationships (trust/affinity/respect/tension deltas with a note), beliefs about others (proposition + confidence + source), and goal progress. Only call it when new evidence actually changes your inner model; do not spam it."
+      "Also use this tool to update relationships (trust/affinity/respect/tension deltas with a note), beliefs about others (proposition + confidence + source), and goal progress. Only call it when new information actually changes your inner model; do not spam it."
     ].join("\n"),
     parameters: z.object({
       emotionDelta: z.object({
@@ -483,6 +509,7 @@ function participantInstructions(context: SocietyAgentContext): string {
     "All speech and all actions that change the world must use tools. Never claim an action happened unless its tool completed.",
     "Use reflect_on_social_situation when incentives or other participants' beliefs are unclear. Use plan_social_strategy when you need to turn a messy situation into a concrete sequence. Use update_inner_state when events genuinely change your emotions, needs, beliefs, or relationships.",
     "Use read_the_room when another participant's motives or honesty are uncertain, before making commitments, accusations, or trust decisions.",
+    "Use at most one cognitive handoff (reflect_on_social_situation, read_the_room, or plan_social_strategy) per turn unless the situation is urgent. Prefer acting on your existing model once you have enough clarity.",
     "Do not reveal private role information unless doing so serves your strategy. Do not output hidden chain-of-thought.",
     "After the required tool succeeds, stop with a brief confirmation. Never expose hidden reasoning or narrate an action that did not happen.",
     affectContext(context.mind.mood),
@@ -499,6 +526,7 @@ function reflectionInstructions(context: SocietyAgentContext): string {
     "You are a private reflection specialist serving one social participant.",
     "Infer incentives, likely beliefs held by others, risks, opportunities, and two concrete strategic options.",
     "Separate observed facts from uncertain inference. You cannot communicate or act in the world.",
+    "After delivering your analysis, immediately call return_to_participant so the participant can act.",
     formatObservation(observation),
     `Goals: ${context.mind.goals.map((goal) => `${goal.id}: ${goal.description}`).join("; ")}`,
     `Current beliefs: ${context.mind.beliefs.map((belief) => `${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`).join("; ") || "none"}`
@@ -512,6 +540,7 @@ function mindReaderInstructions(context: SocietyAgentContext): string {
     "For every other participant, produce four items: (1) what they most likely want this round, (2) how trustworthy their public behavior has been, (3) what they probably believe about you, and (4) what they may be concealing.",
     "Treat statements as cheap talk: separate claims from committed actions and from incentives.",
     "Label each inference with confidence (high / medium / low). You cannot communicate or act in the world.",
+    "After delivering your analysis, immediately call return_to_participant so the participant can act.",
     formatObservation(observation),
     `Your relationships: ${context.mind.relationships.map((relationship) => `${relationship.agentId}: trust ${relationship.trust.toFixed(2)}, affinity ${relationship.affinity.toFixed(2)}, tension ${relationship.tension.toFixed(2)} — ${relationship.note}`).join("; ") || "none"}`,
     `Your beliefs: ${context.mind.beliefs.map((belief) => `${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`).join("; ") || "none"}`
@@ -525,6 +554,7 @@ function planningInstructions(context: SocietyAgentContext): string {
     "Produce a concrete plan for this exact phase: what to say, what to conceal, which tool to call, and what to watch for after the action.",
     "Ground the plan in goals, beliefs, relationships, emotional state and likely reactions from others.",
     "Keep it actionable and short. You cannot communicate or act in the world.",
+    "After delivering your plan, immediately call return_to_participant so the participant can act.",
     formatObservation(observation),
     `Goals: ${context.mind.goals.map((goal) => `${goal.id}: ${goal.description} (${goal.progress})`).join("; ")}`,
     `Current beliefs: ${context.mind.beliefs.map((belief) => `${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`).join("; ") || "none"}`,

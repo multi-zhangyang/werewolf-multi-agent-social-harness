@@ -25,9 +25,9 @@ SocietyRoom ── schedules activations and owns the event log
 `src/society/participant.ts` creates one SDK `Agent` per participant. The
 participant has a stable session, a private mind state and an associative
 memory store. `communicate`, `remember_experience`, `recall_memory` and
-`update_social_model` are SDK function tools. A reflection Agent is exposed as
-`agent.asTool()` so reflection remains a real model run without gaining world
-mutation authority.
+`update_inner_state` are SDK function tools. Reflection, theory-of-mind and
+planning are real SDK Agents reached through handoffs; they return control to
+the participant after private analysis.
 
 The runner streams model and tool events to the room. A model's final text is a
 decision note for the observer; it is not an action protocol. World changes can

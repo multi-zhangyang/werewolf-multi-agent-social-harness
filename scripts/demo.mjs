@@ -10,7 +10,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const API = process.env.DEMO_API ?? "http://127.0.0.1:8787";
-const SCENARIOS = ["prisoners-dilemma", "ultimatum-game", "trust-game", "public-goods", "beauty-contest", "werewolf"];
+const SCENARIOS = ["prisoners-dilemma", "ultimatum-game", "trust-game", "public-goods", "beauty-contest", "sealed-bid-auction", "werewolf"];
 const MODELS = [
   "your-model",
   "your-model",

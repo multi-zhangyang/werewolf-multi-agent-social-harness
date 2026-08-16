@@ -66,6 +66,17 @@ export const SCENARIO_METADATA: Record<ScenarioSummary["id"], ScenarioSummary> =
     minRounds: 2,
     maxRounds: 12,
     capabilities: ["高阶信念", "同时行动", "策略误导", "群体心理"]
+  },
+  "sealed-bid-auction": {
+    id: "sealed-bid-auction",
+    name: "密封拍卖",
+    shortDescription: "私密估值、公开试探、次价结算。",
+    description: "每个参与者持有私密估值，讨论后同时提交密封出价；最高价者获胜并支付次高价。考验策略误导、高阶信念与长期声誉。",
+    players: 3,
+    defaultRounds: 4,
+    minRounds: 2,
+    maxRounds: 10,
+    capabilities: ["私密估值", "同时出价", "策略误导", "次价结算"]
   }
 };
 

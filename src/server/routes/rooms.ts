@@ -6,7 +6,7 @@ import type { SocietyRoomSnapshot } from "../../society/room";
 import type { ServerContext } from "../context";
 
 const createRoomSchema = z.object({
-  scenarioId: z.enum(["prisoners-dilemma", "public-goods", "trust-game", "werewolf", "ultimatum-game", "beauty-contest"]),
+  scenarioId: z.enum(["prisoners-dilemma", "public-goods", "trust-game", "werewolf", "ultimatum-game", "beauty-contest", "sealed-bid-auction"]),
   models: z.array(z.string().min(1).max(180)).min(1).max(8),
   rounds: z.number().int().positive().max(20).optional(),
   temperature: z.number().min(0).max(2).optional(),

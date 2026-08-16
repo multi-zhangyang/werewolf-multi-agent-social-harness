@@ -1,6 +1,6 @@
 import type { Agent, MemorySession, Tool } from "@openai/agents";
 
-export type ScenarioId = "prisoners-dilemma" | "public-goods" | "trust-game" | "werewolf" | "ultimatum-game" | "beauty-contest";
+export type ScenarioId = "prisoners-dilemma" | "public-goods" | "trust-game" | "werewolf" | "ultimatum-game" | "beauty-contest" | "sealed-bid-auction";
 export type RoomStatus = "lobby" | "running" | "paused" | "finished" | "error";
 export type SocialChannel = "public" | "private" | "team";
 export type AgentStatus = "lobby" | "thinking" | "acting" | "speaking" | "idle" | "finished" | "error";
