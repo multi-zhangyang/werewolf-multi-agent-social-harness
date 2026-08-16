@@ -132,6 +132,8 @@ export class DiscussionDirector {
    * activate those with real response pressure.
    */
   nextWave(): string[] {
+    // End conditions always win: budget, wave cap, or nobody under pressure.
+    if (this.done()) return [];
     this.wave += 1;
     if (this.wave === 1) return [...this.actorIds];
     const candidates = this.actorIds
