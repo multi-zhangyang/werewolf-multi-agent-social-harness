@@ -40,7 +40,23 @@ Most "multi-agent" demos are prompt wrappers or JSON parsers in disguise. Societ
 | 密封拍卖 | 私密估值、策略误导与次价结算 |
 | 狼人杀 | 隐藏身份、阵营与欺骗 |
 
-![Room](docs/screenshots/room.png)
+## Screenshots
+
+### Landing
+
+![Landing](docs/screenshots/landing.png)
+
+### Create a world
+
+![Create Room](docs/screenshots/create-room.png)
+
+### Live running room
+
+![Room Running](docs/screenshots/room-running.png)
+
+### Agent Mind Inspector
+
+![Agent Mind](docs/screenshots/agent-mind.png)
 
 ## Architecture
 
