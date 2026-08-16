@@ -95,7 +95,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
       description: `Commit an integer from 0 to ${this.endowment} to the public pool for this round. The action is private until every participant commits and cannot be changed afterward.`,
       parameters: z.object({
         amount: z.number().int().min(0).max(this.endowment),
-        reason: z.string().min(1).max(500)
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async ({ amount, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
@@ -132,7 +132,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
     if (!Number.isInteger(amount) || typeof amount !== "number" || amount < 0 || amount > this.endowment) {
       throw new Error(`CONTRIBUTION_INVALID: Choose an integer from 0 to ${this.endowment}.`);
     }
-    const reason = typeof value.reason === "string" ? value.reason.trim().slice(0, 500) : "";
+    const reason = typeof value.reason === "string" ? value.reason.trim() : "";
     this.contributions.set(actorId, amount);
     this.emitUpdate();
     return {

@@ -98,7 +98,7 @@ export class UltimatumWorld extends SocialWorldBase {
     const propose = tool({
       name: "propose_split",
       description: `As the current proposer, offer the responder an integer share from 0 to ${this.pot} of the ${this.pot}-point pot. You keep the rest, but an angry rejection gives both zero.`,
-      parameters: z.object({ offer: z.number().int().min(0).max(this.pot), reason: z.string().min(1).max(500) }).strict(),
+      parameters: z.object({ offer: z.number().int().min(0).max(this.pot), reason: z.string().min(1).max(2_000) }).strict(),
       execute: async ({ offer, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
         const commit = await this.performAction(actorId, "propose_split", { offer, reason });
@@ -109,7 +109,7 @@ export class UltimatumWorld extends SocialWorldBase {
     const respond = tool({
       name: "respond_to_offer",
       description: "As the current responder, accept or reject the proposer's split. Accepting locks in both payoffs; rejecting gives both zero for this round.",
-      parameters: z.object({ accept: z.boolean(), reason: z.string().min(1).max(500) }).strict(),
+      parameters: z.object({ accept: z.boolean(), reason: z.string().min(1).max(2_000) }).strict(),
       execute: async ({ accept, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
         const commit = await this.performAction(actorId, "respond_to_offer", { accept, reason });

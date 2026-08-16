@@ -117,7 +117,7 @@ export class WerewolfWorld extends SocialWorldBase {
     const vote = tool({
       name: "cast_day_vote",
       description: "Cast your binding daytime vote against one living participant. Votes remain hidden until every living participant commits and cannot be changed.",
-      parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(600) }).strict(),
+      parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(2_000) }).strict(),
       execute: async ({ targetId, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
         const commit = await this.performAction(actorId, "cast_day_vote", { targetId, reason });
@@ -130,7 +130,7 @@ export class WerewolfWorld extends SocialWorldBase {
       const eliminate = tool({
         name: "choose_night_target",
         description: "As a living wolf at night, nominate one living non-wolf participant for elimination. Each wolf submits a target; the pack's majority decides.",
-        parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(600) }).strict(),
+        parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(2_000) }).strict(),
         execute: async ({ targetId, reason }, runContext) => {
           const context = contextFromRunContext(runContext);
           const commit = await this.performAction(actorId, "choose_night_target", { targetId, reason });
@@ -144,7 +144,7 @@ export class WerewolfWorld extends SocialWorldBase {
       const investigate = tool({
         name: "investigate_identity",
         description: "As the living seer at night, inspect one other living participant. The exact hidden role is returned privately and remains available in future observations.",
-        parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(600) }).strict(),
+        parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(2_000) }).strict(),
         execute: async ({ targetId, reason }, runContext) => {
           const context = contextFromRunContext(runContext);
           const commit = await this.performAction(actorId, "investigate_identity", { targetId, reason });
@@ -202,7 +202,7 @@ export class WerewolfWorld extends SocialWorldBase {
       throw new Error("TARGET_REQUIRED: Select a participant.");
     }
     const targetId = value.targetId;
-    const reason = typeof value.reason === "string" ? value.reason.trim().slice(0, 600) : "";
+    const reason = typeof value.reason === "string" ? value.reason.trim() : "";
     this.assertActiveActor(actorId);
     this.assertLivingTarget(targetId);
     if (action === "cast_day_vote") {

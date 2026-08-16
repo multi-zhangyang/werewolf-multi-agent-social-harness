@@ -6,7 +6,7 @@ export function emitAction(context: SocietyAgentContext, action: string, detail:
     roomId: context.roomId,
     actorId: context.actorId,
     action,
-    detail: detail.slice(0, 260),
+    detail,
     at: new Date().toISOString()
   });
 }

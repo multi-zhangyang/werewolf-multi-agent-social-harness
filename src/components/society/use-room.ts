@@ -5,6 +5,10 @@ import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "@/society/ro
 export interface LiveAgentActivity {
   /** Streamed text deltas from the model while it speaks or decides. */
   text: string;
+  /** Streamed hidden reasoning from reasoning-capable providers. */
+  reasoning?: string;
+  /** Streamed private specialist output (reflection / mind-read / plan). */
+  thought?: { kind: "reflection" | "mind-read" | "plan"; text: string };
   /** The SDK tool the agent is currently invoking. */
   tool?: string;
   /** Last event timestamp for this agent. */
@@ -26,6 +30,8 @@ export interface RoomConnection {
 }
 
 const DELTA_CAP = 480;
+const REASONING_CAP = 700;
+const THOUGHT_CAP = 900;
 
 export function useRoom(roomId: string | undefined, token?: string): RoomConnection {
   const [room, setRoom] = useState<SocietyRoomSnapshot | null>(null);
@@ -135,7 +141,23 @@ function reduceEvent(
     setActivity((current) => {
       const previous = current[event.actorId]?.text ?? "";
       const text = (previous + event.delta).slice(-DELTA_CAP);
-      return { ...current, [event.actorId]: { text, at: event.at, tool: current[event.actorId]?.tool } };
+      return { ...current, [event.actorId]: { text, at: event.at, tool: current[event.actorId]?.tool, reasoning: current[event.actorId]?.reasoning } };
+    });
+    return;
+  }
+  if (event.type === "agent.reasoning") {
+    setActivity((current) => {
+      const previous = current[event.actorId]?.reasoning ?? "";
+      const reasoning = (previous + event.delta).slice(-REASONING_CAP);
+      return { ...current, [event.actorId]: { ...current[event.actorId], reasoning, at: event.at } };
+    });
+    return;
+  }
+  if (event.type === "agent.thought") {
+    setActivity((current) => {
+      const previous = current[event.actorId]?.thought;
+      const text = ((previous?.kind === event.specialist ? previous.text : "") + event.delta).slice(-THOUGHT_CAP);
+      return { ...current, [event.actorId]: { ...current[event.actorId], thought: { kind: event.specialist, text }, at: event.at } };
     });
     return;
   }

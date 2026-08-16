@@ -77,6 +77,50 @@ export const SCENARIO_METADATA: Record<ScenarioSummary["id"], ScenarioSummary> =
     minRounds: 2,
     maxRounds: 10,
     capabilities: ["私密估值", "同时出价", "策略误导", "次价结算"]
+  },
+  avalon: {
+    id: "avalon",
+    name: "阿瓦隆",
+    shortDescription: "忠臣与内奸混在圆桌边，任务成败只藏在一次举手之间。",
+    description: "五名忠臣与两名内奸争夺三次任务。队长组队，全体表决，队员暗中决定任务成败；一旦任务全胜，刺客将用最后一剑赌上梅林的身份。",
+    players: 6,
+    defaultRounds: 4,
+    minRounds: 2,
+    maxRounds: 5,
+    capabilities: ["隐藏阵营", "组队与表决", "暗中破坏", "最终刺杀"]
+  },
+  "centipede-game": {
+    id: "centipede-game",
+    name: "蜈蚣博弈",
+    shortDescription: "罐子越传越大，谁先伸手拿走，谁就背叛了共同的未来。",
+    description: "两人轮流决定拿走或传递不断翻倍的奖池。每一次传递都在积累信任，也把背叛的诱惑留给下一个人。",
+    players: 2,
+    defaultRounds: 6,
+    minRounds: 2,
+    maxRounds: 10,
+    capabilities: ["轮流传递", "奖池翻倍", "信任与背叛", "后发制人"]
+  },
+  "chicken-game": {
+    id: "chicken-game",
+    name: "胆小鬼博弈",
+    shortDescription: "谁也不先打方向盘，直到两辆车撞在一起。",
+    description: "双方同时决定闪避还是硬冲：闪避者保住性命但丢面子，对冲者赢下一切，两人都不闪则两败俱伤。",
+    players: 2,
+    defaultRounds: 6,
+    minRounds: 2,
+    maxRounds: 12,
+    capabilities: ["同时选择", "虚张声势", "面子博弈", "升级冲突"]
+  },
+  "stag-hunt": {
+    id: "stag-hunt",
+    name: "猎鹿博弈",
+    shortDescription: "一起猎鹿收获最大，但任何一人转向兔子，另一个人就一无所获。",
+    description: "两人同时选择合作猎鹿还是独自猎兔。猎鹿需要彼此托付，猎兔永远安全——信任的高收益与确定性之间永恒的对峙。",
+    players: 2,
+    defaultRounds: 6,
+    minRounds: 2,
+    maxRounds: 12,
+    capabilities: ["同时选择", "协作承诺", "风险厌恶", "信任校准"]
   }
 };
 

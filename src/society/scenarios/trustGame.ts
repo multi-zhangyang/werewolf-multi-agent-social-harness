@@ -102,7 +102,7 @@ export class TrustGameWorld extends SocialWorldBase {
     const invest = tool({
       name: "make_investment",
       description: `As the current investor, commit an integer from 0 to ${this.endowment}. The amount is multiplied by ${this.multiplier} before the trustee decides what to return.`,
-      parameters: z.object({ amount: z.number().int().min(0).max(this.endowment), reason: z.string().min(1).max(500) }).strict(),
+      parameters: z.object({ amount: z.number().int().min(0).max(this.endowment), reason: z.string().min(1).max(2_000) }).strict(),
       execute: async ({ amount, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
         const commit = await this.performAction(actorId, "make_investment", { amount, reason });
@@ -113,7 +113,7 @@ export class TrustGameWorld extends SocialWorldBase {
     const returnFromTrust = tool({
       name: "return_from_trust",
       description: "As the current trustee, return an integer amount to the investor from the multiplied investment. You may return none, some, or all of the available amount.",
-      parameters: z.object({ amount: z.number().int().min(0), reason: z.string().min(1).max(500) }).strict(),
+      parameters: z.object({ amount: z.number().int().min(0), reason: z.string().min(1).max(2_000) }).strict(),
       execute: async ({ amount, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
         const commit = await this.performAction(actorId, "return_from_trust", { amount, reason });
@@ -162,7 +162,7 @@ export class TrustGameWorld extends SocialWorldBase {
     if (typeof amount !== "number" || !Number.isInteger(amount)) {
       throw new Error("AMOUNT_INVALID: Choose a whole-number amount.");
     }
-    const reason = typeof value.reason === "string" ? value.reason.trim().slice(0, 500) : "";
+    const reason = typeof value.reason === "string" ? value.reason.trim() : "";
     const [investorId, trusteeId] = this.rolesForRound();
     if (action === "make_investment") {
       if (this.phase !== "investment") throw new Error("INVESTMENT_NOT_OPEN: Investment is not open now.");

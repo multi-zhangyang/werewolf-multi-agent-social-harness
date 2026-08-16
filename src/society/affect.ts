@@ -1,12 +1,13 @@
 import type { AgentMoodState, CoreEmotions, PadState } from "./contracts";
 
 /**
- * Dimensional affect model grounded in Sentipolis (arXiv:2601.18027) and
- * Mehrabian's PAD framework: a persistent Pleasure-Arousal-Dominance vector,
- * six core emotion intensities (Shvo et al.), a Maslow-inspired needs layer,
- * and decay-driven dynamics. Emotion is first-class state that carries across
- * turns, is tagged onto memories, and is surfaced to the model as a
- * human-readable label and description.
+ * Dimensional affect model grounded in Mehrabian's PAD framework: a persistent
+ * Pleasure-Arousal-Dominance vector, six core emotion intensities, a
+ * Maslow-inspired needs layer, and decay-driven dynamics. Because LLM emotion
+ * reasoning is fragile under complex context (arXiv:2508.05880), emotion is
+ * kept as explicit structured appraisal — a PAD anchor plus a human-readable
+ * label and description — that carries across turns, is tagged onto memories,
+ * and is surfaced to the model as state rather than left to free-form recall.
  */
 
 interface PadAnchor {

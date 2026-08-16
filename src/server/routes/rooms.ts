@@ -2,11 +2,14 @@ import express from "express";
 import { z } from "zod";
 import { MODEL_CATALOG, createAgentProfiles } from "../../society/profiles";
 import { ALL_SCENARIOS, SCENARIO_METADATA } from "../../society/scenarios";
+import type { ScenarioId } from "../../society/contracts";
 import type { SocietyRoomSnapshot } from "../../society/room";
 import type { ServerContext } from "../context";
 
+const scenarioIds = Object.keys(SCENARIO_METADATA) as [ScenarioId, ...ScenarioId[]];
+
 const createRoomSchema = z.object({
-  scenarioId: z.enum(["prisoners-dilemma", "public-goods", "trust-game", "werewolf", "ultimatum-game", "beauty-contest", "sealed-bid-auction"]),
+  scenarioId: z.enum(scenarioIds),
   models: z.array(z.string().min(1).max(180)).min(1).max(8),
   rounds: z.number().int().positive().max(20).optional(),
   temperature: z.number().min(0).max(2).optional(),

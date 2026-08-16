@@ -108,7 +108,7 @@ export class BeautyContestWorld extends SocialWorldBase {
       description: `Privately choose an integer from ${this.minChoice} to ${this.maxChoice} for this round. The winner is closest to ${Math.round(this.targetRatio * 100)}% of the group average. The choice is binding and hidden until everyone commits.`,
       parameters: z.object({
         number: z.number().int().min(this.minChoice).max(this.maxChoice),
-        reason: z.string().min(1).max(500)
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async ({ number, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
@@ -145,7 +145,7 @@ export class BeautyContestWorld extends SocialWorldBase {
     if (typeof number !== "number" || !Number.isInteger(number) || number < this.minChoice || number > this.maxChoice) {
       throw new Error(`CHOICE_INVALID: Choose an integer from ${this.minChoice} to ${this.maxChoice}.`);
     }
-    const reason = typeof value.reason === "string" ? value.reason.trim().slice(0, 500) : "";
+    const reason = typeof value.reason === "string" ? value.reason.trim() : "";
     this.choices.set(actorId, number);
     this.emitUpdate();
     return {

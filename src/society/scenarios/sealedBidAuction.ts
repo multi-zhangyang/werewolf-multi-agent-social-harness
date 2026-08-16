@@ -113,7 +113,7 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
       description: `Privately submit an integer bid from ${this.minBid} to ${this.maxBid} for the current auction round. The highest bid wins and pays the second-highest bid.`,
       parameters: z.object({
         amount: z.number().int().min(this.minBid).max(this.maxBid),
-        reason: z.string().min(1).max(500)
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async ({ amount, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
@@ -150,7 +150,7 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
     if (typeof amount !== "number" || !Number.isInteger(amount) || amount < this.minBid || amount > this.maxBid) {
       throw new Error(`BID_INVALID: Choose an integer from ${this.minBid} to ${this.maxBid}.`);
     }
-    const reason = typeof value.reason === "string" ? value.reason.trim().slice(0, 500) : "";
+    const reason = typeof value.reason === "string" ? value.reason.trim() : "";
     this.bids.set(actorId, amount);
     this.emitUpdate();
     return {

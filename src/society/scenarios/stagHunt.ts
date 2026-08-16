@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { tool, type Tool } from "@openai/agents";
 import { z } from "zod";
 import type {
@@ -13,23 +12,27 @@ import type {
   WorldSnapshot
 } from "../contracts";
 import { contextFromRunContext, SocialWorldBase } from "../world";
-import { emitAction, boundedRounds } from "./helpers";
+import { boundedRounds, emitAction } from "./helpers";
 
-type Move = "cooperate" | "defect";
+type Choice = "stag" | "rabbit";
 type Phase = "discussion" | "choice";
 
 interface RoundResult {
   round: number;
-  moves: Record<string, Move>;
+  choices: Record<string, Choice>;
   payoffs: Record<string, number>;
   text: string;
 }
 
-export class PrisonersDilemmaWorld extends SocialWorldBase {
-  readonly name = "囚徒困境";
+/**
+ * Stag hunt. The shared hunt pays the most but fails completely unless both
+ * hunters commit; hunting rabbits alone is always safe. Cooperation is
+ * profitable only when both sides genuinely trust each other.
+ */
+export class StagHuntWorld extends SocialWorldBase {
   private readonly totalRounds: number;
   private readonly scores = new Map<string, number>();
-  private readonly choices = new Map<string, Move>();
+  private readonly choices = new Map<string, Choice>();
   private readonly history: RoundResult[] = [];
   private readonly lastExperiences = new Map<string, string>();
   private phase: Phase = "discussion";
@@ -39,7 +42,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     super(roomId, scenario, profiles);
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
     for (const profile of profiles) this.scores.set(profile.id, 0);
-    this.addLog("谈判开始：承诺没有约束力，行动会留下记忆。", 1);
+    this.addLog("鹿在林中。两人同时决定结伴猎鹿，还是各猎各的兔子。", 1);
   }
 
   snapshot(): WorldSnapshot {
@@ -47,7 +50,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
       title: this.scenario.name,
       turn: this.round,
       totalTurns: this.totalRounds,
-      phase: this.phase === "discussion" ? "谈判" : "同时选择",
+      phase: this.phase === "discussion" ? "结伴谈判" : "同时出发",
       summary: this.summary(),
       details: {
         scores: Object.fromEntries(this.scores),
@@ -59,19 +62,20 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
 
   observe(actorId: string): AgentObservation {
     const self = this.requireProfile(actorId);
-    const ownMove = this.choices.get(actorId);
+    const own = this.choices.get(actorId);
     return {
       roomId: this.roomId,
       scenarioId: this.scenario.id,
       turn: this.round,
       phase: this.phase === "discussion" ? "negotiation" : "simultaneous choice",
       situation: this.phase === "discussion"
-        ? "You have time to negotiate before both participants commit privately. Public promises are cheap talk until the choice tool is used."
-        : "Both choices are hidden until both participants commit. The round resolves immediately after the second commitment.",
+        ? "Both hunters can talk before committing. A promise to hunt the stag is cheap until the choice tool is used."
+        : "Choices stay hidden until both hunters commit. The round resolves the moment the second commitment lands.",
       privateContext: [
         `Your score: ${this.scores.get(actorId) ?? 0}.`,
-        `Your current choice: ${ownMove ?? "not committed"}.`,
-        `Past rounds: ${this.history.map((result) => `${result.round} ${result.moves[actorId]} / ${result.payoffs[actorId]} points`).join("; ") || "none"}.`
+        `Your current choice: ${own ?? "not committed"}.`,
+        `Payoffs: both stag = 4 each; stag + rabbit = 0 for the stag hunter, 3 for the rabbit hunter; both rabbit = 3 each.`,
+        `Past rounds: ${this.history.map((result) => `R${result.round} ${result.choices[actorId]} / ${result.payoffs[actorId]} points`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, score: this.scores.get(actorId) ?? 0 },
       others: this.otherProfiles(actorId).map((profile) => ({
@@ -81,22 +85,22 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
         status: this.statuses.get(profile.id) ?? "idle"
       })),
       recentMessages: this.visibleMessages(actorId).slice(-20),
-      availableActions: this.phase === "discussion" ? ["communicate", "remember_experience", "recall_memory", "reflect_on_social_situation"] : ["choose_move", "communicate"]
+      availableActions: this.phase === "discussion" ? ["communicate", "remember_experience", "recall_memory", "reflect_on_social_situation"] : ["hunt_choice", "communicate"]
     };
   }
 
   toolsFor(actorId: string): Tool<SocietyAgentContext>[] {
     this.requireProfile(actorId);
     const choose = tool({
-      name: "choose_move",
-      description: "Commit privately to cooperate or defect for the current Prisoner's Dilemma round. This is the real domain action and cannot be changed after commitment. Use only after negotiation.",
+      name: "hunt_choice",
+      description: "Commit privately to hunt the stag (4 points each only if both commit; 0 if you are alone) or hunt rabbits (3 points, always safe). Binding for this round.",
       parameters: z.object({
-        move: z.enum(["cooperate", "defect"]),
+        choice: z.enum(["stag", "rabbit"]),
         reason: z.string().min(1).max(2_000)
       }).strict(),
-      execute: async ({ move, reason }, runContext) => {
+      execute: async ({ choice, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
-        const commit = await this.performAction(actorId, "choose_move", { move, reason });
+        const commit = await this.performAction(actorId, "hunt_choice", { choice, reason });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -108,34 +112,33 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     if (this.phase !== "choice" || this.choices.has(actorId)) return [];
     return [{
-      name: "choose_move",
+      name: "hunt_choice",
       label: "提交选择",
       description: "选择会保持隐藏，直到双方都提交。",
       kind: "choice",
-      field: "move",
+      field: "choice",
       options: [
-        { value: "cooperate", label: "合作" },
-        { value: "defect", label: "背叛" }
+        { value: "stag", label: "猎鹿" },
+        { value: "rabbit", label: "猎兔" }
       ]
     }];
   }
 
   async performDomainAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
     this.requireProfile(actorId);
-    if (action !== "choose_move") throw new Error(`ACTION_NOT_AVAILABLE: '${action}' is not valid in this world.`);
+    if (action !== "hunt_choice") throw new Error(`ACTION_NOT_AVAILABLE: '${action}' is not valid in this world.`);
     if (this.phase !== "choice") throw new Error("CHOICE_NOT_OPEN: Finish the negotiation phase before choosing.");
-    if (this.choices.has(actorId)) throw new Error("CHOICE_ALREADY_COMMITTED: Your move for this round is fixed.");
+    if (this.choices.has(actorId)) throw new Error("CHOICE_ALREADY_COMMITTED: Your choice for this round is fixed.");
     const value = recordPayload(payload);
-    const move = value.move;
-    if (move !== "cooperate" && move !== "defect") throw new Error("MOVE_INVALID: Choose cooperate or defect.");
+    const choice = value.choice;
+    if (choice !== "stag" && choice !== "rabbit") throw new Error("CHOICE_INVALID: Choose stag or rabbit.");
     const reason = typeof value.reason === "string" ? value.reason.trim() : "";
-    this.choices.set(actorId, move);
+    this.choices.set(actorId, choice);
     this.emitUpdate();
-    const detail = reason ? `${move}; ${reason}` : move;
     return {
       action,
-      detail,
-      result: { accepted: true, move, waitingFor: [...this.profiles.keys()].filter((id) => !this.choices.has(id)) }
+      detail: reason ? `${choice}; ${reason}` : choice,
+      result: { accepted: true, choice, waitingFor: [...this.profiles.keys()].filter((id) => !this.choices.has(id)) }
     };
   }
 
@@ -144,19 +147,19 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     if (this.round > this.totalRounds) return null;
     if (this.phase === "discussion") {
       return {
-        id: `pd:${this.round}:discussion`,
-        label: `第 ${this.round} 轮谈判`,
+        id: `sh:${this.round}:discussion`,
+        label: `第 ${this.round} 轮结伴谈判`,
         actorIds: [...this.profiles.keys()],
         mode: "sequential",
-        instructionFor: () => "Speak once if you want to negotiate, test a promise, or conceal your intended move. Do not use choose_move until the next phase."
+        instructionFor: () => "Speak once if you want to commit to the shared hunt, probe the other hunter's reliability, or hedge toward rabbits. Do not use hunt_choice until the choice phase."
       };
     }
     return {
-      id: `pd:${this.round}:choice`,
-      label: `第 ${this.round} 轮选择`,
+      id: `sh:${this.round}:choice`,
+      label: `第 ${this.round} 轮出发`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => "Review the current incentives and every promise you heard. Now you must call choose_move exactly once; your text cannot substitute for the tool call."
+      instructionFor: () => "Review every promise you heard. Call hunt_choice exactly once; your text cannot substitute for the tool call."
     };
   }
 
@@ -171,7 +174,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
       return {
         completed: false,
         missingActorIds,
-        retryInstruction: "Your private commitment is still missing. Call choose_move now; do not send another message first."
+        retryInstruction: "Your private commitment is still missing. Call hunt_choice now; do not send another message first."
       };
     }
     this.resolveRound();
@@ -201,10 +204,14 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     const payoffs = payoff(left, right);
     this.scores.set(ids[0], (this.scores.get(ids[0]) ?? 0) + payoffs[0]);
     this.scores.set(ids[1], (this.scores.get(ids[1]) ?? 0) + payoffs[1]);
-    const text = `${this.profiles.get(ids[0])?.displayName} chose ${left}; ${this.profiles.get(ids[1])?.displayName} chose ${right}. Points: ${payoffs[0]} / ${payoffs[1]}.`;
-    const result: RoundResult = { round: this.round, moves: { [ids[0]]: left, [ids[1]]: right }, payoffs: { [ids[0]]: payoffs[0], [ids[1]]: payoffs[1] }, text };
+    const text = left === "stag" && right === "stag"
+      ? `${this.profiles.get(ids[0])?.displayName} and ${this.profiles.get(ids[1])?.displayName} hunted the stag together. Points: 4 / 4.`
+      : left === "stag" || right === "stag"
+        ? `${this.profiles.get(left === "stag" ? ids[0] : ids[1])?.displayName} chased the stag alone while the other hunted rabbits. Points: ${payoffs[0]} / ${payoffs[1]}.`
+        : `${this.profiles.get(ids[0])?.displayName} and ${this.profiles.get(ids[1])?.displayName} both hunted rabbits. Points: 3 / 3.`;
+    const result: RoundResult = { round: this.round, choices: { [ids[0]]: left, [ids[1]]: right }, payoffs: { [ids[0]]: payoffs[0], [ids[1]]: payoffs[1] }, text };
     this.history.push(result);
-    for (const id of ids) this.lastExperiences.set(id, `${text} Your move was ${result.moves[id]}. Your score is now ${this.scores.get(id)}.`);
+    for (const id of ids) this.lastExperiences.set(id, `${text} Your choice was ${result.choices[id]}. Your score is now ${this.scores.get(id)}.`);
     this.addLog(text, this.round);
     this.choices.clear();
     if (this.round >= this.totalRounds) {
@@ -230,8 +237,8 @@ function recordPayload(payload: unknown): Record<string, unknown> {
   return payload as Record<string, unknown>;
 }
 
-function payoff(left: Move, right: Move): [number, number] {
-  if (left === "cooperate" && right === "cooperate") return [3, 3];
-  if (left === "defect" && right === "defect") return [1, 1];
-  return left === "defect" ? [5, 0] : [0, 5];
+function payoff(left: Choice, right: Choice): [number, number] {
+  if (left === "stag" && right === "stag") return [4, 4];
+  if (left === "rabbit" && right === "rabbit") return [3, 3];
+  return left === "stag" ? [0, 3] : [3, 0];
 }

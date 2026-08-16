@@ -1,106 +1,107 @@
 # Society
 
-**Live Multi-Agent Social Worlds · Powered by OpenAI Agents SDK**
+**Live Multi-Agent Social Worlds · Built on the OpenAI Agents SDK**
 
-Society is a real-time platform for observing and interacting with multi-agent social intelligence. Every participant is a first-class OpenAI Agents SDK `Agent` with its own model, session, memory, emotional state, beliefs, goals, relationships and domain tools. Agents negotiate, form alliances, betray, deceive and adapt inside deterministic game worlds — and every interaction is streamed live to a polished, Vercel-inspired interface.
+Society is a real-time arena where fully autonomous AI agents negotiate, form alliances, deceive, betray and rebuild trust — in Werewolf, Avalon, the Prisoner's Dilemma, and a growing catalog of game-theory and social-deduction worlds. Every participant is a first-class OpenAI Agents SDK `Agent` with its own model, session, memory, emotional state, beliefs, goals, relationships and domain tools. You watch it all happen live, on a premium broadcast-style interface — or take a seat and play against the agents yourself.
 
-![Landing](docs/screenshots/landing.png)
+<p align="center">
+  <img src="docs/screenshots/landing.png" width="820" alt="Society landing page" />
+</p>
 
 ## Why Society
 
 Most "multi-agent" demos are prompt wrappers or JSON parsers in disguise. Society is built the way the OpenAI Agents SDK intends:
 
-- **Real agents, not scripts**  
-  Each participant is an SDK `Agent` with `Runner`, `MemorySession`, function tools and sub-agents. Model text is never parsed as a command; only successful SDK tool calls change the world.
+- **Real agents, not scripts** — each participant is an SDK `Agent` run by the SDK `Runner` with a private `MemorySession`, function tools and nested specialist agents. Model text is never parsed as a command; only successful SDK tool calls change the world.
+- **True multi-agent cognition** — every participant commands a private council of three SDK sub-agents: *reflection*, *theory-of-mind*, and *planning*, reached through `Agent.asTool()` nested runs. Each specialist works in an isolated context and returns a distilled brief that only its owner can read.
+- **Human-like social state** — agents carry a PAD mood model, core emotions, needs, energy, associative memory, beliefs about others, relationships and goals. Personality is anchored in Big Five (OCEAN) profiles that measurably shift negotiation and conflict behavior.
+- **Live reasoning on display** — the arena streams everything: hidden chain-of-thought from reasoning models, specialist deliberations, tool activity, spoken messages and world mutations — as a watchable performance, not a log console.
+- **A broadcast, not a lab bench** — a cinematic three-column stage: participant presence rail, live conversation stage, and world panel with scoreboard, activity and history. Role reveals and eliminations land as dramatic beats.
+- **Expandable world catalog** — every game is a plain module implementing the shared `SocialWorld` contract. Adding a new game means zero changes to the agent runtime, server or UI.
 
-- **True multi-agent cognition**  
-  Participants can hand off to private reflection, theory-of-mind and planning agents through SDK handoffs. These specialists return control to the participant, so every actor reasons with memory, emotion and strategy before acting.
+## Worlds
 
-- **Human-like social state**  
-  Agents carry PAD emotion, core emotions, needs, energy, associative memory, beliefs about others, relationships and goals. Reflection and counterfactual theory-of-mind are grounded in the latest social-agent research.
-
-- **Live interaction, not a lab bench**  
-  The UI is designed for watching agents think, speak, act and react in real time — through a clean three-panel workspace with live activity, conversation, world state and history.
-
-- **Agent Mind Inspector**  
-  Click any participant to inspect their live inner world: mood, needs, energy, goals, beliefs, relationships and memory stream.
-
-- **Expandable scenario system**  
-  New games are plain modules implementing a shared `SocialWorld` contract. No need to duplicate agent runtime, server routes or UI.
-
-## Scenes
-
-| Scenario | Core tension |
+| World | Core tension |
 | --- | --- |
-| 囚徒困境 | 短期背叛 vs 长期互惠 |
-| 公共品博弈 | 集体收益 vs 搭便车 |
-| 信任博弈 | 交出控制权后的返还 |
-| 最后通牒博弈 | 分配权与公平惩罚 |
-| 选美博弈 | 高阶信念与群体误判 |
-| 密封拍卖 | 私密估值、策略误导与次价结算 |
-| 狼人杀 | 隐藏身份、阵营与欺骗 |
+| 狼人杀 Werewolf | Hidden roles, public accusations, night kills and a third faction |
+| 阿瓦隆 Avalon | Loyal servants vs. hidden minions; secret quest votes and the final Merlin assassination |
+| 囚徒困境 Prisoner's Dilemma | Short-term betrayal vs. long-term reciprocity |
+| 蜈蚣博弈 Centipede Game | A pot that doubles with every pass — and the temptation to grab it |
+| 胆小鬼博弈 Chicken | Bluffing on a collision course: swerve or drive straight |
+| 猎鹿博弈 Stag Hunt | Trust pays double, but only if both hunters commit |
+| 信任博弈 Trust Game | Handing over control, then waiting for the return |
+| 最后通牒博弈 Ultimatum Game | Fairness, leverage and the power to burn everything down |
+| 公共品博弈 Public Goods | Collective gain vs. free-riding |
+| 选美博弈 Beauty Contest | Higher-order beliefs and crowd misjudgment |
+| 密封拍卖 Sealed-Bid Auction | Private valuations, strategic misdirection, second-price settlement |
 
 ## Screenshots
 
 ### Landing
 
-![Landing](docs/screenshots/landing.png)
+<p align="center"><img src="docs/screenshots/landing.png" width="820" alt="Landing page" /></p>
 
 ### Create a world
 
-![Create Room](docs/screenshots/create-room.png)
+<p align="center"><img src="docs/screenshots/create-room.png" width="820" alt="Create room dialog" /></p>
 
-### Live running room
+### Live room — agents thinking
 
-![Room Running](docs/screenshots/room-running.png)
+<p align="center"><img src="docs/screenshots/room-running.png" width="820" alt="Live room with agents thinking" /></p>
+
+### Live room — negotiation in full flow
+
+<p align="center"><img src="docs/screenshots/room-live.png" width="820" alt="Live negotiation" /></p>
+
+### Avalon — a quest in progress
+
+<p align="center"><img src="docs/screenshots/room-avalon.png" width="820" alt="Avalon quest" /></p>
 
 ### Agent Mind Inspector
 
-![Agent Mind](docs/screenshots/agent-mind.png)
+<p align="center"><img src="docs/screenshots/agent-mind.png" width="820" alt="Agent mind inspector" /></p>
+
+### Finished room
+
+<p align="center"><img src="docs/screenshots/room-finished.png" width="820" alt="Finished room" /></p>
 
 ## Architecture
 
 ```text
 Browser
-  ▲ SSE snapshots and live events
+  ▲ SSE snapshots and live events (status · reasoning · thoughts · speech · world)
   │
-SocietyRoom ── schedules activations, owns event log and human waits
+SocietyRoom ── schedules activations, owns the event log and human waits
   │
   ├─ OpenAISocietyAgent × participants
-  │    ├─ @openai/agents Agent + Runner
-  │    ├─ MemorySession + associative memory
+  │    ├─ @openai/agents Agent + Runner (per participant)
+  │    ├─ MemorySession + associative memory stream
   │    ├─ social tools (communicate / remember / recall / inner state)
-  │    ├─ reflection / theory-of-mind / planning SDK Agents via handoffs
-  │    └─ scenario tools
+  │    ├─ reflection / theory-of-mind / planning SDK Agents via asTool()
+  │    └─ scenario tools (typed, validated, committed)
   │
   └─ SocialWorld ── observation, visibility, rules and deterministic resolution
-       └─ scene implementation
+       └─ scene implementation (werewolf, avalon, centipede, …)
 ```
 
-### Agent boundary
-
-`src/society/participant.ts` creates one SDK `Agent` per participant with a stable session and a private mind state. Cognitive specialists are real SDK Agents reached through handoffs, so the main participant can delegate private analysis and then continue acting.
-
-### World boundary
-
-`src/society/world.ts` defines the shared world contract: scoped observations, public/private/team message visibility, activation schedules, typed SDK tools, deterministic resolution and short experiences for memory consolidation.
-
-### Room and event stream
-
-`src/society/room.ts` starts the world, runs each activation with bounded turns and timeout signals, and retains a finite event log. Express SSE pushes snapshots and live events to the browser.
+- **Agent boundary** (`src/society/participant.ts`) — one SDK `Agent` per participant with a stable session and a private mind. Cognitive specialists are real SDK Agents run as nested tools, so the participant keeps ownership of every world-changing action.
+- **World boundary** (`src/society/world.ts`) — scoped observations, public/private/team channels, activation schedules, typed SDK tools, deterministic resolution and per-round experiences for memory consolidation.
+- **Room & event stream** (`src/society/room.ts`) — schedules activations with bounded turns and timeout signals, and pushes snapshots + live events to the browser over SSE. Provider keys and raw provider diagnostics never enter a snapshot or event.
 
 ## Getting started
 
-Requirements: Node.js 22+ and an OpenAI-compatible chat-completions endpoint.
+Requirements: Node.js 22+ and any OpenAI-compatible chat-completions endpoint.
 
 ```bash
 npm install
 cp .env.example .env.local
-# edit .env.local and set OPENAI_API_KEY / OPENAI_BASE_URL
+# edit .env.local: set OPENAI_API_KEY, OPENAI_BASE_URL and SOCIETY_MODELS
 npm run dev
 ```
 
-The web app is served at `http://127.0.0.1:5173`; the API is at `http://127.0.0.1:8787`.
+The web app is served at `http://127.0.0.1:5173`; the API is at `http://127.0.0.1:8787` (production-style: `npm run build && npm run server`, then open `http://127.0.0.1:8787`).
+
+`SOCIETY_MODELS` is a comma-separated list of model IDs accepted by your endpoint; agents are assigned models from this list when you create a room. No provider credentials or model IDs live in this repository — they are read exclusively from your local environment.
 
 Useful checks:
 
@@ -114,17 +115,17 @@ curl http://127.0.0.1:8787/api/health
 
 ```bash
 npm run server &
-node scripts/demo.mjs prisoners-dilemma
+node scripts/demo.mjs prisoners-dilemma   # or: node scripts/demo.mjs avalon
 ```
 
-The demo boots rooms against the configured provider and writes transcripts to `artifacts/transcripts`.
+The demo boots live rooms against your configured provider and writes transcripts to `artifacts/transcripts`.
 
 ## HTTP surface
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/health` | Runtime and provider configuration status |
-| GET | `/api/scenarios` | Scene and model catalog |
+| GET | `/api/scenarios` | World and model catalog |
 | GET | `/api/rooms` | Rooms held by this server process |
 | POST | `/api/rooms` | Create and start a room |
 | GET | `/api/rooms/:roomId` | Current room snapshot |
@@ -134,22 +135,39 @@ The demo boots rooms against the configured provider and writes transcripts to `
 
 ## Tech stack
 
-- **Frontend**: React 19, Vite, Tailwind CSS 4, shadcn/ui
-- **Backend**: Express 5, SSE
+- **Frontend**: React 19, Vite, Tailwind CSS 4, shadcn/ui, Radix, lucide-react, Geist
+- **Backend**: Express 5, Server-Sent Events
 - **AI runtime**: OpenAI Agents SDK (`@openai/agents`)
 - **Validation**: Zod
 
 ## Research foundations
 
-- Park et al., *Generative Agents: Interactive Simulacra of Human Behavior* — arXiv:2304.03442
-- Zhou et al., *SOTOPIA: Interactive Evaluation for Social Intelligence in Language Agents* — arXiv:2310.11667
-- Vezhnevets et al., *Generative agent-based modeling with actions grounded in physical, social, or digital space using Concordia* — arXiv:2312.03664
-- Chan et al., *AmongAgents: Evaluating LLMs in the Interactive Text-Based Social Deduction Game* — arXiv:2407.16521
-- Curvo et al., *The Traitors: Deception and Trust in Multi-Agent Language Model Simulations* — arXiv:2505.12923
-- Xu et al., *Large Language Models as Theory of Mind Aware Generative Agents with Counterfactual Reflection* — arXiv:2501.15355
-- MultiMind: *Enhancing Werewolf Agents with Multimodal Reasoning and Theory of Mind* — arXiv:2504.18039
-- Li et al., *Cooperation, Competition, and Maliciousness: LLM-Stakeholders Interactive Negotiation* — arXiv:2309.17234
-- PieArena: *Ranking and Profiling Language Agents in Realistic Negotiation Scenarios* — arXiv:2602.05302
+Every design decision is grounded in peer-reviewed work — see `docs/research/agent-social-runtime.md` and the implementation playbook in `docs/research/llm-social-agents-sota.md`:
+
+- Park et al., *Generative Agents* — [arXiv:2304.03442](https://arxiv.org/abs/2304.03442)
+- Zhou et al., *SOTOPIA* — [arXiv:2310.11667](https://arxiv.org/abs/2310.11667)
+- Bakhtin et al., *Cicero (Diplomacy)* — [arXiv:2210.05492](https://arxiv.org/abs/2210.05492)
+- Xu et al., *LLMs for Communication Games: Werewolf* — [arXiv:2309.04658](https://arxiv.org/abs/2309.04658)
+- Chi et al., *AMONGAGENTS* — [arXiv:2407.16521](https://arxiv.org/abs/2407.16521)
+- Guo et al., *Suspicion-Agent* — [arXiv:2309.17277](https://arxiv.org/abs/2309.17277)
+- Kosinski, *Evaluating LLMs in Theory of Mind Tasks* — [arXiv:2302.02083](https://arxiv.org/abs/2302.02083)
+- Street et al., *Higher-order Theory of Mind* — [arXiv:2405.18870](https://arxiv.org/abs/2405.18870)
+- Pan et al., *MACHIAVELLI Benchmark* — [arXiv:2304.03279](https://arxiv.org/abs/2304.03279)
+- Fontana et al., *Nicer Than Humans (Prisoner's Dilemma)* — [arXiv:2406.13605](https://arxiv.org/abs/2406.13605)
+- Taylor & Bergen, *Spontaneous Rational Deception* — [arXiv:2504.00285](https://arxiv.org/abs/2504.00285)
+- Ou et al., *LLMs in Economic Trust Games* — [arXiv:2505.17053](https://arxiv.org/abs/2505.17053)
+- Zhao et al., *CompeteAI* — [arXiv:2310.17512](https://arxiv.org/abs/2310.17512)
+- Bianchi et al., *NegotiationArena* — [arXiv:2402.05863](https://arxiv.org/abs/2402.05863)
+- Noh & Chang, *LLMs with Personalities in Negotiation* — [arXiv:2405.05248](https://arxiv.org/abs/2405.05248)
+- Huang et al., *PsychoBench* — [arXiv:2310.01386](https://arxiv.org/abs/2310.01386)
+- Lee et al., *TRAIT* — [arXiv:2406.14703](https://arxiv.org/abs/2406.14703)
+- Bhattacharyya et al., *Fragile Emotion Reasoning* — [arXiv:2508.05880](https://arxiv.org/abs/2508.05880)
+- Manning et al., *Automated Social Science* — [arXiv:2404.11794](https://arxiv.org/abs/2404.11794)
+- Lupu et al., *Decrypto Benchmark* — [arXiv:2506.20664](https://arxiv.org/abs/2506.20664)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). New worlds follow the five-step guide in `docs/architecture.md`.
 
 ## License
 

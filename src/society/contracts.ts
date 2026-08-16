@@ -1,11 +1,22 @@
 import type { Agent, MemorySession, Tool } from "@openai/agents";
 
-export type ScenarioId = "prisoners-dilemma" | "public-goods" | "trust-game" | "werewolf" | "ultimatum-game" | "beauty-contest" | "sealed-bid-auction";
+export type ScenarioId =
+  | "prisoners-dilemma"
+  | "public-goods"
+  | "trust-game"
+  | "werewolf"
+  | "ultimatum-game"
+  | "beauty-contest"
+  | "sealed-bid-auction"
+  | "avalon"
+  | "centipede-game"
+  | "chicken-game"
+  | "stag-hunt";
 export type RoomStatus = "lobby" | "running" | "paused" | "finished" | "error";
 export type SocialChannel = "public" | "private" | "team";
 export type AgentStatus = "lobby" | "thinking" | "acting" | "speaking" | "idle" | "finished" | "error";
 export type ParticipantController = "agent" | "human";
-export type PlayerActionKind = "message" | "choice" | "number" | "target";
+export type PlayerActionKind = "message" | "choice" | "number" | "target" | "team";
 export type ReasoningEffort = "low" | "medium" | "high";
 
 export interface ScenarioSummary {
@@ -20,6 +31,14 @@ export interface ScenarioSummary {
   capabilities: string[];
 }
 
+export interface AgentTemperament {
+  openness: number;
+  conscientiousness: number;
+  extraversion: number;
+  agreeableness: number;
+  neuroticism: number;
+}
+
 export interface AgentProfile {
   id: string;
   displayName: string;
@@ -29,6 +48,10 @@ export interface AgentProfile {
   traits: string[];
   values: string[];
   goals: string[];
+  /** Big Five (OCEAN) profile, grounded in personality-anchoring research. */
+  temperament?: AgentTemperament;
+  /** How this character speaks: pacing, register, verbal habits. */
+  voice?: string;
   temperature?: number;
   reasoningEffort?: ReasoningEffort;
 }
@@ -104,6 +127,13 @@ export interface AgentMemoryItem {
   createdAt: string;
 }
 
+export interface AgentDeliberation {
+  kind: "reflection" | "mind-read" | "plan";
+  text: string;
+  turn: number;
+  at: string;
+}
+
 export interface AgentMindState {
   mood: AgentMoodState;
   attention: string[];
@@ -112,6 +142,8 @@ export interface AgentMindState {
   relationships: AgentRelationship[];
   memories: AgentMemoryItem[];
   latestReflection?: string;
+  /** Private analyses produced by this agent's specialist sub-agents. */
+  deliberations: AgentDeliberation[];
 }
 
 export interface SocialMessage {
@@ -223,7 +255,9 @@ export type AgentRuntimeEvent =
   | { type: "agent.status"; roomId: string; actorId: string; status: AgentStatus; at: string }
   | { type: "agent.updated"; roomId: string; actorId: string; status: AgentStatus; mind: AgentMindState; turnCount: number; totalTokens: number; lastOutput?: string; at: string }
   | { type: "agent.delta"; roomId: string; actorId: string; delta: string; at: string }
+  | { type: "agent.reasoning"; roomId: string; actorId: string; delta: string; at: string }
   | { type: "agent.tool"; roomId: string; actorId: string; toolName: string; phase: "started" | "completed"; summary?: string; at: string }
+  | { type: "agent.thought"; roomId: string; actorId: string; specialist: AgentDeliberation["kind"]; delta: string; at: string }
   | { type: "agent.message"; roomId: string; message: SocialMessage }
   | { type: "world.action"; roomId: string; actorId: string; action: string; detail: string; at: string }
   | { type: "world.updated"; roomId: string; snapshot: WorldSnapshot }

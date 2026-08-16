@@ -358,7 +358,6 @@ export class SocietyRoom {
         throw new Error(`${runtime.profile.displayName} (${runtime.profile.model}) failed: ${errorMessage(error)}`, { cause: error });
       }
       card.turnCount += 1;
-      card.totalTokens += result.usage?.totalTokens ?? 0;
       this.notify();
     };
     if (activation.mode === "parallel") {
@@ -439,7 +438,9 @@ export class SocietyRoom {
       event.type === "world.action" ||
       event.type === "agent.message" ||
       event.type === "agent.delta" ||
-      event.type === "agent.tool"
+      event.type === "agent.reasoning" ||
+      event.type === "agent.tool" ||
+      event.type === "agent.thought"
     ) {
       this.emit(event);
     }

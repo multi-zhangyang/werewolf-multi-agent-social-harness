@@ -49,8 +49,8 @@ function recallScore(entry: AgentMemoryItem, terms: string[], moodPad?: PadState
   const text = `${entry.text} ${entry.tags.join(" ")}`.toLocaleLowerCase();
   const relevance = terms.reduce((score, term) => score + (text.includes(term) ? 1 : 0), 0);
   const recency = 1 / (1 + Math.max(0, Date.now() - Date.parse(entry.createdAt)) / 3_600_000);
-  // Mood-congruent recall: memories stored in an emotional state similar to the
-  // current one resurface more easily (Sentipolis emotion-memory coupling).
+  // Mood-congruent recall (Bower-style state-dependent memory): memories stored
+  // in an emotional state similar to the current one resurface more easily.
   const congruence = moodPad && entry.pad ? Math.max(0, 1 - padDistance(moodPad, entry.pad) / 3) : 0;
   return relevance * 2.2 + entry.salience * 1.4 + Math.abs(entry.valence) * 0.35 + recency * 0.45 + congruence * 0.5;
 }

@@ -57,7 +57,8 @@ the event sequence for the activity panels and Agent inspector.
 
 Events deliberately describe observable execution:
 
-- agent status, streamed text deltas and decision notes;
+- agent status, streamed text deltas, hidden reasoning deltas and decision notes;
+- private specialist output (reflection / theory-of-mind / planning);
 - SDK tool start/completion;
 - messages with channel and recipients;
 - committed world actions;
@@ -76,4 +77,5 @@ Provider keys and raw provider diagnostics never enter a snapshot or event.
 
 The UI and room API then discover the scene through the catalog. This makes it
 possible to add negotiation, bluffing, coalition and trust games beyond
-Werewolf without creating another runtime.
+Werewolf — Avalon, Centipede, Chicken and Stag Hunt ship today — without
+creating another runtime.

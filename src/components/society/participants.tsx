@@ -13,41 +13,40 @@ import {
   SheetTitle
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
-import { AgentAvatar, ModelLabel, StatusDot, StatusLabel } from "./shared";
+import { AgentPresence, ModelLabel, StatusLabel } from "./shared";
 
 export function ParticipantsRail({ participants, humanActorId }: { participants: SocietyParticipantCard[]; humanActorId?: string }): ReactNode {
   const [selected, setSelected] = useState<SocietyParticipantCard | null>(null);
+  const leaderId = [...participants].sort((left, right) => (right.score ?? -1) - (left.score ?? -1))[0]?.profile.id;
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-2">
       {participants.map((participant, index) => {
         const isHuman = humanActorId === participant.profile.id;
         const dead = !participant.alive;
+        const leader = leaderId !== undefined && participant.score !== undefined && participant.profile.id === leaderId;
         return (
           <button
             key={participant.profile.id}
             onClick={() => setSelected(participant)}
             className={cn(
-              "group w-full rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4 text-left transition-all hover:border-white/12 hover:bg-white/[0.04]",
-              dead && "opacity-50",
-              isHuman && "border-zinc-400/30 bg-zinc-100/[0.05]"
+              "group w-full rounded-2xl border border-transparent px-3 py-2.5 text-left transition-all hover:border-white/[0.08] hover:bg-white/[0.03]",
+              dead && "opacity-45",
+              isHuman && "border-zinc-400/25 bg-zinc-100/[0.04]",
+              leader && "leader-wash"
             )}
           >
             <div className="flex items-center gap-3">
               <div className="relative">
-                <AgentAvatar name={participant.profile.displayName} index={index} size="lg" />
+                <AgentPresence name={participant.profile.displayName} index={index} size="lg" status={dead ? "finished" : participant.status} />
                 {dead ? (
                   <span className="absolute -bottom-1 -right-1 flex size-5 items-center justify-center rounded-full bg-zinc-900 text-zinc-400 ring-1 ring-white/10">
                     <Skull className="size-3" />
                   </span>
-                ) : (
-                  <span className="absolute -bottom-1 -right-1 flex size-5 items-center justify-center rounded-full bg-zinc-900 ring-1 ring-white/10">
-                    <StatusDot status={participant.status} />
-                  </span>
-                )}
+                ) : null}
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
-                  <span className="truncate text-sm font-semibold text-zinc-100">{participant.profile.displayName}</span>
+                  <span className="truncate text-sm font-semibold tracking-tight text-zinc-100">{participant.profile.displayName}</span>
                   {isHuman ? (
                     <span className="rounded-md bg-zinc-100 px-1.5 py-px text-[9px] font-bold text-zinc-950">你</span>
                   ) : null}
@@ -55,24 +54,21 @@ export function ParticipantsRail({ participants, humanActorId }: { participants:
                     <span className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-px text-[9px] text-zinc-400">{participant.role}</span>
                   ) : null}
                 </div>
-                <div className="mt-1 flex items-center gap-1.5 text-[11px] text-zinc-500">
-                  <StatusDot status={dead ? "finished" : participant.status} />
+                <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-zinc-500">
                   <StatusLabel status={dead ? "finished" : participant.status} />
+                  {participant.mood ? <span className="truncate text-zinc-400">· {participant.mood}</span> : null}
                 </div>
-                <ModelLabel model={participant.profile.model} className="mt-1 block max-w-40" />
+                <ModelLabel model={participant.profile.model} className="mt-0.5 block max-w-40" />
               </div>
               <div className="text-right">
                 {participant.score !== undefined ? (
                   <div className="flex items-center justify-end gap-1 font-mono text-base text-zinc-50">
-                    <Crown className="size-3.5 text-amber-300/70" />
+                    {leader ? <Crown className="size-3.5 text-amber-300/80" /> : null}
                     {participant.score}
                   </div>
                 ) : null}
-                {participant.mood ? (
-                  <p className="mt-0.5 max-w-20 truncate text-[10px] text-zinc-500">{participant.mood}</p>
-                ) : null}
                 {participant.energy !== undefined ? (
-                  <p className="mt-0.5 flex items-center justify-end gap-1 font-mono text-[10px] text-zinc-600">
+                  <p className="nums mt-0.5 flex items-center justify-end gap-1 font-mono text-[10px] text-zinc-600">
                     <Zap className="size-2.5" />
                     {participant.energy}%
                   </p>
@@ -91,16 +87,16 @@ function MindSheet({ participant, onOpenChange }: { participant: SocietyParticip
   const mind = participant?.mind;
   return (
     <Sheet open={Boolean(participant)} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full border-white/[0.08] bg-[#0c0c0c] text-zinc-100 sm:max-w-md">
+      <SheetContent className="w-full border-white/[0.08] bg-[#0a0a0a] text-zinc-100 sm:max-w-lg">
         {participant ? (
           <>
             <SheetHeader className="border-b border-white/[0.06]">
               <div className="flex items-center gap-3">
-                <AgentAvatar name={participant.profile.displayName} index={participant.profile.id.length} size="lg" />
+                <AgentPresence name={participant.profile.displayName} index={participant.profile.id.length} size="lg" status={participant.status} />
                 <div>
-                  <SheetTitle className="text-lg text-zinc-50">{participant.profile.displayName}</SheetTitle>
+                  <SheetTitle className="text-lg tracking-tight text-zinc-50">{participant.profile.displayName}</SheetTitle>
                   <SheetDescription className="text-zinc-500">
-                    {participant.role ?? "参与者"} · {participant.status}
+                    {participant.role ?? "参与者"} · {participant.mood ?? participant.status}
                   </SheetDescription>
                 </div>
               </div>
@@ -113,6 +109,7 @@ function MindSheet({ participant, onOpenChange }: { participant: SocietyParticip
                     <GoalsSection mind={mind} />
                     <BeliefsSection mind={mind} />
                     <RelationshipsSection mind={mind} />
+                    <DeliberationsSection mind={mind} />
                     <MemoriesSection mind={mind} />
                   </>
                 ) : (
@@ -138,7 +135,7 @@ function MoodSection({ mind }: { mind: AgentMindState }): ReactNode {
       <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-base font-semibold text-zinc-100">{mind.mood.label}</p>
+            <p className="text-base font-semibold tracking-tight text-zinc-100">{mind.mood.label}</p>
             <p className="mt-0.5 text-xs leading-5 text-zinc-500">{mind.mood.description}</p>
           </div>
           <Badge variant="outline" className="border-white/10 bg-white/[0.03] font-mono text-zinc-400">
@@ -171,7 +168,7 @@ function GoalsSection({ mind }: { mind: AgentMindState }): ReactNode {
             <div className="flex items-center justify-between gap-2">
               <p className="text-sm font-medium text-zinc-200">{goal.description}</p>
               <Badge variant="outline" className={cn("shrink-0 border-white/10 bg-white/[0.03] text-[10px] text-zinc-500", goal.status === "satisfied" && "text-emerald-300", goal.status === "abandoned" && "text-zinc-600")}>
-                {goal.status}
+                {goal.status === "satisfied" ? "已达成" : goal.status === "abandoned" ? "已放弃" : "进行中"}
               </Badge>
             </div>
             <p className="mt-1 text-xs text-zinc-500">{goal.progress}</p>
@@ -191,7 +188,7 @@ function BeliefsSection({ mind }: { mind: AgentMindState }): ReactNode {
         {mind.beliefs.slice(-6).map((belief, index) => (
           <div key={index} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
             <p className="text-sm text-zinc-200">{belief.proposition}</p>
-            <p className="mt-1 font-mono text-[10px] text-zinc-600">
+            <p className="nums mt-1 font-mono text-[10px] text-zinc-600">
               {belief.subjectId} · 置信度 {Math.round(belief.confidence * 100)}% · {belief.source}
             </p>
           </div>
@@ -211,7 +208,7 @@ function RelationshipsSection({ mind }: { mind: AgentMindState }): ReactNode {
           <div key={relationship.agentId} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
             <div className="flex items-center justify-between">
               <p className="text-sm font-medium text-zinc-200">{relationship.agentId}</p>
-              <p className="font-mono text-[10px] text-zinc-500">信任 {Math.round(relationship.trust * 100)}%</p>
+              <p className="nums font-mono text-[10px] text-zinc-500">信任 {Math.round(relationship.trust * 100)}%</p>
             </div>
             <div className="mt-2 grid grid-cols-3 gap-2">
               <Bar label="亲和" value={relationship.affinity} />
@@ -219,6 +216,23 @@ function RelationshipsSection({ mind }: { mind: AgentMindState }): ReactNode {
               <Bar label="张力" value={relationship.tension} />
             </div>
             {relationship.note ? <p className="mt-2 text-xs text-zinc-500">{relationship.note}</p> : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DeliberationsSection({ mind }: { mind: AgentMindState }): ReactNode {
+  if (!mind.deliberations.length) return null;
+  return (
+    <section>
+      <SectionTitle>最近盘算</SectionTitle>
+      <div className="space-y-2">
+        {mind.deliberations.slice(-4).reverse().map((deliberation, index) => (
+          <div key={index} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
+            <p className="font-mono text-[10px] uppercase tracking-widest text-zinc-600">{deliberationLabel(deliberation.kind)}</p>
+            <p className="mt-1 text-sm leading-5 text-zinc-300">{deliberation.text}</p>
           </div>
         ))}
       </div>
@@ -235,7 +249,7 @@ function MemoriesSection({ mind }: { mind: AgentMindState }): ReactNode {
         {mind.memories.slice(-6).reverse().map((memory) => (
           <div key={memory.id} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
             <p className="text-sm leading-5 text-zinc-300">{memory.text}</p>
-            <p className="mt-1 font-mono text-[10px] text-zinc-600">
+            <p className="nums mt-1 font-mono text-[10px] text-zinc-600">
               T{memory.turn} · 显著性 {Math.round(memory.salience * 100)}%
             </p>
           </div>
@@ -245,6 +259,10 @@ function MemoriesSection({ mind }: { mind: AgentMindState }): ReactNode {
   );
 }
 
+function deliberationLabel(kind: string): string {
+  return kind === "reflection" ? "策略反思" : kind === "mind-read" ? "洞察他人" : "谋划行动";
+}
+
 function SectionTitle({ children }: { children: ReactNode }): ReactNode {
   return <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">{children}</h3>;
 }
@@ -252,7 +270,7 @@ function SectionTitle({ children }: { children: ReactNode }): ReactNode {
 function Bar({ label, value }: { label: string; value: number }): ReactNode {
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between text-[11px]">
+      <div className="nums mb-1 flex items-center justify-between text-[11px]">
         <span className="text-zinc-500">{label}</span>
         <span className="font-mono text-zinc-400">{Math.round(value * 100)}%</span>
       </div>

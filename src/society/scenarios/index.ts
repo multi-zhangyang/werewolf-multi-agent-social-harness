@@ -6,6 +6,10 @@ import { UltimatumWorld } from "./ultimatum";
 import { BeautyContestWorld } from "./beautyContest";
 import { WerewolfWorld } from "./werewolf";
 import { SealedBidAuctionWorld } from "./sealedBidAuction";
+import { AvalonWorld } from "./avalon";
+import { CentipedeGameWorld } from "./centipedeGame";
+import { ChickenGameWorld } from "./chickenGame";
+import { StagHuntWorld } from "./stagHunt";
 import { ALL_SCENARIOS, SCENARIO_METADATA } from "./metadata";
 
 export { ALL_SCENARIOS, SCENARIO_METADATA } from "./metadata";
@@ -27,6 +31,10 @@ export function createWorld(input: {
   if (input.scenarioId === "ultimatum-game") return new UltimatumWorld(input.roomId, metadata, input.profiles, input.rounds);
   if (input.scenarioId === "beauty-contest") return new BeautyContestWorld(input.roomId, metadata, input.profiles, input.rounds);
   if (input.scenarioId === "sealed-bid-auction") return new SealedBidAuctionWorld(input.roomId, metadata, input.profiles, input.rounds);
+  if (input.scenarioId === "avalon") return new AvalonWorld(input.roomId, metadata, input.profiles, input.rounds);
+  if (input.scenarioId === "centipede-game") return new CentipedeGameWorld(input.roomId, metadata, input.profiles, input.rounds);
+  if (input.scenarioId === "chicken-game") return new ChickenGameWorld(input.roomId, metadata, input.profiles, input.rounds);
+  if (input.scenarioId === "stag-hunt") return new StagHuntWorld(input.roomId, metadata, input.profiles, input.rounds);
   return new WerewolfWorld(input.roomId, metadata, input.profiles, input.rounds);
 }
 

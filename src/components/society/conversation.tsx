@@ -1,12 +1,20 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Send, Sparkles } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Brain, Check, Send, Sparkles } from "lucide-react";
 import type { SocialMessage, WorldLogEntry } from "@/society/contracts";
 import type { SocietyPlayerState, SocietyRoomSnapshot } from "@/society/room";
 import type { LiveAgentActivity } from "./use-room";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { AgentAvatar, ChannelBadge, formatTime } from "./shared";
+import {
+  AgentAvatar,
+  AgentPresence,
+  ChannelBadge,
+  SpeechBars,
+  channelSurface,
+  eventLabel,
+  formatTime
+} from "./shared";
 
 type TimelineEntry =
   | { kind: "log"; id: string; time: number; text: string; turn: number; phase: string }
@@ -21,8 +29,8 @@ interface ConversationProps {
 export function Conversation({ room, activity, onAction }: ConversationProps): ReactNode {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [draft, setDraft] = useState("");
-
   const entries = useTimeline(room.world.messages, room.world.log);
+  const names = useMemo(() => new Map(room.participants.map((p) => [p.profile.id, p.profile.displayName])), [room.participants]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -41,32 +49,27 @@ export function Conversation({ room, activity, onAction }: ConversationProps): R
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="border-b border-white/[0.05] px-6 py-4">
-        <div className="flex items-center gap-3">
-          <div className="flex size-8 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.02] text-zinc-400">
-            <Sparkles className="size-4 text-emerald-400" />
-          </div>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-zinc-200">{room.world.summary}</p>
-            <p className="mt-0.5 text-xs text-zinc-500">实时对话与行动流</p>
-          </div>
+      <div className="flex items-center gap-3 border-b border-white/[0.05] px-6 py-4">
+        <div className="flex size-8 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.02] text-zinc-400">
+          <Sparkles className="size-4 text-emerald-400" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium tracking-tight text-zinc-200">{room.world.summary}</p>
+          <p className="mt-0.5 text-xs text-zinc-500">实时直播 · 发言与行动</p>
         </div>
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="px-6 py-6">
-          <LiveAgents room={room} activity={activity} />
-          <div className="space-y-6">
+          <LiveAgents room={room} activity={activity} names={names} />
+
+          <div className="space-y-5">
             {entries.length === 0 ? (
-              <div className="flex min-h-56 flex-col items-center justify-center text-center">
-                <div className="flex size-12 items-center justify-center rounded-2xl border border-white/[0.06] bg-white/[0.02]">
-                  <span className="live-pulse size-2 rounded-full bg-emerald-400" />
-                </div>
-                <p className="mt-4 text-sm font-medium text-zinc-300">世界正在苏醒</p>
-                <p className="mt-1 text-xs text-zinc-600">参与者入场后，对话将在这里实时出现。</p>
-              </div>
+              <CastingSlate room={room} />
             ) : (
-              entries.map((entry) => entry.kind === "log" ? <LogEntry key={entry.id} entry={entry} /> : <MessageRow key={entry.id} entry={entry} />)
+              entries.map((entry, index) => entry.kind === "log"
+                ? <ActDivider key={entry.id} entry={entry} />
+                : <MessageRow key={entry.id} entry={entry} names={names} activity={activity} fresh={index >= entries.length - 3 && entry.message.turn === room.world.turn} />)
             )}
           </div>
           <div ref={bottomRef} />
@@ -74,7 +77,7 @@ export function Conversation({ room, activity, onAction }: ConversationProps): R
       </ScrollArea>
 
       {human?.waiting ? (
-        <div className="border-t border-white/[0.06] bg-[#0b0b0b]/95 px-6 py-4">
+        <div className="border-t border-white/[0.06] bg-[#050505]/95 px-6 py-4">
           {waitingLabel ? (
             <p className="mb-3 text-xs font-medium text-zinc-400">
               轮到你：<span className="text-zinc-100">{waitingLabel}</span>
@@ -88,10 +91,9 @@ export function Conversation({ room, activity, onAction }: ConversationProps): R
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => { if (event.key === "Enter") void submit(); }}
                   placeholder="发言…"
-                  maxLength={800}
-                  className="h-11 flex-1 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  className="h-11 flex-1 rounded-full border border-white/[0.08] bg-white/[0.02] px-5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none"
                 />
-                <Button size="icon" className="size-11 rounded-xl bg-zinc-50 text-zinc-950 hover:bg-white" disabled={!draft.trim()} onClick={() => void submit()}>
+                <Button size="icon" className="size-11 rounded-full bg-zinc-50 text-zinc-950 hover:bg-white" disabled={!draft.trim()} onClick={() => void submit()}>
                   <Send className="size-4" />
                 </Button>
               </div>
@@ -104,26 +106,85 @@ export function Conversation({ room, activity, onAction }: ConversationProps): R
   );
 }
 
-function LiveAgents({ room, activity }: { room: SocietyRoomSnapshot; activity: Record<string, LiveAgentActivity> }): ReactNode {
+function CastingSlate({ room }: { room: SocietyRoomSnapshot }): ReactNode {
+  return (
+    <div className="relative flex min-h-56 flex-col items-center justify-center overflow-hidden rounded-2xl border border-white/[0.05]">
+      <div className="shimmer absolute inset-0" aria-hidden />
+      <div className="relative flex items-center gap-3">
+        {room.participants.slice(0, 5).map((participant, index) => (
+          <AgentAvatar
+            key={participant.profile.id}
+            name={participant.profile.displayName}
+            index={index}
+            size={index === 2 ? "lg" : "md"}
+            />
+        ))}
+      </div>
+      <p className="relative mt-4 font-mono text-[10px] uppercase tracking-[0.3em] text-zinc-500">正在唤醒世界</p>
+    </div>
+  );
+}
+
+function LiveAgents({ room, activity, names }: {
+  room: SocietyRoomSnapshot;
+  activity: Record<string, LiveAgentActivity>;
+  names: Map<string, string>;
+}): ReactNode {
   const active = room.participants.filter((participant) => {
     const state = activity[participant.profile.id];
-    return state?.text || state?.tool;
+    const status = participant.status;
+    return (status === "thinking" || status === "acting" || status === "speaking") || Boolean(state?.text || state?.reasoning || state?.thought || state?.tool);
   });
   if (!active.length) return null;
   return (
-    <div className="mb-6 grid grid-cols-1 gap-2 sm:grid-cols-2">
+    <div className="mb-8 space-y-3">
       {active.map((participant) => {
         const state = activity[participant.profile.id];
+        const caption = state?.tool
+          ? `正在调用 ${eventLabel(state.tool)}`
+          : participant.status === "speaking"
+            ? "正在发言"
+            : participant.status === "acting"
+              ? "正在行动"
+              : state?.text
+                ? "斟酌措辞中"
+                : state?.thought || state?.reasoning
+                  ? "心中盘算"
+                  : "思考中";
         return (
-          <div key={participant.profile.id} className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-2.5">
-            <AgentAvatar name={participant.profile.displayName} index={participant.profile.id.length} size="sm" />
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-medium text-zinc-200">{participant.profile.displayName}</p>
-              <p className="truncate font-mono text-[10px] text-zinc-500">
-                {state?.tool ? `正在调用 ${state.tool}` : state?.text ? state.text : "思考中"}
-              </p>
+          <div key={participant.profile.id} className="enter-stage overflow-hidden rounded-2xl border border-white/[0.06] bg-white/[0.015]">
+            <div className="flex items-center gap-3 px-4 py-3">
+              <AgentPresence name={participant.profile.displayName} index={indexOf(participant.profile.id)} size="md" status={participant.status} />
+              <div className="min-w-0 flex-1">
+                <p className="flex items-center gap-2 text-sm font-medium text-zinc-100">
+                  {participant.profile.displayName}
+                  {participant.status === "speaking" ? <SpeechBars /> : <span className="live-pulse size-1.5 rounded-full bg-emerald-400" />}
+                </p>
+                <p className="truncate text-xs text-zinc-500">{caption}</p>
+              </div>
+              <span className="font-mono text-[10px] text-zinc-600">{formatTime(state?.at ?? new Date().toISOString())}</span>
             </div>
-            <span className="live-pulse size-1.5 shrink-0 rounded-full bg-emerald-400" />
+            {state?.reasoning ? (
+              <div className="mx-4 mb-3 rounded-xl border border-sky-400/10 bg-sky-400/[0.03] px-3.5 py-2.5">
+                <p className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-sky-300/60">
+                  <Brain className="size-3" /> 内心推理
+                </p>
+                <p className="stream-caret line-clamp-4 font-mono text-xs leading-5 text-zinc-400">{state.reasoning}</p>
+              </div>
+            ) : null}
+            {state?.thought ? (
+              <div className="mx-4 mb-3 rounded-xl border border-white/[0.05] bg-white/[0.015] px-3.5 py-2.5">
+                <p className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+                  <Brain className="size-3" /> {thoughtLabel(state.thought.kind)}
+                </p>
+                <p className="stream-caret line-clamp-4 text-xs leading-5 text-zinc-400">{state.thought.text}</p>
+              </div>
+            ) : null}
+            {state?.text ? (
+              <div className="mx-4 mb-3 rounded-xl border border-white/[0.05] bg-white/[0.015] px-3.5 py-2.5">
+                <p className="stream-caret line-clamp-3 text-xs leading-5 text-zinc-300">{state.text}</p>
+              </div>
+            ) : null}
           </div>
         );
       })}
@@ -131,41 +192,54 @@ function LiveAgents({ room, activity }: { room: SocietyRoomSnapshot; activity: R
   );
 }
 
-function LogEntry({ entry }: { entry: Extract<TimelineEntry, { kind: "log" }> }): ReactNode {
+function thoughtLabel(kind: "reflection" | "mind-read" | "plan"): string {
+  return kind === "reflection" ? "策略反思" : kind === "mind-read" ? "洞察他人" : "谋划行动";
+}
+
+function ActDivider({ entry }: { entry: Extract<TimelineEntry, { kind: "log" }> }): ReactNode {
   return (
-    <div className="flex items-center gap-4 py-1">
-      <span className="h-px flex-1 bg-gradient-to-r from-transparent via-white/10 to-transparent" />
-      <div className="max-w-[70%] text-center">
-        <p className="font-mono text-[10px] uppercase tracking-widest text-zinc-600">R{entry.turn} · {entry.phase}</p>
-        <p className="mt-1 text-sm leading-6 text-zinc-400">{entry.text}</p>
+    <div className="flex items-center gap-5 py-2">
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent to-white/15" />
+      <div className="text-center">
+        <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-zinc-600">第 {entry.turn} 幕</p>
+        <p className="mt-1 text-sm font-medium tracking-tight text-zinc-300">{entry.text}</p>
       </div>
-      <span className="h-px flex-1 bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+      <div className="h-px flex-1 bg-gradient-to-l from-transparent to-white/15" />
     </div>
   );
 }
 
-function MessageRow({ entry }: { entry: Extract<TimelineEntry, { kind: "message" }> }): ReactNode {
+function MessageRow({ entry, names, activity, fresh }: {
+  entry: Extract<TimelineEntry, { kind: "message" }>;
+  names: Map<string, string>;
+  activity: Record<string, LiveAgentActivity>;
+  fresh: boolean;
+}): ReactNode {
   const { message } = entry;
   const privateChat = message.channel !== "public";
+  const senderLive = Boolean(activity[message.senderId]?.text) && fresh;
   return (
-    <div className="group flex gap-3.5">
+    <div className={cn("group flex gap-3.5", fresh && "enter-stage")}>
       <AgentAvatar name={message.senderName} index={indexOf(message.senderId)} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold text-zinc-100">{message.senderName}</span>
+          <span className="text-sm font-semibold tracking-tight text-zinc-100">{message.senderName}</span>
           <ChannelBadge channel={message.channel} />
           {message.recipientIds?.length ? (
-            <span className="font-mono text-[10px] text-zinc-600">→ {message.recipientIds.length} 人</span>
+            <span className="flex items-center gap-1">
+              <span className="font-mono text-[10px] text-violet-300/60">私发给</span>
+              {message.recipientIds.map((id) => (
+                <AgentAvatar key={id} name={names.get(id) ?? id} index={indexOf(id)} size="sm" />
+              ))}
+            </span>
           ) : null}
           <span className="font-mono text-[10px] text-zinc-600">{formatTime(message.createdAt)}</span>
         </div>
         <div className={cn(
-          "mt-1.5 rounded-2xl rounded-tl-sm border px-4 py-3 text-sm leading-6",
-          privateChat
-            ? "border-violet-400/15 bg-violet-400/[0.06] text-zinc-200"
-            : "border-white/[0.06] bg-white/[0.03] text-zinc-200"
+          "mt-1.5 rounded-2xl rounded-tl-sm border px-4 py-3 text-[15px] leading-7",
+          privateChat ? cn(channelSurface[message.channel], "opacity-95 text-zinc-200") : cn(channelSurface.public, "text-zinc-200")
         )}>
-          {message.text}
+          <p className={cn(senderLive && "stream-caret")}>{message.text}</p>
         </div>
       </div>
     </div>
@@ -186,11 +260,13 @@ function ActionRow({ actions, room, onAction }: { actions: SocietyPlayerState["a
 function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["actions"][number]; room: SocietyRoomSnapshot; onAction: (action: string, payload: unknown) => Promise<void> }): ReactNode {
   const [value, setValue] = useState<string>(action.kind === "choice" ? action.options?.[0]?.value ?? "" : "");
   const [busy, setBusy] = useState(false);
+  const [team, setTeam] = useState<string[]>([]);
 
   const run = async (payload: unknown): Promise<void> => {
     setBusy(true);
     try {
       await onAction(action.name, payload);
+      setTeam([]);
     } finally {
       setBusy(false);
     }
@@ -227,7 +303,7 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
           step={action.step ?? 1}
           value={value}
           onChange={(event) => setValue(event.target.value)}
-          className="h-10 w-28 rounded-xl border border-white/[0.08] bg-white/[0.02] px-3.5 font-mono text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+          className="h-10 w-28 rounded-full border border-white/[0.08] bg-white/[0.02] px-4 font-mono text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
         />
         <Button size="sm" disabled={busy} onClick={() => void run({ [action.field ?? "value"]: Number(value) })} className="h-10 rounded-full bg-zinc-50 px-5 text-zinc-950 hover:bg-white">
           {action.label}
@@ -245,6 +321,50 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
             {target.displayName}
           </Button>
         ))}
+      </div>
+    );
+  }
+
+  if (action.kind === "team") {
+    const members = room.world.agents.filter((agent) => agent.alive);
+    const min = action.min ?? 1;
+    const max = action.max ?? members.length;
+    const toggle = (id: string): void => {
+      setTeam((current) => current.includes(id)
+        ? current.filter((entry) => entry !== id)
+        : [...current, id].slice(0, max));
+    };
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        {members.map((member) => {
+          const selected = team.includes(member.id);
+          return (
+            <Button
+              key={member.id}
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => toggle(member.id)}
+              className={cn(
+                "h-9 rounded-full border px-4",
+                selected
+                  ? "border-zinc-300/40 bg-zinc-100/[0.08] text-zinc-50"
+                  : "border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/[0.06]"
+              )}
+            >
+              {selected ? <Check className="mr-1 size-3" /> : null}
+              {member.displayName}
+            </Button>
+          );
+        })}
+        <Button
+          size="sm"
+          disabled={busy || team.length < min}
+          onClick={() => void run({ [action.field ?? "memberIds"]: team })}
+          className="h-9 rounded-full bg-zinc-50 px-5 text-zinc-950 hover:bg-white"
+        >
+          提出队伍（{team.length}/{max}）
+        </Button>
       </div>
     );
   }

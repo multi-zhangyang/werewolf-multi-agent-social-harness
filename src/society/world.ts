@@ -102,7 +102,7 @@ export abstract class SocialWorldBase implements SocialWorld {
     if (action === "message" || action === "communicate") {
       const input = parseMessagePayload(payload);
       const message = await this.sendMessage({ senderId: actorId, ...input });
-      return { action, detail: input.text.slice(0, 260), result: { messageId: message.id } };
+      return { action, detail: input.text, result: { messageId: message.id } };
     }
     return this.performDomainAction(actorId, action, payload);
   }
@@ -129,7 +129,7 @@ export abstract class SocialWorldBase implements SocialWorld {
       senderId: input.senderId,
       senderName: sender.displayName,
       channel: input.channel,
-      text: text.slice(0, 800),
+      text,
       turn: this.currentTurn(),
       phase: this.currentPhase(),
       createdAt: new Date().toISOString(),
@@ -285,7 +285,7 @@ function parseMessagePayload(payload: unknown): {
   if (typeof value.text !== "string" || !value.text.trim()) {
     throw new Error("MESSAGE_EMPTY: Provide a non-empty message before retrying.");
   }
-  if (value.text.length > 800) throw new Error("MESSAGE_TOO_LONG: Messages are limited to 800 characters.");
+  if (value.text.length > 4_000) throw new Error("MESSAGE_TOO_LONG: Messages are limited to 4000 characters.");
   const channel = value.channel ?? "public";
   if (channel !== "public" && channel !== "private" && channel !== "team") {
     throw new Error("MESSAGE_CHANNEL_INVALID: Choose public, private or team.");

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ArrowRight, Play, Radio, Sparkles } from "lucide-react";
+import { ArrowRight, Play, Sparkles } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
@@ -18,11 +18,14 @@ interface LandingProps {
 }
 
 export function Landing({ scenarios, models, rooms, onStart, onOpenRoom }: LandingProps): ReactNode {
+  const ticker = scenarios.map((scenario) => scenario.name).join(" · ");
   return (
-    <div className="relative min-h-screen overflow-hidden">
+    <div className="relative min-h-screen overflow-hidden bg-[#050505]">
       <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
-        <div className="absolute -top-48 left-1/2 h-[520px] w-[980px] -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,rgba(255,255,255,0.14),transparent)] blur-2xl" />
-        <div className="absolute inset-0 bg-[linear-gradient(to_bottom,transparent_0%,rgba(10,10,10,0.92)_100%)]" />
+        <div className="absolute -top-56 left-1/2 h-[620px] w-[1100px] -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,rgba(255,255,255,0.13),transparent)] blur-2xl" />
+        <div className="absolute -left-40 top-1/3 size-[460px] rounded-full bg-[radial-gradient(closest-side,rgba(56,189,248,0.07),transparent)] blur-2xl" />
+        <div className="absolute -right-40 top-1/2 size-[460px] rounded-full bg-[radial-gradient(closest-side,rgba(52,211,153,0.06),transparent)] blur-2xl" />
+        <div className="absolute inset-0 bg-[linear-gradient(to_bottom,transparent_0%,rgba(5,5,5,0.92)_100%)]" />
       </div>
 
       <header className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between px-6">
@@ -37,12 +40,30 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom }: Landi
               {rooms.length} 个活跃世界
             </Badge>
           ) : null}
-          <Button size="sm" className="rounded-full bg-zinc-50 text-zinc-950 hover:bg-white" onClick={() => onStart(scenarios[0]?.id ?? "werewolf")}>
+          <Button size="sm" className="rounded-full bg-zinc-50 text-zinc-950 transition-transform hover:bg-white active:scale-[0.98]" onClick={() => onStart(scenarios[0]?.id ?? "werewolf")}>
             <Play className="size-3.5" />
             创建世界
           </Button>
         </div>
       </header>
+
+      {ticker ? (
+        <div className="marquee overflow-hidden border-y border-white/[0.05] bg-white/[0.015]">
+          <div className="marquee-track gap-8 py-2 font-mono text-xs text-zinc-500">
+            {[0, 1].map((key) => (
+              <span key={key} className="flex gap-8">
+                {scenarios.map((scenario) => (
+                  <span key={`${key}-${scenario.id}`} className="flex items-center gap-2">
+                    <Sparkles className="size-3 text-zinc-700" />
+                    {scenario.name}
+                    <span className="text-zinc-700">·</span>
+                  </span>
+                ))}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <main className="mx-auto w-full max-w-7xl px-6 pb-24">
         <section className="mx-auto max-w-4xl pt-20 pb-20 text-center sm:pt-28">
@@ -54,12 +75,12 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom }: Landi
             Society
           </h1>
           <p className="mx-auto mt-7 max-w-2xl text-balance text-lg leading-8 text-zinc-400 sm:text-xl">
-            让真正的 AI 智能体在博弈、谈判与欺骗中交锋。
+            真正的多智能体同台交锋 —— 谈判、结盟、欺骗与背叛。
             <br className="hidden sm:block" />
-            每个参与者都拥有记忆、情绪、信念与策略。
+            每个参与者都是带着记忆、情绪与信念的真实模型。
           </p>
           <div className="mt-10 flex items-center justify-center gap-4">
-            <Button size="lg" className="h-11 rounded-full bg-zinc-50 px-8 text-zinc-950 hover:bg-white" onClick={() => onStart(scenarios[0]?.id ?? "werewolf")}>
+            <Button size="lg" className="h-11 rounded-full bg-zinc-50 px-8 text-zinc-950 transition-transform hover:bg-white active:scale-[0.98]" onClick={() => onStart(scenarios[0]?.id ?? "werewolf")}>
               开始一场博弈
               <ArrowRight className="size-4" />
             </Button>
@@ -74,10 +95,10 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom }: Landi
         <section id="scenarios" className="scroll-mt-8">
           <div className="mb-8 flex items-end justify-between">
             <div>
-              <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">Scenarios</p>
-              <h2 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-100">博弈与欺骗的演武场</h2>
+              <p className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-500">Scenarios</p>
+              <h2 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-100">博弈与欺骗的竞技场</h2>
             </div>
-            <span className="font-mono text-xs text-zinc-600">{String(scenarios.length).padStart(2, "0")} scenarios</span>
+            <span className="nums font-mono text-xs text-zinc-600">{String(scenarios.length).padStart(2, "0")} scenarios</span>
           </div>
           <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {scenarios.map((scenario, index) => (
@@ -90,10 +111,10 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom }: Landi
           <section className="mt-20">
             <div className="mb-6 flex items-end justify-between">
               <div>
-                <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">Live</p>
+                <p className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-500">Live</p>
                 <h2 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-100">正在发生的世界</h2>
               </div>
-              <span className="font-mono text-xs text-zinc-600">{rooms.length} rooms</span>
+              <span className="nums font-mono text-xs text-zinc-600">{rooms.length} rooms</span>
             </div>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {rooms.slice(0, 6).map((room) => (
@@ -106,7 +127,7 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom }: Landi
                     <ScenarioIcon id={room.scenarioId} className="size-5" />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-semibold text-zinc-100">{room.title}</span>
+                    <span className="block truncate text-sm font-semibold tracking-tight text-zinc-100">{room.title}</span>
                     <span className="mt-1 flex items-center gap-2 text-xs text-zinc-500">
                       <StatusDot status={room.status} />
                       <StatusLabel status={room.status} />
@@ -125,7 +146,7 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom }: Landi
       <footer className="border-t border-white/[0.06] py-10">
         <div className="mx-auto flex w-full max-w-7xl flex-col items-center justify-between gap-3 px-6 text-xs text-zinc-600 sm:flex-row">
           <span>Society · Live Multi-Agent Social Worlds</span>
-          <span className="font-mono">{models.length} models · {scenarios.length} scenarios · OpenAI Agents SDK</span>
+          <span className="nums font-mono">{models.length} models · {scenarios.length} scenarios · OpenAI Agents SDK</span>
         </div>
       </footer>
     </div>
@@ -166,7 +187,7 @@ function ScenarioCard({ scenario, index, onStart }: { scenario: ScenarioSummary;
       <div className="mt-6">
         <div className="flex items-center gap-3">
           <h3 className="text-xl font-semibold tracking-tight text-zinc-50">{scenario.name}</h3>
-          <span className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-[11px] text-zinc-500">
+          <span className="nums rounded-md border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-[11px] text-zinc-500">
             {scenario.players}P
           </span>
         </div>
