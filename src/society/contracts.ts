@@ -1,10 +1,12 @@
 import type { Agent, MemorySession, Tool } from "@openai/agents";
 
-export type ScenarioId = "prisoners-dilemma" | "public-goods" | "trust-game" | "werewolf";
+export type ScenarioId = "prisoners-dilemma" | "public-goods" | "trust-game" | "werewolf" | "ultimatum-game" | "beauty-contest";
 export type RoomStatus = "lobby" | "running" | "paused" | "finished" | "error";
 export type SocialChannel = "public" | "private" | "team";
 export type AgentStatus = "lobby" | "thinking" | "acting" | "speaking" | "idle" | "finished" | "error";
-export type AgentNoteKind = "observation" | "reflection" | "decision" | "outcome";
+export type ParticipantController = "agent" | "human";
+export type PlayerActionKind = "message" | "choice" | "number" | "target";
+export type ReasoningEffort = "low" | "medium" | "high";
 
 export interface ScenarioSummary {
   id: ScenarioId;
@@ -22,11 +24,13 @@ export interface AgentProfile {
   id: string;
   displayName: string;
   model: string;
+  controller?: ParticipantController;
   persona: string;
   traits: string[];
   values: string[];
   goals: string[];
   temperature?: number;
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface AgentGoal {
@@ -35,6 +39,39 @@ export interface AgentGoal {
   priority: number;
   progress: string;
   status: "active" | "satisfied" | "abandoned";
+}
+
+export interface PadState {
+  pleasure: number;
+  arousal: number;
+  dominance: number;
+}
+
+export interface CoreEmotions {
+  joy: number;
+  sadness: number;
+  anger: number;
+  fear: number;
+  surprise: number;
+  disgust: number;
+}
+
+export interface AgentNeeds {
+  security: number;
+  connection: number;
+  status: number;
+  autonomy: number;
+  achievement: number;
+}
+
+export interface AgentMoodState {
+  label: string;
+  description: string;
+  pad: PadState;
+  emotions: CoreEmotions;
+  needs: AgentNeeds;
+  energy: number;
+  updatedAtTurn: number;
 }
 
 export interface AgentBelief {
@@ -62,13 +99,13 @@ export interface AgentMemoryItem {
   tags: string[];
   salience: number;
   valence: number;
-  createdAt: string;
+  pad?: PadState;
   turn: number;
+  createdAt: string;
 }
 
 export interface AgentMindState {
-  mood: string;
-  energy: number;
+  mood: AgentMoodState;
   attention: string[];
   goals: AgentGoal[];
   beliefs: AgentBelief[];
@@ -125,12 +162,11 @@ export interface WorldAgentSnapshot {
   observerRole?: string;
 }
 
-export interface StoryBeat {
+export interface WorldLogEntry {
   id: string;
-  title: string;
   text: string;
-  tone: "neutral" | "positive" | "warning" | "danger" | "complete";
   turn: number;
+  phase: string;
   at: string;
 }
 
@@ -145,7 +181,7 @@ export interface WorldSnapshot {
   summary: string;
   agents: WorldAgentSnapshot[];
   messages: SocialMessage[];
-  story: StoryBeat[];
+  log: WorldLogEntry[];
   details: Record<string, unknown>;
 }
 
@@ -157,6 +193,26 @@ export interface WorldActivation {
   instructionFor(actorId: string): string;
 }
 
+export interface PlayerActionSpec {
+  name: string;
+  label: string;
+  description: string;
+  kind: PlayerActionKind;
+  field?: string;
+  options?: Array<{ value: string; label: string }>;
+  min?: number;
+  max?: number;
+  step?: number;
+  channels?: SocialChannel[];
+  targetFilter?: "any-living" | "other-living" | "non-wolf";
+}
+
+export interface WorldActionCommit {
+  action: string;
+  detail: string;
+  result?: unknown;
+}
+
 export interface ActivationCompletion {
   completed: boolean;
   missingActorIds: string[];
@@ -166,7 +222,6 @@ export interface ActivationCompletion {
 export type AgentRuntimeEvent =
   | { type: "agent.status"; roomId: string; actorId: string; status: AgentStatus; at: string }
   | { type: "agent.updated"; roomId: string; actorId: string; status: AgentStatus; mind: AgentMindState; turnCount: number; totalTokens: number; lastOutput?: string; at: string }
-  | { type: "agent.note"; roomId: string; actorId: string; kind: AgentNoteKind; text: string; at: string }
   | { type: "agent.delta"; roomId: string; actorId: string; delta: string; at: string }
   | { type: "agent.tool"; roomId: string; actorId: string; toolName: string; phase: "started" | "completed"; summary?: string; at: string }
   | { type: "agent.message"; roomId: string; message: SocialMessage }
@@ -176,7 +231,7 @@ export type AgentRuntimeEvent =
 
 export interface AgentMemoryStore {
   remember(input: Omit<AgentMemoryItem, "id" | "createdAt">): Promise<AgentMemoryItem>;
-  recall(query: string, limit?: number): Promise<AgentMemoryItem[]>;
+  recall(query: string, limit?: number, moodPad?: PadState): Promise<AgentMemoryItem[]>;
   list(limit?: number): Promise<AgentMemoryItem[]>;
 }
 
@@ -196,8 +251,11 @@ export interface SocialWorld {
   start(): void;
   pause(): void;
   snapshot(): WorldSnapshot;
+  snapshotFor(actorId?: string): WorldSnapshot;
   observe(actorId: string): AgentObservation;
   toolsFor(actorId: string): Tool<SocietyAgentContext>[];
+  playerActions(actorId: string): PlayerActionSpec[];
+  performAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit>;
   activation(): WorldActivation | null;
   completeActivation(activation: WorldActivation): ActivationCompletion;
   experienceFor(actorId: string): string | undefined;

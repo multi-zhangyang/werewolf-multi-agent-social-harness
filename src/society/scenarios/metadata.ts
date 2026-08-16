@@ -34,6 +34,17 @@ export const SCENARIO_METADATA: Record<ScenarioSummary["id"], ScenarioSummary> =
     maxRounds: 16,
     capabilities: ["角色交换", "承诺与兑现", "关系记忆", "分阶段行动"]
   },
+  "ultimatum-game": {
+    id: "ultimatum-game",
+    name: "最后通牒博弈",
+    shortDescription: "分配权在手时，公平感决定收益是否归零。",
+    description: "提议者提出 10 点资源的分配方案，回应者可以用拒绝惩罚不公平，也让自己一无所获；轮换角色后，立场反转。",
+    players: 2,
+    defaultRounds: 5,
+    minRounds: 2,
+    maxRounds: 16,
+    capabilities: ["分配谈判", "角色轮换", "拒绝与惩罚", "关系记忆"]
+  },
   werewolf: {
     id: "werewolf",
     name: "狼人杀",
@@ -44,6 +55,17 @@ export const SCENARIO_METADATA: Record<ScenarioSummary["id"], ScenarioSummary> =
     minRounds: 2,
     maxRounds: 8,
     capabilities: ["隐藏身份", "多人讨论", "夜间私密行动", "第三阵营"]
+  },
+  "beauty-contest": {
+    id: "beauty-contest",
+    name: "选美博弈",
+    shortDescription: "你以为大家在猜平均数，其实大家在猜你猜大家猜什么。",
+    description: "每个人私下选择 0–100 的整数，最接近所有人平均值 2/3 的人获胜。考验高阶信念、策略推理与群体误判。",
+    players: 3,
+    defaultRounds: 5,
+    minRounds: 2,
+    maxRounds: 12,
+    capabilities: ["高阶信念", "同时行动", "策略误导", "群体心理"]
   }
 };
 

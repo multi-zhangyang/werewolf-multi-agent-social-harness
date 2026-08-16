@@ -3,7 +3,10 @@ import type { AgentProfile } from "./contracts";
 const DEFAULT_MODEL_CATALOG = [
   { id: "your-model", name: "Your Model", provider: "yourmodel" },
   { id: "your-model", name: "Your Model", provider: "yourmodel" },
-  { id: "your-model", name: "Your Model", provider: "yourmodel" }
+  { id: "your-model", name: "Your Model", provider: "yourmodel" },
+  { id: "your-model", name: "Your Model", provider: "yourmodel" },
+  { id: "your-model", name: "Your Model", provider: "Z.ai" },
+  { id: "your-model", name: "Your Model", provider: "yourprovider AI" }
 ] as const;
 
 export const MODEL_CATALOG = modelCatalogFromEnv();

@@ -6,11 +6,17 @@ import type { SocietyRoomSnapshot } from "../../society/room";
 import type { ServerContext } from "../context";
 
 const createRoomSchema = z.object({
-  scenarioId: z.enum(["prisoners-dilemma", "public-goods", "trust-game", "werewolf"]),
+  scenarioId: z.enum(["prisoners-dilemma", "public-goods", "trust-game", "werewolf", "ultimatum-game", "beauty-contest"]),
   models: z.array(z.string().min(1).max(180)).min(1).max(8),
   rounds: z.number().int().positive().max(20).optional(),
-  temperature: z.number().min(0).max(2).optional()
+  temperature: z.number().min(0).max(2).optional(),
+  mode: z.enum(["ai", "human"]).default("ai"),
+  playerName: z.string().trim().min(1).max(40).optional(),
+  reasoningEffort: z.enum(["low", "medium", "high"]).default("low")
 }).strict().superRefine((input, issueContext) => {
+  if (input.mode === "human" && !input.playerName) {
+    issueContext.addIssue({ code: z.ZodIssueCode.custom, path: ["playerName"], message: "Human mode requires a playerName." });
+  }
   if (input.rounds === undefined) return;
   const scenario = SCENARIO_METADATA[input.scenarioId];
   if (input.rounds < scenario.minRounds || input.rounds > scenario.maxRounds) {
@@ -45,9 +51,21 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       const input = createRoomSchema.parse(request.body);
       const scenario = SCENARIO_METADATA[input.scenarioId];
       const profiles = createAgentProfiles(input.models, scenario.players, input.temperature);
+      for (const profile of profiles) profile.reasoningEffort = input.reasoningEffort;
+      if (input.mode === "human") {
+        profiles[0] = {
+          ...profiles[0],
+          displayName: input.playerName!,
+          model: "human",
+          controller: "human"
+        };
+        for (let index = 1; index < profiles.length; index += 1) {
+          profiles[index].model = input.models[(index - 1) % input.models.length];
+        }
+      }
       const room = context.rooms.create({ scenarioId: input.scenarioId, profiles, rounds: input.rounds });
       void room.start();
-      response.status(202).json(room.snapshot());
+      response.status(202).json(room.creationResult());
     } catch (error) {
       next(error);
     }
@@ -59,7 +77,13 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    response.json(room.snapshot());
+    const token = queryToken(request);
+    const actorId = token ? room.actorForToken(token) : undefined;
+    if (token && !actorId) {
+      response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "The player token is invalid." });
+      return;
+    }
+    response.json(room.snapshotFor(actorId));
   });
 
   app.post("/api/rooms/:roomId/pause", (request, response) => {
@@ -68,8 +92,37 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
+    if (room.humanActorId) {
+      const actorId = room.actorForToken(queryToken(request) ?? bodyToken(request));
+      if (!actorId) {
+        response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "A valid player token is required to pause this room." });
+        return;
+      }
+    }
     room.pause();
-    response.json(room.snapshot());
+    response.json(room.snapshotFor());
+  });
+
+  app.post("/api/rooms/:roomId/action", (request, response, next) => {
+    const room = context.rooms.get(request.params.roomId);
+    if (!room) {
+      response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
+      return;
+    }
+    const token = queryToken(request) ?? bodyToken(request);
+    const action = request.body?.action;
+    if (typeof action !== "string" || !action.trim()) {
+      response.status(400).json({ error: "ACTION_REQUIRED", message: "Provide a structured action name." });
+      return;
+    }
+    const actorId = room.actorForToken(token);
+    if (!actorId) {
+      response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "A valid player token is required." });
+      return;
+    }
+    void room.submitHumanAction(token!, action, request.body?.payload).then((commit) => {
+      response.status(202).json({ commit, room: room.snapshotFor(actorId) });
+    }).catch(next);
   });
 
   app.get("/api/rooms/:roomId/events", (request, response) => {
@@ -78,19 +131,25 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
+    const token = queryToken(request);
+    const actorId = token ? room.actorForToken(token) : undefined;
+    if (token && !actorId) {
+      response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "The player token is invalid." });
+      return;
+    }
     response.status(200);
     response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     response.setHeader("Cache-Control", "no-cache, no-transform");
     response.setHeader("Connection", "keep-alive");
     response.setHeader("X-Accel-Buffering", "no");
     response.flushHeaders?.();
-    const snapshot = room.snapshot();
-    writeEvent(response, "snapshot", snapshot, String(snapshot.recentEvents.at(-1)?.seq ?? 0));
-    const since = Number(request.query.since ?? 0);
-    if (Number.isFinite(since) && since > 0) {
-      for (const event of room.eventsSince(since)) writeEvent(response, "room", event, String(event.seq));
-    }
-    const unsubscribe = room.subscribe((event) => writeEvent(response, "room", event, String(event.seq)));
+    const writeSnapshot = (envelope?: unknown) => {
+      if (response.writableEnded) return;
+      writeEvent(response, "snapshot", room.snapshotFor(actorId));
+      if (envelope) writeEvent(response, "event", envelope);
+    };
+    writeSnapshot();
+    const unsubscribe = room.subscribe((envelope) => writeSnapshot(envelope));
     const heartbeat = setInterval(() => {
       if (!response.writableEnded) response.write(`: ${Date.now()}\n\n`);
     }, 15_000);
@@ -106,9 +165,21 @@ function hasProviderKey(): boolean {
   return Boolean(value && !value.startsWith("replace-with"));
 }
 
-function writeEvent(response: express.Response, name: string, data: SocietyRoomSnapshot | unknown, id?: string): void {
+function queryToken(request: express.Request): string | undefined {
+  const value = request.query.token;
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function bodyToken(request: express.Request): string | undefined {
+  const header = request.header("x-player-token") ?? request.header("authorization");
+  if (header?.toLowerCase().startsWith("bearer ")) return header.slice(7).trim();
+  if (header) return header.trim();
+  const value = request.body?.token;
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function writeEvent(response: express.Response, name: string, data: SocietyRoomSnapshot | unknown): void {
   if (response.writableEnded) return;
-  if (id) response.write(`id: ${id}\n`);
   response.write(`event: ${name}\n`);
   response.write(`data: ${JSON.stringify(data)}\n\n`);
 }

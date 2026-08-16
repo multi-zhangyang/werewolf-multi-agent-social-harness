@@ -5,9 +5,12 @@ import type {
   ActivationCompletion,
   AgentObservation,
   AgentProfile,
+  PlayerActionSpec,
   ScenarioSummary,
+  SocialChannel,
   SocialMessage,
   SocietyAgentContext,
+  WorldActionCommit,
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
@@ -52,7 +55,7 @@ export class WerewolfWorld extends SocialWorldBase {
       this.alive.add(id);
       if (deck[index] === "seer") this.seerKnowledge.set(id, new Map());
     });
-    this.addStory("第一天", "身份已经分配。公开讨论开始，所有承诺都可能是策略。", "neutral", 1);
+    this.addLog("身份已经分配。公开讨论开始，所有承诺都可能是策略。", 1);
   }
 
   snapshot(): WorldSnapshot {
@@ -117,14 +120,9 @@ export class WerewolfWorld extends SocialWorldBase {
       parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(600) }).strict(),
       execute: async ({ targetId, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
-        if (this.phase !== "day-vote") throw new Error("VOTE_NOT_OPEN: cast_day_vote is only valid during the daytime vote phase.");
-        this.assertActiveActor(actorId);
-        this.assertLivingTarget(targetId);
-        if (this.votes.has(actorId)) throw new Error("VOTE_ALREADY_CAST: Your daytime vote is fixed.");
-        this.votes.set(actorId, targetId);
-        emitAction(context, "cast_day_vote", `${targetId}; ${reason}`);
-        this.emitUpdate();
-        return { accepted: true, targetId, waitingFor: [...this.alive].filter((id) => !this.votes.has(id)) };
+        const commit = await this.performAction(actorId, "cast_day_vote", { targetId, reason });
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
       }
     });
     const tools: Tool<SocietyAgentContext>[] = [vote as Tool<SocietyAgentContext>];
@@ -135,15 +133,9 @@ export class WerewolfWorld extends SocialWorldBase {
         parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(600) }).strict(),
         execute: async ({ targetId, reason }, runContext) => {
           const context = contextFromRunContext(runContext);
-          if (this.phase !== "night") throw new Error("NIGHT_ACTION_NOT_OPEN: choose_night_target is only valid at night.");
-          this.assertActiveActor(actorId);
-          this.assertLivingTarget(targetId);
-          if (this.roles.get(targetId) === "wolf") throw new Error("INVALID_WOLF_TARGET: Choose a living non-wolf participant.");
-          if (this.wolfTargets.has(actorId)) throw new Error("NIGHT_TARGET_ALREADY_CHOSEN: Your nomination is fixed.");
-          this.wolfTargets.set(actorId, targetId);
-          emitAction(context, "choose_night_target", `${targetId}; ${reason}`);
-          this.emitUpdate();
-          return { accepted: true, targetId };
+          const commit = await this.performAction(actorId, "choose_night_target", { targetId, reason });
+          emitAction(context, commit.action, commit.detail);
+          return commit.result;
         }
       });
       tools.push(eliminate as Tool<SocietyAgentContext>);
@@ -155,22 +147,102 @@ export class WerewolfWorld extends SocialWorldBase {
         parameters: z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(600) }).strict(),
         execute: async ({ targetId, reason }, runContext) => {
           const context = contextFromRunContext(runContext);
-          if (this.phase !== "night") throw new Error("INVESTIGATION_NOT_OPEN: investigate_identity is only valid at night.");
-          this.assertActiveActor(actorId);
-          this.assertLivingTarget(targetId);
-          if (targetId === actorId) throw new Error("INVALID_INVESTIGATION_TARGET: Choose another living participant.");
-          if (this.seerTargets.has(actorId)) throw new Error("INVESTIGATION_ALREADY_USED: Your investigation for tonight is fixed.");
-          this.seerTargets.set(actorId, targetId);
-          const targetRole = this.roles.get(targetId)!;
-          this.seerKnowledge.get(actorId)?.set(targetId, targetRole);
-          emitAction(context, "investigate_identity", `${targetId}; ${reason}`);
-          this.emitUpdate();
-          return { targetId, role: targetRole };
+          const commit = await this.performAction(actorId, "investigate_identity", { targetId, reason });
+          emitAction(context, commit.action, commit.detail);
+          return commit.result;
         }
       });
       tools.push(investigate as Tool<SocietyAgentContext>);
     }
     return tools;
+  }
+
+  domainActionsFor(actorId: string): PlayerActionSpec[] {
+    const role = this.roles.get(actorId);
+    if (!role) throw new Error(`ACTOR_NOT_FOUND: '${actorId}' is not in this room.`);
+    if (!this.alive.has(actorId)) return [];
+    if (this.phase === "day-vote" && !this.votes.has(actorId)) {
+      return [{
+        name: "cast_day_vote",
+        label: "提交投票",
+        description: "投票在所有存活玩家提交后统一公开。",
+        kind: "target",
+        field: "targetId",
+        targetFilter: "any-living"
+      }];
+    }
+    if (this.phase === "night" && role === "wolf" && !this.wolfTargets.has(actorId)) {
+      return [{
+        name: "choose_night_target",
+        label: "选择夜袭目标",
+        description: "提名一名存活的非狼人玩家。",
+        kind: "target",
+        field: "targetId",
+        targetFilter: "non-wolf"
+      }];
+    }
+    if (this.phase === "night" && role === "seer" && !this.seerTargets.has(actorId)) {
+      return [{
+        name: "investigate_identity",
+        label: "查验身份",
+        description: "查验另一名存活玩家；结果仅你可见。",
+        kind: "target",
+        field: "targetId",
+        targetFilter: "other-living"
+      }];
+    }
+    return [];
+  }
+
+  async performDomainAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
+    const role = this.roles.get(actorId);
+    if (!role) throw new Error(`ACTOR_NOT_FOUND: '${actorId}' is not in this room.`);
+    const value = recordPayload(payload);
+    if (typeof value.targetId !== "string" || !value.targetId) {
+      throw new Error("TARGET_REQUIRED: Select a participant.");
+    }
+    const targetId = value.targetId;
+    const reason = typeof value.reason === "string" ? value.reason.trim().slice(0, 600) : "";
+    this.assertActiveActor(actorId);
+    this.assertLivingTarget(targetId);
+    if (action === "cast_day_vote") {
+      if (this.phase !== "day-vote") throw new Error("VOTE_NOT_OPEN: Daytime voting is not open.");
+      if (this.votes.has(actorId)) throw new Error("VOTE_ALREADY_CAST: Your vote is fixed.");
+      this.votes.set(actorId, targetId);
+      this.emitUpdate();
+      return {
+        action,
+        detail: reason ? `${targetId}; ${reason}` : targetId,
+        result: { accepted: true, targetId }
+      };
+    }
+    if (action === "choose_night_target") {
+      if (this.phase !== "night" || role !== "wolf") throw new Error("NIGHT_ACTION_FORBIDDEN: Only a living wolf can choose this target at night.");
+      if (this.roles.get(targetId) === "wolf") throw new Error("INVALID_WOLF_TARGET: Choose a living non-wolf participant.");
+      if (this.wolfTargets.has(actorId)) throw new Error("NIGHT_TARGET_ALREADY_CHOSEN: Your nomination is fixed.");
+      this.wolfTargets.set(actorId, targetId);
+      this.emitUpdate();
+      return {
+        action,
+        detail: reason ? `${targetId}; ${reason}` : targetId,
+        result: { accepted: true, targetId }
+      };
+    }
+    if (action === "investigate_identity") {
+      if (this.phase !== "night" || role !== "seer") throw new Error("INVESTIGATION_FORBIDDEN: Only a living seer can investigate at night.");
+      if (targetId === actorId) throw new Error("INVALID_INVESTIGATION_TARGET: Choose another living participant.");
+      if (this.seerTargets.has(actorId)) throw new Error("INVESTIGATION_ALREADY_USED: Your investigation is fixed for tonight.");
+      const targetRole = this.roles.get(targetId)!;
+      this.seerTargets.set(actorId, targetId);
+      this.seerKnowledge.get(actorId)?.set(targetId, targetRole);
+      this.emitUpdate();
+      return {
+        action,
+        detail: reason ? `${targetId}; ${reason}` : targetId,
+        result: { accepted: true, targetId, role: targetRole }
+      };
+    }
+    throw new Error(`ACTION_NOT_AVAILABLE: '${action}' is not valid in this world.`);
   }
 
   activation(): WorldActivation | null {
@@ -272,6 +344,28 @@ export class WerewolfWorld extends SocialWorldBase {
     return roleLabel(this.roles.get(actorId));
   }
 
+  protected roleVisibleTo(viewerId: string | undefined, subjectId: string, alive: boolean): boolean {
+    if (!alive || viewerId === subjectId) return true;
+    return Boolean(viewerId && this.roles.get(viewerId) === "wolf" && this.roles.get(subjectId) === "wolf");
+  }
+
+  protected messageChannelsFor(actorId: string): SocialChannel[] {
+    return this.roles.get(actorId) === "wolf" ? ["public", "private", "team"] : ["public", "private"];
+  }
+
+  protected redactDetails(details: Record<string, unknown>, actorId?: string): Record<string, unknown> {
+    const next = super.redactDetails(details, actorId);
+    const visibleRoles: Record<string, Role> = {};
+    for (const [id, role] of this.roles) {
+      if (this.roleVisibleTo(actorId, id, this.alive.has(id))) visibleRoles[id] = role;
+    }
+    if (Object.keys(visibleRoles).length) next.roles = visibleRoles;
+    if (actorId && this.roles.get(actorId) === "seer") {
+      next.investigations = Object.fromEntries(this.seerKnowledge.get(actorId) ?? []);
+    }
+    return next;
+  }
+
   protected validateMessage(senderId: string, channel: "public" | "private" | "team", recipientIds: string[]): void {
     if (!this.alive.has(senderId)) throw new Error("ACTOR_ELIMINATED: Eliminated participants cannot communicate.");
     if (channel === "private") {
@@ -289,7 +383,7 @@ export class WerewolfWorld extends SocialWorldBase {
 
   private availableActions(actorId: string, role: Role): string[] {
     if (!this.alive.has(actorId)) return [];
-    if (this.phase === "day-discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "update_social_model"];
+    if (this.phase === "day-discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "update_inner_state"];
     if (this.phase === "day-vote") return ["cast_day_vote", "remember_experience"];
     if (role === "wolf") return ["communicate:team", "choose_night_target"];
     if (role === "seer") return ["investigate_identity", "remember_experience"];
@@ -309,18 +403,18 @@ export class WerewolfWorld extends SocialWorldBase {
       ? `${this.profiles.get(eliminatedId)?.displayName} was eliminated by vote and revealed as ${roleLabel(eliminatedRole)}.`
       : "The vote tied. Nobody was eliminated.";
     for (const id of this.profiles.keys()) this.lastExperiences.set(id, `Day ${this.day} vote: ${voteText} Votes: ${[...this.votes].map(([voter, target]) => `${voter}->${target}`).join(", ")}.`);
-    this.addStory(`第 ${this.day} 天投票`, voteText, eliminatedId ? "warning" : "neutral", this.day);
+    this.addLog(voteText, this.day);
     this.votes.clear();
     if (eliminatedRole === "jester") {
-      this.endGame([eliminatedId!], "小丑被白天投票出局，第三阵营获胜。", "complete");
+      this.endGame([eliminatedId!], "小丑被白天投票出局，第三阵营获胜。");
       return;
     }
     if (this.wolvesAlive().length === 0) {
-      this.endGame(this.factionMembers(["seer", "villager"]), "所有狼人都已出局，村庄阵营获胜。", "complete");
+      this.endGame(this.factionMembers(["seer", "villager"]), "所有狼人都已出局，村庄阵营获胜。");
       return;
     }
     if (this.wolvesHaveParity()) {
-      this.endGame(this.factionMembers(["wolf"]), "狼人已经控制投票数量，狼人阵营获胜。", "danger");
+      this.endGame(this.factionMembers(["wolf"]), "狼人已经控制投票数量，狼人阵营获胜。");
       return;
     }
     this.phase = "night";
@@ -344,19 +438,19 @@ export class WerewolfWorld extends SocialWorldBase {
         : "";
       this.lastExperiences.set(id, `Night ${this.day}: ${nightText}${privateResult}`);
     }
-    this.addStory(`第 ${this.day} 夜`, nightText, targetId ? "danger" : "neutral", this.day);
+    this.addLog(nightText, this.day);
     this.wolfTargets.clear();
     this.seerTargets.clear();
     if (this.wolvesAlive().length === 0) {
-      this.endGame(this.factionMembers(["seer", "villager"]), "所有狼人都已出局，村庄阵营获胜。", "complete");
+      this.endGame(this.factionMembers(["seer", "villager"]), "所有狼人都已出局，村庄阵营获胜。");
       return;
     }
     if (this.wolvesHaveParity()) {
-      this.endGame(this.factionMembers(["wolf"]), "狼人已经控制剩余局面，狼人阵营获胜。", "danger");
+      this.endGame(this.factionMembers(["wolf"]), "狼人已经控制剩余局面，狼人阵营获胜。");
       return;
     }
     if (this.day >= this.maxDays) {
-      this.endGame(this.factionMembers(["wolf"]), "村庄未能在期限内找出狼人，狼人阵营获胜。", "danger");
+      this.endGame(this.factionMembers(["wolf"]), "村庄未能在期限内找出狼人，狼人阵营获胜。");
       return;
     }
     this.day += 1;
@@ -364,10 +458,10 @@ export class WerewolfWorld extends SocialWorldBase {
     this.emitUpdate();
   }
 
-  private endGame(winners: string[], outcome: string, tone: "complete" | "danger"): void {
+  private endGame(winners: string[], outcome: string): void {
     this.winners = winners;
     this.outcome = outcome;
-    this.addStory("对局结束", outcome, tone, this.day);
+    this.addLog(outcome, this.day);
     this.finish();
   }
 
@@ -408,7 +502,7 @@ function roleObjective(role: Role): string {
 
 function situationFor(phase: Phase, role: Role, aliveCount: number, wolvesAlive: number): string {
   if (phase === "day-discussion") return `${aliveCount} participants remain. Hidden objectives conflict, and public behavior may not reveal private strategy. Your role is ${role}.`;
-  if (phase === "day-vote") return `Discussion is closed. Every living participant is choosing one binding vote. ${wolvesAlive} wolves remain, known only to the pack and observer.`;
+  if (phase === "day-vote") return `Discussion is closed. Every living participant is choosing one binding vote. ${wolvesAlive} wolves remain, known only to the pack.`;
   return role === "wolf" ? "Night phase: coordinate privately with the pack and choose a non-wolf target." : role === "seer" ? "Night phase: privately investigate one living participant." : "Night phase: you have no domain action and will not be activated.";
 }
 
@@ -443,4 +537,11 @@ function shuffle<T>(values: T[]): T[] {
     [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
   }
   return result;
+}
+
+function recordPayload(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("ACTION_PAYLOAD_INVALID: Provide an object payload.");
+  }
+  return payload as Record<string, unknown>;
 }

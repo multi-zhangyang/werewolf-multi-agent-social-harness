@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import {
   BrainCircuit,
-  CircleDollarSign,
+  Gavel,
   Handshake,
   MoonStar,
   Scale,
@@ -11,94 +11,49 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { AgentStatus, ScenarioId } from "@/society/contracts";
+import type { AgentStatus, ScenarioId, SocialChannel } from "@/society/contracts";
 
-const avatarStyles = [
-  "bg-zinc-100 text-zinc-950",
-  "bg-blue-400 text-blue-950",
-  "bg-amber-300 text-amber-950",
-  "bg-emerald-400 text-emerald-950",
-  "bg-violet-400 text-violet-950",
-  "bg-rose-400 text-rose-950"
+const avatarPalette = [
+  "from-zinc-200 to-zinc-400 text-zinc-900",
+  "from-blue-300 to-indigo-400 text-blue-950",
+  "from-amber-200 to-orange-300 text-amber-950",
+  "from-emerald-300 to-teal-400 text-emerald-950",
+  "from-violet-300 to-purple-400 text-violet-950",
+  "from-rose-300 to-pink-400 text-rose-950",
+  "from-cyan-300 to-sky-400 text-cyan-950",
+  "from-lime-300 to-green-400 text-lime-950"
 ];
 
-export function AgentAvatar({ name, index = 0, className }: { name: string; index?: number; className?: string }): ReactNode {
+export function AgentAvatar({ name, index = 0, size = "md" }: { name: string; index?: number; size?: "sm" | "md" | "lg" }): ReactNode {
+  const sizes = { sm: "size-6 text-[10px]", md: "size-8 text-xs", lg: "size-10 text-sm" };
   return (
-    <Avatar className={cn("size-8 rounded-lg", className)}>
-      <AvatarFallback className={cn("rounded-lg text-xs font-semibold", avatarStyles[index % avatarStyles.length])}>
+    <Avatar className={cn("rounded-xl", sizes[size])}>
+      <AvatarFallback className={cn("rounded-xl bg-gradient-to-br font-semibold", avatarPalette[index % avatarPalette.length])}>
         {name.trim().slice(0, 2)}
       </AvatarFallback>
     </Avatar>
   );
 }
 
-export function StatusBadge({ status, compact = false }: { status: AgentStatus | "running" | "paused" | "finished" | "error"; compact?: boolean }): ReactNode {
+export function StatusDot({ status, className }: { status: AgentStatus | "running" | "paused" | "finished" | "error"; className?: string }): ReactNode {
   const live = status === "running" || status === "thinking" || status === "acting" || status === "speaking";
+  const tone = status === "error"
+    ? "bg-red-400"
+    : status === "paused" || status === "lobby"
+      ? "bg-amber-400"
+      : status === "finished"
+        ? "bg-zinc-500"
+        : live
+          ? "bg-emerald-400"
+          : "bg-zinc-600";
   return (
-    <Badge
-      variant="outline"
-      className={cn(
-        "gap-1.5 border-white/10 bg-white/[0.03] font-normal text-muted-foreground",
-        compact && "h-5 px-1.5 text-[10px]",
-        status === "error" && "border-red-500/20 text-red-400",
-        status === "finished" && "text-zinc-300"
-      )}
-    >
-      <span className={cn("size-1.5 rounded-full bg-zinc-600", live && "live-pulse bg-emerald-400", status === "paused" && "bg-amber-400", status === "error" && "bg-red-400")} />
-      {statusLabel(status)}
-    </Badge>
+    <span className={cn("relative inline-flex size-1.5 rounded-full", tone, className)}>
+      {live ? <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/60" /> : null}
+    </span>
   );
 }
 
-export function ScenarioIcon({ id, className }: { id: ScenarioId; className?: string }): ReactNode {
-  const Icon = id === "prisoners-dilemma" ? Scale : id === "public-goods" ? Users : id === "trust-game" ? Handshake : MoonStar;
-  return <Icon className={className} />;
-}
-
-export function RoleBadge({ role }: { role?: string }): ReactNode {
-  if (!role) return null;
-  return <Badge variant="secondary" className="h-5 rounded-md bg-white/[0.06] px-1.5 text-[10px] font-medium text-zinc-300">{role}</Badge>;
-}
-
-export function ModelLabel({ model, compact = false }: { model: string; compact?: boolean }): ReactNode {
-  const label = model.includes("yourmodel") ? "Your Model" : model.includes("pro") ? "Your Model" : model.includes("flash") ? "Your Model" : model;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className={cn("truncate font-mono text-[11px] text-muted-foreground", compact && "max-w-28")}>{label}</span>
-      </TooltipTrigger>
-      <TooltipContent>{model}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-export function EmptyPanel({ icon, title, detail }: { icon?: ReactNode; title: string; detail?: string }): ReactNode {
-  return (
-    <div className="flex min-h-48 flex-col items-center justify-center px-6 text-center">
-      <div className="mb-3 flex size-9 items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] text-muted-foreground">
-        {icon ?? <BrainCircuit className="size-4" />}
-      </div>
-      <p className="text-sm font-medium text-zinc-300">{title}</p>
-      {detail ? <p className="mt-1 max-w-72 text-xs leading-5 text-muted-foreground">{detail}</p> : null}
-    </div>
-  );
-}
-
-export function formatClock(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "--:--";
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date);
-}
-
-export function relativeTime(value: string): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1_000));
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m`;
-  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h`;
-  return `${Math.floor(seconds / 86_400)}d`;
-}
-
-export function statusLabel(status: string): string {
+export function StatusLabel({ status }: { status: AgentStatus | "running" | "paused" | "finished" | "error" }): ReactNode {
   const labels: Record<string, string> = {
     lobby: "准备中",
     running: "进行中",
@@ -110,28 +65,79 @@ export function statusLabel(status: string): string {
     finished: "已结束",
     error: "异常"
   };
-  return labels[status] ?? status;
+  return <>{labels[status] ?? status}</>;
+}
+
+export function ScenarioIcon({ id, className }: { id: ScenarioId; className?: string }): ReactNode {
+  const Icon = id === "prisoners-dilemma" ? Scale
+    : id === "ultimatum-game" ? Gavel
+      : id === "public-goods" ? Users
+        : id === "trust-game" ? Handshake
+          : id === "beauty-contest" ? BrainCircuit
+            : MoonStar;
+  return <Icon className={className} />;
+}
+
+export function ChannelBadge({ channel }: { channel: SocialChannel }): ReactNode {
+  const config: Record<SocialChannel, { label: string; className: string }> = {
+    public: { label: "公开", className: "border-white/10 bg-white/[0.04] text-zinc-400" },
+    private: { label: "私聊", className: "border-violet-400/20 bg-violet-400/10 text-violet-300" },
+    team: { label: "阵营", className: "border-rose-400/20 bg-rose-400/10 text-rose-300" }
+  };
+  const entry = config[channel];
+  return (
+    <Badge variant="outline" className={cn("h-4.5 rounded-full border px-1.5 text-[10px] font-medium", entry.className)}>
+      {entry.label}
+    </Badge>
+  );
+}
+
+export function ModelLabel({ model, className }: { model: string; className?: string }): ReactNode {
+  const label = readableModel(model);
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={cn("truncate font-mono text-[10px] text-zinc-500", className)}>{label}</span>
+      </TooltipTrigger>
+      <TooltipContent>{model}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+export function readableModel(model: string): string {
+  if (model.includes("yourmodel")) return "Your Model";
+  if (model.includes("pro")) return "Your Model";
+  if (model.includes("flash")) return "Your Model";
+  if (model.includes("yourmodel")) return "Your Model";
+  if (model.includes("yourmodel")) return "yourmodel K2.7";
+  const name = model.split("/").at(-1) ?? model;
+  return name.replace(/^@/, "").replaceAll("-", " ");
+}
+
+export function formatTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--:--";
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date);
 }
 
 export function eventLabel(name: string): string {
   const labels: Record<string, string> = {
     communicate: "发送消息",
-    remember_experience: "写入记忆",
+    remember_experience: "记录记忆",
     recall_memory: "检索记忆",
-    update_social_model: "更新社会模型",
-    reflect_on_social_situation: "社会反思",
+    update_inner_state: "更新内在状态",
+    reflect_on_social_situation: "策略反思",
+    read_the_room: "洞察他人",
     choose_move: "提交选择",
     contribute_to_pool: "投入公共池",
     make_investment: "提交投资",
     return_from_trust: "返还资源",
+    propose_split: "提出分配",
+    respond_to_offer: "回应分配",
+    choose_number: "提交数字",
     cast_day_vote: "白天投票",
     choose_night_target: "夜间目标",
     investigate_identity: "身份查验"
   };
   return labels[name] ?? name.replaceAll("_", " ");
-}
-
-export function scenarioMetricIcon(id: ScenarioId): ReactNode {
-  if (id === "public-goods") return <CircleDollarSign className="size-4" />;
-  return <ScenarioIcon id={id} className="size-4" />;
 }

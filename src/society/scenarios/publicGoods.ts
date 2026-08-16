@@ -4,8 +4,10 @@ import type {
   ActivationCompletion,
   AgentObservation,
   AgentProfile,
+  PlayerActionSpec,
   ScenarioSummary,
   SocietyAgentContext,
+  WorldActionCommit,
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
@@ -38,7 +40,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
     if (profiles.length !== scenario.players) throw new Error(`PLAYER_COUNT_INVALID: ${scenario.name} requires ${scenario.players} participants.`);
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
     for (const profile of profiles) this.scores.set(profile.id, 0);
-    this.addStory("协商开始", `每人每轮获得 ${this.endowment} 点资源，公共池按 ${this.multiplier} 倍增长后均分。`, "neutral", 1);
+    this.addLog(`每人每轮获得 ${this.endowment} 点资源，公共池按 ${this.multiplier} 倍增长后均分。`, 1);
   }
 
   snapshot(): WorldSnapshot {
@@ -82,7 +84,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
         status: this.statuses.get(profile.id) ?? "idle"
       })),
       recentMessages: this.visibleMessages(actorId).slice(-30),
-      availableActions: this.phase === "discussion" ? ["communicate", "reflect_on_social_situation", "update_social_model"] : ["contribute_to_pool", "remember_experience"]
+      availableActions: this.phase === "discussion" ? ["communicate", "reflect_on_social_situation", "update_inner_state"] : ["contribute_to_pool", "remember_experience"]
     };
   }
 
@@ -97,15 +99,47 @@ export class PublicGoodsWorld extends SocialWorldBase {
       }).strict(),
       execute: async ({ amount, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
-        if (this.phase !== "contribution") throw new Error("CONTRIBUTION_NOT_OPEN: Wait until the contribution phase.");
-        if (this.contributions.has(actorId)) throw new Error("CONTRIBUTION_ALREADY_COMMITTED: Your amount for this round is fixed.");
-        this.contributions.set(actorId, amount);
-        emitAction(context, "contribute_to_pool", `${amount}; ${reason}`);
-        this.emitUpdate();
-        return { accepted: true, amount, waitingFor: [...this.profiles.keys()].filter((id) => !this.contributions.has(id)) };
+        const commit = await this.performAction(actorId, "contribute_to_pool", { amount, reason });
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
       }
     });
     return [contribute] as Tool<SocietyAgentContext>[];
+  }
+
+  domainActionsFor(actorId: string): PlayerActionSpec[] {
+    this.requireProfile(actorId);
+    if (this.phase !== "contribution" || this.contributions.has(actorId)) return [];
+    return [{
+      name: "contribute_to_pool",
+      label: "投入公共池",
+      description: `提交 0 到 ${this.endowment} 点；所有人提交后才公开。`,
+      kind: "number",
+      field: "amount",
+      min: 0,
+      max: this.endowment,
+      step: 1
+    }];
+  }
+
+  async performDomainAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
+    this.requireProfile(actorId);
+    if (action !== "contribute_to_pool") throw new Error(`ACTION_NOT_AVAILABLE: '${action}' is not valid in this world.`);
+    if (this.phase !== "contribution") throw new Error("CONTRIBUTION_NOT_OPEN: Wait until the contribution phase.");
+    if (this.contributions.has(actorId)) throw new Error("CONTRIBUTION_ALREADY_COMMITTED: Your amount for this round is fixed.");
+    const value = recordPayload(payload);
+    const amount = value.amount;
+    if (!Number.isInteger(amount) || typeof amount !== "number" || amount < 0 || amount > this.endowment) {
+      throw new Error(`CONTRIBUTION_INVALID: Choose an integer from 0 to ${this.endowment}.`);
+    }
+    const reason = typeof value.reason === "string" ? value.reason.trim().slice(0, 500) : "";
+    this.contributions.set(actorId, amount);
+    this.emitUpdate();
+    return {
+      action,
+      detail: reason ? `${amount}; ${reason}` : String(amount),
+      result: { accepted: true, amount, waitingFor: [...this.profiles.keys()].filter((id) => !this.contributions.has(id)) }
+    };
   }
 
   activation(): WorldActivation | null {
@@ -183,12 +217,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
     this.history.push({ round: this.round, contributions, returns, pool, share: roundNumber(share) });
     const highest = Math.max(...this.contributions.values());
     const lowest = Math.min(...this.contributions.values());
-    this.addStory(
-      `第 ${this.round} 轮结算`,
-      `公共池 ${pool}，每人分得 ${formatNumber(share)}。最高投入 ${highest}，最低投入 ${lowest}。`,
-      lowest === 0 ? "warning" : "positive",
-      this.round
-    );
+    this.addLog(`第 ${this.round} 轮结算：公共池 ${pool}，每人分得 ${formatNumber(share)}。最高投入 ${highest}，最低投入 ${lowest}。`, this.round);
     this.contributions.clear();
     if (this.round >= this.totalRounds) {
       this.round = this.totalRounds + 1;
@@ -207,6 +236,13 @@ export class PublicGoodsWorld extends SocialWorldBase {
       .join(" · ");
     return `${this.round > this.totalRounds ? "已结束" : `第 ${this.round} / ${this.totalRounds} 轮`} · ${ranking}`;
   }
+}
+
+function recordPayload(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("ACTION_PAYLOAD_INVALID: Provide an object payload.");
+  }
+  return payload as Record<string, unknown>;
 }
 
 function roundedRecord(values: Map<string, number>): Record<string, number> {

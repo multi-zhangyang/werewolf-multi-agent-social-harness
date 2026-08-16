@@ -1,3 +1,6 @@
+import type { PadState } from "./contracts";
+import { padDistance } from "./affect";
+
 import { randomUUID } from "node:crypto";
 import type { AgentMemoryItem, AgentMemoryStore } from "./contracts";
 
@@ -24,10 +27,10 @@ export class AssociativeMemory implements AgentMemoryStore {
     return structuredClone(entry);
   }
 
-  async recall(query: string, limit = 8): Promise<AgentMemoryItem[]> {
+  async recall(query: string, limit = 8, moodPad?: PadState): Promise<AgentMemoryItem[]> {
     const terms = tokens(query);
     return this.entries
-      .map((entry) => ({ entry, score: recallScore(entry, terms) }))
+      .map((entry) => ({ entry, score: recallScore(entry, terms, moodPad) }))
       .sort((left, right) => right.score - left.score || right.entry.turn - left.entry.turn)
       .slice(0, Math.max(1, Math.min(limit, 16)))
       .map(({ entry }) => structuredClone(entry));
@@ -42,11 +45,14 @@ export class AssociativeMemory implements AgentMemoryStore {
   }
 }
 
-function recallScore(entry: AgentMemoryItem, terms: string[]): number {
+function recallScore(entry: AgentMemoryItem, terms: string[], moodPad?: PadState): number {
   const text = `${entry.text} ${entry.tags.join(" ")}`.toLocaleLowerCase();
   const relevance = terms.reduce((score, term) => score + (text.includes(term) ? 1 : 0), 0);
   const recency = 1 / (1 + Math.max(0, Date.now() - Date.parse(entry.createdAt)) / 3_600_000);
-  return relevance * 2.2 + entry.salience * 1.4 + Math.abs(entry.valence) * 0.35 + recency * 0.45;
+  // Mood-congruent recall: memories stored in an emotional state similar to the
+  // current one resurface more easily (Sentipolis emotion-memory coupling).
+  const congruence = moodPad && entry.pad ? Math.max(0, 1 - padDistance(moodPad, entry.pad) / 3) : 0;
+  return relevance * 2.2 + entry.salience * 1.4 + Math.abs(entry.valence) * 0.35 + recency * 0.45 + congruence * 0.5;
 }
 
 function memoryValue(entry: AgentMemoryItem): number {

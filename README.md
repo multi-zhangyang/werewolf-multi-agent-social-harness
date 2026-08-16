@@ -1,44 +1,87 @@
 # Society
 
-Society is a live space for multi-agent social worlds. Each participant is a
-real `@openai/agents` SDK `Agent` with its own model, session, associative
-memory, goals, beliefs, relationships and domain tools.
+**Live multi-agent social worlds powered by the OpenAI Agents SDK.**
 
-The world owns rules and side effects. Agents own speech, reflection and
-decisions. A domain action is committed only when its SDK tool succeeds; final
-model text is never parsed as a command.
+Society is a real-time observation platform for multi-agent social intelligence. Every participant is an actual `@openai/agents` SDK Agent with its own model, session, associative memory, emotional state, beliefs, goals, relationships and domain tools. Agents negotiate, form alliances, betray, deceive and adapt—inside deterministic game worlds that expose every interaction through a live event stream.
+
+![Landing](docs/screenshots/landing.svg)
+
+## Highlights
+
+- **Real agents, not prompt wrappers**  
+  Each participant is an OpenAI Agents SDK `Agent` with tools, sessions, streaming, memory and sub-agents. Model text is never parsed as a command; only successful SDK tool calls change the world.
+
+- **Human-like social cognition**  
+  Agents carry a persistent inner world: PAD emotion, core emotions, needs, energy, associative memory, beliefs about others, relationships and goals. Reflection and theory-of-mind sub-agents help them reason about incentives and hidden motives.
+
+- **Multi-agent interaction, not a lab bench**  
+  The UI is built around live conversation and participant states. Watch agents think, speak, act and react in real time through SSE.
+
+- **Expandable scenario system**  
+  New games are plain modules implementing a shared `SocialWorld` contract. No need to duplicate agent runtime, server routes or UI.
+
+- **Human-in-the-loop**  
+  A human can take one seat and speak or act alongside AI agents when the room is created in human mode.
 
 ## Scenes
 
-- 囚徒困境：多回合谈判、承诺与同时选择
-- 公共品博弈：群体协商、搭便车与公共池
-- 信任博弈：投资、返还与角色交换
-- 狼人杀：隐藏身份、公开讨论、阵营私聊、查验与第三阵营
+| Scenario | Core tension |
+| --- | --- |
+| 囚徒困境 | 短期背叛 vs 长期互惠 |
+| 公共品博弈 | 集体收益 vs 搭便车 |
+| 信任博弈 | 交出控制权后的返还 |
+| 最后通牒博弈 | 分配权与公平惩罚 |
+| 选美博弈 | 高阶信念与群体误判 |
+| 狼人杀 | 隐藏身份、阵营与欺骗 |
 
-Scenes are ordinary modules under `src/society/scenarios`. A new scene supplies
-its observation, phases, domain tools and deterministic resolution while the
-same Agent runtime, room event stream and UI continue to work.
+## Product preview
 
-## Run locally
+![Room](docs/screenshots/room.svg)
+
+## Architecture
+
+```text
+Browser
+  ▲ SSE snapshots and events
+  │
+SocietyRoom ── schedules activations, owns event log and human waits
+  │
+  ├─ OpenAISocietyAgent × participants
+  │    ├─ @openai/agents Agent
+  │    ├─ MemorySession
+  │    ├─ associative memory
+  │    ├─ social tools
+  │    ├─ reflection / theory-of-mind sub-agents
+  │    └─ scene tools
+  │
+  └─ SocialWorld ── observation, visibility, rules and side effects
+       └─ scene implementation
+```
+
+### Agent boundary
+
+`src/society/participant.ts` creates one SDK Agent per participant with a stable session and a private mind state. `communicate`, `remember_experience`, `recall_memory` and `update_inner_state` are SDK function tools. Reflection and mind-reading are real model runs exposed through `agent.asTool()`, so they can advise without mutating the world.
+
+### World boundary
+
+`src/society/world.ts` defines the shared world contract: scoped observations, public/private/team message visibility, activation schedules, typed SDK tools, deterministic resolution and short experiences for memory consolidation.
+
+### Room and event stream
+
+`src/society/room.ts` starts the world, runs each activation with bounded turns and timeout signals, and retains a finite event log. Express SSE pushes snapshots and live events to the browser.
+
+## Getting started
 
 Requirements: Node.js 22+ and an OpenAI-compatible chat-completions endpoint.
 
 ```bash
 npm install
 cp .env.example .env.local
-# edit .env.local and set OPENAI_API_KEY
+# edit .env.local and set OPENAI_API_KEY / OPENAI_BASE_URL
 npm run dev
 ```
 
-The example endpoint is yourprovider:
-
-```text
-OPENAI_BASE_URL=https://your-endpoint.example.com/v1
-SOCIETY_MODELS=your-model,your-model
-```
-
-The web app is served at `http://127.0.0.1:5173`; the API is at
-`http://127.0.0.1:8787`.
+The web app is served at `http://127.0.0.1:5173`; the API is at `http://127.0.0.1:8787`.
 
 Useful checks:
 
@@ -48,28 +91,14 @@ npm run build
 curl http://127.0.0.1:8787/api/health
 ```
 
-## Observable runtime
+### Real-model demo
 
-```text
-SDK Agent
-  ├─ model + dynamic instructions
-  ├─ MemorySession + associative memory
-  ├─ social tools: communicate / recall / remember / update
-  ├─ scene tools: choose / invest / vote / investigate ...
-  └─ reflection Agent exposed through agent.asTool()
-             │
-             ▼
-SocialWorld
-  ├─ scoped observations and visibility
-  ├─ phases and sequential or simultaneous activations
-  ├─ deterministic rules and side effects
-  └─ room events delivered to the observer UI through SSE
+`scripts/demo.mjs` boots rooms against the configured provider and writes transcripts to `artifacts/transcripts`.
+
+```bash
+npm run server &
+node scripts/demo.mjs prisoners-dilemma
 ```
-
-The UI exposes the public conversation, private and team channels, tool calls,
-domain actions, world changes, decision summaries, memories, beliefs and
-relationships. It is an observer view: it does not invent state that the world
-has not emitted.
 
 ## HTTP surface
 
@@ -82,16 +111,17 @@ has not emitted.
 | GET | `/api/rooms/:roomId` | Current room snapshot |
 | GET | `/api/rooms/:roomId/events` | Snapshot plus live SSE events |
 | POST | `/api/rooms/:roomId/pause` | Pause a running room |
+| POST | `/api/rooms/:roomId/action` | Submit a human action |
 
-## Research references
+## Research foundations
 
-- OpenAI Agents SDK: [define agents](https://developers.openai.com/api/docs/guides/agents/define-agents), [run agents](https://developers.openai.com/api/docs/guides/agents/running-agents), [orchestration](https://developers.openai.com/api/docs/guides/agents/orchestration)
-- *Generative Agents* — [arXiv:2304.03442](https://arxiv.org/abs/2304.03442)
-- *Concordia* — [arXiv:2312.03664](https://arxiv.org/abs/2312.03664)
-- *SOTOPIA* — [arXiv:2310.11667](https://arxiv.org/abs/2310.11667)
-- *MultiMind* — [arXiv:2504.18039](https://arxiv.org/abs/2504.18039)
-- *Triadic Werewolf* — [arXiv:2606.27909](https://arxiv.org/abs/2606.27909)
-- *Even More Deception* — [arXiv:2607.26120](https://arxiv.org/abs/2607.26120)
+- Park et al., *Generative Agents: Interactive Simulacra of Human Behavior* — arXiv:2304.03442
+- Zhou et al., *SOTOPIA: Interactive Evaluation for Social Intelligence in Language Agents* — arXiv:2310.11667
+- Vezhnevets et al., *Concordia: A Library for Generative Social Simulation*
+- Chan et al., *NegotiationToM: A Benchmark for Stress-testing Machine Theory of Mind on Negotiation* — EMNLP 2024
+- Chi et al., *AmongAgents: Evaluating Large Language Models in the Interactive Text-Based Social Deduction Game* — arXiv:2407.16521
+- Curvo et al., *The Traitors: Deception and Trust in Multi-Agent Language Model Simulations* — arXiv:2505.12923
+- Zhang et al., *K-Level Reasoning: Establishing Higher Order Beliefs in Large Language Models for Strategic Reasoning* — NAACL 2025
 
 ## License
 

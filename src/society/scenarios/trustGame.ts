@@ -4,8 +4,10 @@ import type {
   ActivationCompletion,
   AgentObservation,
   AgentProfile,
+  PlayerActionSpec,
   ScenarioSummary,
   SocietyAgentContext,
+  WorldActionCommit,
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
@@ -41,7 +43,7 @@ export class TrustGameWorld extends SocialWorldBase {
     if (profiles.length !== 2) throw new Error("PLAYER_COUNT_INVALID: Trust Game requires two participants.");
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
     for (const profile of profiles) this.scores.set(profile.id, 0);
-    this.addStory("第一轮开始", "投资者先决定交出多少资源，受托者随后决定返还多少。", "neutral", 1);
+    this.addLog("第一轮开始：投资者先决定交出多少资源，受托者随后决定返还多少。", 1);
   }
 
   snapshot(): WorldSnapshot {
@@ -103,14 +105,9 @@ export class TrustGameWorld extends SocialWorldBase {
       parameters: z.object({ amount: z.number().int().min(0).max(this.endowment), reason: z.string().min(1).max(500) }).strict(),
       execute: async ({ amount, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
-        const [investorId] = this.rolesForRound();
-        if (this.phase !== "investment") throw new Error("INVESTMENT_NOT_OPEN: make_investment is only valid during the investment phase.");
-        if (actorId !== investorId) throw new Error(`ROLE_MISMATCH: The current investor is '${investorId}'.`);
-        if (this.investment !== undefined) throw new Error("INVESTMENT_ALREADY_COMMITTED: The investment cannot be changed.");
-        this.investment = amount;
-        emitAction(context, "make_investment", `${amount}; ${reason}`);
-        this.emitUpdate();
-        return { accepted: true, investment: amount, trusteeReceives: amount * this.multiplier };
+        const commit = await this.performAction(actorId, "make_investment", { amount, reason });
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
       }
     });
     const returnFromTrust = tool({
@@ -119,19 +116,82 @@ export class TrustGameWorld extends SocialWorldBase {
       parameters: z.object({ amount: z.number().int().min(0), reason: z.string().min(1).max(500) }).strict(),
       execute: async ({ amount, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
-        const [, trusteeId] = this.rolesForRound();
-        if (this.phase !== "return") throw new Error("RETURN_NOT_OPEN: return_from_trust is only valid after an investment.");
-        if (actorId !== trusteeId) throw new Error(`ROLE_MISMATCH: The current trustee is '${trusteeId}'.`);
-        const available = (this.investment ?? 0) * this.multiplier;
-        if (amount > available) throw new Error(`RETURN_EXCEEDS_AVAILABLE: Return at most ${available}.`);
-        if (this.returnedAmount !== undefined) throw new Error("RETURN_ALREADY_COMMITTED: The return cannot be changed.");
-        this.returnedAmount = amount;
-        emitAction(context, "return_from_trust", `${amount}; ${reason}`);
-        this.emitUpdate();
-        return { accepted: true, returnedAmount: amount, retainedAmount: available - amount };
+        const commit = await this.performAction(actorId, "return_from_trust", { amount, reason });
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
       }
     });
     return [invest, returnFromTrust] as Tool<SocietyAgentContext>[];
+  }
+
+  domainActionsFor(actorId: string): PlayerActionSpec[] {
+    this.requireProfile(actorId);
+    const [investorId, trusteeId] = this.rolesForRound();
+    if (this.phase === "investment" && actorId === investorId && this.investment === undefined) {
+      return [{
+        name: "make_investment",
+        label: "确定投资",
+        description: `投入 0 到 ${this.endowment} 点，随后放大 ${this.multiplier} 倍交给受托者。`,
+        kind: "number",
+        field: "amount",
+        min: 0,
+        max: this.endowment,
+        step: 1
+      }];
+    }
+    if (this.phase === "return" && actorId === trusteeId && this.returnedAmount === undefined) {
+      const available = (this.investment ?? 0) * this.multiplier;
+      return [{
+        name: "return_from_trust",
+        label: "确定返还",
+        description: `从可支配的 ${available} 点中决定返还多少。`,
+        kind: "number",
+        field: "amount",
+        min: 0,
+        max: available,
+        step: 1
+      }];
+    }
+    return [];
+  }
+
+  async performDomainAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
+    this.requireProfile(actorId);
+    const value = recordPayload(payload);
+    const amount = value.amount;
+    if (typeof amount !== "number" || !Number.isInteger(amount)) {
+      throw new Error("AMOUNT_INVALID: Choose a whole-number amount.");
+    }
+    const reason = typeof value.reason === "string" ? value.reason.trim().slice(0, 500) : "";
+    const [investorId, trusteeId] = this.rolesForRound();
+    if (action === "make_investment") {
+      if (this.phase !== "investment") throw new Error("INVESTMENT_NOT_OPEN: Investment is not open now.");
+      if (actorId !== investorId) throw new Error(`ROLE_MISMATCH: The current investor is '${investorId}'.`);
+      if (this.investment !== undefined) throw new Error("INVESTMENT_ALREADY_COMMITTED: The investment cannot be changed.");
+      if (amount < 0 || amount > this.endowment) throw new Error(`INVESTMENT_INVALID: Choose 0 to ${this.endowment}.`);
+      this.investment = amount;
+      this.emitUpdate();
+      return {
+        action,
+        detail: reason ? `${amount}; ${reason}` : String(amount),
+        result: { accepted: true, investment: amount, trusteeReceives: amount * this.multiplier }
+      };
+    }
+    if (action === "return_from_trust") {
+      if (this.phase !== "return") throw new Error("RETURN_NOT_OPEN: Return is only available after an investment.");
+      if (actorId !== trusteeId) throw new Error(`ROLE_MISMATCH: The current trustee is '${trusteeId}'.`);
+      if (this.returnedAmount !== undefined) throw new Error("RETURN_ALREADY_COMMITTED: The return cannot be changed.");
+      const available = (this.investment ?? 0) * this.multiplier;
+      if (amount < 0 || amount > available) throw new Error(`RETURN_EXCEEDS_AVAILABLE: Return 0 to ${available}.`);
+      this.returnedAmount = amount;
+      this.emitUpdate();
+      return {
+        action,
+        detail: reason ? `${amount}; ${reason}` : String(amount),
+        result: { accepted: true, returnedAmount: amount, retainedAmount: available - amount }
+      };
+    }
+    throw new Error(`ACTION_NOT_AVAILABLE: '${action}' is not valid in this world.`);
   }
 
   activation(): WorldActivation | null {
@@ -212,10 +272,34 @@ export class TrustGameWorld extends SocialWorldBase {
     return actorId === investorId ? "投资者" : "受托者";
   }
 
+  protected roleVisibleTo(_viewerId: string | undefined, _subjectId: string, _alive: boolean): boolean {
+    return true;
+  }
+
+  protected redactDetails(details: Record<string, unknown>, actorId?: string): Record<string, unknown> {
+    const next = super.redactDetails(details, actorId);
+    const [investorId, trusteeId] = this.rolesForRound();
+    // The investor knows their own commitment. The trustee only sees it once
+    // the investment phase has closed; spectators never see a pending amount.
+    if (this.phase === "investment") {
+      if (actorId !== investorId) delete next.investment;
+      delete next.multipliedAmount;
+      delete next.returnedAmount;
+    }
+    if (this.phase === "return") {
+      if (actorId !== investorId && actorId !== trusteeId) delete next.investment;
+      delete next.returnedAmount;
+    }
+    if (this.status !== "finished" && this.phase !== "discussion") {
+      delete next.returnedAmount;
+    }
+    return next;
+  }
+
   private availableActions(actorId: string, investorId: string, trusteeId: string): string[] {
     if (this.phase === "investment" && actorId === investorId) return ["make_investment", "remember_experience"];
     if (this.phase === "return" && actorId === trusteeId) return ["return_from_trust", "remember_experience"];
-    return ["communicate", "reflect_on_social_situation", "update_social_model"];
+    return ["communicate", "reflect_on_social_situation", "update_inner_state"];
   }
 
   private rolesForRound(): [string, string] {
@@ -241,12 +325,7 @@ export class TrustGameWorld extends SocialWorldBase {
       );
     }
     const reciprocal = investment > 0 && returnedAmount >= investment;
-    this.addStory(
-      `第 ${this.round} 轮结算`,
-      `投入 ${investment}，增长为 ${multipliedAmount}，返还 ${returnedAmount}。`,
-      reciprocal ? "positive" : investment > 0 && returnedAmount === 0 ? "danger" : "warning",
-      this.round
-    );
+    this.addLog(`第 ${this.round} 轮结算：投入 ${investment}，增长为 ${multipliedAmount}，返还 ${returnedAmount}。`, this.round);
     this.investment = undefined;
     this.returnedAmount = undefined;
     if (this.round >= this.totalRounds) {
@@ -263,6 +342,13 @@ export class TrustGameWorld extends SocialWorldBase {
     const scores = [...this.scores].map(([id, value]) => `${this.profiles.get(id)?.displayName} ${value}`).join(" · ");
     return `${this.round > this.totalRounds ? "已结束" : `第 ${this.round} / ${this.totalRounds} 轮`} · ${scores}`;
   }
+}
+
+function recordPayload(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("ACTION_PAYLOAD_INVALID: Provide an object payload.");
+  }
+  return payload as Record<string, unknown>;
 }
 
 function phaseLabel(phase: Phase): string {

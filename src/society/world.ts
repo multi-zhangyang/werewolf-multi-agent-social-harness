@@ -4,14 +4,16 @@ import type {
   AgentObservation,
   AgentProfile,
   AgentStatus,
+  PlayerActionSpec,
   ScenarioSummary,
   SocialChannel,
   SocialMessage,
   SocialWorld,
   SocietyAgentContext,
-  StoryBeat,
+  WorldActionCommit,
   WorldActivation,
   WorldAgentSnapshot,
+  WorldLogEntry,
   WorldSnapshot
 } from "./contracts";
 import type { Tool } from "@openai/agents";
@@ -23,7 +25,7 @@ export abstract class SocialWorldBase implements SocialWorld {
   protected readonly profiles: Map<string, AgentProfile>;
   protected readonly statuses = new Map<string, AgentStatus>();
   protected readonly messages: SocialMessage[] = [];
-  protected readonly story: StoryBeat[] = [];
+  protected readonly log: WorldLogEntry[] = [];
   protected status: WorldSnapshot["status"] = "lobby";
   protected listeners = new Set<(snapshot: WorldSnapshot) => void>();
 
@@ -47,8 +49,64 @@ export abstract class SocialWorldBase implements SocialWorld {
   }
 
   abstract snapshot(): WorldSnapshot;
+  /**
+   * Return the view that may be sent to a browser. `snapshot()` is retained as
+   * an internal state view for the rules engine; callers at the HTTP boundary
+   * must always use this scoped method.
+   */
+  snapshotFor(actorId?: string): WorldSnapshot {
+    const raw = this.snapshot();
+    const visibleAgents = raw.agents.map((agent) => {
+      const { observerRole, ...publicAgent } = agent;
+      const roleVisible = this.roleVisibleTo(actorId, agent.id, agent.alive);
+      return {
+        ...publicAgent,
+        ...(roleVisible && observerRole ? { observerRole } : {})
+      };
+    });
+    const details = this.redactDetails(raw.details, actorId);
+    const messages = actorId
+      ? this.visibleMessages(actorId).slice(-120)
+      : this.messages.slice(-120);
+    return {
+      ...raw,
+      agents: visibleAgents,
+      messages: structuredClone(messages),
+      details
+    };
+  }
+
   abstract observe(actorId: string): AgentObservation;
   abstract toolsFor(actorId: string): Tool<SocietyAgentContext>[];
+  abstract domainActionsFor(actorId: string): PlayerActionSpec[];
+  abstract performDomainAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit>;
+  playerActions(actorId: string): PlayerActionSpec[] {
+    this.requireProfile(actorId);
+    const actions: PlayerActionSpec[] = [];
+    if (this.isAlive(actorId)) {
+      actions.push({
+        name: "message",
+        label: "发言",
+        description: "发送一条真实消息；消息会进入当前可见频道。",
+        kind: "message",
+        field: "text",
+        channels: this.messageChannelsFor(actorId)
+      });
+    }
+    actions.push(...this.domainActionsFor(actorId));
+    return actions;
+  }
+
+  async performAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
+    this.requireProfile(actorId);
+    if (action === "message" || action === "communicate") {
+      const input = parseMessagePayload(payload);
+      const message = await this.sendMessage({ senderId: actorId, ...input });
+      return { action, detail: input.text.slice(0, 260), result: { messageId: message.id } };
+    }
+    return this.performDomainAction(actorId, action, payload);
+  }
+
   abstract activation(): WorldActivation | null;
   abstract completeActivation(activation: WorldActivation): ActivationCompletion;
   abstract experienceFor(actorId: string): string | undefined;
@@ -98,6 +156,33 @@ export abstract class SocialWorldBase implements SocialWorld {
   protected abstract currentTurn(): number;
   protected abstract currentPhase(): string;
   protected abstract isAlive(actorId: string): boolean;
+
+  /** Roles are private by default; dead roles are public after a reveal. */
+  protected roleVisibleTo(viewerId: string | undefined, subjectId: string, alive: boolean): boolean {
+    return !alive || viewerId === subjectId;
+  }
+
+  protected messageChannelsFor(_actorId: string): SocialChannel[] {
+    return ["public", "private"];
+  }
+
+  /** Remove pending/private domain state before a snapshot crosses a boundary. */
+  protected redactDetails(details: Record<string, unknown>, actorId?: string): Record<string, unknown> {
+    const next = structuredClone(details);
+    for (const key of ["pendingChoices", "pendingContributions", "pendingVotes", "pendingNightTargets", "roles"]) {
+      if (!(key in next)) continue;
+      if (key === "roles" && actorId) {
+        const roles = next[key];
+        if (roles && typeof roles === "object" && !Array.isArray(roles)) {
+          const own = (roles as Record<string, unknown>)[actorId];
+          next[key] = own === undefined ? undefined : { [actorId]: own };
+          continue;
+        }
+      }
+      delete next[key];
+    }
+    return Object.fromEntries(Object.entries(next).filter(([, value]) => value !== undefined));
+  }
 
   protected observerRole(_actorId: string): string | undefined {
     return undefined;
@@ -155,13 +240,13 @@ export abstract class SocialWorldBase implements SocialWorld {
       summary: input.summary,
       agents: this.agentSnapshots(),
       messages: structuredClone(this.messages.slice(-120)),
-      story: structuredClone(this.story.slice(-80)),
+      log: structuredClone(this.log.slice(-80)),
       details: structuredClone(input.details)
     };
   }
 
-  protected addStory(title: string, text: string, tone: StoryBeat["tone"] = "neutral", turn = this.currentTurn()): void {
-    this.story.push({ id: randomUUID(), title, text, tone, turn, at: new Date().toISOString() });
+  protected addLog(text: string, turn = this.currentTurn()): void {
+    this.log.push({ id: randomUUID(), text, turn, phase: this.currentPhase(), at: new Date().toISOString() });
     this.emitUpdate();
   }
 
@@ -172,7 +257,7 @@ export abstract class SocialWorldBase implements SocialWorld {
   }
 
   protected emitUpdate(): void {
-    const snapshot = this.snapshot();
+    const snapshot = this.snapshotFor();
     for (const listener of this.listeners) listener(structuredClone(snapshot));
   }
 
@@ -185,6 +270,39 @@ export abstract class SocialWorldBase implements SocialWorld {
   protected otherProfiles(actorId: string): AgentProfile[] {
     return [...this.profiles.values()].filter((profile) => profile.id !== actorId);
   }
+}
+
+function parseMessagePayload(payload: unknown): {
+  text: string;
+  channel: SocialChannel;
+  recipientIds?: string[];
+  replyTo?: string;
+} {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("MESSAGE_PAYLOAD_INVALID: Provide text, channel and optional recipientIds.");
+  }
+  const value = payload as Record<string, unknown>;
+  if (typeof value.text !== "string" || !value.text.trim()) {
+    throw new Error("MESSAGE_EMPTY: Provide a non-empty message before retrying.");
+  }
+  if (value.text.length > 800) throw new Error("MESSAGE_TOO_LONG: Messages are limited to 800 characters.");
+  const channel = value.channel ?? "public";
+  if (channel !== "public" && channel !== "private" && channel !== "team") {
+    throw new Error("MESSAGE_CHANNEL_INVALID: Choose public, private or team.");
+  }
+  const recipients = value.recipientIds ?? [];
+  if (!Array.isArray(recipients) || recipients.some((entry) => typeof entry !== "string")) {
+    throw new Error("MESSAGE_RECIPIENTS_INVALID: recipientIds must be an array of participant ids.");
+  }
+  if (value.replyTo !== undefined && typeof value.replyTo !== "string") {
+    throw new Error("MESSAGE_REPLY_INVALID: replyTo must be a message id.");
+  }
+  return {
+    text: value.text,
+    channel,
+    ...(recipients.length ? { recipientIds: recipients } : {}),
+    ...(typeof value.replyTo === "string" ? { replyTo: value.replyTo } : {})
+  };
 }
 
 export function contextFromRunContext(

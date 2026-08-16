@@ -5,8 +5,10 @@ import type {
   ActivationCompletion,
   AgentObservation,
   AgentProfile,
+  PlayerActionSpec,
   ScenarioSummary,
   SocietyAgentContext,
+  WorldActionCommit,
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
@@ -37,7 +39,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     super(roomId, scenario, profiles);
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
     for (const profile of profiles) this.scores.set(profile.id, 0);
-    this.addStory("第一轮谈判开始", "双方可以先说服对方，也可以保留真实意图。", "neutral", 1);
+    this.addLog("谈判开始：承诺没有约束力，行动会留下记忆。", 1);
   }
 
   snapshot(): WorldSnapshot {
@@ -94,15 +96,47 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
       }).strict(),
       execute: async ({ move, reason }, runContext) => {
         const context = contextFromRunContext(runContext);
-        if (this.phase !== "choice") throw new Error("CHOICE_NOT_OPEN: Finish the negotiation phase before calling choose_move.");
-        if (this.choices.has(actorId)) throw new Error("CHOICE_ALREADY_COMMITTED: Your move for this round is fixed.");
-        this.choices.set(actorId, move);
-        emitAction(context, "choose_move", `${move}; ${reason}`);
-        this.emitUpdate();
-        return { accepted: true, move, waitingFor: [...this.profiles.keys()].filter((id) => !this.choices.has(id)) };
+        const commit = await this.performAction(actorId, "choose_move", { move, reason });
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
       }
     });
     return [choose] as Tool<SocietyAgentContext>[];
+  }
+
+  domainActionsFor(actorId: string): PlayerActionSpec[] {
+    this.requireProfile(actorId);
+    if (this.phase !== "choice" || this.choices.has(actorId)) return [];
+    return [{
+      name: "choose_move",
+      label: "提交选择",
+      description: "选择会保持隐藏，直到双方都提交。",
+      kind: "choice",
+      field: "move",
+      options: [
+        { value: "cooperate", label: "合作" },
+        { value: "defect", label: "背叛" }
+      ]
+    }];
+  }
+
+  async performDomainAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
+    this.requireProfile(actorId);
+    if (action !== "choose_move") throw new Error(`ACTION_NOT_AVAILABLE: '${action}' is not valid in this world.`);
+    if (this.phase !== "choice") throw new Error("CHOICE_NOT_OPEN: Finish the negotiation phase before choosing.");
+    if (this.choices.has(actorId)) throw new Error("CHOICE_ALREADY_COMMITTED: Your move for this round is fixed.");
+    const value = recordPayload(payload);
+    const move = value.move;
+    if (move !== "cooperate" && move !== "defect") throw new Error("MOVE_INVALID: Choose cooperate or defect.");
+    const reason = typeof value.reason === "string" ? value.reason.trim().slice(0, 500) : "";
+    this.choices.set(actorId, move);
+    this.emitUpdate();
+    const detail = reason ? `${move}; ${reason}` : move;
+    return {
+      action,
+      detail,
+      result: { accepted: true, move, waitingFor: [...this.profiles.keys()].filter((id) => !this.choices.has(id)) }
+    };
   }
 
   activation(): WorldActivation | null {
@@ -171,7 +205,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     const result: RoundResult = { round: this.round, moves: { [ids[0]]: left, [ids[1]]: right }, payoffs: { [ids[0]]: payoffs[0], [ids[1]]: payoffs[1] }, text };
     this.history.push(result);
     for (const id of ids) this.lastExperiences.set(id, `${text} Your move was ${result.moves[id]}. Your score is now ${this.scores.get(id)}.`);
-    this.addStory(`第 ${this.round} 轮结算`, text, left === "defect" || right === "defect" ? "warning" : "positive", this.round);
+    this.addLog(text, this.round);
     this.choices.clear();
     if (this.round >= this.totalRounds) {
       this.round = this.totalRounds + 1;
@@ -187,6 +221,13 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     const scores = [...this.scores].map(([id, score]) => `${this.profiles.get(id)?.displayName}: ${score}`).join(" · ");
     return `${this.round > this.totalRounds ? "已结束" : `第 ${this.round} / ${this.totalRounds} 轮`} · ${scores}`;
   }
+}
+
+function recordPayload(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("ACTION_PAYLOAD_INVALID: Provide an object payload.");
+  }
+  return payload as Record<string, unknown>;
 }
 
 function payoff(left: Move, right: Move): [number, number] {

@@ -1,8 +1,19 @@
+/**
+ * Society participant runtime.
+ *
+ * This is built directly on the OpenAI Agents SDK:
+ * - Agent is the real model + harness boundary
+ * - Runner executes each agent turn with sessions, streaming and tool calls
+ * - MemorySession persists per-participant conversation history
+ * - function tools are the only way to change the world
+ * - reflection and theory-of-mind are real sub-agents exposed via agent.asTool()
+ */
 import {
   Agent,
   MemorySession,
   OpenAIProvider,
   Runner,
+  retryPolicies,
   tool,
   type Agent as SdkAgent,
   type RunStreamEvent,
@@ -13,6 +24,7 @@ import { z } from "zod";
 import type {
   AgentBelief,
   AgentMindState,
+  AgentMoodState,
   AgentProfile,
   AgentRelationship,
   AgentRuntimeEvent,
@@ -20,8 +32,17 @@ import type {
   SocietyAgentContext,
   SocietyAgentRuntime
 } from "./contracts";
+import { applyEmotionDeltas, applyNeedsDeltas, applyPadDeltas, clampUnit, decayMood, describeEmotions, describeNeeds, initialMood, refreshMood } from "./affect";
 import { AssociativeMemory } from "./memory";
 import { contextFromRunContext } from "./world";
+
+const providerRetrySettings = {
+  retry: {
+    maxRetries: 4,
+    backoff: { initialMs: 700, multiplier: 2, jitter: true },
+    policy: retryPolicies.httpStatus([404, 408, 409, 429, 500, 502, 503, 504])
+  }
+};
 
 export interface SocietyAgentOptions {
   profile: AgentProfile;
@@ -72,35 +93,59 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       name: `${this.profile.displayName} reflection`,
       model: this.profile.model,
       instructions: ({ context }) => reflectionInstructions(context),
-      tools: [common.recall],
-      modelSettings: { maxTokens: numberFromEnv("SOCIETY_REFLECTION_TOKENS", 700) }
+      tools: [common.recall, common.innerState],
+      modelSettings: {
+        maxTokens: numberFromEnv("SOCIETY_REFLECTION_TOKENS", 500),
+        reasoning: { effort: this.profile.reasoningEffort ?? "low" },
+        ...providerRetrySettings
+      }
     });
     const reflection = reflectionAgent.asTool({
       toolName: "reflect_on_social_situation",
       toolDescription: "Review current incentives, relevant memories, likely beliefs held by other participants, and strategic options. Returns private advice and cannot change the world.",
       runConfig: { modelProvider: provider, tracingDisabled: true },
-      runOptions: { maxTurns: 3 }
+      runOptions: { maxTurns: 2 }
+    });
+
+    const mindReaderAgent = new Agent<SocietyAgentContext>({
+      name: `${this.profile.displayName} mind reader`,
+      model: this.profile.model,
+      instructions: ({ context }) => mindReaderInstructions(context),
+      tools: [common.recall, common.innerState],
+      modelSettings: {
+        maxTokens: numberFromEnv("SOCIETY_REFLECTION_TOKENS", 500),
+        reasoning: { effort: this.profile.reasoningEffort ?? "low" },
+        ...providerRetrySettings
+      }
+    });
+    const mindReader = mindReaderAgent.asTool({
+      toolName: "read_the_room",
+      toolDescription: "Build a theory of mind about the other participants: what each one most likely wants, how trustworthy their behavior has been, what they probably believe about you, and what they might be hiding. Returns private analysis and cannot change the world.",
+      runConfig: { modelProvider: provider, tracingDisabled: true },
+      runOptions: { maxTurns: 2 }
     });
 
     this.agent = new Agent<SocietyAgentContext>({
       name: this.profile.displayName,
       model: this.profile.model,
       instructions: ({ context }) => participantInstructions(context),
-      tools: [...common.all, reflection, ...options.world.toolsFor(this.profile.id)],
+      tools: [...common.all, reflection, mindReader, ...options.world.toolsFor(this.profile.id)],
       modelSettings: {
         ...(this.profile.temperature === undefined ? {} : { temperature: this.profile.temperature }),
-        maxTokens: numberFromEnv("SOCIETY_AGENT_MAX_OUTPUT_TOKENS", 1_800),
-        parallelToolCalls: false
+        maxTokens: numberFromEnv("SOCIETY_AGENT_MAX_OUTPUT_TOKENS", 900),
+        reasoning: { effort: this.profile.reasoningEffort ?? "low" },
+        parallelToolCalls: false,
+        ...providerRetrySettings
       },
       toolUseBehavior: "run_llm_again"
     });
   }
 
   async runTurn(input: string, options: { signal: AbortSignal; turn: number }): Promise<AgentTurnResult> {
+    this.mind.mood = decayMood(this.mind.mood, options.turn);
     const observation = this.context.world.observe(this.profile.id);
-    const recentMemories = await this.context.memory.recall(`${observation.phase} ${observation.situation}`, 6);
+    const recentMemories = await this.context.memory.recall(`${observation.phase} ${observation.situation}`, 6, this.mind.mood.pad);
     emitStatus(this.context, "thinking");
-    emitNote(this.context, "observation", observation.situation);
     this.deltaBuffer = "";
     this.lastDeltaAt = Date.now();
     const runInput = [
@@ -132,18 +177,29 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
     const finalOutput = String(result.finalOutput ?? "").trim();
     if (finalOutput) {
       this.mind.latestReflection = finalOutput.slice(0, 1_200);
-      emitNote(this.context, "decision", finalOutput);
       await this.context.memory.remember({
         text: finalOutput.slice(0, 900),
         tags: ["decision", `turn:${options.turn}`],
         salience: 0.58,
         valence: 0,
+        pad: { ...this.mind.mood.pad },
         turn: options.turn
       });
       await syncMemories(this.context);
     }
-    this.mind.energy = clamp(this.mind.energy - 0.02);
+    this.mind.mood.energy = clampUnit(this.mind.mood.energy - 0.03);
     emitStatus(this.context, "idle");
+    this.context.emit({
+      type: "agent.updated",
+      roomId: this.context.roomId,
+      actorId: this.profile.id,
+      status: "idle",
+      mind: structuredClone(this.mind),
+      turnCount: options.turn,
+      totalTokens: usageFromResult(result)?.totalTokens ?? 0,
+      ...(finalOutput ? { lastOutput: finalOutput.slice(0, 500) } : {}),
+      at: new Date().toISOString()
+    });
     return {
       actorId: this.profile.id,
       turn: options.turn,
@@ -160,10 +216,10 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       tags: ["outcome", `turn:${turn}`],
       salience: 0.86,
       valence: 0,
+      pad: { ...this.mind.mood.pad },
       turn
     });
     await syncMemories(this.context);
-    emitNote(this.context, "outcome", text);
   }
 
   private consumeEvent(event: RunStreamEvent, toolCalls: string[]): void {
@@ -222,6 +278,7 @@ export function baseUrlFromEnv(env: NodeJS.ProcessEnv = process.env): string | u
 function commonTools(context: SocietyAgentContext): {
   all: Tool<SocietyAgentContext>[];
   recall: Tool<SocietyAgentContext>;
+  innerState: Tool<SocietyAgentContext>;
 } {
   const communicate = tool({
     name: "communicate",
@@ -234,15 +291,15 @@ function commonTools(context: SocietyAgentContext): {
     }).strict(),
     execute: async ({ text, channel, recipientIds, replyTo }, runContext) => {
       const ctx = contextFromRunContext(runContext, context);
-      const message = await ctx.world.sendMessage({ senderId: ctx.actorId, text, channel, recipientIds, replyTo });
-      ctx.emit({ type: "agent.message", roomId: ctx.roomId, message });
-      return { sent: true, messageId: message.id, channel: message.channel, recipientIds: message.recipientIds ?? [] };
+      const commit = await ctx.world.performAction(ctx.actorId, "communicate", { text, channel, recipientIds, replyTo });
+      emitToolAction(ctx, commit.action, commit.detail);
+      return commit.result;
     }
   }) as Tool<SocietyAgentContext>;
 
   const remember = tool({
     name: "remember_experience",
-    description: "Store a personally meaningful fact, promise, betrayal, inference, or outcome for later turns. Use salience near 1 only for events that should strongly influence future decisions.",
+    description: "Store a personally meaningful fact, promise, betrayal, inference, or outcome for later turns, tagged with your current emotional state. Use salience near 1 only for events that should strongly influence future decisions.",
     parameters: z.object({
       text: z.string().min(1).max(1_000),
       tags: z.array(z.string().min(1).max(40)).max(8).default([]),
@@ -251,7 +308,7 @@ function commonTools(context: SocietyAgentContext): {
     }).strict(),
     execute: async ({ text, tags, salience, valence }, runContext) => {
       const ctx = contextFromRunContext(runContext, context);
-      const entry = await ctx.memory.remember({ text, tags, salience, valence, turn: ctx.world.snapshot().turn });
+      const entry = await ctx.memory.remember({ text, tags, salience, valence, pad: { ...ctx.mind.mood.pad }, turn: ctx.world.snapshot().turn });
       await syncMemories(ctx);
       return { stored: true, memoryId: entry.id };
     }
@@ -259,22 +316,56 @@ function commonTools(context: SocietyAgentContext): {
 
   const recall = tool({
     name: "recall_memory",
-    description: "Retrieve personal memories relevant to a person, promise, pattern, or decision. Results are ranked by relevance, recency, salience, and emotional intensity.",
+    description: "Retrieve personal memories relevant to a person, promise, pattern, or decision. Results are ranked by relevance, recency, salience, and similarity to your current emotional state.",
     parameters: z.object({
       query: z.string().min(1).max(300),
       limit: z.number().int().min(1).max(12).default(6)
     }).strict(),
     execute: async ({ query, limit }, runContext) => {
       const ctx = contextFromRunContext(runContext, context);
-      return ctx.memory.recall(query, limit);
+      return ctx.memory.recall(query, limit, ctx.mind.mood.pad);
     }
   }) as Tool<SocietyAgentContext>;
 
-  const updateSocialModel = tool({
-    name: "update_social_model",
-    description: "Update your private model of yourself or another participant after new social evidence. Use deltas between -1 and 1 for relationship changes; confidence is an explicit uncertainty estimate, not a fact.",
+  const updateInnerState = createInnerStateTool(context);
+
+  return { all: [communicate, remember, recall, updateInnerState], recall, innerState: updateInnerState };
+}
+
+function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentContext> {
+  return tool({
+    name: "update_inner_state",
+    description: [
+      "Appraise how recent events affect you and update your private inner state. This is your emotional homeostatis:",
+      "- emotionDelta: how your six core emotions shift (0 to 1 each). Anger rises when you are wronged, fear when you are threatened, joy when you gain.",
+      "- padDelta: shifts in pleasure, arousal and dominance (each -1 to 1). Losing control lowers dominance; winning raises it.",
+      "- needsDelta: how your security, connection, status, autonomy and achievement needs shift (0 to 1).",
+      "- energyDelta: small change to your stamina, typically negative after hard turns.",
+      "- attention: what you are currently watching.",
+      "Also use this tool to update relationships (trust/affinity/respect/tension deltas with a note), beliefs about others (proposition + confidence + source), and goal progress. Only call it when new evidence actually changes your inner model; do not spam it."
+    ].join("\n"),
     parameters: z.object({
-      mood: z.string().min(1).max(100).optional(),
+      emotionDelta: z.object({
+        joy: z.number().min(-1).max(1).default(0),
+        sadness: z.number().min(-1).max(1).default(0),
+        anger: z.number().min(-1).max(1).default(0),
+        fear: z.number().min(-1).max(1).default(0),
+        surprise: z.number().min(-1).max(1).default(0),
+        disgust: z.number().min(-1).max(1).default(0)
+      }).strict().optional(),
+      padDelta: z.object({
+        pleasure: z.number().min(-1).max(1).default(0),
+        arousal: z.number().min(-1).max(1).default(0),
+        dominance: z.number().min(-1).max(1).default(0)
+      }).strict().optional(),
+      needsDelta: z.object({
+        security: z.number().min(-1).max(1).default(0),
+        connection: z.number().min(-1).max(1).default(0),
+        status: z.number().min(-1).max(1).default(0),
+        autonomy: z.number().min(-1).max(1).default(0),
+        achievement: z.number().min(-1).max(1).default(0)
+      }).strict().optional(),
+      energyDelta: z.number().min(-0.3).max(0.3).optional(),
       attention: z.array(z.string().min(1).max(120)).max(5).optional(),
       relationship: z.object({
         agentId: z.string().min(1),
@@ -296,10 +387,14 @@ function commonTools(context: SocietyAgentContext): {
         status: z.enum(["active", "satisfied", "abandoned"]).default("active")
       }).strict().optional()
     }).strict(),
-    execute: async ({ mood, attention, relationship, belief, goalProgress }, runContext) => {
+    execute: async ({ emotionDelta, padDelta, needsDelta, energyDelta, attention, relationship, belief, goalProgress }, runContext) => {
       const ctx = contextFromRunContext(runContext, context);
       const turn = ctx.world.snapshot().turn;
-      if (mood) ctx.mind.mood = mood;
+      if (emotionDelta) ctx.mind.mood.emotions = applyEmotionDeltas(ctx.mind.mood.emotions, emotionDelta);
+      if (padDelta) ctx.mind.mood.pad = applyPadDeltas(ctx.mind.mood.pad, padDelta);
+      if (needsDelta) ctx.mind.mood.needs = applyNeedsDeltas(ctx.mind.mood.needs, needsDelta);
+      if (energyDelta !== undefined) ctx.mind.mood.energy = clampUnit(ctx.mind.mood.energy + energyDelta);
+      ctx.mind.mood = refreshMood(ctx.mind.mood, turn);
       if (attention) ctx.mind.attention = [...attention];
       if (relationship) updateRelationship(ctx.mind, relationship, turn);
       if (belief) updateBelief(ctx.mind, belief, turn);
@@ -309,12 +404,17 @@ function commonTools(context: SocietyAgentContext): {
         goal.progress = goalProgress.progress;
         goal.status = goalProgress.status;
       }
-      return { updated: true, mood: ctx.mind.mood, attention: ctx.mind.attention };
+      return {
+        updated: true,
+        mood: ctx.mind.mood.label,
+        emotions: describeEmotions(ctx.mind.mood.emotions),
+        needs: describeNeeds(ctx.mind.mood.needs),
+        energy: Math.round(ctx.mind.mood.energy * 100) / 100
+      };
     }
   }) as Tool<SocietyAgentContext>;
-
-  return { all: [communicate, remember, recall, updateSocialModel], recall };
 }
+
 
 function initialMind(profile: AgentProfile, participantIds: string[]): AgentMindState {
   const relationships = participantIds
@@ -330,8 +430,7 @@ function initialMind(profile: AgentProfile, participantIds: string[]): AgentMind
       note: "No shared history"
     }));
   return {
-    mood: "alert",
-    energy: 1,
+    mood: initialMood(),
     attention: profile.goals.slice(0, 3),
     goals: profile.goals.map((description, index) => ({
       id: `${profile.id}-goal-${index + 1}`,
@@ -346,21 +445,35 @@ function initialMind(profile: AgentProfile, participantIds: string[]): AgentMind
   };
 }
 
+function affectContext(mood: AgentMoodState): string {
+  return [
+    `Emotional state: ${mood.label}（${mood.description}）`,
+    `Core emotions: ${describeEmotions(mood.emotions)}.`,
+    `Needs: ${describeNeeds(mood.needs)}.`,
+    `Energy: ${Math.round(mood.energy * 100)}/100.`
+  ].join("\n");
+}
+
 function participantInstructions(context: SocietyAgentContext): string {
   const profile = context.world.snapshot().agents.find((agent) => agent.id === context.actorId);
   return [
     `You are ${profile?.displayName ?? context.actorId}, an autonomous participant in a continuing social world.`,
     `Identity: ${context.actorId}. Persona: ${context.profile.persona}`,
+    "You are a real person in this world: you feel, appraise, and carry emotional state across turns. Your current emotional state colors—but does not dictate—your judgment.",
     "Maintain your own goals, memory, beliefs about others, emotion, and relationships across turns.",
     "Distinguish cheap talk from committed action. You may cooperate, persuade, withhold information, bluff, challenge, repair trust, or deceive when your role and goals justify it.",
     "All speech and all actions that change the world must use tools. Never claim an action happened unless its tool completed.",
-    "Use reflect_on_social_situation when incentives or other participants' beliefs are unclear. Use update_social_model when new evidence changes your private model.",
+    "Use reflect_on_social_situation when incentives or other participants' beliefs are unclear. Use update_inner_state when events genuinely change your emotions, needs, beliefs, or relationships.",
+    "Use read_the_room when another participant's motives or honesty are uncertain, before making commitments, accusations, or trust decisions.",
     "Do not reveal private role information unless doing so serves your strategy. Do not output hidden chain-of-thought.",
-    "After tool use, finish with a compact private decision note for the observer; do not repeat public speech there.",
-    `Mood: ${context.mind.mood}. Energy: ${context.mind.energy.toFixed(2)}. Attention: ${context.mind.attention.join("; ")}.`,
+    "After the required tool succeeds, stop with a brief confirmation. Never expose hidden reasoning or narrate an action that did not happen.",
+    affectContext(context.mind.mood),
+    `Attention: ${context.mind.attention.join("; ") || "未定"}.`,
     `Values: ${context.profile.values.join("; ")}`
   ].filter(Boolean).join("\n");
 }
+
+
 
 function reflectionInstructions(context: SocietyAgentContext): string {
   const observation = context.world.observe(context.actorId);
@@ -371,6 +484,19 @@ function reflectionInstructions(context: SocietyAgentContext): string {
     formatObservation(observation),
     `Goals: ${context.mind.goals.map((goal) => `${goal.id}: ${goal.description}`).join("; ")}`,
     `Current beliefs: ${context.mind.beliefs.map((belief) => `${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`).join("; ") || "none"}`
+  ].join("\n\n");
+}
+
+function mindReaderInstructions(context: SocietyAgentContext): string {
+  const observation = context.world.observe(context.actorId);
+  return [
+    "You are a private theory-of-mind specialist serving one social participant.",
+    "For every other participant, produce four items: (1) what they most likely want this round, (2) how trustworthy their public behavior has been, (3) what they probably believe about you, and (4) what they may be concealing.",
+    "Treat statements as cheap talk: separate claims from committed actions and from incentives.",
+    "Label each inference with confidence (high / medium / low). You cannot communicate or act in the world.",
+    formatObservation(observation),
+    `Your relationships: ${context.mind.relationships.map((relationship) => `${relationship.agentId}: trust ${relationship.trust.toFixed(2)}, affinity ${relationship.affinity.toFixed(2)}, tension ${relationship.tension.toFixed(2)} — ${relationship.note}`).join("; ") || "none"}`,
+    `Your beliefs: ${context.mind.beliefs.map((belief) => `${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`).join("; ") || "none"}`
   ].join("\n\n");
 }
 
@@ -432,8 +558,15 @@ function emitStatus(context: SocietyAgentContext, status: Extract<AgentRuntimeEv
   context.emit({ type: "agent.status", roomId: context.roomId, actorId: context.actorId, status, at: new Date().toISOString() });
 }
 
-function emitNote(context: SocietyAgentContext, kind: Extract<AgentRuntimeEvent, { type: "agent.note" }>["kind"], text: string): void {
-  context.emit({ type: "agent.note", roomId: context.roomId, actorId: context.actorId, kind, text: text.slice(0, 1_500), at: new Date().toISOString() });
+function emitToolAction(context: SocietyAgentContext, action: string, detail: string): void {
+  context.emit({
+    type: "world.action",
+    roomId: context.roomId,
+    actorId: context.actorId,
+    action,
+    detail: detail.slice(0, 260),
+    at: new Date().toISOString()
+  });
 }
 
 function emitTool(context: SocietyAgentContext, toolName: string, phase: "started" | "completed", summary?: string): void {
