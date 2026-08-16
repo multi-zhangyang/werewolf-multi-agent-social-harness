@@ -11,14 +11,10 @@ import { resolve } from "node:path";
 
 const API = process.env.DEMO_API ?? "http://127.0.0.1:8787";
 const SCENARIOS = ["prisoners-dilemma", "ultimatum-game", "trust-game", "public-goods", "beauty-contest", "sealed-bid-auction", "werewolf"];
-const MODELS = [
-  "your-model",
-  "your-model",
-  "your-model",
-  "your-model",
-  "your-model",
-  "your-model"
-];
+const MODELS = (process.env.SOCIETY_MODELS ?? "your-model")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
 
 const requested = process.argv.slice(2);
 const targets = requested.length ? requested : SCENARIOS;

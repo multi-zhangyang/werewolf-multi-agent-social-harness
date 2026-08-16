@@ -107,13 +107,8 @@ export function ModelLabel({ model, className }: { model: string; className?: st
 }
 
 export function readableModel(model: string): string {
-  if (model.includes("yourmodel")) return "Your Model";
-  if (model.includes("pro")) return "Your Model";
-  if (model.includes("flash")) return "Your Model";
-  if (model.includes("yourmodel")) return "Your Model";
-  if (model.includes("yourmodel")) return "yourmodel K2.7";
   const name = model.split("/").at(-1) ?? model;
-  return name.replace(/^@/, "").replaceAll("-", " ");
+  return name.replace(/^@/, "").replaceAll("-", " ").replace(/\w/g, (letter) => letter.toUpperCase());
 }
 
 export function formatTime(value: string): string {

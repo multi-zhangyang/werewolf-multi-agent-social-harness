@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { OpenAIProvider, type OpenAIProvider as OpenAIProviderType } from "@openai/agents";
 import type {
+  AgentMindState,
   AgentProfile,
   AgentRuntimeEvent,
   AgentStatus,
@@ -48,6 +49,8 @@ export interface SocietyParticipantCard {
   /** Public-facing emotional state from the agent's latest inner update. */
   mood?: string;
   energy?: number;
+  /** Latest private mind snapshot, useful for observer/debugging UIs. */
+  mind?: AgentMindState;
 }
 
 export interface SocietyPlayerState {
@@ -89,6 +92,7 @@ interface RuntimeCard {
   moodLabel?: string;
   energy?: number;
   lastOutput?: string;
+  mind?: AgentMindState;
 }
 
 interface HumanWaiter {
@@ -196,7 +200,8 @@ export class SocietyRoom {
           alive: state?.alive ?? true,
           ...(state?.score === undefined ? {} : { score: state.score }),
           ...(state?.observerRole ? { role: state.observerRole } : {}),
-          ...(card.moodLabel ? { mood: card.moodLabel, energy: card.energy } : {})
+          ...(card.moodLabel ? { mood: card.moodLabel, energy: card.energy } : {}),
+          ...(card.mind ? { mind: card.mind } : {})
         };
       }),
       ...(actorId
@@ -423,6 +428,7 @@ export class SocietyRoom {
         card.turnCount = event.turnCount;
         card.totalTokens += event.totalTokens;
         if (event.lastOutput) card.lastOutput = event.lastOutput;
+        card.mind = structuredClone(event.mind);
       }
       this.emit(event);
       return;
