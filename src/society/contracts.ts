@@ -102,6 +102,27 @@ export interface AgentProfile {
   reasoningEffort?: ReasoningEffort;
 }
 
+/**
+ * A character is the person (§7.1/§7.2): identity, values, voice, biases and
+ * formative memories — never a game role, never a model. Built-ins ship with
+ * the product; user-defined characters live in the local library and can be
+ * imported/exported without secrets.
+ */
+export interface CharacterDefinition {
+  id: string;
+  displayName: string;
+  persona: string;
+  traits: string[];
+  values: string[];
+  goals: string[];
+  temperament?: AgentTemperament;
+  decisionBiases?: DecisionBias[];
+  voice?: string;
+  regulation?: NonNullable<AgentProfile["regulation"]>;
+  autobiographicalAnchors?: string[];
+  builtIn: boolean;
+}
+
 export interface AgentGoal {
   id: string;
   description: string;

@@ -4,6 +4,7 @@ import express from "express";
 import { ZodError } from "zod";
 import { createServerContext, host, port } from "./context";
 import { registerRoomRoutes } from "./routes/rooms";
+import { registerCharacterRoutes } from "./characters";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,6 +13,7 @@ export function createServerApp(): express.Express {
   const context = createServerContext();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "512kb" }));
+  registerCharacterRoutes(app, context.characters);
   registerRoomRoutes(app, context);
   app.use(express.static(path.resolve(directory, "../../dist")));
   app.get("*path", (_request, response) => {

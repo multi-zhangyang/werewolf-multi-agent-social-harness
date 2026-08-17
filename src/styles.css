@@ -274,6 +274,13 @@ body {
   display: none;
 }
 
+/* Vertically scrollable area with a bottom fade so "more content below"
+   reads as scrollable instead of cut off. */
+.scroll-fade-y {
+  mask-image: linear-gradient(to bottom, black 0, black calc(100% - 40px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 0, black calc(100% - 40px), transparent 100%);
+}
+
 /* Streaming dashes along social links in the hero stage */
 @keyframes dash-flow {
   to { stroke-dashoffset: -32; }

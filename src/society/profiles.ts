@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentTemperament, DecisionBias } from "./contracts";
+import type { AgentProfile, AgentTemperament, CharacterDefinition, DecisionBias } from "./contracts";
 
 const DEFAULT_MODEL_CATALOG = [
   { id: "your-model", name: "Your Model", provider: "OpenAI-compatible" }
@@ -505,16 +505,74 @@ const PERSONALITIES: PersonalitySeed[] = [
   }
 ];
 
+export const BUILTIN_CHARACTER_COUNT = PERSONALITIES.length;
+
+/** Stable, position-based ids for the built-in roster. */
+function builtinId(index: number): string {
+  return `builtin-${String(index + 1).padStart(2, "0")}`;
+}
+
+/** The built-in roster as CharacterDefinitions (person, role and model stay separate). */
+export function builtinCharacters(): CharacterDefinition[] {
+  return PERSONALITIES.map((seed, index) => ({
+    id: builtinId(index),
+    displayName: seed.displayName,
+    persona: seed.persona,
+    traits: [...seed.traits],
+    values: [...seed.values],
+    goals: [...seed.goals],
+    temperament: { ...seed.temperament },
+    decisionBiases: [...seed.decisionBiases],
+    voice: seed.voice,
+    regulation: seed.regulation,
+    autobiographicalAnchors: [...seed.autobiographicalAnchors],
+    builtIn: true
+  }));
+}
+
+export function builtinCharacter(id: string): CharacterDefinition | undefined {
+  const match = /^builtin-(\d+)$/.exec(id);
+  if (!match) return undefined;
+  const index = Number(match[1]) - 1;
+  return builtinCharacters()[index];
+}
+
+/**
+ * Turn a CharacterDefinition into one seat's AgentProfile. The seat gets an
+ * actor id (`agent-NN`), a model from the round-robin, and everything that
+ * makes this person who they are — the character travels with its identity,
+ * memory and relationships across models (§6.7).
+ */
+export function characterAgentProfile(
+  character: CharacterDefinition,
+  seatIndex: number,
+  models: string[],
+  temperature?: number
+): AgentProfile {
+  return {
+    id: `agent-${String(seatIndex + 1).padStart(2, "0")}`,
+    displayName: character.displayName,
+    model: models[seatIndex] ?? models[seatIndex % models.length],
+    persona: character.persona,
+    traits: [...character.traits],
+    values: [...character.values],
+    goals: [...character.goals],
+    ...(character.temperament ? { temperament: { ...character.temperament } } : {}),
+    ...(character.decisionBiases?.length ? { decisionBiases: [...character.decisionBiases] } : {}),
+    ...(character.voice ? { voice: character.voice } : {}),
+    ...(character.regulation ? { regulation: character.regulation } : {}),
+    ...(character.autobiographicalAnchors?.length ? { autobiographicalAnchors: [...character.autobiographicalAnchors] } : {}),
+    ...(temperature === undefined ? {} : { temperature })
+  };
+}
+
 export function createAgentProfiles(models: string[], count: number, temperature?: number): AgentProfile[] {
   if (count < 2 || count > PERSONALITIES.length) throw new Error(`PLAYER_COUNT_INVALID: Expected 2-${PERSONALITIES.length} players.`);
   const selectedModels = models.filter(Boolean);
   if (selectedModels.length === 0) throw new Error("MODEL_REQUIRED: Select at least one model before creating a room.");
-  return PERSONALITIES.slice(0, count).map((personality, index) => ({
-    ...structuredClone(personality),
-    id: `agent-${String(index + 1).padStart(2, "0")}`,
-    model: selectedModels[index] ?? selectedModels[index % selectedModels.length],
-    ...(temperature === undefined ? {} : { temperature })
-  }));
+  return builtinCharacters().slice(0, count).map((character, index) =>
+    characterAgentProfile(character, index, selectedModels, temperature)
+  );
 }
 
 function modelCatalogFromEnv(value = process.env.SOCIETY_MODELS): Array<{ id: string; name: string; provider: string }> {

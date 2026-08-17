@@ -20,7 +20,7 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
 import { ScenarioIcon } from "./shared";
-import type { CreateRoomInput, ModelOption } from "./types";
+import type { CharacterOption, CreateRoomInput, ModelOption } from "./types";
 
 interface CreateRoomProps {
   open: boolean;
@@ -45,6 +45,10 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
   const [seasonMode, setSeasonMode] = useState<"season" | "one-shot">("season");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  /** Character library: built-ins + user-defined characters. */
+  const [characters, setCharacters] = useState<CharacterOption[]>([]);
+  /** Per-seat character picks (absent = the seat's default built-in). */
+  const [seatCharacters, setSeatCharacters] = useState<Record<string, string>>({});
 
   const minRounds = scenario?.minRounds ?? 2;
   const maxRounds = scenario?.maxRounds ?? 10;
@@ -60,6 +64,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     setSelectedModels(visibleModels.slice(0, Math.min(4, visibleModels.length)).map((model) => model.id));
     setSeatOverrides({});
     setSeatTuning({});
+    setSeatCharacters({});
     setAdvanced(false);
     setRounds(scenario?.defaultRounds ?? Math.min(5, maxRounds));
     setPlayers(scenario?.players ?? 2);
@@ -69,6 +74,30 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     setSeasonMode("season");
     setError(undefined);
   }, [open, scenario, maxRounds, visibleModels]);
+
+  // The character library is small; refresh it whenever the dialog opens.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    fetch("/api/characters")
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("CHARACTERS_UNREACHABLE"))))
+      .then((data: { builtins?: CharacterOption[]; customs?: CharacterOption[] }) => {
+        if (cancelled) return;
+        setCharacters([...(data.builtins ?? []), ...(data.customs ?? [])]);
+      })
+      .catch(() => {
+        if (!cancelled) setCharacters([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const characterForSeat = (index: number): CharacterOption | undefined => {
+    const picked = seatCharacters[String(index)];
+    if (picked) return characters.find((character) => character.id === picked);
+    return characters[index];
+  };
 
   const toggleModel = (id: string): void => {
     setSelectedModels((current) => current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]);
@@ -104,6 +133,11 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
         ...(Object.keys(seatTuning).length ? { agentTuning: seatTuning } : {}),
         rounds,
         ...(scenario.playerRange ? { players } : {}),
+        ...(characters.length
+          ? {
+              characterIds: Array.from({ length: players }, (_, index) => seatCharacters[String(index)] ?? characters[index]?.id).filter((id): id is string => Boolean(id))
+            }
+          : {}),
         mode,
         ...(mode === "human" ? { playerName: playerName.trim() } : {}),
         reasoningEffort,
@@ -264,6 +298,11 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                       <span className="text-[11px] text-muted-foreground/70">在设置中注册模型档案后可单独指定</span>
                     )}
                   </div>
+                  {characters.length ? (
+                    <p className="mb-2 text-xs leading-5 text-muted-foreground/80">
+                      为每个席位挑选人物（内置或自建），模型按上方选择轮转；「单 Agent 覆盖」可再为单个席位单独指定模型与参数。
+                    </p>
+                  ) : null}
                   <div className="rounded-lg border border-border bg-muted/60 p-3" data-model>
                     <div className="space-y-1.5">
                       {Array.from({ length: players }).map((_, index) => {
@@ -277,7 +316,33 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                                 <span className="flex size-5 items-center justify-center rounded bg-card font-mono text-[9px] text-muted-foreground/80 ring-1 ring-border">
                                   {String(index + 1).padStart(2, "0")}
                                 </span>
-                                第 {index + 1} 位参与者
+                                {characters.length ? (
+                                  <Select
+                                    value={seatCharacters[String(index)] ?? "__default"}
+                                    onValueChange={(value) => {
+                                      setSeatCharacters((current) => {
+                                        const next = { ...current };
+                                        if (value === "__default") delete next[String(index)];
+                                        else next[String(index)] = value;
+                                        return next;
+                                      });
+                                    }}
+                                  >
+                                    <SelectTrigger aria-label={`第 ${index + 1} 位参与者的人物`} className="h-7 w-44 justify-start rounded-md border-border bg-card text-[11px] text-foreground/80">
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="__default">按顺序内置人物</SelectItem>
+                                      {characters.map((character) => (
+                                        <SelectItem key={character.id} value={character.id}>
+                                          {character.displayName}{character.builtIn ? "" : " · 自建"}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                ) : (
+                                  <span>第 {index + 1} 位参与者</span>
+                                )}
                               </span>
                               {advanced && profilesResolvable ? (
                                 <Select

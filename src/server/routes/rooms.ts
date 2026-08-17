@@ -1,8 +1,8 @@
 import express from "express";
 import { z } from "zod";
-import { createAgentProfiles } from "../../society/profiles";
+import { characterAgentProfile } from "../../society/profiles";
 import { ALL_SCENARIOS, SCENARIO_METADATA } from "../../society/scenarios";
-import type { AgentRuntimeEvent, ScenarioId, ScenarioSummary, SpectatorMode } from "../../society/contracts";
+import type { AgentProfile, AgentRuntimeEvent, ScenarioId, ScenarioSummary, SpectatorMode } from "../../society/contracts";
 import { contextLabel } from "../../society/context-manager";
 import type { SocietyRoom, SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "../../society/room";
 import { defaultCapabilities, defaultContextPolicy, persistRegistry, type AgentModelBinding, type ContextPolicy, type ModelProfile } from "../../society/models";
@@ -70,6 +70,8 @@ const createRoomSchema = z.object({
   rounds: z.number().int().positive().max(20).optional(),
   /** Seat count for this room; defaults to the scenario's default. */
   players: z.number().int().positive().max(12).optional(),
+  /** Character picks for the front seats (built-in ids or custom character ids). */
+  characterIds: z.array(z.string().min(1).max(120)).max(12).optional(),
   temperature: z.number().min(0).max(2).optional(),
   mode: z.enum(["ai", "human"]).default("ai"),
   playerName: z.string().trim().min(1).max(40).optional(),
@@ -214,7 +216,10 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       const scenario = SCENARIO_METADATA[input.scenarioId];
       const seatCount = resolveSeatCount(scenario, input.players);
       const models = resolveModelIds(context, input, seatCount);
-      const profiles = createAgentProfiles(models, seatCount, input.temperature);
+      if (seatCount < 2) throw new Error(`PLAYER_COUNT_INVALID: ${scenario.name} needs at least 2 participants.`);
+      // Explicit character picks fill the front seats; the rest get built-ins.
+      const roster = context.characters.roster(input.characterIds, seatCount);
+      const profiles = roster.map((character, index) => characterAgentProfile(character, index, models, input.temperature));
       for (const profile of profiles) profile.reasoningEffort = input.reasoningEffort;
       if (input.mode === "human") {
         profiles[0] = {
@@ -623,7 +628,7 @@ function resolveModelIds(context: ServerContext, input: z.infer<typeof createRoo
 function buildAgentBindings(
   context: ServerContext,
   input: z.infer<typeof createRoomSchema>,
-  profiles: ReturnType<typeof createAgentProfiles>
+  profiles: AgentProfile[]
 ): Record<string, AgentModelBinding> | undefined {
   const bindings: Record<string, AgentModelBinding> = {};
   if (input.modelProfileIds && input.modelProfileIds.length) {

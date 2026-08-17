@@ -12,6 +12,14 @@ export interface ModelOption {
   capabilitySummary?: string;
 }
 
+/** A character library entry as the create-room dialog consumes it. */
+export interface CharacterOption {
+  id: string;
+  displayName: string;
+  persona: string;
+  builtIn: boolean;
+}
+
 export interface CreateRoomInput {
   scenarioId: string;
   models: string[];
@@ -28,6 +36,8 @@ export interface CreateRoomInput {
   rounds: number;
   /** Seat count for worlds that support more than their default table size. */
   players?: number;
+  /** Character picks for the front seats (built-in or custom character ids). */
+  characterIds?: string[];
   mode: "ai" | "human";
   playerName?: string;
   reasoningEffort: "low" | "medium" | "high";

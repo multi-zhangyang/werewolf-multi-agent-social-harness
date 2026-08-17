@@ -3,6 +3,7 @@ import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { ArchivedRoomSummary } from "@/society/persistence";
 import { About } from "@/components/society/about";
+import { CharactersDialog } from "@/components/society/characters-dialog";
 import { CreateRoomDialog } from "@/components/society/create-room";
 import { Landing } from "@/components/society/landing";
 import { RoomView } from "@/components/society/room-view";
@@ -39,6 +40,7 @@ export function App(): ReactNode {
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
   const [createScenarioId, setCreateScenarioId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [charactersOpen, setCharactersOpen] = useState(false);
   const [error, setError] = useState<string>();
   const [booting, setBooting] = useState(true);
 
@@ -158,6 +160,7 @@ export function App(): ReactNode {
           onStart={(scenarioId) => setCreateScenarioId(scenarioId)}
           onOpenRoom={(roomId) => { location.hash = `#/rooms/${encodeURIComponent(roomId)}`; }}
           onOpenSettings={() => setSettingsOpen(true)}
+          onOpenCharacters={() => setCharactersOpen(true)}
           onOpenAbout={() => { location.hash = "#/about"; }}
           onResetSeason={() => { void resetSeason().catch((cause) => setError(errorMessage(cause))); }}
         />
@@ -174,6 +177,11 @@ export function App(): ReactNode {
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         onSaved={() => { void loadCatalog().catch((cause) => setError(errorMessage(cause))); }}
+      />
+      <CharactersDialog
+        open={charactersOpen}
+        onOpenChange={setCharactersOpen}
+        onChanged={() => undefined}
       />
       {error ? (
         <div className="fixed inset-x-0 bottom-4 z-30 mx-auto w-fit rounded-lg border border-red-200 bg-white px-4 py-2 text-xs text-red-600 shadow-lg">

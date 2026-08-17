@@ -2,6 +2,7 @@ import { SocietyRoomRegistry } from "../society/room";
 import { FileSeasonStore, defaultSeasonPath } from "../society/season";
 import { loadRegistry, seedRegistryFromEnv, type ModelRegistry } from "../society/models";
 import { RoomArchiveStore } from "../society/persistence";
+import { CharacterLibrary } from "./characters";
 
 export interface ServerContext {
   rooms: SocietyRoomRegistry;
@@ -11,6 +12,8 @@ export interface ServerContext {
   models: ModelRegistry;
   /** Rolling room checkpoints (data/rooms/<roomId>/checkpoint.json). */
   archive: RoomArchiveStore;
+  /** Built-in + user-defined characters (data/characters.json). */
+  characters: CharacterLibrary;
 }
 
 export function createServerContext(): ServerContext {
@@ -20,7 +23,8 @@ export function createServerContext(): ServerContext {
     rooms: new SocietyRoomRegistry(),
     season: new FileSeasonStore(defaultSeasonPath()),
     models,
-    archive: new RoomArchiveStore()
+    archive: new RoomArchiveStore(),
+    characters: new CharacterLibrary()
   };
 }
 

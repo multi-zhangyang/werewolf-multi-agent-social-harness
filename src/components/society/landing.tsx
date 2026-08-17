@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Waypoints } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Users, Waypoints } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { ArchivedRoomSummary } from "@/society/persistence";
@@ -25,6 +25,7 @@ interface LandingProps {
   onStart: (scenarioId: string) => void;
   onOpenRoom: (roomId: string) => void;
   onOpenSettings: () => void;
+  onOpenCharacters: () => void;
   onOpenAbout: () => void;
   onResetSeason: () => void;
 }
@@ -75,7 +76,7 @@ const CATEGORY_OF: Record<string, keyof typeof CATEGORY> = {
   "liars-dice": "deception"
 };
 
-export function Landing({ scenarios, models, rooms, archived, season, onStart, onOpenRoom, onOpenSettings, onOpenAbout, onResetSeason }: LandingProps): ReactNode {
+export function Landing({ scenarios, models, rooms, archived, season, onStart, onOpenRoom, onOpenSettings, onOpenCharacters, onOpenAbout, onResetSeason }: LandingProps): ReactNode {
   return (
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-20 border-b border-border/80 bg-background/70 backdrop-blur-xl">
@@ -85,6 +86,10 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
             <span className="text-[15px] font-semibold tracking-tight">Society</span>
           </button>
           <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" className="hidden rounded-lg px-3 text-[13px] text-muted-foreground hover:bg-muted hover:text-foreground sm:inline-flex" onClick={onOpenCharacters}>
+              <Users className="size-3.5" />
+              人物库
+            </Button>
             <Button variant="ghost" size="sm" className="hidden rounded-lg px-3 text-[13px] text-muted-foreground hover:bg-muted hover:text-foreground sm:inline-flex" onClick={onOpenAbout}>
               关于
             </Button>
