@@ -687,11 +687,12 @@ export class SocietyRoom {
       const maxTurns = isDiscussion
         ? positiveIntegerFromEnv("SOCIETY_DISCUSSION_MAX_TURNS", 10)
         : undefined;
-      let result: AgentTurnResult;
-      try {
+      let result: AgentTurnResult | undefined;
+      let failure: unknown;
+      const attemptTurn = (): Promise<AgentTurnResult> => {
         // Hard timeout guard: abort signals can be swallowed by a stalled
         // provider stream, so race the turn against a wall clock as well.
-        result = await Promise.race([
+        return Promise.race([
           runtime.runTurn(`${activation.label}\n${instruction}`, {
             signal,
             turn: this.world.snapshot().turn,
@@ -703,34 +704,50 @@ export class SocietyRoom {
             signal.addEventListener("abort", () => { clearTimeout(timer); }, { once: true });
           })
         ]);
-      } catch (error) {
-        // An observer pause interrupts the turn immediately: the agent goes
-        // quiet / waits; the room never substitutes a decision for it.
-        if (this.pausedAgents.has(actorId)) {
-          return;
+      };
+      // Discussion turns get one immediate retry on provider-side transient
+      // failures (5xx / 429 / timeout / connection): the same agent runs the
+      // same turn once more before the wave accepts its silence. Binding
+      // action turns retry through completeActivation instead, so the room
+      // never substitutes a decision for anyone.
+      const attempts = isDiscussion ? 2 : 1;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+          result = await attemptTurn();
+          failure = undefined;
+          break;
+        } catch (error) {
+          if (this.pausedAgents.has(actorId)) return;
+          failure = error;
+          if (attempt < attempts && !isTransientProviderFailure(error)) break;
         }
-        // Speaking is optional: an agent that fails to produce a coherent turn
-        // simply stays quiet for this wave instead of sinking the whole room.
-        if (isDiscussion) {
-          const reason = friendlyFailure(error);
-          // A budget/timeout cut ends a turn that may already have spoken —
-          // say what happened instead of claiming the agent stayed silent.
-          const cutShort = /行动次数已达上限|思考时间超时/.test(reason);
-          const note = cutShort
-            ? `${runtime.profile.displayName} 本轮讨论中断（${reason}）`
-            : `${runtime.profile.displayName} 本轮未发言（${reason}）`;
+      }
+      try {
+        if (failure !== undefined || result === undefined) {
+          const error = failure ?? new Error("AGENT_TURN_EMPTY: The turn produced no result.");
+          // Speaking is optional: an agent that fails to produce a coherent
+          // turn simply stays quiet for this wave instead of sinking the room.
+          if (isDiscussion) {
+            const reason = friendlyFailure(error);
+            // A budget/timeout cut ends a turn that may already have spoken —
+            // say what happened instead of claiming the agent stayed silent.
+            const cutShort = /行动次数已达上限|思考时间超时/.test(reason);
+            const note = cutShort
+              ? `${runtime.profile.displayName} 本轮讨论中断（${reason}）`
+              : `${runtime.profile.displayName} 本轮未发言（${reason}）`;
+            this.world.addWorldLog(note);
+            this.emit({ type: "agent.status", roomId: this.id, actorId, status: "idle", at: now() });
+            return;
+          }
+          // Binding actions (votes, night targets, bids) stay mandatory, but a
+          // single failed turn must not sink the room: report it, let
+          // completeActivation flag the missing action, and the room retries
+          // the actor once. Only a repeated failure pauses the room.
+          const note = `${runtime.profile.displayName} 行动未完成（${friendlyFailure(error)}），稍后重试`;
           this.world.addWorldLog(note);
-          this.emit({ type: "agent.status", roomId: this.id, actorId, status: "idle", at: now() });
+          this.emit({ type: "agent.status", roomId: this.id, actorId, status: "error", at: now() });
           return;
         }
-        // Binding actions (votes, night targets, bids) stay mandatory, but a
-        // single failed turn must not sink the room: report it, let
-        // completeActivation flag the missing action, and the room retries the
-        // actor once. Only a repeated failure pauses the room.
-        const note = `${runtime.profile.displayName} 行动未完成（${friendlyFailure(error)}），稍后重试`;
-        this.world.addWorldLog(note);
-        this.emit({ type: "agent.status", roomId: this.id, actorId, status: "error", at: now() });
-        return;
       } finally {
         this.activeSignals.delete(actorId);
       }
@@ -1004,6 +1021,11 @@ function errorMessage(error: unknown): string {
 }
 
 /** Turn SDK/provider failures into observer-friendly Chinese. */
+/** Provider-side transient failures that are worth one immediate retry. */
+export function isTransientProviderFailure(error: unknown): boolean {
+  return /429|rate limit|502|503|504|500|Internal server error|ECONN|ETIMEDOUT|socket|network|fetch failed|TURN_TIMEOUT/i.test(errorMessage(error));
+}
+
 function friendlyFailure(error: unknown): string {
   const message = errorMessage(error);
   const maxTurns = /Max turns \((\d+)\) exceeded/i.exec(message);
