@@ -196,4 +196,16 @@ check("recency-weighting boosts memory salience of fresh events", () => {
   assert.equal(plain.salience, 0.5, "without the bias salience is unchanged");
 });
 
+check("every built-in character carries substantive autobiographical anchors (§4.2.1)", () => {
+  const profiles = createAgentProfiles(["model-a"], 25);
+  for (const profile of profiles) {
+    const anchors = profile.autobiographicalAnchors ?? [];
+    assert.ok(anchors.length >= 4, `${profile.displayName} has formative memories, got ${anchors.length}`);
+    assert.equal(new Set(anchors).size, anchors.length, `${profile.displayName} anchors are unique`);
+    for (const anchor of anchors) {
+      assert.ok(anchor.length >= 8, `${profile.displayName} anchor is substantive: ${anchor.slice(0, 12)}…`);
+    }
+  }
+});
+
 console.log(`\nTrait-adaptation checks: ${passed} passed.`);

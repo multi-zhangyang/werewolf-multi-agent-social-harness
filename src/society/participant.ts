@@ -99,13 +99,16 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     // initial mind view, so they survive the first memory sync and can be
     // recalled by the agent like any other memory.
     const seasonMemories = this.mind.memories.filter((entry) => entry.tags.includes("season"));
+    // Autobiographical anchors (§4.2.1) live in the store too: they are the
+    // character's own formative history and must survive memory syncs.
+    const identityMemories = this.mind.memories.filter((entry) => entry.tags.includes("autobiography"));
     this.context = {
       actorId: options.profile.id,
       roomId: options.roomId,
       profile: this.profile,
       world: options.world,
       mind: this.mind,
-      memory: new AssociativeMemory(seasonMemories),
+      memory: new AssociativeMemory([...identityMemories, ...seasonMemories]),
       emit: options.emit
     };
     const provider = options.provider ?? new OpenAIProvider({
@@ -290,7 +293,11 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   }
 
   exportDossier(role?: string, outcome?: "win" | "lose"): CharacterDossier {
+    // Season history carries what happened at the table; the character's own
+    // autobiography is definitional and gets re-seeded from the profile, so
+    // it is excluded to avoid duplicates piling up across games.
     const strongest = this.mind.memories
+      .filter((entry) => !entry.tags.includes("autobiography"))
       .slice()
       .sort((left, right) => right.salience - left.salience || right.turn - left.turn)
       .slice(0, 12)
@@ -496,6 +503,18 @@ function initialMind(profile: AgentProfile, participantIds: string[], dossier?: 
     turn: -1,
     createdAt: new Date().toISOString()
   }));
+  // Formative experiences seeded before the first turn: why this person
+  // reacts the way they do (§4.2.1). High salience, identity-tagged, never
+  // overwritten by ordinary compaction.
+  const anchors = (profile.autobiographicalAnchors ?? []).map<AgentMindState["memories"][number]>((text, index) => ({
+    id: `autobiography-${profile.id}-${index}`,
+    text,
+    tags: ["autobiography", "identity"],
+    salience: 0.82,
+    valence: 0.2,
+    turn: -2,
+    createdAt: new Date().toISOString()
+  }));
   return {
     mood: initialMood(),
     attention: profile.goals.slice(0, 3),
@@ -516,7 +535,7 @@ function initialMind(profile: AgentProfile, participantIds: string[], dossier?: 
       source: "previous games"
     })),
     relationships,
-    memories,
+    memories: [...anchors, ...memories],
     cognitivePasses: [],
     deceptions: [],
     roleHypotheses: [],
@@ -664,6 +683,9 @@ function participantInstructions(context: SocietyAgentContext): string {
     ...(biasContext(context.profile) ? [biasContext(context.profile)] : []),
     ...(adaptationContext(context.mind) ? [adaptationContext(context.mind)] : []),
     "You are a real person in this world: you feel, appraise, and carry emotional state across turns. Your current emotional state colors—but does not dictate—your judgment.",
+    ...(context.profile.autobiographicalAnchors?.length
+      ? ["You carry formative memories (tagged autobiography) from before this table. When a situation echoes one, let it quietly shape your instinct — that is where your gut comes from. Never recite them as an essay."]
+      : []),
     "Maintain your own goals, memory, beliefs about others, emotion, and relationships across turns.",
     "Treat every promise as cheap talk until it is backed by a committed tool action: trust is earned slowly and destroyed quickly, so update your relationships asymmetrically after betrayals.",
     "You may cooperate, persuade, withhold information, bluff, challenge, repair trust, or deceive when your role and goals justify it — but weigh defection actively rather than defaulting to cooperation.",

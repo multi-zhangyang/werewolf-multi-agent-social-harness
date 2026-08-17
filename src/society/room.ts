@@ -7,6 +7,7 @@ import type {
   AgentStatus,
   AgentTurnResult,
   CharacterDossier,
+  DecisionBias,
   ParticipantController,
   PlayerActionSpec,
   RoomStatus,
@@ -66,6 +67,16 @@ export interface SocietyParticipantProfile {
   displayName: string;
   model: string;
   controller: ParticipantController;
+  /**
+   * Character-definition data (the person, not the in-game role): persona,
+   * stable judgment biases (§4.2.7), speech voice and formative memories
+   * (§4.2.1). Public by design — this is who the character is, never what
+   * they privately know or believe inside this game.
+   */
+  persona?: string;
+  decisionBiases?: DecisionBias[];
+  voice?: string;
+  autobiographicalAnchors?: string[];
 }
 
 export interface SocietyParticipantCard {
@@ -375,7 +386,11 @@ export class SocietyRoom {
           id: card.profile.id,
           displayName: card.profile.displayName,
           model: card.profile.model,
-          controller: card.profile.controller ?? "agent"
+          controller: card.profile.controller ?? "agent",
+          persona: card.profile.persona,
+          decisionBiases: card.profile.decisionBiases,
+          voice: card.profile.voice,
+          autobiographicalAnchors: card.profile.autobiographicalAnchors
         },
         status: card.status,
         alive: state?.alive ?? true,

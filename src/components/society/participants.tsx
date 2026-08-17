@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Brain, Crown, Gauge, Pause, Play, Skull, Zap } from "lucide-react";
-import type { AgentMindState } from "@/society/contracts";
-import type { SocietyParticipantCard } from "@/society/room";
+import type { AgentMindState, DecisionBias } from "@/society/contracts";
+import type { SocietyParticipantCard, SocietyParticipantProfile } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -168,6 +168,7 @@ function MindSheet({ participant, activity, onToggleAgentPause, onOpenChange }: 
                     <p className="text-xs leading-5 text-amber-200/90">该参与者已被暂停：讨论阶段它会保持沉默，绑定行动阶段房间会停下来等待恢复——系统不会替它做任何决定。</p>
                   </section>
                 ) : null}
+                <CharacterSection profile={participant.profile} />
                 {mind ? (
                   <>
                     <MoodSection mind={mind} />
@@ -248,6 +249,77 @@ function pressureLabel(level: string): string {
     "hard-guard": "硬限保护"
   };
   return labels[level] ?? level;
+}
+
+/**
+ * The character's stable definition (§4.2.1 / §4.2.7): persona, voice, a few
+ * fixed judgment biases and formative memories. This is who the person is —
+ * it never reveals their in-game role, private beliefs or hidden knowledge.
+ */
+function CharacterSection({ profile }: { profile: SocietyParticipantProfile }): ReactNode {
+  const hasDefinition = Boolean(profile.persona || profile.voice || profile.decisionBiases?.length || profile.autobiographicalAnchors?.length);
+  if (!hasDefinition) return null;
+  return (
+    <section>
+      <SectionTitle>人物底色</SectionTitle>
+      <div className="space-y-2">
+        {profile.persona ? <p className="text-sm leading-6 text-foreground/85">{profile.persona}</p> : null}
+        {profile.voice ? <p className="text-xs leading-5 text-muted-foreground">口吻：{profile.voice}</p> : null}
+        {profile.decisionBiases?.length ? (
+          <div>
+            <div className="flex flex-wrap gap-1.5">
+              {profile.decisionBiases.map((bias) => (
+                <span key={bias} className="rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground" title={biasNote(bias)}>
+                  {biasLabel(bias)}
+                </span>
+              ))}
+            </div>
+            <p className="mt-1.5 text-[10px] leading-4 text-muted-foreground/60">稳定的认知倾向，属于人物底色：它们让同一件事在不同人眼里不一样，但不决定任何一次行动。</p>
+          </div>
+        ) : null}
+        {profile.autobiographicalAnchors?.length ? (
+          <div className="rounded-lg border border-border/60 bg-muted/30 p-3">
+            <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">自传记忆——塑造本能的经历</p>
+            <ul className="space-y-1">
+              {profile.autobiographicalAnchors.map((anchor, index) => (
+                <li key={index} className="text-xs leading-5 text-muted-foreground/90">{anchor}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function biasLabel(bias: DecisionBias): string {
+  const labels: Record<DecisionBias, string> = {
+    confirmation: "确认偏误",
+    "loss-aversion": "损失厌恶",
+    "sunk-cost": "沉没成本",
+    "in-group": "圈内偏好",
+    "authority-sensitivity": "权威敏感",
+    "betrayal-hypervigilance": "背叛警觉",
+    "overconfident-lie-detection": "自信识谎",
+    "self-consistency": "立场一贯",
+    "recency-weighting": "近期加权"
+  };
+  return labels[bias];
+}
+
+function biasNote(bias: DecisionBias): string {
+  const notes: Record<DecisionBias, string> = {
+    confirmation: "更倾向于寻找支持自己当前判断的证据",
+    "loss-aversion": "失去已有之物的痛，大于得到同等的快乐",
+    "sunk-cost": "已经投入过的路线，更难放手",
+    "in-group": "更偏向自己人，对外来信号打折",
+    "authority-sensitivity": "对资历与权威的声音更易服从",
+    "betrayal-hypervigilance": "过度警觉背叛，信任掉得快、回得慢",
+    "overconfident-lie-detection": "高估自己识破谎言的能力",
+    "self-consistency": "公开立场一旦形成，倾向升级捍卫而非回头",
+    "recency-weighting": "近期事件压过长期规律"
+  };
+  return notes[bias];
 }
 
 function MoodSection({ mind }: { mind: AgentMindState }): ReactNode {

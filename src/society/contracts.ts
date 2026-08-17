@@ -87,6 +87,13 @@ export interface AgentProfile {
   temperament?: AgentTemperament;
   /** A few stable judgment biases this character lives with (§4.2.7). */
   decisionBiases?: DecisionBias[];
+  /**
+   * Autobiographical anchors (§4.2.1): short formative memories — childhood,
+   * key wins, betrayals, the source of this character's values. Seeded into
+   * the agent's associative memory as high-salience identity memories so a
+   * situation that echoes them can surface why this person reacts this way.
+   */
+  autobiographicalAnchors?: string[];
   /** How this character speaks: pacing, register, verbal habits. */
   voice?: string;
   /** Emotion-regulation strategy, per Gross-style process model research. */
