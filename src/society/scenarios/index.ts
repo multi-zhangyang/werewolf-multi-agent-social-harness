@@ -10,6 +10,8 @@ import { AvalonWorld } from "./avalon";
 import { CentipedeGameWorld } from "./centipedeGame";
 import { ChickenGameWorld } from "./chickenGame";
 import { StagHuntWorld } from "./stagHunt";
+import { NegotiationWorld } from "./negotiationGame";
+import { LiarsDiceWorld } from "./liarsDice";
 import { ALL_SCENARIOS, SCENARIO_METADATA } from "./metadata";
 
 export { ALL_SCENARIOS, SCENARIO_METADATA } from "./metadata";
@@ -35,6 +37,8 @@ export function createWorld(input: {
   if (input.scenarioId === "centipede-game") return new CentipedeGameWorld(input.roomId, metadata, input.profiles, input.rounds);
   if (input.scenarioId === "chicken-game") return new ChickenGameWorld(input.roomId, metadata, input.profiles, input.rounds);
   if (input.scenarioId === "stag-hunt") return new StagHuntWorld(input.roomId, metadata, input.profiles, input.rounds);
+  if (input.scenarioId === "negotiation-game") return new NegotiationWorld(input.roomId, metadata, input.profiles, input.rounds);
+  if (input.scenarioId === "liars-dice") return new LiarsDiceWorld(input.roomId, metadata, input.profiles, input.rounds);
   return new WerewolfWorld(input.roomId, metadata, input.profiles, input.rounds);
 }
 

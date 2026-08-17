@@ -250,7 +250,8 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     const result: RoundResult = { round: this.round, moves: { [ids[0]]: left, [ids[1]]: right }, payoffs: { [ids[0]]: payoffs[0], [ids[1]]: payoffs[1] }, text };
     this.history.push(result);
     for (const id of ids) this.lastExperiences.set(id, `${text} Your move was ${result.moves[id]}. Your score is now ${this.scores.get(id)}.`);
-    this.addLog(text, this.round);
+    const beat = left === right ? (left === "cooperate" ? "promise-kept" as const : undefined) : "betrayal" as const;
+    this.addLog(text, this.round, beat);
     this.choices.clear();
     if (this.round >= this.totalRounds) {
       this.round = this.totalRounds + 1;

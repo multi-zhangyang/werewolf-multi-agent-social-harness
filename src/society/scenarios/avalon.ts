@@ -348,7 +348,7 @@ export class AvalonWorld extends SocialWorldBase {
         ? `${this.profiles.get(actorId)?.displayName} identified ${this.profiles.get(targetId)?.displayName} as Merlin. The loyal cause falls; evil wins.`
         : `${this.profiles.get(actorId)?.displayName} missed — ${this.profiles.get(targetId)?.displayName} was not Merlin. The loyal side wins.`;
       for (const id of this.profiles.keys()) this.lastExperiences.set(id, `${this.outcome} Final roles: ${[...this.roles].map(([memberId, memberRole]) => `${memberId}=${memberRole}`).join(", ")}.`);
-      this.addLog(this.outcome, this.quest);
+      this.addLog(this.outcome, this.quest, correct ? "win" : "misplay");
       this.finish();
       return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, correct, targetId } };
     }
@@ -607,7 +607,7 @@ export class AvalonWorld extends SocialWorldBase {
     const text = approved
       ? `Quest ${this.quest}: the table approved team [${team.join(", ")}] with ${approveCount} votes.`
       : `Quest ${this.quest}: the table rejected team [${team.join(", ")}] with ${approveCount} approvals.`;
-    this.addLog(text, this.quest);
+    this.addLog(text, this.quest, approved ? "alliance" : undefined);
     if (approved) {
       this.rejections = 0;
       this.phase = "quest";
@@ -685,7 +685,7 @@ export class AvalonWorld extends SocialWorldBase {
         });
       }
     }
-    this.addLog(text, this.quest);
+    this.addLog(text, this.quest, outcome === "fail" ? "betrayal" : "promise-kept");
     if (this.failures >= 2) {
       this.winners = this.factionMembers(["assassin", "mordred"]);
       this.outcome = "两次任务失败，内奸得逞，圆桌陷落。";

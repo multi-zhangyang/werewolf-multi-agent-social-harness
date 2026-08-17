@@ -349,7 +349,8 @@ export class UltimatumWorld extends SocialWorldBase {
         `Round ${this.round}: ${this.profiles.get(proposerId)?.displayName} offered ${offer} of ${this.pot}; ${this.profiles.get(responderId)?.displayName} ${accepted ? "accepted" : "rejected"}. Your payoff was ${payoffs[id]}. Roles reverse on the next round.`
       );
     }
-    this.addLog(`第 ${this.round} 轮结算：提议 ${offer}/${this.pot}，回应者${accepted ? "接受" : "拒绝"}。`, this.round);
+    const beat = accepted ? (offer >= 4 ? "alliance" as const : undefined) : "misplay" as const;
+    this.addLog(`第 ${this.round} 轮结算：提议 ${offer}/${this.pot}，回应者${accepted ? "接受" : "拒绝"}。`, this.round, beat);
     this.offer = undefined;
     this.response = undefined;
     if (this.round >= this.totalRounds) {

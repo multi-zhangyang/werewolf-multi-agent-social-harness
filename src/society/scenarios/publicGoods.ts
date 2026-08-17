@@ -217,7 +217,14 @@ export class PublicGoodsWorld extends SocialWorldBase {
     this.history.push({ round: this.round, contributions, returns, pool, share: roundNumber(share) });
     const highest = Math.max(...this.contributions.values());
     const lowest = Math.min(...this.contributions.values());
-    this.addLog(`第 ${this.round} 轮结算：公共池 ${pool}，每人分得 ${formatNumber(share)}。最高投入 ${highest}，最低投入 ${lowest}。`, this.round);
+    const beat = highest === 0
+      ? undefined
+      : lowest === 0 && highest >= 3
+        ? "betrayal" as const
+        : lowest > 0 && lowest >= highest * 0.75
+          ? "promise-kept" as const
+          : undefined;
+    this.addLog(`第 ${this.round} 轮结算：公共池 ${pool}，每人分得 ${formatNumber(share)}。最高投入 ${highest}，最低投入 ${lowest}。`, this.round, beat);
     this.contributions.clear();
     if (this.round >= this.totalRounds) {
       this.round = this.totalRounds + 1;

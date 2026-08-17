@@ -51,11 +51,12 @@ event-driven, never self-reported.
 
 Each participant is a fully isolated SDK agent: its own `Agent` instance, its
 own `MemorySession` (id = room + actor), its own mind, its own associative
-memory store, its own context object and its own nested specialist team. A
-verification script (`npm run verify:isolation`) proves with real SDK objects
-that sessions, minds and memories never cross agents, and that a tool bound to
-one agent refuses to execute with another agent's context
-(`scopedContext` raises `CROSS_AGENT_CONTEXT_DETECTED`).
+memory store, its own context object and its own nested specialist team. The
+isolation is structural rather than asserted: sessions, minds and memory
+stores are constructed per actor in `participant.ts`, and every tool is bound
+to one actor — `scopedContext` raises `CROSS_AGENT_CONTEXT_DETECTED` if the SDK
+ever hands it another agent's run context, so a tool can never act as someone
+else.
 
 Context is also budgeted per agent (`src/society/context-manager.ts`): the
 model's context window is resolved by model id (`SOCIETY_MODEL_CONTEXTS`,

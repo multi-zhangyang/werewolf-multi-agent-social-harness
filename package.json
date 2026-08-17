@@ -35,8 +35,7 @@
     "server": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx src/server/index.ts",
     "typecheck": "tsc --noEmit --pretty false",
     "ci": "npm run typecheck && npm run build",
-    "society:server": "npm run server",
-    "verify:isolation": "tsx scripts/verify-isolation.mts"
+    "society:server": "npm run server"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",

@@ -1,8 +1,10 @@
 import type { ReactNode } from "react";
 import {
+  ArrowLeftRight,
   BrainCircuit,
   Castle,
   ChevronsLeftRight,
+  Dices,
   Gavel,
   HandCoins,
   Handshake,
@@ -124,7 +126,7 @@ export function SpeechBars({ className }: { className?: string }): ReactNode {
   return (
     <span className={cn("flex h-3 items-end gap-[3px]", className)} aria-hidden>
       {[0, 1, 2].map((bar) => (
-        <span key={bar} className="wave-bar w-[3px] rounded-full bg-emerald-500" style={{ height: `${[8, 12, 6][bar]}px`, animationDelay: `${bar * 140}ms` }} />
+        <span key={bar} className="wave-bar w-[3px] rounded-full bg-emerald-400" style={{ height: `${[8, 12, 6][bar]}px`, animationDelay: `${bar * 140}ms` }} />
       ))}
     </span>
   );
@@ -135,15 +137,15 @@ export function StatusDot({ status, className }: { status: AgentStatus | "runnin
   const tone = status === "error"
     ? "bg-red-500"
     : status === "paused" || status === "lobby"
-      ? "bg-amber-500"
+      ? "bg-amber-400"
       : status === "finished"
-        ? "bg-zinc-400"
+        ? "bg-muted-foreground/40"
         : live
-          ? "bg-emerald-500"
-          : "bg-zinc-300";
+          ? "bg-emerald-400"
+          : "bg-muted-foreground/40";
   return (
     <span className={cn("relative inline-flex size-1.5 rounded-full", tone, className)}>
-      {live ? <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-500/50" /> : null}
+      {live ? <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/50" /> : null}
     </span>
   );
 }
@@ -174,15 +176,17 @@ export function ScenarioIcon({ id, className }: { id: ScenarioId; className?: st
                 : id === "centipede-game" ? Waypoints
                   : id === "chicken-game" ? ChevronsLeftRight
                     : id === "stag-hunt" ? Sword
-                      : MoonStar;
+                      : id === "negotiation-game" ? ArrowLeftRight
+                        : id === "liars-dice" ? Dices
+                          : MoonStar;
   return <Icon className={className} />;
 }
 
 export function ChannelBadge({ channel }: { channel: SocialChannel }): ReactNode {
   const config: Record<SocialChannel, { label: string; className: string }> = {
-    public: { label: "公开", className: "border-zinc-200 bg-zinc-50 text-zinc-500" },
-    private: { label: "私聊", className: "border-violet-200 bg-violet-50 text-violet-600" },
-    team: { label: "阵营", className: "border-rose-200 bg-rose-50 text-rose-600" }
+    public: { label: "公开", className: "border-border bg-muted text-muted-foreground" },
+    private: { label: "私聊", className: "border-violet-400/30 bg-violet-400/10 text-violet-400" },
+    team: { label: "阵营", className: "border-rose-400/30 bg-rose-400/10 text-rose-400" }
   };
   const entry = config[channel];
   return (
@@ -194,9 +198,9 @@ export function ChannelBadge({ channel }: { channel: SocialChannel }): ReactNode
 
 /** Channel → surface styling so public/private/team reads at a glance. */
 export const channelSurface: Record<SocialChannel, string> = {
-  public: "border-zinc-200 bg-white",
-  private: "border-violet-200 bg-violet-50/60",
-  team: "border-rose-200 bg-rose-50/60"
+  public: "border-border bg-card",
+  private: "border-violet-400/30 bg-violet-400/10",
+  team: "border-rose-400/30 bg-rose-400/10"
 };
 
 export function ModelLabel({ model, className }: { model: string; className?: string }): ReactNode {
@@ -204,7 +208,7 @@ export function ModelLabel({ model, className }: { model: string; className?: st
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span data-model className={cn("truncate font-mono text-[10px] text-zinc-400", className)}>{label}</span>
+        <span data-model className={cn("truncate font-mono text-[10px] text-muted-foreground/80", className)}>{label}</span>
       </TooltipTrigger>
       <TooltipContent>{model}</TooltipContent>
     </Tooltip>
@@ -214,6 +218,33 @@ export function ModelLabel({ model, className }: { model: string; className?: st
 export function readableModel(model: string): string {
   const name = model.split("/").at(-1) ?? model;
   return name.replace(/^@/, "").replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+/** Localize scenario roles for observer display (werewolf + avalon). */
+export function roleLabelZh(role: string | undefined): string {
+  const labels: Record<string, string> = {
+    wolf: "狼人",
+    seer: "预言家",
+    jester: "小丑",
+    villager: "村民",
+    merlin: "梅林",
+    servant: "忠臣",
+    assassin: "刺客",
+    mordred: "莫德雷德"
+  };
+  return role ? labels[role] ?? role : "未知";
+}
+
+/** Faction tint for a role badge: red for deceivers, green for loyal, gold for seers. */
+export function roleTintClass(role: string | undefined): string {
+  if (!role) return "border-border bg-card text-muted-foreground";
+  const red = ["狼人", "刺客", "莫德雷德", "wolf", "assassin", "mordred"];
+  const gold = ["预言家", "梅林", "seer", "merlin"];
+  const violet = ["小丑", "jester"];
+  if (red.includes(role)) return "border-rose-400/30 bg-rose-400/10 text-rose-300";
+  if (gold.includes(role)) return "border-amber-400/30 bg-amber-400/10 text-amber-300";
+  if (violet.includes(role)) return "border-violet-400/30 bg-violet-400/10 text-violet-300";
+  return "border-emerald-400/30 bg-emerald-400/10 text-emerald-300";
 }
 
 export function formatTime(value: string): string {
@@ -248,14 +279,19 @@ export function eventLabel(name: string): string {
     assassinate_merlin: "刺杀梅林",
     centipede_move: "拿走或传递",
     chicken_choice: "闪避或硬冲",
-    hunt_choice: "猎鹿或猎兔"
+    hunt_choice: "猎鹿或猎兔",
+    submit_demand: "提交叫价",
+    liars_move: "叫价或质疑",
+    liars_challenge: "开盅质疑",
+    liars_bid_quantity: "喊个数",
+    liars_bid_face: "喊点数"
   };
   return labels[name] ?? name.replaceAll("_", " ");
 }
 
 export function SparkleDivider({ children }: { children?: ReactNode }): ReactNode {
   return (
-    <div className="flex items-center gap-2 text-zinc-400">
+    <div className="flex items-center gap-2 text-muted-foreground/80">
       <Sparkles className="size-3" />
       <span className="text-[10px] font-medium uppercase tracking-[0.18em]">{children}</span>
     </div>

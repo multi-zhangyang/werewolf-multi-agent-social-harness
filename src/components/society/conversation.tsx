@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Brain, Check, Send, Sparkles } from "lucide-react";
-import type { SocialMessage, WorldLogEntry } from "@/society/contracts";
+import { AlertTriangle, Brain, Check, Eye, HeartHandshake, RotateCcw, Send, ShieldCheck, ShieldX, Skull, Sparkles, TrendingUp, Trophy } from "lucide-react";
+import type { SocialMessage, StoryBeatKind, WorldLogEntry } from "@/society/contracts";
 import type { SocietyPlayerState, SocietyRoomSnapshot } from "@/society/room";
 import type { LiveAgentActivity } from "./use-room";
 import { Button } from "@/components/ui/button";
@@ -13,20 +13,23 @@ import {
   SpeechBars,
   channelSurface,
   eventLabel,
-  formatTime
+  formatTime,
+  roleLabelZh,
+  roleTintClass
 } from "./shared";
 
 type TimelineEntry =
-  | { kind: "log"; id: string; time: number; text: string; turn: number; phase: string }
+  | { kind: "log"; id: string; time: number; text: string; turn: number; phase: string; beat?: StoryBeatKind }
   | { kind: "message"; id: string; time: number; message: SocialMessage };
 
 interface ConversationProps {
   room: SocietyRoomSnapshot;
   activity: Record<string, LiveAgentActivity>;
   onAction: (action: string, payload: unknown) => Promise<void>;
+  onReplay?: () => void;
 }
 
-export function Conversation({ room, activity, onAction }: ConversationProps): ReactNode {
+export function Conversation({ room, activity, onAction, onReplay }: ConversationProps): ReactNode {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [draft, setDraft] = useState("");
   const entries = useTimeline(room.world.messages, room.world.log);
@@ -49,18 +52,22 @@ export function Conversation({ room, activity, onAction }: ConversationProps): R
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center gap-3 border-b border-zinc-200/80 bg-white px-6 py-4">
-        <div className="flex size-8 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500">
-          <Sparkles className="size-4 text-emerald-600" />
-        </div>
+      <div className="flex items-center gap-3 border-b border-border/80 bg-card/60 px-6 py-3">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium tracking-tight">{room.world.summary}</p>
-          <p className="mt-0.5 text-xs text-zinc-400">实时直播 · 发言与行动</p>
         </div>
+        <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="live-pulse size-1.5 rounded-full bg-emerald-400" />
+          实时直播
+        </span>
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="px-6 py-6">
+        <div className="mx-auto max-w-[760px] px-6 py-6">
+          {room.world.status === "finished" ? (
+            <ResultCard room={room} onReplay={onReplay} />
+          ) : null}
+
           <LiveAgents room={room} activity={activity} names={names} />
 
           <div className="space-y-5">
@@ -86,10 +93,10 @@ export function Conversation({ room, activity, onAction }: ConversationProps): R
       </ScrollArea>
 
       {human?.waiting ? (
-        <div className="border-t border-zinc-200 bg-white px-6 py-4">
+        <div className="border-t border-border/80 bg-card/80 px-6 py-4">
           {waitingLabel ? (
-            <p className="mb-3 text-xs font-medium text-zinc-500">
-              轮到你：<span className="text-zinc-900">{waitingLabel}</span>
+            <p className="mb-3 text-xs font-medium text-muted-foreground">
+              轮到你：<span className="text-foreground">{waitingLabel}</span>
             </p>
           ) : null}
           <div className="space-y-3">
@@ -100,9 +107,9 @@ export function Conversation({ room, activity, onAction }: ConversationProps): R
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => { if (event.key === "Enter") void submit(); }}
                   placeholder="发言…"
-                  className="h-11 flex-1 rounded-lg border border-zinc-200 bg-white px-5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-500 focus:outline-none"
+                  className="h-11 flex-1 rounded-lg border border-input bg-card px-5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:border-ring focus:outline-none"
                 />
-                <Button size="icon" className="size-11 rounded-lg bg-foreground text-background hover:bg-zinc-800" disabled={!draft.trim()} onClick={() => void submit()}>
+                <Button size="icon" className="size-11 rounded-lg bg-foreground text-background hover:bg-foreground/85" disabled={!draft.trim()} onClick={() => void submit()}>
                   <Send className="size-4" />
                 </Button>
               </div>
@@ -115,9 +122,81 @@ export function Conversation({ room, activity, onAction }: ConversationProps): R
   );
 }
 
+/** The reveal: once the world ends, the stage shows who won and why. */
+function ResultCard({ room, onReplay }: { room: SocietyRoomSnapshot; onReplay?: () => void }): ReactNode {
+  const world = room.world;
+  const winners = (world.details.winners ?? []) as string[] | undefined;
+  const names = new Map(room.participants.map((p) => [p.profile.id, p.profile.displayName]));
+  const leaders = winners?.length
+    ? winners
+    : [...room.participants]
+        .filter((p) => p.score !== undefined)
+        .sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
+        .slice(0, 1)
+        .map((p) => p.profile.id);
+  const lastLog = world.log.at(-1)?.text;
+  const revealed = room.participants.filter((p) => p.role);
+  const faction = factionTitle(room, winners);
+  return (
+    <div className="reveal-up mb-8 overflow-hidden rounded-xl border border-border bg-gradient-to-b from-muted/60 to-card">
+      <div className="flex items-center gap-2 border-b border-border/60 px-5 py-3">
+        <Trophy className="size-4 text-amber-400" />
+        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">本局终章</p>
+      </div>
+      <div className="px-5 py-5">
+        <p className="enter-stage text-2xl font-semibold tracking-tight" style={{ animationDelay: "80ms" }}>{faction}</p>
+        <p className="enter-stage mt-1 text-sm text-foreground/80" style={{ animationDelay: "200ms" }}>
+          {leaders.length ? `${leaders.map((id) => names.get(id) ?? id).join("、")}` : ""}
+        </p>
+        {lastLog ? <p className="enter-stage mt-2 text-sm leading-6 text-muted-foreground" style={{ animationDelay: "320ms" }}>{lastLog}</p> : null}
+        {revealed.length ? (
+          <div className="enter-stage mt-4 flex flex-wrap gap-2" style={{ animationDelay: "440ms" }}>
+            {revealed.map((participant) => (
+              <span
+                key={participant.profile.id}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs",
+                  roleTintClass(participant.role),
+                  !participant.alive && "opacity-60"
+                )}
+              >
+                {participant.profile.displayName}
+                <span className="font-medium">{roleLabelZh(participant.role)}</span>
+              </span>
+            ))}
+          </div>
+        ) : null}
+        <div className="enter-stage mt-4 flex flex-wrap items-center gap-3" style={{ animationDelay: "560ms" }}>
+          {onReplay ? (
+            <Button size="sm" className="rounded-lg bg-foreground px-4 text-background hover:bg-foreground/85" onClick={onReplay}>
+              <RotateCcw className="size-3.5" />
+              同场景再来一局
+            </Button>
+          ) : null}
+          <span className="text-xs text-muted-foreground/80">角色们会带着这一局的记忆与恩怨进入下一场</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Faction title for the finale, derived from revealed roles. */
+function factionTitle(room: SocietyRoomSnapshot, winners?: string[]): string {
+  const roles = new Map(room.participants.map((p) => [p.profile.id, roleLabelZh(p.role)]));
+  const winning = winners?.length ? winners : [];
+  const winnerRoles = winning.map((id) => roles.get(id) ?? "");
+  if (winnerRoles.includes("小丑")) return "小丑达成了目标 —— 被投出去就是胜利";
+  const deceptive = ["狼人", "刺客", "莫德雷德"];
+  const faithful = ["村民", "忠臣"];
+  if (winnerRoles.some((role) => deceptive.includes(role))) return "欺骗阵营胜利";
+  if (winnerRoles.some((role) => faithful.includes(role))) return "忠诚阵营胜利";
+  if (winnerRoles.includes("预言家") || winnerRoles.includes("梅林")) return "忠诚阵营胜利";
+  return winners?.length ? "胜利者已经产生" : "这一局已经落幕";
+}
+
 function CastingSlate({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   return (
-    <div className="relative flex min-h-56 flex-col items-center justify-center overflow-hidden rounded-xl border border-zinc-200 bg-white">
+    <div className="relative flex min-h-56 flex-col items-center justify-center overflow-hidden rounded-xl border border-border bg-card">
       <div className="shimmer absolute inset-0" aria-hidden />
       <div className="relative flex items-center gap-3">
         {room.participants.slice(0, 5).map((participant, index) => (
@@ -126,10 +205,10 @@ function CastingSlate({ room }: { room: SocietyRoomSnapshot }): ReactNode {
             name={participant.profile.displayName}
             index={index}
             size={index === 2 ? "lg" : "md"}
-            />
+          />
         ))}
       </div>
-      <p className="relative mt-4 font-mono text-[10px] uppercase tracking-[0.3em] text-zinc-400">正在唤醒世界</p>
+      <p className="relative mt-4 font-mono text-[10px] uppercase tracking-[0.3em] text-muted-foreground">正在唤醒世界</p>
     </div>
   );
 }
@@ -161,43 +240,43 @@ function LiveAgents({ room, activity, names }: {
                   ? "心中盘算"
                   : "思考中";
         return (
-          <div key={participant.profile.id} className="enter-stage overflow-hidden rounded-lg border border-zinc-200 bg-white">
+          <div key={participant.profile.id} className="enter-stage overflow-hidden rounded-lg border border-border bg-card">
             <div className="flex items-center gap-3 px-4 py-3">
               <AgentPresence name={participant.profile.displayName} index={indexOf(participant.profile.id)} size="md" status={participant.status} />
               <div className="min-w-0 flex-1">
-                <p className="flex items-center gap-2 text-sm font-medium text-zinc-900">
+                <p className="flex items-center gap-2 text-sm font-medium">
                   {participant.profile.displayName}
-                  {participant.status === "speaking" ? <SpeechBars /> : <span className="live-pulse size-1.5 rounded-full bg-emerald-500" />}
+                  {participant.status === "speaking" ? <SpeechBars /> : <span className="live-pulse size-1.5 rounded-full bg-emerald-400" />}
                 </p>
-                <p className="truncate text-xs text-zinc-400">{caption}</p>
+                <p className="truncate text-xs text-muted-foreground">{caption}</p>
               </div>
-              <span className="nums font-mono text-[10px] text-zinc-300">{formatTime(state?.at ?? new Date().toISOString())}</span>
+              <span className="nums font-mono text-[10px] text-muted-foreground/50">{formatTime(state?.at ?? new Date().toISOString())}</span>
             </div>
             {state?.reasoning ? (
-              <div className="mx-4 mb-3 rounded-lg border border-sky-200 bg-sky-50/60 px-3.5 py-2.5">
-                <p className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-sky-600">
+              <div className="mx-4 mb-3 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3.5 py-2.5">
+                <p className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-sky-300">
                   <Brain className="size-3" /> 内心推理
                 </p>
-                <p className="stream-caret line-clamp-4 font-mono text-xs leading-5 text-zinc-500">{state.reasoning}</p>
+                <p className="stream-caret line-clamp-4 font-mono text-xs leading-5 text-sky-100/80">{state.reasoning}</p>
               </div>
             ) : null}
             {state?.thought ? (
-              <div className="mx-4 mb-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3.5 py-2.5">
-                <p className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-400">
+              <div className="mx-4 mb-3 rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
+                <p className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
                   <Brain className="size-3" /> {thoughtLabel(state.thought.kind)}
                 </p>
-                <p className="stream-caret line-clamp-4 text-xs leading-5 text-zinc-500">{state.thought.text}</p>
+                <p className="stream-caret line-clamp-4 text-xs leading-5 text-muted-foreground">{state.thought.text}</p>
               </div>
             ) : null}
             {state?.text ? (
-              <div className="mx-4 mb-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3.5 py-2.5">
-                <p className="stream-caret line-clamp-3 text-xs leading-5 text-zinc-600">{state.text}</p>
+              <div className="mx-4 mb-3 rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
+                <p className="stream-caret line-clamp-3 text-xs leading-5 text-foreground/80">{state.text}</p>
               </div>
             ) : null}
             {state?.compacted ? (
-              <div className="mx-4 mb-3 rounded-lg border border-amber-200 bg-amber-50/60 px-3.5 py-2">
-                <p className="font-mono text-[10px] uppercase tracking-widest text-amber-600">记忆压缩</p>
-                <p className="mt-0.5 text-xs leading-5 text-amber-800">{state.compacted}</p>
+              <div className="mx-4 mb-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3.5 py-2">
+                <p className="font-mono text-[10px] uppercase tracking-widest text-amber-300">记忆压缩</p>
+                <p className="mt-0.5 text-xs leading-5 text-amber-100/80">{state.compacted}</p>
               </div>
             ) : null}
           </div>
@@ -214,27 +293,55 @@ function thoughtLabel(kind: "reflection" | "mind-read" | "plan"): string {
 function WaveDivider({ wave }: { wave: number }): ReactNode {
   return (
     <div className="flex items-center gap-4 pt-1">
-      <div className="h-px flex-1 bg-zinc-200" />
-      <span className="rounded-full border border-zinc-200 bg-white px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-400">
+      <div className="h-px flex-1 bg-border" />
+      <span className="rounded-full border border-border bg-card px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
         {wave === 1 ? "开场发言" : `回应第 ${wave - 1} 轮`}
       </span>
-      <div className="h-px flex-1 bg-zinc-200" />
+      <div className="h-px flex-1 bg-border" />
     </div>
   );
 }
 
 function ActDivider({ entry }: { entry: Extract<TimelineEntry, { kind: "log" }> }): ReactNode {
+  const beat = entry.beat ? BEATS[entry.beat] : undefined;
+  if (beat) {
+    const Icon = beat.icon;
+    return (
+      <div className="enter-stage flex items-center gap-3 rounded-lg border border-border/70 bg-card px-4 py-3">
+        <span className={cn("flex size-7 shrink-0 items-center justify-center rounded-full border", beat.chip)}>
+          <Icon className="size-3.5" />
+        </span>
+        <div className="min-w-0">
+          <p className={cn("font-mono text-[10px] uppercase tracking-[0.2em]", beat.labelColor)}>
+            {beat.label} · 第 {entry.turn} 幕
+          </p>
+          <p className="mt-0.5 text-sm font-medium leading-5 text-foreground/90">{entry.text}</p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex items-center gap-5 py-2">
-      <div className="h-px flex-1 bg-gradient-to-r from-transparent to-zinc-200" />
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent to-border" />
       <div className="text-center">
-        <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-zinc-400">第 {entry.turn} 幕</p>
-        <p className="mt-1 text-sm font-medium tracking-tight text-zinc-700">{entry.text}</p>
+        <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-muted-foreground">第 {entry.turn} 幕</p>
+        <p className="mt-1 text-sm font-medium tracking-tight text-foreground/90">{entry.text}</p>
       </div>
-      <div className="h-px flex-1 bg-gradient-to-l from-transparent to-zinc-200" />
+      <div className="h-px flex-1 bg-gradient-to-l from-transparent to-border" />
     </div>
   );
 }
+
+const BEATS: Record<StoryBeatKind, { label: string; icon: typeof Trophy; chip: string; labelColor: string }> = {
+  betrayal: { label: "背叛", icon: Skull, chip: "border-rose-400/40 bg-rose-400/10 text-rose-300", labelColor: "text-rose-300/80" },
+  "deception-exposed": { label: "谎言拆穿", icon: Eye, chip: "border-amber-400/40 bg-amber-400/10 text-amber-300", labelColor: "text-amber-300/80" },
+  alliance: { label: "结盟", icon: HeartHandshake, chip: "border-emerald-400/40 bg-emerald-400/10 text-emerald-300", labelColor: "text-emerald-300/80" },
+  "promise-kept": { label: "承诺兑现", icon: ShieldCheck, chip: "border-emerald-400/40 bg-emerald-400/10 text-emerald-300", labelColor: "text-emerald-300/80" },
+  "promise-broken": { label: "背弃承诺", icon: ShieldX, chip: "border-rose-400/40 bg-rose-400/10 text-rose-300", labelColor: "text-rose-300/80" },
+  comeback: { label: "逆转", icon: TrendingUp, chip: "border-sky-400/40 bg-sky-400/10 text-sky-300", labelColor: "text-sky-300/80" },
+  misplay: { label: "失手", icon: AlertTriangle, chip: "border-orange-400/40 bg-orange-400/10 text-orange-300", labelColor: "text-orange-300/80" },
+  win: { label: "决胜", icon: Sparkles, chip: "border-amber-400/40 bg-amber-400/10 text-amber-300", labelColor: "text-amber-300/80" }
+};
 
 function MessageRow({ entry, names, activity, fresh }: {
   entry: Extract<TimelineEntry, { kind: "message" }>;
@@ -250,21 +357,21 @@ function MessageRow({ entry, names, activity, fresh }: {
       <AgentAvatar name={message.senderName} index={indexOf(message.senderId)} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold tracking-tight text-zinc-900">{message.senderName}</span>
+          <span className="text-sm font-semibold tracking-tight">{message.senderName}</span>
           <ChannelBadge channel={message.channel} />
           {message.recipientIds?.length ? (
-            <span className="flex items-center gap-1">
-              <span className="font-mono text-[10px] text-violet-500">私发给</span>
+            <span className="flex items-center gap-1 text-muted-foreground/80">
+              <span className="font-mono text-[10px]">私发给</span>
               {message.recipientIds.map((id) => (
                 <AgentAvatar key={id} name={names.get(id) ?? id} index={indexOf(id)} size="sm" />
               ))}
             </span>
           ) : null}
-          <span className="nums font-mono text-[10px] text-zinc-300">{formatTime(message.createdAt)}</span>
+          <span className="nums font-mono text-[10px] text-muted-foreground/60">{formatTime(message.createdAt)}</span>
         </div>
         <div className={cn(
-          "mt-1.5 rounded-lg rounded-tl-sm border px-4 py-3 text-[15px] leading-7 shadow-[0_1px_2px_rgba(0,0,0,0.03)]",
-          privateChat ? cn(channelSurface[message.channel], "opacity-95 text-zinc-800") : cn(channelSurface.public, "text-zinc-800")
+          "mt-1.5 rounded-lg border border-l-2 px-4 py-3 text-[15px] leading-7",
+          privateChat ? cn(channelSurface[message.channel], "opacity-95 text-foreground/90") : cn(channelSurface.public, "text-foreground/90")
         )}>
           <p className={cn(senderLive && "stream-caret")}>{message.text}</p>
         </div>
@@ -309,7 +416,7 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
             variant="outline"
             disabled={busy}
             onClick={() => void run({ [action.field ?? "choice"]: option.value === "true" })}
-            className="h-9 rounded-lg border-zinc-200 bg-white px-4 text-zinc-700 hover:bg-zinc-50 hover:text-zinc-900"
+            className="h-9 rounded-lg border-border bg-card px-4 text-foreground/80 hover:bg-muted hover:text-foreground"
           >
             {option.label}
           </Button>
@@ -330,9 +437,9 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
           step={action.step ?? 1}
           value={value}
           onChange={(event) => setValue(event.target.value)}
-          className="h-10 w-28 rounded-lg border border-zinc-200 bg-white px-4 font-mono text-sm text-zinc-900 focus:border-zinc-500 focus:outline-none"
+          className="h-10 w-28 rounded-lg border border-input bg-card px-4 font-mono text-sm text-foreground focus:border-ring focus:outline-none"
         />
-        <Button size="sm" disabled={busy} onClick={() => void run({ [action.field ?? "value"]: Number(value) })} className="h-10 rounded-lg bg-foreground px-5 text-background hover:bg-zinc-800">
+        <Button size="sm" disabled={busy} onClick={() => void run({ [action.field ?? "value"]: Number(value) })} className="h-10 rounded-lg bg-foreground px-5 text-background hover:bg-foreground/85">
           {action.label}
         </Button>
       </div>
@@ -344,7 +451,7 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
     return (
       <div className="flex flex-wrap items-center gap-2">
         {targets.map((target) => (
-          <Button key={target.id} size="sm" variant="outline" disabled={busy} onClick={() => void run({ [action.field ?? "targetId"]: target.id })} className="h-9 rounded-lg border-zinc-200 bg-white px-4 text-zinc-700 hover:bg-zinc-50 hover:text-zinc-900">
+          <Button key={target.id} size="sm" variant="outline" disabled={busy} onClick={() => void run({ [action.field ?? "targetId"]: target.id })} className="h-9 rounded-lg border-border bg-card px-4 text-foreground/80 hover:bg-muted hover:text-foreground">
             {target.displayName}
           </Button>
         ))}
@@ -375,8 +482,8 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
               className={cn(
                 "h-9 rounded-lg border px-4",
                 selected
-                  ? "border-zinc-800 bg-zinc-900 text-white hover:bg-zinc-800"
-                  : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                  ? "border-foreground/70 bg-foreground text-background hover:bg-foreground/85"
+                  : "border-border bg-card text-foreground/80 hover:bg-muted"
               )}
             >
               {selected ? <Check className="mr-1 size-3" /> : null}
@@ -388,7 +495,7 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
           size="sm"
           disabled={busy || team.length < min}
           onClick={() => void run({ [action.field ?? "memberIds"]: team })}
-          className="h-9 rounded-lg bg-foreground px-5 text-background hover:bg-zinc-800"
+          className="h-9 rounded-lg bg-foreground px-5 text-background hover:bg-foreground/85"
         >
           提出队伍（{team.length}/{max}）
         </Button>
@@ -412,7 +519,8 @@ function useTimeline(messages: SocialMessage[], log: WorldLogEntry[]): TimelineE
     time: Date.parse(entry.at),
     text: entry.text,
     turn: entry.turn,
-    phase: entry.phase
+    phase: entry.phase,
+    ...(entry.beat ? { beat: entry.beat } : {})
   }));
   return [...messageEntries, ...logEntries]
     .filter((entry) => Number.isFinite(entry.time))

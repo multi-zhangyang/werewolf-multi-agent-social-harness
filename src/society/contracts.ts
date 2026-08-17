@@ -11,7 +11,9 @@ export type ScenarioId =
   | "avalon"
   | "centipede-game"
   | "chicken-game"
-  | "stag-hunt";
+  | "stag-hunt"
+  | "negotiation-game"
+  | "liars-dice";
 export type RoomStatus = "lobby" | "running" | "paused" | "finished" | "error";
 export type SocialChannel = "public" | "private" | "team";
 export type AgentStatus = "lobby" | "thinking" | "acting" | "speaking" | "idle" | "finished" | "error";
@@ -216,12 +218,24 @@ export interface WorldAgentSnapshot {
   observerRole?: string;
 }
 
+export type StoryBeatKind =
+  | "betrayal"          // a trust that existed was broken
+  | "deception-exposed" // a lie or bluff got called out
+  | "alliance"          // two sides publicly bound themselves together
+  | "promise-kept"      // a commitment survived contact with self-interest
+  | "promise-broken"    // a commitment was dropped when it mattered
+  | "comeback"          // someone behind the curve turned the game
+  | "misplay"           // a self-inflicted, costly error
+  | "win";              // decisive, game-changing strike
+
 export interface WorldLogEntry {
   id: string;
   text: string;
   turn: number;
   phase: string;
   at: string;
+  /** Optional story-node tag: the beat this log marks, for the timeline. */
+  beat?: StoryBeatKind;
 }
 
 export interface WorldSnapshot {

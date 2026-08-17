@@ -415,6 +415,7 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   protected roleVisibleTo(viewerId: string | undefined, subjectId: string, alive: boolean): boolean {
+    if (this.status === "finished") return true;
     if (!alive || viewerId === subjectId) return true;
     return Boolean(viewerId && this.roles.get(viewerId) === "wolf" && this.roles.get(subjectId) === "wolf");
   }
@@ -473,7 +474,14 @@ export class WerewolfWorld extends SocialWorldBase {
       ? `${this.profiles.get(eliminatedId)?.displayName} was eliminated by vote and revealed as ${roleLabel(eliminatedRole)}.`
       : "The vote tied. Nobody was eliminated.";
     for (const id of this.profiles.keys()) this.lastExperiences.set(id, `Day ${this.day} vote: ${voteText} Votes: ${[...this.votes].map(([voter, target]) => `${voter}->${target}`).join(", ")}.`);
-    this.addLog(voteText, this.day);
+    const voteBeat = eliminatedId
+      ? eliminatedRole === "wolf"
+        ? "deception-exposed" as const
+        : eliminatedRole === "jester"
+          ? "win" as const
+          : "misplay" as const
+      : undefined;
+    this.addLog(voteText, this.day, voteBeat);
 
     // Appraisal events: every vote is a social act, every elimination a loss.
     for (const [voterId, targetId] of this.votes) {
@@ -564,7 +572,7 @@ export class WerewolfWorld extends SocialWorldBase {
         : "";
       this.lastExperiences.set(id, `Night ${this.day}: ${nightText}${privateResult}`);
     }
-    this.addLog(nightText, this.day);
+    this.addLog(nightText, this.day, targetId ? "betrayal" : undefined);
 
     if (targetId) {
       this.pushEvent(targetId, {
@@ -630,7 +638,7 @@ export class WerewolfWorld extends SocialWorldBase {
   private endGame(winners: string[], outcome: string): void {
     this.winners = winners;
     this.outcome = outcome;
-    this.addLog(outcome, this.day);
+    this.addLog(outcome, this.day, "win");
     for (const id of this.profiles.keys()) {
       const won = winners.includes(id);
       this.pushEvent(id, {

@@ -3,7 +3,6 @@ import { Brain, Crown, Skull, Zap } from "lucide-react";
 import type { AgentMindState } from "@/society/contracts";
 import type { SocietyParticipantCard } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Sheet,
@@ -13,7 +12,7 @@ import {
   SheetTitle
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
-import { AgentPresence, ModelLabel, StatusLabel } from "./shared";
+import { AgentPresence, ModelLabel, StatusLabel, roleTintClass } from "./shared";
 
 export function ParticipantsRail({ participants, humanActorId }: { participants: SocietyParticipantCard[]; humanActorId?: string }): ReactNode {
   const [selected, setSelected] = useState<SocietyParticipantCard | null>(null);
@@ -24,54 +23,62 @@ export function ParticipantsRail({ participants, humanActorId }: { participants:
         const isHuman = humanActorId === participant.profile.id;
         const dead = !participant.alive;
         const leader = leaderId !== undefined && participant.score !== undefined && participant.profile.id === leaderId;
+        const live = participant.status === "thinking" || participant.status === "acting" || participant.status === "speaking";
         return (
           <button
             key={participant.profile.id}
             onClick={() => setSelected(participant)}
             className={cn(
-              "group w-full rounded-lg border border-transparent bg-white px-3 py-2.5 text-left transition-all hover:border-zinc-200 hover:shadow-sm",
-              dead && "opacity-50",
-              isHuman && "border-zinc-300 bg-zinc-50",
+              "group relative w-full rounded-lg border border-transparent bg-card/60 px-3 py-2.5 text-left transition-all hover:border-border hover:bg-card",
+              dead && "opacity-45",
+              isHuman && "border-border bg-card",
+              live && "border-emerald-400/40",
               leader && "leader-wash"
             )}
           >
-            <div className="flex items-center gap-3">
+            <span
+              className={cn(
+                "absolute inset-y-2 left-0 w-0.5 rounded-full transition-opacity",
+                live ? "bg-emerald-400 opacity-100" : "opacity-0"
+              )}
+              aria-hidden
+            />
+            <div className="flex items-center gap-2.5">
               <div className="relative">
                 <AgentPresence name={participant.profile.displayName} index={index} size="lg" status={dead ? "finished" : participant.status} />
                 {dead ? (
-                  <span className="absolute -bottom-1 -right-1 flex size-5 items-center justify-center rounded-full bg-white text-zinc-400 ring-1 ring-zinc-200">
+                  <span className="absolute -bottom-1 -right-1 flex size-5 items-center justify-center rounded-full bg-background text-muted-foreground ring-1 ring-border">
                     <Skull className="size-3" />
                   </span>
                 ) : null}
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
-                  <span className="truncate text-sm font-semibold tracking-tight text-zinc-900">{participant.profile.displayName}</span>
+                  <span className="truncate text-sm font-semibold tracking-tight">{participant.profile.displayName}</span>
                   {isHuman ? (
-                    <span className="rounded bg-zinc-900 px-1.5 py-px text-[9px] font-bold text-white">你</span>
+                    <span className="rounded bg-foreground px-1.5 py-px text-[9px] font-bold text-background">你</span>
                   ) : null}
                   {participant.mind?.memories.some((memory) => memory.tags.includes("season")) ? (
-                    <span className="rounded border border-zinc-300 bg-white px-1.5 py-px text-[9px] font-medium text-zinc-500">老面孔</span>
+                    <span className="rounded border border-border bg-card px-1.5 py-px text-[9px] font-medium text-muted-foreground">老面孔</span>
                   ) : null}
                   {participant.role ? (
-                    <span className="rounded border border-zinc-200 bg-zinc-50 px-1.5 py-px text-[9px] text-zinc-500">{participant.role}</span>
+                    <span className={cn("rounded border px-1.5 py-px text-[9px]", roleTintClass(participant.role))}>{participant.role}</span>
                   ) : null}
                 </div>
-                <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-zinc-400">
+                <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
                   <StatusLabel status={dead ? "finished" : participant.status} />
-                  {participant.mood ? <span className="truncate text-zinc-500">· {participant.mood}</span> : null}
+                  {participant.mood ? <span className="truncate">· {participant.mood}</span> : null}
                 </div>
-                <ModelLabel model={participant.profile.model} className="mt-0.5 block max-w-40" />
               </div>
               <div className="text-right">
                 {participant.score !== undefined ? (
-                  <div className="nums flex items-center justify-end gap-1 font-mono text-base text-zinc-900">
-                    {leader ? <Crown className="size-3.5 text-amber-500" /> : null}
+                  <div className="nums flex items-center justify-end gap-1 font-mono text-base text-foreground">
+                    {leader ? <Crown className="size-3.5 text-amber-400" /> : null}
                     {participant.score}
                   </div>
                 ) : null}
                 {participant.energy !== undefined ? (
-                  <p className="nums mt-0.5 flex items-center justify-end gap-1 font-mono text-[10px] text-zinc-400">
+                  <p className="nums mt-0.5 flex items-center justify-end gap-1 font-mono text-[10px] text-muted-foreground/70">
                     <Zap className="size-2.5" />
                     {participant.energy}%
                   </p>
@@ -90,16 +97,17 @@ function MindSheet({ participant, onOpenChange }: { participant: SocietyParticip
   const mind = participant?.mind;
   return (
     <Sheet open={Boolean(participant)} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full border-zinc-200 bg-white text-foreground sm:max-w-lg">
+      <SheetContent className="w-full border-border bg-card text-foreground sm:max-w-lg">
         {participant ? (
           <>
-            <SheetHeader className="border-b border-zinc-100">
+            <SheetHeader className="border-b border-border/60">
               <div className="flex items-center gap-3">
                 <AgentPresence name={participant.profile.displayName} index={participant.profile.id.length} size="lg" status={participant.status} />
-                <div>
+                <div className="min-w-0">
                   <SheetTitle className="text-lg tracking-tight">{participant.profile.displayName}</SheetTitle>
-                  <SheetDescription className="text-zinc-400">
-                    {participant.role ?? "参与者"} · {participant.mood ?? participant.status}
+                  <SheetDescription className="flex flex-wrap items-center gap-2">
+                    <span>{participant.role ?? "参与者"} · {participant.mood ?? participant.status}</span>
+                    <ModelLabel model={participant.profile.model} />
                   </SheetDescription>
                 </div>
               </div>
@@ -117,9 +125,9 @@ function MindSheet({ participant, onOpenChange }: { participant: SocietyParticip
                   </>
                 ) : (
                   <div className="flex flex-col items-center justify-center py-16 text-center">
-                    <Brain className="size-8 text-zinc-300" />
-                    <p className="mt-3 text-sm text-zinc-500">等待智能体更新内心状态</p>
-                    <p className="mt-1 text-xs text-zinc-400">第一次行动后这里会显示情绪、目标、信念与记忆。</p>
+                    <Brain className="size-8 text-muted-foreground/50" />
+                    <p className="mt-3 text-sm text-muted-foreground">等待智能体更新内心状态</p>
+                    <p className="mt-1 text-xs text-muted-foreground/70">第一次行动后这里会显示情绪、目标、信念与记忆。</p>
                   </div>
                 )}
               </div>
@@ -135,13 +143,13 @@ function MoodSection({ mind }: { mind: AgentMindState }): ReactNode {
   return (
     <section>
       <SectionTitle>情绪状态</SectionTitle>
-      <div className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-4">
+      <div className="rounded-lg border border-border bg-muted/40 p-4">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-base font-semibold tracking-tight">{mind.mood.label}</p>
-            <p className="mt-0.5 text-xs leading-5 text-zinc-500">{mind.mood.description}</p>
+            <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{mind.mood.description}</p>
           </div>
-          <Badge variant="outline" className="border-zinc-200 bg-white font-mono text-zinc-500">
+          <Badge variant="outline" className="border-border bg-card font-mono text-muted-foreground">
             能量 {Math.round(mind.mood.energy * 100)}%
           </Badge>
         </div>
@@ -150,12 +158,12 @@ function MoodSection({ mind }: { mind: AgentMindState }): ReactNode {
             <Bar key={key} label={emotionLabel(key)} value={value} />
           ))}
         </div>
-        <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-zinc-200/80 pt-3">
+        <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-border/80 pt-3">
           {Object.entries(mind.mood.socialEmotions).map(([key, value]) => (
             <Bar key={key} label={socialEmotionLabel(key)} value={value} />
           ))}
         </div>
-        <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-zinc-200/80 pt-3">
+        <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-border/80 pt-3">
           {Object.entries(mind.mood.needs).map(([key, value]) => (
             <Bar key={key} label={needLabel(key)} value={value} />
           ))}
@@ -172,14 +180,14 @@ function GoalsSection({ mind }: { mind: AgentMindState }): ReactNode {
       <SectionTitle>目标</SectionTitle>
       <div className="space-y-2">
         {mind.goals.map((goal) => (
-          <div key={goal.id} className="rounded-lg border border-zinc-200 bg-white p-3">
+          <div key={goal.id} className="rounded-lg border border-border bg-card p-3">
             <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-medium text-zinc-800">{goal.description}</p>
-              <Badge variant="outline" className={cn("shrink-0 border-zinc-200 bg-zinc-50 text-[10px] text-zinc-500", goal.status === "satisfied" && "border-emerald-200 bg-emerald-50 text-emerald-600", goal.status === "abandoned" && "text-zinc-400")}>
+              <p className="text-sm font-medium text-foreground/90">{goal.description}</p>
+              <Badge variant="outline" className={cn("shrink-0 border-border bg-muted/50 text-[10px] text-muted-foreground", goal.status === "satisfied" && "border-emerald-400/30 bg-emerald-400/10 text-emerald-300", goal.status === "abandoned" && "text-muted-foreground/70")}>
                 {goal.status === "satisfied" ? "已达成" : goal.status === "abandoned" ? "已放弃" : "进行中"}
               </Badge>
             </div>
-            <p className="mt-1 text-xs text-zinc-500">{goal.progress}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{goal.progress}</p>
           </div>
         ))}
       </div>
@@ -194,9 +202,9 @@ function BeliefsSection({ mind }: { mind: AgentMindState }): ReactNode {
       <SectionTitle>对他人的判断</SectionTitle>
       <div className="space-y-2">
         {mind.beliefs.slice(-6).map((belief, index) => (
-          <div key={index} className="rounded-lg border border-zinc-200 bg-white p-3">
-            <p className="text-sm text-zinc-800">{belief.proposition}</p>
-            <p className="nums mt-1 font-mono text-[10px] text-zinc-400">
+          <div key={index} className="rounded-lg border border-border bg-card p-3">
+            <p className="text-sm text-foreground/90">{belief.proposition}</p>
+            <p className="nums mt-1 font-mono text-[10px] text-muted-foreground">
               {belief.subjectId} · 置信度 {Math.round(belief.confidence * 100)}% · {belief.source}
             </p>
           </div>
@@ -213,17 +221,17 @@ function RelationshipsSection({ mind }: { mind: AgentMindState }): ReactNode {
       <SectionTitle>关系</SectionTitle>
       <div className="space-y-2">
         {mind.relationships.map((relationship) => (
-          <div key={relationship.agentId} className="rounded-lg border border-zinc-200 bg-white p-3">
+          <div key={relationship.agentId} className="rounded-lg border border-border bg-card p-3">
             <div className="flex items-center justify-between">
-              <p className="text-sm font-medium text-zinc-800">{relationship.agentId}</p>
-              <p className="nums font-mono text-[10px] text-zinc-400">信任 {Math.round(relationship.trust * 100)}%</p>
+              <p className="text-sm font-medium text-foreground/90">{relationship.agentId}</p>
+              <p className="nums font-mono text-[10px] text-muted-foreground">信任 {Math.round(relationship.trust * 100)}%</p>
             </div>
             <div className="mt-2 grid grid-cols-3 gap-2">
               <Bar label="亲和" value={relationship.affinity} />
               <Bar label="尊重" value={relationship.respect} />
               <Bar label="张力" value={relationship.tension} />
             </div>
-            {relationship.note ? <p className="mt-2 text-xs text-zinc-500">{relationship.note}</p> : null}
+            {relationship.note ? <p className="mt-2 text-xs text-muted-foreground">{relationship.note}</p> : null}
           </div>
         ))}
       </div>
@@ -238,9 +246,9 @@ function DeliberationsSection({ mind }: { mind: AgentMindState }): ReactNode {
       <SectionTitle>最近盘算</SectionTitle>
       <div className="space-y-2">
         {mind.deliberations.slice(-4).reverse().map((deliberation, index) => (
-          <div key={index} className="rounded-lg border border-zinc-200 bg-white p-3">
-            <p className="font-mono text-[10px] uppercase tracking-widest text-zinc-400">{deliberationLabel(deliberation.kind)}</p>
-            <p className="mt-1 text-sm leading-5 text-zinc-600">{deliberation.text}</p>
+          <div key={index} className="rounded-lg border border-border bg-card p-3">
+            <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">{deliberationLabel(deliberation.kind)}</p>
+            <p className="mt-1 text-sm leading-5 text-foreground/80">{deliberation.text}</p>
           </div>
         ))}
       </div>
@@ -255,9 +263,9 @@ function MemoriesSection({ mind }: { mind: AgentMindState }): ReactNode {
       <SectionTitle>记忆</SectionTitle>
       <div className="space-y-2">
         {mind.memories.slice(-6).reverse().map((memory) => (
-          <div key={memory.id} className="rounded-lg border border-zinc-200 bg-white p-3">
-            <p className="text-sm leading-5 text-zinc-600">{memory.text}</p>
-            <p className="nums mt-1 font-mono text-[10px] text-zinc-400">
+          <div key={memory.id} className="rounded-lg border border-border bg-card p-3">
+            <p className="text-sm leading-5 text-foreground/80">{memory.text}</p>
+            <p className="nums mt-1 font-mono text-[10px] text-muted-foreground">
               T{memory.turn} · 显著性 {Math.round(memory.salience * 100)}%
             </p>
           </div>
@@ -272,18 +280,18 @@ function deliberationLabel(kind: string): string {
 }
 
 function SectionTitle({ children }: { children: ReactNode }): ReactNode {
-  return <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-zinc-400">{children}</h3>;
+  return <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">{children}</h3>;
 }
 
 function Bar({ label, value }: { label: string; value: number }): ReactNode {
   return (
     <div>
       <div className="nums mb-1 flex items-center justify-between text-[11px]">
-        <span className="text-zinc-500">{label}</span>
-        <span className="font-mono text-zinc-400">{Math.round(value * 100)}%</span>
+        <span className="text-muted-foreground">{label}</span>
+        <span className="font-mono text-muted-foreground/80">{Math.round(value * 100)}%</span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-zinc-100">
-        <div className="h-full rounded-full bg-zinc-700 transition-all" style={{ width: `${Math.max(0, Math.min(100, value * 100))}%` }} />
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+        <div className="h-full rounded-full bg-foreground/80 transition-all" style={{ width: `${Math.max(0, Math.min(100, value * 100))}%` }} />
       </div>
     </div>
   );

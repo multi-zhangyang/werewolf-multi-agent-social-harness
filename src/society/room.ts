@@ -208,7 +208,9 @@ export class SocietyRoom {
           ...(state?.score === undefined ? {} : { score: state.score }),
           ...(state?.observerRole ? { role: state.observerRole } : {}),
           ...(card.moodLabel ? { mood: card.moodLabel, energy: card.energy } : {}),
-          ...(card.mind ? { mind: card.mind } : {})
+          // Private minds belong to the observer seat only; a human player's
+          // snapshot must never expose another participant's inner state.
+          ...(actorId === undefined && card.mind ? { mind: card.mind } : {})
         };
       }),
       ...(actorId

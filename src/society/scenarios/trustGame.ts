@@ -370,7 +370,14 @@ export class TrustGameWorld extends SocialWorldBase {
       );
     }
     const reciprocal = investment > 0 && returnedAmount >= investment;
-    this.addLog(`第 ${this.round} 轮结算：投入 ${investment}，增长为 ${multipliedAmount}，返还 ${returnedAmount}。`, this.round);
+    const beat = investment === 0
+      ? undefined
+      : reciprocal
+        ? "promise-kept" as const
+        : returnedAmount === 0
+          ? "betrayal" as const
+          : "promise-broken" as const;
+    this.addLog(`第 ${this.round} 轮结算：投入 ${investment}，增长为 ${multipliedAmount}，返还 ${returnedAmount}。`, this.round, beat);
     this.investment = undefined;
     this.returnedAmount = undefined;
     if (this.round >= this.totalRounds) {

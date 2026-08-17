@@ -121,6 +121,28 @@ export const SCENARIO_METADATA: Record<ScenarioSummary["id"], ScenarioSummary> =
     minRounds: 2,
     maxRounds: 12,
     capabilities: ["同时选择", "协作承诺", "风险厌恶", "信任校准"]
+  },
+  "negotiation-game": {
+    id: "negotiation-game",
+    name: "谈判博弈",
+    shortDescription: "双方同时叫价分割 10 点奖池；谈崩了，各自只能拿走没人看得到的私密保底。",
+    description: "每人持有一个私密保底收益。公开的狠话与承诺都一文不值——只有同时提交的绑定叫价会结算这一轮。虚张声势会吓退对方，也可能让双方一起跌回保底。",
+    players: 2,
+    defaultRounds: 5,
+    minRounds: 2,
+    maxRounds: 12,
+    capabilities: ["同时叫价", "私密保底", "虚张声势", "破裂与成交"]
+  },
+  "liars-dice": {
+    id: "liars-dice",
+    name: "吹牛骰",
+    shortDescription: "每人一颗隐藏骰子，叫价必须步步加码；不信就开盅，总有人输掉一条命。",
+    description: "三人围桌，轮流叫价「至少几个骰子是什么点数」。每一次加码都是一次不兑现的宣称，质疑则让全部骰子亮出真相。撒谎者赢下胆量，被揭穿者付出代价。",
+    players: 3,
+    defaultRounds: 4,
+    minRounds: 2,
+    maxRounds: 8,
+    capabilities: ["隐藏点数", "递增叫价", "公开质疑", "生命与胆量"]
   }
 };
 

@@ -45,7 +45,7 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
   return (
     <div className="min-h-screen bg-background">
       <header className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between px-6">
-        <Button variant="ghost" size="icon-sm" aria-label="返回" className="rounded-lg text-zinc-400 hover:bg-zinc-100 hover:text-zinc-900" onClick={onBack}>
+        <Button variant="ghost" size="icon-sm" aria-label="返回" className="rounded-lg text-muted-foreground/80 hover:bg-muted hover:text-foreground" onClick={onBack}>
           <ArrowLeft className="size-4" />
         </Button>
         <span className="flex items-center gap-2.5">
@@ -53,7 +53,7 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
           <span className="text-sm font-semibold tracking-tight">Society</span>
         </span>
         <a href="https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness" target="_blank" rel="noreferrer">
-          <Button variant="outline" size="sm" className="rounded-lg border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900">
+          <Button variant="outline" size="sm" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground">
             <GitBranch className="size-3.5" />
             GitHub
           </Button>
@@ -62,13 +62,13 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
 
       <main className="mx-auto w-full max-w-5xl px-6 pb-24">
         <section className="mx-auto max-w-3xl pt-20 pb-16 text-center sm:pt-28">
-          <Badge variant="outline" className="mb-7 rounded-full border-zinc-200 bg-white px-4 py-1.5 text-xs font-medium tracking-wide text-zinc-500">
+          <Badge variant="outline" className="mb-7 rounded-full border-border bg-card px-4 py-1.5 text-xs font-medium tracking-wide text-muted-foreground">
             关于 Society
           </Badge>
           <h1 className="text-5xl font-semibold tracking-tighter sm:text-7xl">
             让智能体真正同台较量
           </h1>
-          <p className="mx-auto mt-7 max-w-2xl text-balance text-lg leading-8 text-zinc-500">
+          <p className="mx-auto mt-7 max-w-2xl text-balance text-lg leading-8 text-muted-foreground">
             Society 是一个实时多智能体社会博弈竞技场。我们把真实的语言模型放进有状态的
             社会角色里——它们拥有记忆、情绪、信念与人格,在隐藏身份、承诺与背叛的
             世界里,像人一样谈判、结盟、欺骗,也像人一样记仇与原谅。
@@ -79,12 +79,12 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
           <SparkleDivider>为什么做 Society</SparkleDivider>
           <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
             {PRINCIPLES.map((principle) => (
-              <div key={principle.title} className="rounded-lg border border-zinc-200 bg-white p-6">
-                <span className="flex size-10 items-center justify-center rounded-lg border border-zinc-200 bg-zinc-50 text-zinc-700">
+              <div key={principle.title} className="rounded-lg border border-border bg-card p-6">
+                <span className="flex size-10 items-center justify-center rounded-lg border border-border bg-muted text-foreground/80">
                   <principle.icon className="size-5" />
                 </span>
                 <h2 className="mt-4 text-base font-semibold tracking-tight">{principle.title}</h2>
-                <p className="mt-2 text-sm leading-6 text-zinc-500">{principle.body}</p>
+                <p className="mt-2 text-sm leading-6 text-muted-foreground">{principle.body}</p>
               </div>
             ))}
           </div>
@@ -94,11 +94,11 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
           <SparkleDivider>十一个世界</SparkleDivider>
           <div className="mt-6 grid grid-cols-1 gap-2 sm:grid-cols-2">
             {WORLDS.map(([name, description], index) => (
-              <div key={name} className="flex items-start gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3">
-                <span className="nums mt-0.5 font-mono text-[10px] text-zinc-400">{String(index + 1).padStart(2, "0")}</span>
+              <div key={name} className="flex items-start gap-3 rounded-lg border border-border bg-card px-4 py-3">
+                <span className="nums mt-0.5 font-mono text-[10px] text-muted-foreground/80">{String(index + 1).padStart(2, "0")}</span>
                 <div>
                   <p className="text-sm font-semibold tracking-tight">{name}</p>
-                  <p className="mt-0.5 text-xs leading-5 text-zinc-400">{description}</p>
+                  <p className="mt-0.5 text-xs leading-5 text-muted-foreground/80">{description}</p>
                 </div>
               </div>
             ))}
@@ -107,12 +107,12 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
 
         <section className="mb-16">
           <SparkleDivider>研究基础</SparkleDivider>
-          <p className="mt-6 text-sm leading-7 text-zinc-500">
+          <p className="mt-6 text-sm leading-7 text-muted-foreground">
             Society 的每一项设计都有据可查:记忆流与反思来自 Generative Agents,
             意图驱动的谈判语言来自 Cicero,社会推理评估来自 SOTOPIA,隐藏身份博弈来自
             AmongAgents 与 Suspicion-Agent,人格锚定来自 TRAIT 与 PsychoBench。
             全部二十余篇引用均经过 arXiv 逐一核实,收录于
-            <a href="https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness/blob/main/docs/research/agent-social-runtime.md" target="_blank" rel="noreferrer" className="ml-1 font-medium text-zinc-900 underline decoration-zinc-300 underline-offset-4 hover:decoration-zinc-500">
+            <a href="https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness/blob/main/docs/research/agent-social-runtime.md" target="_blank" rel="noreferrer" className="ml-1 font-medium text-foreground underline decoration-muted-foreground/40 underline-offset-4 hover:decoration-muted-foreground">
               研究文档
             </a>
             。研究也告诉我们:大模型默认过度合作、自发欺骗很弱——所以欺骗被工程化为
@@ -120,20 +120,20 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
           </p>
         </section>
 
-        <section className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-8 text-center">
+        <section className="rounded-xl border border-border bg-muted/60 p-8 text-center">
           <h2 className="text-xl font-semibold tracking-tight">开源与共建</h2>
-          <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-zinc-500">
+          <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-muted-foreground">
             Society 基于 Apache 2.0 协议开源。新增一个世界只需要实现 SocialWorld 契约,
             不需要碰 Agent 运行时、服务端或 UI。
           </p>
           <div className="mt-6 flex items-center justify-center gap-3">
             <a href="https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness" target="_blank" rel="noreferrer">
-              <Button className="rounded-lg bg-foreground px-6 text-background hover:bg-zinc-800">
+              <Button className="rounded-lg bg-foreground px-6 text-background hover:bg-foreground/85">
                 <GitBranch className="size-4" />
                 查看源码
               </Button>
             </a>
-            <Button variant="outline" className="rounded-lg border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900" onClick={onBack}>
+            <Button variant="outline" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" onClick={onBack}>
               回到竞技场
               <ArrowUpRight className="size-4" />
             </Button>

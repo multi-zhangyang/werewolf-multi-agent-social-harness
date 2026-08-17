@@ -4,44 +4,45 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Society design system — light, editorial, Vercel-flavored.
- * White surfaces, near-black ink, one-pixel zinc borders, tabular numerals,
- * Geist for display. Live signals are emerald, secrets violet, danger rose.
+ * Society design system — dark-first, cinematic, Vercel-flavored.
+ * Near-black neutral stage, white-on-black hairlines, Geist for display.
+ * Color belongs to the agents: emerald for live speech, sky for private
+ * reasoning, rose for suspicion, violet for secrets, amber for prestige.
  */
 
 :root {
   --radius: 0.5rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.145 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.96 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.3);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.145 0 0);
-  --chart-1: oklch(0.646 0.222 41.1);
-  --chart-2: oklch(0.6 0.118 184.7);
-  --chart-3: oklch(0.398 0.07 227.4);
-  --chart-4: oklch(0.828 0.189 84.4);
-  --chart-5: oklch(0.769 0.188 70.1);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.145 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.96 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --background: oklch(0.085 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.13 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.15 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.13 0 0);
+  --secondary: oklch(0.19 0 0);
+  --secondary-foreground: oklch(0.9 0 0);
+  --muted: oklch(0.19 0 0);
+  --muted-foreground: oklch(0.68 0 0);
+  --accent: oklch(0.22 0 0);
+  --accent-foreground: oklch(0.95 0 0);
+  --destructive: oklch(0.65 0.22 22);
+  --border: oklch(1 0 0 / 0.12);
+  --input: oklch(1 0 0 / 0.16);
+  --ring: oklch(0.85 0 0);
+  --chart-1: oklch(0.75 0.18 50);
+  --chart-2: oklch(0.7 0.15 195);
+  --chart-3: oklch(0.65 0.12 260);
+  --chart-4: oklch(0.8 0.16 95);
+  --chart-5: oklch(0.78 0.18 15);
+  --sidebar: oklch(0.1 0 0);
+  --sidebar-foreground: oklch(0.9 0 0);
+  --sidebar-primary: oklch(0.985 0 0);
+  --sidebar-primary-foreground: oklch(0.13 0 0);
+  --sidebar-accent: oklch(0.17 0 0);
+  --sidebar-accent-foreground: oklch(0.9 0 0);
+  --sidebar-border: oklch(1 0 0 / 0.1);
+  --sidebar-ring: oklch(0.6 0 0);
 }
 
 @theme inline {
@@ -91,7 +92,7 @@
   }
 
   html {
-    color-scheme: light;
+    color-scheme: dark;
   }
 
   body {
@@ -109,21 +110,21 @@
   }
 }
 
-/* Subtle paper grain: a whisper of radial light from the top, fine dot grid. */
+/* Stage light: a whisper of white radiance from above, fading to black. */
 body {
   background-image:
-    radial-gradient(1200px 500px at 50% -180px, oklch(0.97 0 0 / 0.9), transparent 70%);
+    radial-gradient(1100px 480px at 50% -160px, oklch(1 0 0 / 0.055), transparent 70%);
   background-repeat: no-repeat;
 }
 
 ::selection {
-  color: #fff;
-  background: #000;
+  color: #000;
+  background: #fff;
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: oklch(0.85 0 0) transparent;
+  scrollbar-color: oklch(0.26 0 0) transparent;
 }
 
 /* ---------------------------------------------------------------- motion */
@@ -149,7 +150,7 @@ body {
   position: absolute;
   inset: -3px;
   border-radius: 9999px;
-  border: 1px solid oklch(0.646 0.222 41.1 / 0.5);
+  border: 1px solid oklch(0.72 0.16 155 / 0.55);
   animation: halo 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
@@ -182,7 +183,7 @@ body {
 .stream-caret::after {
   content: "▋";
   margin-left: 2px;
-  color: oklch(0.145 0 0 / 0.4);
+  color: oklch(1 0 0 / 0.45);
   animation: caret-blink 1s steps(1) infinite;
 }
 
@@ -205,7 +206,7 @@ body {
 }
 
 .shimmer {
-  background-image: linear-gradient(110deg, transparent 40%, oklch(0.145 0 0 / 0.03) 50%, transparent 60%);
+  background-image: linear-gradient(110deg, transparent 40%, oklch(1 0 0 / 0.045) 50%, transparent 60%);
   background-size: 200% 100%;
   animation: shimmer 2.2s linear infinite;
 }
@@ -237,11 +238,28 @@ body {
 
 /* Gold wash for the leading player */
 .leader-wash {
-  background-image: linear-gradient(90deg, oklch(0.905 0.182 79.3 / 0.08), transparent 60%);
+  background-image: linear-gradient(90deg, oklch(0.85 0.15 85 / 0.09), transparent 60%);
 }
 
 .nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* Hero display gradient: white falling into the void. */
+.hero-ink {
+  background-image: linear-gradient(180deg, oklch(1 0 0) 0%, oklch(1 0 0 / 0.78) 55%, oklch(1 0 0 / 0.42) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Streaming dashes along social links in the hero stage */
+@keyframes dash-flow {
+  to { stroke-dashoffset: -32; }
+}
+
+.dash-flow {
+  animation: dash-flow 2.4s linear infinite;
 }
 
 /* Screenshot mode: strip provider/model identifiers from published shots. */

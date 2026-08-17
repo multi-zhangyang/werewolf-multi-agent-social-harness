@@ -247,7 +247,8 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
     }
     this.history.push({ round: this.round, values, bids, winnerId, price, payoffs });
     const winnerName = winnerId ? this.profiles.get(winnerId)?.displayName ?? winnerId : "nobody";
-    this.addLog(`第 ${this.round} 轮结算：${winnerName} 以 ${price} 点拍得，支付次高价。`, this.round);
+    const beat = winnerId && price > (values[winnerId] ?? 0) ? "misplay" as const : "win" as const;
+    this.addLog(`第 ${this.round} 轮结算：${winnerName} 以 ${price} 点拍得，支付次高价。`, this.round, beat);
     this.bids.clear();
     if (this.round >= this.totalRounds) {
       this.round = this.totalRounds + 1;
