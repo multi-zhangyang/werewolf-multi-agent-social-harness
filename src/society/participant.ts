@@ -32,6 +32,7 @@ import type {
   AgentRuntimeEvent,
   AgentTurnResult,
   CharacterDossier,
+  DecisionBias,
   SocialEvent,
   SocietyAgentContext,
   SocietyAgentRuntime
@@ -193,7 +194,12 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       : pressure === "deep-compact" || pressure === "emergency" || pressure === "hard-guard"
         ? 2
         : 6;
-    const recentMemories = await this.context.memory.recall(`${observation.phase} ${observation.situation}`, recallLimit, this.mind.mood.pad);
+    const recentMemories = await this.context.memory.recall(
+      `${observation.phase} ${observation.situation}`,
+      recallLimit,
+      this.mind.mood.pad,
+      this.profile.decisionBiases?.includes("recency-weighting") ? 1.8 : 1
+    );
     emitStatus(this.context, "thinking");
     this.deltaBuffer = "";
     this.lastDeltaAt = Date.now();
@@ -618,6 +624,31 @@ function regulationContext(regulation: NonNullable<AgentProfile["regulation"]>):
   return `Emotion regulation: ${notes[regulation]}`;
 }
 
+/**
+ * Stable judgment biases (§4.2.7). Only the few biases this character actually
+ * lives with are announced — in plain behavioral terms, never as a checklist of
+ * labels. They bias how evidence is weighed; they do not dictate any action.
+ */
+function biasContext(profile: AgentProfile): string | undefined {
+  const biases = profile.decisionBiases;
+  if (!biases?.length) return undefined;
+  const notes: Record<DecisionBias, string> = {
+    confirmation: "you mostly seek evidence that fits your current read and need a real contradiction to change your mind",
+    "loss-aversion": "losing what you hold hurts more than winning the same amount pleases, so you over-protect your position",
+    "sunk-cost": "you keep backing a course you have already invested in even when the evidence says to fold",
+    "in-group": "you favor people you count as your own and discount outsiders' signals",
+    "authority-sensitivity": "you defer to experienced or senior voices and hesitate to dismiss their judgment",
+    "betrayal-hypervigilance": "you over-detect betrayal; trust drops fast and returns slowly",
+    "overconfident-lie-detection": "you over-trust your own read of who is lying",
+    "self-consistency": "once you take a public stance you escalate to defend it instead of reversing",
+    "recency-weighting": "recent events outweigh older patterns in your judgment"
+  };
+  return [
+    "Stable judgment biases you live with (part of who you are — they slant, not decide):",
+    ...biases.map((bias) => `- ${notes[bias]}.`)
+  ].join("\n");
+}
+
 function participantInstructions(context: SocietyAgentContext): string {
   const profile = context.world.snapshot().agents.find((agent) => agent.id === context.actorId);
   const effective = effectiveTemperament(context.profile.temperament, context.mind.traitAdaptations);
@@ -630,6 +661,7 @@ function participantInstructions(context: SocietyAgentContext): string {
     `Identity: ${context.actorId}. Persona: ${context.profile.persona}`,
     ...(context.profile.voice ? [`Voice: ${context.profile.voice}`] : []),
     temperamentContextText,
+    ...(biasContext(context.profile) ? [biasContext(context.profile)] : []),
     ...(adaptationContext(context.mind) ? [adaptationContext(context.mind)] : []),
     "You are a real person in this world: you feel, appraise, and carry emotional state across turns. Your current emotional state colors—but does not dictate—your judgment.",
     "Maintain your own goals, memory, beliefs about others, emotion, and relationships across turns.",

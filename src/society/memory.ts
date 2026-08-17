@@ -27,10 +27,10 @@ export class AssociativeMemory implements AgentMemoryStore {
     return structuredClone(entry);
   }
 
-  async recall(query: string, limit = 8, moodPad?: PadState): Promise<AgentMemoryItem[]> {
+  async recall(query: string, limit = 8, moodPad?: PadState, recencyBoost = 1): Promise<AgentMemoryItem[]> {
     const terms = tokens(query);
     return this.entries
-      .map((entry) => ({ entry, score: recallScore(entry, terms, moodPad) }))
+      .map((entry) => ({ entry, score: recallScore(entry, terms, moodPad, recencyBoost) }))
       .sort((left, right) => right.score - left.score || right.entry.turn - left.entry.turn)
       .slice(0, Math.max(1, Math.min(limit, 16)))
       .map(({ entry }) => structuredClone(entry));
@@ -45,14 +45,20 @@ export class AssociativeMemory implements AgentMemoryStore {
   }
 }
 
-function recallScore(entry: AgentMemoryItem, terms: string[], moodPad?: PadState): number {
+/**
+ * @param recencyBoost  Multiplier on the recency term. Characters living with
+ *                      the recency-weighting bias (§4.2.7) recall recent
+ *                      events with extra weight, letting them crowd out older
+ *                      patterns the way they would for such a person.
+ */
+function recallScore(entry: AgentMemoryItem, terms: string[], moodPad?: PadState, recencyBoost = 1): number {
   const text = `${entry.text} ${entry.tags.join(" ")}`.toLocaleLowerCase();
   const relevance = terms.reduce((score, term) => score + (text.includes(term) ? 1 : 0), 0);
   const recency = 1 / (1 + Math.max(0, Date.now() - Date.parse(entry.createdAt)) / 3_600_000);
   // Mood-congruent recall (Bower-style state-dependent memory): memories stored
   // in an emotional state similar to the current one resurface more easily.
   const congruence = moodPad && entry.pad ? Math.max(0, 1 - padDistance(moodPad, entry.pad) / 3) : 0;
-  return relevance * 2.2 + entry.salience * 1.4 + Math.abs(entry.valence) * 0.35 + recency * 0.45 + congruence * 0.5;
+  return relevance * 2.2 + entry.salience * 1.4 + Math.abs(entry.valence) * 0.35 + recency * 0.45 * recencyBoost + congruence * 0.5;
 }
 
 function memoryValue(entry: AgentMemoryItem): number {

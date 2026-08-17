@@ -15,7 +15,7 @@ import type {
 } from "../contracts";
 import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
 import { DiscussionDirector } from "../conversation";
-import { emitAction, boundedRounds } from "./helpers";
+import { emitAction, boundedRounds, discussionPersonality } from "./helpers";
 
 type Move = "cooperate" | "defect";
 type Phase = "discussion" | "choice";
@@ -214,12 +214,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     return new DiscussionDirector({
       actorIds: [...this.profiles.keys()],
       displayName: (id) => this.profiles.get(id)?.displayName ?? id,
-      talkativeness: (id) => this.profiles.get(id)?.temperament?.extraversion ?? 0.5,
-      dominance: (id) => {
-        const t = this.profiles.get(id)?.temperament;
-        return t ? 0.5 + (t.extraversion - 0.5) * 0.6 + (t.conscientiousness - 0.5) * 0.3 : 0.5;
-      },
-      sensitivity: (id) => this.profiles.get(id)?.temperament?.neuroticism ?? 0.5
+      ...discussionPersonality(this.profiles)
     });
   }
 

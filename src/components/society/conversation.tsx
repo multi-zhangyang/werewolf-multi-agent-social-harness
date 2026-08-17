@@ -175,7 +175,7 @@ function ResultCard({ room, onReplay }: { room: SocietyRoomSnapshot; onReplay?: 
           ) : null}
           <span className="text-xs text-muted-foreground/80">
             {room.seasonMode === "one-shot"
-              ? "单局模式:本局结束,记忆随房间消散,不留任何历史"
+              ? "单局模式：本局结束，记忆随房间消散，不留任何历史"
               : "角色们会带着这一局的记忆与恩怨进入下一场"}
           </span>
         </div>

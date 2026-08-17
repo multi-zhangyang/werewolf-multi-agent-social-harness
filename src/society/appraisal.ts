@@ -15,7 +15,7 @@
  * salient events become retrievable memories).
  */
 
-import type { AgentMindState, AgentProfile, AgentTemperament, SocialEvent } from "./contracts";
+import type { AgentMindState, AgentProfile, AgentTemperament, DecisionBias, SocialEvent } from "./contracts";
 import { applyEmotionDeltas, applyNeedsDeltas, applyPadDeltas, clampSigned, clampUnit } from "./affect";
 
 export interface AppraisalMemorySeed {
@@ -72,13 +72,15 @@ export function appraiseEvents(
   // The effective Big Five (baseline + bounded adaptation) modulates how the
   // same event lands; the stored profile baseline stays untouched (§4.2.8).
   const temperament = effectiveTemperament ?? profile.temperament;
+  const biases = new Set(profile.decisionBiases ?? []);
   const memories: AppraisalMemorySeed[] = [];
   let changed = false;
 
   for (const event of events) {
     const raw = appraisalFor(mind, event, temperament);
     if (!raw) continue;
-    const deltas = modulateByRegulation(raw, profile.regulation);
+    const biased = modulateByBiases(raw, biases);
+    const deltas = modulateByRegulation(biased, profile.regulation);
     changed = true;
     apply(mind, event, deltas, turn);
     const valence = estimateValence(deltas);
@@ -100,6 +102,40 @@ export function appraiseEvents(
 }
 
 const NEGATIVE_EMOTIONS = ["anger", "fear", "sadness", "disgust"] as const;
+
+/**
+ * Stable judgment biases, measurably applied (§4.2.7): a bias is part of the
+ * character, fixed for life, and modulates how the same event lands — it is
+ * never a per-round random error. Three biases are measurable here:
+ *
+ *  - betrayal-hypervigilance deepens trust drops and raises tension;
+ *  - loss-aversion amplifies negative affect (losses loom larger);
+ *  - recency-weighting boosts the salience of fresh memories, so recent
+ *    events crowd out older patterns when the agent recalls.
+ */
+export function modulateByBiases(deltas: Deltas, biases: ReadonlySet<DecisionBias>): Deltas {
+  if (biases.size === 0) return deltas;
+  const next: Deltas = structuredClone(deltas);
+  if (biases.has("betrayal-hypervigilance")) {
+    if (next.relationship) {
+      const { trust, tension } = next.relationship;
+      if (trust !== undefined && trust < 0) next.relationship.trust = trust * 1.35;
+      if (tension !== undefined && tension > 0) next.relationship.tension = tension * 1.2;
+    }
+  }
+  if (biases.has("loss-aversion")) {
+    const emotions = next.emotions ?? {};
+    for (const key of NEGATIVE_EMOTIONS) {
+      if (emotions[key] !== undefined) emotions[key] *= 1.15;
+    }
+    if (next.emotions) next.emotions = emotions;
+    if (next.pad?.pleasure !== undefined && next.pad.pleasure < 0) next.pad.pleasure *= 1.1;
+  }
+  if (biases.has("recency-weighting")) {
+    next.salience = Math.min(1, next.salience * 1.2);
+  }
+  return next;
+}
 
 /**
  * Gross-style emotion regulation: the same event lands differently depending

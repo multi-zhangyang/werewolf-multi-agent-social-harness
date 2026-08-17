@@ -13,7 +13,9 @@ import {
   effectiveTemperament,
   traitStatesFromTemperament
 } from "../src/society/traits";
-import type { AdaptableTrait, AgentTemperament, SocialEvent } from "../src/society/contracts";
+import type { AdaptableTrait, AgentTemperament, DecisionBias, SocialEvent } from "../src/society/contracts";
+import { createAgentProfiles } from "../src/society/profiles";
+import { modulateByBiases } from "../src/society/appraisal";
 
 let passed = 0;
 function check(name: string, fn: () => void): void {
@@ -134,6 +136,64 @@ check("missing temperament and missing states degrade to no-ops", () => {
 check("event types outside the adaptation rules never move traits", () => {
   const states = adaptTraits({ temperament: TEMPERAMENT, events: [event("defended", 1), event("included", 1)], turn: 1 }).states;
   assert.equal(totalDrift(states), 0, "neutral events do not bend personality");
+});
+
+// ── Stable judgment biases (§4.2.7) ─────────────────────────────────────────
+
+const VALID_BIASES: DecisionBias[] = [
+  "confirmation",
+  "loss-aversion",
+  "sunk-cost",
+  "in-group",
+  "authority-sensitivity",
+  "betrayal-hypervigilance",
+  "overconfident-lie-detection",
+  "self-consistency",
+  "recency-weighting"
+];
+
+check("every built-in character carries 1-3 valid, fixed decision biases", () => {
+  const profiles = createAgentProfiles(["model-a"], 25);
+  assert.equal(profiles.length, 25, "the full roster is produced");
+  for (const profile of profiles) {
+    const biases = profile.decisionBiases ?? [];
+    assert.ok(biases.length >= 1 && biases.length <= 3, `${profile.displayName} owns a small fixed set, got ${biases.length}`);
+    for (const bias of biases) {
+      assert.ok(VALID_BIASES.includes(bias), `${profile.displayName} bias ${bias} is a known bias`);
+    }
+  }
+});
+
+check("bias coverage stays spread across the roster (no bias-granting, no empty roster)", () => {
+  const profiles = createAgentProfiles(["model-a"], 25);
+  const used = new Set(profiles.flatMap((profile) => profile.decisionBiases ?? []));
+  assert.ok(used.size >= 7, `at least 7 of 9 bias kinds appear across characters, got ${used.size}`);
+  assert.ok(used.size <= 9, "no unknown bias kinds leaked in");
+});
+
+check("betrayal-hypervigilance deepens trust drops and tension; absent bias changes nothing", () => {
+  const base = { relationship: { trust: -0.14, tension: 0.12 }, salience: 0.6 };
+  const vigilant = modulateByBiases(base, new Set<DecisionBias>(["betrayal-hypervigilance"]));
+  assert.ok(vigilant.relationship!.trust! < -0.14, "trust drop deepens");
+  assert.ok(vigilant.relationship!.tension! > 0.12, "tension rises further");
+  const calm = modulateByBiases(base, new Set<DecisionBias>());
+  assert.equal(calm.relationship!.trust, -0.14, "no bias leaves the delta untouched");
+  assert.equal(calm.relationship!.tension, 0.12);
+});
+
+check("loss-aversion amplifies negative affect only", () => {
+  const base = { emotions: { anger: 0.2, fear: 0.1, joy: 0.1 }, salience: 0.5 };
+  const averse = modulateByBiases(base, new Set<DecisionBias>(["loss-aversion"]));
+  assert.ok(averse.emotions!.anger! > 0.2, "anger amplifies");
+  assert.ok(averse.emotions!.fear! > 0.1, "fear amplifies");
+  assert.equal(averse.emotions!.joy, 0.1, "positive emotions stay untouched");
+});
+
+check("recency-weighting boosts memory salience of fresh events", () => {
+  const weighted = modulateByBiases({ salience: 0.5 }, new Set<DecisionBias>(["recency-weighting"]));
+  assert.ok(weighted.salience > 0.5 && weighted.salience <= 1, "salience rises within bounds");
+  const plain = modulateByBiases({ salience: 0.5 }, new Set<DecisionBias>([]));
+  assert.equal(plain.salience, 0.5, "without the bias salience is unchanged");
 });
 
 console.log(`\nTrait-adaptation checks: ${passed} passed.`);

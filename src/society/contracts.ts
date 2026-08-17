@@ -54,6 +54,26 @@ export interface AgentTemperament {
   neuroticism: number;
 }
 
+/**
+ * Stable judgment biases (AGENTS.md §4.2.7): bounded rationality comes from
+ * the character, not from random error. Each character owns only a few of
+ * these, fixed for its lifetime — never the whole list, never shuffled per
+ * round. Some biases are measurable in the appraisal engine (hypervigilance
+ * deepens trust drops, loss-aversion amplifies negative affect, recency
+ * weighting boosts memory salience); the rest shape how the model weighs
+ * evidence through the instructions.
+ */
+export type DecisionBias =
+  | "confirmation"
+  | "loss-aversion"
+  | "sunk-cost"
+  | "in-group"
+  | "authority-sensitivity"
+  | "betrayal-hypervigilance"
+  | "overconfident-lie-detection"
+  | "self-consistency"
+  | "recency-weighting";
+
 export interface AgentProfile {
   id: string;
   displayName: string;
@@ -65,6 +85,8 @@ export interface AgentProfile {
   goals: string[];
   /** Big Five (OCEAN) profile, grounded in personality-anchoring research. */
   temperament?: AgentTemperament;
+  /** A few stable judgment biases this character lives with (§4.2.7). */
+  decisionBiases?: DecisionBias[];
   /** How this character speaks: pacing, register, verbal habits. */
   voice?: string;
   /** Emotion-regulation strategy, per Gross-style process model research. */
@@ -548,7 +570,8 @@ export type AgentRuntimeEvent =
 
 export interface AgentMemoryStore {
   remember(input: Omit<AgentMemoryItem, "id" | "createdAt">): Promise<AgentMemoryItem>;
-  recall(query: string, limit?: number, moodPad?: PadState): Promise<AgentMemoryItem[]>;
+  /** `recencyBoost` weights fresh memories higher for recency-weighting characters (§4.2.7). */
+  recall(query: string, limit?: number, moodPad?: PadState, recencyBoost?: number): Promise<AgentMemoryItem[]>;
   list(limit?: number): Promise<AgentMemoryItem[]>;
 }
 

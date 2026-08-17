@@ -255,9 +255,9 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Hero display gradient: white falling into the void. */
+/* Hero display gradient: white falling into the void (kept readable to the last glyph). */
 .hero-ink {
-  background-image: linear-gradient(180deg, oklch(1 0 0) 0%, oklch(1 0 0 / 0.78) 55%, oklch(1 0 0 / 0.42) 100%);
+  background-image: linear-gradient(180deg, oklch(1 0 0) 0%, oklch(1 0 0 / 0.9) 60%, oklch(1 0 0 / 0.72) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;

@@ -132,15 +132,14 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
 
       <main className="mx-auto w-full max-w-6xl px-6 pb-28">
         <section className="mx-auto max-w-3xl pt-24 pb-16 text-center sm:pt-28">
-          <Badge variant="outline" className="mb-8 rounded-full border-border bg-card px-3.5 py-1.5 text-xs font-medium tracking-wide text-muted-foreground">
+          <Badge variant="outline" className="mb-8 rounded-full border-border bg-card px-3.5 py-1.5 text-xs font-medium tracking-wide text-foreground/70">
             Powered by OpenAI Agents SDK
           </Badge>
           <h1 className="hero-ink text-5xl font-semibold tracking-tighter sm:text-7xl">
             多智能体社会博弈竞技场
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-balance text-lg leading-8 text-muted-foreground sm:text-xl">
-            狼人杀、阿瓦隆、囚徒困境——真实的模型 Agent 在 {scenarios.length} 个世界里谈判、结盟、欺骗与背叛。
-            每个参与者都带着记忆、情绪与人格，过去真的会改变未来。
+            狼人杀、阿瓦隆、囚徒困境——真实的模型 Agent 在 {scenarios.length} 个世界里谈判、结盟、欺骗与背叛。每个参与者都带着记忆、情绪与人格，过去真的会改变未来。
           </p>
           <div className="mt-10 flex items-center justify-center gap-3">
             <Button size="lg" className="h-11 rounded-lg bg-foreground px-8 text-background shadow-sm hover:bg-foreground/85" onClick={() => onStart(scenarios[0]?.id ?? "werewolf")}>
@@ -148,7 +147,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
               <ArrowRight className="size-4" />
             </Button>
             <a href="#scenarios">
-              <Button size="lg" variant="ghost" className="h-11 rounded-lg border border-transparent px-7 text-foreground/70 hover:bg-muted/60 hover:text-foreground">
+              <Button size="lg" variant="ghost" className="h-11 rounded-lg border border-transparent px-7 text-foreground/80 hover:bg-muted/60 hover:text-foreground">
                 浏览全部世界
               </Button>
             </a>
@@ -173,7 +172,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
               <SeasonResetButton onReset={onResetSeason} />
             </div>
             <p className="mb-4 max-w-3xl text-[13px] leading-6 text-muted-foreground">
-              社会季:同一批角色会跨局延续——上一局的背叛、恩怨与信任会进入下一局,像一群真正熟悉的旧友。每局的身份与阵营重新分配,过去的角色不决定今天的忠诚,但过去的经历会改变今天的判断。随时可以清空,开启一个所有人都互不相识的全新社会季。
+              社会季：同一批角色会跨局延续——上一局的背叛、恩怨与信任会进入下一局，像一群真正熟悉的旧友。每局的身份与阵营重新分配，过去的角色不决定今天的忠诚，但过去的经历会改变今天的判断。随时可以清空，开启一个所有人都互不相识的全新社会季。
             </p>
             <div className="flex flex-wrap justify-center gap-3">
               {season.slice(0, 8).map((entry) => {
@@ -220,7 +219,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
               <h3 className="text-lg font-semibold tracking-tight">社会季模式</h3>
             </div>
             <p className="mt-2.5 text-sm leading-6 text-muted-foreground">
-              同一批角色跨局延续:上一局的背叛、恩怨与信任进入下一局,像一群越玩越熟的老友。每局身份重新分配,过去的角色不决定今天的忠诚,但过去的经历会改变今天的判断。可以在首页一键「重置社会季」,让所有人重新互不相识。
+              同一批角色跨局延续：上一局的背叛、恩怨与信任进入下一局，像一群越玩越熟的老友。每局身份重新分配，过去的角色不决定今天的忠诚，但过去的经历会改变今天的判断。可以在首页一键「重置社会季」，让所有人重新互不相识。
             </p>
           </div>
           <div className="rounded-xl border border-border bg-card p-7">
@@ -229,7 +228,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
               <h3 className="text-lg font-semibold tracking-tight">单局模式</h3>
             </div>
             <p className="mt-2.5 text-sm leading-6 text-muted-foreground">
-              一局定胜负、零历史干扰:角色互不相识,不读取任何过往记忆,结束后也不留下任何记忆。适合想观察纯粹博弈、或者不被上一局恩怨影响的公平对决——创建房间时选择「单局模式」即可。
+              一局定胜负、零历史干扰：角色互不相识，不读取任何过往记忆，结束后也不留下任何记忆。适合想观察纯粹博弈、或者不被上一局恩怨影响的公平对决——创建房间时选择「单局模式」即可。
             </p>
           </div>
         </section>

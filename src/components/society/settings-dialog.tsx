@@ -320,8 +320,8 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                 <p className="mb-2 text-xs font-medium text-muted-foreground">添加提供商</p>
                 <div className="grid grid-cols-2 gap-2">
                   <Input value={providerDraft.name} onChange={(event) => setProviderDraft({ ...providerDraft, name: event.target.value })} placeholder="名称（如 MyProvider）" spellCheck={false} />
-                  <Input value={providerDraft.baseURL} onChange={(event) => setProviderDraft({ ...providerDraft, baseURL: event.target.value })} placeholder="Base URL（如 https://api.example.com/v1）" spellCheck={false} />
-                  <Input type="password" value={providerDraft.apiKey} onChange={(event) => setProviderDraft({ ...providerDraft, apiKey: event.target.value })} placeholder="API 密钥（可选，写入本机 .env.local）" spellCheck={false} autoComplete="off" />
+                  <Input value={providerDraft.baseURL} onChange={(event) => setProviderDraft({ ...providerDraft, baseURL: event.target.value })} placeholder="Base URL" spellCheck={false} />
+                  <Input type="password" value={providerDraft.apiKey} onChange={(event) => setProviderDraft({ ...providerDraft, apiKey: event.target.value })} placeholder="API 密钥（写入 .env.local）" spellCheck={false} autoComplete="off" />
                   <Select value={providerDraft.apiMode} onValueChange={(value) => setProviderDraft({ ...providerDraft, apiMode: value })}>
                     <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -331,6 +331,9 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                     </SelectContent>
                   </Select>
                 </div>
+                <p className="mt-2 text-[11px] leading-5 text-muted-foreground/80">
+                  Base URL 示例：https://api.example.com/v1；API 密钥只写入本机 .env.local，不回显、不进入模型档案与房间快照。
+                </p>
                 <Button variant="outline" size="sm" className="mt-2 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={() => void addProvider()}>
                   <Plus className="size-3.5" /> 添加提供商
                 </Button>
@@ -356,8 +359,10 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                         </p>
                         <p className="truncate font-mono text-[10px] text-muted-foreground/80">{profile.modelId} · {config.providers.find((provider) => provider.id === profile.providerProfileId)?.name ?? profile.providerProfileId}</p>
                         {Object.entries(profile.capabilities).some(([, state]) => state !== "unknown") ? (
-                          <p className="mt-0.5 text-[10px] text-muted-foreground/70">
-                            {Object.entries(profile.capabilities).filter(([, state]) => state !== "unknown").map(([key, state]) => `${capabilityName(key)}:${state === "yes" ? "✓" : "✗"}`).join("  ")}
+                          <p className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground/70">
+                            {Object.entries(profile.capabilities).filter(([, state]) => state !== "unknown").map(([key, state]) => (
+                              <span key={key} className="whitespace-nowrap">{capabilityName(key)}:{state === "yes" ? "✓" : "✗"}</span>
+                            ))}
                           </p>
                         ) : (
                           <p className="mt-0.5 text-[10px] text-muted-foreground/50">能力未验证——参数不会盲目发送；点击「探测」实测。</p>

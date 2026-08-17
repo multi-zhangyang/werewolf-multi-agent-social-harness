@@ -403,26 +403,26 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                     active={seasonMode === "season"}
                     onClick={() => setSeasonMode("season")}
                     title="社会季模式"
-                    description="角色带着过往对局的记忆、关系与恩怨入场,一局结束后继续积累。像一群越玩越熟的老友。"
+                    description="角色带着过往对局的记忆、关系与恩怨入场，一局结束后继续积累。像一群越玩越熟的老友。"
                     hint={seasonCount > 0 ? `${seasonCount} 位角色已有历史` : "从零开始积累"}
                   />
                   <SeasonModeCard
                     active={seasonMode === "one-shot"}
                     onClick={() => setSeasonMode("one-shot")}
                     title="单局模式"
-                    description="本局完全隔离,不读取任何历史,结束后也不留下任何记忆。适合一局定胜负、零干扰对决。"
+                    description="本局完全隔离，不读取任何历史，结束后也不留下任何记忆。适合一局定胜负、零干扰对决。"
                     hint="无历史、无残留"
                   />
                 </div>
                 {seasonMode === "season" && seasonCount > 0 ? (
                   <p className="mt-2 flex items-start gap-1.5 text-xs leading-5 text-muted-foreground">
                     <History className="mt-0.5 size-3.5 shrink-0" />
-                    社会季进行中:{seasonCount} 位角色会带着历史入场。想让他们互不相识,请先在首页「重置社会季」,或改用单局模式。
+                    社会季进行中：{seasonCount} 位角色会带着历史入场。想让他们互不相识，请先在首页「重置社会季」，或改用单局模式。
                   </p>
                 ) : null}
                 {seasonMode === "one-shot" ? (
                   <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                    不读取、也不写入社会季:身份随机、记忆归零,连角色关系都从陌生人开始。
+                    不读取、也不写入社会季：身份随机、记忆归零，连角色关系都从陌生人开始。
                   </p>
                 ) : null}
               </section>

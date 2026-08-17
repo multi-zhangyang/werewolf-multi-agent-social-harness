@@ -17,7 +17,7 @@ import type {
 import { contextFromRunContext, scopedContext, SocialWorldBase } from "../../world";
 import { DiscussionDirector } from "../../conversation";
 import { SuspicionClimate } from "../../suspicion";
-import { boundedRounds, emitAction } from "../helpers";
+import { boundedRounds, discussionPersonality, emitAction } from "../helpers";
 import { roleHypothesisTool } from "../../cognition";
 import {
   WEREWOLF_ROLES,
@@ -965,12 +965,7 @@ export class WerewolfWorld extends SocialWorldBase {
     return new DiscussionDirector({
       actorIds: aliveIds,
       displayName: (id) => this.profiles.get(id)?.displayName ?? id,
-      talkativeness: (id) => this.profiles.get(id)?.temperament?.extraversion ?? 0.5,
-      dominance: (id) => {
-        const t = this.profiles.get(id)?.temperament;
-        return t ? 0.5 + (t.extraversion - 0.5) * 0.6 + (t.conscientiousness - 0.5) * 0.3 : 0.5;
-      },
-      sensitivity: (id) => this.profiles.get(id)?.temperament?.neuroticism ?? 0.5
+      ...discussionPersonality(this.profiles)
     });
   }
 
