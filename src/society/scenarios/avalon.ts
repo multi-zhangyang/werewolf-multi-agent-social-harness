@@ -329,14 +329,14 @@ export class AvalonWorld extends SocialWorldBase {
             type: "included",
             actorId,
             targetId: id,
-            detail: `Quest ${this.quest}: ${leaderName} chose you for the quest team.`
+            detail: `任务 ${this.quest}：${leaderName} 将你选入任务队伍。`
           });
         } else {
           this.pushEvent(id, {
             type: "excluded",
             actorId,
             targetId: id,
-            detail: `Quest ${this.quest}: ${leaderName} left you off the quest team.`
+            detail: `任务 ${this.quest}：${leaderName} 没有将你选入任务队伍。`
           });
         }
       }

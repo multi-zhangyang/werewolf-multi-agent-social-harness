@@ -588,7 +588,7 @@ function BeatOverlay({ world, names, scenarioId }: { world: WorldSnapshot; names
   if (!beat) return null;
   return (
     <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-[3px]" />
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" />
       <div className="reveal-up relative mx-6 max-w-md rounded-xl border border-border bg-card px-10 py-8 text-center shadow-2xl shadow-black/10">
         <Sparkles className="mx-auto size-5 text-amber-500" />
         <p className="mt-3 text-lg font-medium leading-7 tracking-tight text-foreground">{beat}</p>

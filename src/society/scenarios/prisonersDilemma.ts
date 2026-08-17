@@ -241,10 +241,11 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     const payoffs = payoff(left, right);
     this.scores.set(ids[0], (this.scores.get(ids[0]) ?? 0) + payoffs[0]);
     this.scores.set(ids[1], (this.scores.get(ids[1]) ?? 0) + payoffs[1]);
-    const text = `${this.profiles.get(ids[0])?.displayName} chose ${left}; ${this.profiles.get(ids[1])?.displayName} chose ${right}. Points: ${payoffs[0]} / ${payoffs[1]}.`;
+    const moveLabel = (move: Move): string => (move === "cooperate" ? "合作" : "背叛");
+    const text = `${this.profiles.get(ids[0])?.displayName}选择${moveLabel(left)}；${this.profiles.get(ids[1])?.displayName}选择${moveLabel(right)}。得分：${payoffs[0]} / ${payoffs[1]}。`;
     const result: RoundResult = { round: this.round, moves: { [ids[0]]: left, [ids[1]]: right }, payoffs: { [ids[0]]: payoffs[0], [ids[1]]: payoffs[1] }, text };
     this.history.push(result);
-    for (const id of ids) this.lastExperiences.set(id, `${text} Your move was ${result.moves[id]}. Your score is now ${this.scores.get(id)}.`);
+    for (const id of ids) this.lastExperiences.set(id, `${text} 你本轮选择了${moveLabel(result.moves[id])}。你的累计得分：${this.scores.get(id)}。`);
     const beat = left === right ? (left === "cooperate" ? "promise-kept" as const : undefined) : "betrayal" as const;
     this.addLog(text, this.round, beat);
     this.choices.clear();

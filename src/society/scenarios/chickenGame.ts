@@ -203,12 +203,13 @@ export class ChickenGameWorld extends SocialWorldBase {
     const payoffs = payoff(left, right);
     this.scores.set(ids[0], (this.scores.get(ids[0]) ?? 0) + payoffs[0]);
     this.scores.set(ids[1], (this.scores.get(ids[1]) ?? 0) + payoffs[1]);
+    const choiceLabel = (choice: Choice): string => (choice === "swerve" ? "闪避" : "硬冲");
     const text = payoffs[0] === 0 && payoffs[1] === 0
-      ? `${this.profiles.get(ids[0])?.displayName} and ${this.profiles.get(ids[1])?.displayName} both drove straight. Head-on collision: 0 / 0.`
-      : `${this.profiles.get(ids[0])?.displayName} chose ${left}; ${this.profiles.get(ids[1])?.displayName} chose ${right}. Points: ${payoffs[0]} / ${payoffs[1]}.`;
+      ? `${this.profiles.get(ids[0])?.displayName}与${this.profiles.get(ids[1])?.displayName}都选择硬冲，正面相撞：0 / 0。`
+      : `${this.profiles.get(ids[0])?.displayName}选择${choiceLabel(left)}；${this.profiles.get(ids[1])?.displayName}选择${choiceLabel(right)}。得分：${payoffs[0]} / ${payoffs[1]}。`;
     const result: RoundResult = { round: this.round, choices: { [ids[0]]: left, [ids[1]]: right }, payoffs: { [ids[0]]: payoffs[0], [ids[1]]: payoffs[1] }, text };
     this.history.push(result);
-    for (const id of ids) this.lastExperiences.set(id, `${text} Your choice was ${result.choices[id]}. Your score is now ${this.scores.get(id)}.`);
+    for (const id of ids) this.lastExperiences.set(id, `${text} 你本轮选择了${choiceLabel(result.choices[id])}。你的累计得分：${this.scores.get(id)}。`);
     const beat = payoffs[0] === 0 && payoffs[1] === 0 ? "misplay" as const : payoffs[0] === 4 || payoffs[1] === 4 ? "win" as const : undefined;
     this.addLog(text, this.round, beat);
     this.choices.clear();

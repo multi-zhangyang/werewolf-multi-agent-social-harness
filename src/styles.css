@@ -263,6 +263,17 @@ body {
   color: transparent;
 }
 
+/* Horizontally scrollable strip with edge fades so the overflow reads as
+   scrollable instead of cut off (world tags, small screens). */
+.scroll-fade-x {
+  mask-image: linear-gradient(to right, transparent 0, black 14px, black calc(100% - 44px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0, black 14px, black calc(100% - 44px), transparent 100%);
+  scrollbar-width: none;
+}
+.scroll-fade-x::-webkit-scrollbar {
+  display: none;
+}
+
 /* Streaming dashes along social links in the hero stage */
 @keyframes dash-flow {
   to { stroke-dashoffset: -32; }

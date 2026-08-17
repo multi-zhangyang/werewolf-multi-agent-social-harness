@@ -237,7 +237,7 @@ function ArenaStage({ room, cue, activity }: {
   return (
     <section className="rounded-xl border border-border bg-card/40 px-4 py-3">
       <div className="mb-2 flex items-center justify-between px-1">
-        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">舞台席位</p>
+        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-foreground/65">舞台席位</p>
         <span className="nums font-mono text-[11px] text-muted-foreground">{room.participants.filter((participant) => participant.alive).length} 人存活</span>
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-6">
@@ -261,7 +261,7 @@ function ArenaStage({ room, cue, activity }: {
               ) : null}
               <AgentPresence name={participant.profile.displayName} index={index} size="xl" status={dead ? "finished" : participant.status} />
               <p className="mt-1.5 max-w-full truncate text-xs font-semibold tracking-tight">{participant.profile.displayName}</p>
-              <p className="flex max-w-full items-center gap-1 text-[10px] text-muted-foreground">
+              <p className="flex max-w-full items-center gap-1 text-[10px] text-foreground/60">
                 <StatusDot status={dead ? "finished" : participant.status} />
                 <span className="truncate">{participant.role ?? participant.mood ?? "—"}</span>
               </p>
@@ -275,14 +275,6 @@ function ArenaStage({ room, cue, activity }: {
         })}
       </div>
       <DuelStrip room={room} cue={cue} names={names} />
-      {cue ? (
-        <p className="mt-2 truncate px-1 text-center text-[11px] text-muted-foreground/80">
-          <Clapperboard className="mr-1 inline size-3" />
-          {cue.title}
-          {cue.subtitle ? ` · ${cue.subtitle}` : ""}
-          {focusIds.size ? ` · 焦点：${[...focusIds].map((id) => names.get(id) ?? id).join("、")}` : ""}
-        </p>
-      ) : null}
     </section>
   );
 }
@@ -381,7 +373,7 @@ function CueBanner({ cue, names }: { cue: RoomConnection["cue"]; names: Map<stri
         ? "border-amber-400/40 bg-amber-400/10 text-amber-200"
         : "border-border bg-card/90 text-foreground";
   return (
-    <div key={cue.id} className="absolute inset-x-0 top-0 z-10 flex justify-center px-3 pt-3">
+    <div key={cue.id} className="pointer-events-none absolute inset-x-0 top-12 z-10 flex justify-center px-3">
       <div className={cn("cue-enter flex max-w-xl items-center gap-2.5 rounded-xl border px-4 py-2.5 shadow-lg backdrop-blur", tone)}>
         <Clapperboard className="size-4 shrink-0" />
         <div className="min-w-0">

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Waypoints } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Waypoints } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { ArchivedRoomSummary } from "@/society/persistence";
@@ -106,7 +106,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
       </header>
 
       {scenarios.length ? (
-        <div className="overflow-x-auto border-b border-border/80 bg-muted/40">
+        <div className="scroll-fade-x overflow-x-auto border-b border-border/80 bg-muted/40">
           <div className="mx-auto flex w-full max-w-6xl gap-1.5 px-6 py-2.5">
             {scenarios.map((scenario) => {
               const tone = CATEGORY[CATEGORY_OF[scenario.id] ?? "confrontation"];
@@ -149,13 +149,14 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
             <a href="#scenarios">
               <Button size="lg" variant="ghost" className="h-11 rounded-lg border border-transparent px-7 text-foreground/80 hover:bg-muted/60 hover:text-foreground">
                 浏览全部世界
+                <ArrowDown className="size-4" />
               </Button>
             </a>
           </div>
 
           <HeroStage />
 
-          <div className="mt-12 flex items-center justify-center gap-3">
+          <div className="mt-12 flex flex-wrap items-center justify-center gap-3">
             <StatCard value={String(scenarios.length).padStart(2, "0")} label="博弈世界" />
             {rooms.length > 0 ? <StatCard value={String(rooms.length).padStart(2, "0")} label="进行中" live /> : null}
             {models.length > 0 ? <StatCard value={String(models.length).padStart(2, "0")} label="可用模型" /> : null}
