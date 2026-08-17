@@ -42,7 +42,7 @@ export class StagHuntWorld extends SocialWorldBase {
     super(roomId, scenario, profiles);
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
     for (const profile of profiles) this.scores.set(profile.id, 0);
-    this.addLog("鹿在林中。两人同时决定结伴猎鹿，还是各猎各的兔子。", 1);
+    this.addLog(`鹿在林中。${profiles.length} 名猎人同时决定结伴猎鹿，还是各猎各的兔子。`, 1);
   }
 
   snapshot(): WorldSnapshot {
@@ -69,12 +69,12 @@ export class StagHuntWorld extends SocialWorldBase {
       turn: this.round,
       phase: this.phase === "discussion" ? "negotiation" : "simultaneous choice",
       situation: this.phase === "discussion"
-        ? "Both hunters can talk before committing. A promise to hunt the stag is cheap until the choice tool is used."
-        : "Choices stay hidden until both hunters commit. The round resolves the moment the second commitment lands.",
+        ? "All hunters can talk before committing. A promise to hunt the stag is cheap until the choice tool is used."
+        : "Choices stay hidden until every hunter commits. The round resolves the moment the last commitment lands.",
       privateContext: [
         `Your score: ${this.scores.get(actorId) ?? 0}.`,
         `Your current choice: ${own ?? "not committed"}.`,
-        `Payoffs: both stag = 4 each; stag + rabbit = 0 for the stag hunter, 3 for the rabbit hunter; both rabbit = 3 each.`,
+        `Payoffs: all stag = 4 each; if anyone hunts rabbits, every stag hunter gets 0 and every rabbit hunter gets 3.`,
         `Past rounds: ${this.history.map((result) => `R${result.round} ${result.choices[actorId]} / ${result.payoffs[actorId]} points`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, score: this.scores.get(actorId) ?? 0 },
@@ -93,7 +93,7 @@ export class StagHuntWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const choose = tool({
       name: "hunt_choice",
-      description: "Commit privately to hunt the stag (4 points each only if both commit; 0 if you are alone) or hunt rabbits (3 points, always safe). Binding for this round.",
+      description: "Commit privately to hunt the stag (4 points each only if every hunter commits; 0 for stag hunters otherwise) or hunt rabbits (3 points, always safe). Binding for this round.",
       parameters: z.object({
         choice: z.enum(["stag", "rabbit"]),
         reason: z.string().min(1).max(2_000)
@@ -114,7 +114,7 @@ export class StagHuntWorld extends SocialWorldBase {
     return [{
       name: "hunt_choice",
       label: "提交选择",
-      description: "选择会保持隐藏，直到双方都提交。",
+      description: "选择会保持隐藏，直到所有猎人都提交。",
       kind: "choice",
       field: "choice",
       options: [
@@ -199,22 +199,28 @@ export class StagHuntWorld extends SocialWorldBase {
 
   private resolveRound(): void {
     const ids = [...this.profiles.keys()];
-    const left = this.choices.get(ids[0])!;
-    const right = this.choices.get(ids[1])!;
-    const payoffs = payoff(left, right);
-    this.scores.set(ids[0], (this.scores.get(ids[0]) ?? 0) + payoffs[0]);
-    this.scores.set(ids[1], (this.scores.get(ids[1]) ?? 0) + payoffs[1]);
-    const text = left === "stag" && right === "stag"
-      ? `${this.profiles.get(ids[0])?.displayName} and ${this.profiles.get(ids[1])?.displayName} hunted the stag together. Points: 4 / 4.`
-      : left === "stag" || right === "stag"
-        ? `${this.profiles.get(left === "stag" ? ids[0] : ids[1])?.displayName} chased the stag alone while the other hunted rabbits. Points: ${payoffs[0]} / ${payoffs[1]}.`
-        : `${this.profiles.get(ids[0])?.displayName} and ${this.profiles.get(ids[1])?.displayName} both hunted rabbits. Points: 3 / 3.`;
-    const result: RoundResult = { round: this.round, choices: { [ids[0]]: left, [ids[1]]: right }, payoffs: { [ids[0]]: payoffs[0], [ids[1]]: payoffs[1] }, text };
+    const choices: Record<string, Choice> = {};
+    const payoffs: Record<string, number> = {};
+    const allStag = ids.every((id) => this.choices.get(id) === "stag");
+    for (const id of ids) {
+      const choice = this.choices.get(id)!;
+      choices[id] = choice;
+      payoffs[id] = allStag ? 4 : choice === "stag" ? 0 : 3;
+      this.scores.set(id, (this.scores.get(id) ?? 0) + payoffs[id]);
+    }
+    const stagHunters = ids.filter((id) => choices[id] === "stag");
+    const names = (list: string[]) => list.map((id) => this.profiles.get(id)?.displayName ?? id).join("、");
+    const text = allStag
+      ? `${names(ids)} 一起猎到了鹿。每人 4 分。`
+      : stagHunters.length
+        ? `${names(stagHunters)} 扑向鹿群却一无所获（0 分），其余人猎兔各得 3 分。`
+        : `所有人都去猎兔，各得 3 分。`;
+    const result: RoundResult = { round: this.round, choices, payoffs, text };
     this.history.push(result);
-    for (const id of ids) this.lastExperiences.set(id, `${text} Your choice was ${result.choices[id]}. Your score is now ${this.scores.get(id)}.`);
-    const beat = left === "stag" && right === "stag"
+    for (const id of ids) this.lastExperiences.set(id, `${text} 你的选择是 ${choices[id] === "stag" ? "猎鹿" : "猎兔"}。你当前得分 ${this.scores.get(id)}。`);
+    const beat = allStag
       ? "promise-kept" as const
-      : left !== right
+      : stagHunters.length > 0 && stagHunters.length < ids.length
         ? "betrayal" as const
         : undefined;
     this.addLog(text, this.round, beat);
@@ -242,8 +248,3 @@ function recordPayload(payload: unknown): Record<string, unknown> {
   return payload as Record<string, unknown>;
 }
 
-function payoff(left: Choice, right: Choice): [number, number] {
-  if (left === "stag" && right === "stag") return [4, 4];
-  if (left === "rabbit" && right === "rabbit") return [3, 3];
-  return left === "stag" ? [0, 3] : [3, 0];
-}

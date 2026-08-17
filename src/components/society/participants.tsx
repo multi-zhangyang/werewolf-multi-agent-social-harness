@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from "react";
-import { Brain, Crown, Skull, Zap } from "lucide-react";
+import { Brain, Crown, Gauge, Pause, Play, Skull, Zap } from "lucide-react";
 import type { AgentMindState } from "@/society/contracts";
 import type { SocietyParticipantCard } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Sheet,
@@ -13,8 +14,18 @@ import {
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { AgentPresence, ModelLabel, StatusLabel, roleTintClass } from "./shared";
+import type { RoomConnection } from "./use-room";
 
-export function ParticipantsRail({ participants, humanActorId }: { participants: SocietyParticipantCard[]; humanActorId?: string }): ReactNode {
+interface ParticipantsRailProps {
+  participants: SocietyParticipantCard[];
+  humanActorId?: string;
+  /** Live per-agent activity (streams, thought-beats, context pressure). */
+  activity?: RoomConnection["activity"];
+  /** Pause/resume one participant (observer control; empty for human seats). */
+  onToggleAgentPause?: (actorId: string, paused: boolean) => void;
+}
+
+export function ParticipantsRail({ participants, humanActorId, activity, onToggleAgentPause }: ParticipantsRailProps): ReactNode {
   const [selected, setSelected] = useState<SocietyParticipantCard | null>(null);
   const leaderId = [...participants].sort((left, right) => (right.score ?? -1) - (left.score ?? -1))[0]?.profile.id;
   return (
@@ -22,8 +33,10 @@ export function ParticipantsRail({ participants, humanActorId }: { participants:
       {participants.map((participant, index) => {
         const isHuman = humanActorId === participant.profile.id;
         const dead = !participant.alive;
+        const paused = Boolean(participant.paused);
         const leader = leaderId !== undefined && participant.score !== undefined && participant.profile.id === leaderId;
         const live = participant.status === "thinking" || participant.status === "acting" || participant.status === "speaking";
+        const pressure = activity?.[participant.profile.id]?.pressure;
         return (
           <button
             key={participant.profile.id}
@@ -33,13 +46,14 @@ export function ParticipantsRail({ participants, humanActorId }: { participants:
               dead && "opacity-45",
               isHuman && "border-border bg-card",
               live && "border-emerald-400/40",
+              paused && "border-amber-400/40 bg-amber-400/5",
               leader && "leader-wash"
             )}
           >
             <span
               className={cn(
                 "absolute inset-y-2 left-0 w-0.5 rounded-full transition-opacity",
-                live ? "bg-emerald-400 opacity-100" : "opacity-0"
+                live ? "bg-emerald-400 opacity-100" : paused ? "bg-amber-400 opacity-100" : "opacity-0"
               )}
               aria-hidden
             />
@@ -58,6 +72,9 @@ export function ParticipantsRail({ participants, humanActorId }: { participants:
                   {isHuman ? (
                     <span className="rounded bg-foreground px-1.5 py-px text-[9px] font-bold text-background">你</span>
                   ) : null}
+                  {paused ? (
+                    <span className="rounded border border-amber-400/50 bg-amber-400/10 px-1.5 py-px text-[9px] font-medium text-amber-300">已暂停</span>
+                  ) : null}
                   {participant.mind?.memories.some((memory) => memory.tags.includes("season")) ? (
                     <span className="rounded border border-border bg-card px-1.5 py-px text-[9px] font-medium text-muted-foreground">老面孔</span>
                   ) : null}
@@ -69,6 +86,15 @@ export function ParticipantsRail({ participants, humanActorId }: { participants:
                   <StatusLabel status={dead ? "finished" : participant.status} />
                   {participant.mood ? <span className="truncate">· {participant.mood}</span> : null}
                 </div>
+                {pressure && pressure.level !== "normal" ? (
+                  <div className="mt-1 flex items-center gap-1.5" title={`上下文压力 ${Math.round(pressure.ratio * 100)}%（${pressure.current.toLocaleString()} / ${pressure.usable.toLocaleString()} tokens）`}>
+                    <Gauge className={cn("size-3", pressure.level === "hard-guard" ? "text-red-400" : pressure.level === "emergency" || pressure.level === "deep-compact" ? "text-orange-400" : "text-amber-400")} />
+                    <div className="h-1 w-20 overflow-hidden rounded-full bg-muted">
+                      <div className={cn("h-full rounded-full", pressure.level === "hard-guard" ? "bg-red-400" : pressure.level === "emergency" || pressure.level === "deep-compact" ? "bg-orange-400" : "bg-amber-400")} style={{ width: `${Math.min(100, Math.round(pressure.ratio * 100))}%` }} />
+                    </div>
+                    <span className="nums font-mono text-[9px]">{Math.round(pressure.ratio * 100)}%</span>
+                  </div>
+                ) : null}
               </div>
               <div className="text-right">
                 {participant.score !== undefined ? (
@@ -88,13 +114,25 @@ export function ParticipantsRail({ participants, humanActorId }: { participants:
           </button>
         );
       })}
-      <MindSheet participant={selected} onOpenChange={(open) => { if (!open) setSelected(null); }} />
+      <MindSheet
+        participant={selected}
+        activity={activity?.[selected?.profile.id ?? ""]}
+        onToggleAgentPause={onToggleAgentPause}
+        onOpenChange={(open) => { if (!open) setSelected(null); }}
+      />
     </div>
   );
 }
 
-function MindSheet({ participant, onOpenChange }: { participant: SocietyParticipantCard | null; onOpenChange: (open: boolean) => void }): ReactNode {
+function MindSheet({ participant, activity, onToggleAgentPause, onOpenChange }: {
+  participant: SocietyParticipantCard | null;
+  activity?: RoomConnection["activity"][string];
+  onToggleAgentPause?: (actorId: string, paused: boolean) => void;
+  onOpenChange: (open: boolean) => void;
+}): ReactNode {
   const mind = participant?.mind;
+  const paused = Boolean(participant?.paused);
+  const isHuman = participant?.profile.controller === "human";
   return (
     <Sheet open={Boolean(participant)} onOpenChange={onOpenChange}>
       <SheetContent className="w-full border-border bg-card text-foreground sm:max-w-lg">
@@ -110,13 +148,30 @@ function MindSheet({ participant, onOpenChange }: { participant: SocietyParticip
                     <ModelLabel model={participant.profile.model} />
                   </SheetDescription>
                 </div>
+                {!isHuman && onToggleAgentPause ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="ml-auto shrink-0 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+                    onClick={() => onToggleAgentPause(participant.profile.id, !paused)}
+                  >
+                    {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
+                    {paused ? "恢复参与" : "暂停参与"}
+                  </Button>
+                ) : null}
               </div>
             </SheetHeader>
             <ScrollArea className="flex-1">
               <div className="space-y-5 p-5">
+                {paused ? (
+                  <section className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3">
+                    <p className="text-xs leading-5 text-amber-200/90">该参与者已被暂停：讨论阶段它会保持沉默，绑定行动阶段房间会停下来等待恢复——系统不会替它做任何决定。</p>
+                  </section>
+                ) : null}
                 {mind ? (
                   <>
                     <MoodSection mind={mind} />
+                    <ContextSection activity={activity} model={participant.profile.model} />
                     <AppraisalsSection mind={mind} />
                     <GoalsSection mind={mind} />
                     <BeliefsSection mind={mind} />
@@ -140,6 +195,58 @@ function MindSheet({ participant, onOpenChange }: { participant: SocietyParticip
       </SheetContent>
     </Sheet>
   );
+}
+
+/** Live context budget: window, usable input, current pressure and compaction. */
+function ContextSection({ activity, model }: { activity?: RoomConnection["activity"][string]; model: string }): ReactNode {
+  const pressure = activity?.pressure;
+  if (!pressure && !activity?.compacted) {
+    return (
+      <section>
+        <SectionTitle>上下文预算</SectionTitle>
+        <p className="text-xs leading-5 text-muted-foreground/70">上下文压力仍处于 normal 级。窗口与预算按该参与者解析出的模型档案计算。</p>
+      </section>
+    );
+  }
+  const level = pressure?.level ?? "normal";
+  const ratio = pressure?.ratio ?? 0;
+  const tone = level === "hard-guard" ? "text-red-400" : level === "emergency" || level === "deep-compact" ? "text-orange-400" : level === "soft-compact" || level === "retrieval-tight" ? "text-amber-400" : level === "watch" ? "text-sky-400" : "text-emerald-400";
+  return (
+    <section>
+      <SectionTitle>上下文预算</SectionTitle>
+      <div className="rounded-lg border border-border bg-muted/40 p-4">
+        <div className="flex items-center justify-between">
+          <span className={cn("text-[13px] font-semibold", tone)}>{pressureLabel(level)}</span>
+          <span className="nums font-mono text-xs text-muted-foreground">{Math.round(ratio * 100)}%</span>
+        </div>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+          <div className={cn("h-full rounded-full transition-all", level === "hard-guard" ? "bg-red-400" : level === "emergency" || level === "deep-compact" ? "bg-orange-400" : level === "soft-compact" || level === "retrieval-tight" ? "bg-amber-400" : level === "watch" ? "bg-sky-400" : "bg-emerald-400")} style={{ width: `${Math.min(100, Math.round(ratio * 100))}%` }} />
+        </div>
+        {pressure ? (
+          <p className="nums mt-2 font-mono text-[10px] leading-4 text-muted-foreground">
+            当前 {pressure.current.toLocaleString()} / 可用 {pressure.usable.toLocaleString()} tokens（窗口 {pressure.window.toLocaleString()}）
+          </p>
+        ) : null}
+        <p className="mt-1 text-[10px] text-muted-foreground/60">模型档案：{model}</p>
+        {activity?.compacted ? (
+          <p className="mt-2 rounded border border-amber-400/30 bg-amber-400/10 px-2 py-1.5 text-[11px] leading-4 text-amber-200/90">{activity.compacted}</p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function pressureLabel(level: string): string {
+  const labels: Record<string, string> = {
+    normal: "正常",
+    watch: "关注",
+    "retrieval-tight": "检索收紧",
+    "soft-compact": "轻量压缩",
+    "deep-compact": "深度压缩",
+    emergency: "紧急压缩",
+    "hard-guard": "硬限保护"
+  };
+  return labels[level] ?? level;
 }
 
 function MoodSection({ mind }: { mind: AgentMindState }): ReactNode {
@@ -322,15 +429,15 @@ function RelationshipsSection({ mind }: { mind: AgentMindState }): ReactNode {
 }
 
 function DeliberationsSection({ mind }: { mind: AgentMindState }): ReactNode {
-  if (!mind.deliberations.length) return null;
+  if (!mind.cognitivePasses.length) return null;
   return (
     <section>
-      <SectionTitle>最近盘算</SectionTitle>
+      <SectionTitle>内部认知</SectionTitle>
       <div className="space-y-2">
-        {mind.deliberations.slice(-4).reverse().map((deliberation, index) => (
+        {mind.cognitivePasses.slice(-4).reverse().map((pass, index) => (
           <div key={index} className="rounded-lg border border-border bg-card p-3">
-            <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">{deliberationLabel(deliberation.kind)}</p>
-            <p className="mt-1 text-sm leading-5 text-foreground/80">{deliberation.text}</p>
+            <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">{deliberationLabel(pass.kind)}</p>
+            <p className="mt-1 text-sm leading-5 text-foreground/80">{pass.text}</p>
           </div>
         ))}
       </div>

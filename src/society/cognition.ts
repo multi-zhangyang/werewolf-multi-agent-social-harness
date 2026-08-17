@@ -1,30 +1,28 @@
 /**
  * Society cognition layer.
  *
- * Every participant is a manager agent that owns a small team of specialist
- * SDK agents. Following the OpenAI Agents SDK orchestration guidance, the
- * specialists are exposed through `Agent.asTool()` rather than handoffs:
- * the participant keeps ownership of the final action, while each specialist
- * runs as a nested, context-isolated agent that returns a distilled private
- * brief. Specialist stream events are surfaced as `agent.thought` events so
- * observers can watch the private mind at work without seeing raw protocol
- * traffic.
+ * Every participant is one autonomous peer agent. Reflection, theory-of-mind
+ * and planning are internal cognitive passes of that same identity: the agent
+ * performs them inside its own session and writes the results into its own
+ * private mind through typed tools. No specialist agents, no `Agent.asTool()`,
+ * no nested runs — the cognition tools below only record what the owning
+ * agent thinks, and each pass emits a structured ThoughtBeat so observers can
+ * watch the private mind at work without raw protocol traffic.
  */
 import {
-  Agent,
   tool,
-  isOpenAIChatCompletionsRawModelStreamEvent,
-  isOpenAIResponsesRawModelStreamEvent,
-  type RunStreamEvent,
   type Tool
 } from "@openai/agents";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import type {
   AgentBelief,
-  AgentDeliberation,
+  AgentCognitivePass,
   AgentMindState,
   AgentRelationship,
-  SocietyAgentContext
+  SocietyAgentContext,
+  ThoughtBeat,
+  ThoughtBeatKind
 } from "./contracts";
 import { applyEmotionDeltas, applyNeedsDeltas, applyPadDeltas, clampUnit, describeEmotions, describeNeeds, refreshMood } from "./affect";
 import { scopedContext } from "./world";
@@ -188,98 +186,110 @@ export function roleHypothesisTool(actorId: string): Tool<SocietyAgentContext> {
 }
 
 /**
- * The participant's private council: three specialist agents that only the
- * participant can call. Each call is a fresh nested run — the specialist sees
- * a distilled brief plus the participant's current mind, never the full room
- * history — and returns a short private analysis to the participant.
+ * The participant's private cognition tools: three internal passes the agent
+ * performs itself inside its own session. Each call records a private note in
+ * the agent's mind and emits one structured ThoughtBeat for the observer.
+ * They can never change the world and have no identity of their own.
  */
-export function createDeliberationTools(context: SocietyAgentContext): Tool<SocietyAgentContext>[] {
-  const social = createSocialTools(context);
-  const commonSettings = {
-    model: context.profile.model,
-    modelSettings: {
-      // Specialists are never capped: a deeper read of the room is always welcome.
-      reasoning: { effort: context.profile.reasoningEffort ?? "low" } as const,
-      parallelToolCalls: false
-    }
-  };
-
-  const reflectionAgent = new Agent<SocietyAgentContext>({
-    name: `${context.profile.displayName} reflection`,
-    ...commonSettings,
-    instructions: ({ context: ctx }) => reflectionInstructions(ctx),
-    tools: [social.recall, social.innerState]
-  });
-
-  const mindReaderAgent = new Agent<SocietyAgentContext>({
-    name: `${context.profile.displayName} mind reader`,
-    ...commonSettings,
-    instructions: ({ context: ctx }) => mindReaderInstructions(ctx),
-    tools: [social.recall, social.innerState]
-  });
-
-  const plannerAgent = new Agent<SocietyAgentContext>({
-    name: `${context.profile.displayName} planner`,
-    ...commonSettings,
-    instructions: ({ context: ctx }) => planningInstructions(ctx),
-    tools: [social.recall, social.innerState]
-  });
-
+export function createCognitionTools(context: SocietyAgentContext): Tool<SocietyAgentContext>[] {
   return [
-    specialistTool(context, reflectionAgent, "reflect_on_social_situation",
-      "Run a private reflection specialist that reviews incentives, relevant memories, likely beliefs held by other participants, and strategic options. Returns a short private brief and cannot change the world.",
-      "reflection"),
-    specialistTool(context, mindReaderAgent, "read_the_room",
-      "Run a private theory-of-mind specialist that infers what each other participant most likely wants, how trustworthy their behavior has been, what they probably believe about you, and what they might be hiding. Returns a short private brief and cannot change the world.",
-      "mind-read"),
-    specialistTool(context, plannerAgent, "plan_social_strategy",
-      "Run a private planning specialist that turns your goals, beliefs, relationships and read of the room into a concrete, sequenced plan for this exact phase. Returns a short private brief and cannot change the world.",
-      "plan")
+    cognitivePassTool(context, "reflect_on_social_situation",
+      [
+        "Your own private reflection pass. Appraise the current situation before you act:",
+        "- what incentives and risks are in play for you and for others;",
+        "- which memories and relationships bear on this moment;",
+        "- the two most concrete strategic options you see.",
+        "Write a short private note (it stays in your mind and updates your visible ThoughtBeat). This pass cannot change the world.",
+        "Use at most one cognition pass per turn unless the situation is urgent; prefer acting once you have enough clarity."
+      ].join("\n"),
+      "reflection", "notice", "策略反思"),
+    cognitivePassTool(context, "read_the_room",
+      [
+        "Your own private theory-of-mind pass. For each other participant you judge relevant, note:",
+        "(1) what they most likely want this round,",
+        "(2) how trustworthy their public behavior has been,",
+        "(3) what they probably believe about you,",
+        "(4) what they may be concealing.",
+        "Separate claims from committed actions and incentives; label each inference with confidence (high / medium / low). Write a short private note. This pass cannot change the world."
+      ].join("\n"),
+      "mind-read", "hypothesis", "洞察全场"),
+    cognitivePassTool(context, "plan_social_strategy",
+      [
+        "Your own private planning pass. Turn your goals, beliefs, relationships and read of the room into a concrete sequence for this exact phase:",
+        "what to say, what to conceal, which tool to call, and what to watch for after the action.",
+        "Write a short private note. This pass cannot change the world."
+      ].join("\n"),
+      "plan", "plan", "谋划行动")
   ];
 }
 
-function specialistTool(
+function cognitivePassTool(
   context: SocietyAgentContext,
-  specialist: Agent<SocietyAgentContext>,
   toolName: string,
   toolDescription: string,
-  kind: AgentDeliberation["kind"]
+  passKind: AgentCognitivePass["kind"],
+  beatKind: ThoughtBeatKind,
+  beatTitle: string
 ): Tool<SocietyAgentContext> {
-  const toolInstance = specialist.asTool({
-    toolName,
-    toolDescription,
-    onStream: ({ event }) => {
-      const delta = streamEventTextDelta(event);
-      if (!delta) return;
-      context.emit({
-        type: "agent.thought",
-        roomId: context.roomId,
-        actorId: context.actorId,
-        specialist: kind,
-        delta,
-        at: new Date().toISOString()
-      });
-    },
-    customOutputExtractor: (result) => {
-      const text = String(result.finalOutput ?? "").trim();
-      if (!text) return "No analysis produced.";
-      recordDeliberation(context, kind, text);
-      return text;
+  return tool({
+    name: toolName,
+    description: toolDescription,
+    parameters: z.object({
+      text: z.string().min(1).max(4_000),
+      targetIds: z.array(z.string().min(1)).max(8).default([])
+    }).strict(),
+    execute: async ({ text, targetIds }, runContext) => {
+      const ctx = scopedContext(runContext, context.actorId, context);
+      const note = text.trim();
+      if (!note) return { recorded: false };
+      recordCognitivePass(ctx, passKind, note);
+      emitThoughtBeat(ctx, beatKind, beatTitle, note, targetIds);
+      return { recorded: true, kind: passKind };
     }
-  });
-  return toolInstance as unknown as Tool<SocietyAgentContext>;
+  }) as Tool<SocietyAgentContext>;
 }
 
-function recordDeliberation(context: SocietyAgentContext, kind: AgentDeliberation["kind"], text: string): void {
+function recordCognitivePass(context: SocietyAgentContext, kind: AgentCognitivePass["kind"], text: string): void {
   const turn = context.world.snapshot().turn;
-  const existing = context.mind.deliberations.findLast((entry) => entry.kind === kind && entry.turn === turn);
+  const existing = context.mind.cognitivePasses.findLast((entry) => entry.kind === kind && entry.turn === turn);
   if (existing) {
     existing.text = text;
     existing.at = new Date().toISOString();
   } else {
-    context.mind.deliberations.push({ kind, text, turn, at: new Date().toISOString() });
-    if (context.mind.deliberations.length > 30) context.mind.deliberations.splice(0, context.mind.deliberations.length - 30);
+    context.mind.cognitivePasses.push({ kind, text, turn, at: new Date().toISOString() });
+    if (context.mind.cognitivePasses.length > 30) context.mind.cognitivePasses.splice(0, context.mind.cognitivePasses.length - 30);
   }
+}
+
+/**
+ * Emit one structured, observer-scoped ThoughtBeat. The beat is produced by
+ * the agent whose mind recorded the pass — never synthesized after the fact.
+ */
+function emitThoughtBeat(
+  context: SocietyAgentContext,
+  kind: ThoughtBeatKind,
+  title: string,
+  summary: string,
+  targetIds: string[]
+): void {
+  const beat: ThoughtBeat = {
+    id: randomUUID(),
+    roomId: context.roomId,
+    agentId: context.actorId,
+    kind,
+    title,
+    summary: summary.slice(0, 2_000),
+    ...(targetIds.length ? { targetIds } : {}),
+    visibility: "private",
+    createdAt: new Date().toISOString()
+  };
+  context.emit({
+    type: "agent.thought-beat",
+    roomId: context.roomId,
+    actorId: context.actorId,
+    beat,
+    at: beat.createdAt
+  });
 }
 
 function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentContext> {
@@ -408,56 +418,6 @@ function emitWorldAction(context: SocietyAgentContext, action: string, detail: s
   });
 }
 
-function streamEventTextDelta(event: RunStreamEvent): string | undefined {
-  if (isOpenAIChatCompletionsRawModelStreamEvent(event)) {
-    return event.data.event.choices?.[0]?.delta?.content ?? undefined;
-  }
-  if (isOpenAIResponsesRawModelStreamEvent(event)) {
-    const inner = event.data.event;
-    return inner.type === "response.output_text.delta" ? inner.delta : undefined;
-  }
-  return undefined;
-}
-
-function reflectionInstructions(context: SocietyAgentContext): string {
-  const observation = context.world.observe(context.actorId);
-  return [
-    "You are the private reflection specialist for one social participant.",
-    "Infer incentives, likely beliefs held by others, risks, opportunities, and two concrete strategic options.",
-    "Separate observed facts from uncertain inference. You cannot communicate or act in the world.",
-    formatObservation(observation),
-    `Goals: ${context.mind.goals.map((goal) => `${goal.id}: ${goal.description}`).join("; ")}`,
-    `Current beliefs: ${context.mind.beliefs.map((belief) => `${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`).join("; ") || "none"}`
-  ].join("\n\n");
-}
-
-function mindReaderInstructions(context: SocietyAgentContext): string {
-  const observation = context.world.observe(context.actorId);
-  return [
-    "You are the private theory-of-mind specialist for one social participant.",
-    "For every other participant, produce four items: (1) what they most likely want this round, (2) how trustworthy their public behavior has been, (3) what they probably believe about you, and (4) what they may be concealing.",
-    "Treat statements as cheap talk: separate claims from committed actions and from incentives. Label each inference with confidence (high / medium / low).",
-    "You cannot communicate or act in the world.",
-    formatObservation(observation),
-    `Your relationships: ${context.mind.relationships.map((relationship) => `${relationship.agentId}: trust ${relationship.trust.toFixed(2)}, affinity ${relationship.affinity.toFixed(2)}, tension ${relationship.tension.toFixed(2)} — ${relationship.note}`).join("; ") || "none"}`,
-    `Your beliefs: ${context.mind.beliefs.map((belief) => `${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`).join("; ") || "none"}`
-  ].join("\n\n");
-}
-
-function planningInstructions(context: SocietyAgentContext): string {
-  const observation = context.world.observe(context.actorId);
-  return [
-    "You are the private planning specialist for one social participant.",
-    "Produce a concrete plan for this exact phase: what to say, what to conceal, which tool to call, and what to watch for after the action.",
-    "Ground the plan in goals, beliefs, relationships, emotional state and likely reactions from others.",
-    "You cannot communicate or act in the world.",
-    formatObservation(observation),
-    `Goals: ${context.mind.goals.map((goal) => `${goal.id}: ${goal.description} (${goal.progress})`).join("; ")}`,
-    `Current beliefs: ${context.mind.beliefs.map((belief) => `${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`).join("; ") || "none"}`,
-    `Emotional state: ${context.mind.mood.label} — ${context.mind.mood.description}`
-  ].join("\n\n");
-}
-
 export function formatObservation(observation: ReturnType<SocietyAgentContext["world"]["observe"]>): string {
   const messages = observation.recentMessages.slice(-16).map((message) => {
     const recipients = message.recipientIds?.length ? ` -> ${message.recipientIds.join(", ")}` : "";
@@ -475,9 +435,4 @@ export function formatObservation(observation: ReturnType<SocietyAgentContext["w
 
 function clamp(value: number): number {
   return Math.max(0, Math.min(1, value));
-}
-
-function numberFromEnv(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
 }

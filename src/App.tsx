@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
+import type { ArchivedRoomSummary } from "@/society/persistence";
 import { About } from "@/components/society/about";
 import { CreateRoomDialog } from "@/components/society/create-room";
 import { Landing } from "@/components/society/landing";
@@ -15,6 +16,7 @@ interface CatalogResponse {
 
 interface RoomListResponse {
   rooms: SocietyRoomSnapshot[];
+  archived?: ArchivedRoomSummary[];
 }
 
 interface SeasonResponse {
@@ -32,6 +34,7 @@ export function App(): ReactNode {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [rooms, setRooms] = useState<SocietyRoomSnapshot[]>([]);
+  const [archived, setArchived] = useState<ArchivedRoomSummary[]>([]);
   const [season, setSeason] = useState<SeasonResponse["dossiers"]>([]);
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
   const [createScenarioId, setCreateScenarioId] = useState<string>();
@@ -64,6 +67,7 @@ export function App(): ReactNode {
     setScenarios(catalog.scenarios);
     setModels(catalog.models);
     setRooms(list.rooms);
+    setArchived(list.archived ?? []);
     setSeason(seasonResponse.dossiers);
   }, []);
 
@@ -77,7 +81,10 @@ export function App(): ReactNode {
 
   useEffect(() => {
     const poll = window.setInterval(() => {
-      void getJson<RoomListResponse>("/api/rooms").then((list) => setRooms(list.rooms)).catch(() => undefined);
+      void getJson<RoomListResponse>("/api/rooms").then((list) => {
+        setRooms(list.rooms);
+        setArchived(list.archived ?? []);
+      }).catch(() => undefined);
     }, 15_000);
     return () => window.clearInterval(poll);
   }, []);
@@ -146,6 +153,7 @@ export function App(): ReactNode {
           scenarios={scenarios}
           models={models}
           rooms={rooms}
+          archived={archived}
           season={season}
           onStart={(scenarioId) => setCreateScenarioId(scenarioId)}
           onOpenRoom={(roomId) => { location.hash = `#/rooms/${encodeURIComponent(roomId)}`; }}

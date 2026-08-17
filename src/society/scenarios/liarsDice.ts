@@ -64,6 +64,10 @@ export class LiarsDiceWorld extends SocialWorldBase {
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
+    const range = scenario.playerRange ?? { min: scenario.players, max: scenario.players };
+    if (profiles.length < range.min || profiles.length > range.max) {
+      throw new Error(`PLAYER_COUNT_INVALID: ${scenario.name} supports ${range.min}-${range.max} participants.`);
+    }
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
     for (const profile of profiles) {
       this.lives.set(profile.id, LIVES);

@@ -10,11 +10,12 @@ browser
   │
 SocietyRoom ── schedules activations, settles social accounts
   │
-  ├─ OpenAISocietyAgent × participants
+  ├─ AutonomousSocietyAgent × participants
   │    ├─ @openai/agents Agent
   │    ├─ MemorySession
   │    ├─ associative memory
   │    ├─ appraisal engine (event → emotion/relationship/memory)
+  │    ├─ internal cognition passes (reflection / mind-read / plan)
   │    ├─ social tools
   │    └─ scene tools
   │
@@ -26,12 +27,16 @@ SocietyRoom ── schedules activations, settles social accounts
 
 ## Agent boundary
 
-`src/society/participant.ts` creates one SDK `Agent` per participant. The
-participant has a stable session, a private mind state and an associative
-memory store. `communicate`, `remember_experience`, `recall_memory` and
-`update_inner_state` are SDK function tools. Reflection, theory-of-mind and
-planning are real SDK Agents reached through `Agent.asTool()`; they return
-control to the participant after private analysis.
+`src/society/participant.ts` creates one SDK `Agent` per participant — and only
+one. The participant has a stable session, a private mind state and an
+associative memory store. `communicate`, `remember_experience`, `recall_memory`
+and `update_inner_state` are SDK function tools. Reflection, theory-of-mind and
+planning are internal cognitive passes of this same identity: the agent performs
+them inside its own session through private tools (`reflect_on_social_situation`,
+`read_the_room`, `plan_social_strategy`), writes the results into its own mind
+and emits a structured `ThoughtBeat` for observers. There are no specialist
+sub-agents and no `Agent.asTool()` delegation — the participant stays one peer
+agent from start to finish.
 
 The runner streams model and tool events to the room. A model's final text is a
 decision note for the observer; it is not an action protocol. World changes can
@@ -51,12 +56,11 @@ event-driven, never self-reported.
 
 Each participant is a fully isolated SDK agent: its own `Agent` instance, its
 own `MemorySession` (id = room + actor), its own mind, its own associative
-memory store, its own context object and its own nested specialist team. The
-isolation is structural rather than asserted: sessions, minds and memory
-stores are constructed per actor in `participant.ts`, and every tool is bound
-to one actor — `scopedContext` raises `CROSS_AGENT_CONTEXT_DETECTED` if the SDK
-ever hands it another agent's run context, so a tool can never act as someone
-else.
+memory store and its own context object. The isolation is structural rather
+than asserted: sessions, minds and memory stores are constructed per actor in
+`participant.ts`, and every tool is bound to one actor — `scopedContext` raises
+`CROSS_AGENT_CONTEXT_DETECTED` if the SDK ever hands it another agent's run
+context, so a tool can never act as someone else.
 
 Context is also budgeted per agent (`src/society/context-manager.ts`): the
 model's context window is resolved by model id (`SOCIETY_MODEL_CONTEXTS`,
@@ -105,6 +109,19 @@ urgency so talkative characters hold the floor.
 Scenario code never needs to know how an Agent is hosted or how the UI renders
 events. It only owns the rules of its own world.
 
+## Spectator boundary
+
+`src/society/spectator/` hosts the presentation-only layer: a deterministic
+`TensionEngine` (calm / warm / tense / climax from real event impacts with
+decay) and the `CinematicDirector`, which derives camera cues (speaker, duel,
+vote-board, role-reveal, endgame…) from public facts only — world beats,
+eliminations, vote tallies, role actions and emotional spikes. The director
+never reads hidden identity counts, never advises agents and never modifies
+world state; its outputs (`tension.changed`, `cinematic.cue`) are
+presentational events on the same stream. The room UI renders them as a
+tension meter, a cue banner and a unified timeline tab (thought / tool /
+message / action / cue / memory).
+
 ## Room and event stream
 
 `src/society/room.ts` starts the world, runs each activation with bounded turns
@@ -112,21 +129,29 @@ and timeout signals, and retains a finite event log. After every resolved
 activation it settles social accounts: agents appraise their queued events and
 store the round's outcome. Speaking turns are optional — an agent that fails a
 turn stays quiet instead of sinking the room; binding domain actions stay
-strict. The Express route `/api/rooms/:roomId/events` sends an initial snapshot
-followed by SSE envelopes. The browser reduces those envelopes into the current
-room view while retaining the event sequence for the activity panels and Agent
-inspector.
+strict. Single agents can be paused and resumed individually: a paused agent is
+silent in discussion waves, and binding activations wait for its resume instead
+of substituting a decision. The Express route `/api/rooms/:roomId/events` sends
+an initial snapshot followed by SSE envelopes. The browser reduces those
+envelopes into the current room view while retaining the event sequence for the
+activity panels and Agent inspector.
 
 Events deliberately describe observable execution:
 
 - agent status, streamed text deltas, hidden reasoning deltas and decision notes;
-- private specialist output (reflection / theory-of-mind / planning);
-- SDK tool start/completion;
+- structured `ThoughtBeat` events produced by the agent's own cognition passes;
+- SDK tool traces (start / success) with stable ids;
+- multi-level context pressure and compaction events;
+- per-agent pause / resume events;
 - messages with channel and recipients;
 - committed world actions;
+- tension changes and cinematic cues from the spectator director;
 - world snapshots and room lifecycle changes.
 
-Provider keys and raw provider diagnostics never enter a snapshot or event.
+The model registry (`src/society/models/`) resolves each agent's final model
+configuration; `/api/model-config/probe` runs bounded capability probes against
+a model profile and stores three-state (yes / no / unknown) results. Provider
+keys and raw provider diagnostics never enter a snapshot or event.
 
 ## Adding a scene
 

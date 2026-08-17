@@ -34,6 +34,18 @@ export function createServerApp(): express.Express {
 const app = createServerApp();
 
 if (isMainModule()) {
+  // Fail loudly instead of dying silently: a long-running room server must
+  // surface process-level failures with a scrubbed, grep-able reason so an
+  // external supervisor can restart it.
+  process.on("unhandledRejection", (reason) => {
+    console.error("[society] unhandled rejection:", errorMessage(reason));
+    process.exit(1);
+  });
+  process.on("uncaughtException", (error) => {
+    console.error("[society] uncaught exception:", errorMessage(error));
+    if (error instanceof Error && error.stack) console.error(error.stack);
+    process.exit(1);
+  });
   app.listen(port, host, () => {
     console.log(`Society listening on http://${host}:${port}`);
   });
@@ -46,5 +58,11 @@ function isMainModule(): boolean {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s,;]+/gi, "$1[redacted]")
+    .replace(/(api[_ -]?key\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
+    .replace(/\brp_[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
+    .slice(0, 800);
 }

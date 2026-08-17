@@ -138,6 +138,30 @@ function persistToEnvFile(settings: ProviderSettings): void {
   writeFileSync(ENV_FILE, content, { mode: 0o600 });
 }
 
+/**
+ * Write one provider secret into .env.local under a managed variable name.
+ * Only the variable reference is stored in the model registry; the raw key
+ * never leaves the local secret file.
+ */
+export function writeEnvKey(name: string, value: string): void {
+  const key = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : "SOCIETY_PROVIDER_KEY";
+  const lines = existsSync(ENV_FILE) ? readFileSync(ENV_FILE, "utf8").split(/\r?\n/) : [];
+  const next: string[] = [];
+  let written = false;
+  for (const line of lines) {
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
+    if (match && match[1] === key) {
+      next.push(`${key}=${value}`);
+      written = true;
+    } else {
+      next.push(line);
+    }
+  }
+  if (!written) next.push(`${key}=${value}`);
+  const content = next.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+  writeFileSync(ENV_FILE, content, { mode: 0o600 });
+}
+
 function normalizeBaseUrl(value: string | undefined): string {
   const trimmed = (value ?? "").trim();
   if (!trimmed) return "";

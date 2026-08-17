@@ -94,7 +94,7 @@ const planner = new Agent({
   handoffs: [handoff(reflectionAgent, { onHandoff: (ctx, input) => {} })],
 });
 
-// asTool — manager keeps control (the society pattern for the 3 specialists):
+// asTool — manager keeps control:
 const reflectionAsTool = reflectionAgent.asTool({
   toolName: "reflect",                 // default: agent.name
   toolDescription: "Reflect on recent events and produce self-assessment",
@@ -107,7 +107,15 @@ const participant = new Agent({
 });
 ```
 
-For the social simulation, **`asTool()` is idiomatic** (matches docs' "agents as tools" recommendation): the participant owns the final action; the 3 specialists are bounded, context-isolated helpers. `asTool()` runs the sub-agent in a fresh nested `Runner`; pass `runConfig` (nested runner defaults) and `runOptions` (nested run options) to tune it.
+**Project decision (AGENTS.md §0.2/§2.1/§17.1): neither primitive is used on the
+participant path.** Both would create a second agent identity or a nested run
+inside one player, which the charter forbids — one player is one peer agent, and
+reflection / theory-of-mind / planning must be internal cognitive passes of that
+same agent. The patterns are documented here as SDK reference only; `cognition.ts`
+implements the passes as plain typed tools that write into the owning agent's
+mind. `asTool()` runs the sub-agent in a fresh nested `Runner`; pass `runConfig`
+(nested runner defaults) and `runOptions` (nested run options) to tune it — noted
+for completeness, not for use in participant code.
 
 ### 1.3 Nested runs
 
@@ -471,7 +479,7 @@ const result = await runner.run(agent, turnInput, {
 
 ## 6. TL;DR for the society refactor
 
-1. One `Agent` per participant, **`outputType`** (not `structuredOutput`) for typed decisions, **`asTool()`** (not handoffs) for the 3 specialists, **one `MemorySession` per participant** (swap for a DB-backed `Session` in prod), **one mutable `context` per participant** — *not cloned*, so `update_inner_state` mutates it directly.
+1. One `Agent` per participant — and only one, per the project charter (no handoffs, no `asTool()` specialists; reflection / mind-read / plan are internal passes of that same agent), **one `MemorySession` per participant** (swap for a DB-backed `Session` in prod), **one mutable `context` per participant** — *not cloned*, so `update_inner_state` mutates it directly.
 2. `modelSettings.parallelToolCalls` + `tool()` + zod + `strict` for tool schemas.
 3. For OpenAI-compatible reasoning models: `OpenAIProvider({ baseURL, useResponses: false })` (pass `baseURL` explicitly — no env fallback), `modelSettings.reasoning.effort`, and read `reasoning_content` yourself from raw chat-completions chunks (the SDK does not).
 4. Disable tracing with `setTracingDisabled(true)` / `Runner({ tracingDisabled: true })` — no env var exists.
@@ -480,7 +488,7 @@ const result = await runner.run(agent, turnInput, {
 
 ## 7. Concrete fixes for `src/society/participant.ts` and `src/society/cognition.ts`
 
-Your code is already close to idiomatic (asTool specialists ✔, per-participant MemorySession ✔, `useResponses: false` ✔, `tracingDisabled: true` ✔, dynamic `instructions` ✔). The issues below are the *real* deviations from the 0.16 API.
+Status against the 0.16 API: per-participant MemorySession ✔, `useResponses: false` ✔, `tracingDisabled: true` ✔, dynamic phase guidance ✔, and the charter's single-peer-agent rule ✔ (the former asTool specialists were removed; cognition passes are same-agent tools). The issues below are the *real* deviations from the 0.16 API.
 
 ### 7.1 🐛 Critical: `textDelta()` only works for Responses — chat-completions deltas are silently dropped
 
@@ -652,19 +660,15 @@ if (finalOutput) {
 
 ### 7.5 ✅ (Already correct) Confirmations
 
-- `asTool({ onStream, customOutputExtractor })` for the 3 specialists — **idiomatic**, matches docs' "agents as tools" pattern.
 - Per-participant `MemorySession` with `sessionId: ${roomId}:${id}` — **correct**; just swap for a durable `Session` backend before production scale.
 - Passing `context: this.context` with a live mutable object (`this.mind`) — **correct**; context is not cloned, so `update_inner_state` mutations persist.
 - `useResponses: false` + explicit `baseURL`/`apiKey` on `OpenAIProvider` — **correct** for OpenAI-compatible endpoints; note `OPENAI_BASE_URL` is *not* auto-read, so your `baseUrlFromEnv` is doing necessary work.
 - `baseUrlFromEnv` stripping trailing `/chat/completions`|`/responses` — sensible; keep it (the SDK does no such normalization).
 - `tracingDisabled: true` on the Runner — correct; there is no env var for this.
+- Cognition as same-agent internal passes (no `asTool`, no handoffs, no discussion-agent second identity) — **correct per the project charter**; the previous `asTool({ onStream, customOutputExtractor })` specialist wiring has been removed and must not be reintroduced.
 
 ### 7.6 Minor polish
 
-- In `cognition.ts`, `specialistTool` casts the tool twice (`as unknown as Tool<SocietyAgentContext>`). With 0.16 you can drop the double cast — `asTool()` returns `AgentTool<TContext, …>` which is already a `FunctionTool<TContext, …>`:
-  ```ts
-  const toolInstance = specialist.asTool({ /* … */ });
-  return toolInstance;   // already Tool<SocietyAgentContext> (FunctionTool + .on())
-  ```
-- Consider giving each specialist an `outputType` (e.g. `z.object({ assessment, options })`) + `customOutputExtractor` that serializes it, so `recordDeliberation` stores structured data instead of free text.
-- `consumeevent` reads `event.item` via `as unknown as Record<string, unknown>`; the typed `event.item` already exposes `.name`/`.rawItem`/`.output`, so `toolName`/`toolOutput` can accept the SDK `RunItem` type instead of `unknown` for better safety.
+- The cognition pass tools in `cognition.ts` are plain `tool()` entries (no more `specialistTool` double cast); keep them typed as `Tool<SocietyAgentContext>`.
+- Consider giving each cognition pass an `outputType` (e.g. `z.object({ assessment, options })`) so the recorded pass stores structured data instead of free text.
+- `consumeEvent` reads `event.item` via `as unknown as Record<string, unknown>`; the typed `event.item` already exposes `.name`/`.rawItem`/`.output`, so `toolName`/`toolOutput` can accept the SDK `RunItem` type instead of `unknown` for better safety.

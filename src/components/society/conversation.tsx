@@ -256,14 +256,7 @@ function LiveAgents({ room, activity, names }: {
               </div>
               <span className="nums font-mono text-[10px] text-muted-foreground/50">{formatTime(state?.at ?? new Date().toISOString())}</span>
             </div>
-            {state?.reasoning ? (
-              <div className="mx-4 mb-3 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3.5 py-2.5">
-                <p className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-sky-300">
-                  <Brain className="size-3" /> 内心推理
-                </p>
-                <p className="stream-caret line-clamp-4 font-mono text-xs leading-5 text-sky-100/80">{state.reasoning}</p>
-              </div>
-            ) : null}
+            {state?.reasoning ? <CollapsedReasoning text={state.reasoning} /> : null}
             {state?.thought ? (
               <div className="mx-4 mb-3 rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
                 <p className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
@@ -290,8 +283,49 @@ function LiveAgents({ room, activity, names }: {
   );
 }
 
-function thoughtLabel(kind: "reflection" | "mind-read" | "plan"): string {
-  return kind === "reflection" ? "策略反思" : kind === "mind-read" ? "洞察他人" : "谋划行动";
+/**
+ * The model's private thinking stream, collapsed by default (§8.5): it is
+ * real provider reasoning, shown only on explicit expansion, never as an
+ * auto-playing feed. Public seats never receive these events server-side.
+ */
+function CollapsedReasoning({ text }: { text: string }): ReactNode {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mx-4 mb-3 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3.5 py-2.5">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex w-full items-center gap-1.5 text-left"
+        aria-expanded={open}
+      >
+        <Brain className="size-3 shrink-0 text-sky-300" />
+        <span className="font-mono text-[10px] uppercase tracking-widest text-sky-300">内心推理</span>
+        <span className="truncate text-[10px] text-sky-200/50">{open ? "点击收起" : "点击展开"}</span>
+        <svg viewBox="0 0 12 12" className={cn("ml-auto size-2.5 shrink-0 text-sky-300/70 transition-transform", open && "rotate-180")} fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+          <path d="M2 4l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open ? (
+        <p className="stream-caret mt-1.5 whitespace-pre-wrap break-words font-mono text-xs leading-5 text-sky-100/80">{text}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function thoughtLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    notice: "有所察觉",
+    recall: "回忆涌起",
+    doubt: "心生怀疑",
+    goal: "目标浮现",
+    hypothesis: "洞察他人",
+    conflict: "内心冲突",
+    plan: "谋划行动",
+    decision: "下定决心",
+    regret: "事后懊悔",
+    realization: "恍然大悟"
+  };
+  return labels[kind] ?? "心中盘算";
 }
 
 function WaveDivider({ wave }: { wave: number }): ReactNode {

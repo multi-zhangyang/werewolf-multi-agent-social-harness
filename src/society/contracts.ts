@@ -1,4 +1,4 @@
-import type { Agent, MemorySession, Tool } from "@openai/agents";
+import type { Agent, Session, Tool } from "@openai/agents";
 
 export type ScenarioId =
   | "prisoners-dilemma"
@@ -16,17 +16,30 @@ export type ScenarioId =
   | "liars-dice";
 export type RoomStatus = "lobby" | "running" | "paused" | "finished" | "error";
 export type SocialChannel = "public" | "private" | "team";
-export type AgentStatus = "lobby" | "thinking" | "acting" | "speaking" | "idle" | "finished" | "error";
+export type AgentStatus = "lobby" | "thinking" | "acting" | "speaking" | "idle" | "paused" | "finished" | "error";
 export type ParticipantController = "agent" | "human";
 export type PlayerActionKind = "message" | "choice" | "number" | "target" | "team";
 export type ReasoningEffort = "low" | "medium" | "high";
+
+/**
+ * Spectator information modes (AGENTS.md §8.3). Visibility projection happens
+ * server-side: a mode never lets data leak across its boundary.
+ */
+export type SpectatorMode = "public" | "omniscient" | "agent-pov" | "postgame";
 
 export interface ScenarioSummary {
   id: ScenarioId;
   name: string;
   shortDescription: string;
   description: string;
+  /** Default seat count when the creator does not choose one. */
   players: number;
+  /**
+   * Supported seat counts for this world, following the game's own table
+   * conventions (werewolf 6-12, avalon 5-10, dice 2-6, …). Absent for games
+   * whose identity is two-player.
+   */
+  playerRange?: { min: number; max: number };
   defaultRounds: number;
   minRounds: number;
   maxRounds: number;
@@ -151,11 +164,51 @@ export interface AgentMemoryItem {
   createdAt: string;
 }
 
-export interface AgentDeliberation {
+/**
+ * A private cognitive pass recorded by the agent itself: the same identity
+ * running an internal phase (reflection / theory-of-mind / planning) inside
+ * its own session and writing the result into its own mind. It is not a
+ * separate agent and has no identity of its own.
+ */
+export interface AgentCognitivePass {
   kind: "reflection" | "mind-read" | "plan";
   text: string;
   turn: number;
   at: string;
+}
+
+/**
+ * A structured, observable beat from an agent's own cognition — what it
+ * noticed, hypothesized, planned or decided. Produced by the same agent that
+ * acts (never by a spectator or a specialist), tied to a real activation, and
+ * carrying real references where available. Raw hidden chain-of-thought is
+ * never a ThoughtBeat.
+ */
+export type ThoughtBeatKind =
+  | "notice"
+  | "recall"
+  | "doubt"
+  | "goal"
+  | "hypothesis"
+  | "conflict"
+  | "plan"
+  | "decision"
+  | "regret"
+  | "realization";
+
+export interface ThoughtBeat {
+  id: string;
+  roomId: string;
+  agentId: string;
+  activationId?: string;
+  kind: ThoughtBeatKind;
+  title: string;
+  summary: string;
+  confidence?: number;
+  targetIds?: string[];
+  memoryIds?: string[];
+  visibility: "private" | "omniscient" | "postgame" | "public";
+  createdAt: string;
 }
 
 /**
@@ -189,6 +242,62 @@ export interface AgentAppraisalNote {
   at: string;
 }
 
+/**
+ * Deterministic tension signal derived from real events. Presentation-only:
+ * it drives camera and pacing, never the game (AGENTS.md §8.6).
+ */
+export type TensionReason =
+  | "direct-accusation"
+  | "contradiction"
+  | "betrayal"
+  | "alliance-break"
+  | "vote-swing"
+  | "role-action"
+  | "deception-exposed"
+  | "save"
+  | "elimination"
+  | "win-condition-near"
+  | "emotional-spike";
+
+export interface TensionSignal {
+  eventId: string;
+  score: number;
+  reasons: TensionReason[];
+  primaryAgentIds: string[];
+}
+
+export type CameraMode =
+  | "wide-table"
+  | "speaker"
+  | "duel"
+  | "agent-mind"
+  | "tool-action"
+  | "vote-board"
+  | "relationship"
+  | "role-reveal"
+  | "endgame";
+
+/**
+ * A presentational camera cue derived from real events; re-derivable and
+ * never part of the world truth (AGENTS.md §10.6).
+ */
+export interface CinematicCue {
+  id: string;
+  roomId: string;
+  sourceEventIds: string[];
+  camera: CameraMode;
+  focusAgentIds: string[];
+  priority: number;
+  minimumDurationMs: number;
+  maximumDurationMs: number;
+  title?: string;
+  subtitle?: string;
+  effect?: string;
+  sound?: string;
+  skippable: boolean;
+  createdAt: string;
+}
+
 export interface AgentMindState {
   mood: AgentMoodState;
   attention: string[];
@@ -197,8 +306,8 @@ export interface AgentMindState {
   relationships: AgentRelationship[];
   memories: AgentMemoryItem[];
   latestReflection?: string;
-  /** Private analyses produced by this agent's specialist sub-agents. */
-  deliberations: AgentDeliberation[];
+  /** Private analyses produced by this agent's own internal cognitive passes. */
+  cognitivePasses: AgentCognitivePass[];
   /** Planned strategic deceptions, typed and audience-scoped. */
   deceptions: AgentDeceptionPlan[];
   /** Role-probability hypotheses in hidden-identity worlds. */
@@ -366,13 +475,51 @@ export type AgentRuntimeEvent =
   | { type: "agent.updated"; roomId: string; actorId: string; status: AgentStatus; mind: AgentMindState; turnCount: number; totalTokens: number; lastOutput?: string; at: string }
   | { type: "agent.delta"; roomId: string; actorId: string; delta: string; at: string }
   | { type: "agent.reasoning"; roomId: string; actorId: string; delta: string; at: string }
-  | { type: "agent.tool"; roomId: string; actorId: string; toolName: string; phase: "started" | "completed"; summary?: string; at: string }
-  | { type: "agent.thought"; roomId: string; actorId: string; specialist: AgentDeliberation["kind"]; delta: string; at: string }
-  | { type: "agent.compacted"; roomId: string; actorId: string; estimatedTokens: number; threshold: number; digest: string; at: string }
+  | {
+      type: "agent.tool";
+      roomId: string;
+      actorId: string;
+      /** Stable trace id for this tool invocation. */
+      toolCallId: string;
+      toolName: string;
+      /** Human-readable action label for the stage, e.g. "投出白昼票". */
+      label?: string;
+      phase: "queued" | "started" | "streaming" | "succeeded" | "failed";
+      safeInputSummary?: string;
+      safeOutputSummary?: string;
+      worldEffect?: string;
+      errorCode?: string;
+      at: string;
+    }
+  | { type: "agent.thought-beat"; roomId: string; actorId: string; beat: ThoughtBeat; at: string }
+  | { type: "agent.compacted"; roomId: string; actorId: string; estimatedTokens: number; threshold: number; digest: string; level: string; pressureAfter: number; at: string }
+  | {
+      type: "agent.context.pressure";
+      roomId: string;
+      actorId: string;
+      level: "normal" | "watch" | "retrieval-tight" | "soft-compact" | "deep-compact" | "emergency" | "hard-guard";
+      pressureRatio: number;
+      usableInputTokens: number;
+      currentInputTokens: number;
+      contextWindow: number;
+      at: string;
+    }
   | { type: "agent.guardrail"; roomId: string; actorId: string; label: string; snippet: string; at: string }
+  | { type: "agent.paused"; roomId: string; actorId: string; reason: string; at: string }
+  | { type: "agent.resumed"; roomId: string; actorId: string; at: string }
   | { type: "agent.message"; roomId: string; message: SocialMessage }
   | { type: "world.action"; roomId: string; actorId: string; action: string; detail: string; at: string }
   | { type: "world.updated"; roomId: string; snapshot: WorldSnapshot }
+  | {
+      type: "tension.changed";
+      roomId: string;
+      score: number;
+      level: "calm" | "warm" | "tense" | "climax";
+      reasons: TensionReason[];
+      primaryAgentIds: string[];
+      at: string;
+    }
+  | { type: "cinematic.cue"; roomId: string; cue: CinematicCue; at: string }
   | { type: "room.status"; roomId: string; status: RoomStatus; detail?: string; at: string };
 
 export interface AgentMemoryStore {
@@ -468,7 +615,7 @@ export interface AgentTurnResult {
 export interface SocietyAgentRuntime {
   readonly profile: AgentProfile;
   readonly agent: Agent<SocietyAgentContext>;
-  readonly session: MemorySession;
+  readonly session: Session;
   readonly mind: AgentMindState;
   runTurn(input: string, options: { signal: AbortSignal; turn: number }): Promise<AgentTurnResult>;
   rememberOutcome(text: string, turn: number): Promise<void>;

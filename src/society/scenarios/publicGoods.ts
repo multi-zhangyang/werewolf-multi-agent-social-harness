@@ -37,10 +37,13 @@ export class PublicGoodsWorld extends SocialWorldBase {
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
-    if (profiles.length !== scenario.players) throw new Error(`PLAYER_COUNT_INVALID: ${scenario.name} requires ${scenario.players} participants.`);
+    const range = scenario.playerRange ?? { min: scenario.players, max: scenario.players };
+    if (profiles.length < range.min || profiles.length > range.max) {
+      throw new Error(`PLAYER_COUNT_INVALID: ${scenario.name} supports ${range.min}-${range.max} participants.`);
+    }
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
     for (const profile of profiles) this.scores.set(profile.id, 0);
-    this.addLog(`每人每轮获得 ${this.endowment} 点资源，公共池按 ${this.multiplier} 倍增长后均分。`, 1);
+    this.addLog(`${profiles.length} 名参与者每人每轮获得 ${this.endowment} 点资源，公共池按 ${this.multiplier} 倍增长后均分。`, 1);
   }
 
   snapshot(): WorldSnapshot {

@@ -24,8 +24,14 @@ export function createWorld(input: {
 }): SocialWorld {
   const metadata = SCENARIO_METADATA[input.scenarioId];
   if (!metadata) throw new Error(`SCENARIO_NOT_FOUND: '${input.scenarioId}' is not available.`);
-  if (input.profiles.length !== metadata.players) {
-    throw new Error(`PLAYER_COUNT_INVALID: ${metadata.name} requires ${metadata.players} participants.`);
+  const range = metadata.playerRange;
+  const min = range?.min ?? metadata.players;
+  const max = range?.max ?? metadata.players;
+  if (input.profiles.length < min || input.profiles.length > max) {
+    const expected = range
+      ? `${min}-${max} 名参与者`
+      : `${metadata.players} 名参与者`;
+    throw new Error(`PLAYER_COUNT_INVALID: ${metadata.name} requires ${expected}.`);
   }
   if (input.scenarioId === "prisoners-dilemma") return new PrisonersDilemmaWorld(input.roomId, metadata, input.profiles, input.rounds);
   if (input.scenarioId === "public-goods") return new PublicGoodsWorld(input.roomId, metadata, input.profiles, input.rounds);

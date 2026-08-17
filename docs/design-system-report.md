@@ -195,10 +195,10 @@ Key hierarchy decision: **the ring color is the agent's live perception** — `s
 
 ### 2.3 Streaming thought / typing indicator
 
-`agent.thought` events carry `specialist` (`reflection | mind-read | plan`) + `delta`; `agent.delta` is the public stream. **Show both, but tier them**:
+`agent.thought-beat` events carry a structured `ThoughtBeat` (`kind` ∈ notice / recall / doubt / goal / hypothesis / conflict / plan / decision / regret / realization + title + summary), produced by the agent's own cognition passes; `agent.delta` is the public stream. **Show both, but tier them**:
 
 - **Public speech** (a message is being composed): stream into a *live* message bubble with a blinking caret so it feels like the agent is talking on the record.
-- **Private thought** (`agent.thought`, a deliberation): show in a dimmed mono block with a "正在思考" header and an auto-reveal affordance — this is your biggest untapped "watch the machine think" asset.
+- **Private thought** (`agent.thought-beat`, a structured cognition result): show in a dimmed mono block with a "正在思考" header and an auto-reveal affordance — this is your biggest untapped "watch the machine think" asset.
 
 ```tsx
 function ThoughtStream({ activity }) {

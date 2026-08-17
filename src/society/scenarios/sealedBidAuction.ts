@@ -49,13 +49,14 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
-    if (profiles.length !== scenario.players) {
-      throw new Error(`PLAYER_COUNT_INVALID: ${scenario.name} requires ${scenario.players} participants.`);
+    const range = scenario.playerRange ?? { min: scenario.players, max: scenario.players };
+    if (profiles.length < range.min || profiles.length > range.max) {
+      throw new Error(`PLAYER_COUNT_INVALID: ${scenario.name} supports ${range.min}-${range.max} participants.`);
     }
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
     for (const profile of profiles) this.scores.set(profile.id, 0);
     this.dealValues();
-    this.addLog("拍卖开始：每个人都有一份私密估值，公开讨论后同时提交密封出价。", 1);
+    this.addLog(`拍卖开始：${profiles.length} 位竞拍者各持一份私密估值，公开讨论后同时提交密封出价。`, 1);
   }
 
   snapshot(): WorldSnapshot {

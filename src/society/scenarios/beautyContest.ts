@@ -46,8 +46,9 @@ export class BeautyContestWorld extends SocialWorldBase {
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
-    if (profiles.length < 3) {
-      throw new Error("PLAYER_COUNT_INVALID: Beauty Contest requires at least three participants.");
+    const range = scenario.playerRange ?? { min: scenario.players, max: scenario.players };
+    if (profiles.length < range.min || profiles.length > range.max) {
+      throw new Error(`PLAYER_COUNT_INVALID: ${scenario.name} supports ${range.min}-${range.max} participants.`);
     }
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
     for (const profile of profiles) this.scores.set(profile.id, 0);

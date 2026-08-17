@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Activity, BarChart3, Crosshair, Flame, History, Network, Radio, Sparkles } from "lucide-react";
+import { Activity, BarChart3, BrainCircuit, Clapperboard, Crosshair, Flame, History, ListOrdered, MessageSquare, Network, Radio, Sparkles, Wrench } from "lucide-react";
 import type { ScenarioId, WorldSnapshot } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import type { RoomConnection } from "./use-room";
+import type { RoomConnection, TimelineEntry } from "./use-room";
 import { AgentAvatar, StatusDot, StatusLabel, eventLabel, roleLabelZh } from "./shared";
 import { RelationshipNetwork } from "./network";
 
@@ -21,7 +21,7 @@ interface SuspicionState {
   entries: Array<{ turn: number; accuser: string; target: string; kind: "speech" | "vote" | "outcome" }>;
 }
 
-export function WorldPanel({ room, toolCalls = [] }: { room: SocietyRoomSnapshot; toolCalls?: RoomConnection["toolCalls"] }): ReactNode {
+export function WorldPanel({ room, toolCalls = [], timeline = [] }: { room: SocietyRoomSnapshot; toolCalls?: RoomConnection["toolCalls"]; timeline?: TimelineEntry[] }): ReactNode {
   const world = room.world;
   const names = new Map(world.agents.map((agent) => [agent.id, agent.displayName]));
 
@@ -66,6 +66,14 @@ export function WorldPanel({ room, toolCalls = [] }: { room: SocietyRoomSnapshot
               <Radio className="size-3.5" />
               动态
             </TabsTrigger>
+            <TabsTrigger value="timeline" className="rounded-lg border border-transparent px-3 py-1 text-xs data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground">
+              <ListOrdered className="size-3.5" />
+              时间线
+            </TabsTrigger>
+            <TabsTrigger value="highlights" className="rounded-lg border border-transparent px-3 py-1 text-xs data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground">
+              <Sparkles className="size-3.5" />
+              高光
+            </TabsTrigger>
             <TabsTrigger value="history" className="rounded-lg border border-transparent px-3 py-1 text-xs data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground">
               <History className="size-3.5" />
               进程
@@ -79,6 +87,12 @@ export function WorldPanel({ room, toolCalls = [] }: { room: SocietyRoomSnapshot
           </TabsContent>
           <TabsContent value="activity" className="pt-3">
             <ActivityCard toolCalls={toolCalls} names={names} />
+          </TabsContent>
+          <TabsContent value="timeline" className="pt-3">
+            <TimelineCard timeline={timeline} names={names} />
+          </TabsContent>
+          <TabsContent value="highlights" className="pt-3">
+            <HighlightsCard highlights={room.highlights ?? []} names={names} />
           </TabsContent>
           <TabsContent value="history" className="pt-3">
             <HistoryCard world={world} names={names} scenarioId={room.scenarioId} />
@@ -370,6 +384,78 @@ function ActivityCard({ toolCalls, names }: { toolCalls: RoomConnection["toolCal
       ))}
     </div>
   );
+}
+
+function TimelineCard({ timeline, names }: { timeline: TimelineEntry[]; names: Map<string, string> }): ReactNode {
+  if (!timeline.length) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-xs text-muted-foreground/80">
+        <ListOrdered className="size-3.5" />
+        思考、记忆、工具与行动会按发生顺序汇聚到这里…
+      </div>
+    );
+  }
+  const ICONS: Record<TimelineEntry["kind"], ReactNode> = {
+    thought: <BrainCircuit className="size-3.5 text-violet-400" />,
+    tool: <Wrench className="size-3.5 text-sky-400" />,
+    message: <MessageSquare className="size-3.5 text-emerald-400" />,
+    action: <Crosshair className="size-3.5 text-amber-400" />,
+    cue: <Clapperboard className="size-3.5 text-rose-400" />,
+    memory: <BrainCircuit className="size-3.5 text-teal-400" />,
+    pressure: <Flame className="size-3.5 text-orange-400" />
+  };
+  return (
+    <div className="space-y-0.5 rounded-lg border border-border bg-card p-1.5">
+      {timeline.slice(0, 40).map((entry) => (
+        <div key={entry.id} className="flex items-start gap-2.5 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
+          <span className="mt-0.5 shrink-0">{ICONS[entry.kind]}</span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-muted-foreground">
+              {entry.actorId ? <span className="font-medium text-foreground/90">{names.get(entry.actorId) ?? entry.actorId}</span> : null}
+              {entry.actorId ? <span className="mx-1 text-muted-foreground/50">·</span> : null}
+              {entry.label}
+            </p>
+            {entry.detail ? <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground/70">{entry.detail}</p> : null}
+          </div>
+          <span className="nums mt-0.5 shrink-0 font-mono text-[10px] text-muted-foreground/50">{formatTime(entry.at)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function HighlightsCard({ highlights, names }: { highlights: SocietyRoomSnapshot["highlights"]; names: Map<string, string> }): ReactNode {
+  if (!highlights?.length) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-xs text-muted-foreground/80">
+        <Sparkles className="size-3.5" />
+        高光由高优先级镜头自动生成（淘汰、背叛、谎言揭穿、终局）——它们只会来自真实事件。
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1.5">
+      {[...highlights].reverse().map((highlight) => (
+        <div key={highlight.id} className="rounded-lg border border-border bg-card px-3 py-2.5">
+          <p className="flex items-center gap-2 text-[13px] font-semibold text-foreground/90">
+            <Clapperboard className="size-3.5 text-rose-400" />
+            {highlight.title}
+            <span className="nums ml-auto font-mono text-[10px] font-normal text-muted-foreground/60">{formatTime(highlight.at)}</span>
+          </p>
+          {highlight.subtitle ? <p className="mt-1 text-xs leading-5 text-muted-foreground">{highlight.subtitle}</p> : null}
+          {highlight.focusAgentIds.length ? (
+            <p className="mt-1 text-[11px] text-muted-foreground/70">焦点：{highlight.focusAgentIds.map((id) => names.get(id) ?? id).join("、")}</p>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function formatTime(at: string): string {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function HistoryCard({ world, names, scenarioId }: { world: WorldSnapshot; names: Map<string, string>; scenarioId: ScenarioId }): ReactNode {

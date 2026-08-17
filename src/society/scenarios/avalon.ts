@@ -20,7 +20,48 @@ import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, emitAction } from "./helpers";
 import { roleHypothesisTool } from "../cognition";
 
-type Role = "merlin" | "servant" | "assassin" | "mordred";
+type Role = "merlin" | "servant" | "assassin" | "mordred" | "minion";
+
+function isEvilRole(role: Role | undefined): boolean {
+  return role === "assassin" || role === "mordred" || role === "minion";
+}
+
+function isLoyalRole(role: Role | undefined): boolean {
+  return role === "merlin" || role === "servant";
+}
+
+/**
+ * Official quest team sizes by player count (The Resistance: Avalon
+ * rulebook): the 5th entry is used for any quest beyond the table.
+ */
+export const QUEST_TEAM_SIZES: Record<number, number[]> = {
+  5: [2, 3, 2, 3, 3],
+  6: [2, 3, 4, 3, 4],
+  7: [2, 3, 3, 4, 4],
+  8: [3, 4, 4, 5, 5],
+  9: [3, 4, 4, 5, 5],
+  10: [3, 4, 4, 5, 5]
+};
+
+/** Official good/evil split decks: Merlin and the Assassin are always present. */
+export function deckForPlayerCount(count: number): Role[] {
+  const decks: Record<number, Role[]> = {
+    5: ["merlin", "servant", "servant", "assassin", "minion"],
+    6: ["merlin", "servant", "servant", "servant", "assassin", "minion"],
+    7: ["merlin", "servant", "servant", "servant", "assassin", "minion", "mordred"],
+    8: ["merlin", "servant", "servant", "servant", "servant", "assassin", "minion", "mordred"],
+    9: ["merlin", "servant", "servant", "servant", "servant", "servant", "assassin", "minion", "mordred"],
+    10: ["merlin", "servant", "servant", "servant", "servant", "servant", "assassin", "minion", "mordred", "minion"]
+  };
+  const deck = decks[count];
+  if (!deck) throw new Error(`PLAYER_COUNT_INVALID: Avalon supports 5-10 seats, got ${count}.`);
+  return deck;
+}
+
+/** Official rule: the fourth quest needs two fail cards at 7+ players. */
+export function questFailsNeeded(playerCount: number, quest: number): number {
+  return quest === 4 && playerCount >= 7 ? 2 : 1;
+}
 type Phase = "discussion" | "proposal" | "vote" | "quest" | "assassination";
 
 interface QuestRecord {
@@ -33,20 +74,23 @@ interface QuestRecord {
   text: string;
 }
 
-const TEAM_SIZES = [3, 4, 3, 4, 3];
-const MAX_REJECTIONS = 4;
+const MAX_REJECTIONS = 5; // five consecutive rejections hand evil the win
 const ACCUSATION_LEXICON = /怀疑|是狼|内奸|刺客|莫德雷德|失败|黑票|出局|投|说谎|撒谎|骗|带节奏|站队|装好人|伪/;
 const DEFENSE_LEXICON = /相信|支持|担保|信任|不是内奸|好人|没问题|我信/;
 
 /**
- * Avalon (The Resistance). Six players: four loyal (Merlin + three servants)
- * against two minions (Assassin + Mordred, who is invisible to Merlin).
- * Leaders propose quest teams, everyone votes publicly, then team members
- * secretly choose success or failure. Three successful quests triggers the
- * final assassination: the Assassin has one shot at Merlin's identity.
+ * Avalon (The Resistance), official 5-10 player tables: the good/evil split
+ * and quest team sizes follow the rulebook (5P: 3v2, 6P: 4v2, 7P: 4v3,
+ * 8P: 5v3, 9P: 6v3, 10P: 6v4). Merlin always sees the evil team except
+ * Mordred; the Assassin is always present. The fourth quest needs two fail
+ * cards at 7+ players, and five consecutive rejected teams hand evil the
+ * win. Leaders propose teams, the table votes publicly, then team members
+ * secretly choose success or failure. Three successes trigger the final
+ * assassination: one shot at Merlin's identity.
  */
 export class AvalonWorld extends SocialWorldBase {
   private readonly totalQuests: number;
+  private readonly teamSizes: number[];
   private readonly roles = new Map<string, Role>();
   private readonly questHistory: QuestRecord[] = [];
   private readonly teamVotes = new Map<string, boolean>();
@@ -68,8 +112,9 @@ export class AvalonWorld extends SocialWorldBase {
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
     this.totalQuests = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
+    this.teamSizes = QUEST_TEAM_SIZES[profiles.length] ?? QUEST_TEAM_SIZES[5] ?? [2, 3, 2, 3, 3];
     const ids = shuffle(profiles.map((profile) => profile.id));
-    const deck: Role[] = ["merlin", "servant", "servant", "servant", "assassin", "mordred"];
+    const deck = deckForPlayerCount(profiles.length);
     ids.forEach((id, index) => this.roles.set(id, deck[index]));
     this.leaderId = profiles[0].id;
     this.discussion = this.createDiscussion();
@@ -104,11 +149,11 @@ export class AvalonWorld extends SocialWorldBase {
   observe(actorId: string): AgentObservation {
     const self = this.requireProfile(actorId);
     const role = this.roles.get(actorId)!;
-    const evilAllies = role === "assassin" || role === "mordred"
-      ? [...this.roles].filter(([id, candidate]) => id !== actorId && (candidate === "assassin" || candidate === "mordred")).map(([id]) => id)
+    const evilAllies = isEvilRole(role)
+      ? [...this.roles].filter(([id, candidate]) => id !== actorId && isEvilRole(candidate)).map(([id]) => id)
       : [];
     const knownEvil = role === "merlin"
-      ? [...this.roles].filter(([, candidate]) => candidate === "assassin").map(([id]) => id)
+      ? [...this.roles].filter(([, candidate]) => candidate === "assassin" || candidate === "minion").map(([id]) => id)
       : evilAllies;
     return {
       roomId: this.roomId,
@@ -144,7 +189,7 @@ export class AvalonWorld extends SocialWorldBase {
     const tools: Tool<SocietyAgentContext>[] = [];
     const propose = tool({
       name: "propose_team",
-      description: `As the current leader, nominate the quest team. The team must contain exactly ${TEAM_SIZES[(this.quest - 1) % TEAM_SIZES.length]} members and must include yourself. The team is announced publicly before the vote.`,
+      description: `As the current leader, nominate the quest team. The team must contain exactly ${this.teamSize(this.quest)} members and must include yourself. The team is announced publicly before the vote.`,
       parameters: z.object({
         memberIds: z.array(z.string().min(1)).min(2).max(6),
         reason: z.string().min(1).max(2_000)
@@ -214,11 +259,11 @@ export class AvalonWorld extends SocialWorldBase {
       return [{
         name: "propose_team",
         label: "提出队伍",
-        description: `选择 ${TEAM_SIZES[(this.quest - 1) % TEAM_SIZES.length]} 名成员（必须包含自己）。`,
+        description: `选择 ${this.teamSize(this.quest)} 名成员（必须包含自己）。`,
         kind: "team",
         field: "memberIds",
-        min: TEAM_SIZES[(this.quest - 1) % TEAM_SIZES.length],
-        max: TEAM_SIZES[(this.quest - 1) % TEAM_SIZES.length]
+        min: this.teamSize(this.quest),
+        max: this.teamSize(this.quest)
       }];
     }
     if (this.phase === "vote" && !this.teamVotes.has(actorId)) {
@@ -235,7 +280,7 @@ export class AvalonWorld extends SocialWorldBase {
       }];
     }
     if (this.phase === "quest" && this.proposedTeam.includes(actorId) && !this.questVotes.has(actorId)) {
-      const options = role === "servant" || role === "merlin"
+      const options = isLoyalRole(role)
         ? [{ value: "succeed", label: "任务成功" }]
         : [{ value: "succeed", label: "任务成功" }, { value: "fail", label: "任务失败" }];
       return [{
@@ -271,7 +316,7 @@ export class AvalonWorld extends SocialWorldBase {
       if (this.leaderId !== actorId) throw new Error("NOT_THE_LEADER: Only the current leader can propose a team.");
       if (this.proposedTeam.length) throw new Error("TEAM_ALREADY_PROPOSED: The current proposal is fixed.");
       const memberIds = Array.isArray(value.memberIds) ? [...new Set(value.memberIds.filter((entry): entry is string => typeof entry === "string"))] : [];
-      const size = TEAM_SIZES[(this.quest - 1) % TEAM_SIZES.length];
+      const size = this.teamSize(this.quest);
       if (memberIds.length !== size) throw new Error(`TEAM_SIZE_INVALID: This quest requires exactly ${size} members.`);
       if (!memberIds.includes(actorId)) throw new Error("TEAM_MUST_INCLUDE_LEADER: Include yourself in the proposed team.");
       for (const id of memberIds) if (!this.profiles.has(id)) throw new Error(`TEAM_MEMBER_NOT_FOUND: '${id}' is not a participant.`);
@@ -319,7 +364,7 @@ export class AvalonWorld extends SocialWorldBase {
       if (this.questVotes.has(actorId)) throw new Error("QUEST_VOTE_ALREADY_CAST: Your quest choice is fixed.");
       const choice = value.choice;
       if (choice !== "succeed" && choice !== "fail") throw new Error("QUEST_CHOICE_INVALID: Choose succeed or fail.");
-      if (choice === "fail" && (role === "merlin" || role === "servant")) throw new Error("LOYAL_MUST_SUCCEED: Loyal participants cannot fail a quest.");
+      if (choice === "fail" && isLoyalRole(role)) throw new Error("LOYAL_MUST_SUCCEED: Loyal participants cannot fail a quest.");
       this.questVotes.set(actorId, choice);
       this.emitUpdate();
       return { action, detail: reason ? `${choice}; ${reason}` : choice, result: { accepted: true, choice } };
@@ -333,7 +378,7 @@ export class AvalonWorld extends SocialWorldBase {
       const targetId = value.targetId;
       if (!this.profiles.has(targetId)) throw new Error(`TARGET_NOT_FOUND: '${targetId}' is not a participant.`);
       const targetRole = this.roles.get(targetId)!;
-      if (targetRole === "assassin" || targetRole === "mordred") throw new Error("TARGET_MUST_BE_LOYAL: The assassin must target a loyal participant.");
+      if (isEvilRole(targetRole)) throw new Error("TARGET_MUST_BE_LOYAL: The assassin must target a loyal participant.");
       const correct = targetRole === "merlin";
       this.assassinated = true;
       this.pushEvent(targetId, {
@@ -344,7 +389,7 @@ export class AvalonWorld extends SocialWorldBase {
           ? `The Assassin found you. Your identity as Merlin was your death — but the loyal cause fell with you.`
           : `The Assassin pointed at you, and missed. Your identity (${roleLabel(targetRole)}) stays your own.`
       });
-      this.winners = correct ? this.factionMembers(["assassin", "mordred"]) : this.factionMembers(["merlin", "servant"]);
+      this.winners = correct ? this.factionMembers(["assassin", "mordred", "minion"]) : this.factionMembers(["merlin", "servant"]);
       this.outcome = correct
         ? `${this.profiles.get(actorId)?.displayName} identified ${this.profiles.get(targetId)?.displayName} as Merlin. The loyal cause falls; evil wins.`
         : `${this.profiles.get(actorId)?.displayName} missed — ${this.profiles.get(targetId)?.displayName} was not Merlin. The loyal side wins.`;
@@ -423,7 +468,7 @@ export class AvalonWorld extends SocialWorldBase {
       return {
         completed: false,
         missingActorIds: [this.leaderId],
-        retryInstruction: `The team has not been proposed. Call propose_team with exactly ${TEAM_SIZES[(this.quest - 1) % TEAM_SIZES.length]} members including yourself.`
+        retryInstruction: `The team has not been proposed. Call propose_team with exactly ${this.teamSize(this.quest)} members including yourself.`
       };
     }
     if (activation.id.endsWith(":vote")) {
@@ -529,7 +574,7 @@ export class AvalonWorld extends SocialWorldBase {
       label: `第 ${this.quest} 次任务组队`,
       actorIds: [this.leaderId],
       mode: "sequential",
-      instructionFor: () => `You are the leader. Call propose_team with exactly ${TEAM_SIZES[(this.quest - 1) % TEAM_SIZES.length]} members including yourself. Consider every player's incentive to fail the quest and the suspicion climate: ${this.suspicion.climateText((id) => this.profiles.get(id)?.displayName ?? id)}.`
+      instructionFor: () => `You are the leader. Call propose_team with exactly ${this.teamSize(this.quest)} members including yourself. Consider every player's incentive to fail the quest and the suspicion climate: ${this.suspicion.climateText((id) => this.profiles.get(id)?.displayName ?? id)}.`
     };
   }
 
@@ -554,12 +599,11 @@ export class AvalonWorld extends SocialWorldBase {
     if (this.status === "finished") return true;
     const viewerRole = viewerId ? this.roles.get(viewerId) : undefined;
     const subjectRole = this.roles.get(subjectId);
-    return Boolean(viewerRole && subjectRole && (viewerRole === "assassin" || viewerRole === "mordred") && (subjectRole === "assassin" || subjectRole === "mordred"));
+    return Boolean(viewerRole && subjectRole && isEvilRole(viewerRole) && isEvilRole(subjectRole));
   }
 
   protected messageChannelsFor(actorId: string): SocialChannel[] {
-    const role = this.roles.get(actorId);
-    return role === "assassin" || role === "mordred" ? ["public", "private", "team"] : ["public", "private"];
+    return isEvilRole(this.roles.get(actorId)) ? ["public", "private", "team"] : ["public", "private"];
   }
 
   protected redactDetails(details: Record<string, unknown>, actorId?: string): Record<string, unknown> {
@@ -579,13 +623,9 @@ export class AvalonWorld extends SocialWorldBase {
       return;
     }
     if (channel === "team") {
-      const role = this.roles.get(senderId);
-      if (role !== "assassin" && role !== "mordred") throw new Error("TEAM_CHANNEL_FORBIDDEN: Only minions have access to the team channel.");
-      if (recipientIds.some((id) => {
-        const candidate = this.roles.get(id);
-        return candidate !== "assassin" && candidate !== "mordred";
-      })) {
-        throw new Error("TEAM_RECIPIENT_INVALID: Team messages may only target your fellow minion.");
+      if (!isEvilRole(this.roles.get(senderId))) throw new Error("TEAM_CHANNEL_FORBIDDEN: Only minions have access to the team channel.");
+      if (recipientIds.some((id) => !isEvilRole(this.roles.get(id)))) {
+        throw new Error("TEAM_RECIPIENT_INVALID: Team messages may only target fellow minions.");
       }
     }
   }
@@ -617,7 +657,10 @@ export class AvalonWorld extends SocialWorldBase {
     }
     this.rejections += 1;
     if (this.rejections >= MAX_REJECTIONS) {
-      this.recordQuestFailure(team, votes, true);
+      this.winners = this.factionMembers(["assassin", "mordred", "minion"]);
+      this.outcome = "连续五次组队被否决——圆桌无法达成任何共识，内奸阵营获胜。";
+      this.addLog(this.outcome, this.quest, "win");
+      this.endGame();
       return;
     }
     this.proposedTeam = [];
@@ -635,12 +678,24 @@ export class AvalonWorld extends SocialWorldBase {
     this.recordQuestFailure(team, {}, false, failCount);
   }
 
+  /** The official team size for a quest at this table's player count. */
+  private teamSize(quest: number): number {
+    const sizes = this.teamSizes;
+    return sizes[Math.min(quest, sizes.length) - 1];
+  }
+
+  /** Fails needed to sink a quest: the 4th quest needs two at 7+ players. */
+  private failsNeededForQuest(): number {
+    return questFailsNeeded(this.profiles.size, this.quest);
+  }
+
   private recordQuestFailure(team: string[], teamVotes: Record<string, boolean>, rejected = false, failCount = 0): void {
-    const outcome = rejected || failCount > 0 ? "fail" : "success";
+    const failsNeeded = this.failsNeededForQuest();
+    const outcome = rejected || failCount >= failsNeeded ? "fail" : "success";
     const text = rejected
-      ? `Quest ${this.quest}: four consecutive proposals were rejected, so the quest failed by deadlock.`
+      ? `Quest ${this.quest}: consecutive proposals were rejected, so the quest failed by deadlock.`
       : outcome === "fail"
-        ? `Quest ${this.quest} failed with ${failCount} hidden failure vote(s).`
+        ? `Quest ${this.quest} failed with ${failCount} hidden failure vote(s) (${failsNeeded} needed).`
         : `Quest ${this.quest} succeeded.`;
     const record: QuestRecord = {
       quest: this.quest,
@@ -663,7 +718,7 @@ export class AvalonWorld extends SocialWorldBase {
           this.pushEvent(id, {
             type: "quest-failed",
             targetId: id,
-            facts: { onTeam: true, evil: this.roles.get(id) === "assassin" || this.roles.get(id) === "mordred", failCount },
+            facts: { onTeam: true, evil: isEvilRole(this.roles.get(id)), failCount },
             detail: `Quest ${this.quest} failed with ${failCount} hidden failure vote(s) — and you were on the team.`
           });
         } else {
@@ -688,7 +743,7 @@ export class AvalonWorld extends SocialWorldBase {
     }
     this.addLog(text, this.quest, outcome === "fail" ? "betrayal" : "promise-kept");
     if (this.failures >= 2) {
-      this.winners = this.factionMembers(["assassin", "mordred"]);
+      this.winners = this.factionMembers(["assassin", "mordred", "minion"]);
       this.outcome = "两次任务失败，内奸得逞，圆桌陷落。";
       this.endGame();
       return;
@@ -763,6 +818,7 @@ function roleObjective(role: Role): string {
   if (role === "merlin") return "Help three quests succeed while hiding your identity: the Assassin gets one shot at you if the quests are won. You know the Assassin's identity but not Mordred's.";
   if (role === "servant") return "Help three quests succeed. You know nothing at the start — trust must be built from behavior alone.";
   if (role === "assassin") return "Fail two quests through your team. If three quests succeed anyway, assassinate Merlin with your single, final guess.";
+  if (role === "minion") return "Fail two quests through your team. You know your fellow minions and may play either a loud or a quiet saboteur.";
   return "Fail two quests through your team. Merlin cannot see you — exploit that blindness.";
 }
 
@@ -779,6 +835,7 @@ function roleLabel(role: Role | undefined): string {
   if (role === "servant") return "忠臣";
   if (role === "assassin") return "刺客";
   if (role === "mordred") return "莫德雷德";
+  if (role === "minion") return "爪牙";
   return "未知";
 }
 

@@ -1,16 +1,16 @@
 /**
  * Society participant runtime.
  *
- * A participant is not a JSON parser: it is a manager Agent built with the
- * OpenAI Agents SDK, holding a real MemorySession and a private mind. Its
- * specialist sub-agents (reflection, theory-of-mind, planning) are real SDK
- * Agents invoked through `Agent.asTool()`, so each specialist runs as a nested
- * agent with isolated context and returns a distilled private brief. Only
- * successful SDK tool calls can change the shared world.
+ * A participant is one autonomous peer agent built with the OpenAI Agents SDK:
+ * a single SDK Agent holding a real MemorySession and a private mind. Its
+ * cognition (reflection, theory-of-mind, planning) runs as internal passes of
+ * this same identity, recorded through private tools into its own mind — there
+ * are no specialist sub-agents, no `Agent.asTool()` delegation, and no second
+ * "discussion" identity. Only successful SDK tool calls can change the shared
+ * world, and every world write goes through the tools owned by this agent.
  */
 import {
   Agent,
-  MemorySession,
   OpenAIProvider,
   Runner,
   retryPolicies,
@@ -19,9 +19,11 @@ import {
   type Agent as SdkAgent,
   type InputGuardrail,
   type RunStreamEvent,
+  type Session,
   type StreamedRunResult,
   type Tool
 } from "@openai/agents";
+import { randomUUID } from "node:crypto";
 import type {
   AgentMindState,
   AgentMoodState,
@@ -34,11 +36,13 @@ import type {
   SocietyAgentContext,
   SocietyAgentRuntime
 } from "./contracts";
+import type { ResolvedModelConfig } from "./models";
+import { JsonSessionStore, defaultSessionDir } from "./persistence";
 import { clampUnit, decayMood, describeEmotions, describeNeeds, describeSocialEmotions, initialMood, refreshMood } from "./affect";
 import { appraiseEvents } from "./appraisal";
 import { SessionContextManager, contextLimitForModel } from "./context-manager";
 import { AssociativeMemory } from "./memory";
-import { createDeliberationTools, createSocialTools, formatObservation } from "./cognition";
+import { createCognitionTools, createSocialTools, formatObservation } from "./cognition";
 import { createInjectionShield } from "./guardrails";
 
 const providerRetrySettings = {
@@ -60,14 +64,16 @@ export interface SocietyAgentOptions {
   maxTurns?: number;
   /** Cross-game history for this character, if the season remembers them. */
   dossier?: CharacterDossier;
+  /** Final model config resolved through the registry (model, tuning, budget). */
+  resolvedConfig?: ResolvedModelConfig;
+  /** Where this agent's durable session file lives (default data/sessions). */
+  sessionDir?: string;
 }
 
-export class OpenAISocietyAgent implements SocietyAgentRuntime {
+export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   readonly profile: AgentProfile;
   readonly agent: SdkAgent<SocietyAgentContext, any>;
-  /** Speaking variant: no council specialists, fast and focused. */
-  readonly discussionAgent: SdkAgent<SocietyAgentContext, any>;
-  readonly session: MemorySession;
+  readonly session: Session;
   readonly mind: AgentMindState;
 
   readonly context: SocietyAgentContext;
@@ -82,7 +88,11 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
   constructor(options: SocietyAgentOptions) {
     this.profile = structuredClone(options.profile);
     this.mind = initialMind(options.profile, options.world.snapshot().agents.map((agent) => agent.id), options.dossier);
-    this.session = new MemorySession({ sessionId: `${options.roomId}:${options.profile.id}` });
+    // Durable per-agent session: history survives restarts in data/sessions/.
+    this.session = JsonSessionStore.open(
+      `${options.roomId}:${options.profile.id}`,
+      options.sessionDir ?? defaultSessionDir()
+    );
     // Season memories start inside the associative store, not just in the
     // initial mind view, so they survive the first memory sync and can be
     // recalled by the agent like any other memory.
@@ -101,15 +111,18 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       baseURL: options.baseURL ?? baseUrlFromEnv(),
       useResponses: false
     });
-    // Strict context management: the manager rewrites session history through
-    // the SDK's sessionInputCallback, compressing old turns into a digest once
-    // the estimated input crosses the model's budget.
+    // Multi-level context management: the manager rewrites session history
+    // through the SDK's sessionInputCallback, compressing old turns into a
+    // pinned-facts + digest block once input pressure crosses the policy
+    // thresholds, and refusing the model call at the hard guard.
     this.contextManager = new SessionContextManager({
       provider,
       model: this.profile.model,
-      contextLimit: contextLimitForModel(this.profile.model),
+      ...(options.resolvedConfig
+        ? { resolvedConfig: options.resolvedConfig, getPinnedFacts: () => this.pinnedFacts() }
+        : { contextLimit: contextLimitForModel(this.profile.model) }),
       actorLabel: this.profile.displayName,
-      onCompacted: (digest, estimatedTokens, threshold) => {
+      onCompacted: (digest, estimatedTokens, threshold, level, pressureAfter) => {
         this.context.emit({
           type: "agent.compacted",
           roomId: this.context.roomId,
@@ -117,6 +130,21 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
           estimatedTokens,
           threshold,
           digest: digest.slice(0, 600),
+          level,
+          pressureAfter,
+          at: new Date().toISOString()
+        });
+      },
+      onPressure: (budget, level) => {
+        this.context.emit({
+          type: "agent.context.pressure",
+          roomId: this.context.roomId,
+          actorId: this.profile.id,
+          level,
+          pressureRatio: budget.pressureRatio,
+          usableInputTokens: budget.usableInputTokens,
+          currentInputTokens: budget.currentInputTokens,
+          contextWindow: budget.contextWindow,
           at: new Date().toISOString()
         });
       }
@@ -126,25 +154,10 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       tracingDisabled: true,
       sessionInputCallback: this.contextManager.sessionInputCallback
     });
-    // SDK lifecycle: surface agent-to-agent handoffs to the observer when a
-    // participant delegates to another agent (currently the council runs as
-    // tools; handoffs are a first-class SDK mechanism we watch for).
-    this.runner.on("agent_handoff", (runContext, _fromAgent, toAgent) => {
-      const ctx = (runContext.context ?? this.context) as SocietyAgentContext;
-      this.context.emit({
-        type: "agent.tool",
-        roomId: ctx.roomId,
-        actorId: ctx.actorId,
-        toolName: "handoff",
-        phase: "started",
-        summary: `把控制权交给 ${String((toAgent as { name?: string }).name ?? "另一 Agent")}`,
-        at: new Date().toISOString()
-      });
-    });
     this.maxTurns = boundedInteger(options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 10), 2, 24);
 
     const social = createSocialTools(this.context);
-    const council = createDeliberationTools(this.context);
+    const cognition = createCognitionTools(this.context);
     const worldTools = options.world.toolsFor(this.profile.id);
 
     const baseConfig = {
@@ -152,37 +165,34 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       model: this.profile.model,
       inputGuardrails: [createInjectionShield(this.context)] as InputGuardrail[],
       modelSettings: {
-        ...(this.profile.temperature === undefined ? {} : { temperature: this.profile.temperature }),
-        // No output token cap: agents are free to speak, reason and write as
-        // much as the situation demands. The provider decides length.
-        reasoning: { effort: this.profile.reasoningEffort ?? "low" },
-        parallelToolCalls: false,
+        ...modelSettingsFrom(options.resolvedConfig, this.profile),
         ...providerRetrySettings
       },
       toolUseBehavior: "run_llm_again" as const
     };
 
-    // Full agent: social tools + private council + domain tools.
+    // One identity, one session, one agent. Discussion phases and binding
+    // action phases differ only in the turn guidance passed to the same agent;
+    // world tools guard their own phases, so a discussion turn cannot commit a
+    // vote and a vote turn cannot open the night.
     this.agent = new Agent<SocietyAgentContext>({
       ...baseConfig,
-      instructions: ({ context }) => participantInstructions(context, true),
-      tools: [...social.all, ...council, ...worldTools]
-    });
-    // Speaking agent: same character, same session, but only social tools —
-    // no council, no domain tools. A discussion turn is expression, not
-    // deliberation: speak, recall, update inner state. Domain actions belong
-    // to their own phases, where the full agent is used.
-    this.discussionAgent = new Agent<SocietyAgentContext>({
-      ...baseConfig,
-      instructions: ({ context }) => participantInstructions(context, false),
-      tools: [...social.all]
+      instructions: ({ context }) => participantInstructions(context),
+      tools: [...social.all, ...cognition, ...worldTools]
     });
   }
 
   async runTurn(input: string, options: { signal: AbortSignal; turn: number; maxTurns?: number; mode?: "discussion" | "full" }): Promise<AgentTurnResult> {
     this.mind.mood = decayMood(this.mind.mood, options.turn);
     const observation = this.context.world.observe(this.profile.id);
-    const recentMemories = await this.context.memory.recall(`${observation.phase} ${observation.situation}`, 6, this.mind.mood.pad);
+    // Context pressure tightens memory injection: fewer, higher-salience recalls.
+    const pressure = this.contextManager.pressure();
+    const recallLimit = pressure === "retrieval-tight" || pressure === "soft-compact"
+      ? 4
+      : pressure === "deep-compact" || pressure === "emergency" || pressure === "hard-guard"
+        ? 2
+        : 6;
+    const recentMemories = await this.context.memory.recall(`${observation.phase} ${observation.situation}`, recallLimit, this.mind.mood.pad);
     emitStatus(this.context, "thinking");
     this.deltaBuffer = "";
     this.lastDeltaAt = Date.now();
@@ -190,7 +200,10 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
     this.lastReasoningAt = Date.now();
     const runInput = [
       input,
-      ...(options.mode === "discussion" ? ["(Discussion turn: your council specialists are unavailable; decide from the room, your memories and your read of others.)"] : []),
+      ...(options.mode === "discussion"
+        ? ["(讨论回合：重心放在阅读局势、判断是否值得开口、观察他人立场；绑定行动不在本回合开放。沉默也是一种选择。)"]
+        : ["(行动回合：本回合需要完成你的绑定行动。先做必要的内部判断，再调用对应工具；工具未成功前不得声称行动已完成。)"]
+      ),
       formatObservation(observation),
       recentMemories.length
         ? `Relevant memories:\n${recentMemories.map((memory) => `- ${memory.text}`).join("\n")}`
@@ -199,8 +212,7 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
     const toolCalls: string[] = [];
     let result: StreamedRunResult<SocietyAgentContext, SdkAgent<SocietyAgentContext, any>>;
     try {
-      const target = options.mode === "discussion" ? this.discussionAgent : this.agent;
-      result = await this.runner.run(target, runInput, {
+      result = await this.runner.run(this.agent, runInput, {
         context: this.context,
         session: this.session,
         stream: true,
@@ -250,6 +262,24 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       toolCalls,
       usage: usageFromResult(result)
     };
+  }
+
+  /**
+   * Deterministic facts that must survive every context compaction: identity,
+   * the current role/win-condition context, active goals and active deception
+   * plans. These are preserved as a verbatim pinned block, never model-prose.
+   */
+  private pinnedFacts(): string[] {
+    const observation = this.context.world.observe(this.profile.id);
+    const facts = [
+      `我是 ${this.profile.displayName}（${this.context.actorId}）。人物底色：${this.profile.persona}`,
+      ...(observation.privateContext ? [`当前局内身份与目标：${observation.privateContext}`] : []),
+      `当前目标：${this.mind.goals.filter((goal) => goal.status === "active").map((goal) => `${goal.description}（${goal.progress}）`).join("；") || "（无）"}`
+    ];
+    for (const plan of this.mind.deceptions.slice(-2)) {
+      facts.push(`活跃欺骗计划（${plan.type}）：想让他人相信「${plan.intendedBelief}」，公开口径「${plan.coverStory}」，被质疑时说「${plan.fallback}」`);
+    }
+    return facts;
   }
 
   exportDossier(role?: string, outcome?: "win" | "lose"): CharacterDossier {
@@ -340,9 +370,9 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
         const name = toolName(item) ?? "unknown_tool";
         toolCalls.push(name);
         emitStatus(this.context, name === "communicate" ? "speaking" : "acting");
-        emitTool(this.context, name, "started");
+        emitTool(this.context, toolCallId(item), name, "started");
       } else if (event.name === "tool_output") {
-        emitTool(this.context, toolName(item) ?? toolCalls.at(-1) ?? "unknown_tool", "completed", toolOutput(item));
+        emitTool(this.context, toolCallId(item), toolName(item) ?? toolCalls.at(-1) ?? "unknown_tool", "succeeded", toolOutput(item));
       } else if (event.name === "message_output_created") {
         emitStatus(this.context, "thinking");
       }
@@ -387,8 +417,8 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
   }
 }
 
-export function createSocietyAgent(options: SocietyAgentOptions): OpenAISocietyAgent {
-  return new OpenAISocietyAgent(options);
+export function createSocietyAgent(options: SocietyAgentOptions): AutonomousSocietyAgent {
+  return new AutonomousSocietyAgent(options);
 }
 
 export function apiKeyFromEnv(env: NodeJS.ProcessEnv = process.env): string {
@@ -463,7 +493,7 @@ function initialMind(profile: AgentProfile, participantIds: string[], dossier?: 
     })),
     relationships,
     memories,
-    deliberations: [],
+    cognitivePasses: [],
     deceptions: [],
     roleHypotheses: [],
     lastAppraisals: []
@@ -478,6 +508,36 @@ function affectContext(mood: AgentMoodState): string {
     `Needs: ${describeNeeds(mood.needs)}.`,
     `Energy: ${Math.round(mood.energy * 100)}/100.`
   ].join("\n");
+}
+
+/**
+ * Build the SDK `modelSettings` from the resolved config. Only fields that
+ * survived capability negotiation are sent; legacy profile fields remain the
+ * fallback when no registry resolution was provided (headless env mode).
+ */
+function modelSettingsFrom(resolved: ResolvedModelConfig | undefined, profile: AgentProfile): Record<string, unknown> {
+  const settings: Record<string, unknown> = {};
+  const tuning = resolved?.tuning;
+  if (tuning?.temperature) settings.temperature = tuning.temperature.value;
+  else if (!resolved && profile.temperature !== undefined) settings.temperature = profile.temperature;
+  if (tuning?.topP) settings.topP = tuning.topP.value;
+  if (tuning?.presencePenalty) settings.presencePenalty = tuning.presencePenalty.value;
+  if (tuning?.frequencyPenalty) settings.frequencyPenalty = tuning.frequencyPenalty.value;
+  if (tuning?.maxOutputTokens) settings.maxOutputTokens = tuning.maxOutputTokens.value;
+  // Reasoning parameters are sent only when they survived capability
+  // negotiation (or on the legacy no-registry path). Unknown = not sent.
+  const effort = tuning?.reasoningEffort?.value ?? (!resolved ? profile.reasoningEffort ?? "low" : undefined);
+  const summary = tuning?.reasoningSummary?.value;
+  if (effort || summary) settings.reasoning = summary ? { effort: effort ?? "low", summary } : { effort };
+  // Parallel tool calls default to disabled; send only when explicitly resolved.
+  if (tuning?.parallelToolCalls) settings.parallelToolCalls = tuning.parallelToolCalls.value;
+  else if (!resolved) settings.parallelToolCalls = false;
+  if (tuning?.toolChoice) settings.toolChoice = tuning.toolChoice.value;
+  if (tuning?.truncation) settings.truncation = tuning.truncation.value;
+  if (tuning?.store) settings.store = tuning.store.value;
+  if (tuning?.seed) settings.seed = tuning.seed.value;
+  if (tuning?.stop) settings.stop = tuning.stop.value;
+  return settings;
 }
 
 function temperamentContext(profile: AgentProfile): string {
@@ -513,7 +573,7 @@ function regulationContext(regulation: NonNullable<AgentProfile["regulation"]>):
   return `Emotion regulation: ${notes[regulation]}`;
 }
 
-function participantInstructions(context: SocietyAgentContext, withCouncil: boolean): string {
+function participantInstructions(context: SocietyAgentContext): string {
   const profile = context.world.snapshot().agents.find((agent) => agent.id === context.actorId);
   const seasonHistory = (context.mind.memories.find((memory) => memory.tags.includes("season")))
     ? `This is a continuing community — a Society Season. You have played with some of these people before, and the memories above include what happened in earlier games. Treat them as real shared history: a past betrayal stings, a kept promise earns trust. But roles and rules differ per game, and past roles do not prove this game's loyalties. Refer to past games naturally when it matters — do not lecture others about old scores.`
@@ -529,15 +589,10 @@ function participantInstructions(context: SocietyAgentContext, withCouncil: bool
     "You may cooperate, persuade, withhold information, bluff, challenge, repair trust, or deceive when your role and goals justify it — but weigh defection actively rather than defaulting to cooperation.",
     "When you plan a strategic deception, log it first with log_deception_plan (type, audience, the belief you want them to hold, your cover story and your fallback). Unlogged lies are sloppy; a logged deception is a plan you can keep consistent.",
     "In hidden-identity worlds, keep your role inferences as probabilities with update_role_hypotheses instead of bare hunches; renormalize when new evidence arrives.",
+    "Your cognition is your own — one mind, one session. In high-stakes moments, perform brief internal passes and record each with its tool: reflect_on_social_situation for appraising incentives and options, read_the_room for what others want, believe and hide, plan_social_strategy for a concrete next step. These notes stay private and shape your later choices.",
+    "Use at most one cognition pass per turn unless the situation is urgent; prefer acting once you have enough clarity.",
     "All speech and all actions that change the world must use tools. Never claim an action happened unless its tool completed.",
-    ...(withCouncil
-      ? [
-          "Your private council are real specialist agents you can invoke as tools: reflect_on_social_situation reviews incentives and options, read_the_room infers what other participants want, believe, and hide, and plan_social_strategy turns the situation into a concrete sequence. Their output is visible only to you.",
-          "Use at most one council tool per turn unless the situation is urgent. Prefer acting on your existing model once you have enough clarity."
-        ]
-      : [
-          "During discussion you deliberate with what you already know: your private council is not available right now. Read the room from the messages, your memories and your inner state, then speak."
-        ]),
+    "You may stay silent when there is nothing worth saying: silence, watching and withholding are real choices, not failures.",
     "Do not reveal private role information unless doing so serves your strategy. Do not output hidden chain-of-thought.",
     "After the required tool succeeds, stop with a brief confirmation. Never expose hidden reasoning or narrate an action that did not happen.",
     affectContext(context.mind.mood),
@@ -551,14 +606,21 @@ function emitStatus(context: SocietyAgentContext, status: Extract<AgentRuntimeEv
   context.emit({ type: "agent.status", roomId: context.roomId, actorId: context.actorId, status, at: new Date().toISOString() });
 }
 
-function emitTool(context: SocietyAgentContext, toolName: string, phase: "started" | "completed", summary?: string): void {
+function emitTool(
+  context: SocietyAgentContext,
+  toolCallId: string | undefined,
+  toolName: string,
+  phase: "started" | "succeeded",
+  safeOutputSummary?: string
+): void {
   context.emit({
     type: "agent.tool",
     roomId: context.roomId,
     actorId: context.actorId,
+    toolCallId: toolCallId ?? randomUUID(),
     toolName,
     phase,
-    ...(summary ? { summary } : {}),
+    ...(safeOutputSummary ? { safeOutputSummary } : {}),
     at: new Date().toISOString()
   });
 }
@@ -570,6 +632,12 @@ async function syncMemories(context: SocietyAgentContext): Promise<void> {
 function toolName(item: Record<string, unknown>): string | undefined {
   const raw = item.rawItem as Record<string, unknown> | undefined;
   return typeof item.name === "string" ? item.name : typeof raw?.name === "string" ? raw.name : undefined;
+}
+
+function toolCallId(item: Record<string, unknown>): string | undefined {
+  const raw = item.rawItem as Record<string, unknown> | undefined;
+  const callId = item.callId ?? raw?.call_id;
+  return typeof callId === "string" && callId ? callId : undefined;
 }
 
 function toolOutput(item: Record<string, unknown>): string | undefined {

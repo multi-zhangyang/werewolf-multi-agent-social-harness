@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Waypoints } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
+import type { ArchivedRoomSummary } from "@/society/persistence";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AgentAvatar, ScenarioIcon, StatusDot, StatusLabel } from "./shared";
@@ -19,6 +20,7 @@ interface LandingProps {
   scenarios: ScenarioSummary[];
   models: ModelOption[];
   rooms: SocietyRoomSnapshot[];
+  archived: ArchivedRoomSummary[];
   season: SeasonSummary[];
   onStart: (scenarioId: string) => void;
   onOpenRoom: (roomId: string) => void;
@@ -31,7 +33,7 @@ const FEATURES = [
   {
     icon: Waypoints,
     title: "真实 Agent 同台交锋",
-    body: "每个参与者都是 OpenAI Agents SDK 的 Agent：独立会话、私有记忆、函数工具与专属认知专家。只有成功的工具调用才能改变世界。"
+    body: "每个参与者都是 OpenAI Agents SDK 的 Agent：独立会话、私有记忆、函数工具与自己的内部认知循环。只有成功的工具调用才能改变世界。"
   },
   {
     icon: BrainCircuit,
@@ -46,7 +48,7 @@ const FEATURES = [
   {
     icon: Radio,
     title: "一切实时可见",
-    body: "内心的推理、专家的盘算、每一次工具调用、每一条公聊与密谋，都像直播一样流向观察席。身份揭晓与淘汰，是戏剧性时刻而不是日志。"
+    body: "内心的推理、Agent 自己的结构化思考节拍、每一次工具调用、每一条公聊与密谋，都像直播一样流向观察席。身份揭晓与淘汰，是戏剧性时刻而不是日志。"
   }
 ];
 
@@ -73,7 +75,7 @@ const CATEGORY_OF: Record<string, keyof typeof CATEGORY> = {
   "liars-dice": "deception"
 };
 
-export function Landing({ scenarios, models, rooms, season, onStart, onOpenRoom, onOpenSettings, onOpenAbout, onResetSeason }: LandingProps): ReactNode {
+export function Landing({ scenarios, models, rooms, archived, season, onStart, onOpenRoom, onOpenSettings, onOpenAbout, onResetSeason }: LandingProps): ReactNode {
   return (
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-20 border-b border-border/80 bg-background/70 backdrop-blur-xl">
@@ -291,6 +293,41 @@ export function Landing({ scenarios, models, rooms, season, onStart, onOpenRoom,
             </div>
           </section>
         ) : null}
+
+        {archived.length ? (
+          <section className="mt-12">
+            <div className="mb-6 flex items-end justify-between">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground/80">Archive</p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-muted-foreground">已归档的对局</h2>
+              </div>
+              <span className="nums font-mono text-xs text-muted-foreground/80">{archived.length} archives</span>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {archived.slice(0, 6).map((room) => (
+                <div
+                  key={room.roomId}
+                  className="flex items-center gap-4 rounded-lg border border-border/60 bg-card/50 p-4 text-left opacity-80"
+                >
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/50 text-muted-foreground/70">
+                    <ScenarioIcon id={room.scenarioId} className="size-4.5" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold tracking-tight text-foreground/70">{room.title}</span>
+                    <span className="nums mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/70">
+                      <span>已归档</span>
+                      <span className="text-muted-foreground/40">·</span>
+                      <span>{room.messages} 条消息 · {room.participants.length} 名参与者</span>
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 text-xs leading-5 text-muted-foreground/60">
+              归档是服务器在运行中持续写入的滚动检查点（data/rooms/）；重启后房间历史与每个 Agent 的会话文件仍然保留，可从检查点恢复查看。
+            </p>
+          </section>
+        ) : null}
       </main>
 
       <footer className="border-t border-border py-10">
@@ -400,7 +437,7 @@ function ScenarioCard({ scenario, onStart, wide }: { scenario: ScenarioSummary; 
           <ScenarioIcon id={scenario.id} className="size-4.5" />
         </span>
         <span className="nums rounded-md border border-border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground/80">
-          {scenario.players}P
+          {scenario.playerRange ? `${scenario.playerRange.min}-${scenario.playerRange.max}P` : `${scenario.players}P`}
         </span>
       </div>
       <div className="mt-4">

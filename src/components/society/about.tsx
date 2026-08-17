@@ -24,7 +24,7 @@ const PRINCIPLES = [
   {
     icon: Users,
     title: "真实的多智能体",
-    body: "每一个参与者都是 OpenAI Agents SDK 的 Agent,由 Runner 驱动,持有独立的 MemorySession、函数工具和私有专家子智能体。模型文本从来不是命令协议——只有成功的工具调用才能改变世界。"
+    body: "每一个参与者都是 OpenAI Agents SDK 的 Agent,由 Runner 驱动,持有独立的 MemorySession、函数工具和私有心智;反思、读心与规划都是同一个 Agent 的内部认知阶段。模型文本从来不是命令协议——只有成功的工具调用才能改变世界。"
   },
   {
     icon: BrainCircuit,
@@ -34,7 +34,7 @@ const PRINCIPLES = [
   {
     icon: Radio,
     title: "一切实时可见",
-    body: "思考模型的隐藏推理、专家子智能体的私下盘算、每一次工具调用、每一条公聊与密谋,都像直播一样流到观察界面——身份揭晓与淘汰是戏剧性时刻,而不是日志。"
+    body: "思考模型的隐藏推理、每个 Agent 自己产出的结构化 ThoughtBeat、每一次工具调用、每一条公聊与密谋,都像直播一样流到观察界面——身份揭晓与淘汰是戏剧性时刻,而不是日志。"
   },
   {
     icon: ShieldCheck,
