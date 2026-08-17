@@ -115,6 +115,19 @@ export function App(): ReactNode {
     setSeason([]);
   }, []);
 
+  const removeRoom = useCallback(async (roomId: string): Promise<void> => {
+    if (!window.confirm("停止并移除这个房间？对局历史会保留在归档中。")) return;
+    try {
+      const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => undefined);
+      if (!response.ok) throw new Error(payload?.message ?? `HTTP ${response.status}`);
+      setRooms((current) => current.filter((room) => room.id !== roomId));
+      setArchived(payload?.archived ?? []);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  }, []);
+
   const scenario = useMemo(
     () => scenarios.find((candidate) => candidate.id === createScenarioId),
     [scenarios, createScenarioId]
@@ -163,6 +176,7 @@ export function App(): ReactNode {
           onOpenCharacters={() => setCharactersOpen(true)}
           onOpenAbout={() => { location.hash = "#/about"; }}
           onResetSeason={() => { void resetSeason().catch((cause) => setError(errorMessage(cause))); }}
+          onRemoveRoom={(roomId) => { void removeRoom(roomId); }}
         />
       )}
       <CreateRoomDialog

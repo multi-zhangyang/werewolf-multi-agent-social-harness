@@ -462,6 +462,29 @@ export class SocietyRoom {
     });
   }
 
+  /**
+   * Stop and release a room: abort all in-flight work, finalize the rolling
+   * checkpoint (the archive keeps the history) and detach the director. Used
+   * when an observer removes the room; sessions and season dossiers stay on
+   * disk for the characters.
+   */
+  dispose(reason = "房间已被移除"): void {
+    if (this.status === "running") {
+      this.status = "paused";
+      if (!this.abortController.signal.aborted) this.abortController.abort(new Error(reason));
+      if (this.waitingHuman) {
+        clearTimeout(this.waitingHuman.timer);
+        const waiter = this.waitingHuman;
+        this.waitingHuman = undefined;
+        waiter.reject(new Error(reason));
+      }
+      this.world.pause();
+    }
+    this.director.dispose();
+    this.saveCheckpoint();
+    this.emit({ type: "room.status", roomId: this.id, status: this.status, detail: reason, at: now() });
+  }
+
   /** Pause one agent without sinking the room: its running turn is interrupted
    *  and it stops being activated until resumed. */
   pauseAgent(actorId: string, reason = "已由观察者暂停"): void {
@@ -1020,6 +1043,15 @@ export class SocietyRoomRegistry {
 
   get(roomId: string): SocietyRoom | undefined {
     return this.rooms.get(roomId);
+  }
+
+  /** Stop the room, finalize its checkpoint and release it from memory. */
+  remove(roomId: string): SocietyRoom | undefined {
+    const room = this.rooms.get(roomId);
+    if (!room) return undefined;
+    room.dispose();
+    this.rooms.delete(roomId);
+    return room;
   }
 
   list(): SocietyRoomSnapshot[] {

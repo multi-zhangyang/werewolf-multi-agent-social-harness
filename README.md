@@ -154,6 +154,7 @@ node scripts/demo.mjs prisoners-dilemma   # 或 node scripts/demo.mjs avalon
 | GET | `/api/scenarios` | 世界与模型目录 |
 | GET | `/api/rooms` | 本进程内的房间列表与归档摘要 |
 | POST | `/api/rooms` | 创建并启动房间（支持统一模型、轮转、单 Agent 覆盖、参数覆盖与逐席位人物选择） |
+| DELETE | `/api/rooms/:roomId` | 停止并移除房间（历史保留在归档；真人房间需要玩家令牌） |
 | GET | `/api/rooms/:roomId` | 当前房间快照 |
 | GET | `/api/rooms/:roomId/events` | 快照 + 实时 SSE 事件 |
 | POST | `/api/rooms/:roomId/pause` | 暂停运行中的房间 |

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Users, Waypoints } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Trash2, Users, Waypoints } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { ArchivedRoomSummary } from "@/society/persistence";
@@ -28,6 +28,8 @@ interface LandingProps {
   onOpenCharacters: () => void;
   onOpenAbout: () => void;
   onResetSeason: () => void;
+  /** Stop and release a room; its history stays in the archive. */
+  onRemoveRoom: (roomId: string) => void;
 }
 
 const FEATURES = [
@@ -76,7 +78,7 @@ const CATEGORY_OF: Record<string, keyof typeof CATEGORY> = {
   "liars-dice": "deception"
 };
 
-export function Landing({ scenarios, models, rooms, archived, season, onStart, onOpenRoom, onOpenSettings, onOpenCharacters, onOpenAbout, onResetSeason }: LandingProps): ReactNode {
+export function Landing({ scenarios, models, rooms, archived, season, onStart, onOpenRoom, onOpenSettings, onOpenCharacters, onOpenAbout, onResetSeason, onRemoveRoom }: LandingProps): ReactNode {
   return (
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-20 border-b border-border/80 bg-background/70 backdrop-blur-xl">
@@ -275,25 +277,37 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {rooms.slice(0, 6).map((room) => (
-                <button
+                <div
                   key={room.id}
-                  onClick={() => onOpenRoom(room.id)}
-                  className="group flex items-center gap-4 rounded-lg border border-border bg-card p-4 text-left transition-all hover:-translate-y-0.5 hover:border-foreground/25 hover:shadow-[0_8px_30px_-12px_rgba(0,0,0,0.6)]"
+                  className="group flex items-center gap-3 rounded-lg border border-border bg-card p-4 transition-all hover:-translate-y-0.5 hover:border-foreground/25 hover:shadow-[0_8px_30px_-12px_rgba(0,0,0,0.6)]"
                 >
-                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground">
-                    <ScenarioIcon id={room.scenarioId} className="size-4.5" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-semibold tracking-tight">{room.title}</span>
-                    <span className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/80">
-                      <StatusDot status={room.status} />
-                      <StatusLabel status={room.status} />
-                      <span className="text-muted-foreground/50">·</span>
-                      <span className="nums">{room.participants.length} 名参与者</span>
+                  <button onClick={() => onOpenRoom(room.id)} className="flex min-w-0 flex-1 items-center gap-4 text-left">
+                    <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground">
+                      <ScenarioIcon id={room.scenarioId} className="size-4.5" />
                     </span>
-                  </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-semibold tracking-tight">{room.title}</span>
+                      <span className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/80">
+                        <StatusDot status={room.status} />
+                        <StatusLabel status={room.status} />
+                        <span className="text-muted-foreground/50">·</span>
+                        <span className="nums">{room.participants.length} 名参与者</span>
+                      </span>
+                    </span>
+                  </button>
+                  {room.mode === "ai" ? (
+                    <button
+                      type="button"
+                      aria-label={`移除 ${room.title}`}
+                      title="停止并移除：对局历史会保留在归档中"
+                      onClick={() => onRemoveRoom(room.id)}
+                      className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/50 transition-colors hover:bg-border hover:text-red-400"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  ) : null}
                   <ArrowUpRight className="size-4 shrink-0 text-muted-foreground/50 transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-foreground" />
-                </button>
+                </div>
               ))}
             </div>
           </section>

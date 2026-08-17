@@ -180,6 +180,25 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     response.json({ rooms: context.rooms.list(), archived: context.archive.list() });
   });
 
+  // Remove a room: stops it, finalizes its archive checkpoint, frees memory.
+  // Human rooms require the player's own token; AI rooms are observer-owned.
+  app.delete("/api/rooms/:roomId", (request, response) => {
+    const room = context.rooms.get(request.params.roomId);
+    if (!room) {
+      response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
+      return;
+    }
+    if (room.humanActorId) {
+      const actorId = room.actorForToken(queryToken(request) ?? bodyToken(request));
+      if (!actorId) {
+        response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "A valid player token is required to remove this room." });
+        return;
+      }
+    }
+    const removed = context.rooms.remove(request.params.roomId);
+    response.json({ removed: Boolean(removed), roomId: request.params.roomId, archived: context.archive.list() });
+  });
+
   app.get("/api/rooms/:roomId/archive", (request, response) => {
     const checkpoint = context.archive.load(request.params.roomId);
     if (!checkpoint) {
