@@ -211,6 +211,27 @@ export function Landing({ scenarios, models, rooms, season, onStart, onOpenRoom,
           })}
         </section>
 
+        <section className="mb-20 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="rounded-xl border border-emerald-400/30 bg-gradient-to-b from-emerald-400/10 to-card p-7">
+            <div className="flex items-center gap-2">
+              <span className="live-pulse size-1.5 rounded-full bg-emerald-400" />
+              <h3 className="text-lg font-semibold tracking-tight">社会季模式</h3>
+            </div>
+            <p className="mt-2.5 text-sm leading-6 text-muted-foreground">
+              同一批角色跨局延续:上一局的背叛、恩怨与信任进入下一局,像一群越玩越熟的老友。每局身份重新分配,过去的角色不决定今天的忠诚,但过去的经历会改变今天的判断。可以在首页一键「重置社会季」,让所有人重新互不相识。
+            </p>
+          </div>
+          <div className="rounded-xl border border-border bg-card p-7">
+            <div className="flex items-center gap-2">
+              <span className="size-1.5 rounded-full bg-amber-400" />
+              <h3 className="text-lg font-semibold tracking-tight">单局模式</h3>
+            </div>
+            <p className="mt-2.5 text-sm leading-6 text-muted-foreground">
+              一局定胜负、零历史干扰:角色互不相识,不读取任何过往记忆,结束后也不留下任何记忆。适合想观察纯粹博弈、或者不被上一局恩怨影响的公平对决——创建房间时选择「单局模式」即可。
+            </p>
+          </div>
+        </section>
+
         <section id="scenarios" className="scroll-mt-20">
           <div className="mb-8 flex items-end justify-between">
             <div className="flex items-center gap-3">

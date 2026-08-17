@@ -31,6 +31,8 @@ export interface SocietyRoomCreateOptions {
   /** Cross-game memory: dossiers are loaded for returning characters and
    *  saved when the room finishes. */
   season?: SeasonStore;
+  /** season = characters carry history; one-shot = no memory in, none out. */
+  seasonMode?: "season" | "one-shot";
 }
 
 export interface SocietyRoomEventEnvelope {
@@ -71,6 +73,8 @@ export interface SocietyRoomSnapshot {
   scenarioId: ScenarioId;
   title: string;
   mode: "human" | "ai";
+  /** season = characters carry cross-game history; one-shot = no memory. */
+  seasonMode: "season" | "one-shot";
   status: RoomStatus;
   createdAt: string;
   updatedAt: string;
@@ -126,6 +130,7 @@ export class SocietyRoom {
   private readonly apiKey?: string;
   private readonly baseURL?: string;
   private readonly season?: SeasonStore;
+  private readonly seasonMode: "season" | "one-shot";
   private readonly turnTimeoutMs: number;
   private readonly humanTurnTimeoutMs: number;
   private readonly humanToken?: string;
@@ -146,6 +151,7 @@ export class SocietyRoom {
     this.apiKey = options.apiKey;
     this.baseURL = options.baseURL;
     this.season = options.season;
+    this.seasonMode = options.seasonMode ?? (options.season ? "season" : "one-shot");
     this.turnTimeoutMs = positiveIntegerFromEnv("SOCIETY_AGENT_TURN_TIMEOUT_MS", 300_000);
     this.humanTurnTimeoutMs = positiveIntegerFromEnv("SOCIETY_HUMAN_TURN_TIMEOUT_MS", 1_800_000);
     const humans = options.profiles.filter((profile) => profile.controller === "human");
@@ -190,6 +196,7 @@ export class SocietyRoom {
       scenarioId: this.scenarioId,
       title: world.title,
       mode: this.humanActorId ? "human" : "ai",
+      seasonMode: this.seasonMode,
       status: this.status,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,

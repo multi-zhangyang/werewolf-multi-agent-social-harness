@@ -11,12 +11,36 @@
  *
  * Memories are carried with their game context (role, scenario) so characters
  * can tell "he plays wolves well" from "he is untrustworthy".
+ *
+ * Persistence: dossiers are written atomically (temp file + rename) to
+ * `SOCIETY_SEASON_FILE` (default `data/season.json`, gitignored) on every
+ * save and clear, so the season survives server restarts. `clear()` starts a
+ * brand-new season — a fresh community with no shared history.
  */
 
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import type { CharacterDossier, SeasonStore } from "./contracts";
 
-export class InMemorySeasonStore implements SeasonStore {
+interface SeasonFile {
+  version: 1;
+  updatedAt: string;
+  dossiers: Record<string, CharacterDossier>;
+}
+
+export function defaultSeasonPath(): string {
+  return process.env.SOCIETY_SEASON_FILE?.trim()
+    || path.resolve(process.cwd(), "data", "season.json");
+}
+
+export class FileSeasonStore implements SeasonStore {
+  private readonly filePath: string;
   private readonly dossiers = new Map<string, CharacterDossier>();
+
+  constructor(filePath = defaultSeasonPath()) {
+    this.filePath = filePath;
+    this.load();
+  }
 
   get(characterKey: string): CharacterDossier | undefined {
     const dossier = this.dossiers.get(characterKey);
@@ -25,6 +49,7 @@ export class InMemorySeasonStore implements SeasonStore {
 
   save(dossier: CharacterDossier): void {
     this.dossiers.set(dossier.characterKey, structuredClone(dossier));
+    this.persist();
   }
 
   list(): CharacterDossier[] {
@@ -36,6 +61,47 @@ export class InMemorySeasonStore implements SeasonStore {
   /** Start a fresh season: forget every cross-game memory at once. */
   clear(): void {
     this.dossiers.clear();
+    this.persist();
+  }
+
+  private load(): void {
+    let raw: string;
+    try {
+      raw = readFileSync(this.filePath, "utf8");
+    } catch {
+      return; // No history yet — a brand-new season.
+    }
+    try {
+      const parsed = JSON.parse(raw) as SeasonFile;
+      if (!parsed || parsed.version !== 1 || typeof parsed.dossiers !== "object" || parsed.dossiers === null) {
+        throw new Error("SEASON_FILE_SCHEMA_INVALID");
+      }
+      for (const [key, dossier] of Object.entries(parsed.dossiers)) {
+        if (dossier && typeof dossier === "object" && typeof dossier.characterKey === "string") {
+          this.dossiers.set(key, structuredClone(dossier));
+        }
+      }
+    } catch {
+      // A corrupted season file must never sink the server: quarantine it and
+      // start clean rather than crashing on boot.
+      try {
+        renameSync(this.filePath, `${this.filePath}.corrupt-${Date.now()}`);
+      } catch {
+        // Best effort; the in-memory store simply starts empty.
+      }
+    }
+  }
+
+  private persist(): void {
+    const payload: SeasonFile = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      dossiers: Object.fromEntries(this.dossiers)
+    };
+    const tmp = `${this.filePath}.tmp`;
+    mkdirSync(path.dirname(this.filePath), { recursive: true });
+    writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 });
+    renameSync(tmp, this.filePath);
   }
 }
 

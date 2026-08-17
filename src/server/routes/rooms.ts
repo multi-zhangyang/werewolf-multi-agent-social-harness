@@ -23,7 +23,8 @@ const createRoomSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   mode: z.enum(["ai", "human"]).default("ai"),
   playerName: z.string().trim().min(1).max(40).optional(),
-  reasoningEffort: z.enum(["low", "medium", "high"]).default("low")
+  reasoningEffort: z.enum(["low", "medium", "high"]).default("low"),
+  season: z.enum(["season", "one-shot"]).default("season")
 }).strict().superRefine((input, issueContext) => {
   if (input.mode === "human" && !input.playerName) {
     issueContext.addIssue({ code: z.ZodIssueCode.custom, path: ["playerName"], message: "Human mode requires a playerName." });
@@ -125,7 +126,8 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
         rounds: input.rounds,
         apiKey: getProviderSettings().apiKey || undefined,
         baseURL: getProviderSettings().baseURL || undefined,
-        season: context.season
+        seasonMode: input.season,
+        ...(input.season === "season" ? { season: context.season } : {})
       });
       void room.start();
       response.status(202).json(room.creationResult());

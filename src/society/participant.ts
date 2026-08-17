@@ -260,9 +260,14 @@ export class OpenAISocietyAgent implements SocietyAgentRuntime {
       .map((entry) => ({ text: entry.text, salience: entry.salience, valence: entry.valence }));
     return {
       characterKey: this.profile.displayName,
-      games: outcome
-        ? [{ scenarioId: this.context.world.scenario.id, ...(role ? { role } : {}), outcome, at: new Date().toISOString() }]
-        : [],
+      // Every game is recorded, with or without a declared winner: the season
+      // cares about history, not just victories.
+      games: [{
+        scenarioId: this.context.world.scenario.id,
+        ...(role ? { role } : {}),
+        ...(outcome ? { outcome } : {}),
+        at: new Date().toISOString()
+      }],
       relationships: this.mind.relationships.map((entry) => ({
         agentId: entry.agentId,
         trust: entry.trust,

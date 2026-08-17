@@ -15,6 +15,8 @@ export interface CreateRoomInput {
   mode: "ai" | "human";
   playerName?: string;
   reasoningEffort: "low" | "medium" | "high";
+  /** season = characters carry cross-game history; one-shot = no memory. */
+  season: "season" | "one-shot";
 }
 
 export interface CreateRoomResult {

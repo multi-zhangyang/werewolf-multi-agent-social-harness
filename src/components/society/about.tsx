@@ -7,6 +7,8 @@ import { SparkleDivider } from "./shared";
 const WORLDS = [
   ["狼人杀", "隐藏身份、公开指控、夜间行动与第三阵营"],
   ["阿瓦隆", "忠臣与内奸混坐圆桌,任务成败藏于一次举手"],
+  ["吹牛骰", "隐藏点数、步步加码的叫价,质疑则开盅"],
+  ["谈判博弈", "同时叫价分割奖池,谈崩了各自跌回私密保底"],
   ["囚徒困境", "短期背叛与长期互惠的永恒拉扯"],
   ["蜈蚣博弈", "奖池每传一次就翻倍,信任与贪婪对赌"],
   ["胆小鬼博弈", "谁也不先打方向盘,直到两辆车相撞"],
@@ -91,7 +93,7 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
         </section>
 
         <section className="mb-16">
-          <SparkleDivider>十一个世界</SparkleDivider>
+          <SparkleDivider>十三个世界</SparkleDivider>
           <div className="mt-6 grid grid-cols-1 gap-2 sm:grid-cols-2">
             {WORLDS.map(([name, description], index) => (
               <div key={name} className="flex items-start gap-3 rounded-lg border border-border bg-card px-4 py-3">
@@ -102,6 +104,24 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
                 </div>
               </div>
             ))}
+          </div>
+        </section>
+
+        <section className="mb-16">
+          <SparkleDivider>社会季与单局</SparkleDivider>
+          <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="rounded-lg border border-emerald-400/30 bg-gradient-to-b from-emerald-400/10 to-card p-6">
+              <h2 className="text-base font-semibold tracking-tight">社会季模式</h2>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                同一批角色跨局延续:一局结束,每个角色的信任、恩怨与最强记忆被归档;下一局开始时,同一批人带着旧账回到桌前,像一群越玩越熟的老友。每局身份与阵营重新随机,过去的角色不证明本局的忠诚。历史持久化保存在本地,服务器重启也不会丢。随时可以在首页「重置社会季」,让所有人重新互不相识。
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-card p-6">
+              <h2 className="text-base font-semibold tracking-tight">单局模式</h2>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                一局定胜负、零历史干扰:创建房间时选择「单局模式」,角色互不相识,不读取任何过往记忆,结束后也不写入任何历史。适合观察纯粹博弈,或者进行不受上一局恩怨影响的公平对决。
+              </p>
+            </div>
           </div>
         </section>
 

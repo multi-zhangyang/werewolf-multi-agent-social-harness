@@ -431,7 +431,7 @@ export interface CharacterDossier {
   games: Array<{
     scenarioId: string;
     role?: string;
-    outcome: "win" | "lose";
+    outcome?: "win" | "lose";
     at: string;
   }>;
   relationships: Array<{
