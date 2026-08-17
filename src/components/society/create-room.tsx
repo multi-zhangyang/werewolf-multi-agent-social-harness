@@ -193,20 +193,24 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                         data-model
                         onClick={() => toggleModel(model.id)}
                         className={cn(
-                          "flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors",
+                          "flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors sm:w-auto",
                           active
                             ? "border-foreground/70 bg-muted"
                             : "border-border bg-card hover:border-border"
                         )}
                       >
-                        <span className={cn("flex size-3.5 items-center justify-center rounded-full border", active ? "border-foreground bg-foreground" : "border-border")}>
+                        <span className={cn("flex size-3.5 shrink-0 items-center justify-center rounded-full border", active ? "border-foreground bg-foreground" : "border-border")}>
                           {active ? <span className="size-1.5 rounded-full bg-card" /> : null}
                         </span>
-                        <span className="text-[13px] font-medium text-foreground/90">{model.name}</span>
-                        {model.contextLabel ? (
-                          <span className="rounded border border-border bg-muted px-1 font-mono text-[9px] text-muted-foreground/80">{model.contextLabel}</span>
-                        ) : null}
-                        <span className="font-mono text-[10px] text-muted-foreground/80">{model.provider}</span>
+                        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          <span className="break-all text-[13px] font-medium leading-5 text-foreground/90">{model.name}</span>
+                          <span className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground/80">
+                            <span className="truncate">{model.provider}</span>
+                            {model.contextLabel ? (
+                              <span className="shrink-0 rounded border border-border bg-muted px-1 text-[9px]">{model.contextLabel}</span>
+                            ) : null}
+                          </span>
+                        </span>
                       </button>
                     );
                   })}

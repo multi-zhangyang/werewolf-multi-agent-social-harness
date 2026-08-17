@@ -42,15 +42,25 @@ The runner streams model and tool events to the room. A model's final text is a
 decision note for the observer; it is not an action protocol. World changes can
 only happen inside a successful domain tool call.
 
+Model switching (§12.4) keeps this boundary: while the room (or that one seat)
+is paused, `AutonomousSocietyAgent.switchModel` rebuilds the engine on a new
+provider/model binding and recomputes the context budget, but the session, mind,
+memory and world role are carried over verbatim — and when the new window is
+smaller, the session history is compacted first so the first post-switch turn
+starts below its pressure thresholds. The switch is broadcast as
+`agent.model.switched`.
+
 ## Appraisal boundary
 
 `src/society/appraisal.ts` turns world events into inner state. The world
 emits structured, observer-scoped events — *"林默 voted against you"*, *"苏遥
 stood up for you"*, *"you were eliminated"* — and the appraisal engine maps them
 to PAD / core emotion / social emotion / need / relationship deltas, modulated
-by the character's Big Five profile. Salient events become memories with
-valence and salience, so a betrayal surfaces again later. Emotions are
-event-driven, never self-reported.
+by the character's Big Five profile and its stable judgment biases (§4.2.7):
+betrayal-hypervigilance deepens trust drops, loss-aversion amplifies negative
+affect and recency-weighting raises the salience of fresh memories. Salient
+events become memories with valence and salience, so a betrayal surfaces again
+later. Emotions are event-driven, never self-reported.
 
 ## Context boundary (one character = one agent)
 
@@ -74,6 +84,19 @@ different models (1M vs 256k) compact at their own limits.
 An SDK input guardrail (`injection-shield`) scans every turn's input for
 manipulation attempts hidden in other players' speech; it never halts a turn,
 but flags the attempt for observers and stores it in the character's memory.
+
+## Character boundary
+
+Four concepts stay decoupled (§7.1): the **character** is a persistent person
+(persona, values, voice, stable judgment biases, autobiographical anchors), the
+**agent** is how they perceive and act, the **model** is the engine, and the
+**role** is this game's temporary identity. `src/society/profiles.ts` ships 25
+built-in characters; the local library (`src/server/characters.ts`,
+`data/characters.json`, gitignored, no secrets) adds user-defined ones with
+create / edit / copy / delete / import / export, and the room creator can cast
+any character to any seat. Autobiographical anchors are seeded as high-salience
+identity memories so echoing situations can surface why this person reacts this
+way, and season dossiers carry table history without duplicating them.
 
 ## Suspicion boundary
 
@@ -131,10 +154,11 @@ store the round's outcome. Speaking turns are optional — an agent that fails a
 turn stays quiet instead of sinking the room; binding domain actions stay
 strict. Single agents can be paused and resumed individually: a paused agent is
 silent in discussion waves, and binding activations wait for its resume instead
-of substituting a decision. The Express route `/api/rooms/:roomId/events` sends
-an initial snapshot followed by SSE envelopes. The browser reduces those
-envelopes into the current room view while retaining the event sequence for the
-activity panels and Agent inspector.
+of substituting a decision. While paused, a seat's model can be switched through
+`/api/rooms/:roomId/agents/:actorId/model` (§12.4 — see Agent boundary). The
+Express route `/api/rooms/:roomId/events` sends an initial snapshot followed by
+SSE envelopes. The browser reduces those envelopes into the current room view
+while retaining the event sequence for the activity panels and Agent inspector.
 
 Events deliberately describe observable execution:
 

@@ -86,7 +86,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
             <span className="text-[15px] font-semibold tracking-tight">Society</span>
           </button>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" className="hidden rounded-lg px-3 text-[13px] text-muted-foreground hover:bg-muted hover:text-foreground sm:inline-flex" onClick={onOpenCharacters}>
+            <Button variant="ghost" size="sm" className="rounded-lg px-3 text-[13px] text-muted-foreground hover:bg-muted hover:text-foreground" onClick={onOpenCharacters}>
               <Users className="size-3.5" />
               人物库
             </Button>
