@@ -32,6 +32,11 @@ export class InMemorySeasonStore implements SeasonStore {
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       .map((dossier) => structuredClone(dossier));
   }
+
+  /** Start a fresh season: forget every cross-game memory at once. */
+  clear(): void {
+    this.dossiers.clear();
+  }
 }
 
 /** How many season games a character has played. */

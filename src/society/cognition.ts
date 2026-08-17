@@ -85,7 +85,106 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
 
   const updateInnerState = createInnerStateTool(context);
 
-  return { all: [communicate, remember, recall, updateInnerState], recall, innerState: updateInnerState };
+  // Strategic deception is a typed, audience-aware plan — not an invisible
+  // lie. The model records what it wants others to believe and how it will
+  // keep the story consistent before it acts.
+  const logDeception = tool({
+    name: "log_deception_plan",
+    description: [
+      "Record a planned strategic deception BEFORE you act on it, so you can keep your story consistent. This is private: nobody else sees it.",
+      "- type: lying (a false claim), bluff (threat or bid you may not honor), paltering (true words meant to mislead), omission (letting a false belief stand), or false-promise (a commitment you already plan to break).",
+      "- targetIds: which participants the deception is aimed at.",
+      "- intendedBelief: exactly what you want them to believe afterwards.",
+      "- coverStory: the public claims that must stay consistent with the deception.",
+      "- fallback: what you will say or do if challenged.",
+      "Weigh the cost before lying: exposure damages your credibility with every listener. Honest moves need no ledger entry."
+    ].join("\n"),
+    parameters: z.object({
+      type: z.enum(["lying", "bluff", "paltering", "omission", "false-promise"]),
+      targetIds: z.array(z.string().min(1)).max(8),
+      intendedBelief: z.string().min(1).max(1_000),
+      coverStory: z.string().min(1).max(1_000),
+      fallback: z.string().min(1).max(1_000)
+    }).strict(),
+    execute: async (input, runContext) => {
+      const ctx = scopedContext(runContext, context.actorId, context);
+      const plan = {
+        ...input,
+        turn: ctx.world.snapshot().turn,
+        at: new Date().toISOString()
+      };
+      ctx.mind.deceptions.push(plan);
+      if (ctx.mind.deceptions.length > 10) ctx.mind.deceptions.splice(0, ctx.mind.deceptions.length - 10);
+      return { logged: true, type: input.type, targets: input.targetIds };
+    }
+  }) as Tool<SocietyAgentContext>;
+
+  return { all: [communicate, remember, recall, updateInnerState, logDeception], recall, innerState: updateInnerState };
+}
+
+/**
+ * Role-probability hypotheses for hidden-identity worlds (werewolf, avalon).
+ * Probabilities are per-subject and renormalized per subject, so suspicion
+ * stays a distribution — not a free-text hunch. Bound per actor like every
+ * world tool: the live run context decides whose mind gets updated.
+ */
+export function roleHypothesisTool(actorId: string): Tool<SocietyAgentContext> {
+  return tool({
+    name: "update_role_hypotheses",
+    description: [
+      "Update your probability judgments about other participants' hidden roles. This is your private belief ledger in this hidden-identity world.",
+      "Give one entry per (subject, role) pair you want to revise. Probabilities are 0..1; they should sum to at most 1 per subject across all roles.",
+      "Base each update on evidence: public claims, votes, team choices, quest outcomes, night information — never raise confidence without a reason.",
+      "Use this instead of burying your suspicion in prose; your final actions should be consistent with these numbers."
+    ].join("\n"),
+    parameters: z.object({
+      hypotheses: z.array(z.object({
+        subjectId: z.string().min(1),
+        role: z.string().min(1).max(24),
+        probability: z.number().min(0).max(1)
+      }).strict()).min(1).max(12)
+    }).strict(),
+    execute: async ({ hypotheses }, runContext) => {
+      const ctx = scopedContext(runContext, actorId);
+      const turn = ctx.world.snapshot().turn;
+      for (const entry of hypotheses) {
+        const existing = ctx.mind.roleHypotheses.find(
+          (candidate) => candidate.subjectId === entry.subjectId && candidate.role === entry.role
+        );
+        if (existing) {
+          existing.probability = entry.probability;
+          existing.updatedAtTurn = turn;
+        } else {
+          ctx.mind.roleHypotheses.push({ ...entry, updatedAtTurn: turn });
+        }
+      }
+      // Renormalize per subject: probabilities across roles cap at 1, keeping
+      // the ledger a valid distribution.
+      const subjects = new Set(ctx.mind.roleHypotheses.map((entry) => entry.subjectId));
+      for (const subjectId of subjects) {
+        const entries = ctx.mind.roleHypotheses.filter((entry) => entry.subjectId === subjectId);
+        const total = entries.reduce((sum, entry) => sum + entry.probability, 0);
+        if (total > 1) {
+          const scale = 1 / total;
+          for (const entry of entries) entry.probability = Math.round(entry.probability * scale * 100) / 100;
+        }
+      }
+      if (ctx.mind.roleHypotheses.length > 40) ctx.mind.roleHypotheses.splice(0, ctx.mind.roleHypotheses.length - 40);
+      return {
+        updated: true,
+        summary: subjects.size
+          ? [...subjects].map((subjectId) => {
+              const entries = ctx.mind.roleHypotheses
+                .filter((entry) => entry.subjectId === subjectId)
+                .sort((left, right) => right.probability - left.probability)
+                .map((entry) => `${entry.role} ${Math.round(entry.probability * 100)}%`)
+                .join(", ");
+              return `${subjectId}: ${entries}`;
+            }).join(" | ")
+          : "cleared"
+      };
+    }
+  }) as Tool<SocietyAgentContext>;
 }
 
 /**

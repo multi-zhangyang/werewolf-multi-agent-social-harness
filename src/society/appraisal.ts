@@ -73,8 +73,9 @@ export function appraiseEvents(
   let changed = false;
 
   for (const event of events) {
-    const deltas = appraisalFor(mind, event, temperament);
-    if (!deltas) continue;
+    const raw = appraisalFor(mind, event, temperament);
+    if (!raw) continue;
+    const deltas = modulateByRegulation(raw, profile.regulation);
     changed = true;
     apply(mind, event, deltas, turn);
     const valence = estimateValence(deltas);
@@ -84,9 +85,92 @@ export function appraiseEvents(
       salience: deltas.salience,
       valence
     });
+    mind.lastAppraisals.push({
+      text: `${eventTypeLabel(event.type)}：${event.detail}`,
+      turn,
+      at: new Date().toISOString()
+    });
+    if (mind.lastAppraisals.length > 8) mind.lastAppraisals.splice(0, mind.lastAppraisals.length - 8);
   }
 
   return { changed, memories };
+}
+
+const NEGATIVE_EMOTIONS = ["anger", "fear", "sadness", "disgust"] as const;
+
+/**
+ * Gross-style emotion regulation: the same event lands differently depending
+ * on how the character copes (arXiv:2508.05880; Gross 1998 process model).
+ * Reappraisers blunt the sting and keep the good; suppressors bury the
+ * feeling at an energy cost; ruminators amplify and prolong; act-out types
+ * externalize anger into dominance; repairers soften relationship damage.
+ */
+function modulateByRegulation(
+  deltas: Deltas,
+  regulation: AgentProfile["regulation"]
+): Deltas {
+  if (!regulation) return deltas;
+  const next: Deltas = structuredClone(deltas);
+  const emotions = next.emotions ?? {};
+  const pad = next.pad ?? {};
+  if (regulation === "reappraise") {
+    for (const key of NEGATIVE_EMOTIONS) {
+      if (emotions[key] !== undefined) emotions[key] *= 0.7;
+    }
+    if (emotions.joy !== undefined) emotions.joy *= 1.15;
+    if (pad.pleasure !== undefined) pad.pleasure *= 0.8;
+  } else if (regulation === "suppress") {
+    for (const key of NEGATIVE_EMOTIONS) {
+      if (emotions[key] !== undefined) emotions[key] *= 0.5;
+    }
+    if (next.social?.shame !== undefined) next.social.shame *= 0.6;
+    next.energy = (next.energy ?? 0) - 0.04;
+    if (pad.arousal !== undefined) pad.arousal += 0.03;
+  } else if (regulation === "ruminate") {
+    for (const key of NEGATIVE_EMOTIONS) {
+      if (emotions[key] !== undefined) emotions[key] *= 1.15;
+    }
+    if (pad.arousal !== undefined) pad.arousal += 0.04;
+  } else if (regulation === "act-out") {
+    if (emotions.anger !== undefined) emotions.anger *= 1.2;
+    if (pad.dominance !== undefined) pad.dominance += 0.04;
+    if (next.relationship?.tension !== undefined) next.relationship.tension += 0.04;
+  } else if (regulation === "repair") {
+    if (next.relationship) {
+      for (const key of ["trust", "affinity"] as const) {
+        const value = next.relationship[key];
+        if (value !== undefined && value < 0) next.relationship[key] = value * 0.6;
+      }
+      const tension = next.relationship.tension;
+      if (tension !== undefined) next.relationship.tension = tension * 0.7;
+    }
+    if (next.social?.guilt !== undefined) next.social.guilt *= 1.1;
+  }
+  if (Object.keys(emotions).length) next.emotions = emotions;
+  next.pad = pad;
+  return next;
+}
+
+function eventTypeLabel(type: SocialEvent["type"]): string {
+  const labels: Record<SocialEvent["type"], string> = {
+    accused: "被公开指控",
+    defended: "被公开辩护",
+    "vote-against": "被投票针对",
+    "vote-cast": "投出一票",
+    "voted-with": "有人与你同票",
+    eliminated: "被淘汰",
+    "eliminated-other": "他人被淘汰",
+    investigation: "查验结果",
+    "night-kill": "参与夜间行动",
+    included: "被选入队伍",
+    excluded: "被排除在队伍外",
+    "quest-passed": "任务成功",
+    "quest-failed": "任务失败",
+    assassinated: "被刺杀",
+    win: "赢得本局",
+    lose: "输掉本局"
+  };
+  return labels[type] ?? type;
 }
 
 function appraisalFor(mind: AgentMindState, event: SocialEvent, t: AgentTemperament | undefined): Deltas | null {

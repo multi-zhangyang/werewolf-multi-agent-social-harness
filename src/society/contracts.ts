@@ -54,6 +54,8 @@ export interface AgentProfile {
   temperament?: AgentTemperament;
   /** How this character speaks: pacing, register, verbal habits. */
   voice?: string;
+  /** Emotion-regulation strategy, per Gross-style process model research. */
+  regulation?: "reappraise" | "suppress" | "ruminate" | "act-out" | "repair";
   temperature?: number;
   reasoningEffort?: ReasoningEffort;
 }
@@ -156,6 +158,37 @@ export interface AgentDeliberation {
   at: string;
 }
 
+/**
+ * A strategic deception this agent has planned. Recorded through the private
+ * `log_deception_plan` tool, so deception is a typed, audience-aware goal —
+ * never an invisible lie (AGENTS.md §10: goal, audience, intended belief,
+ * cover story, cost review).
+ */
+export interface AgentDeceptionPlan {
+  type: "lying" | "bluff" | "paltering" | "omission" | "false-promise";
+  targetIds: string[];
+  intendedBelief: string;
+  coverStory: string;
+  fallback: string;
+  turn: number;
+  at: string;
+}
+
+/** A probability judgment about another participant's hidden role. */
+export interface AgentRoleHypothesis {
+  subjectId: string;
+  role: string;
+  probability: number;
+  updatedAtTurn: number;
+}
+
+/** Why the mood just moved: the event behind each appraisal change. */
+export interface AgentAppraisalNote {
+  text: string;
+  turn: number;
+  at: string;
+}
+
 export interface AgentMindState {
   mood: AgentMoodState;
   attention: string[];
@@ -166,6 +199,12 @@ export interface AgentMindState {
   latestReflection?: string;
   /** Private analyses produced by this agent's specialist sub-agents. */
   deliberations: AgentDeliberation[];
+  /** Planned strategic deceptions, typed and audience-scoped. */
+  deceptions: AgentDeceptionPlan[];
+  /** Role-probability hypotheses in hidden-identity worlds. */
+  roleHypotheses: AgentRoleHypothesis[];
+  /** The causal notes behind recent appraisal-driven mood changes. */
+  lastAppraisals: AgentAppraisalNote[];
 }
 
 export interface SocialMessage {
@@ -414,6 +453,8 @@ export interface SeasonStore {
   get(characterKey: string): CharacterDossier | undefined;
   save(dossier: CharacterDossier): void;
   list(): CharacterDossier[];
+  /** Forget all dossiers — the operator starts a brand-new season. */
+  clear(): void;
 }
 
 export interface AgentTurnResult {

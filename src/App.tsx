@@ -100,6 +100,12 @@ export function App(): ReactNode {
     return { roomId: result.room.id, playerToken: result.playerToken };
   }, []);
 
+  const resetSeason = useCallback(async (): Promise<void> => {
+    const response = await fetch("/api/season", { method: "DELETE" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    setSeason([]);
+  }, []);
+
   const scenario = useMemo(
     () => scenarios.find((candidate) => candidate.id === createScenarioId),
     [scenarios, createScenarioId]
@@ -145,12 +151,14 @@ export function App(): ReactNode {
           onOpenRoom={(roomId) => { location.hash = `#/rooms/${encodeURIComponent(roomId)}`; }}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenAbout={() => { location.hash = "#/about"; }}
+          onResetSeason={() => { void resetSeason().catch((cause) => setError(errorMessage(cause))); }}
         />
       )}
       <CreateRoomDialog
         open={createScenarioId !== undefined}
         scenario={scenario}
         models={models}
+        seasonCount={season.length}
         onOpenChange={(open) => { if (!open) setCreateScenarioId(undefined); }}
         onCreated={createRoom}
       />

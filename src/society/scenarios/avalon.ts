@@ -18,6 +18,7 @@ import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world"
 import { DiscussionDirector } from "../conversation";
 import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, emitAction } from "./helpers";
+import { roleHypothesisTool } from "../cognition";
 
 type Role = "merlin" | "servant" | "assassin" | "mordred";
 type Phase = "discussion" | "proposal" | "vote" | "quest" | "assassination";

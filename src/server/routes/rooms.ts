@@ -96,6 +96,12 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     });
   });
 
+  // A fresh season: forget every cross-game memory and start over.
+  app.delete("/api/season", (_request, response) => {
+    context.season.clear();
+    response.json({ cleared: true, dossiers: [] });
+  });
+
   app.post("/api/rooms", (request, response, next) => {
     try {
       const input = createRoomSchema.parse(request.body);

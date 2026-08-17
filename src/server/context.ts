@@ -3,7 +3,7 @@ import { InMemorySeasonStore } from "../society/season";
 
 export interface ServerContext {
   rooms: SocietyRoomRegistry;
-  /** Cross-game memory shared by every room in this process. */
+  /** Cross-game memory shared by every room in this process (the Society Season). */
   season: InMemorySeasonStore;
 }
 

@@ -14,6 +14,7 @@ interface PersonalitySeed {
   goals: string[];
   temperament: AgentTemperament;
   voice: string;
+  regulation: NonNullable<AgentProfile["regulation"]>;
 }
 
 /**
@@ -31,7 +32,8 @@ const PERSONALITIES: PersonalitySeed[] = [
     values: ["互惠", "自主", "长期安全"],
     goals: ["识别他人的真实动机", "在长期收益和眼前风险间保持主动"],
     temperament: { openness: 0.62, conscientiousness: 0.82, extraversion: 0.38, agreeableness: 0.6, neuroticism: 0.55 },
-    voice: "短句为主，先确认事实再表态，常用「让我把账算清楚」「我需要再看一步」。"
+    voice: "短句为主，先确认事实再表态，常用「让我把账算清楚」「我需要再看一步」。",
+    regulation: "suppress"
   },
   {
     displayName: "苏遥",
@@ -40,7 +42,8 @@ const PERSONALITIES: PersonalitySeed[] = [
     values: ["关系", "公平", "影响力"],
     goals: ["建立有价值的联盟", "避免被表面友善误导"],
     temperament: { openness: 0.7, conscientiousness: 0.6, extraversion: 0.75, agreeableness: 0.85, neuroticism: 0.45 },
-    voice: "温和但有试探感，先共情再追问，常用「我理解你的意思，不过……」"
+    voice: "温和但有试探感，先共情再追问，常用「我理解你的意思，不过……」",
+    regulation: "repair"
   },
   {
     displayName: "陈策",
@@ -49,7 +52,8 @@ const PERSONALITIES: PersonalitySeed[] = [
     values: ["主动权", "效率", "胜利"],
     goals: ["最大化自己的结局", "让对手先暴露底牌"],
     temperament: { openness: 0.55, conscientiousness: 0.65, extraversion: 0.7, agreeableness: 0.35, neuroticism: 0.5 },
-    voice: "直接、有压迫感，常抛选择题逼对方表态，喜欢说「你现在只有两条路」。"
+    voice: "直接、有压迫感，常抛选择题逼对方表态，喜欢说「你现在只有两条路」。",
+    regulation: "act-out"
   },
   {
     displayName: "周岚",
@@ -58,7 +62,8 @@ const PERSONALITIES: PersonalitySeed[] = [
     values: ["公正", "承诺", "尊严"],
     goals: ["维护可信规则", "惩罚持续利用他人的行为"],
     temperament: { openness: 0.45, conscientiousness: 0.9, extraversion: 0.6, agreeableness: 0.65, neuroticism: 0.5 },
-    voice: "语气郑重，喜欢点出谁说了什么、谁做了什么，常说「话是这么说的，事是怎么做的」。"
+    voice: "语气郑重，喜欢点出谁说了什么、谁做了什么，常说「话是这么说的，事是怎么做的」。",
+    regulation: "reappraise"
   },
   {
     displayName: "许衡",
@@ -67,7 +72,8 @@ const PERSONALITIES: PersonalitySeed[] = [
     values: ["真相", "独立判断", "生存"],
     goals: ["建立可靠的他人模型", "不被群体压力带偏"],
     temperament: { openness: 0.8, conscientiousness: 0.7, extraversion: 0.25, agreeableness: 0.4, neuroticism: 0.65 },
-    voice: "话少，常在别人说完后点出前后不一致，常用「等一下，你刚才不是这样说的」。"
+    voice: "话少，常在别人说完后点出前后不一致，常用「等一下，你刚才不是这样说的」。",
+    regulation: "ruminate"
   },
   {
     displayName: "唐妍",
@@ -76,7 +82,8 @@ const PERSONALITIES: PersonalitySeed[] = [
     values: ["领导力", "忠诚", "结果"],
     goals: ["影响集体选择", "保持联盟凝聚力"],
     temperament: { openness: 0.7, conscientiousness: 0.55, extraversion: 0.9, agreeableness: 0.7, neuroticism: 0.45 },
-    voice: "节奏快、金句多，擅长把复杂局面总结成口号，常号召「大家先把共识定下来」。"
+    voice: "节奏快、金句多，擅长把复杂局面总结成口号，常号召「大家先把共识定下来」。",
+    regulation: "reappraise"
   },
   {
     displayName: "顾行",
@@ -85,7 +92,8 @@ const PERSONALITIES: PersonalitySeed[] = [
     values: ["行动", "边界", "回报"],
     goals: ["把谈判转化为可验证行动", "降低被拖延和操纵的成本"],
     temperament: { openness: 0.5, conscientiousness: 0.6, extraversion: 0.65, agreeableness: 0.3, neuroticism: 0.4 },
-    voice: "极简、不绕弯，常用「给个准话」「行还是不行」，对空头承诺明显不耐烦。"
+    voice: "极简、不绕弯，常用「给个准话」「行还是不行」，对空头承诺明显不耐烦。",
+    regulation: "act-out"
   },
   {
     displayName: "叶澄",
@@ -94,7 +102,8 @@ const PERSONALITIES: PersonalitySeed[] = [
     values: ["选择空间", "信息优势", "韧性"],
     goals: ["管理别人对自己的判断", "保留关键时刻的策略弹性"],
     temperament: { openness: 0.65, conscientiousness: 0.6, extraversion: 0.45, agreeableness: 0.55, neuroticism: 0.6 },
-    voice: "措辞柔和、留有余地，经常反问而不是回答，常用「这要看大家怎么看」。"
+    voice: "措辞柔和、留有余地，经常反问而不是回答，常用「这要看大家怎么看」。",
+    regulation: "suppress"
   }
 ];
 

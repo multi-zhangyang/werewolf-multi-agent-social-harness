@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, Settings2, Sparkles, Waypoints } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Waypoints } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
@@ -24,6 +24,7 @@ interface LandingProps {
   onOpenRoom: (roomId: string) => void;
   onOpenSettings: () => void;
   onOpenAbout: () => void;
+  onResetSeason: () => void;
 }
 
 const FEATURES = [
@@ -72,7 +73,7 @@ const CATEGORY_OF: Record<string, keyof typeof CATEGORY> = {
   "liars-dice": "deception"
 };
 
-export function Landing({ scenarios, models, rooms, season, onStart, onOpenRoom, onOpenSettings, onOpenAbout }: LandingProps): ReactNode {
+export function Landing({ scenarios, models, rooms, season, onStart, onOpenRoom, onOpenSettings, onOpenAbout, onResetSeason }: LandingProps): ReactNode {
   return (
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-20 border-b border-border/80 bg-background/70 backdrop-blur-xl">
@@ -167,8 +168,11 @@ export function Landing({ scenarios, models, rooms, season, onStart, onOpenRoom,
                 <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground/80">Season</p>
                 <h2 className="mt-2 text-2xl font-semibold tracking-tight">延续的社群</h2>
               </div>
-              <span className="nums font-mono text-xs text-muted-foreground/80">{season.length} 位角色带着历史回归</span>
+              <SeasonResetButton onReset={onResetSeason} />
             </div>
+            <p className="mb-4 max-w-3xl text-[13px] leading-6 text-muted-foreground">
+              社会季:同一批角色会跨局延续——上一局的背叛、恩怨与信任会进入下一局,像一群真正熟悉的旧友。每局的身份与阵营重新分配,过去的角色不决定今天的忠诚,但过去的经历会改变今天的判断。随时可以清空,开启一个所有人都互不相识的全新社会季。
+            </p>
             <div className="flex flex-wrap justify-center gap-3">
               {season.slice(0, 8).map((entry) => {
                 const wins = entry.games.filter((game) => game.outcome === "win").length;
@@ -310,6 +314,31 @@ function HeroStage(): ReactNode {
         ))}
       </div>
     </div>
+  );
+}
+
+/** Two-step season reset: forget every cross-game memory and start fresh. */
+function SeasonResetButton({ onReset }: { onReset: () => void }): ReactNode {
+  const [armed, setArmed] = useState(false);
+  return armed ? (
+    <span className="flex items-center gap-2">
+      <span className="text-xs text-muted-foreground">清空全部角色记忆,开启全新社会季?</span>
+      <Button
+        size="sm"
+        className="rounded-lg border border-rose-400/40 bg-rose-400/10 px-3 text-rose-300 hover:bg-rose-400/20"
+        onClick={() => { onReset(); setArmed(false); }}
+      >
+        确认清空
+      </Button>
+      <Button size="sm" variant="ghost" className="px-3 text-muted-foreground" onClick={() => setArmed(false)}>
+        取消
+      </Button>
+    </span>
+  ) : (
+    <Button size="sm" variant="outline" className="gap-1.5 rounded-lg border-border bg-card px-3 text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => setArmed(true)}>
+      <RotateCcw className="size-3.5" />
+      重置社会季
+    </Button>
   );
 }
 

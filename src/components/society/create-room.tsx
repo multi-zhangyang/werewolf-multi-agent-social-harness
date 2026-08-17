@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Loader2, Play } from "lucide-react";
+import { History, Loader2, Play } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,11 +26,13 @@ interface CreateRoomProps {
   open: boolean;
   scenario: ScenarioSummary | undefined;
   models: ModelOption[];
+  /** How many characters carry cross-game history into this room. */
+  seasonCount?: number;
   onOpenChange: (open: boolean) => void;
   onCreated: (input: CreateRoomInput) => Promise<{ roomId: string }>;
 }
 
-export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
+export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [rounds, setRounds] = useState<number>(5);
   const [mode, setMode] = useState<"ai" | "human">("ai");
@@ -215,6 +217,15 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                       })}
                     </div>
                   </div>
+                </section>
+              ) : null}
+
+              {seasonCount > 0 ? (
+                <section className="flex items-start gap-2.5 rounded-lg border border-border bg-muted/40 px-4 py-3">
+                  <History className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    社会季进行中:{seasonCount} 位角色会带着过往对局的记忆与恩怨入场。想让他们互不相识,请先在首页「重置社会季」清空历史。
+                  </p>
                 </section>
               ) : null}
 

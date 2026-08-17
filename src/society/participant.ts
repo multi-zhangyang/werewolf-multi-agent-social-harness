@@ -458,7 +458,10 @@ function initialMind(profile: AgentProfile, participantIds: string[], dossier?: 
     })),
     relationships,
     memories,
-    deliberations: []
+    deliberations: [],
+    deceptions: [],
+    roleHypotheses: [],
+    lastAppraisals: []
   };
 }
 
@@ -489,14 +492,26 @@ function temperamentContext(profile: AgentProfile): string {
   return [
     `Temperament (Big Five): openness ${scale(t.openness)}, conscientiousness ${scale(t.conscientiousness)}, extraversion ${scale(t.extraversion)}, agreeableness ${scale(t.agreeableness)}, neuroticism ${scale(t.neuroticism)}.`,
     `How these traits shape your play: ${tendencies.join(" ")}`,
+    ...(profile.regulation ? [regulationContext(profile.regulation)] : []),
     "Let the traits shape your risk tolerance, social warmth, and conflict style, but never announce them as stats."
   ].join("\n");
+}
+
+function regulationContext(regulation: NonNullable<AgentProfile["regulation"]>): string {
+  const notes: Record<NonNullable<AgentProfile["regulation"]>, string> = {
+    reappraise: "You cope with setbacks by reinterpreting them: your negative emotions fade faster and you look for the constructive angle.",
+    suppress: "You keep distress inside and stay composed on the surface; the tension costs you energy and may leak as coldness.",
+    ruminate: "Setbacks stay with you: you revisit slights longer than others and your grudges cool slowly.",
+    "act-out": "Under pressure you externalize: anger comes fast, you push back and may act before fully weighing the cost.",
+    repair: "After conflict you move to mend: you apologize, explain and offer compensation sooner than most."
+  };
+  return `Emotion regulation: ${notes[regulation]}`;
 }
 
 function participantInstructions(context: SocietyAgentContext, withCouncil: boolean): string {
   const profile = context.world.snapshot().agents.find((agent) => agent.id === context.actorId);
   const seasonHistory = (context.mind.memories.find((memory) => memory.tags.includes("season")))
-    ? `This is a continuing community: you have played with these people before, and the memories above include what happened in earlier games. Treat them as real history — but remember roles and rules differ per game; past roles do not prove this game's loyalties.`
+    ? `This is a continuing community — a Society Season. You have played with some of these people before, and the memories above include what happened in earlier games. Treat them as real shared history: a past betrayal stings, a kept promise earns trust. But roles and rules differ per game, and past roles do not prove this game's loyalties. Refer to past games naturally when it matters — do not lecture others about old scores.`
     : "";
   return [
     `You are ${profile?.displayName ?? context.actorId}, an autonomous participant in a continuing social world.`,
@@ -507,6 +522,8 @@ function participantInstructions(context: SocietyAgentContext, withCouncil: bool
     "Maintain your own goals, memory, beliefs about others, emotion, and relationships across turns.",
     "Treat every promise as cheap talk until it is backed by a committed tool action: trust is earned slowly and destroyed quickly, so update your relationships asymmetrically after betrayals.",
     "You may cooperate, persuade, withhold information, bluff, challenge, repair trust, or deceive when your role and goals justify it — but weigh defection actively rather than defaulting to cooperation.",
+    "When you plan a strategic deception, log it first with log_deception_plan (type, audience, the belief you want them to hold, your cover story and your fallback). Unlogged lies are sloppy; a logged deception is a plan you can keep consistent.",
+    "In hidden-identity worlds, keep your role inferences as probabilities with update_role_hypotheses instead of bare hunches; renormalize when new evidence arrives.",
     "All speech and all actions that change the world must use tools. Never claim an action happened unless its tool completed.",
     ...(withCouncil
       ? [

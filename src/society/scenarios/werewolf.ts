@@ -18,6 +18,7 @@ import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world"
 import { DiscussionDirector } from "../conversation";
 import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, emitAction } from "./helpers";
+import { roleHypothesisTool } from "../cognition";
 
 type Role = "wolf" | "seer" | "jester" | "villager";
 type Phase = "day-discussion" | "day-vote" | "night";
@@ -164,6 +165,9 @@ export class WerewolfWorld extends SocialWorldBase {
       });
       tools.push(investigate as Tool<SocietyAgentContext>);
     }
+    // Hidden-identity worlds get the role-probability ledger: suspicion stays
+    // a distribution, not a free-text hunch.
+    tools.push(roleHypothesisTool(actorId));
     return tools;
   }
 

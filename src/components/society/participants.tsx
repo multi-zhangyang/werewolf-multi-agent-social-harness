@@ -117,9 +117,12 @@ function MindSheet({ participant, onOpenChange }: { participant: SocietyParticip
                 {mind ? (
                   <>
                     <MoodSection mind={mind} />
+                    <AppraisalsSection mind={mind} />
                     <GoalsSection mind={mind} />
                     <BeliefsSection mind={mind} />
+                    <RoleHypothesesSection mind={mind} />
                     <RelationshipsSection mind={mind} />
+                    <DeceptionsSection mind={mind} />
                     <DeliberationsSection mind={mind} />
                     <MemoriesSection mind={mind} />
                   </>
@@ -171,6 +174,85 @@ function MoodSection({ mind }: { mind: AgentMindState }): ReactNode {
       </div>
     </section>
   );
+}
+
+function RoleHypothesesSection({ mind }: { mind: AgentMindState }): ReactNode {
+  if (!mind.roleHypotheses.length) return null;
+  const subjects = new Map<string, Array<{ role: string; probability: number }>>();
+  for (const entry of mind.roleHypotheses) {
+    const list = subjects.get(entry.subjectId) ?? [];
+    list.push({ role: entry.role, probability: entry.probability });
+    subjects.set(entry.subjectId, list);
+  }
+  return (
+    <section>
+      <SectionTitle>身份推断</SectionTitle>
+      <div className="space-y-2">
+        {[...subjects.entries()].map(([subjectId, entries]) => (
+          <div key={subjectId} className="rounded-lg border border-border bg-card p-3">
+            <p className="text-sm font-medium text-foreground/90">{subjectId}</p>
+            <div className="mt-2 space-y-1.5">
+              {[...entries].sort((left, right) => right.probability - left.probability).map((entry) => (
+                <div key={entry.role} className="flex items-center gap-2">
+                  <span className="w-16 truncate text-[11px] text-muted-foreground">{entry.role}</span>
+                  <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
+                    <div className="h-full rounded-full bg-violet-400/80 transition-all" style={{ width: `${Math.round(entry.probability * 100)}%` }} />
+                  </div>
+                  <span className="nums w-9 text-right font-mono text-[10px] text-muted-foreground">{Math.round(entry.probability * 100)}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DeceptionsSection({ mind }: { mind: AgentMindState }): ReactNode {
+  if (!mind.deceptions.length) return null;
+  return (
+    <section>
+      <SectionTitle>欺骗意图</SectionTitle>
+      <div className="space-y-2">
+        {mind.deceptions.slice(-4).reverse().map((plan, index) => (
+          <div key={index} className="rounded-lg border border-rose-400/20 bg-card p-3">
+            <p className="font-mono text-[10px] uppercase tracking-widest text-rose-300/80">{deceptionLabel(plan.type)} · 目标 {plan.targetIds.join("、")}</p>
+            <p className="mt-1 text-sm leading-5 text-foreground/85">想让他们相信:{plan.intendedBelief}</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">掩护说法:{plan.coverStory}</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground/80">被拆穿后的退路:{plan.fallback}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AppraisalsSection({ mind }: { mind: AgentMindState }): ReactNode {
+  if (!mind.lastAppraisals.length) return null;
+  return (
+    <section>
+      <SectionTitle>情绪来源</SectionTitle>
+      <div className="space-y-1.5">
+        {mind.lastAppraisals.slice(-4).reverse().map((note, index) => (
+          <p key={index} className="rounded-lg border border-border/60 bg-card px-3 py-2 text-xs leading-5 text-muted-foreground">
+            {note.text}
+          </p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function deceptionLabel(type: string): string {
+  const labels: Record<string, string> = {
+    lying: "说谎",
+    bluff: "虚张声势",
+    paltering: "真话误导",
+    omission: "隐瞒",
+    "false-promise": "虚假承诺"
+  };
+  return labels[type] ?? type;
 }
 
 function GoalsSection({ mind }: { mind: AgentMindState }): ReactNode {
