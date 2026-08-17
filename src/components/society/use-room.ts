@@ -275,6 +275,29 @@ function reduceEvent(
     });
     return;
   }
+  if (event.type === "agent.model.switched") {
+    // The same person on a new engine: identity, session and memory survive.
+    setRoom((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        participants: current.participants.map((participant) =>
+          participant.profile.id === event.actorId
+            ? { ...participant, profile: { ...participant.profile, model: event.model } }
+            : participant
+        )
+      };
+    });
+    pushTimeline({
+      id: `model-switch-${event.actorId}-${event.at}`,
+      at: event.at,
+      kind: "action",
+      actorId: event.actorId,
+      label: "切换模型",
+      detail: `${event.previousModel} → ${event.model}`
+    });
+    return;
+  }
   if (event.type === "agent.tool") {
     setActivity((current) => ({
       ...current,

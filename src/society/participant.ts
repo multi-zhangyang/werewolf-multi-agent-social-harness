@@ -74,13 +74,14 @@ export interface SocietyAgentOptions {
 
 export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   readonly profile: AgentProfile;
-  readonly agent: SdkAgent<SocietyAgentContext, any>;
+  agent: SdkAgent<SocietyAgentContext, any>;
   readonly session: Session;
   readonly mind: AgentMindState;
 
   readonly context: SocietyAgentContext;
-  private readonly runner: Runner;
-  private readonly contextManager: SessionContextManager;
+  private runner: Runner;
+  private contextManager: SessionContextManager;
+  private readonly tools: Tool<SocietyAgentContext>[];
   private readonly maxTurns: number;
   private deltaBuffer = "";
   private lastDeltaAt = 0;
@@ -116,15 +117,78 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       baseURL: options.baseURL ?? baseUrlFromEnv(),
       useResponses: false
     });
-    // Multi-level context management: the manager rewrites session history
-    // through the SDK's sessionInputCallback, compressing old turns into a
-    // pinned-facts + digest block once input pressure crosses the policy
-    // thresholds, and refusing the model call at the hard guard.
-    this.contextManager = new SessionContextManager({
+    this.contextManager = this.buildContextManager(provider, options.resolvedConfig);
+    this.runner = new Runner({
+      modelProvider: provider,
+      tracingDisabled: true,
+      sessionInputCallback: this.contextManager.sessionInputCallback
+    });
+    this.maxTurns = boundedInteger(options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 10), 2, 24);
+
+    const social = createSocialTools(this.context);
+    const cognition = createCognitionTools(this.context);
+    const worldTools = options.world.toolsFor(this.profile.id);
+    this.tools = [...social.all, ...cognition, ...worldTools];
+
+    // One identity, one session, one agent. Discussion phases and binding
+    // action phases differ only in the turn guidance passed to the same agent;
+    // world tools guard their own phases, so a discussion turn cannot commit a
+    // vote and a vote turn cannot open the night.
+    this.agent = this.buildAgent(options.resolvedConfig);
+  }
+
+  /**
+   * Model switch (§12.4): the person stays, the engine changes. The session,
+   * mind and memory are preserved verbatim; history is compacted first if the
+   * new window is smaller, the context budget is recomputed for the new
+   * model, and the switch is announced as a real event for the observer seat.
+   */
+  async switchModel(next: { provider: OpenAIProvider; resolvedConfig: ResolvedModelConfig }): Promise<{ previousModel: string; model: string }> {
+    const previousModel = this.profile.model;
+    const nextModel = next.resolvedConfig.modelId;
+    this.profile.model = nextModel;
+    // Build the new engine first so the pre-switch compaction targets the new
+    // window — a smaller window starts below its pressure thresholds.
+    const nextManager = this.buildContextManager(next.provider, next.resolvedConfig);
+    const history = await this.session.getItems();
+    const replacement = await nextManager.compactHistory(history);
+    if (replacement !== history) {
+      if (this.session.replaceHistoryWithCompaction) await this.session.replaceHistoryWithCompaction(replacement);
+      else {
+        await this.session.clearSession();
+        await this.session.addItems(replacement);
+      }
+    }
+    this.contextManager = nextManager;
+    this.runner = new Runner({
+      modelProvider: next.provider,
+      tracingDisabled: true,
+      sessionInputCallback: nextManager.sessionInputCallback
+    });
+    this.agent = this.buildAgent(next.resolvedConfig);
+    this.context.emit({
+      type: "agent.model.switched",
+      roomId: this.context.roomId,
+      actorId: this.context.actorId,
+      previousModel,
+      model: nextModel,
+      at: new Date().toISOString()
+    });
+    return { previousModel, model: nextModel };
+  }
+
+  /**
+   * Multi-level context management: the manager rewrites session history
+   * through the SDK's sessionInputCallback, compressing old turns into a
+   * pinned-facts + digest block once input pressure crosses the policy
+   * thresholds, and refusing the model call at the hard guard.
+   */
+  private buildContextManager(provider: OpenAIProvider, resolvedConfig: ResolvedModelConfig | undefined): SessionContextManager {
+    return new SessionContextManager({
       provider,
       model: this.profile.model,
-      ...(options.resolvedConfig
-        ? { resolvedConfig: options.resolvedConfig, getPinnedFacts: () => this.pinnedFacts() }
+      ...(resolvedConfig
+        ? { resolvedConfig, getPinnedFacts: () => this.pinnedFacts() }
         : { contextLimit: contextLimitForModel(this.profile.model) }),
       actorLabel: this.profile.displayName,
       onCompacted: (digest, estimatedTokens, threshold, level, pressureAfter) => {
@@ -154,36 +218,21 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         });
       }
     });
-    this.runner = new Runner({
-      modelProvider: provider,
-      tracingDisabled: true,
-      sessionInputCallback: this.contextManager.sessionInputCallback
-    });
-    this.maxTurns = boundedInteger(options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 10), 2, 24);
+  }
 
-    const social = createSocialTools(this.context);
-    const cognition = createCognitionTools(this.context);
-    const worldTools = options.world.toolsFor(this.profile.id);
-
-    const baseConfig = {
+  /** One identity, one session: only the model binding differs between builds. */
+  private buildAgent(resolvedConfig: ResolvedModelConfig | undefined): SdkAgent<SocietyAgentContext, any> {
+    return new Agent<SocietyAgentContext>({
       name: this.profile.displayName,
       model: this.profile.model,
       inputGuardrails: [createInjectionShield(this.context)] as InputGuardrail[],
       modelSettings: {
-        ...modelSettingsFrom(options.resolvedConfig, this.profile),
+        ...modelSettingsFrom(resolvedConfig, this.profile),
         ...providerRetrySettings
       },
-      toolUseBehavior: "run_llm_again" as const
-    };
-
-    // One identity, one session, one agent. Discussion phases and binding
-    // action phases differ only in the turn guidance passed to the same agent;
-    // world tools guard their own phases, so a discussion turn cannot commit a
-    // vote and a vote turn cannot open the night.
-    this.agent = new Agent<SocietyAgentContext>({
-      ...baseConfig,
+      toolUseBehavior: "run_llm_again" as const,
       instructions: ({ context }) => participantInstructions(context),
-      tools: [...social.all, ...cognition, ...worldTools]
+      tools: this.tools
     });
   }
 

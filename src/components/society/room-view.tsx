@@ -148,6 +148,8 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
             participants={room.participants}
             humanActorId={room.player?.actorId}
             activity={activity}
+            roomPaused={room.status === "paused"}
+            roomId={room.id}
             onToggleAgentPause={(actorId, paused) => { void toggleAgentPause(actorId, paused); }}
           />
         </aside>

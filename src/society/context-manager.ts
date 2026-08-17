@@ -151,6 +151,25 @@ export class SessionContextManager {
     return this.lastLevel;
   }
 
+  /**
+   * One-shot compaction against this manager's window, used by model switches
+   * (§12.4): before the agent continues on a smaller window, its history is
+   * compacted so the first turn after the switch starts below the pressure
+   * thresholds instead of tripping the hard guard. Returns the replacement
+   * history (compaction marker + retained suffix).
+   */
+  async compactHistory(historyItems: AgentInputItem[]): Promise<AgentInputItem[]> {
+    if (historyItems.length === 0) return historyItems;
+    const estimated = estimateTokens(historyItems, this.policy.heuristicSafetyMultiplier);
+    const ratio = estimated / Math.max(1, this.usableInputTokens);
+    const level = this.levelFor(ratio);
+    if (level !== "soft-compact" && level !== "deep-compact" && level !== "emergency" && level !== "hard-guard") {
+      return historyItems;
+    }
+    const { kept } = await this.compact(historyItems, level === "hard-guard" ? "deep-compact" : level);
+    return [digestItem(kept.digest), ...kept.recent];
+  }
+
   /** The SDK-native hook: combines session history with the new turn's input. */
   readonly sessionInputCallback: SessionInputCallback = async (historyItems, newItems) => {
     // Some thinking models emit tool-call arguments that get truncated mid-JSON.

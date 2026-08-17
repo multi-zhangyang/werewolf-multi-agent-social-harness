@@ -1,4 +1,5 @@
-import type { Agent, Session, Tool } from "@openai/agents";
+import type { Agent, ModelProvider, Session, Tool } from "@openai/agents";
+import type { ResolvedModelConfig } from "./models";
 
 export type ScenarioId =
   | "prisoners-dilemma"
@@ -581,6 +582,7 @@ export type AgentRuntimeEvent =
   | { type: "agent.guardrail"; roomId: string; actorId: string; label: string; snippet: string; at: string }
   | { type: "agent.paused"; roomId: string; actorId: string; reason: string; at: string }
   | { type: "agent.resumed"; roomId: string; actorId: string; at: string }
+  | { type: "agent.model.switched"; roomId: string; actorId: string; previousModel: string; model: string; at: string }
   | { type: "agent.message"; roomId: string; message: SocialMessage }
   | { type: "world.action"; roomId: string; actorId: string; action: string; detail: string; at: string }
   | { type: "world.updated"; roomId: string; snapshot: WorldSnapshot }
@@ -703,6 +705,11 @@ export interface SocietyAgentRuntime {
   rememberOutcome(text: string, turn: number): Promise<void>;
   /** Process world-appraisal events into emotion, relationship and memory. */
   appraise(events: SocialEvent[], turn: number): Promise<void>;
+  /**
+   * Model switch (§12.4): keeps this agent's identity, session, mind and
+   * memory; swaps the model binding and recomputes the context budget.
+   */
+  switchModel(next: { provider: ModelProvider; resolvedConfig: ResolvedModelConfig }): Promise<{ previousModel: string; model: string }>;
   /** Distill this character's private mind into a season dossier. */
   exportDossier(role?: string, outcome?: "win" | "lose"): CharacterDossier;
 }

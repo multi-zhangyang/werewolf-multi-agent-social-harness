@@ -347,6 +347,27 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     response.json(room.snapshotFor());
   });
 
+  // Model switch (§12.4): swap one agent's model while paused; identity,
+  // session and memory survive. The room must be paused (or just that agent).
+  app.post("/api/rooms/:roomId/agents/:actorId/model", (request, response, next) => {
+    const room = context.rooms.get(request.params.roomId);
+    if (!room) {
+      response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
+      return;
+    }
+    if (room.humanActorId) {
+      const actorId = room.actorForToken(queryToken(request) ?? bodyToken(request));
+      if (!actorId) {
+        response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "A valid player token is required to switch a model in this room." });
+        return;
+      }
+    }
+    const input = z.object({ modelProfileId: z.string().min(1).max(120) }).strict().parse(request.body);
+    void room.switchAgentModel(request.params.actorId, input.modelProfileId).then((switched) => {
+      response.json({ switched, room: room.snapshotFor() });
+    }).catch(next);
+  });
+
   app.post("/api/rooms/:roomId/action", (request, response, next) => {
     const room = context.rooms.get(request.params.roomId);
     if (!room) {

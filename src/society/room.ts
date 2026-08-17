@@ -494,6 +494,49 @@ export class SocietyRoom {
     return this.pausedAgents.has(actorId);
   }
 
+  /**
+   * Model switch (§12.4): swaps one agent's model binding while the room (or
+   * that agent) is paused. Identity, session, memory and world role are kept;
+   * the new binding is resolved through the registry, the context budget is
+   * recomputed, and a history compaction runs first when the new window is
+   * smaller. Old/new models are recorded and the switch is broadcast.
+   */
+  async switchAgentModel(actorId: string, modelProfileId: string): Promise<{ previousModel: string; model: string }> {
+    const runtime = this.agents.get(actorId);
+    const card = this.cards.get(actorId);
+    if (!runtime || !card) throw new Error(`PARTICIPANT_NOT_FOUND: '${actorId}' is not an AI participant in this room.`);
+    if (this.status !== "paused" && !this.pausedAgents.has(actorId)) {
+      throw new Error("ROOM_NOT_PAUSED: Pause the room (or this participant) before switching its model.");
+    }
+    const modelProfile = this.modelRegistry.modelProfile(modelProfileId);
+    if (!modelProfile || modelProfile.enabled === false) {
+      throw new Error(`MODEL_PROFILE_MISSING: '${modelProfileId}' is not an enabled model profile.`);
+    }
+    const binding: AgentModelBinding = {
+      ...(this.agentBindings[actorId] ?? {}),
+      defaultModelProfileId: modelProfileId
+    };
+    const config = resolveAgentModelConfig({
+      agentId: actorId,
+      binding,
+      roomDefaults: this.roomDefaults,
+      globalDefaults: this.modelRegistry.globalDefaults(),
+      lookup: {
+        modelProfile: (id) => this.modelRegistry.modelProfile(id),
+        providerProfile: (id) => this.modelRegistry.providerProfile(id),
+        contextPolicy: (id) => this.modelRegistry.contextPolicy(id),
+        firstModelProfile: () => this.modelRegistry.listModelProfiles().find((profile) => profile.enabled)
+      }
+    });
+    const previousModel = card.profile.model;
+    const provider = this.providerClientFor(config.providerProfileId);
+    await runtime.switchModel({ provider, resolvedConfig: config });
+    this.agentBindings[actorId] = binding;
+    card.profile.model = config.modelId;
+    this.saveCheckpoint();
+    return { previousModel, model: config.modelId };
+  }
+
   currentStatus(): RoomStatus {
     return this.status;
   }

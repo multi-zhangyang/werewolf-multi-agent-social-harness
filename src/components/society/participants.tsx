@@ -1,10 +1,17 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Brain, Crown, Gauge, Pause, Play, Skull, Zap } from "lucide-react";
 import type { AgentMindState, DecisionBias } from "@/society/contracts";
 import type { SocietyParticipantCard, SocietyParticipantProfile } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select";
 import {
   Sheet,
   SheetContent,
@@ -23,9 +30,13 @@ interface ParticipantsRailProps {
   activity?: RoomConnection["activity"];
   /** Pause/resume one participant (observer control; empty for human seats). */
   onToggleAgentPause?: (actorId: string, paused: boolean) => void;
+  /** True while the whole room is paused (unlocks model switching §12.4). */
+  roomPaused?: boolean;
+  /** Room id for model-switch requests. */
+  roomId?: string;
 }
 
-export function ParticipantsRail({ participants, humanActorId, activity, onToggleAgentPause }: ParticipantsRailProps): ReactNode {
+export function ParticipantsRail({ participants, humanActorId, activity, onToggleAgentPause, roomPaused = false, roomId }: ParticipantsRailProps): ReactNode {
   const [selected, setSelected] = useState<SocietyParticipantCard | null>(null);
   const leaderId = [...participants].sort((left, right) => (right.score ?? -1) - (left.score ?? -1))[0]?.profile.id;
   return (
@@ -117,6 +128,8 @@ export function ParticipantsRail({ participants, humanActorId, activity, onToggl
       <MindSheet
         participant={selected}
         activity={activity?.[selected?.profile.id ?? ""]}
+        roomPaused={roomPaused}
+        roomId={roomId}
         onToggleAgentPause={onToggleAgentPause}
         onOpenChange={(open) => { if (!open) setSelected(null); }}
       />
@@ -124,15 +137,53 @@ export function ParticipantsRail({ participants, humanActorId, activity, onToggl
   );
 }
 
-function MindSheet({ participant, activity, onToggleAgentPause, onOpenChange }: {
+function MindSheet({ participant, activity, roomPaused, roomId, onToggleAgentPause, onOpenChange }: {
   participant: SocietyParticipantCard | null;
   activity?: RoomConnection["activity"][string];
+  roomPaused: boolean;
+  roomId?: string;
   onToggleAgentPause?: (actorId: string, paused: boolean) => void;
   onOpenChange: (open: boolean) => void;
 }): ReactNode {
   const mind = participant?.mind;
   const paused = Boolean(participant?.paused);
   const isHuman = participant?.profile.controller === "human";
+  const canSwitchModel = Boolean(participant && roomId && !isHuman && (roomPaused || paused));
+  const [modelProfiles, setModelProfiles] = useState<Array<{ id: string; name: string; modelId: string }>>([]);
+  const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState<string>();
+
+  useEffect(() => {
+    if (!participant || !canSwitchModel) return;
+    let cancelled = false;
+    fetch("/api/model-config")
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("MODEL_CONFIG_UNREACHABLE"))))
+      .then((data: { modelProfiles?: Array<{ id: string; name: string; modelId: string; enabled?: boolean }> }) => {
+        if (!cancelled) setModelProfiles((data.modelProfiles ?? []).filter((profile) => profile.enabled !== false));
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [participant, canSwitchModel]);
+
+  const switchModel = async (modelProfileId: string): Promise<void> => {
+    if (!participant || !roomId) return;
+    setSwitching(true);
+    setSwitchError(undefined);
+    try {
+      const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(participant.profile.id)}/model`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelProfileId })
+      });
+      const payload = await response.json().catch(() => undefined);
+      if (!response.ok) throw new Error(payload?.message ?? `HTTP ${response.status}`);
+    } catch (cause) {
+      setSwitchError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSwitching(false);
+    }
+  };
+
   return (
     <Sheet open={Boolean(participant)} onOpenChange={onOpenChange}>
       <SheetContent className="w-full border-border bg-card text-foreground sm:max-w-lg">
@@ -166,6 +217,26 @@ function MindSheet({ participant, activity, onToggleAgentPause, onOpenChange }: 
                 {paused ? (
                   <section className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3">
                     <p className="text-xs leading-5 text-amber-200/90">该参与者已被暂停：讨论阶段它会保持沉默，绑定行动阶段房间会停下来等待恢复——系统不会替它做任何决定。</p>
+                  </section>
+                ) : null}
+                {canSwitchModel && participant ? (
+                  <section>
+                    <SectionTitle>切换模型</SectionTitle>
+                    <Select value="__none" onValueChange={(value) => { if (value !== "__none") void switchModel(value); }} disabled={switching}>
+                      <SelectTrigger className="w-full rounded-lg border-border bg-card text-foreground/90">
+                        <SelectValue placeholder={`当前：${participant.profile.model}`} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none" disabled>当前：{participant.profile.model}</SelectItem>
+                        {modelProfiles.map((profile) => (
+                          <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
+                      人物不变，只换引擎：会话、记忆、关系与本局角色都会保留；新模型窗口更小时会先自动压缩历史。
+                    </p>
+                    {switchError ? <p className="mt-1 text-[11px] text-red-400">{switchError}</p> : null}
                   </section>
                 ) : null}
                 <CharacterSection profile={participant.profile} />

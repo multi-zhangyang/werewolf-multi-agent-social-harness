@@ -174,6 +174,36 @@ async function run(): Promise<void> {
     assert.equal(calls.digest, firstCount, "cooldown must suppress another compaction");
     assert.ok(result.length >= again.length);
   });
+
+  await check("compactHistory (model-switch path) leaves small histories untouched", async () => {
+    const calls = { digest: 0 };
+    const manager = new SessionContextManager({
+      provider: fakeProvider(calls), model: "fake-model", actorLabel: "T",
+      resolvedConfig: resolved
+    });
+    const history = bigHistory(2_000);
+    const replacement = await manager.compactHistory(history);
+    assert.equal(replacement, history, "no compaction when pressure is low");
+    assert.equal(calls.digest, 0);
+  });
+
+  await check("compactHistory compacts an over-budget history down to digest + recent", async () => {
+    const calls = { digest: 0 };
+    const manager = new SessionContextManager({
+      provider: fakeProvider(calls), model: "fake-model", actorLabel: "T",
+      resolvedConfig: resolved,
+      getPinnedFacts: () => ["我是 T，角色：预言家"]
+    });
+    const history = bigHistory(Math.floor(resolved.usableInputTokens * 0.85));
+    const replacement = await manager.compactHistory(history);
+    assert.ok(calls.digest >= 1, "a digest call is expected");
+    assert.ok(replacement.length < history.length, "replacement is much shorter");
+    const first = replacement[0] as unknown as Record<string, unknown>;
+    const content = (first.content as Array<Record<string, unknown>>)[0]?.text as string;
+    assert.ok(content.includes("固定事实"), "digest carries the pinned-facts block");
+    assert.ok(content.includes("预言家"), "the role fact survives the pre-switch compaction");
+    assert.equal(replacement.at(-1), history.at(-1), "the most recent item stays verbatim at the tail");
+  });
 }
 
 void run().then(() => {
