@@ -408,7 +408,7 @@ export class SocietyRoom {
         // Speaking is optional: an agent that fails to produce a coherent turn
         // simply stays quiet for this wave instead of sinking the whole room.
         if (isDiscussion) {
-          const note = `${runtime.profile.displayName} 本轮未能发言（${errorMessage(error)}）`;
+          const note = `${runtime.profile.displayName} 本轮未发言（${friendlyFailure(error)}）`;
           this.world.addWorldLog(note);
           this.emit({ type: "agent.status", roomId: this.id, actorId, status: "idle", at: now() });
           return;
@@ -417,7 +417,7 @@ export class SocietyRoom {
         // single failed turn must not sink the room: report it, let
         // completeActivation flag the missing action, and the room retries the
         // actor once. Only a repeated failure pauses the room.
-        const note = `${runtime.profile.displayName} 行动失败（${errorMessage(error)}），稍后重试`;
+        const note = `${runtime.profile.displayName} 行动未完成（${friendlyFailure(error)}），稍后重试`;
         this.world.addWorldLog(note);
         this.emit({ type: "agent.status", roomId: this.id, actorId, status: "error", at: now() });
         return;
@@ -602,4 +602,17 @@ function errorMessage(error: unknown): string {
     .replace(/(api[_ -]?key\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]")
     .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
     .slice(0, 800);
+}
+
+/** Turn SDK/provider failures into observer-friendly Chinese. */
+function friendlyFailure(error: unknown): string {
+  const message = errorMessage(error);
+  const maxTurns = /Max turns \((\d+)\) exceeded/i.exec(message);
+  if (maxTurns) return `本轮行动次数已达上限（${maxTurns[1]} 次）`;
+  if (/TURN_TIMEOUT/i.test(message)) return "思考时间超时";
+  if (/aborted|abort/i.test(message)) return "本轮被中断";
+  if (/OPENAI_API_KEY_REQUIRED/i.test(message)) return "提供商密钥未配置";
+  if (/429|rate limit/i.test(message)) return "提供商限流，稍后重试";
+  if (/502|503|504/i.test(message)) return "提供商暂时不可用";
+  return message.replace(/^[A-Za-z_]+:\s*/, "").slice(0, 160);
 }

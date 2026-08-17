@@ -160,7 +160,7 @@ export function StatusLabel({ status }: { status: AgentStatus | "running" | "pau
     idle: "静候",
     paused: "已暂停",
     finished: "已结束",
-    error: "异常"
+    error: "行动失败"
   };
   return <>{labels[status] ?? status}</>;
 }

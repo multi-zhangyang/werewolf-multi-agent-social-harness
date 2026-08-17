@@ -51,9 +51,9 @@ const FEATURES = [
 
 /** Category color coding: cooperation / confrontation / deception. */
 const CATEGORY: Record<string, { accent: string; bar: string; tag: string }> = {
-  cooperation: { accent: "text-emerald-400", bar: "bg-emerald-400", tag: "border-emerald-400/30 bg-emerald-400/10 text-emerald-300" },
-  confrontation: { accent: "text-orange-400", bar: "bg-orange-400", tag: "border-orange-400/30 bg-orange-400/10 text-orange-300" },
-  deception: { accent: "text-violet-400", bar: "bg-violet-400", tag: "border-violet-400/30 bg-violet-400/10 text-violet-300" }
+  cooperation: { accent: "text-emerald-400", bar: "bg-emerald-400", tag: "border-emerald-400/40 bg-emerald-400/15 text-emerald-200" },
+  confrontation: { accent: "text-orange-400", bar: "bg-orange-400", tag: "border-orange-400/40 bg-orange-400/15 text-orange-200" },
+  deception: { accent: "text-violet-400", bar: "bg-violet-400", tag: "border-violet-400/40 bg-violet-400/15 text-violet-200" }
 };
 
 const CATEGORY_OF: Record<string, keyof typeof CATEGORY> = {
@@ -169,11 +169,11 @@ export function Landing({ scenarios, models, rooms, season, onStart, onOpenRoom,
               </div>
               <span className="nums font-mono text-xs text-muted-foreground/80">{season.length} 位角色带着历史回归</span>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            <div className="flex flex-wrap justify-center gap-3">
               {season.slice(0, 8).map((entry) => {
                 const wins = entry.games.filter((game) => game.outcome === "win").length;
                 return (
-                  <div key={entry.characterKey} className="rounded-lg border border-border bg-card p-4 transition-colors hover:border-border">
+                  <div key={entry.characterKey} className="w-[calc(50%-6px)] rounded-lg border border-border bg-card p-4 transition-colors hover:border-border sm:w-[calc(33.33%-8px)] lg:w-[calc(25%-9px)]">
                     <p className="flex items-center gap-2 text-sm font-semibold tracking-tight">
                       <AgentAvatar name={entry.characterKey} index={hashIndex(entry.characterKey)} size="sm" />
                       {entry.characterKey}
@@ -291,17 +291,17 @@ function HeroStage(): ReactNode {
   return (
     <div className="relative mx-auto mt-12 flex h-28 w-fit items-start justify-center px-10 pt-2" aria-hidden>
       <svg className="absolute inset-x-0 top-2 h-full w-full" viewBox="0 0 300 96" preserveAspectRatio="none">
-        <path className="dash-flow" d="M74 34 C 100 12, 200 12, 226 34" fill="none" stroke="currentColor" strokeOpacity="0.16" strokeWidth="1" strokeDasharray="3 5" />
-        <path className="dash-flow" style={{ animationDelay: "0.6s" }} d="M74 34 C 100 56, 200 56, 226 34" fill="none" stroke="currentColor" strokeOpacity="0.11" strokeWidth="1" strokeDasharray="3 5" />
-        <path d="M36 34 C 80 2, 220 2, 264 34" fill="none" stroke="currentColor" strokeOpacity="0.08" strokeWidth="1" />
+        <path className="dash-flow" d="M74 34 C 100 12, 200 12, 226 34" fill="none" stroke="currentColor" strokeOpacity="0.28" strokeWidth="1.1" strokeDasharray="3 5" />
+        <path className="dash-flow" style={{ animationDelay: "0.6s" }} d="M74 34 C 100 56, 200 56, 226 34" fill="none" stroke="currentColor" strokeOpacity="0.18" strokeWidth="1.1" strokeDasharray="3 5" />
+        <path d="M36 34 C 80 2, 220 2, 264 34" fill="none" stroke="currentColor" strokeOpacity="0.12" strokeWidth="1" />
       </svg>
       <div className="relative flex items-start gap-9">
         {cast.map((name, index) => (
           <span key={name} className={cn("relative flex flex-col items-center gap-2 rounded-lg", index % 2 === 1 && "translate-y-3")}>
             <span className="relative">
-              <AgentAvatar name={name} index={index} size="md" />
+              <AgentAvatar name={name} index={index} size="lg" />
               <span
-                className="live-pulse absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-emerald-400"
+                className="live-pulse absolute -right-1 -top-1 size-2 rounded-full bg-emerald-400"
                 style={{ animationDelay: `${index * 420}ms` }}
               />
             </span>
@@ -341,7 +341,7 @@ function ScenarioCard({ scenario, onStart, wide }: { scenario: ScenarioSummary; 
       onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onStart(); }}
       className={cn(
         "group relative flex cursor-pointer flex-col justify-between overflow-hidden rounded-lg border border-border bg-card p-6 transition-all hover:-translate-y-1 hover:border-foreground/25 hover:shadow-[0_12px_40px_-16px_rgba(0,0,0,0.8)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground",
-        wide ? "min-h-48 sm:col-span-2 sm:min-h-44" : "min-h-48"
+        wide ? "min-h-48 sm:col-span-2 lg:col-span-3 sm:min-h-44" : "min-h-48"
       )}
     >
       <span className={cn("absolute inset-y-0 left-0 w-0.5 opacity-70 transition-opacity group-hover:opacity-100", tone.bar)} aria-hidden />

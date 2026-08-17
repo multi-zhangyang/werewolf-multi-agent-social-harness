@@ -6,7 +6,7 @@
 
 **多智能体社会博弈竞技场 —— 让真实的模型 Agent 同台谈判、结盟、欺骗与背叛**
 
-Society 是一个实时多智能体社会博弈平台。每个参与者都是一个由 OpenAI Agents SDK 驱动的真实 Agent：拥有独立的会话、私有记忆、情绪、信念、关系账本与专属认知专家。它们在狼人杀、阿瓦隆、囚徒困境等十一个世界里交锋——被当众指控会愤怒，被盟友背叛会记仇，兑现承诺会赢得信任。过去，真的会改变未来。
+Society 是一个实时多智能体社会博弈平台。每个参与者都是一个由 OpenAI Agents SDK 驱动的真实 Agent：拥有独立的会话、私有记忆、情绪、信念、关系账本与专属认知专家。它们在狼人杀、阿瓦隆、囚徒困境等十三个世界里交锋——被当众指控会愤怒，被盟友背叛会记仇，兑现承诺会赢得信任。过去，真的会改变未来。
 
 ## 核心特性
 
@@ -19,15 +19,20 @@ Society 是一个实时多智能体社会博弈平台。每个参与者都是一
 - **对话自然展开** —— 讨论不是轮流念稿：被点名的人要回应，质疑会被追问，谎言会被拆穿，无话可说的人可以选择沉默。讨论在没有人再有话要说时自然结束（邻接对驱动的下一说话人选择，源自对话分析研究）。狼人杀、阿瓦隆、囚徒困境、信任博弈、最后通牒的谈判阶段全部采用动态调度。
 - **跨局社会季** —— 一局结束，社群不散。每个角色的信任、恩怨与最强记忆会被归档；下一局开始时，同一批角色带着旧账回到桌前——上一局投票淘汰过你的人，这一局你还会信任他组队吗？过去的角色不证明本局忠诚，但过去的经历会改变今天的判断。
 - **怀疑氛围实时可读** —— 每一条公开指控与投票都会让被点名的对象在世界级的「怀疑氛围」中升温。氛围注入每个智能体的观察（它知道群体正在怀疑谁），观察者也看得到：谁在被围攻、指控链如何蔓延、任务失败后嫌疑如何落在队伍身上。
+- **故事节点自动浮现** —— 背叛、谎言拆穿、结盟、承诺兑现或背弃、逆转与失手，都由世界层从结算事实中确定性检测，并在时间线上以高亮节点呈现。不是模型宣布的「戏剧时刻」，而是真实发生的因果。
+- **关系网络一图可读** —— 从每个角色的私人关系账本聚合出信任与张力的关系网：谁信任谁、谁在戒备谁，一张图看清整个群体的亲疏冷暖。
+- **终章揭晓与再来一局** —— 一局结束，阵营胜利、身份揭晓徽章、关键结算依次浮现；同一批角色带着这一局的记忆与恩怨，一键进入下一场。
 - **一切实时可见** —— 思考模型的隐藏推理、专家子智能体的私下盘算、每一次工具调用、每一条公聊与密谋，都像直播一样流向观察席。身份揭晓与淘汰，是戏剧性时刻而不是控制台日志。
 - **是直播剧场，不是实验台** —— 影院式三栏舞台：参与者状态栏、实时对话主舞台、战况面板。讨论热度面板实时显示谁在被质疑、谁在被围攻。
 
-## 十一个世界
+## 十三个世界
 
 | 世界 | 核心张力 |
 | --- | --- |
 | 狼人杀 | 隐藏身份、公开指控、夜间行动与第三阵营 |
 | 阿瓦隆 | 忠臣与内奸混坐圆桌，任务成败藏于一次举手，以及最终的梅林刺杀 |
+| 吹牛骰 | 隐藏点数、步步加码的叫价，质疑则开盅，撒谎者与揭穿者必有一个付出代价 |
+| 谈判博弈 | 双方同时叫价分割奖池，谈崩了各自跌回无人看得到的私密保底 |
 | 囚徒困境 | 短期背叛与长期互惠的永恒拉扯 |
 | 蜈蚣博弈 | 奖池每传递一次就翻倍，信任与贪婪对赌 |
 | 胆小鬼博弈 | 谁也不先打方向盘，直到两辆车相撞 |
@@ -149,16 +154,19 @@ node scripts/demo.mjs prisoners-dilemma   # 或 node scripts/demo.mjs avalon
 
 ## 研究基础
 
-Society 的每一项设计都有可核实的同行评审研究背书——详见 `docs/research/agent-social-runtime.md` 与 `docs/research/llm-social-agents-sota.md`：
+Society 的每一项设计都有可核实的同行评审研究背书——详见 `docs/research/agent-social-runtime.md`、`docs/research/llm-social-agents-sota.md` 与 `docs/research/frontier-synthesis.md`：
 
 - **记忆与反思**：Park et al., *Generative Agents*（arXiv:2304.03442）
+- **大规模社会仿真**：*AgentSociety*（arXiv:2502.08691）
 - **意图驱动的谈判语言**：Bakhtin et al., *Cicero*（arXiv:2210.05492）
 - **社会智能评测**：Zhou et al., *SOTOPIA*（arXiv:2310.11667）
 - **隐藏身份博弈**：Xu et al.（arXiv:2309.04658）、Chi et al., *AMONGAGENTS*（arXiv:2407.16521）、Guo et al., *Suspicion-Agent*（arXiv:2309.17277）
-- **高阶心智理论**：Street et al.（arXiv:2405.18870）、Lupu et al., *Decrypto*（arXiv:2506.20664）
+- **身份信念的贝叶斯推断**：*Bayesian Social Deduction with Graph-Informed Language Models*（arXiv:2506.17788）
+- **高阶心智理论**：Street et al.（arXiv:2405.18870）、Lupu et al., *Decrypto*（arXiv:2506.20664）、*ToMATO*（AAAI 2025）
 - **人格与行为**：Noh & Chang（arXiv:2405.05248）、Huang et al., *PsychoBench*（arXiv:2310.01386）、Lee et al., *TRAIT*（arXiv:2406.14703）
 - **情绪的结构化评估**：Bhattacharyya et al.（arXiv:2508.05880）
-- **欺骗的工程化**：Taylor & Bergen（arXiv:2504.00285）、Fontana et al.（arXiv:2406.13605）
+- **欺骗的工程化**：Taylor & Bergen（arXiv:2504.00285）、Fontana et al.（arXiv:2406.13605）、*When Thinking LLMs Lie*（arXiv:2506.04909）
+- **行为博弈论与 LLM**：*Playing repeated games with large language models*（Nature Human Behaviour, 2025）、*Rethinking Prospect Theory for LLMs*（arXiv:2508.08992）
 - **动态对话调度**：*Who Speaks Next?*（arXiv:2412.04937）、*Think-Before-Speak*（arXiv:2606.03137）
 - **情感记忆架构**：*PsychoAgent*（arXiv:2608.07438）
 

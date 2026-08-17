@@ -117,7 +117,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                 <p className="mb-3 text-xs leading-5 text-muted-foreground/80">
                   每个参与者都是一个独立 Agent。选择一个模型 ID 给所有人，或选择多个模型让不同角色使用不同模型同台对决（按顺序轮转分配）。
                 </p>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap gap-2" data-model>
                   {visibleModels.map((model) => {
                     const active = selectedModels.includes(model.id);
                     return (
@@ -191,7 +191,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
               {scenario && selectedModels.length > 0 ? (
                 <section>
                   <p className="mb-2.5 text-[13px] font-medium text-foreground/80">参与者阵容</p>
-                  <div className="rounded-lg border border-border bg-muted/60 p-3">
+                  <div className="rounded-lg border border-border bg-muted/60 p-3" data-model>
                     <div className="space-y-1.5">
                       {Array.from({ length: scenario.players }).map((_, index) => {
                         const model = selectedModels[index % selectedModels.length];
