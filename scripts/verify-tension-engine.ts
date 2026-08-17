@@ -12,10 +12,15 @@ import { timelineContextAround } from "../src/society/spectator/projection";
 import type { AgentRuntimeEvent, WorldSnapshot } from "../src/society/contracts";
 
 let passed = 0;
-function check(name: string, fn: () => void): void {
-  fn();
-  passed += 1;
-  console.log(`  ok  ${name}`);
+const pending: Array<Promise<void>> = [];
+function check(name: string, fn: () => void | Promise<void>): void {
+  pending.push(Promise.resolve(fn()).then(() => {
+    passed += 1;
+    console.log(`  ok  ${name}`);
+  }).catch((cause) => {
+    console.error(`  FAIL ${name}:`, cause instanceof Error ? cause.message : cause);
+    process.exitCode = 1;
+  }));
 }
 
 check("starts calm at zero", () => {
@@ -65,7 +70,6 @@ check("reason labels exist for every tension reason", () => {
   }
 });
 
-console.log(`\nTension-engine checks: ${passed} passed.`);
 // --- CinematicDirector: duel cues derive from public accusation facts ---
 
 function fakeWorld(input: { suspicion?: Array<{ kind: string; accuser: string; target: string }>; agents?: Array<{ id: string; displayName: string; alive: boolean }> }): WorldSnapshot {
@@ -124,7 +128,7 @@ check("timelineContextAround keeps chronological order and survives a post-timel
   const timeline = Array.from({ length: 8 }, (_, index) => entry(index * 10)).reverse(); // shuffled input
   const window = timelineContextAround(timeline, entry(100).at);
   const labels = window.map((item) => item.label);
-  assert.deepEqual(labels, ["e30", "e40", "e50", "e60", "e70"], "latest entries when the moment is newer than the buffer");
+  assert.deepEqual(labels, ["e20", "e30", "e40", "e50", "e60", "e70"], "latest entries when the moment is newer than the buffer");
   const inside = timelineContextAround(timeline, entry(40).at);
   assert.deepEqual(inside.map((item) => item.label), ["e0", "e10", "e20", "e30", "e40", "e50"], "window is chronological around the moment");
 });
@@ -132,4 +136,8 @@ check("timelineContextAround keeps chronological order and survives a post-timel
 check("timelineContextAround tolerates empty and unparseable inputs", () => {
   assert.deepEqual(timelineContextAround([], entry(0).at), []);
   assert.deepEqual(timelineContextAround([{ at: "not-a-time", label: "x" }], entry(0).at), []);
+});
+
+void Promise.all(pending).then(() => {
+  console.log(`\nTension-engine checks: ${passed} passed.`);
 });

@@ -3,6 +3,7 @@ import { FileSeasonStore, defaultSeasonPath } from "../society/season";
 import { loadRegistry, seedRegistryFromEnv, type ModelRegistry } from "../society/models";
 import { RoomArchiveStore } from "../society/persistence";
 import { CharacterLibrary } from "./characters";
+import { limiterFromEnv, type ActivationLimiter } from "../society/activation-limiter";
 
 export interface ServerContext {
   rooms: SocietyRoomRegistry;
@@ -14,6 +15,8 @@ export interface ServerContext {
   archive: RoomArchiveStore;
   /** Built-in + user-defined characters (data/characters.json). */
   characters: CharacterLibrary;
+  /** Shared provider activation pool across all rooms (P3 backpressure). */
+  limiter: ActivationLimiter;
 }
 
 export function createServerContext(): ServerContext {
@@ -24,7 +27,8 @@ export function createServerContext(): ServerContext {
     season: new FileSeasonStore(defaultSeasonPath()),
     models,
     archive: new RoomArchiveStore(),
-    characters: new CharacterLibrary()
+    characters: new CharacterLibrary(),
+    limiter: limiterFromEnv()
   };
 }
 

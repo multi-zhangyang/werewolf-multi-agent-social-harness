@@ -99,7 +99,12 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       status: "ok",
       runtime: "@openai/agents",
       providerConfigured: Boolean(settings.apiKey),
-      baseURL: settings.baseURL ? "configured" : "default"
+      baseURL: settings.baseURL ? "configured" : "default",
+      activations: {
+        active: context.limiter.concurrency(),
+        pending: context.limiter.pending(),
+        max: context.limiter.maxConcurrent
+      }
     });
   });
 
@@ -261,6 +266,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
         baseURL: getProviderSettings().baseURL || undefined,
         seasonMode: input.season,
         modelRegistry: context.models,
+        limiter: context.limiter,
         ...(roomDefaults ? { roomDefaults } : {}),
         ...(agentBindings ? { agentBindings } : {}),
         ...(input.season === "season" ? { season: context.season } : {})

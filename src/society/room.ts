@@ -32,6 +32,7 @@ import {
 } from "./models";
 import { RoomArchiveStore, defaultRoomArchiveDir, type RoomCheckpoint } from "./persistence";
 import { CinematicDirector } from "./spectator/cinematic-director";
+import { ActivationLimiter } from "./activation-limiter";
 
 export interface SocietyRoomCreateOptions {
   id?: string;
@@ -52,6 +53,12 @@ export interface SocietyRoomCreateOptions {
   roomDefaults?: { modelProfileId?: string; tuning?: Record<string, unknown>; contextPolicyId?: string };
   /** Per-agent model bindings, keyed by profile id. */
   agentBindings?: Record<string, AgentModelBinding>;
+  /**
+   * Process-wide provider backpressure (P3): every agent turn acquires a
+   * permit from this shared pool before calling the model, so multiple rooms
+   * never fan out more concurrent activations than the deployment can bear.
+   */
+  limiter?: ActivationLimiter;
 }
 
 export interface SocietyRoomEventEnvelope {
@@ -182,6 +189,8 @@ export class SocietyRoom {
   private readonly agentBindings: Record<string, AgentModelBinding>;
   /** Shared stateless provider clients, keyed by provider profile id. */
   private readonly providerClients = new Map<string, OpenAIProvider>();
+  /** Process-wide activation pool; absent in embedded single-room use. */
+  private readonly limiter?: ActivationLimiter;
   private readonly pausedAgents = new Set<string>();
   /** Per-agent abort controllers for turns that are running right now. */
   private readonly activeSignals = new Map<string, AbortController>();
@@ -215,6 +224,7 @@ export class SocietyRoom {
     this.modelRegistry = options.modelRegistry ?? fallbackRegistryFromEnv();
     this.roomDefaults = options.roomDefaults;
     this.agentBindings = options.agentBindings ?? {};
+    this.limiter = options.limiter;
     this.archive = new RoomArchiveStore();
     this.director = new CinematicDirector({
       roomId: this.id,
@@ -770,21 +780,29 @@ export class SocietyRoom {
         : undefined;
       let result: AgentTurnResult | undefined;
       let failure: unknown;
-      const attemptTurn = (): Promise<AgentTurnResult> => {
-        // Hard timeout guard: abort signals can be swallowed by a stalled
-        // provider stream, so race the turn against a wall clock as well.
-        return Promise.race([
-          runtime.runTurn(`${activation.label}\n${instruction}`, {
-            signal,
-            turn: this.world.snapshot().turn,
-            ...(maxTurns ? { maxTurns } : {}),
-            mode: isDiscussion ? "discussion" : "full"
-          }),
-          new Promise<never>((_, reject) => {
-            const timer = setTimeout(() => reject(new Error(`TURN_TIMEOUT after ${this.turnTimeoutMs}ms`)), this.turnTimeoutMs + 15_000);
-            signal.addEventListener("abort", () => { clearTimeout(timer); }, { once: true });
-          })
-        ]);
+      const attemptTurn = async (): Promise<AgentTurnResult> => {
+        // Cross-room backpressure: wait for a provider slot before the call.
+        // Releasing happens in `finally` so aborted and timed-out turns free
+        // their slot for the next room.
+        const release = this.limiter ? await this.limiter.acquire(signal) : undefined;
+        try {
+          // Hard timeout guard: abort signals can be swallowed by a stalled
+          // provider stream, so race the turn against a wall clock as well.
+          return await Promise.race([
+            runtime.runTurn(`${activation.label}\n${instruction}`, {
+              signal,
+              turn: this.world.snapshot().turn,
+              ...(maxTurns ? { maxTurns } : {}),
+              mode: isDiscussion ? "discussion" : "full"
+            }),
+            new Promise<never>((_, reject) => {
+              const timer = setTimeout(() => reject(new Error(`TURN_TIMEOUT after ${this.turnTimeoutMs}ms`)), this.turnTimeoutMs + 15_000);
+              signal.addEventListener("abort", () => { clearTimeout(timer); }, { once: true });
+            })
+          ]);
+        } finally {
+          release?.();
+        }
       };
       // Discussion turns get one immediate retry on provider-side transient
       // failures (5xx / 429 / timeout / connection): the same agent runs the
@@ -799,6 +817,7 @@ export class SocietyRoom {
           break;
         } catch (error) {
           if (this.pausedAgents.has(actorId)) return;
+          if (this.abortController.signal.aborted) return; // the room is stopping
           failure = error;
           if (attempt < attempts && !isTransientProviderFailure(error)) break;
         }
