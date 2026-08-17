@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import type { RoomConnection, TimelineEntry } from "./use-room";
 import { AgentAvatar, StatusDot, StatusLabel, eventLabel, roleLabelZh } from "./shared";
 import { RelationshipNetwork } from "./network";
+import { timelineContextAround } from "@/society/spectator/projection";
 
 interface DiscussionState {
   wave: number;
@@ -92,7 +93,7 @@ export function WorldPanel({ room, toolCalls = [], timeline = [] }: { room: Soci
             <TimelineCard timeline={timeline} names={names} />
           </TabsContent>
           <TabsContent value="highlights" className="pt-3">
-            <HighlightsCard highlights={room.highlights ?? []} names={names} />
+            <HighlightsCard highlights={room.highlights ?? []} timeline={timeline} names={names} />
           </TabsContent>
           <TabsContent value="history" className="pt-3">
             <HistoryCard world={world} names={names} scenarioId={room.scenarioId} />
@@ -424,7 +425,13 @@ function TimelineCard({ timeline, names }: { timeline: TimelineEntry[]; names: M
   );
 }
 
-function HighlightsCard({ highlights, names }: { highlights: SocietyRoomSnapshot["highlights"]; names: Map<string, string> }): ReactNode {
+/**
+ * Endgame/high-tension moments, derived from real cues. Each highlight can be
+ * expanded to show the surrounding timeline entries — the cause before it and
+ * what followed — so the drama is clickable rather than just listed (§8.7).
+ */
+function HighlightsCard({ highlights, timeline, names }: { highlights: SocietyRoomSnapshot["highlights"]; timeline: TimelineEntry[]; names: Map<string, string> }): ReactNode {
+  const [expandedId, setExpandedId] = useState<string>();
   if (!highlights?.length) {
     return (
       <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-xs text-muted-foreground/80">
@@ -433,21 +440,57 @@ function HighlightsCard({ highlights, names }: { highlights: SocietyRoomSnapshot
       </div>
     );
   }
+  const contextAround = (at: string): TimelineEntry[] => timelineContextAround(timeline, at);
   return (
     <div className="space-y-1.5">
-      {[...highlights].reverse().map((highlight) => (
-        <div key={highlight.id} className="rounded-lg border border-border bg-card px-3 py-2.5">
-          <p className="flex items-center gap-2 text-[13px] font-semibold text-foreground/90">
-            <Clapperboard className="size-3.5 text-rose-400" />
-            {highlight.title}
-            <span className="nums ml-auto font-mono text-[10px] font-normal text-muted-foreground/60">{formatTime(highlight.at)}</span>
-          </p>
-          {highlight.subtitle ? <p className="mt-1 text-xs leading-5 text-muted-foreground">{highlight.subtitle}</p> : null}
-          {highlight.focusAgentIds.length ? (
-            <p className="mt-1 text-[11px] text-muted-foreground/70">焦点：{highlight.focusAgentIds.map((id) => names.get(id) ?? id).join("、")}</p>
-          ) : null}
-        </div>
-      ))}
+      {[...highlights].reverse().map((highlight) => {
+        const open = expandedId === highlight.id;
+        const context = open ? contextAround(highlight.at) : [];
+        return (
+          <div key={highlight.id} className="rounded-lg border border-border bg-card px-3 py-2.5">
+            <button
+              type="button"
+              onClick={() => setExpandedId(open ? undefined : highlight.id)}
+              className="flex w-full items-center gap-2 text-left"
+              aria-expanded={open}
+              title={open ? "收起前因后果" : "展开前因后果"}
+            >
+              <Clapperboard className="size-3.5 shrink-0 text-rose-400" />
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-semibold text-foreground/90">{highlight.title}</span>
+                {!open && highlight.subtitle ? <span className="mt-0.5 block truncate text-xs leading-5 text-muted-foreground">{highlight.subtitle}</span> : null}
+              </span>
+              <span className="nums shrink-0 font-mono text-[10px] font-normal text-muted-foreground/60">{formatTime(highlight.at)}</span>
+              <span className={cn("shrink-0 text-[10px] text-muted-foreground/70 transition-transform", open && "rotate-180")}>▾</span>
+            </button>
+            {open ? (
+              <div className="mt-2 border-t border-border/60 pt-2">
+                {highlight.subtitle ? <p className="text-xs leading-5 text-muted-foreground">{highlight.subtitle}</p> : null}
+                {highlight.focusAgentIds.length ? (
+                  <p className="mt-1 text-[11px] text-muted-foreground/70">焦点：{highlight.focusAgentIds.map((id) => names.get(id) ?? id).join("、")}</p>
+                ) : null}
+                {context.length ? (
+                  <div className="mt-2 space-y-1">
+                    <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground/60">前因后果</p>
+                    {context.map((entry) => (
+                      <div key={`${entry.id}-${entry.at}`} className="flex items-start gap-2 rounded-md bg-muted/40 px-2 py-1.5">
+                        <span className="nums mt-px shrink-0 font-mono text-[9px] text-muted-foreground/60">{formatTime(entry.at)}</span>
+                        <span className="min-w-0 text-[11px] leading-4 text-muted-foreground">
+                          {entry.actorId && names.get(entry.actorId) ? <span className="text-foreground/75">{names.get(entry.actorId)} · </span> : null}
+                          <span className="font-medium text-foreground/75">{entry.label}</span>
+                          {entry.detail ? <span className="text-muted-foreground"> — {entry.detail}</span> : null}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-[11px] text-muted-foreground/60">时间线缓冲区里没有更早的条目（较早事件已被窗口裁剪）。</p>
+                )}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -8,6 +8,7 @@
 import { strict as assert } from "node:assert";
 import { TensionEngine, levelFor, reasonLabel } from "../src/society/spectator/tension-engine";
 import { CinematicDirector } from "../src/society/spectator/cinematic-director";
+import { timelineContextAround } from "../src/society/spectator/projection";
 import type { AgentRuntimeEvent, WorldSnapshot } from "../src/society/contracts";
 
 let passed = 0;
@@ -101,4 +102,34 @@ check("director ignores non-speech suspicion entries for duel cues", async () =>
   director.ingest({ type: "world.updated", roomId: "r", snapshot: world, at: new Date().toISOString() }, world);
   assert.ok(!emitted.some((event) => event.type === "cinematic.cue" && event.cue.camera === "duel"), "votes are not accusations");
   director.dispose();
+});
+
+// ── Highlight cause-and-effect window (§8.7) ────────────────────────────────
+
+const T0 = Date.parse("2026-08-17T20:00:00Z");
+function entry(secondsFromStart: number): { at: string; label: string } {
+  return { at: new Date(T0 + secondsFromStart * 1000).toISOString(), label: `e${secondsFromStart}` };
+}
+
+check("timelineContextAround returns a small window before and after the moment", () => {
+  const timeline = Array.from({ length: 20 }, (_, index) => entry(index * 10));
+  const window = timelineContextAround(timeline, entry(100).at);
+  assert.ok(window.length >= 4 && window.length <= 6, "window is bounded");
+  assert.ok(window.some((item) => item.label === "e100"), "the moment itself is inside the window");
+  assert.ok(window.every((item) => Number(item.label.slice(1)) >= 60), "the cause precedes the moment");
+  assert.ok(window.every((item) => Number(item.label.slice(1)) <= 110), "the aftermath is brief");
+});
+
+check("timelineContextAround keeps chronological order and survives a post-timeline moment", () => {
+  const timeline = Array.from({ length: 8 }, (_, index) => entry(index * 10)).reverse(); // shuffled input
+  const window = timelineContextAround(timeline, entry(100).at);
+  const labels = window.map((item) => item.label);
+  assert.deepEqual(labels, ["e30", "e40", "e50", "e60", "e70"], "latest entries when the moment is newer than the buffer");
+  const inside = timelineContextAround(timeline, entry(40).at);
+  assert.deepEqual(inside.map((item) => item.label), ["e0", "e10", "e20", "e30", "e40", "e50"], "window is chronological around the moment");
+});
+
+check("timelineContextAround tolerates empty and unparseable inputs", () => {
+  assert.deepEqual(timelineContextAround([], entry(0).at), []);
+  assert.deepEqual(timelineContextAround([{ at: "not-a-time", label: "x" }], entry(0).at), []);
 });

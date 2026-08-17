@@ -66,3 +66,21 @@ function projectPov(event: AgentRuntimeEvent, selfId: string | undefined): Agent
       return event;
   }
 }
+
+/**
+ * Timeline window around a highlight moment (§8.7): a few entries before it
+ * (the cause) and a couple after (what followed), from an ascending-sorted,
+ * time-parseable timeline. Used by the highlights card to expand 前因后果.
+ */
+export function timelineContextAround<T extends { at: string }>(timeline: T[], at: string): T[] {
+  const ordered = timeline
+    .slice()
+    .filter((entry) => Number.isFinite(Date.parse(entry.at)))
+    .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+  if (!ordered.length) return [];
+  const target = Date.parse(at);
+  if (!Number.isFinite(target)) return ordered.slice(-6);
+  const index = ordered.findIndex((entry) => Date.parse(entry.at) >= target);
+  if (index < 0) return ordered.slice(-6);
+  return ordered.slice(Math.max(0, index - 4), Math.min(ordered.length, index + 2));
+}
