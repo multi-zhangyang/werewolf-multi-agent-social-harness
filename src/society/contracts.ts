@@ -178,6 +178,24 @@ export interface AgentCognitivePass {
 }
 
 /**
+ * Slow personality adaptation (AGENTS.md §4.2.8). A character's Big Five
+ * baseline does not flip after one game; repeated, high-intensity experiences
+ * only shift a small bounded adaptation that decays back toward the baseline
+ * unless reinforced. `effective = baseline + bounded(adaptation)`, and every
+ * movement records why, so changes stay explainable and observable.
+ */
+export interface TraitState {
+  baseline: number;
+  adaptation: number;
+  effective: number;
+  /** Human-readable causes of the current adaptation, newest first. */
+  lastCauses: string[];
+  updatedAtTurn: number;
+}
+
+export type AdaptableTrait = keyof AgentTemperament;
+
+/**
  * A structured, observable beat from an agent's own cognition — what it
  * noticed, hypothesized, planned or decided. Produced by the same agent that
  * acts (never by a spectator or a specialist), tied to a real activation, and
@@ -314,6 +332,12 @@ export interface AgentMindState {
   roleHypotheses: AgentRoleHypothesis[];
   /** The causal notes behind recent appraisal-driven mood changes. */
   lastAppraisals: AgentAppraisalNote[];
+  /**
+   * Slow, bounded personality adaptation (AGENTS.md §4.2.8). Effective Big
+   * Five values = baseline + bounded adaptation; adaptation decays back toward
+   * baseline unless reinforced by repeated high-intensity experiences.
+   */
+  traitAdaptations?: Record<AdaptableTrait, TraitState>;
 }
 
 export interface SocialMessage {
@@ -592,6 +616,13 @@ export interface CharacterDossier {
   }>;
   beliefs: Array<{ subjectId: string; proposition: string; confidence: number }>;
   memories: Array<{ text: string; salience: number; valence: number }>;
+  /**
+   * Slow personality drift carried across games (§4.2.8): the bounded
+   * adaptation each Big Five trait accumulated, with its recorded causes.
+   * Loaded back with a season-boundary decay so drift survives a game but
+   * erodes while the character is away from the table.
+   */
+  traitAdaptations?: Record<AdaptableTrait, TraitState>;
   updatedAt: string;
 }
 

@@ -61,7 +61,7 @@ function skipDiscussion(world: ReturnType<typeof createWorld>): void {
 async function run() {
   // --- deck composition ---
   await check("werewolf decks match their player counts and standard wolf tables", () => {
-    const expectedWolves: Record<number, number> = { 6: 2, 8: 2, 9: 3, 10: 3, 12: 4 };
+    const expectedWolves: Record<number, number> = { 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 4, 12: 4 };
     for (const deck of WEREWOLF_DECKS) {
       assert.equal(deck.roles.length, deck.playerCount, `${deck.name} role count`);
       const wolves = deck.roles.filter(isWolfRole).length;
@@ -70,6 +70,14 @@ async function run() {
     }
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("wolf-king"), "12P includes the wolf king");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 10)!.roles.includes("jester"), "10P includes the jester");
+    assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 7), "7P deck exists (生还者 board)");
+    assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 11), "11P deck exists (standard board)");
+    // Every count in the advertised 6-12 range must resolve to a full deck.
+    for (let count = 6; count <= 12; count += 1) {
+      const deck = WEREWOLF_DECKS.find((entry) => entry.playerCount === count);
+      assert.ok(deck, `deck exists for ${count}P`);
+      assert.equal(deck!.roles.length, count, `${count}P deck size`);
+    }
   });
 
   // --- day flow: discussion ends, votes eliminate ---
@@ -306,7 +314,7 @@ async function run() {
   });
 
   await check("werewolf rejects out-of-range player counts with a clear error", () => {
-    assert.throws(() => createWorld({ roomId: "r", scenarioId: "werewolf", profiles: profiles(7), rounds: 2 }), /PLAYER_COUNT_INVALID/);
+    assert.throws(() => createWorld({ roomId: "r", scenarioId: "werewolf", profiles: profiles(5), rounds: 2 }), /PLAYER_COUNT_INVALID/);
     assert.throws(() => createWorld({ roomId: "r", scenarioId: "werewolf", profiles: profiles(13), rounds: 2 }), /PLAYER_COUNT_INVALID/);
   });
 

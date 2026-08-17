@@ -171,6 +171,7 @@ function MindSheet({ participant, activity, onToggleAgentPause, onOpenChange }: 
                 {mind ? (
                   <>
                     <MoodSection mind={mind} />
+                    <TraitDriftSection mind={mind} />
                     <ContextSection activity={activity} model={participant.profile.model} />
                     <AppraisalsSection mind={mind} />
                     <GoalsSection mind={mind} />
@@ -281,6 +282,59 @@ function MoodSection({ mind }: { mind: AgentMindState }): ReactNode {
       </div>
     </section>
   );
+}
+
+/**
+ * Slow personality drift (AGENTS.md §4.2.8): the baseline stays the person,
+ * but repeated high-intensity experiences move a bounded adaptation. Only
+ * drifted traits are shown, with the direction and the recorded cause — the
+ * observer sees a person changing, not a stats dump.
+ */
+function TraitDriftSection({ mind }: { mind: AgentMindState }): ReactNode {
+  const states = mind.traitAdaptations;
+  if (!states) return null;
+  const drifted = (Object.entries(states) as Array<[string, { baseline: number; adaptation: number; effective: number; lastCauses: string[] }]>)
+    .filter(([, state]) => Math.abs(state.adaptation) >= 0.02)
+    .sort((left, right) => Math.abs(right[1].adaptation) - Math.abs(left[1].adaptation));
+  if (!drifted.length) return null;
+  return (
+    <section>
+      <SectionTitle>人格偏移</SectionTitle>
+      <div className="space-y-2">
+        <p className="text-[11px] leading-4 text-muted-foreground/80">性格底色不变，但反复的高强度经历会留下缓慢、有界的偏移——不强化就会随时间回弹。</p>
+        {drifted.map(([trait, state]) => {
+          const up = state.adaptation > 0;
+          return (
+            <div key={trait} className="rounded-lg border border-border bg-card p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-foreground/90">{traitLabel(trait)}</p>
+                <span className={cn("nums font-mono text-[10px]", up ? "text-emerald-300" : "text-rose-300")}>
+                  {up ? "↑" : "↓"} {Math.round(state.baseline * 100)}% → {Math.round(state.effective * 100)}%
+                </span>
+              </div>
+              <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
+                <div className={cn("h-full rounded-full", up ? "bg-emerald-400/70" : "bg-rose-400/70")} style={{ width: `${Math.min(100, Math.abs(state.adaptation) * 400)}%` }} />
+              </div>
+              {state.lastCauses.length ? (
+                <p className="mt-1.5 text-xs leading-4 text-muted-foreground">因为:{state.lastCauses[0]}</p>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function traitLabel(trait: string): string {
+  const labels: Record<string, string> = {
+    openness: "开放性",
+    conscientiousness: "尽责性",
+    extraversion: "外向性",
+    agreeableness: "宜人性",
+    neuroticism: "神经质"
+  };
+  return labels[trait] ?? trait;
 }
 
 function RoleHypothesesSection({ mind }: { mind: AgentMindState }): ReactNode {

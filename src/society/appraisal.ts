@@ -66,9 +66,12 @@ export function appraiseEvents(
   mind: AgentMindState,
   profile: AgentProfile,
   events: SocialEvent[],
-  turn: number
+  turn: number,
+  effectiveTemperament?: AgentTemperament
 ): AppraisalSummary {
-  const temperament = profile.temperament;
+  // The effective Big Five (baseline + bounded adaptation) modulates how the
+  // same event lands; the stored profile baseline stays untouched (§4.2.8).
+  const temperament = effectiveTemperament ?? profile.temperament;
   const memories: AppraisalMemorySeed[] = [];
   let changed = false;
 

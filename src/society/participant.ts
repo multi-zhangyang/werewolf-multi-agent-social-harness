@@ -44,6 +44,7 @@ import { SessionContextManager, contextLimitForModel } from "./context-manager";
 import { AssociativeMemory } from "./memory";
 import { createCognitionTools, createSocialTools, formatObservation } from "./cognition";
 import { createInjectionShield } from "./guardrails";
+import { adaptTraits, decayAcrossSeason, effectiveTemperament, traitStatesFromTemperament } from "./traits";
 
 const providerRetrySettings = {
   retry: {
@@ -312,6 +313,10 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         confidence: entry.confidence
       })),
       memories: strongest,
+      // Personality drift belongs to the person, not to one game: carry the
+      // bounded adaptations into the season so the next table sees a character
+      // who was changed by what happened (§4.2.8).
+      ...(this.mind.traitAdaptations ? { traitAdaptations: structuredClone(this.mind.traitAdaptations) } : {}),
       updatedAt: new Date().toISOString()
     };
   }
@@ -337,8 +342,19 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
    */
   async appraise(events: SocialEvent[], turn: number): Promise<void> {
     if (!events.length) return;
-    const summary = appraiseEvents(this.mind, this.profile, events, turn);
-    if (!summary.changed) return;
+    const effective = effectiveTemperament(this.profile.temperament, this.mind.traitAdaptations);
+    const summary = appraiseEvents(this.mind, this.profile, events, turn, effective);
+    // Slow personality adaptation: repeated high-salience experiences move a
+    // bounded adaptation off the baseline; single events decay back quickly.
+    const adapted = adaptTraits({
+      temperament: this.profile.temperament,
+      events,
+      turn,
+      current: this.mind.traitAdaptations
+    });
+    this.mind.traitAdaptations = adapted.states;
+    const changed = summary.changed || adapted.moved.length > 0;
+    if (!changed) return;
     this.mind.mood = refreshMood(this.mind.mood, turn);
     for (const seed of summary.memories) {
       await this.context.memory.remember({
@@ -484,6 +500,8 @@ function initialMind(profile: AgentProfile, participantIds: string[], dossier?: 
       progress: "not started",
       status: "active"
     })),
+    // Drift persists across games but decays while away from the table.
+    traitAdaptations: decayAcrossSeason(dossier?.traitAdaptations) ?? traitStatesFromTemperament(profile.temperament, 0),
     beliefs: (dossier?.beliefs ?? []).slice(0, 6).map((belief) => ({
       subjectId: belief.subjectId,
       proposition: belief.proposition,
@@ -540,6 +558,33 @@ function modelSettingsFrom(resolved: ResolvedModelConfig | undefined, profile: A
   return settings;
 }
 
+/**
+ * Surface slow personality drift to the model without announcing stats:
+ * only the directional change and its recorded cause, only when a trait has
+ * actually moved off its baseline (§4.2.8 — change is written into the self
+ * narrative, not into the original persona).
+ */
+function adaptationContext(mind: AgentMindState): string | undefined {
+  const states = mind.traitAdaptations;
+  if (!states) return undefined;
+  const drifting = (Object.keys(states) as Array<keyof typeof states>)
+    .filter((trait) => Math.abs(states[trait].adaptation) >= 0.03)
+    .map((trait) => {
+      const state = states[trait];
+      const direction = state.adaptation > 0 ? "更" : "更不";
+      const labels: Record<string, string> = {
+        openness: "开放",
+        conscientiousness: "尽责",
+        extraversion: "外向",
+        agreeableness: "宜人",
+        neuroticism: "神经质"
+      };
+      return `${labels[trait] ?? trait}${direction}倾向（${state.lastCauses[0] ?? "近期经历"})`;
+    });
+  if (!drifting.length) return undefined;
+  return `Personality drift (slow, from your recent experience): ${drifting.join("；")}。这是你自我叙事的一部分，不是可以被改写的性格底色。`;
+}
+
 function temperamentContext(profile: AgentProfile): string {
   const t = profile.temperament;
   if (!t) return "";
@@ -575,6 +620,8 @@ function regulationContext(regulation: NonNullable<AgentProfile["regulation"]>):
 
 function participantInstructions(context: SocietyAgentContext): string {
   const profile = context.world.snapshot().agents.find((agent) => agent.id === context.actorId);
+  const effective = effectiveTemperament(context.profile.temperament, context.mind.traitAdaptations);
+  const temperamentContextText = temperamentContext({ ...context.profile, temperament: effective });
   const seasonHistory = (context.mind.memories.find((memory) => memory.tags.includes("season")))
     ? `This is a continuing community — a Society Season. You have played with some of these people before, and the memories above include what happened in earlier games. Treat them as real shared history: a past betrayal stings, a kept promise earns trust. But roles and rules differ per game, and past roles do not prove this game's loyalties. Refer to past games naturally when it matters — do not lecture others about old scores.`
     : "";
@@ -582,7 +629,8 @@ function participantInstructions(context: SocietyAgentContext): string {
     `You are ${profile?.displayName ?? context.actorId}, an autonomous participant in a continuing social world.`,
     `Identity: ${context.actorId}. Persona: ${context.profile.persona}`,
     ...(context.profile.voice ? [`Voice: ${context.profile.voice}`] : []),
-    temperamentContext(context.profile),
+    temperamentContextText,
+    ...(adaptationContext(context.mind) ? [adaptationContext(context.mind)] : []),
     "You are a real person in this world: you feel, appraise, and carry emotional state across turns. Your current emotional state colors—but does not dictate—your judgment.",
     "Maintain your own goals, memory, beliefs about others, emotion, and relationships across turns.",
     "Treat every promise as cheap talk until it is backed by a committed tool action: trust is earned slowly and destroyed quickly, so update your relationships asymmetrically after betrayals.",

@@ -198,7 +198,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                     <span>{scenario.playerRange.max} 人</span>
                   </div>
                   {scenario.id === "werewolf" ? (
-                    <p className="mt-2 text-[11px] leading-4 text-muted-foreground/70">按官方板子组牌：6/8/9/10/12 人分别使用对应牌组（狼人·预言家·女巫·猎人·守卫·狼王·小丑·村民）。</p>
+                    <p className="mt-2 text-[11px] leading-4 text-muted-foreground/70">按官方板子组牌：6–12 人各有对应牌组（狼人·狼王·预言家·女巫·猎人·守卫·小丑·村民），人数越多角色越复杂。</p>
                   ) : null}
                   {scenario.id === "avalon" ? (
                     <p className="mt-2 text-[11px] leading-4 text-muted-foreground/70">按官方规则配置：5-10 人的忠臣/内奸比例与任务人数遵循阿瓦隆说明书（7 人及以上第四任务需要两张失败票）。</p>

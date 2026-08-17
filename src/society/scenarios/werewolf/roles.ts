@@ -99,7 +99,11 @@ export interface WerewolfDeck {
 
 /**
  * Built-in deck templates (AGENTS.md §7.4). Wolf counts follow the standard
- * tables: 6-8P → 2 wolves, 9-10P → 3 wolves, 12P → 4 wolves (incl. wolf king).
+ * tables: 6-8P → 2 wolves, 9-10P → 3 wolves, 11-12P → 4 wolves (incl. wolf
+ * king at the deeper boards). The 7P "生还者" style board (researched on
+ * zh.wikiversity / werewolv.es) puts 4 specials against 2 wolves; the 11P
+ * standard board (4 wolves · seer · witch · hunter · guard · 3 villagers,
+ * Chinese 标准配置) uses guard in place of 白痴 so every count 6-12 is playable.
  */
 export const WEREWOLF_DECKS: WerewolfDeck[] = [
   {
@@ -107,6 +111,12 @@ export const WEREWOLF_DECKS: WerewolfDeck[] = [
     name: "6 人快速局",
     description: "双狼 · 预言家 · 女巫 · 双村民：入门节奏，两晚内见分晓。",
     roles: ["wolf", "wolf", "seer", "witch", "villager", "villager"]
+  },
+  {
+    playerCount: 7,
+    name: "7 人生还者局",
+    description: "双狼 · 预言家 · 女巫 · 猎人 · 守卫 · 村民：生还者式四神防守，狼人压力最大。",
+    roles: ["wolf", "wolf", "seer", "witch", "hunter", "guard", "villager"]
   },
   {
     playerCount: 8,
@@ -127,6 +137,12 @@ export const WEREWOLF_DECKS: WerewolfDeck[] = [
     roles: ["wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "guard", "jester", "villager", "villager"]
   },
   {
+    playerCount: 11,
+    name: "11 人标准局",
+    description: "四狼（三小狼+狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 三村民：标准 11 人板，屠边节奏。",
+    roles: ["wolf", "wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "guard", "villager", "villager", "villager"]
+  },
+  {
     playerCount: 12,
     name: "12 人多能力局",
     description: "四狼（三小狼+狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 小丑 · 三村民：经典预女猎守满配。",
@@ -136,7 +152,7 @@ export const WEREWOLF_DECKS: WerewolfDeck[] = [
 
 export function deckForPlayerCount(count: number): WerewolfDeck {
   const deck = WEREWOLF_DECKS.find((entry) => entry.playerCount === count);
-  if (!deck) throw new Error(`PLAYER_COUNT_INVALID: Werewolf supports 6, 8, 9, 10 or 12 seats (${WEREWOLF_DECKS.map((entry) => entry.playerCount).join("/")}), got ${count}.`);
+  if (!deck) throw new Error(`PLAYER_COUNT_INVALID: Werewolf supports 6-12 seats (${WEREWOLF_DECKS.map((entry) => entry.playerCount).join("/")}), got ${count}.`);
   return deck;
 }
 
