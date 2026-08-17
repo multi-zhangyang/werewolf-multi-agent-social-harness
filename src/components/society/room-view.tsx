@@ -51,7 +51,7 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
   return (
     <div className="flex min-h-screen flex-col bg-background" style={{ "--pace": String(pace) } as React.CSSProperties}>
       <header className="sticky top-0 z-20 border-b border-border/80 bg-background/70 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 w-full max-w-[1440px] items-center gap-3 px-6">
+        <div className="mx-auto flex min-h-16 w-full max-w-[1440px] flex-wrap items-center gap-3 gap-y-2 px-6 py-2">
           <Button variant="ghost" size="icon-sm" aria-label="返回" className="text-muted-foreground hover:bg-muted hover:text-foreground" onClick={onBack}>
             <ArrowLeft className="size-4" />
           </Button>
@@ -80,7 +80,7 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
             </p>
           </div>
 
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             <ViewModeSwitcher
               mode={viewerMode}
               isPlayer={Boolean(token)}
