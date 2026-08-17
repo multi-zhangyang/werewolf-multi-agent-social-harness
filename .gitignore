@@ -20,6 +20,11 @@ artifacts/
 /trajectory.jsonl
 /tournament-artifacts.json
 
+# Local runtime data — the Society Season history and transcripts. These
+# contain private character memories and must never enter the repository.
+data/
+*.season.json
+
 # Environment-provided skill instructions
 .agents/
 

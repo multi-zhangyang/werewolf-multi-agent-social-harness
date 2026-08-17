@@ -120,7 +120,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
               <section>
                 <p className="mb-2.5 text-[13px] font-medium text-foreground/80">模型</p>
                 <p className="mb-3 text-xs leading-5 text-muted-foreground/80">
-                  每个参与者都是一个独立 Agent。选择一个模型 ID 给所有人，或选择多个模型让不同角色使用不同模型同台对决（按顺序轮转分配）。
+                  每个参与者都是一个独立 Agent。选择一个模型给所有人，或选择多个模型让不同角色使用不同模型同台对决（按顺序轮转分配）。
                 </p>
                 <div className="flex flex-wrap gap-2" data-model>
                   {visibleModels.map((model) => {
@@ -230,13 +230,15 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                     active={seasonMode === "season"}
                     onClick={() => setSeasonMode("season")}
                     title="社会季模式"
-                    description="角色带着过往对局的记忆、关系与恩怨入场;一局结束后继续积累。像一群越玩越熟的老友。"
+                    description="角色带着过往对局的记忆、关系与恩怨入场,一局结束后继续积累。像一群越玩越熟的老友。"
+                    hint={seasonCount > 0 ? `${seasonCount} 位角色已有历史` : "从零开始积累"}
                   />
                   <SeasonModeCard
                     active={seasonMode === "one-shot"}
                     onClick={() => setSeasonMode("one-shot")}
                     title="单局模式"
-                    description="本局完全隔离:不读取任何历史,结束后也不留下任何记忆。适合一局定胜负、零干扰对决。"
+                    description="本局完全隔离,不读取任何历史,结束后也不留下任何记忆。适合一局定胜负、零干扰对决。"
+                    hint="无历史、无残留"
                   />
                 </div>
                 {seasonMode === "season" && seasonCount > 0 ? (
@@ -302,17 +304,18 @@ function ModeButton({ active, onClick, children }: { active: boolean; onClick: (
   );
 }
 
-function SeasonModeCard({ active, onClick, title, description }: {
+function SeasonModeCard({ active, onClick, title, description, hint }: {
   active: boolean;
   onClick: () => void;
   title: string;
   description: string;
+  hint?: string;
 }): ReactNode {
   return (
     <button
       onClick={onClick}
       className={cn(
-        "rounded-lg border p-3.5 text-left transition-colors",
+        "flex flex-col rounded-lg border p-3.5 text-left transition-colors",
         active ? "border-emerald-400/50 bg-emerald-400/10" : "border-border bg-card hover:border-border"
       )}
     >
@@ -321,6 +324,7 @@ function SeasonModeCard({ active, onClick, title, description }: {
           {active ? <span className="size-1.5 rounded-full bg-background" /> : null}
         </span>
         {title}
+        {hint ? <span className={cn("ml-auto rounded-full border px-2 py-px text-[10px] font-normal", active ? "border-emerald-400/40 text-emerald-300/90" : "border-border text-muted-foreground")}>{hint}</span> : null}
       </span>
       <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">{description}</span>
     </button>
