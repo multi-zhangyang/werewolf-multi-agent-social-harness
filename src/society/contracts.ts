@@ -213,6 +213,24 @@ export interface AgentMemoryItem {
   pad?: PadState;
   turn: number;
   createdAt: string;
+  /** Links to related memories (AGENTS.md §5.4.7). Built deterministically
+   *  on write; the fact layer stays stable, only interpretation links move. */
+  links?: MemoryLink[];
+}
+
+export interface MemoryLink {
+  toMemoryId: string;
+  kind:
+    | "same-person"
+    | "supports"
+    | "contradicts"
+    | "caused-by"
+    | "resolved-by"
+    | "similar-situation"
+    | "promise-chain"
+    | "deception-chain";
+  weight: number;
+  lastReinforcedAt: string;
 }
 
 /**
@@ -601,6 +619,8 @@ export type AgentRuntimeEvent =
 
 export interface AgentMemoryStore {
   remember(input: Omit<AgentMemoryItem, "id" | "createdAt">): Promise<AgentMemoryItem>;
+  /** Link two existing memories by id (AGENTS.md §5.4.7). */
+  link(fromMemoryId: string, toMemoryId: string, kind: MemoryLink["kind"]): Promise<void>;
   /** `recencyBoost` weights fresh memories higher for recency-weighting characters (§4.2.7). */
   recall(query: string, limit?: number, moodPad?: PadState, recencyBoost?: number): Promise<AgentMemoryItem[]>;
   list(limit?: number): Promise<AgentMemoryItem[]>;

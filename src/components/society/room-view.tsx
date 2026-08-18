@@ -197,7 +197,7 @@ function ViewModeSwitcher({ mode, isPlayer, finished, onChange }: {
     { value: "postgame", label: "终局", disabled: !finished, hint: finished ? "终局解锁全部真相与高光" : "对局结束后解锁" }
   ];
   return (
-    <div className="flex items-center rounded-full border border-border bg-card p-0.5">
+    <div className="flex items-center overflow-x-auto rounded-full border border-border bg-card p-0.5">
       {options.map((option) => (
         <Tooltip key={option.value}>
           <TooltipTrigger asChild>
@@ -249,7 +249,7 @@ function ArenaStage({ room, cue, activity }: {
   const focusIds = new Set(cue?.focusAgentIds ?? []);
   const names = new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]));
   return (
-    <section className="rounded-xl border border-border bg-card/40 px-4 py-3">
+    <section className="rounded-xl border border-border bg-card/40 px-4 py-3 pb-6 sm:pb-3">
       <div className="mb-2 flex items-center justify-between px-1">
         <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-foreground/65">舞台席位</p>
         <span className="nums font-mono text-[11px] text-muted-foreground">
@@ -260,6 +260,7 @@ function ArenaStage({ room, cue, activity }: {
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {room.participants.map((participant, index) => {
+          const orphan = index === room.participants.length - 1 && room.participants.length % 2 === 1;
           const state = activity[participant.profile.id];
           const speaking = participant.status === "speaking" || participant.status === "acting";
           const focused = focusIds.has(participant.profile.id);
@@ -269,6 +270,7 @@ function ArenaStage({ room, cue, activity }: {
               key={participant.profile.id}
               className={cn(
                 "relative flex flex-col items-center rounded-lg border px-2 py-2.5 transition-all",
+                orphan && "col-span-2",
                 dead ? "border-border/50 opacity-45" : "border-border bg-card",
                 speaking && "border-emerald-400/50",
                 focused && "ring-2 ring-amber-400/60"
@@ -276,6 +278,9 @@ function ArenaStage({ room, cue, activity }: {
             >
               {focused ? (
                 <span className="absolute -top-2 left-1/2 -translate-x-1/2 rounded-full border border-amber-400/50 bg-card px-1.5 py-px text-[9px] font-medium text-amber-300">焦点</span>
+              ) : null}
+              {dead ? (
+                <span className="absolute right-1.5 top-1.5 rounded-full border border-rose-400/30 bg-rose-400/10 px-1.5 py-px text-[9px] font-medium text-rose-300">已出局</span>
               ) : null}
               <AgentPresence name={participant.profile.displayName} index={index} size="xl" status={dead || room.status === "finished" ? "finished" : participant.status} />
               <p className="mt-1.5 max-w-full truncate text-xs font-semibold tracking-tight">{participant.profile.displayName}</p>
@@ -481,7 +486,7 @@ function ShareButton({ roomId }: { roomId: string }): ReactNode {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Button variant="outline" size="icon-sm" aria-label={copied ? "已复制" : "复制房间链接"} className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => void copy()}>
+        <Button variant="outline" size="icon-sm" aria-label={copied ? "已复制" : "复制房间链接"} className="min-h-10 min-w-10 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => void copy()}>
           {copied ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
         </Button>
       </TooltipTrigger>
