@@ -26,8 +26,7 @@ const CAPABILITY_GATE: Record<string, keyof ModelCapabilities> = {
   nativeCompaction: "nativeCompaction",
   seed: "seed",
   stopSequences: "stopSequences",
-  imageInput: "imageInput",
-  maxOutputTokens: "maxOutputTokens"
+  imageInput: "imageInput"
 };
 
 /**
@@ -54,6 +53,13 @@ export function negotiateTuning(
     const field = rawField as keyof ModelTuning;
     if (passthrough.has(rawField)) {
       allowed[field] = rawValue as never;
+      continue;
+    }
+    // Generation caps are never transmitted: models must not receive a
+    // `max_tokens` parameter (product constraint). The value stays a
+    // local-only hint and is explicitly reported as not sent.
+    if (rawField === "maxOutputTokens") {
+      dropped.push({ field: rawField, reason: "local-only-not-transmitted" });
       continue;
     }
     const capability = CAPABILITY_GATE[rawField];

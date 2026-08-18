@@ -5,6 +5,10 @@
  * capability as yes / no / unknown. Unknown is preserved when a probe cannot
  * conclude; nothing is deleted from the user's configuration, and failures
  * only mark capabilities — never block the provider from being used.
+ *
+ * Generation caps are never transmitted by this product (models must not
+ * receive `max_tokens`), so the probes below never send it and the
+ * `maxOutputTokens` capability stays "unknown" — nothing depends on it.
  */
 import type { CapabilityState, ModelCapabilities } from "../society/models";
 
@@ -41,17 +45,14 @@ export async function probeCapabilities(input: CapabilityProbeInput): Promise<Ca
   const detail: CapabilityProbeResult["detail"] = [];
 
   const minimal = await chat(input, {
-    messages: [{ role: "user", content: "ping" }],
-    max_tokens: 4
+    messages: [{ role: "user", content: "ping" }]
   });
   if (minimal.status === 200) {
-    capabilities.maxOutputTokens = "yes";
     capabilities.streaming = "yes";
     detail.push({ probe: "minimal", result: "ok" });
     if (minimal.body.usage) detail.push({ probe: "usage", result: "returned" });
     else detail.push({ probe: "usage", result: "absent" });
   } else if (minimal.status === 400 || minimal.status === 404 || minimal.status === 422) {
-    capabilities.maxOutputTokens = "no";
     detail.push({ probe: "minimal", result: `HTTP ${minimal.status}` });
     return { ok: false, message: `最小补全请求被拒绝（HTTP ${minimal.status}）：${minimal.text.slice(0, 160)}`, capabilities, detail };
   } else {
@@ -70,8 +71,7 @@ export async function probeCapabilities(input: CapabilityProbeInput): Promise<Ca
         parameters: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] }
       }
     }],
-    tool_choice: "required",
-    max_tokens: 128
+    tool_choice: "required"
   });
   if (tooled.status === 200) {
     const calls = tooled.body.choices?.[0]?.message?.tool_calls;
@@ -85,7 +85,6 @@ export async function probeCapabilities(input: CapabilityProbeInput): Promise<Ca
   // Streaming: read at least one chunk from a streamed completion.
   const streamed = await chatStream(input, {
     messages: [{ role: "user", content: "Say hello." }],
-    max_tokens: 16,
     stream: true,
     stream_options: { include_usage: true }
   });
@@ -100,7 +99,6 @@ export async function probeCapabilities(input: CapabilityProbeInput): Promise<Ca
   // Reasoning-effort parameter acceptance.
   const reasoning = await chat(input, {
     messages: [{ role: "user", content: "ping" }],
-    max_tokens: 4,
     reasoning_effort: "low"
   });
   if (reasoning.status === 200) {
@@ -116,8 +114,7 @@ export async function probeCapabilities(input: CapabilityProbeInput): Promise<Ca
   // Structured output (JSON mode).
   const json = await chat(input, {
     messages: [{ role: "user", content: "Return {\"ok\": true} as JSON." }],
-    response_format: { type: "json_object" },
-    max_tokens: 32
+    response_format: { type: "json_object" }
   });
   if (json.status === 200) {
     capabilities.structuredOutput = "yes";
@@ -252,7 +249,7 @@ export function capabilitySummary(capabilities: ModelCapabilities): string {
   };
   const parts: string[] = [];
   for (const [name, state] of Object.entries(capabilities)) {
-    if (state === "unknown") continue;
+    if (state === "unknown" || name === "maxOutputTokens") continue; // generation caps are never transmitted
     const label = labels[name as keyof ModelCapabilities] ?? name;
     parts.push(`${label}:${state === "yes" ? "✓" : "✗"}`);
   }

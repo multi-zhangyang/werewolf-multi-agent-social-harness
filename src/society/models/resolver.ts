@@ -114,7 +114,7 @@ export function resolveAgentModelConfig(input: ModelResolutionInput): ResolvedMo
   // fields (prompt cache lifetime / extra provider payload) and are kept.
 
   const negotiationNotes = negotiation.dropped.map((entry) =>
-    `${entry.field}: ${entry.reason === "unsupported-by-provider" ? "提供商不支持" : entry.reason === "unknown-capability-forced" ? "能力未验证（用户强制发送）" : "能力未验证（未发送）"}`
+    `${entry.field}: ${entry.reason === "unsupported-by-provider" ? "提供商不支持" : entry.reason === "unknown-capability-forced" ? "能力未验证（用户强制发送）" : entry.reason === "local-only-not-transmitted" ? "仅本地保留（不发送给提供商）" : "能力未验证（未发送）"}`
   );
 
   return {

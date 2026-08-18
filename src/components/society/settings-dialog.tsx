@@ -65,8 +65,7 @@ const CAPABILITY_CHOICES = [
   { key: "reasoning", label: "思考/推理参数" },
   { key: "reasoningSummary", label: "推理摘要" },
   { key: "structuredOutput", label: "结构化输出" },
-  { key: "parallelToolCalls", label: "并行工具" },
-  { key: "maxOutputTokens", label: "最大输出参数" }
+  { key: "parallelToolCalls", label: "并行工具" }
 ] as const;
 
 /** Capabilities offered as quick checkboxes in the add-model form. */
@@ -278,7 +277,8 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl">
-        <div className="max-h-[84vh] overflow-y-auto">
+        <div className="flex max-h-[84vh] flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="border-b border-border/60 p-6">
             <DialogHeader className="gap-2 text-left">
               <div className="flex items-center gap-3">
@@ -318,18 +318,30 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
               </div>
               <div className="mt-3 rounded-lg border border-dashed border-border p-3">
                 <p className="mb-2 text-xs font-medium text-muted-foreground">添加提供商</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <Input value={providerDraft.name} onChange={(event) => setProviderDraft({ ...providerDraft, name: event.target.value })} placeholder="名称（如 MyProvider）" spellCheck={false} />
-                  <Input value={providerDraft.baseURL} onChange={(event) => setProviderDraft({ ...providerDraft, baseURL: event.target.value })} placeholder="Base URL" spellCheck={false} />
-                  <Input type="password" value={providerDraft.apiKey} onChange={(event) => setProviderDraft({ ...providerDraft, apiKey: event.target.value })} placeholder="API 密钥（写入 .env.local）" spellCheck={false} autoComplete="off" />
-                  <Select value={providerDraft.apiMode} onValueChange={(value) => setProviderDraft({ ...providerDraft, apiMode: value })}>
-                    <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="chat-completions">chat-completions</SelectItem>
-                      <SelectItem value="responses">responses</SelectItem>
-                      <SelectItem value="auto">auto</SelectItem>
-                    </SelectContent>
-                  </Select>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[11px] font-medium text-foreground/70">名称</span>
+                    <Input value={providerDraft.name} onChange={(event) => setProviderDraft({ ...providerDraft, name: event.target.value })} placeholder="如 MyProvider" spellCheck={false} />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[11px] font-medium text-foreground/70">Base URL</span>
+                    <Input value={providerDraft.baseURL} onChange={(event) => setProviderDraft({ ...providerDraft, baseURL: event.target.value })} placeholder="https://api.example.com/v1" spellCheck={false} />
+                  </label>
+                  <label className="flex flex-col gap-1 sm:col-span-2">
+                    <span className="text-[11px] font-medium text-foreground/70">API 密钥（只写入本机 .env.local）</span>
+                    <Input type="password" value={providerDraft.apiKey} onChange={(event) => setProviderDraft({ ...providerDraft, apiKey: event.target.value })} placeholder="sk-…" spellCheck={false} autoComplete="off" />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[11px] font-medium text-foreground/70">API 模式</span>
+                    <Select value={providerDraft.apiMode} onValueChange={(value) => setProviderDraft({ ...providerDraft, apiMode: value })}>
+                      <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="chat-completions">chat-completions</SelectItem>
+                        <SelectItem value="responses">responses</SelectItem>
+                        <SelectItem value="auto">auto</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </label>
                 </div>
                 <p className="mt-2 text-[11px] leading-5 text-muted-foreground/80">
                   Base URL 示例：https://api.example.com/v1；API 密钥只写入本机 .env.local，不回显、不进入模型档案与房间快照。
@@ -358,9 +370,9 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                           </span>
                         </p>
                         <p className="truncate font-mono text-[10px] text-muted-foreground/80">{profile.modelId} · {config.providers.find((provider) => provider.id === profile.providerProfileId)?.name ?? profile.providerProfileId}</p>
-                        {Object.entries(profile.capabilities).some(([, state]) => state !== "unknown") ? (
+                        {Object.entries(profile.capabilities).some(([key, state]) => state !== "unknown" && key !== "maxOutputTokens") ? (
                           <p className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground/70">
-                            {Object.entries(profile.capabilities).filter(([, state]) => state !== "unknown").map(([key, state]) => (
+                            {Object.entries(profile.capabilities).filter(([key, state]) => state !== "unknown" && key !== "maxOutputTokens").map(([key, state]) => (
                               <span key={key} className="whitespace-nowrap">{capabilityName(key)}:{state === "yes" ? "✓" : "✗"}</span>
                             ))}
                           </p>
@@ -459,16 +471,17 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
             ) : null}
 
             {error ? <p className="text-[13px] text-red-400">{error}</p> : null}
+          </div>
+          </div>
 
-            <div className="flex items-center justify-between border-t border-border/60 pt-5">
-              <Button variant="outline" size="sm" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={testing || saving} onClick={() => void test()}>
-                {testing ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
-                测试默认提供商连接
-              </Button>
-              <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={() => { setLoaded(false); onOpenChange(false); }}>
-                关闭
-              </Button>
-            </div>
+          <div className="flex items-center justify-between border-t border-border/60 bg-card px-6 py-4">
+            <Button variant="outline" size="sm" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={testing || saving} onClick={() => void test()}>
+              {testing ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+              测试默认提供商连接
+            </Button>
+            <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={() => { setLoaded(false); onOpenChange(false); }}>
+              关闭
+            </Button>
           </div>
         </div>
       </DialogContent>

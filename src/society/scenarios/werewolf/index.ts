@@ -757,9 +757,9 @@ export class WerewolfWorld extends SocialWorldBase {
     const record: DayRecord = { day: this.day, votes: Object.fromEntries(this.votes), ...(eliminatedId ? { eliminatedId, eliminatedRole } : {}) };
     this.history.push(record);
     const voteText = eliminatedId
-      ? `${this.profiles.get(eliminatedId)?.displayName} was eliminated by vote and revealed as ${roleLabel(eliminatedRole)}.`
-      : "The vote tied. Nobody was eliminated.";
-    for (const id of this.profiles.keys()) this.lastExperiences.set(id, `Day ${this.day} vote: ${voteText} Votes: ${[...this.votes].map(([voter, target]) => `${voter}->${target}`).join(", ")}.`);
+      ? `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。`
+      : "本轮平票，无人被放逐。";
+    for (const id of this.profiles.keys()) this.lastExperiences.set(id, `第 ${this.day} 天投票：${voteText} 投票：${[...this.votes].map(([voter, target]) => `${voter}->${target}`).join(", ")}。`);
     const voteBeat = eliminatedId
       ? eliminatedRole === "wolf" || eliminatedRole === "wolf-king"
         ? "deception-exposed" as const
@@ -846,7 +846,7 @@ export class WerewolfWorld extends SocialWorldBase {
         record.nightKillId = wolfKillId;
         record.nightKillRole = this.roles.get(wolfKillId);
       }
-      parts.push(`${this.profiles.get(wolfKillId)?.displayName} was eliminated during the night and revealed as ${roleLabel(this.roles.get(wolfKillId))}.`);
+      parts.push(`${this.profiles.get(wolfKillId)?.displayName} 夜里被狼人杀害，身份揭晓：${roleLabel(this.roles.get(wolfKillId))}。`);
     } else if (savedId) {
       parts.push(`夜里狼人袭击了 ${this.profiles.get(savedId)?.displayName}，但 ${guardId === savedId && saveId === savedId ? "守卫与女巫同时出手" : guardId === savedId ? "守卫挡住了这一刀" : "女巫用解药救回了"} TA。`);
     } else if (wolfTargetId && bothOnWolfTarget) {
@@ -857,24 +857,24 @@ export class WerewolfWorld extends SocialWorldBase {
         record.nightKillRole = this.roles.get(wolfTargetId);
       }
     } else if (!wolfTargetId) {
-      parts.push("The night ended without a wolf kill.");
+      parts.push("今夜没有发生狼人袭击。");
     }
     if (poisonId) {
       this.alive.delete(poisonId);
       if (record && record.day === this.day) {
         record.poisonId = poisonId;
       }
-      parts.push(`${this.profiles.get(poisonId)?.displayName} died of the witch's poison and was revealed as ${roleLabel(this.roles.get(poisonId))}.`);
+      parts.push(`${this.profiles.get(poisonId)?.displayName} 被女巫毒杀，身份揭晓：${roleLabel(this.roles.get(poisonId))}。`);
     }
     const nightText = parts.join(" ");
     for (const id of this.profiles.keys()) {
       const privateResult = this.roles.get(id) === "seer" && this.seerTargets.has(id)
-        ? ` Your investigation: ${this.seerTargets.get(id)} is ${roleLabel(this.roles.get(this.seerTargets.get(id)!))}.`
+        ? ` 你的查验结果：${this.seerTargets.get(id)} 是${roleLabel(this.roles.get(this.seerTargets.get(id)!))}。`
         : "";
       const witchResult = this.roles.get(id) === "witch" && wolfTargetId
-        ? ` Tonight the wolves attacked ${wolfTargetId}.`
+        ? ` 今晚狼人袭击了 ${wolfTargetId}。`
         : "";
-      this.lastExperiences.set(id, `Night ${this.day}: ${nightText}${privateResult}${witchResult}`);
+      this.lastExperiences.set(id, `第 ${this.day} 天夜晚：${nightText}${privateResult}${witchResult}`);
     }
     this.addLog(nightText, this.day, wolfKillId || (wolfTargetId && bothOnWolfTarget) ? "betrayal" : undefined);
 
@@ -888,7 +888,7 @@ export class WerewolfWorld extends SocialWorldBase {
         actorId: seerId,
         targetId: target,
         facts: { role: roleLabel(this.roles.get(target)) },
-        detail: `Night ${this.day}: your investigation shows ${this.profiles.get(target)?.displayName ?? target} is ${roleLabel(this.roles.get(target))}.`
+        detail: `第 ${this.day} 天夜晚：你的查验显示 ${this.profiles.get(target)?.displayName ?? target} 是${roleLabel(this.roles.get(target))}。`
       });
     }
 
@@ -912,10 +912,10 @@ export class WerewolfWorld extends SocialWorldBase {
       targetId,
       facts: { by, role: roleLabel(role) },
       detail: by === "vote"
-        ? `Day ${this.day}: you were eliminated by the village vote and revealed as ${roleLabel(role)}.`
+        ? `第 ${this.day} 天：你被村庄投票放逐，身份揭晓：${roleLabel(role)}。`
         : by === "poison"
-          ? `Night ${this.day}: the witch's poison took you. You were revealed as ${roleLabel(role)}. You cannot use your death skill.`
-          : `You were eliminated (${by}) and revealed as ${roleLabel(role)}.`
+          ? `第 ${this.day} 天夜晚：女巫的毒药带走了你，身份揭晓：${roleLabel(role)}。你无法使用死亡技能。`
+          : `你被淘汰了（${by}），身份揭晓：${roleLabel(role)}。`
     });
     for (const id of this.profiles.keys()) {
       if (id === targetId) continue;
@@ -927,7 +927,7 @@ export class WerewolfWorld extends SocialWorldBase {
           iVoted: by === "vote" && this.votes.get(id) === targetId,
           ally: isVillageRole(this.roles.get(id)) && isVillageRole(role)
         },
-        detail: `${targetName} was eliminated (${by}) and revealed as ${roleLabel(role)}${by === "vote" && this.votes.get(id) === targetId ? " — you voted for them." : ""}`
+        detail: `${targetName} 被淘汰（${by}），身份揭晓：${roleLabel(role)}${by === "vote" && this.votes.get(id) === targetId ? " —— 你投了 TA。" : ""}`
       });
     }
     // Hunter / wolf-king death shots. Poisoned victims cannot shoot.

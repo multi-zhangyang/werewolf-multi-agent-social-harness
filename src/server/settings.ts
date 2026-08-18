@@ -94,7 +94,7 @@ async function probeChatCompletion(settings: ProviderSettings, headers: Record<s
     const response = await fetch(`${settings.baseURL}/chat/completions`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages: [{ role: "user", content: "ping" }], max_tokens: 1 }),
+      body: JSON.stringify({ model, messages: [{ role: "user", content: "ping" }] }),
       signal: AbortSignal.timeout(20_000)
     });
     if (response.ok) return { ok: true, message: `连接成功（${model} 完成一次最小补全）。` };

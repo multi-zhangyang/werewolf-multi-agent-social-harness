@@ -784,7 +784,8 @@ function sdkSettingsFromNegotiated(allowed: Record<string, unknown>): Record<str
       case "verbosity":
         continue; // folded into the SDK-shaped fields below
       case "maxOutputTokens":
-        settings.maxTokens = value;
+        // Never transmitted: models must not receive a `max_tokens`
+        // generation cap (product constraint). The value is local-only.
         continue;
       default:
         settings[key] = value;

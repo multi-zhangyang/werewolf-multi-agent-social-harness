@@ -112,7 +112,15 @@ check("capability negotiation drops unknown-gated fields and keeps passthrough",
   assert.equal(result.allowed.seed, undefined);
   assert.equal(result.allowed.maxOutputTokens, undefined);
   assert.ok(result.dropped.some((entry) => entry.field === "seed"));
-  assert.ok(result.dropped.some((entry) => entry.field === "maxOutputTokens"));
+  assert.ok(result.dropped.some((entry) => entry.field === "maxOutputTokens" && entry.reason === "local-only-not-transmitted"));
+});
+
+check("max output is local-only: never sent, even when capable and forced", () => {
+  const capable = defaultCapabilities();
+  capable.maxOutputTokens = "yes";
+  const result = negotiateTuning({ maxOutputTokens: 800 }, capable, new Set(["maxOutputTokens"]));
+  assert.equal(result.allowed.maxOutputTokens, undefined);
+  assert.ok(result.dropped.some((entry) => entry.field === "maxOutputTokens" && entry.reason === "local-only-not-transmitted"));
 });
 
 check("capability negotiation sends unknown fields only when forced", () => {

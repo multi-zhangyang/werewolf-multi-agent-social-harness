@@ -24,7 +24,6 @@ const templateSchema = z.object({
   agentModelOverrides: z.record(z.string().min(1).max(4), z.string().min(1).max(120)).optional(),
   agentTuning: z.record(z.string().min(1).max(4), z.object({
     temperature: z.number().min(0).max(2).optional(),
-    maxOutputTokens: z.number().int().positive().max(64_000).optional(),
     reasoningEffort: z.enum(["low", "medium", "high"]).optional()
   }).strict()).optional(),
   players: z.number().int().positive().max(12).optional(),

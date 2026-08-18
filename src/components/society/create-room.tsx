@@ -40,7 +40,7 @@ interface RosterTemplateOption {
   models: string[];
   modelProfileIds?: string[];
   agentModelOverrides?: Record<string, string>;
-  agentTuning?: Record<string, { temperature?: number; maxOutputTokens?: number; reasoningEffort?: "low" | "medium" | "high" }>;
+  agentTuning?: Record<string, { temperature?: number; reasoningEffort?: "low" | "medium" | "high" }>;
   players?: number;
   characterIds?: string[];
   rounds?: number;
@@ -51,7 +51,7 @@ interface RosterTemplateOption {
 export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [seatOverrides, setSeatOverrides] = useState<Record<string, string>>({});
-  const [seatTuning, setSeatTuning] = useState<Record<string, { temperature?: number; maxOutputTokens?: number; reasoningEffort?: "low" | "medium" | "high" }>>({});
+  const [seatTuning, setSeatTuning] = useState<Record<string, { temperature?: number; reasoningEffort?: "low" | "medium" | "high" }>>({});
   const [advanced, setAdvanced] = useState(false);
   const [rounds, setRounds] = useState<number>(5);
   const [players, setPlayers] = useState<number>(6);
@@ -258,7 +258,8 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     <Dialog open={open} onOpenChange={(next) => { if (!next && !submitting) onOpenChange(false); }}>
       <DialogContent className="max-w-xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl" showCloseButton={!submitting}>
         {scenario ? (
-          <div className="max-h-[82vh] overflow-y-auto">
+          <div className="flex max-h-[82vh] flex-col">
+            <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="border-b border-border/60 p-6">
               <DialogHeader className="gap-2 text-left">
                 <div className="flex items-center gap-3">
@@ -288,7 +289,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                 <p className="mb-3 text-xs leading-5 text-muted-foreground/80">
                   每个参与者都是一个独立 Agent。选择一个模型给所有人，或选择多个模型让不同角色使用不同模型同台对决（按顺序轮转分配）。需要的话，可在「参与者阵容」里为单个席位指定不同模型。
                 </p>
-                <div className="flex flex-wrap gap-2" data-model>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" data-model>
                   {visibleModels.map((model) => {
                     const active = selectedModels.includes(model.id);
                     return (
@@ -297,7 +298,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                         data-model
                         onClick={() => toggleModel(model.id)}
                         className={cn(
-                          "flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors sm:w-auto",
+                          "flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors",
                           active
                             ? "border-foreground/70 bg-muted"
                             : "border-border bg-card hover:border-border"
@@ -508,28 +509,6 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                                   aria-label={`第 ${index + 1} 位温度`}
                                 />
                                 <span className="nums w-7 font-mono">{tuning?.temperature ?? 1}</span>
-                                <span className="ml-2">最大输出</span>
-                                <input
-                                  type="number"
-                                  min={256}
-                                  max={64_000}
-                                  step={256}
-                                  placeholder="继承"
-                                  value={tuning?.maxOutputTokens ?? ""}
-                                  onChange={(event) => setSeatTuning((current) => {
-                                    const next = { ...current };
-                                    const value = Number(event.target.value);
-                                    if (Number.isFinite(value) && value > 0) next[String(index)] = { ...(next[String(index)] ?? {}), maxOutputTokens: value };
-                                    else {
-                                      const entry = { ...(next[String(index)] ?? {}) };
-                                      delete entry.maxOutputTokens;
-                                      if (Object.keys(entry).length) next[String(index)] = entry;
-                                      else delete next[String(index)];
-                                    }
-                                    return next;
-                                  })}
-                                  className="h-7 w-20 rounded-md border border-border bg-card px-2 font-mono text-[11px]"
-                                />
                                 <span className="ml-2">推理</span>
                                 <Select
                                   value={tuning?.reasoningEffort ?? "__inherit"}
@@ -669,20 +648,21 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                   </div>
                 </div>
               </section>
+            </div>
+            </div>
 
-              <div className="flex items-center justify-end gap-3 border-t border-border/60 pt-5">
-                <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={submitting} onClick={() => onOpenChange(false)}>
-                  取消
-                </Button>
-                <Button
-                  onClick={submit}
-                  disabled={submitting}
-                  className="rounded-lg bg-foreground px-6 text-background hover:bg-foreground/85"
-                >
-                  {submitting ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                  开始世界
-                </Button>
-              </div>
+            <div className="flex items-center justify-end gap-3 border-t border-border/60 bg-card px-6 py-4">
+              <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={submitting} onClick={() => onOpenChange(false)}>
+                取消
+              </Button>
+              <Button
+                onClick={submit}
+                disabled={submitting}
+                className="rounded-lg bg-foreground px-6 text-background hover:bg-foreground/85"
+              >
+                {submitting ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+                开始世界
+              </Button>
             </div>
           </div>
         ) : null}

@@ -61,10 +61,9 @@ const createRoomSchema = z.object({
   modelProfileIds: z.array(z.string().min(1).max(120)).min(1).max(8).optional(),
   /** Per-seat overrides: slot index → model profile id. */
   agentModelOverrides: z.record(z.string().min(1).max(8), z.string().min(1).max(120)).optional(),
-  /** Per-seat tuning overrides: slot index → temperature / max output / effort. */
+  /** Per-seat tuning overrides: slot index → temperature / effort. */
   agentTuning: z.record(z.string().min(1).max(8), z.object({
     temperature: z.number().min(0).max(2).optional(),
-    maxOutputTokens: z.number().int().positive().max(64_000).optional(),
     reasoningEffort: z.enum(["low", "medium", "high"]).optional()
   }).strict()).optional(),
   rounds: z.number().int().positive().max(20).optional(),

@@ -27,10 +27,9 @@ export interface CreateRoomInput {
   modelProfileIds?: string[];
   /** Per-seat overrides: slot index → model-profile id. */
   agentModelOverrides?: Record<string, string>;
-  /** Per-seat tuning: slot index → temperature / max output / effort. */
+  /** Per-seat tuning: slot index → temperature / effort. */
   agentTuning?: Record<string, {
     temperature?: number;
-    maxOutputTokens?: number;
     reasoningEffort?: "low" | "medium" | "high";
   }>;
   rounds: number;

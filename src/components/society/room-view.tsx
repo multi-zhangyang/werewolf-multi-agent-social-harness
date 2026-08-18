@@ -242,7 +242,7 @@ function ArenaStage({ room, cue, activity }: {
         <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-foreground/65">舞台席位</p>
         <span className="nums font-mono text-[11px] text-muted-foreground">{room.participants.filter((participant) => participant.alive).length} 人存活</span>
       </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-6">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {room.participants.map((participant, index) => {
           const state = activity[participant.profile.id];
           const speaking = participant.status === "speaking" || participant.status === "acting";
@@ -375,8 +375,14 @@ function CueBanner({ cue, names }: { cue: RoomConnection["cue"]; names: Map<stri
         ? "border-amber-400/40 bg-amber-400/10 text-amber-200"
         : "border-border bg-card/90 text-foreground";
   return (
-    <div key={cue.id} className="pointer-events-none absolute inset-x-0 top-12 z-10 flex justify-center px-3">
-      <div className={cn("cue-enter flex max-w-xl items-center gap-2.5 rounded-xl border px-4 py-2.5 shadow-lg backdrop-blur", tone)}>
+    <div key={cue.id} className="pointer-events-auto absolute inset-x-0 top-12 z-10 flex justify-center px-3">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-label="关闭此镜头字幕"
+        onClick={() => setVisible(false)}
+        onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setVisible(false); }}
+        className={cn("cue-enter flex max-w-xl cursor-pointer items-center gap-2.5 rounded-xl border px-4 py-2.5 shadow-lg backdrop-blur", tone)}>
         <Clapperboard className="size-4 shrink-0" />
         <div className="min-w-0">
           <p className="text-[13px] font-semibold leading-4">{cue.title}</p>

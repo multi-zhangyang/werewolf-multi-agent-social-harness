@@ -63,7 +63,7 @@ export function Conversation({ room, activity, onAction, onReplay }: Conversatio
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="mx-auto max-w-[760px] px-6 py-6">
+        <div className="mx-auto max-w-[760px] px-6 pb-14 pt-6">
           {room.world.status === "finished" ? (
             <ResultCard room={room} onReplay={onReplay} />
           ) : null}
