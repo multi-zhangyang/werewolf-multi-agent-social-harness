@@ -234,6 +234,18 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     response.json({ cleared: true, dossiers: [] });
   });
 
+  // Forget ONE character's cross-game memory (§7.2): their next game starts
+  // from a clean slate while everyone else keeps their history.
+  app.delete("/api/season/:characterKey", (request, response) => {
+    const key = decodeURIComponent(request.params.characterKey);
+    if (!key.trim() || key.length > 60) {
+      response.status(400).json({ error: "CHARACTER_KEY_INVALID", message: "Provide a valid character key." });
+      return;
+    }
+    const removed = context.season.remove(key);
+    response.json({ removed, characterKey: key, dossiers: context.season.list().length });
+  });
+
   app.post("/api/rooms", (request, response, next) => {
     try {
       const input = createRoomSchema.parse(request.body);

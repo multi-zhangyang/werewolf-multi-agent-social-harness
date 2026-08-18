@@ -115,6 +115,20 @@ export function App(): ReactNode {
     setSeason([]);
   }, []);
 
+  const forgetCharacter = useCallback(async (characterKey: string): Promise<void> => {
+    if (!window.confirm(`让「${characterKey}」忘掉全部跨局历史？下一局它会像陌生人一样入场。`)) return;
+    try {
+      const response = await fetch(`/api/season/${encodeURIComponent(characterKey)}`, { method: "DELETE" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => undefined);
+        throw new Error(payload?.message ?? `HTTP ${response.status}`);
+      }
+      setSeason((current) => current.filter((entry) => entry.characterKey !== characterKey));
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  }, []);
+
   const removeRoom = useCallback(async (roomId: string): Promise<void> => {
     if (!window.confirm("停止并移除这个房间？对局历史会保留在归档中。")) return;
     try {
@@ -176,6 +190,7 @@ export function App(): ReactNode {
           onOpenCharacters={() => setCharactersOpen(true)}
           onOpenAbout={() => { location.hash = "#/about"; }}
           onResetSeason={() => { void resetSeason().catch((cause) => setError(errorMessage(cause))); }}
+          onForgetCharacter={(characterKey) => { void forgetCharacter(characterKey); }}
           onRemoveRoom={(roomId) => { void removeRoom(roomId); }}
         />
       )}

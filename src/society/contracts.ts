@@ -689,6 +689,8 @@ export interface SeasonStore {
   list(): CharacterDossier[];
   /** Forget all dossiers — the operator starts a brand-new season. */
   clear(): void;
+  /** Forget one character's cross-game memory (§7.2 重置长期记忆). */
+  remove(characterKey: string): boolean;
 }
 
 export interface AgentTurnResult {

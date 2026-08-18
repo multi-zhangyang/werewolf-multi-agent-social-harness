@@ -5,6 +5,7 @@ import { ZodError } from "zod";
 import { createServerContext, host, port } from "./context";
 import { registerRoomRoutes } from "./routes/rooms";
 import { registerCharacterRoutes } from "./characters";
+import { registerTemplateRoutes } from "./templates";
 import type { AgentModelBinding } from "../society/models";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -15,6 +16,7 @@ export function createServerApp(): express.Express {
   app.disable("x-powered-by");
   app.use(express.json({ limit: "512kb" }));
   registerCharacterRoutes(app, context.characters);
+  registerTemplateRoutes(app, context.templates);
   registerRoomRoutes(app, context);
   recoverInterruptedRooms(context);
   app.use(express.static(path.resolve(directory, "../../dist")));

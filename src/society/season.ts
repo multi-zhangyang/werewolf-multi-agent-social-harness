@@ -64,6 +64,13 @@ export class FileSeasonStore implements SeasonStore {
     this.persist();
   }
 
+  /** Forget one character's history; the rest of the table keeps theirs. */
+  remove(characterKey: string): boolean {
+    const existed = this.dossiers.delete(characterKey);
+    if (existed) this.persist();
+    return existed;
+  }
+
   private load(): void {
     let raw: string;
     try {

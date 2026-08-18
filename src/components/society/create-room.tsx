@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { History, Loader2, Play } from "lucide-react";
+import { History, Loader2, Play, Trash2 } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,22 @@ interface CreateRoomProps {
   onCreated: (input: CreateRoomInput) => Promise<{ roomId: string }>;
 }
 
+/** A saved create-room configuration (§6.4 阵容模板). */
+interface RosterTemplateOption {
+  id: string;
+  name: string;
+  scenarioId: string;
+  models: string[];
+  modelProfileIds?: string[];
+  agentModelOverrides?: Record<string, string>;
+  agentTuning?: Record<string, { temperature?: number; maxOutputTokens?: number; reasoningEffort?: "low" | "medium" | "high" }>;
+  players?: number;
+  characterIds?: string[];
+  rounds?: number;
+  reasoningEffort?: "low" | "medium" | "high";
+  season?: "season" | "one-shot";
+}
+
 export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [seatOverrides, setSeatOverrides] = useState<Record<string, string>>({});
@@ -49,6 +65,10 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
   const [characters, setCharacters] = useState<CharacterOption[]>([]);
   /** Per-seat character picks (absent = the seat's default built-in). */
   const [seatCharacters, setSeatCharacters] = useState<Record<string, string>>({});
+  /** Saved roster templates for this world (§6.4). */
+  const [templates, setTemplates] = useState<RosterTemplateOption[]>([]);
+  const [templateName, setTemplateName] = useState("");
+  const [loadedTemplateId, setLoadedTemplateId] = useState<string>();
 
   const minRounds = scenario?.minRounds ?? 2;
   const maxRounds = scenario?.maxRounds ?? 10;
@@ -88,15 +108,99 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
       .catch(() => {
         if (!cancelled) setCharacters([]);
       });
+    fetch("/api/room-templates")
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("TEMPLATES_UNREACHABLE"))))
+      .then((data: { templates?: RosterTemplateOption[] }) => {
+        if (cancelled) return;
+        setTemplates((data.templates ?? []).filter((template) => template.scenarioId === scenario?.id));
+      })
+      .catch(() => {
+        if (!cancelled) setTemplates([]);
+      });
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, [open, scenario]);
 
   const characterForSeat = (index: number): CharacterOption | undefined => {
     const picked = seatCharacters[String(index)];
     if (picked) return characters.find((character) => character.id === picked);
     return characters[index];
+  };
+
+  const applyTemplate = (template: RosterTemplateOption): void => {
+    setLoadedTemplateId(template.id);
+    setSelectedModels(template.models.filter((id) => visibleModels.some((model) => model.id === id)));
+    setSeatOverrides(template.agentModelOverrides ?? {});
+    setSeatTuning(template.agentTuning ?? {});
+    if (template.players !== undefined) setPlayers(template.players);
+    if (template.rounds !== undefined) setRounds(template.rounds);
+    setReasoningEffort(template.reasoningEffort ?? "low");
+    setSeasonMode(template.season ?? "season");
+    if (characters.length && template.characterIds?.length) {
+      const picks: Record<string, string> = {};
+      template.characterIds.forEach((id, index) => {
+        if (id !== characters[index]?.id) picks[String(index)] = id;
+      });
+      setSeatCharacters(picks);
+    } else {
+      setSeatCharacters({});
+    }
+    setError(undefined);
+  };
+
+  const saveTemplate = async (): Promise<void> => {
+    const name = templateName.trim();
+    if (!name) {
+      setError("给模板起个名字。");
+      return;
+    }
+    if (!scenario) return;
+    setSubmitting(true);
+    setError(undefined);
+    try {
+      const response = await fetch("/api/room-templates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          scenarioId: scenario.id,
+          models: selectedModels,
+          ...(profilesResolvable ? { modelProfileIds: selectedModels.map((id) => visibleModels.find((model) => model.id === id)?.profileId).filter((id): id is string => Boolean(id)) } : {}),
+          ...(Object.keys(seatOverrides).length ? { agentModelOverrides: seatOverrides } : {}),
+          ...(Object.keys(seatTuning).length ? { agentTuning: seatTuning } : {}),
+          ...(scenario.playerRange ? { players } : {}),
+          ...(characters.length ? { characterIds: Array.from({ length: players }, (_, index) => seatCharacters[String(index)] ?? characters[index]?.id).filter((id): id is string => Boolean(id)) } : {}),
+          rounds,
+          reasoningEffort,
+          season: seasonMode
+        })
+      });
+      const payload = await response.json().catch(() => undefined);
+      if (!response.ok) throw new Error(payload?.message ?? `HTTP ${response.status}`);
+      setTemplates((current) => [{ ...payload, id: payload.id }, ...current.filter((template) => template.name !== name)]);
+      setTemplateName("");
+      setLoadedTemplateId(payload.id as string);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const deleteTemplate = async (id: string): Promise<void> => {
+    setSubmitting(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/room-templates/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setTemplates((current) => current.filter((template) => template.id !== id));
+      if (loadedTemplateId === id) setLoadedTemplateId(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const toggleModel = (id: string): void => {
@@ -510,6 +614,61 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
               ) : null}
 
               {error ? <p className="text-[13px] text-red-400">{error}</p> : null}
+
+              <section>
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-[13px] font-medium text-foreground/80">阵容模板</p>
+                  {loadedTemplateId ? (
+                    <button
+                      type="button"
+                      className="flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-red-400"
+                      disabled={submitting}
+                      onClick={() => void deleteTemplate(loadedTemplateId)}
+                    >
+                      <Trash2 className="size-3" />
+                      删除当前模板
+                    </button>
+                  ) : null}
+                </div>
+                <p className="mb-2.5 text-xs leading-5 text-muted-foreground/80">
+                  把当前配置（模型、席位覆盖、人物、回合数、社会季模式）存为模板，一键复用。模板按世界保存，只存本机，不含任何密钥。
+                </p>
+                <div className="space-y-2">
+                  {templates.length ? (
+                    <Select
+                      value={loadedTemplateId ?? "__none"}
+                      onValueChange={(value) => {
+                        if (value === "__none") return;
+                        const template = templates.find((entry) => entry.id === value);
+                        if (template) applyTemplate(template);
+                      }}
+                    >
+                      <SelectTrigger className="h-9 w-full rounded-lg border-border bg-card text-foreground/90">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none" disabled>{loadedTemplateId ? `已载入：${templates.find((entry) => entry.id === loadedTemplateId)?.name ?? ""}` : "载入模板…"}</SelectItem>
+                        {templates.map((template) => (
+                          <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : null}
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={templateName}
+                      onChange={(event) => setTemplateName(event.target.value)}
+                      onKeyDown={(event) => { if (event.key === "Enter") void saveTemplate(); }}
+                      placeholder="模板名称（如：狼人杀快局）"
+                      maxLength={40}
+                      className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-card px-3 text-sm text-foreground placeholder:text-muted-foreground/70 focus:border-ring focus:outline-none"
+                    />
+                    <Button variant="outline" size="sm" className="h-9 shrink-0 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={submitting} onClick={() => void saveTemplate()}>
+                      保存为模板
+                    </Button>
+                  </div>
+                </div>
+              </section>
 
               <div className="flex items-center justify-end gap-3 border-t border-border/60 pt-5">
                 <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={submitting} onClick={() => onOpenChange(false)}>

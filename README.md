@@ -153,6 +153,9 @@ node scripts/demo.mjs prisoners-dilemma   # 或 node scripts/demo.mjs avalon
 | POST / PUT / DELETE | `/api/characters[/:id]` | 新建 / 编辑 / 删除自建人物 |
 | POST | `/api/characters/:id/copy` | 复制人物（内置人物复制后成为可编辑的自建人物） |
 | GET / POST | `/api/characters/export` `/api/characters/import` | 不含密钥的人物导入导出 |
+| GET / POST / DELETE | `/api/room-templates[/:id]` | 阵容模板：保存 / 载入 / 删除创建房间配置（本机，不含密钥） |
+| DELETE | `/api/season` | 重置整个社会季（清空全部角色记忆） |
+| DELETE | `/api/season/:characterKey` | 只让一位角色忘记全部跨局历史 |
 | GET | `/api/scenarios` | 世界与模型目录 |
 | GET | `/api/rooms` | 本进程内的房间列表与归档摘要 |
 | POST | `/api/rooms` | 创建并启动房间（支持统一模型、轮转、单 Agent 覆盖、参数覆盖与逐席位人物选择） |

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Trash2, Users, Waypoints } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, Eraser, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Trash2, Users, Waypoints } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { ArchivedRoomSummary } from "@/society/persistence";
@@ -28,6 +28,8 @@ interface LandingProps {
   onOpenCharacters: () => void;
   onOpenAbout: () => void;
   onResetSeason: () => void;
+  /** Forget one character's cross-game memory (§7.2). */
+  onForgetCharacter: (characterKey: string) => void;
   /** Stop and release a room; its history stays in the archive. */
   onRemoveRoom: (roomId: string) => void;
 }
@@ -78,7 +80,7 @@ const CATEGORY_OF: Record<string, keyof typeof CATEGORY> = {
   "liars-dice": "deception"
 };
 
-export function Landing({ scenarios, models, rooms, archived, season, onStart, onOpenRoom, onOpenSettings, onOpenCharacters, onOpenAbout, onResetSeason, onRemoveRoom }: LandingProps): ReactNode {
+export function Landing({ scenarios, models, rooms, archived, season, onStart, onOpenRoom, onOpenSettings, onOpenCharacters, onOpenAbout, onResetSeason, onForgetCharacter, onRemoveRoom }: LandingProps): ReactNode {
   return (
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-20 border-b border-border/80 bg-background/70 backdrop-blur-xl">
@@ -182,11 +184,11 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
             <p className="mb-4 max-w-3xl text-[13px] leading-6 text-muted-foreground">
               社会季：同一批角色会跨局延续——上一局的背叛、恩怨与信任会进入下一局，像一群真正熟悉的旧友。每局的身份与阵营重新分配，过去的角色不决定今天的忠诚，但过去的经历会改变今天的判断。随时可以清空，开启一个所有人都互不相识的全新社会季。
             </p>
-            <div className="flex flex-wrap justify-center gap-3">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {season.slice(0, 8).map((entry) => {
                 const wins = entry.games.filter((game) => game.outcome === "win").length;
                 return (
-                  <div key={entry.characterKey} className="w-[calc(50%-6px)] rounded-lg border border-border bg-card p-4 transition-colors hover:border-border sm:w-[calc(33.33%-8px)] lg:w-[calc(25%-9px)]">
+                  <div key={entry.characterKey} className="group relative rounded-lg border border-border bg-card p-4 transition-colors hover:border-border">
                     <p className="flex items-center gap-2 text-sm font-semibold tracking-tight">
                       <AgentAvatar name={entry.characterKey} index={hashIndex(entry.characterKey)} size="sm" />
                       {entry.characterKey}
@@ -198,6 +200,15 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
                       最近：{entry.games.at(-1)?.scenarioId ?? "—"}
                       {entry.games.at(-1)?.role ? ` · ${entry.games.at(-1)?.role}` : ""}
                     </p>
+                    <button
+                      type="button"
+                      aria-label={`忘记 ${entry.characterKey} 的跨局历史`}
+                      title={`让 ${entry.characterKey} 忘掉全部跨局历史，下一局从陌生人开始`}
+                      onClick={() => onForgetCharacter(entry.characterKey)}
+                      className="absolute right-2 top-2 flex size-6 items-center justify-center rounded-md text-muted-foreground/40 transition-colors hover:bg-border hover:text-red-400 group-hover:text-muted-foreground/80"
+                    >
+                      <Eraser className="size-3.5" />
+                    </button>
                   </div>
                 );
               })}
