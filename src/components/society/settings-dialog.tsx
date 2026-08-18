@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Check, Loader2, Plus, Settings2, Trash2 } from "lucide-react";
+import { Activity, Check, Loader2, Plus, Settings2, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -275,11 +275,10 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => { if (!next) { setLoaded(false); setError(undefined); } onOpenChange(next); }}>
       <DialogContent className="max-w-2xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl">
         <div className="flex max-h-[84vh] flex-col">
-          <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="border-b border-border/60 p-6">
+          <div className="shrink-0 border-b border-border/60 p-6">
             <DialogHeader className="gap-2 text-left">
               <div className="flex items-center gap-3">
                 <span className="flex size-10 items-center justify-center rounded-xl border border-white/10 bg-muted text-foreground/80">
@@ -295,6 +294,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
             </DialogHeader>
           </div>
 
+          <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="space-y-7 p-6">
             <section>
               <p className="mb-2.5 text-[13px] font-medium text-foreground/80">提供商</p>
@@ -331,7 +331,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                     <span className="text-[11px] font-medium text-foreground/70">API 密钥（只写入本机 .env.local）</span>
                     <Input type="password" value={providerDraft.apiKey} onChange={(event) => setProviderDraft({ ...providerDraft, apiKey: event.target.value })} placeholder="sk-…" spellCheck={false} autoComplete="off" />
                   </label>
-                  <label className="flex flex-col gap-1">
+                  <label className="flex flex-col gap-1 sm:col-span-2">
                     <span className="text-[11px] font-medium text-foreground/70">API 模式</span>
                     <Select value={providerDraft.apiMode} onValueChange={(value) => setProviderDraft({ ...providerDraft, apiMode: value })}>
                       <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue /></SelectTrigger>
@@ -391,9 +391,16 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                           {probing === profile.id ? <Loader2 className="size-3 animate-spin" /> : null}
                           探测
                         </Button>
-                        <button type="button" aria-label={`移除 ${profile.name}`} onClick={() => void removeModel(profile.id)} className="flex size-7 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-border hover:text-red-400">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`移除 ${profile.name}`}
+                          disabled={saving || Boolean(probing)}
+                          onClick={() => void removeModel(profile.id)}
+                          className="size-7 rounded-md text-muted-foreground/60 hover:bg-border hover:text-red-400"
+                        >
                           <Trash2 className="size-3.5" />
-                        </button>
+                        </Button>
                       </div>
                     </div>
                     {probeResults[profile.id] ? (
@@ -476,7 +483,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
 
           <div className="flex items-center justify-between border-t border-border/60 bg-card px-6 py-4">
             <Button variant="outline" size="sm" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={testing || saving} onClick={() => void test()}>
-              {testing ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+              {testing ? <Loader2 className="size-3.5 animate-spin" /> : <Activity className="size-3.5" />}
               测试默认提供商连接
             </Button>
             <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={() => { setLoaded(false); onOpenChange(false); }}>

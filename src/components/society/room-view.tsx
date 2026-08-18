@@ -20,6 +20,7 @@ interface RoomViewProps {
 
 export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): ReactNode {
   const [viewerMode, setViewerMode] = useState<"public" | "omniscient" | "agent-pov" | "postgame">(token ? "public" : "omniscient");
+  const [autoSwitchedToPostgame, setAutoSwitchedToPostgame] = useState(false);
   const [povAgentId, setPovAgentId] = useState<string>();
   const [stageView, setStageView] = useState<"arena" | "analysis">("arena");
   const [pace, setPace] = useState<0.5 | 1 | 2 | 4>(1);
@@ -35,6 +36,14 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
     }
   }, [viewerMode, povAgentId, room?.player?.actorId]);
 
+  // Once the game ends, step the default viewer into the postgame truth
+  // layer exactly once; the user can still switch back to any other mode.
+  useEffect(() => {
+    if (!autoSwitchedToPostgame && room?.status === "finished" && viewerMode !== "postgame") {
+      setAutoSwitchedToPostgame(true);
+      setViewerMode("postgame");
+    }
+  }, [room?.status, viewerMode, autoSwitchedToPostgame]);
   if (!room) {
     return (
       <div className="flex min-h-screen flex-col">
@@ -100,8 +109,8 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
                 ))}
               </select>
             ) : null}
-            <TensionMeter tension={tension} />
-            <div className="hidden items-center gap-3 rounded-full border border-border bg-card px-4 py-1.5 md:flex">
+            {room.status !== "finished" ? <TensionMeter tension={tension} /> : null}
+            <div className="flex items-center gap-3 rounded-full border border-border bg-card px-4 py-1.5">
               <span className={cn("size-1.5 rounded-full", room.world.status === "finished" ? "bg-muted-foreground/40" : "bg-emerald-400")} />
               <span className="text-xs font-medium text-foreground/90">{room.world.phase}</span>
               <span className="nums font-mono text-[11px] text-muted-foreground">
@@ -109,7 +118,7 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
               </span>
               <ActBar turn={room.world.turn} total={room.world.totalTurns} finished={room.world.status === "finished"} />
             </div>
-            <PaceControl pace={pace} onChange={setPace} />
+            {room.status !== "finished" ? <PaceControl pace={pace} onChange={setPace} /> : null}
             <ShareButton roomId={room.id} />
             {room.status === "running" ? (
               <Button variant="outline" size="sm" aria-label="暂停房间" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => void pause()}>
@@ -191,16 +200,18 @@ function ViewModeSwitcher({ mode, isPlayer, finished, onChange }: {
       {options.map((option) => (
         <Tooltip key={option.value}>
           <TooltipTrigger asChild>
-            <button
-              disabled={option.disabled}
-              onClick={() => onChange(option.value)}
-              className={cn(
-                "rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-35",
-                mode === option.value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              {option.label}
-            </button>
+            <span className="inline-flex" tabIndex={0} aria-disabled={option.disabled}>
+              <button
+                disabled={option.disabled}
+                onClick={() => onChange(option.value)}
+                className={cn(
+                  "rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-35",
+                  mode === option.value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {option.label}
+              </button>
+            </span>
           </TooltipTrigger>
           <TooltipContent>{option.hint}</TooltipContent>
         </Tooltip>
@@ -263,9 +274,9 @@ function ArenaStage({ room, cue, activity }: {
               )}
             >
               {focused ? (
-                <span className="absolute -top-2 rounded-full border border-amber-400/50 bg-card px-1.5 py-px text-[9px] font-medium text-amber-300">焦点</span>
+                <span className="absolute -top-2 left-1/2 -translate-x-1/2 rounded-full border border-amber-400/50 bg-card px-1.5 py-px text-[9px] font-medium text-amber-300">焦点</span>
               ) : null}
-              <AgentPresence name={participant.profile.displayName} index={index} size="xl" status={dead ? "finished" : participant.status} />
+              <AgentPresence name={participant.profile.displayName} index={index} size="xl" status={dead || room.status === "finished" ? "finished" : participant.status} />
               <p className="mt-1.5 max-w-full truncate text-xs font-semibold tracking-tight">{participant.profile.displayName}</p>
               <p className="flex max-w-full items-center gap-1 text-[10px] text-foreground/60">
                 <StatusDot status={dead ? "finished" : participant.status} />
@@ -307,25 +318,35 @@ function DuelStrip({ room, cue, names }: {
   if (sides.length < 2) return null;
   return (
     <div className="mt-3 grid grid-cols-[1fr_auto_1fr] items-stretch gap-2">
-      {sides.map((side, index) => (
+      {sides[0] ? (
         <div
-          key={side.id}
-          className={cn(
-            "rounded-lg border px-3 py-2",
-            index === 0 ? "border-red-400/30 bg-red-400/5 text-left" : "border-sky-400/30 bg-sky-400/5 text-right"
-          )}
+          className="rounded-lg border border-red-400/30 bg-red-400/5 px-3 py-2 text-left"
         >
           <p className="flex items-center gap-1.5 text-xs font-semibold tracking-tight">
-            {index === 0 ? <SwordsIcon className="size-3 text-red-400" /> : null}
-            {side.participant.profile.displayName}
-            {side.participant.mood ? <span className="text-[10px] font-normal text-muted-foreground">· {side.participant.mood}</span> : null}
-            {index === 1 ? <SwordsIcon className="size-3 text-sky-400" /> : null}
+            <SwordsIcon className="size-3 text-red-400" />
+            {sides[0].participant.profile.displayName}
+            {sides[0].participant.mood ? <span className="text-[10px] font-normal text-muted-foreground">· {sides[0].participant.mood}</span> : null}
           </p>
           <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground/90">
-            {side.lastPublic ? `「${side.lastPublic.text.slice(0, 160)}」` : "尚未公开发言"}
+            {sides[0].lastPublic ? `「${sides[0].lastPublic.text.slice(0, 160)}」` : "尚未公开发言"}
           </p>
         </div>
-      ))}
+      ) : null}
+      <div className="flex items-center justify-center self-center text-[10px] font-bold tracking-widest text-muted-foreground/60">VS</div>
+      {sides[1] ? (
+        <div
+          className="rounded-lg border border-sky-400/30 bg-sky-400/5 px-3 py-2 text-right"
+        >
+          <p className="flex items-center justify-end gap-1.5 text-xs font-semibold tracking-tight">
+            {sides[1].participant.profile.displayName}
+            {sides[1].participant.mood ? <span className="text-[10px] font-normal text-muted-foreground">· {sides[1].participant.mood}</span> : null}
+            <SwordsIcon className="size-3 text-sky-400" />
+          </p>
+          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground/90">
+            {sides[1].lastPublic ? `「${sides[1].lastPublic.text.slice(0, 160)}」` : "尚未公开发言"}
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }

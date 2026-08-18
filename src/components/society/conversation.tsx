@@ -438,7 +438,7 @@ function MessageRow({ entry, names, activity, fresh }: {
           <ChannelBadge channel={message.channel} />
           {message.recipientIds?.length ? (
             <span className="flex items-center gap-1 text-muted-foreground/80">
-              <span className="font-mono text-[10px]">私发给</span>
+              <span className="font-mono text-[10px]">{privateChat ? "私发给" : "对"}</span>
               {message.recipientIds.map((id) => (
                 <AgentAvatar key={id} name={names.get(id) ?? id} index={indexOf(id)} size="sm" />
               ))}

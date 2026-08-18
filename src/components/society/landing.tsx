@@ -155,12 +155,12 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
               开始一场博弈
               <ArrowRight className="size-4" />
             </Button>
-            <a href="#scenarios">
-              <Button size="lg" variant="ghost" className="h-11 rounded-lg border border-transparent px-7 text-foreground/80 hover:bg-muted/60 hover:text-foreground">
+            <Button size="lg" variant="ghost" asChild className="h-11 rounded-lg border border-transparent px-7 text-foreground/80 hover:bg-muted/60 hover:text-foreground">
+              <a href="#scenarios">
                 浏览全部世界
                 <ArrowDown className="size-4" />
-              </Button>
-            </a>
+              </a>
+            </Button>
           </div>
 
           <HeroStage />
@@ -188,7 +188,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
               {season.slice(0, 8).map((entry) => {
                 const wins = entry.games.filter((game) => game.outcome === "win").length;
                 return (
-                  <div key={entry.characterKey} className="group relative rounded-lg border border-border bg-card p-4 transition-colors hover:border-border">
+                  <div key={entry.characterKey} className="group relative rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/25">
                     <p className="flex items-center gap-2 text-sm font-semibold tracking-tight">
                       <AgentAvatar name={entry.characterKey} index={hashIndex(entry.characterKey)} size="sm" />
                       {entry.characterKey}
@@ -205,7 +205,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
                       aria-label={`忘记 ${entry.characterKey} 的跨局历史`}
                       title={`让 ${entry.characterKey} 忘掉全部跨局历史，下一局从陌生人开始`}
                       onClick={() => onForgetCharacter(entry.characterKey)}
-                      className="absolute right-2 top-2 flex size-6 items-center justify-center rounded-md text-muted-foreground/40 transition-colors hover:bg-border hover:text-red-400 group-hover:text-muted-foreground/80"
+                      className="absolute right-2 top-2 flex size-6 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-border hover:text-red-400 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-foreground"
                     >
                       <Eraser className="size-3.5" />
                     </button>
@@ -329,7 +329,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
             <div className="mb-6 flex items-end justify-between">
               <div>
                 <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground/80">Archive</p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-muted-foreground">已归档的对局</h2>
+                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground/80">已归档的对局</h2>
               </div>
               <span className="nums font-mono text-xs text-muted-foreground/80">{archived.length} archives</span>
             </div>
@@ -337,7 +337,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
               {archived.slice(0, 6).map((room) => (
                 <div
                   key={room.roomId}
-                  className="flex items-center gap-4 rounded-lg border border-border/60 bg-card/50 p-4 text-left opacity-80"
+                  className="flex items-center gap-4 rounded-lg border border-border/60 bg-card/60 p-4 text-left opacity-95"
                 >
                   <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/50 text-muted-foreground/70">
                     <ScenarioIcon id={room.scenarioId} className="size-4.5" />

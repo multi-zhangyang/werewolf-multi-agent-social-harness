@@ -301,7 +301,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                           "flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors",
                           active
                             ? "border-foreground/70 bg-muted"
-                            : "border-border bg-card hover:border-border"
+                            : "border-border bg-card hover:border-foreground/30"
                         )}
                       >
                         <span className={cn("flex size-3.5 shrink-0 items-center justify-center rounded-full border", active ? "border-foreground bg-foreground" : "border-border")}>
@@ -652,7 +652,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
             </div>
 
             <div className="flex items-center justify-end gap-3 border-t border-border/60 bg-card px-6 py-4">
-              <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={submitting} onClick={() => onOpenChange(false)}>
+              <Button variant="outline" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={submitting} onClick={() => onOpenChange(false)}>
                 取消
               </Button>
               <Button
