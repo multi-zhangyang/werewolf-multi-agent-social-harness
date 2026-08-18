@@ -26,6 +26,7 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
   const [povAgentId, setPovAgentId] = useState<string>();
   const [stageView, setStageView] = useState<"arena" | "analysis">("arena");
   const [pace, setPace] = useState<0.5 | 1 | 2 | 4>(1);
+  const [jumpToAt, setJumpToAt] = useState<string>();
   const { room, connection, error, activity, toolCalls, tension, cue, timeline, pause, resume, toggleAgentPause, submitAction } = useRoom(
     roomId,
     token,
@@ -155,10 +156,10 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
           <ArenaStage room={room} cue={cue} activity={activity} />
           <main className="relative min-h-[56vh] overflow-hidden rounded-xl border border-border bg-card/40">
             <CueBanner cue={cue} finished={room.world.status === "finished"} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
-            <Conversation room={room} activity={activity} onAction={submitAction} onReplay={onReplay} />
+            <Conversation room={room} activity={activity} onAction={submitAction} onReplay={onReplay} jumpToAt={jumpToAt} />
           </main>
           <div className="hidden md:block">
-            <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} />
+            <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
           </div>
           <div className="fixed inset-x-0 bottom-3 z-30 flex justify-center md:hidden">
             <Sheet>
@@ -169,7 +170,7 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
                 </Button>
               </SheetTrigger>
               <SheetContent side="bottom" className="max-h-[70vh] overflow-y-auto rounded-t-2xl border-white/10 bg-[#0a0a0a]">
-                <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} />
+                <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
               </SheetContent>
             </Sheet>
           </div>
@@ -193,11 +194,11 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
 
         <main className="relative order-1 min-h-[72vh] overflow-hidden rounded-xl border border-border bg-card/40 lg:order-2 lg:min-h-0 lg:max-h-[calc(100vh-6rem)]">
           <CueBanner cue={cue} finished={room.world.status === "finished"} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
-          <Conversation room={room} activity={activity} onAction={submitAction} onReplay={onReplay} />
+          <Conversation room={room} activity={activity} onAction={submitAction} onReplay={onReplay} jumpToAt={jumpToAt} />
         </main>
 
         <aside className="order-3 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto">
-          <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} />
+          <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
         </aside>
       </div>
       )}

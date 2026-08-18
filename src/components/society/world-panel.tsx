@@ -22,7 +22,7 @@ interface SuspicionState {
   entries: Array<{ turn: number; accuser: string; target: string; kind: "speech" | "vote" | "outcome" }>;
 }
 
-export function WorldPanel({ room, toolCalls = [], timeline = [] }: { room: SocietyRoomSnapshot; toolCalls?: RoomConnection["toolCalls"]; timeline?: TimelineEntry[] }): ReactNode {
+export function WorldPanel({ room, toolCalls = [], timeline = [], onJumpToAt }: { room: SocietyRoomSnapshot; toolCalls?: RoomConnection["toolCalls"]; timeline?: TimelineEntry[]; onJumpToAt?: (at: string) => void }): ReactNode {
   const world = room.world;
   const names = new Map(world.agents.map((agent) => [agent.id, agent.displayName]));
 
@@ -93,7 +93,7 @@ export function WorldPanel({ room, toolCalls = [], timeline = [] }: { room: Soci
             <TimelineCard timeline={timeline} names={names} />
           </TabsContent>
           <TabsContent value="highlights" className="pt-3">
-            <HighlightsCard highlights={room.highlights ?? []} timeline={timeline} names={names} />
+            <HighlightsCard highlights={room.highlights ?? []} timeline={timeline} names={names} onJumpToAt={onJumpToAt} />
           </TabsContent>
           <TabsContent value="history" className="pt-3">
             <HistoryCard world={world} names={names} scenarioId={room.scenarioId} />
@@ -430,7 +430,7 @@ function TimelineCard({ timeline, names }: { timeline: TimelineEntry[]; names: M
  * expanded to show the surrounding timeline entries — the cause before it and
  * what followed — so the drama is clickable rather than just listed (§8.7).
  */
-function HighlightsCard({ highlights, timeline, names }: { highlights: SocietyRoomSnapshot["highlights"]; timeline: TimelineEntry[]; names: Map<string, string> }): ReactNode {
+function HighlightsCard({ highlights, timeline, names, onJumpToAt }: { highlights: SocietyRoomSnapshot["highlights"]; timeline: TimelineEntry[]; names: Map<string, string>; onJumpToAt?: (at: string) => void }): ReactNode {
   const [expandedId, setExpandedId] = useState<string>();
   if (!highlights?.length) {
     return (
@@ -461,6 +461,18 @@ function HighlightsCard({ highlights, timeline, names }: { highlights: SocietyRo
                 {!open && highlight.subtitle ? <span className="mt-0.5 block truncate text-xs leading-5 text-muted-foreground">{highlight.subtitle}</span> : null}
               </span>
               <span className="nums shrink-0 font-mono text-[10px] font-normal text-muted-foreground/60">{formatTime(highlight.at)}</span>
+              {onJumpToAt ? (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  aria-label="定位到对话"
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-sky-300/80 transition-colors hover:bg-sky-400/10 hover:text-sky-200"
+                  onClick={(e) => { e.stopPropagation(); onJumpToAt(highlight.at); }}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); onJumpToAt(highlight.at); } }}
+                >
+                  定位
+                </span>
+              ) : null}
               <span className={cn("shrink-0 text-[10px] text-muted-foreground/70 transition-transform", open && "rotate-180")}>▾</span>
             </button>
             {open ? (

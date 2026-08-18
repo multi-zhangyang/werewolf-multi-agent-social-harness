@@ -29,7 +29,7 @@ interface ConversationProps {
   onReplay?: () => void;
 }
 
-export function Conversation({ room, activity, onAction, onReplay }: ConversationProps): ReactNode {
+export function Conversation({ room, activity, onAction, onReplay, jumpToAt }: ConversationProps & { jumpToAt?: string }): ReactNode {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [draft, setDraft] = useState("");
@@ -48,6 +48,24 @@ export function Conversation({ room, activity, onAction, onReplay }: Conversatio
     }
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [entries.length, room.updatedAt, finished]);
+
+  // Jump to the message nearest a highlight timestamp (§8.3): the entry whose
+  // `at` is the last one at-or-before the target.
+  useEffect(() => {
+    if (!jumpToAt || finished) return;
+    const viewport = shellRef.current?.querySelector('[data-slot="scroll-area-viewport"]');
+    if (!viewport) return;
+    const target = Date.parse(jumpToAt);
+    let candidate: Element | undefined;
+    for (const row of viewport.querySelectorAll<HTMLElement>("[data-msg-at]")) {
+      const at = Number(row.dataset.msgAt ?? NaN);
+      if (Number.isFinite(at) && at <= target) candidate = row;
+    }
+    if (!candidate) return;
+    candidate.scrollIntoView({ behavior: "smooth", block: "center" });
+    candidate.classList.add("msg-jump-flash");
+    window.setTimeout(() => candidate?.classList.remove("msg-jump-flash"), 2200);
+  }, [jumpToAt, finished]);
 
   const human = room.player;
   const humanAction = human?.waiting ? human.actions : [];
@@ -90,7 +108,7 @@ export function Conversation({ room, activity, onAction, onReplay }: Conversatio
                 const waveTurn = previous && previous.kind === "message" && previous.message.wave !== undefined
                   && entry.message.wave !== undefined && previous.message.wave !== entry.message.wave;
                 return (
-                  <div key={entry.id} className="space-y-5">
+                  <div key={entry.id} className="space-y-5" data-msg-at={Date.parse(entry.message.createdAt) || undefined}>
                     {waveTurn ? <WaveDivider wave={entry.message.wave ?? 1} /> : null}
                     <MessageRow entry={entry} names={names} activity={activity} fresh={index >= entries.length - 3 && entry.message.turn === room.world.turn} />
                   </div>
