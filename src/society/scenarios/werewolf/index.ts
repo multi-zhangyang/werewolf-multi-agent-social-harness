@@ -42,6 +42,8 @@ interface DayRecord {
   poisonId?: string;
   shotId?: string;
   shotRole?: WerewolfRoleId;
+  /** Players the white wolf king's explosion took with them. */
+  boomVictims?: string[];
 }
 
 /** A pending death skill: hunter or wolf-king must decide a target (or hold). */
@@ -466,7 +468,7 @@ export class WerewolfWorld extends SocialWorldBase {
         return { action, detail: `${actorId}; ${duelTarget}`, result: { accepted: true, targetId: duelTarget, targetIsWolf } };
       }
       if (this.wolvesHaveParity()) {
-        this.endGame(this.factionMembers(["wolf", "wolf-king"]), "狼人已经控制投票数量，狼人阵营获胜。");
+        this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king"]), "狼人已经控制投票数量，狼人阵营获胜。");
         return { action, detail: `${actorId}; ${duelTarget}`, result: { accepted: true, targetId: duelTarget, targetIsWolf } };
       }
       this.phase = "day-vote";
@@ -603,6 +605,7 @@ export class WerewolfWorld extends SocialWorldBase {
           : "The discussion is live and people have reacted. Respond to what was actually said: answer questions directed at you, defend yourself if accused, challenge weak claims, support allies, or expose contradictions. You may also stay silent if you have nothing new to add. Do not cast a vote yet."
       };
     }
+    if (this.phase === "day-knight") return this.knightActivation();
     if (this.phase === "day-vote") return this.voteActivation();
     return this.nightActivation(aliveIds);
   }
@@ -868,17 +871,27 @@ export class WerewolfWorld extends SocialWorldBase {
     const idiotSurvives = eliminatedId !== undefined && eliminatedRole === "idiot" && !this.idiotRevealed.has(eliminatedId);
     if (idiotSurvives) this.idiotRevealed.add(eliminatedId);
     else if (eliminatedId) this.alive.delete(eliminatedId);
+    // White wolf king explosion: everyone who voted for it dies with it
+    // (its own death is the vote-out itself; the boom takes the voters).
+    const whiteWolfBoom = eliminatedId !== undefined && eliminatedRole === "white-wolf-king" && !idiotSurvives;
+    const boomVictims = whiteWolfBoom
+      ? [...this.votes].filter(([voterId, targetId]) => targetId === eliminatedId && voterId !== eliminatedId && this.alive.has(voterId)).map(([voterId]) => voterId)
+      : [];
+    for (const victimId of boomVictims) this.alive.delete(victimId);
     const record: DayRecord = {
       day: this.day,
       votes: Object.fromEntries(this.votes),
       ...(eliminatedId ? { eliminatedId, eliminatedRole } : {}),
-      ...(idiotSurvives ? { idiotSurvived: true } : {})
+      ...(idiotSurvives ? { idiotSurvived: true } : {}),
+      ...(boomVictims.length ? { boomVictims } : {})
     };
     this.history.push(record);
     const voteText = idiotSurvives
       ? `${this.profiles.get(eliminatedId!)?.displayName} 被投票放逐，亮明白痴身份——免于一死，但从此失去投票权。`
       : eliminatedId
-        ? `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。`
+        ? boomVictims.length
+          ? `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。白狼王自爆——投票给 TA 的 ${boomVictims.map((id) => this.profiles.get(id)?.displayName ?? id).join("、")} 一同出局。`
+          : `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。`
         : "本轮平票，无人被放逐。";
     for (const id of this.profiles.keys()) this.lastExperiences.set(id, `第 ${this.day} 天投票：${voteText} 投票：${[...this.votes].map(([voter, target]) => `${voter}->${target}`).join(", ")}。`);
     const voteBeat = idiotSurvives
@@ -939,6 +952,7 @@ export class WerewolfWorld extends SocialWorldBase {
       }
     } else if (eliminatedId) {
       this.pushEliminationEvents(eliminatedId, "vote", eliminatedRole);
+      for (const victimId of boomVictims) this.pushEliminationEvents(victimId, "boom", this.roles.get(victimId));
     }
     for (const [voterId, targetId] of this.votes) this.suspicion.noteVote(this.day, voterId, targetId);
     if (eliminatedId) this.suspicion.noteResolved(this.day, eliminatedId);
@@ -1046,7 +1060,7 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   /** Schedule death skills and run the shared win checks after any death. */
-  private pushEliminationEvents(targetId: string, by: "vote" | "night" | "poison" | "shot" | "knight", role: WerewolfRoleId | undefined): void {
+  private pushEliminationEvents(targetId: string, by: "vote" | "night" | "poison" | "shot" | "knight" | "boom", role: WerewolfRoleId | undefined): void {
     const targetName = this.profiles.get(targetId)?.displayName ?? targetId;
     this.pushEvent(targetId, {
       type: "eliminated",
@@ -1056,7 +1070,9 @@ export class WerewolfWorld extends SocialWorldBase {
         ? `第 ${this.day} 天：你被村庄投票放逐，身份揭晓：${roleLabel(role)}。`
         : by === "poison"
           ? `第 ${this.day} 天夜晚：女巫的毒药带走了你，身份揭晓：${roleLabel(role)}。你无法使用死亡技能。`
-          : `你被淘汰了（${by}），身份揭晓：${roleLabel(role)}。`
+          : by === "boom"
+            ? `第 ${this.day} 天：白狼王被放逐时自爆，带走了你，身份揭晓：${roleLabel(role)}。你无法使用死亡技能。`
+            : `你被淘汰了（${by}），身份揭晓：${roleLabel(role)}。`
     });
     for (const id of this.profiles.keys()) {
       if (id === targetId) continue;
@@ -1071,8 +1087,8 @@ export class WerewolfWorld extends SocialWorldBase {
         detail: `${targetName} 被淘汰（${by}），身份揭晓：${roleLabel(role)}${by === "vote" && this.votes.get(id) === targetId ? " —— 你投了 TA。" : ""}`
       });
     }
-    // Hunter / wolf-king death shots. Poisoned victims cannot shoot.
-    if (by === "poison") return;
+    // Hunter / wolf-king death shots. Poisoned or exploded victims cannot shoot.
+    if (by === "poison" || by === "boom") return;
     if (role === "hunter") this.pendingShots.push({ shooterId: targetId, kind: "hunter", cause: by });
     if (role === "wolf-king" && (by === "vote" || by === "shot")) this.pendingShots.push({ shooterId: targetId, kind: "wolf-king", cause: by });
   }
@@ -1128,7 +1144,7 @@ export class WerewolfWorld extends SocialWorldBase {
       return;
     }
     if (this.wolvesHaveParity()) {
-      this.endGame(this.factionMembers(["wolf", "wolf-king"]), this.jesterWon ? "狼人已经控制投票数量，狼人阵营获胜（小丑已单独获胜离场）。" : "狼人已经控制投票数量，狼人阵营获胜。");
+      this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king"]), this.jesterWon ? "狼人已经控制投票数量，狼人阵营获胜（小丑已单独获胜离场）。" : "狼人已经控制投票数量，狼人阵营获胜。");
       return;
     }
     this.phase = "night";
@@ -1141,11 +1157,11 @@ export class WerewolfWorld extends SocialWorldBase {
       return;
     }
     if (this.wolvesHaveParity()) {
-      this.endGame(this.factionMembers(["wolf", "wolf-king"]), this.jesterWon ? "狼人已经控制剩余局面，狼人阵营获胜（小丑已单独获胜离场）。" : "狼人已经控制剩余局面，狼人阵营获胜。");
+      this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king"]), this.jesterWon ? "狼人已经控制剩余局面，狼人阵营获胜（小丑已单独获胜离场）。" : "狼人已经控制剩余局面，狼人阵营获胜。");
       return;
     }
     if (this.day >= this.maxDays) {
-      this.endGame(this.factionMembers(["wolf", "wolf-king"]), "村庄未能在期限内找出狼人，狼人阵营获胜。");
+      this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king"]), "村庄未能在期限内找出狼人，狼人阵营获胜。");
       return;
     }
     this.day += 1;

@@ -72,6 +72,7 @@ async function run() {
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("knight"), "12P includes the knight");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("idiot"), "12P includes the idiot");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("hidden-wolf"), "12P includes the hidden wolf");
+    assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("white-wolf-king"), "12P includes the white wolf king");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 11)!.roles.includes("hidden-wolf"), "11P includes the hidden wolf");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 10)!.roles.includes("jester"), "10P includes the jester");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 7), "7P deck exists (生还者 board)");
@@ -131,9 +132,10 @@ async function run() {
       void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === idiot ? byRole("villager")[0] : idiot, reason: "t" });
     }
     world.completeActivation(vote1);
-    // A quiet night: wolves kill one villager, witch passes.
+    // A quiet night: wolves kill one villager, witch passes, guard skips.
     const night = world.activation();
-    for (const wolf of byRole("wolf")) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("villager")[0], reason: "t" });
+    for (const wolf of [...byRole("wolf"), ...byRole("wolf-king")]) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("villager")[0], reason: "t" });
+    void world.performDomainAction(byRole("guard")[0], "guard_tonight", {});
     void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
     void world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
     world.completeActivation(night!);
@@ -195,7 +197,7 @@ async function run() {
     world.completeActivation(vote);
     const night = world.activation();
     const guard = byRole("guard")[0];
-    for (const wolf of [...byRole("wolf"), ...byRole("wolf-king")]) void world.performDomainAction(wolf, "choose_night_target", { targetId: guard, reason: "t" });
+    for (const wolf of [...byRole("wolf"), ...byRole("wolf-king"), ...byRole("hidden-wolf"), ...byRole("white-wolf-king")]) void world.performDomainAction(wolf, "choose_night_target", { targetId: guard, reason: "t" });
     void world.performDomainAction(guard, "guard_tonight", { targetId: byRole("seer")[0] });
     void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
     void world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
@@ -374,6 +376,53 @@ async function run() {
     assert.equal(after.status, "running", "the game continues after a jester win");
     assert.equal((after.details.jesterWon), true, "the solo win is recorded");
     assert.ok(after.log.some((entry) => /单独获胜/.test(entry.text)), "log reports the solo win");
+  });
+
+  await check("white wolf king explodes on vote-out and takes its voters", () => {
+    const { world, byRole } = makeWerewolf(12);
+    skipDiscussion(world);
+    // 12P opens with the knight duel: pass it, then the vote opens.
+    let activation = world.activation();
+    if (activation && activation.id.endsWith(":knight")) {
+      void world.performDomainAction(byRole("knight")[0], "knight_challenge", { reason: "t" });
+      world.completeActivation(activation);
+    }
+    const vote = world.activation();
+    const wwk = byRole("white-wolf-king")[0];
+    // Seven voters line up against the white wolf king; they must die in the boom.
+    const voters = vote.actorIds.filter((id) => id !== wwk).slice(0, 7);
+    for (const actor of vote.actorIds) {
+      void world.performDomainAction(actor, "cast_day_vote", { targetId: voters.includes(actor) ? wwk : byRole("villager")[0], reason: "t" });
+    }
+    world.completeActivation(vote);
+    const after = world.snapshot();
+    assert.ok(!after.agents.find((agent) => agent.id === wwk)?.alive, "the white wolf king is voted out");
+    for (const voter of voters) {
+      assert.ok(!after.agents.find((agent) => agent.id === voter)?.alive, `voter ${voter} died in the boom`);
+    }
+    assert.ok(after.log.some((entry) => /自爆/.test(entry.text)), "log reports the explosion");
+  });
+
+  await check("white wolf king explosion silences death skills", () => {
+    const { world, byRole } = makeWerewolf(12);
+    skipDiscussion(world);
+    let activation = world.activation();
+    if (activation && activation.id.endsWith(":knight")) {
+      void world.performDomainAction(byRole("knight")[0], "knight_challenge", { reason: "t" });
+      world.completeActivation(activation);
+    }
+    const vote = world.activation();
+    const wwk = byRole("white-wolf-king")[0];
+    const hunter = byRole("hunter")[0];
+    // The hunter votes the white wolf king and must die without a shot.
+    // Seven votes land on the white wolf king so the boom actually triggers.
+    const boomVoters = vote.actorIds.filter((id) => id !== wwk).slice(0, 7);
+    for (const actor of vote.actorIds) {
+      void world.performDomainAction(actor, "cast_day_vote", { targetId: boomVoters.includes(actor) ? wwk : byRole("seer")[0], reason: "t" });
+    }
+    world.completeActivation(vote);
+    const next = world.activation();
+    assert.ok(!next?.id.includes(":shot:"), "no hunter shot after being exploded");
   });
 
   await check("wolves win at parity after a night kill", () => {
