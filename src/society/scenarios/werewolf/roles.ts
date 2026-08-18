@@ -32,6 +32,9 @@ export type WerewolfRoleId =
   | "knight"
   | "hidden-wolf"
   | "white-wolf-king"
+  | "wolf-beauty"
+  | "nightmare"
+  | "spirit-seer"
   | "villager";
 
 export type WerewolfFaction = "wolves" | "village" | "jester";
@@ -61,6 +64,24 @@ export const WEREWOLF_ROLES: Record<WerewolfRoleId, WerewolfRoleDef> = {
     label: "白狼王",
     faction: "wolves",
     objective: "像狼人一样协作夜袭；被投票放逐时自爆，带走所有投票给你的玩家。被夜杀、毒杀或决斗出局不会自爆。"
+  },
+  "wolf-beauty": {
+    id: "wolf-beauty",
+    label: "狼美人",
+    faction: "wolves",
+    objective: "像狼人一样协作夜袭；每晚可魅惑一名玩家，若你被放逐，被魅惑的玩家陪你一起出局（被夜杀或毒杀不触发）。"
+  },
+  nightmare: {
+    id: "nightmare",
+    label: "梦魇",
+    faction: "wolves",
+    objective: "像狼人一样协作夜袭；每晚诅咒一名玩家，次日白天 TA 不能投票。"
+  },
+  "spirit-seer": {
+    id: "spirit-seer",
+    label: "通灵师",
+    faction: "village",
+    objective: "每晚查验一名已死亡玩家的真实身份，用死者的信息帮助村庄找出狼人。"
   },
   "wolf-king": {
     id: "wolf-king",
@@ -161,19 +182,19 @@ export const WEREWOLF_DECKS: WerewolfDeck[] = [
   {
     playerCount: 10,
     name: "10 人进阶局",
-    description: "三狼（含狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 小丑 · 白痴 · 村民：双枪、小丑与白痴翻牌同场。",
-    roles: ["wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "guard", "jester", "idiot", "villager"]
+    description: "三狼（含狼王与梦魇）· 预言家 · 女巫 · 猎人 · 守卫 · 小丑 · 白痴 · 村民：梦魇诅咒封票、小丑与白痴翻牌同场。",
+    roles: ["wolf", "nightmare", "wolf-king", "seer", "witch", "hunter", "guard", "jester", "idiot", "villager"]
   },
   {
     playerCount: 11,
     name: "11 人标准局",
-    description: "四狼（两小狼+隐狼+狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 三村民：标准 11 人板，隐狼骗过预言家。",
-    roles: ["wolf", "wolf", "hidden-wolf", "wolf-king", "seer", "witch", "hunter", "guard", "villager", "villager", "villager"]
+    description: "四狼（隐狼+狼美人+小狼+狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 通灵师 · 双村民：狼美人魅惑陪葬、通灵师读取死者身份。",
+    roles: ["wolf", "hidden-wolf", "wolf-beauty", "wolf-king", "seer", "witch", "hunter", "guard", "spirit-seer", "villager", "villager"]
   },
   {
     playerCount: 12,
     name: "12 人多能力局",
-    description: "四狼（小狼+隐狼+白狼王+狼王）· 预言家 · 女巫 · 猎人 · 骑士 · 守卫 · 小丑 · 白痴 · 村民：预女猎守+骑士决斗+白狼王自爆+小丑白痴满配。",
+    description: "四狼（小狼+隐狼+白狼王+狼美人）· 预言家 · 女巫 · 猎人 · 骑士 · 守卫 · 小丑 · 白痴 · 村民：白狼王自爆、狼美人魅惑陪葬满配。",
     roles: ["wolf", "hidden-wolf", "white-wolf-king", "wolf-king", "seer", "witch", "hunter", "knight", "guard", "jester", "idiot", "villager"]
   }
 ];
@@ -185,11 +206,11 @@ export function deckForPlayerCount(count: number): WerewolfDeck {
 }
 
 export function isWolfRole(role: WerewolfRoleId | undefined): boolean {
-  return role === "wolf" || role === "wolf-king" || role === "hidden-wolf" || role === "white-wolf-king";
+  return role === "wolf" || role === "wolf-king" || role === "hidden-wolf" || role === "white-wolf-king" || role === "wolf-beauty" || role === "nightmare";
 }
 
 export function isVillageRole(role: WerewolfRoleId | undefined): boolean {
-  return role === "seer" || role === "witch" || role === "hunter" || role === "guard" || role === "idiot" || role === "knight" || role === "villager";
+  return role === "seer" || role === "witch" || role === "hunter" || role === "guard" || role === "idiot" || role === "knight" || role === "spirit-seer" || role === "villager";
 }
 
 export function roleLabel(role: WerewolfRoleId | undefined): string {

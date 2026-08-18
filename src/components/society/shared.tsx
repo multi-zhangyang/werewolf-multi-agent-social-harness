@@ -227,6 +227,9 @@ export function roleLabelZh(role: string | undefined): string {
     "wolf-king": "狼王",
     "hidden-wolf": "隐狼",
     "white-wolf-king": "白狼王",
+    "wolf-beauty": "狼美人",
+    nightmare: "梦魇",
+    "spirit-seer": "通灵师",
     seer: "预言家",
     witch: "女巫",
     hunter: "猎人",
@@ -250,8 +253,8 @@ export function roleLabelZh(role: string | undefined): string {
 /** Faction tint for a role badge: red for deceivers, green for loyal, gold for seers. */
 export function roleTintClass(role: string | undefined): string {
   if (!role) return "border-border bg-card text-muted-foreground";
-  const red = ["狼人", "狼王", "隐狼", "白狼王", "刺客", "莫德雷德", "莫甘娜", "奥伯伦", "爪牙", "wolf", "wolf-king", "hidden-wolf", "white-wolf-king", "assassin", "mordred", "morgana", "oberon", "minion"];
-  const gold = ["预言家", "梅林", "派西维尔", "seer", "merlin", "percival"];
+  const red = ["狼人", "狼王", "隐狼", "白狼王", "狼美人", "梦魇", "刺客", "莫德雷德", "莫甘娜", "奥伯伦", "爪牙", "wolf", "wolf-king", "hidden-wolf", "white-wolf-king", "wolf-beauty", "nightmare", "assassin", "mordred", "morgana", "oberon", "minion"];
+  const gold = ["预言家", "通灵师", "梅林", "派西维尔", "seer", "spirit-seer", "merlin", "percival"];
   const violet = ["小丑", "jester"];
   if (red.includes(role)) return "border-rose-400/30 bg-rose-400/10 text-rose-300";
   if (gold.includes(role)) return "border-amber-400/30 bg-amber-400/10 text-amber-300";

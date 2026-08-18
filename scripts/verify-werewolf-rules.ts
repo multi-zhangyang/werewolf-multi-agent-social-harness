@@ -73,6 +73,9 @@ async function run() {
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("idiot"), "12P includes the idiot");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("hidden-wolf"), "12P includes the hidden wolf");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("white-wolf-king"), "12P includes the white wolf king");
+    assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 11)!.roles.includes("wolf-beauty"), "11P includes the wolf beauty");
+    assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 11)!.roles.includes("spirit-seer"), "11P includes the spirit seer");
+    assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 10)!.roles.includes("nightmare"), "10P includes the nightmare");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 11)!.roles.includes("hidden-wolf"), "11P includes the hidden wolf");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 10)!.roles.includes("jester"), "10P includes the jester");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 7), "7P deck exists (生还者 board)");
@@ -134,7 +137,8 @@ async function run() {
     world.completeActivation(vote1);
     // A quiet night: wolves kill one villager, witch passes, guard skips.
     const night = world.activation();
-    for (const wolf of [...byRole("wolf"), ...byRole("wolf-king")]) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("villager")[0], reason: "t" });
+    for (const wolf of [...byRole("wolf"), ...byRole("wolf-king"), ...byRole("nightmare")]) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("villager")[0], reason: "t" });
+    if (byRole("nightmare")[0]) void world.performDomainAction(byRole("nightmare")[0], "dream_curse", {});
     void world.performDomainAction(byRole("guard")[0], "guard_tonight", {});
     void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
     void world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
@@ -423,6 +427,95 @@ async function run() {
     world.completeActivation(vote);
     const next = world.activation();
     assert.ok(!next?.id.includes(":shot:"), "no hunter shot after being exploded");
+  });
+
+  await check("nightmare curse blocks the next day's vote", async () => {
+    const { world, byRole } = makeWerewolf(10);
+    skipDiscussion(world);
+    const vote1 = world.activation();
+    const villager = byRole("villager")[0];
+    for (const actor of vote1.actorIds) {
+      void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === villager ? byRole("seer")[0] : villager, reason: "t" });
+    }
+    world.completeActivation(vote1);
+    const night = world.activation();
+    const nightmare = byRole("nightmare")[0];
+    for (const wolf of [...byRole("wolf"), ...byRole("wolf-king"), nightmare]) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("seer")[0], reason: "t" });
+    void world.performDomainAction(nightmare, "dream_curse", { targetId: byRole("witch")[0] });
+    void world.performDomainAction(byRole("guard")[0], "guard_tonight", {});
+    void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
+    void world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
+    const nightResult = world.completeActivation(night!);
+    console.log("[nightmare test] night:", night?.id, "actors:", night?.actorIds, "complete:", JSON.stringify(nightResult));
+    skipDiscussion(world);
+    const vote2 = world.activation();
+    console.log("[nightmare test] vote2:", vote2?.id);
+    assert.ok(vote2 && vote2.id.endsWith(":vote"), "the next day votes open");
+    const cursed = byRole("witch")[0];
+    assert.ok(!vote2.actorIds.includes(cursed), "the cursed witch is not asked to vote");
+    await assert.rejects(
+      world.performDomainAction(cursed, "cast_day_vote", { targetId: byRole("seer")[0], reason: "t" }),
+      /NIGHTMARE_CURSED/,
+      "the cursed witch cannot vote"
+    );
+  });
+
+  await check("wolf beauty's charmed companion dies with her on vote-out", () => {
+    const { world, byRole } = makeWerewolf(11);
+    skipDiscussion(world);
+    const vote1 = world.activation();
+    const target = byRole("villager")[0];
+    for (const actor of vote1.actorIds) {
+      void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === target ? byRole("seer")[0] : target, reason: "t" });
+    }
+    world.completeActivation(vote1);
+    const night = world.activation();
+    const beauty = byRole("wolf-beauty")[0];
+    for (const wolf of [...byRole("wolf"), ...byRole("hidden-wolf"), ...byRole("wolf-king"), beauty]) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("seer")[0], reason: "t" });
+    void world.performDomainAction(beauty, "charm_target", { targetId: byRole("guard")[0] });
+    void world.performDomainAction(byRole("guard")[0], "guard_tonight", {});
+    void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
+    void world.performDomainAction(byRole("spirit-seer")[0], "investigate_dead_identity", { targetId: byRole("villager")[0] });
+    void world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
+    world.completeActivation(night!);
+    skipDiscussion(world);
+    const vote2 = world.activation();
+    assert.ok(vote2 && vote2.id.endsWith(":vote"), "the next day votes open");
+    const guard = byRole("guard")[0];
+    for (const actor of vote2.actorIds) {
+      void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === beauty ? guard : beauty, reason: "t" });
+    }
+    world.completeActivation(vote2);
+    const after = world.snapshot();
+    assert.ok(!after.agents.find((agent) => agent.id === beauty)?.alive, "the wolf beauty is voted out");
+    assert.ok(!after.agents.find((agent) => agent.id === guard)?.alive, "the charmed guard dies with her");
+    assert.ok(after.log.some((entry) => /魅惑/.test(entry.text)), "the charm is logged");
+  });
+
+  await check("spirit seer reads a dead player's true role", async () => {
+    const { world, byRole } = makeWerewolf(11);
+    skipDiscussion(world);
+    const vote1 = world.activation();
+    const target = byRole("villager")[0];
+    for (const actor of vote1.actorIds) {
+      void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === target ? byRole("seer")[0] : target, reason: "t" });
+    }
+    world.completeActivation(vote1);
+    const night = world.activation();
+    const spirit = byRole("spirit-seer")[0];
+    for (const wolf of [...byRole("wolf"), ...byRole("hidden-wolf"), ...byRole("wolf-king")]) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("witch")[0], reason: "t" });
+    void world.performDomainAction(byRole("guard")[0], "guard_tonight", {});
+    void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
+    void world.performDomainAction(spirit, "investigate_dead_identity", { targetId: target });
+    void world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
+    world.completeActivation(night!);
+    const after = world.snapshot();
+    assert.ok(!after.agents.find((agent) => agent.id === target)?.alive, "the dead player stays dead");
+    await assert.rejects(
+      world.performDomainAction(spirit, "investigate_dead_identity", { targetId: byRole("wolf")[0] }),
+      /SPIRIT_INVESTIGATION_ALREADY_USED/,
+      "one communion per night"
+    );
   });
 
   await check("wolves win at parity after a night kill", () => {

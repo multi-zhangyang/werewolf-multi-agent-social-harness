@@ -549,7 +549,7 @@ export interface PlayerActionSpec {
   max?: number;
   step?: number;
   channels?: SocialChannel[];
-  targetFilter?: "any-living" | "other-living" | "non-wolf";
+  targetFilter?: "any-living" | "other-living" | "non-wolf" | "any-dead";
 }
 
 export interface WorldActionCommit {

@@ -44,6 +44,8 @@ interface DayRecord {
   shotRole?: WerewolfRoleId;
   /** Players the white wolf king's explosion took with them. */
   boomVictims?: string[];
+  /** The wolf beauty's charmed companion, if she was voted out. */
+  charmVictim?: string;
 }
 
 /** A pending death skill: hunter or wolf-king must decide a target (or hold). */
@@ -91,6 +93,13 @@ export class WerewolfWorld extends SocialWorldBase {
   private readonly idiotRevealed = new Set<string>();
   /** The knight's one daytime duel: once per game, before the vote. */
   private knightUsed = false;
+  /** Nightmare's curse: the cursed player cannot vote the next day. */
+  private nightmareCurse: string | null | undefined;
+  /** Wolf beauty's charm: if she is voted out, her charmed target dies with her. */
+  private charmTarget: string | null | undefined;
+  /** Spirit seer's knowledge: dead players' true roles, per spirit seer. */
+  private readonly spiritKnowledge = new Map<string, Map<string, WerewolfRoleId>>();
+  private readonly spiritTargets = new Map<string, string>();
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
@@ -103,6 +112,7 @@ export class WerewolfWorld extends SocialWorldBase {
       this.roles.set(id, role);
       this.alive.add(id);
       if (role === "seer") this.seerKnowledge.set(id, new Map());
+      if (role === "spirit-seer") this.spiritKnowledge.set(id, new Map());
     });
     this.discussion = this.createDiscussion();
     this.addLog(`身份已经分配（${deck.name}）。公开讨论开始，所有承诺都可能是策略。`, 1);
@@ -134,7 +144,11 @@ export class WerewolfWorld extends SocialWorldBase {
       pendingShots: structuredClone(this.pendingShots),
       jesterWon: this.jesterWon,
       idiotRevealed: [...this.idiotRevealed],
-      knightUsed: this.knightUsed
+      knightUsed: this.knightUsed,
+      nightmareCurse: this.nightmareCurse ?? null,
+      charmTarget: this.charmTarget ?? null,
+      spiritKnowledge: [...this.spiritKnowledge.entries()].map(([seerId, knowledge]) => [seerId, [...knowledge.entries()]] as [string, Array<[string, WerewolfRoleId]>]),
+      spiritTargets: this.mapEntries(this.spiritTargets)
     };
   }
 
@@ -147,6 +161,8 @@ export class WerewolfWorld extends SocialWorldBase {
       winners: string[]; outcome: string; antidoteAvailable: boolean; poisonAvailable: boolean;
       witchSaveId: string | null; witchPoisonId: string | null; witchActed: boolean;
       guardTargetId: string | null; lastGuardTargetId: string | null; pendingShots: PendingShot[]; jesterWon: boolean; idiotRevealed: string[]; knightUsed: boolean;
+      nightmareCurse: string | null; charmTarget: string | null;
+      spiritKnowledge: Array<[string, Array<[string, WerewolfRoleId]>]>; spiritTargets: Array<[string, string]>;
     }> | undefined;
     if (!s) return;
     this.day = Number(s.day ?? 1);
@@ -176,6 +192,13 @@ export class WerewolfWorld extends SocialWorldBase {
     this.witchSaveId = s.witchSaveId ?? undefined;
     this.witchPoisonId = s.witchPoisonId ?? undefined;
     this.witchActed = Boolean(s.witchActed);
+    this.nightmareCurse = s.nightmareCurse ?? undefined;
+    this.charmTarget = s.charmTarget ?? undefined;
+    this.spiritKnowledge.clear();
+    for (const [seerId, knowledge] of s.spiritKnowledge ?? []) {
+      this.spiritKnowledge.set(seerId, new Map(knowledge ?? []));
+    }
+    this.fillMap(this.spiritTargets, s.spiritTargets);
     this.guardTargetId = s.guardTargetId ?? undefined;
     this.lastGuardTargetId = s.lastGuardTargetId ?? undefined;
     this.pendingShots.length = 0;
@@ -216,12 +239,25 @@ export class WerewolfWorld extends SocialWorldBase {
       ? [...this.roles].filter(([id, candidateRole]) => id !== actorId && isWolfRole(candidateRole)).map(([id]) => id)
       : [];
     const knowledge = role === "seer" ? Object.fromEntries(this.seerKnowledge.get(actorId) ?? []) : {};
+    const spiritKnowledge = role === "spirit-seer" ? Object.fromEntries(this.spiritKnowledge.get(actorId) ?? []) : {};
     const wolfTarget = this.currentWolfTarget();
     const privateContext: string[] = [
       `Your hidden role: ${roleLabel(role)}.`,
       `Your objective: ${this.rolesObjective(role)}`,
       ...(teammates.length ? [`Wolf teammates (you know each other): ${teammates.join(", ")}.`] : []),
       ...(role === "seer" ? [`Private investigations: ${Object.entries(knowledge).map(([id, knownRole]) => `${id}=${knownRole}`).join(", ") || "none"}.`] : []),
+      ...(role === "spirit-seer" ? [
+        `Private communions: ${Object.entries(spiritKnowledge).map(([id, knownRole]) => `${id}=${knownRole}`).join(", ") || "none"}.`,
+        "Rules: 每晚查验一名已死亡玩家的真实身份；死者身份不会变化。"
+      ] : []),
+      ...(role === "nightmare" ? [
+        `Tonight's curse: ${this.nightmareCurse === undefined ? "not decided" : this.nightmareCurse === null ? "skipped" : this.nightmareCurse}.`,
+        "Rules: 被诅咒的玩家明天白天不能投票。"
+      ] : []),
+      ...(role === "wolf-beauty" ? [
+        `Tonight's charm: ${this.charmTarget === undefined ? "not decided" : this.charmTarget === null ? "skipped" : this.charmTarget}.`,
+        "Rules: 你被投票放逐时，被魅惑的玩家陪你一起出局；被夜杀或毒杀不触发。"
+      ] : []),
       ...(role === "witch" ? [
         `Potions: 解药 ${this.antidoteAvailable ? "可用" : "已用"} · 毒药 ${this.poisonAvailable ? "可用" : "已用"}.`,
         ...(this.phase === "night" && wolfTarget ? [`Tonight the wolves are attacking: ${wolfTarget}.`] : []),
@@ -423,6 +459,36 @@ export class WerewolfWorld extends SocialWorldBase {
           targetFilter: "any-living"
         }];
       }
+      if (role === "nightmare" && this.nightmareCurse === undefined) {
+        return [{
+          name: "dream_curse",
+          label: "诅咒目标",
+          description: "诅咒一名存活玩家，次日白天 TA 不能投票；也可以跳过。",
+          kind: "target",
+          field: "targetId",
+          targetFilter: "any-living"
+        }];
+      }
+      if (role === "wolf-beauty" && this.charmTarget === undefined) {
+        return [{
+          name: "charm_target",
+          label: "魅惑目标",
+          description: "魅惑一名存活玩家；若你被放逐，TA 会陪你出局；也可以跳过或改换目标。",
+          kind: "target",
+          field: "targetId",
+          targetFilter: "any-living"
+        }];
+      }
+      if (role === "spirit-seer" && !this.spiritTargets.has(actorId)) {
+        return [{
+          name: "investigate_dead_identity",
+          label: "通灵查验",
+          description: "查验一名已死亡玩家的真实身份；结果仅你可见。",
+          kind: "target",
+          field: "targetId",
+          targetFilter: "any-dead"
+        }];
+      }
     }
     return [];
   }
@@ -468,7 +534,7 @@ export class WerewolfWorld extends SocialWorldBase {
         return { action, detail: `${actorId}; ${duelTarget}`, result: { accepted: true, targetId: duelTarget, targetIsWolf } };
       }
       if (this.wolvesHaveParity()) {
-        this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king"]), "狼人已经控制投票数量，狼人阵营获胜。");
+        this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king", "wolf-beauty", "nightmare"]), "狼人已经控制投票数量，狼人阵营获胜。");
         return { action, detail: `${actorId}; ${duelTarget}`, result: { accepted: true, targetId: duelTarget, targetIsWolf } };
       }
       this.phase = "day-vote";
@@ -477,6 +543,7 @@ export class WerewolfWorld extends SocialWorldBase {
     }
     if (action === "cast_day_vote") {
       if (this.idiotRevealed.has(actorId)) throw new Error("IDIOT_CANNOT_VOTE: 白痴翻牌后失去投票权，只能发言。");
+      if (this.nightmareCurse === actorId) throw new Error("NIGHTMARE_CURSED: 梦魇的诅咒让你今天无法投票。");
       if (!targetId) throw new Error("TARGET_REQUIRED: Select a participant.");
       this.assertLivingTarget(targetId);
       if (this.phase !== "day-vote") throw new Error("VOTE_NOT_OPEN: Daytime voting is not open.");
@@ -509,6 +576,47 @@ export class WerewolfWorld extends SocialWorldBase {
       this.seerKnowledge.get(actorId)?.set(targetId, perceivedRole);
       this.emitUpdate();
       return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId, role: perceivedRole } };
+    }
+    if (action === "investigate_dead_identity") {
+      if (this.phase !== "night" || role !== "spirit-seer") throw new Error("SPIRIT_INVESTIGATION_FORBIDDEN: Only a living spirit seer can commune with the dead at night.");
+      if (this.spiritTargets.has(actorId)) throw new Error("SPIRIT_INVESTIGATION_ALREADY_USED: Your communion for tonight is fixed.");
+      if (!targetId) throw new Error("TARGET_REQUIRED: Select a participant.");
+      if (!this.profiles.has(targetId)) throw new Error("TARGET_NOT_FOUND: Unknown participant.");
+      if (this.alive.has(targetId)) throw new Error("INVALID_SPIRIT_TARGET: The spirit seer reads the dead, not the living.");
+      if (targetId === actorId) throw new Error("INVALID_SPIRIT_TARGET: You cannot commune with yourself.");
+      const targetRole = this.roles.get(targetId)!;
+      this.spiritTargets.set(actorId, targetId);
+      this.spiritKnowledge.get(actorId)?.set(targetId, targetRole);
+      this.emitUpdate();
+      return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId, role: targetRole } };
+    }
+    if (action === "dream_curse") {
+      if (this.phase !== "night" || role !== "nightmare") throw new Error("NIGHTMARE_FORBIDDEN: Only the living nightmare may curse at night.");
+      if (this.nightmareCurse !== undefined) throw new Error("NIGHTMARE_CURSE_LOCKED: Your curse for tonight is fixed.");
+      if (targetId) {
+        this.assertLivingTarget(targetId);
+        if (targetId === actorId) throw new Error("INVALID_CURSE_TARGET: You may not curse yourself.");
+        if (isWolfRole(this.roles.get(targetId))) throw new Error("INVALID_CURSE_TARGET: Curse a non-wolf.");
+        this.nightmareCurse = targetId;
+      } else {
+        this.nightmareCurse = null;
+      }
+      this.emitUpdate();
+      return { action, detail: targetId ?? "skip", result: { accepted: true, targetId } };
+    }
+    if (action === "charm_target") {
+      if (this.phase !== "night" || role !== "wolf-beauty") throw new Error("CHARM_FORBIDDEN: Only the living wolf beauty may charm at night.");
+      if (this.charmTarget !== undefined) throw new Error("CHARM_LOCKED: Your charm for tonight is fixed.");
+      if (targetId) {
+        this.assertLivingTarget(targetId);
+        if (targetId === actorId) throw new Error("INVALID_CHARM_TARGET: You may not charm yourself.");
+        if (isWolfRole(this.roles.get(targetId))) throw new Error("INVALID_CHARM_TARGET: Charm a non-wolf.");
+        this.charmTarget = targetId;
+      } else {
+        this.charmTarget = null;
+      }
+      this.emitUpdate();
+      return { action, detail: targetId ?? "skip", result: { accepted: true, targetId } };
     }
     if (action === "witch_night_choice") {
       if (this.phase !== "night" || role !== "witch") throw new Error("WITCH_ACTION_FORBIDDEN: Only the living witch may use potions at night.");
@@ -630,7 +738,7 @@ export class WerewolfWorld extends SocialWorldBase {
     return {
       id: `ww:${this.day}:vote`,
       label: `第 ${this.day} 天投票`,
-      actorIds: [...this.alive].filter((id) => !this.idiotRevealed.has(id)),
+      actorIds: [...this.alive].filter((id) => !this.idiotRevealed.has(id) && id !== this.nightmareCurse),
       mode: "parallel",
       instructionFor: () => "The discussion is closed. You must call cast_day_vote exactly once against a living participant. Consider not only hidden roles but how every faction benefits from being suspected or eliminated."
     };
@@ -640,8 +748,11 @@ export class WerewolfWorld extends SocialWorldBase {
   private nightActivation(aliveIds: string[]): WorldActivation {
     const ordered: string[] = [];
     for (const id of aliveIds) if (isWolfRole(this.roles.get(id)) && !this.wolfTargets.has(id)) ordered.push(id);
+    for (const id of aliveIds) if (this.roles.get(id) === "nightmare" && this.nightmareCurse === undefined) ordered.push(id);
+    for (const id of aliveIds) if (this.roles.get(id) === "wolf-beauty" && this.charmTarget === undefined) ordered.push(id);
     for (const id of aliveIds) if (this.roles.get(id) === "guard" && !this.guardTargetId) ordered.push(id);
     for (const id of aliveIds) if (this.roles.get(id) === "seer" && !this.seerTargets.has(id)) ordered.push(id);
+    for (const id of aliveIds) if (this.roles.get(id) === "spirit-seer" && !this.spiritTargets.has(id)) ordered.push(id);
     for (const id of aliveIds) {
       if (this.roles.get(id) === "witch" && !this.witchChoiceMade() && (this.antidoteAvailable || this.poisonAvailable)) ordered.push(id);
     }
@@ -653,8 +764,11 @@ export class WerewolfWorld extends SocialWorldBase {
       instructionFor: (actorId) => {
         const role = this.roles.get(actorId);
         if (isWolfRole(role)) return "Use the private team channel if coordination is useful, then call choose_night_target exactly once against a living non-wolf.";
+        if (role === "nightmare") return "Call dream_curse once: curse one living non-wolf so they cannot vote tomorrow, or omit targetId to skip.";
+        if (role === "wolf-beauty") return "Call charm_target once: charm one living non-wolf so they die with you if you are voted out, or omit targetId to skip.";
         if (role === "guard") return "Call guard_tonight once: protect a player from the wolf kill, or omit targetId to skip. Remember you cannot guard the same target two nights in a row.";
         if (role === "seer") return "Call investigate_identity exactly once on another living participant. Keep the result private unless revealing it later serves your strategy.";
+        if (role === "spirit-seer") return "Call investigate_dead_identity exactly once on a dead participant to read their true role. Keep it private unless revealing it serves your strategy.";
         return "Call witch_night_choice exactly once: save the wolf victim with the antidote (not yourself), poison one living player, or pass. You cannot use both potions in the same night.";
       }
     };
@@ -832,6 +946,9 @@ export class WerewolfWorld extends SocialWorldBase {
     if (this.phase === "day-vote") return this.idiotRevealed.has(actorId) ? ["remember_experience"] : ["cast_day_vote", "remember_experience"];
     if (isWolfRole(role)) return ["communicate:team", "choose_night_target"];
     if (role === "seer") return ["investigate_identity", "remember_experience"];
+    if (role === "spirit-seer") return ["investigate_dead_identity", "remember_experience"];
+    if (role === "nightmare") return ["communicate:team", "choose_night_target", "dream_curse"];
+    if (role === "wolf-beauty") return ["communicate:team", "choose_night_target", "charm_target"];
     if (role === "witch") return ["witch_night_choice", "remember_experience"];
     if (role === "guard") return ["guard_tonight", "remember_experience"];
     return [];
@@ -846,6 +963,9 @@ export class WerewolfWorld extends SocialWorldBase {
     if (isWolfRole(role)) return this.wolfTargets.has(actorId);
     if (role === "guard") return Boolean(this.guardTargetId);
     if (role === "seer") return this.seerTargets.has(actorId);
+    if (role === "spirit-seer") return this.spiritTargets.has(actorId);
+    if (role === "nightmare") return this.nightmareCurse !== undefined;
+    if (role === "wolf-beauty") return this.charmTarget !== undefined;
     if (role === "witch") return this.witchChoiceMade() || (!this.antidoteAvailable && !this.poisonAvailable);
     return true;
   }
@@ -878,12 +998,18 @@ export class WerewolfWorld extends SocialWorldBase {
       ? [...this.votes].filter(([voterId, targetId]) => targetId === eliminatedId && voterId !== eliminatedId && this.alive.has(voterId)).map(([voterId]) => voterId)
       : [];
     for (const victimId of boomVictims) this.alive.delete(victimId);
+    // Wolf beauty's charm: the charmed player dies with her on a vote-out.
+    const charmVictim = eliminatedRole === "wolf-beauty" && !idiotSurvives && this.charmTarget
+      ? (this.alive.has(this.charmTarget) ? this.charmTarget : undefined)
+      : undefined;
+    if (charmVictim) this.alive.delete(charmVictim);
     const record: DayRecord = {
       day: this.day,
       votes: Object.fromEntries(this.votes),
       ...(eliminatedId ? { eliminatedId, eliminatedRole } : {}),
       ...(idiotSurvives ? { idiotSurvived: true } : {}),
-      ...(boomVictims.length ? { boomVictims } : {})
+      ...(boomVictims.length ? { boomVictims } : {}),
+      ...(charmVictim ? { charmVictim } : {})
     };
     this.history.push(record);
     const voteText = idiotSurvives
@@ -891,7 +1017,9 @@ export class WerewolfWorld extends SocialWorldBase {
       : eliminatedId
         ? boomVictims.length
           ? `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。白狼王自爆——投票给 TA 的 ${boomVictims.map((id) => this.profiles.get(id)?.displayName ?? id).join("、")} 一同出局。`
-          : `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。`
+          : charmVictim
+            ? `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。狼美人的魅惑——${this.profiles.get(charmVictim)?.displayName} 陪葬。`
+            : `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。`
         : "本轮平票，无人被放逐。";
     for (const id of this.profiles.keys()) this.lastExperiences.set(id, `第 ${this.day} 天投票：${voteText} 投票：${[...this.votes].map(([voter, target]) => `${voter}->${target}`).join(", ")}。`);
     const voteBeat = idiotSurvives
@@ -953,10 +1081,13 @@ export class WerewolfWorld extends SocialWorldBase {
     } else if (eliminatedId) {
       this.pushEliminationEvents(eliminatedId, "vote", eliminatedRole);
       for (const victimId of boomVictims) this.pushEliminationEvents(victimId, "boom", this.roles.get(victimId));
+      if (charmVictim) this.pushEliminationEvents(charmVictim, "charm", this.roles.get(charmVictim));
     }
     for (const [voterId, targetId] of this.votes) this.suspicion.noteVote(this.day, voterId, targetId);
     if (eliminatedId) this.suspicion.noteResolved(this.day, eliminatedId);
     this.votes.clear();
+    // The nightmare's curse expires once the day's vote is settled.
+    this.nightmareCurse = undefined;
 
     if (eliminatedRole === "jester") {
       // The jester wins alone and leaves; the main game continues.
@@ -1049,6 +1180,7 @@ export class WerewolfWorld extends SocialWorldBase {
 
     this.wolfTargets.clear();
     this.seerTargets.clear();
+    this.spiritTargets.clear();
     this.witchSaveId = undefined;
     this.witchPoisonId = undefined;
     this.witchActed = false;
@@ -1060,7 +1192,7 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   /** Schedule death skills and run the shared win checks after any death. */
-  private pushEliminationEvents(targetId: string, by: "vote" | "night" | "poison" | "shot" | "knight" | "boom", role: WerewolfRoleId | undefined): void {
+  private pushEliminationEvents(targetId: string, by: "vote" | "night" | "poison" | "shot" | "knight" | "boom" | "charm", role: WerewolfRoleId | undefined): void {
     const targetName = this.profiles.get(targetId)?.displayName ?? targetId;
     this.pushEvent(targetId, {
       type: "eliminated",
@@ -1072,7 +1204,9 @@ export class WerewolfWorld extends SocialWorldBase {
           ? `第 ${this.day} 天夜晚：女巫的毒药带走了你，身份揭晓：${roleLabel(role)}。你无法使用死亡技能。`
           : by === "boom"
             ? `第 ${this.day} 天：白狼王被放逐时自爆，带走了你，身份揭晓：${roleLabel(role)}。你无法使用死亡技能。`
-            : `你被淘汰了（${by}），身份揭晓：${roleLabel(role)}。`
+            : by === "charm"
+              ? `第 ${this.day} 天：你被狼美人魅惑，随她一同出局，身份揭晓：${roleLabel(role)}。你无法使用死亡技能。`
+              : `你被淘汰了（${by}），身份揭晓：${roleLabel(role)}。`
     });
     for (const id of this.profiles.keys()) {
       if (id === targetId) continue;
@@ -1088,7 +1222,7 @@ export class WerewolfWorld extends SocialWorldBase {
       });
     }
     // Hunter / wolf-king death shots. Poisoned or exploded victims cannot shoot.
-    if (by === "poison" || by === "boom") return;
+    if (by === "poison" || by === "boom" || by === "charm") return;
     if (role === "hunter") this.pendingShots.push({ shooterId: targetId, kind: "hunter", cause: by });
     if (role === "wolf-king" && (by === "vote" || by === "shot")) this.pendingShots.push({ shooterId: targetId, kind: "wolf-king", cause: by });
   }
@@ -1144,7 +1278,7 @@ export class WerewolfWorld extends SocialWorldBase {
       return;
     }
     if (this.wolvesHaveParity()) {
-      this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king"]), this.jesterWon ? "狼人已经控制投票数量，狼人阵营获胜（小丑已单独获胜离场）。" : "狼人已经控制投票数量，狼人阵营获胜。");
+      this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king", "wolf-beauty", "nightmare"]), this.jesterWon ? "狼人已经控制投票数量，狼人阵营获胜（小丑已单独获胜离场）。" : "狼人已经控制投票数量，狼人阵营获胜。");
       return;
     }
     this.phase = "night";
@@ -1157,11 +1291,11 @@ export class WerewolfWorld extends SocialWorldBase {
       return;
     }
     if (this.wolvesHaveParity()) {
-      this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king"]), this.jesterWon ? "狼人已经控制剩余局面，狼人阵营获胜（小丑已单独获胜离场）。" : "狼人已经控制剩余局面，狼人阵营获胜。");
+      this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king", "wolf-beauty", "nightmare"]), this.jesterWon ? "狼人已经控制剩余局面，狼人阵营获胜（小丑已单独获胜离场）。" : "狼人已经控制剩余局面，狼人阵营获胜。");
       return;
     }
     if (this.day >= this.maxDays) {
-      this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king"]), "村庄未能在期限内找出狼人，狼人阵营获胜。");
+      this.endGame(this.factionMembers(["wolf", "wolf-king", "hidden-wolf", "white-wolf-king", "wolf-beauty", "nightmare"]), "村庄未能在期限内找出狼人，狼人阵营获胜。");
       return;
     }
     this.day += 1;
