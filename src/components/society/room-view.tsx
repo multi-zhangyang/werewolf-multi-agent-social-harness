@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, Check, Copy, Clapperboard, Flame, ListOrdered, Pause, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -46,6 +46,17 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
       setViewerMode("postgame");
     }
   }, [room?.status, viewerMode, autoSwitchedToPostgame]);
+
+  // High-tension moments snap playback back to 1× so nobody misses the beat
+  // while skipping ahead (§8.9).
+  const previousTension = useRef(tension?.level);
+  useEffect(() => {
+    const level = tension?.level;
+    if ((level === "tense" || level === "climax") && previousTension.current !== level) {
+      setPace(1);
+    }
+    previousTension.current = level;
+  }, [tension?.level]);
   if (!room) {
     return (
       <div className="flex min-h-screen flex-col">
