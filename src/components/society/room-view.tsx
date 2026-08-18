@@ -240,7 +240,11 @@ function ArenaStage({ room, cue, activity }: {
     <section className="rounded-xl border border-border bg-card/40 px-4 py-3">
       <div className="mb-2 flex items-center justify-between px-1">
         <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-foreground/65">舞台席位</p>
-        <span className="nums font-mono text-[11px] text-muted-foreground">{room.participants.filter((participant) => participant.alive).length} 人存活</span>
+        <span className="nums font-mono text-[11px] text-muted-foreground">
+          {room.participants.some((participant) => !participant.alive)
+            ? `${room.participants.filter((participant) => participant.alive).length} 人存活`
+            : `${room.participants.length} 人在场`}
+        </span>
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {room.participants.map((participant, index) => {

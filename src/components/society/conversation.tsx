@@ -145,20 +145,38 @@ function ResultCard({ room, onReplay }: { room: SocietyRoomSnapshot; onReplay?: 
         .slice(0, 1)
         .map((p) => p.profile.id);
   const lastLog = world.log.at(-1)?.text;
+  const scored = room.participants
+    .filter((participant) => participant.score !== undefined)
+    .sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
   const revealed = room.participants.filter((p) => p.role);
   const faction = factionTitle(room, winners);
   return (
     <div className="reveal-up mb-8 overflow-hidden rounded-xl border border-amber-400/25 bg-gradient-to-b from-muted/60 to-card shadow-lg">
       <div className="flex items-center gap-2 border-b border-border/60 px-5 py-3">
         <Trophy className="size-4 text-amber-400" />
-        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-amber-300/90">本局终章</p>
+        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-amber-300/90">本局结算</p>
       </div>
       <div className="px-5 py-6">
         <p className="enter-stage text-3xl font-semibold tracking-tight text-foreground" style={{ animationDelay: "80ms" }}>{faction}</p>
         <p className="enter-stage mt-1.5 text-sm text-foreground/80" style={{ animationDelay: "200ms" }}>
           {leaders.length ? `胜者：${leaders.map((id) => names.get(id) ?? id).join("、")}` : ""}
         </p>
-        {lastLog ? <p className="enter-stage mt-3 text-sm leading-6 text-muted-foreground" style={{ animationDelay: "320ms" }}>{lastLog}</p> : null}
+        {lastLog ? (
+          <p className="enter-stage mt-3 text-sm leading-6 text-muted-foreground" style={{ animationDelay: "320ms" }}>
+            <span className="mr-1 rounded border border-border bg-muted px-1 py-px text-[10px] text-muted-foreground/80">赛果记录</span>
+            {lastLog}
+          </p>
+        ) : null}
+        {scored.length ? (
+          <p className="enter-stage nums mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground" style={{ animationDelay: "380ms" }}>
+            <span className="text-muted-foreground/70">最终得分</span>
+            {scored.map((entry, index) => (
+              <span key={entry.profile.id} className={index === 0 ? "font-medium text-amber-300" : ""}>
+                {names.get(entry.profile.id) ?? entry.profile.id} {entry.score}
+              </span>
+            ))}
+          </p>
+        ) : null}
         {revealed.length ? (
           <div className="enter-stage mt-5" style={{ animationDelay: "440ms" }}>
             <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">身份揭晓</p>
