@@ -30,6 +30,7 @@ export type WerewolfRoleId =
   | "jester"
   | "idiot"
   | "knight"
+  | "hidden-wolf"
   | "villager";
 
 export type WerewolfFaction = "wolves" | "village" | "jester";
@@ -47,6 +48,12 @@ export const WEREWOLF_ROLES: Record<WerewolfRoleId, WerewolfRoleDef> = {
     label: "狼人",
     faction: "wolves",
     objective: "与狼队夜间协作淘汰好人，白天隐藏身份、转移怀疑，直到狼队控制投票。"
+  },
+  "hidden-wolf": {
+    id: "hidden-wolf",
+    label: "隐狼",
+    faction: "wolves",
+    objective: "像狼人一样协作夜袭，但预言家查验你时只会看到「村民」——白天尽情伪装好人。"
   },
   "wolf-king": {
     id: "wolf-king",
@@ -153,14 +160,14 @@ export const WEREWOLF_DECKS: WerewolfDeck[] = [
   {
     playerCount: 11,
     name: "11 人标准局",
-    description: "四狼（三小狼+狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 三村民：标准 11 人板，屠边节奏。",
-    roles: ["wolf", "wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "guard", "villager", "villager", "villager"]
+    description: "四狼（两小狼+隐狼+狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 三村民：标准 11 人板，隐狼骗过预言家。",
+    roles: ["wolf", "wolf", "hidden-wolf", "wolf-king", "seer", "witch", "hunter", "guard", "villager", "villager", "villager"]
   },
   {
     playerCount: 12,
     name: "12 人多能力局",
-    description: "四狼（三小狼+狼王）· 预言家 · 女巫 · 猎人 · 骑士 · 守卫 · 小丑 · 白痴 · 村民：预女猎守+骑士决斗+小丑白痴满配。",
-    roles: ["wolf", "wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "knight", "guard", "jester", "idiot", "villager"]
+    description: "四狼（两小狼+隐狼+狼王）· 预言家 · 女巫 · 猎人 · 骑士 · 守卫 · 小丑 · 白痴 · 村民：预女猎守+骑士决斗+小丑白痴+隐狼满配。",
+    roles: ["wolf", "wolf", "hidden-wolf", "wolf-king", "seer", "witch", "hunter", "knight", "guard", "jester", "idiot", "villager"]
   }
 ];
 
@@ -171,7 +178,7 @@ export function deckForPlayerCount(count: number): WerewolfDeck {
 }
 
 export function isWolfRole(role: WerewolfRoleId | undefined): boolean {
-  return role === "wolf" || role === "wolf-king";
+  return role === "wolf" || role === "wolf-king" || role === "hidden-wolf";
 }
 
 export function isVillageRole(role: WerewolfRoleId | undefined): boolean {

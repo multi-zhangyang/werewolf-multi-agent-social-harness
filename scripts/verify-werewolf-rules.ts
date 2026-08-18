@@ -71,6 +71,8 @@ async function run() {
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("wolf-king"), "12P includes the wolf king");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("knight"), "12P includes the knight");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("idiot"), "12P includes the idiot");
+    assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("hidden-wolf"), "12P includes the hidden wolf");
+    assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 11)!.roles.includes("hidden-wolf"), "11P includes the hidden wolf");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 10)!.roles.includes("jester"), "10P includes the jester");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 7), "7P deck exists (生还者 board)");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 11), "11P deck exists (standard board)");

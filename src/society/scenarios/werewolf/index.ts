@@ -501,10 +501,12 @@ export class WerewolfWorld extends SocialWorldBase {
       if (targetId === actorId) throw new Error("INVALID_INVESTIGATION_TARGET: Choose another living participant.");
       if (this.seerTargets.has(actorId)) throw new Error("INVESTIGATION_ALREADY_USED: Your investigation is fixed for tonight.");
       const targetRole = this.roles.get(targetId)!;
+      // The hidden wolf reads as a villager through the seer's eyes (§7.4).
+      const perceivedRole = targetRole === "hidden-wolf" ? "villager" : targetRole;
       this.seerTargets.set(actorId, targetId);
-      this.seerKnowledge.get(actorId)?.set(targetId, targetRole);
+      this.seerKnowledge.get(actorId)?.set(targetId, perceivedRole);
       this.emitUpdate();
-      return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId, role: targetRole } };
+      return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId, role: perceivedRole } };
     }
     if (action === "witch_night_choice") {
       if (this.phase !== "night" || role !== "witch") throw new Error("WITCH_ACTION_FORBIDDEN: Only the living witch may use potions at night.");
@@ -1008,7 +1010,7 @@ export class WerewolfWorld extends SocialWorldBase {
     const nightText = parts.join(" ");
     for (const id of this.profiles.keys()) {
       const privateResult = this.roles.get(id) === "seer" && this.seerTargets.has(id)
-        ? ` 你的查验结果：${this.seerTargets.get(id)} 是${roleLabel(this.roles.get(this.seerTargets.get(id)!))}。`
+        ? ` 你的查验结果：${this.seerTargets.get(id)} 是${roleLabel(this.seerKnowledge.get(id)?.get(this.seerTargets.get(id)!) ?? this.roles.get(this.seerTargets.get(id)!))}。`
         : "";
       const witchResult = this.roles.get(id) === "witch" && wolfTargetId
         ? ` 今晚狼人袭击了 ${wolfTargetId}。`
@@ -1026,8 +1028,8 @@ export class WerewolfWorld extends SocialWorldBase {
         type: "investigation",
         actorId: seerId,
         targetId: target,
-        facts: { role: roleLabel(this.roles.get(target)) },
-        detail: `第 ${this.day} 天夜晚：你的查验显示 ${this.profiles.get(target)?.displayName ?? target} 是${roleLabel(this.roles.get(target))}。`
+        facts: { role: roleLabel(this.seerKnowledge.get(seerId)?.get(target) ?? this.roles.get(target)) },
+        detail: `第 ${this.day} 天夜晚：你的查验显示 ${this.profiles.get(target)?.displayName ?? target} 是${roleLabel(this.seerKnowledge.get(seerId)?.get(target) ?? this.roles.get(target))}。`
       });
     }
 
