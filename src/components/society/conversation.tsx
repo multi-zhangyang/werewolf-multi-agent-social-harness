@@ -205,9 +205,15 @@ function factionTitle(room: SocietyRoomSnapshot, winners?: string[]): string {
   if (winnerRoles.includes("小丑")) return "小丑达成了目标 —— 被投出去就是胜利";
   const deceptive = ["狼人", "狼王", "刺客", "莫德雷德", "莫甘娜", "奥伯伦", "爪牙"];
   const faithful = ["村民", "忠臣", "女巫", "猎人", "守卫", "白痴"];
-  if (winnerRoles.some((role) => deceptive.includes(role))) return "欺骗阵营胜利";
-  if (winnerRoles.some((role) => faithful.includes(role))) return "忠诚阵营胜利";
-  if (winnerRoles.includes("预言家") || winnerRoles.includes("梅林") || winnerRoles.includes("派西维尔")) return "忠诚阵营胜利";
+  if (winnerRoles.some((role) => deceptive.includes(role))) {
+    return room.scenarioId === "werewolf" ? "狼人阵营胜利" : "欺骗阵营胜利";
+  }
+  if (winnerRoles.some((role) => faithful.includes(role))) {
+    return room.scenarioId === "werewolf" ? "村庄阵营胜利" : "忠诚阵营胜利";
+  }
+  if (winnerRoles.includes("预言家") || winnerRoles.includes("梅林") || winnerRoles.includes("派西维尔")) {
+    return room.scenarioId === "werewolf" ? "村庄阵营胜利" : "忠诚阵营胜利";
+  }
   return winners?.length ? "胜利者已经产生" : "这一局已经落幕";
 }
 
