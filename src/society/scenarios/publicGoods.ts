@@ -46,6 +46,32 @@ export class PublicGoodsWorld extends SocialWorldBase {
     this.addLog(`${profiles.length} 名参与者每人每轮获得 ${this.endowment} 点资源，公共池按 ${this.multiplier} 倍增长后均分。`, 1);
   }
 
+  protected exportWorldState(): unknown {
+    return {
+      round: this.round,
+      phase: this.phase,
+      scores: this.mapEntries(this.scores),
+      contributions: this.mapEntries(this.contributions),
+      history: structuredClone(this.history),
+      lastExperiences: this.mapEntries(this.lastExperiences)
+    };
+  }
+
+  protected restoreWorldState(state: unknown): void {
+    const s = state as Partial<{
+      round: number; phase: string; scores: Array<[string, number]>; contributions: Array<[string, number]>;
+      history: PublicGoodsRound[]; lastExperiences: Array<[string, string]>;
+    }> | undefined;
+    if (!s) return;
+    this.round = Number(s.round ?? 1);
+    this.phase = (s.phase ?? "discussion") as Phase;
+    this.fillMap(this.scores, s.scores);
+    this.fillMap(this.contributions, s.contributions);
+    this.history.length = 0;
+    this.history.push(...structuredClone(s.history ?? []));
+    this.fillMap(this.lastExperiences, s.lastExperiences);
+  }
+
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
       title: this.scenario.name,

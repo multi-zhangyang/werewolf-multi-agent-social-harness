@@ -45,6 +45,37 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     this.addLog("谈判开始：承诺没有约束力，行动会留下记忆。", 1);
   }
 
+  protected exportWorldState(): unknown {
+    return {
+      round: this.round,
+      phase: this.phase,
+      scores: this.mapEntries(this.scores),
+      choices: this.mapEntries(this.choices),
+      history: structuredClone(this.history),
+      lastExperiences: this.mapEntries(this.lastExperiences),
+      discussion: this.discussion ? this.discussion.exportState() : null
+    };
+  }
+
+  protected restoreWorldState(state: unknown): void {
+    const s = state as Partial<{
+      round: number; phase: string; scores: Array<[string, number]>; choices: Array<[string, Move]>;
+      history: RoundResult[]; lastExperiences: Array<[string, string]>; discussion: unknown;
+    }> | undefined;
+    if (!s) return;
+    this.round = Number(s.round ?? 1);
+    this.phase = (s.phase ?? "discussion") as Phase;
+    this.fillMap(this.scores, s.scores);
+    this.fillMap(this.choices, s.choices);
+    this.history.length = 0;
+    this.history.push(...structuredClone(s.history ?? []));
+    this.fillMap(this.lastExperiences, s.lastExperiences);
+    if (s.discussion) {
+      this.discussion = this.createDiscussion();
+      this.discussion.restoreState(s.discussion);
+    }
+  }
+
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
       title: this.scenario.name,

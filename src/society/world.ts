@@ -5,6 +5,7 @@ import type {
   AgentProfile,
   AgentStatus,
   PlayerActionSpec,
+  ScenarioId,
   ScenarioSummary,
   SocialChannel,
   SocialEvent,
@@ -18,6 +19,24 @@ import type {
   WorldSnapshot
 } from "./contracts";
 import type { Tool } from "@openai/agents";
+
+/**
+ * Serializable world state for restart recovery (P3). The base class owns the
+ * shared stream (messages, log, statuses, queued appraisal events); each
+ * scenario owns its private rules state under `world`. Everything here must
+ * survive a JSON round-trip — maps travel as entry tuples, never as Maps.
+ */
+export interface WorldSerializedState {
+  scenarioId: ScenarioId;
+  shared: {
+    status: WorldSnapshot["status"];
+    statuses: Array<[string, AgentStatus]>;
+    messages: SocialMessage[];
+    log: WorldLogEntry[];
+    pendingEvents: Array<[string, SocialEvent[]]>;
+  };
+  world: unknown;
+}
 
 export abstract class SocialWorldBase implements SocialWorld {
   readonly roomId: string;
@@ -49,6 +68,41 @@ export abstract class SocialWorldBase implements SocialWorld {
     this.status = "paused";
     this.emitUpdate();
   }
+
+  /** Serialize the whole world for a room checkpoint (restart recovery, P3). */
+  exportState(): WorldSerializedState {
+    return {
+      scenarioId: this.scenario.id,
+      shared: {
+        status: this.status,
+        statuses: [...this.statuses.entries()],
+        messages: structuredClone(this.messages),
+        log: structuredClone(this.log),
+        pendingEvents: [...this.pendingEvents.entries()].map(([id, events]) => [id, structuredClone(events)] as [string, SocialEvent[]])
+      },
+      world: this.exportWorldState()
+    };
+  }
+
+  /** Rehydrate this world from a checkpoint; the scenario must be the same. */
+  restoreState(state: WorldSerializedState): void {
+    if (state.scenarioId !== this.scenario.id) {
+      throw new Error(`SCENARIO_STATE_MISMATCH: checkpoint is ${state.scenarioId}, world is ${this.scenario.id}.`);
+    }
+    this.status = state.shared.status;
+    this.statuses.clear();
+    for (const [id, status] of state.shared.statuses) this.statuses.set(id, status);
+    this.messages.length = 0;
+    this.messages.push(...structuredClone(state.shared.messages));
+    this.log.length = 0;
+    this.log.push(...structuredClone(state.shared.log));
+    this.pendingEvents.clear();
+    for (const [id, events] of state.shared.pendingEvents) this.pendingEvents.set(id, structuredClone(events));
+    this.restoreWorldState(state.world);
+  }
+
+  protected abstract exportWorldState(): unknown;
+  protected abstract restoreWorldState(state: unknown): void;
 
   abstract snapshot(): WorldSnapshot;
   /**
@@ -309,6 +363,19 @@ export abstract class SocialWorldBase implements SocialWorld {
 
   protected otherProfiles(actorId: string): AgentProfile[] {
     return [...this.profiles.values()].filter((profile) => profile.id !== actorId);
+  }
+
+  /** JSON-safe serialization helpers for scenario state maps. */
+  protected mapEntries<K, V>(map: Map<K, V>): Array<[K, V]> {
+    return [...map.entries()];
+  }
+
+  protected fillMap<K, V>(target: Map<K, V>, entries: unknown): void {
+    target.clear();
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries) {
+      if (Array.isArray(entry) && entry.length >= 2) target.set(entry[0] as K, entry[1] as V);
+    }
   }
 }
 

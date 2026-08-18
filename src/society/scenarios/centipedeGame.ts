@@ -48,6 +48,32 @@ export class CentipedeGameWorld extends SocialWorldBase {
     this.addLog(`蜈蚣博弈开始：奖池从 4 点起，每传递一次翻倍。共有 ${this.totalMoves} 次机会。`, 1);
   }
 
+  protected exportWorldState(): unknown {
+    return {
+      move: this.move,
+      ended: this.ended,
+      phase: this.phase,
+      scores: this.mapEntries(this.scores),
+      history: structuredClone(this.history),
+      lastExperiences: this.mapEntries(this.lastExperiences)
+    };
+  }
+
+  protected restoreWorldState(state: unknown): void {
+    const s = state as Partial<{
+      move: number; ended: boolean; phase: string; scores: Array<[string, number]>;
+      history: MoveRecord[]; lastExperiences: Array<[string, string]>;
+    }> | undefined;
+    if (!s) return;
+    this.move = Number(s.move ?? 1);
+    this.ended = Boolean(s.ended);
+    this.phase = (s.phase ?? "discussion") as Phase;
+    this.fillMap(this.scores, s.scores);
+    this.history.length = 0;
+    this.history.push(...structuredClone(s.history ?? []));
+    this.fillMap(this.lastExperiences, s.lastExperiences);
+  }
+
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
       title: this.scenario.name,

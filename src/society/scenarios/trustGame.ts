@@ -49,6 +49,35 @@ export class TrustGameWorld extends SocialWorldBase {
     this.addLog("第一轮开始：投资者先决定交出多少资源，受托者随后决定返还多少。", 1);
   }
 
+  protected exportWorldState(): unknown {
+    return {
+      round: this.round,
+      phase: this.phase,
+      scores: this.mapEntries(this.scores),
+      history: structuredClone(this.history),
+      lastExperiences: this.mapEntries(this.lastExperiences),
+      discussion: this.discussion ? this.discussion.exportState() : null
+    };
+  }
+
+  protected restoreWorldState(state: unknown): void {
+    const s = state as Partial<{
+      round: number; phase: string; scores: Array<[string, number]>; history: TrustRound[];
+      lastExperiences: Array<[string, string]>; discussion: unknown;
+    }> | undefined;
+    if (!s) return;
+    this.round = Number(s.round ?? 1);
+    this.phase = (s.phase ?? "discussion") as Phase;
+    this.fillMap(this.scores, s.scores);
+    this.history.length = 0;
+    this.history.push(...structuredClone(s.history ?? []));
+    this.fillMap(this.lastExperiences, s.lastExperiences);
+    if (s.discussion) {
+      this.discussion = this.createDiscussion();
+      this.discussion.restoreState(s.discussion);
+    }
+  }
+
   snapshot(): WorldSnapshot {
     const [investorId, trusteeId] = this.rolesForRound();
     return this.worldSnapshot({

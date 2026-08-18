@@ -200,4 +200,36 @@ export class DiscussionDirector {
       spokeCounts
     };
   }
+
+  /** Checkpoint serialization (restart recovery, P3). */
+  exportState(): {
+    messages: DiscussionMessage[];
+    urgency: Array<[string, number]>;
+    spokeCounts: Array<[string, number]>;
+    wave: number;
+    messageCount: number;
+  } {
+    return {
+      messages: structuredClone(this.messages),
+      urgency: [...this.urgency.entries()],
+      spokeCounts: [...this.spokeCounts.entries()],
+      wave: this.wave,
+      messageCount: this.messageCount
+    };
+  }
+
+  restoreState(state: unknown): void {
+    const value = state as Partial<ReturnType<DiscussionDirector["exportState"]>> | undefined;
+    if (!value) return;
+    this.messages.length = 0;
+    for (const message of value.messages ?? []) {
+      if (message && typeof message === "object") this.messages.push({ ...message } as DiscussionMessage);
+    }
+    this.urgency.clear();
+    for (const [actorId, urgency] of value.urgency ?? []) this.urgency.set(actorId, Number(urgency));
+    this.spokeCounts.clear();
+    for (const [actorId, count] of value.spokeCounts ?? []) this.spokeCounts.set(actorId, Number(count));
+    this.wave = Number(value.wave ?? 0);
+    this.messageCount = Number(value.messageCount ?? 0);
+  }
 }

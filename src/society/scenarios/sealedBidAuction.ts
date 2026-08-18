@@ -59,6 +59,34 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
     this.addLog(`拍卖开始：${profiles.length} 位竞拍者各持一份私密估值，公开讨论后同时提交密封出价。`, 1);
   }
 
+  protected exportWorldState(): unknown {
+    return {
+      round: this.round,
+      phase: this.phase,
+      scores: this.mapEntries(this.scores),
+      values: this.mapEntries(this.values),
+      bids: this.mapEntries(this.bids),
+      history: structuredClone(this.history),
+      lastExperiences: this.mapEntries(this.lastExperiences)
+    };
+  }
+
+  protected restoreWorldState(state: unknown): void {
+    const s = state as Partial<{
+      round: number; phase: string; scores: Array<[string, number]>; values: Array<[string, number]>;
+      bids: Array<[string, number]>; history: AuctionRound[]; lastExperiences: Array<[string, string]>;
+    }> | undefined;
+    if (!s) return;
+    this.round = Number(s.round ?? 1);
+    this.phase = (s.phase ?? "discussion") as Phase;
+    this.fillMap(this.scores, s.scores);
+    this.fillMap(this.values, s.values);
+    this.fillMap(this.bids, s.bids);
+    this.history.length = 0;
+    this.history.push(...structuredClone(s.history ?? []));
+    this.fillMap(this.lastExperiences, s.lastExperiences);
+  }
+
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
       title: this.scenario.name,

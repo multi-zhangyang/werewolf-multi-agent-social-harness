@@ -121,6 +121,60 @@ export class AvalonWorld extends SocialWorldBase {
     this.addLog("圆桌就座。忠臣要完成任务，内奸要暗中破坏；梅林看得见刺客，但看不见莫德雷德。", 1);
   }
 
+  protected exportWorldState(): unknown {
+    return {
+      quest: this.quest,
+      phase: this.phase,
+      leaderId: this.leaderId,
+      proposedTeam: [...this.proposedTeam],
+      rejections: this.rejections,
+      successes: this.successes,
+      failures: this.failures,
+      winners: [...this.winners],
+      outcome: this.outcome,
+      assassinated: this.assassinated,
+      roles: this.mapEntries(this.roles),
+      questHistory: structuredClone(this.questHistory),
+      teamVotes: this.mapEntries(this.teamVotes),
+      questVotes: this.mapEntries(this.questVotes),
+      lastExperiences: this.mapEntries(this.lastExperiences),
+      discussion: this.discussion ? this.discussion.exportState() : null,
+      suspicion: this.suspicion.exportState()
+    };
+  }
+
+  protected restoreWorldState(state: unknown): void {
+    const s = state as Partial<{
+      quest: number; phase: string; leaderId: string; proposedTeam: string[]; rejections: number;
+      successes: number; failures: number; winners: string[]; outcome: string; assassinated: boolean;
+      roles: Array<[string, Role]>; questHistory: QuestRecord[]; teamVotes: Array<[string, boolean]>;
+      questVotes: Array<[string, "succeed" | "fail"]>; lastExperiences: Array<[string, string]>;
+      discussion: unknown; suspicion: unknown;
+    }> | undefined;
+    if (!s) return;
+    this.quest = Number(s.quest ?? 1);
+    this.phase = (s.phase ?? "discussion") as Phase;
+    this.leaderId = String(s.leaderId ?? this.profiles.keys().next().value ?? "");
+    this.proposedTeam = [...(s.proposedTeam ?? [])];
+    this.rejections = Number(s.rejections ?? 0);
+    this.successes = Number(s.successes ?? 0);
+    this.failures = Number(s.failures ?? 0);
+    this.winners = [...(s.winners ?? [])];
+    this.outcome = String(s.outcome ?? "");
+    this.assassinated = Boolean(s.assassinated);
+    this.fillMap(this.roles, s.roles);
+    this.questHistory.length = 0;
+    this.questHistory.push(...structuredClone(s.questHistory ?? []));
+    this.fillMap(this.teamVotes, s.teamVotes);
+    this.fillMap(this.questVotes, s.questVotes);
+    this.fillMap(this.lastExperiences, s.lastExperiences);
+    if (s.discussion) {
+      this.discussion = this.createDiscussion();
+      this.discussion.restoreState(s.discussion);
+    }
+    this.suspicion.restoreState(s.suspicion);
+  }
+
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
       title: this.scenario.name,

@@ -642,6 +642,9 @@ export interface SocialWorld {
   /** Append a public world-log entry (shown in the observer timeline). */
   addWorldLog(text: string): void;
   onUpdate(listener: (snapshot: WorldSnapshot) => void): () => void;
+  /** Restart recovery (P3): serialize / rehydrate the full rules state. */
+  exportState(): import("./world").WorldSerializedState;
+  restoreState(state: import("./world").WorldSerializedState): void;
 }
 
 /**

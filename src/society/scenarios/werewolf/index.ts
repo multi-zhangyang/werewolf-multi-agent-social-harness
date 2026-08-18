@@ -100,6 +100,79 @@ export class WerewolfWorld extends SocialWorldBase {
     this.addLog(`身份已经分配（${deck.name}）。公开讨论开始，所有承诺都可能是策略。`, 1);
   }
 
+  protected exportWorldState(): unknown {
+    return {
+      day: this.day,
+      phase: this.phase,
+      roles: this.mapEntries(this.roles),
+      alive: [...this.alive],
+      votes: this.mapEntries(this.votes),
+      wolfTargets: this.mapEntries(this.wolfTargets),
+      seerKnowledge: [...this.seerKnowledge.entries()].map(([seerId, knowledge]) => [seerId, [...knowledge.entries()]] as [string, Array<[string, WerewolfRoleId]>]),
+      seerTargets: this.mapEntries(this.seerTargets),
+      history: structuredClone(this.history),
+      lastExperiences: this.mapEntries(this.lastExperiences),
+      discussion: this.discussion ? this.discussion.exportState() : null,
+      suspicion: this.suspicion.exportState(),
+      winners: [...this.winners],
+      outcome: this.outcome,
+      antidoteAvailable: this.antidoteAvailable,
+      poisonAvailable: this.poisonAvailable,
+      witchSaveId: this.witchSaveId ?? null,
+      witchPoisonId: this.witchPoisonId ?? null,
+      witchActed: this.witchActed,
+      guardTargetId: this.guardTargetId ?? null,
+      lastGuardTargetId: this.lastGuardTargetId ?? null,
+      pendingShots: structuredClone(this.pendingShots),
+      jesterWon: this.jesterWon
+    };
+  }
+
+  protected restoreWorldState(state: unknown): void {
+    const s = state as Partial<{
+      day: number; phase: string; roles: Array<[string, WerewolfRoleId]>; alive: string[];
+      votes: Array<[string, string]>; wolfTargets: Array<[string, string]>;
+      seerKnowledge: Array<[string, Array<[string, WerewolfRoleId]>]>; seerTargets: Array<[string, string]>;
+      history: DayRecord[]; lastExperiences: Array<[string, string]>; discussion: unknown; suspicion: unknown;
+      winners: string[]; outcome: string; antidoteAvailable: boolean; poisonAvailable: boolean;
+      witchSaveId: string | null; witchPoisonId: string | null; witchActed: boolean;
+      guardTargetId: string | null; lastGuardTargetId: string | null; pendingShots: PendingShot[]; jesterWon: boolean;
+    }> | undefined;
+    if (!s) return;
+    this.day = Number(s.day ?? 1);
+    this.phase = (s.phase ?? "day-discussion") as Phase;
+    this.fillMap(this.roles, s.roles);
+    this.alive.clear();
+    for (const id of s.alive ?? []) this.alive.add(id);
+    this.fillMap(this.votes, s.votes);
+    this.fillMap(this.wolfTargets, s.wolfTargets);
+    this.seerKnowledge.clear();
+    for (const [seerId, knowledge] of s.seerKnowledge ?? []) {
+      this.seerKnowledge.set(seerId, new Map(knowledge ?? []));
+    }
+    this.fillMap(this.seerTargets, s.seerTargets);
+    this.history.length = 0;
+    this.history.push(...structuredClone(s.history ?? []));
+    this.fillMap(this.lastExperiences, s.lastExperiences);
+    if (s.discussion) {
+      this.discussion = this.createDiscussion();
+      this.discussion.restoreState(s.discussion);
+    }
+    this.suspicion.restoreState(s.suspicion);
+    this.winners = [...(s.winners ?? [])];
+    this.outcome = String(s.outcome ?? "");
+    this.antidoteAvailable = Boolean(s.antidoteAvailable);
+    this.poisonAvailable = Boolean(s.poisonAvailable);
+    this.witchSaveId = s.witchSaveId ?? undefined;
+    this.witchPoisonId = s.witchPoisonId ?? undefined;
+    this.witchActed = Boolean(s.witchActed);
+    this.guardTargetId = s.guardTargetId ?? undefined;
+    this.lastGuardTargetId = s.lastGuardTargetId ?? undefined;
+    this.pendingShots.length = 0;
+    this.pendingShots.push(...structuredClone(s.pendingShots ?? []));
+    this.jesterWon = Boolean(s.jesterWon);
+  }
+
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
       title: this.scenario.name,

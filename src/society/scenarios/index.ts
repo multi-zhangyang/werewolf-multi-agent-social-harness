@@ -1,4 +1,5 @@
 import type { AgentProfile, ScenarioId, SocialWorld } from "../contracts";
+import { SocialWorldBase, type WorldSerializedState } from "../world";
 import { PrisonersDilemmaWorld } from "./prisonersDilemma";
 import { PublicGoodsWorld } from "./publicGoods";
 import { TrustGameWorld } from "./trustGame";
@@ -21,6 +22,8 @@ export function createWorld(input: {
   scenarioId: ScenarioId;
   profiles: AgentProfile[];
   rounds?: number;
+  /** Checkpoint state for restart recovery (P3). */
+  state?: WorldSerializedState;
 }): SocialWorld {
   const metadata = SCENARIO_METADATA[input.scenarioId];
   if (!metadata) throw new Error(`SCENARIO_NOT_FOUND: '${input.scenarioId}' is not available.`);
@@ -33,19 +36,25 @@ export function createWorld(input: {
       : `${metadata.players} 名参与者`;
     throw new Error(`PLAYER_COUNT_INVALID: ${metadata.name} requires ${expected}.`);
   }
-  if (input.scenarioId === "prisoners-dilemma") return new PrisonersDilemmaWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "public-goods") return new PublicGoodsWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "trust-game") return new TrustGameWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "ultimatum-game") return new UltimatumWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "beauty-contest") return new BeautyContestWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "sealed-bid-auction") return new SealedBidAuctionWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "avalon") return new AvalonWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "centipede-game") return new CentipedeGameWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "chicken-game") return new ChickenGameWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "stag-hunt") return new StagHuntWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "negotiation-game") return new NegotiationWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.scenarioId === "liars-dice") return new LiarsDiceWorld(input.roomId, metadata, input.profiles, input.rounds);
-  return new WerewolfWorld(input.roomId, metadata, input.profiles, input.rounds);
+  let world: SocialWorld;
+  if (input.scenarioId === "prisoners-dilemma") world = new PrisonersDilemmaWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "public-goods") world = new PublicGoodsWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "trust-game") world = new TrustGameWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "ultimatum-game") world = new UltimatumWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "beauty-contest") world = new BeautyContestWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "sealed-bid-auction") world = new SealedBidAuctionWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "avalon") world = new AvalonWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "centipede-game") world = new CentipedeGameWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "chicken-game") world = new ChickenGameWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "stag-hunt") world = new StagHuntWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "negotiation-game") world = new NegotiationWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else if (input.scenarioId === "liars-dice") world = new LiarsDiceWorld(input.roomId, metadata, input.profiles, input.rounds);
+  else world = new WerewolfWorld(input.roomId, metadata, input.profiles, input.rounds);
+  if (input.state) {
+    (world as SocialWorldBase).restoreState(input.state);
+    world.pause();
+  }
+  return world;
 }
 
 export function isScenarioId(value: unknown): value is ScenarioId {

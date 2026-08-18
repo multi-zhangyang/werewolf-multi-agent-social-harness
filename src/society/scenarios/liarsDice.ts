@@ -79,6 +79,45 @@ export class LiarsDiceWorld extends SocialWorldBase {
     this.addLog("骰盅已摇。每个人只看得见自己的点数，看不见别人的。", 1);
   }
 
+  protected exportWorldState(): unknown {
+    return {
+      round: this.round,
+      bidCount: this.bidCount,
+      starterId: this.starterId,
+      expectedActorId: this.expectedActorId,
+      awaitingMove: this.awaitingMove,
+      pendingHumanQuantity: this.pendingHumanQuantity ?? null,
+      lives: this.mapEntries(this.lives),
+      scores: this.mapEntries(this.scores),
+      dice: this.mapEntries(this.dice),
+      bids: structuredClone(this.bids),
+      history: structuredClone(this.history),
+      lastExperiences: this.mapEntries(this.lastExperiences)
+    };
+  }
+
+  protected restoreWorldState(state: unknown): void {
+    const s = state as Partial<{
+      round: number; bidCount: number; starterId: string; expectedActorId: string; awaitingMove: boolean;
+      pendingHumanQuantity: number | null; lives: Array<[string, number]>; scores: Array<[string, number]>;
+      dice: Array<[string, number]>; bids: Bid[]; history: RoundOutcome[]; lastExperiences: Array<[string, string]>;
+    }> | undefined;
+    if (!s) return;
+    this.round = Number(s.round ?? 1);
+    this.bidCount = Number(s.bidCount ?? 0);
+    this.starterId = String(s.starterId ?? "");
+    this.expectedActorId = String(s.expectedActorId ?? "");
+    this.awaitingMove = Boolean(s.awaitingMove);
+    this.pendingHumanQuantity = s.pendingHumanQuantity === null ? undefined : Number(s.pendingHumanQuantity);
+    this.fillMap(this.lives, s.lives);
+    this.fillMap(this.scores, s.scores);
+    this.fillMap(this.dice, s.dice);
+    this.bids = structuredClone(s.bids ?? []);
+    this.history.length = 0;
+    this.history.push(...structuredClone(s.history ?? []));
+    this.fillMap(this.lastExperiences, s.lastExperiences);
+  }
+
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
       title: this.scenario.name,

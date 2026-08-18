@@ -11,8 +11,9 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { AgentMindState, ScenarioId } from "../contracts";
+import type { AgentMindState, AgentProfile, ScenarioId } from "../contracts";
 import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "../room";
+import type { WorldSerializedState } from "../world";
 
 export interface RoomCheckpoint {
   roomId: string;
@@ -22,6 +23,16 @@ export interface RoomCheckpoint {
   envelopes: SocietyRoomEventEnvelope[];
   agentMinds: Record<string, AgentMindState>;
   sessionFiles: Record<string, string>;
+  /** Full participant profiles (character + controller), for recovery. */
+  profiles?: AgentProfile[];
+  /** Serialized world rules state, for recovery. */
+  worldState?: WorldSerializedState;
+  /** Per-agent model bindings at checkpoint time, for recovery. */
+  agentBindings?: Record<string, { defaultModelProfileId?: string; tuningOverrides?: Record<string, unknown> }>;
+  pausedAgents?: string[];
+  seasonMode?: "season" | "one-shot";
+  /** False when the room was disposed on purpose — not restarted on boot. */
+  recoverable?: boolean;
 }
 
 export interface ArchivedRoomSummary {
@@ -93,6 +104,24 @@ export class RoomArchiveStore {
           model: participant.profile.model
         }))
       }))
+      .sort((left, right) => right.archivedAt.localeCompare(left.archivedAt));
+  }
+
+  /**
+   * Checkpoints whose rooms were interrupted (status running/paused, not
+   * disposed, with enough state to rebuild). These are candidates for
+   * restart recovery at boot.
+   */
+  interrupted(): RoomCheckpoint[] {
+    if (!existsSync(this.dir)) return [];
+    return readdirSafe(this.dir)
+      .map((name) => readFileSafe(path.join(this.dir, name, "checkpoint.json")))
+      .filter((checkpoint): checkpoint is RoomCheckpoint => Boolean(checkpoint))
+      .filter((checkpoint) => checkpoint.status === "running" || checkpoint.status === "paused")
+      .filter((checkpoint) => checkpoint.recoverable !== false)
+      .filter((checkpoint) => Array.isArray(checkpoint.profiles) && checkpoint.profiles.length >= 2)
+      .filter((checkpoint) => Boolean(checkpoint.worldState))
+      .filter((checkpoint) => checkpoint.snapshot.mode !== "human")
       .sort((left, right) => right.archivedAt.localeCompare(left.archivedAt));
   }
 }

@@ -78,6 +78,25 @@ export class SuspicionClimate {
     return { scores: this.normalized(), entries: this.entryList() };
   }
 
+  /** Checkpoint serialization (restart recovery, P3). */
+  exportState(): { scores: Array<[string, number]>; entries: SuspicionEntry[]; maxScore: number } {
+    return {
+      scores: [...this.scores.entries()],
+      entries: structuredClone(this.entries.slice(-120)),
+      maxScore: this.maxScore
+    };
+  }
+
+  restoreState(state: unknown): void {
+    const value = state as Partial<ReturnType<SuspicionClimate["exportState"]>> | undefined;
+    if (!value) return;
+    this.scores.clear();
+    for (const [target, score] of value.scores ?? []) this.scores.set(target, score);
+    this.entries.length = 0;
+    this.entries.push(...structuredClone(value.entries ?? []));
+    this.maxScore = value.maxScore ?? 0;
+  }
+
   /** Human-readable climate line for observations, e.g. "陈策 ██████ · 唐妍 ██". */
   climateText(displayName: (id: string) => string): string {
     const ranked = [...this.scores].sort((left, right) => right[1] - left[1]).slice(0, 3);

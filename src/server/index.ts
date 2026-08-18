@@ -5,6 +5,7 @@ import { ZodError } from "zod";
 import { createServerContext, host, port } from "./context";
 import { registerRoomRoutes } from "./routes/rooms";
 import { registerCharacterRoutes } from "./characters";
+import type { AgentModelBinding } from "../society/models";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
@@ -15,6 +16,7 @@ export function createServerApp(): express.Express {
   app.use(express.json({ limit: "512kb" }));
   registerCharacterRoutes(app, context.characters);
   registerRoomRoutes(app, context);
+  recoverInterruptedRooms(context);
   app.use(express.static(path.resolve(directory, "../../dist")));
   app.get("*path", (_request, response) => {
     response.sendFile(path.resolve(directory, "../../dist/index.html"));
@@ -67,4 +69,39 @@ function errorMessage(error: unknown): string {
     .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
     .replace(/\brp_[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
     .slice(0, 800);
+}
+
+/**
+ * Restart recovery (P3): rooms whose last checkpoint was interrupted are
+ * rehydrated from it — world state, profiles, model bindings, the paused
+ * seats and the event stream — and held paused for an explicit resume.
+ * Sessions and memories come back from disk per agent. Human rooms are left
+ * archived (player tokens are not persisted).
+ */
+function recoverInterruptedRooms(context: ReturnType<typeof createServerContext>): void {
+  for (const checkpoint of context.archive.interrupted()) {
+    try {
+      const room = context.rooms.create({
+        id: checkpoint.roomId,
+        scenarioId: checkpoint.snapshot.scenarioId,
+        profiles: checkpoint.profiles!,
+        rounds: checkpoint.snapshot.world.totalTurns,
+        seasonMode: checkpoint.seasonMode ?? "season",
+        modelRegistry: context.models,
+        limiter: context.limiter,
+        ...(checkpoint.seasonMode === "season" ? { season: context.season } : {}),
+        restore: {
+          worldState: checkpoint.worldState!,
+          rounds: checkpoint.snapshot.world.totalTurns,
+          ...(checkpoint.agentBindings ? { agentBindings: checkpoint.agentBindings as Record<string, AgentModelBinding> } : {}),
+          ...(checkpoint.pausedAgents ? { pausedAgents: checkpoint.pausedAgents } : {}),
+          ...(checkpoint.envelopes?.length ? { events: checkpoint.envelopes } : {})
+        }
+      });
+      room.recoverFromCheckpoint();
+      console.log(`[society] recovered ${checkpoint.snapshot.scenarioId} room ${checkpoint.roomId} from checkpoint (paused, awaiting resume)`);
+    } catch (error) {
+      console.warn(`[society] could not recover room ${checkpoint.roomId}:`, errorMessage(error));
+    }
+  }
 }

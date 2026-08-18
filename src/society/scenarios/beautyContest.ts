@@ -55,6 +55,32 @@ export class BeautyContestWorld extends SocialWorldBase {
     this.addLog("选美博弈开始：每人私下选择 0–100 的整数，最接近所有人平均值 2/3 的人获胜。", 1);
   }
 
+  protected exportWorldState(): unknown {
+    return {
+      round: this.round,
+      phase: this.phase,
+      scores: this.mapEntries(this.scores),
+      choices: this.mapEntries(this.choices),
+      history: structuredClone(this.history),
+      lastExperiences: this.mapEntries(this.lastExperiences)
+    };
+  }
+
+  protected restoreWorldState(state: unknown): void {
+    const s = state as Partial<{
+      round: number; phase: string; scores: Array<[string, number]>; choices: Array<[string, number]>;
+      history: BeautyRound[]; lastExperiences: Array<[string, string]>;
+    }> | undefined;
+    if (!s) return;
+    this.round = Number(s.round ?? 1);
+    this.phase = (s.phase ?? "discussion") as Phase;
+    this.fillMap(this.scores, s.scores);
+    this.fillMap(this.choices, s.choices);
+    this.history.length = 0;
+    this.history.push(...structuredClone(s.history ?? []));
+    this.fillMap(this.lastExperiences, s.lastExperiences);
+  }
+
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
       title: this.scenario.name,

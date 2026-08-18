@@ -33,6 +33,7 @@ import {
 import { RoomArchiveStore, defaultRoomArchiveDir, type RoomCheckpoint } from "./persistence";
 import { CinematicDirector } from "./spectator/cinematic-director";
 import { ActivationLimiter } from "./activation-limiter";
+import type { WorldSerializedState } from "./world";
 
 export interface SocietyRoomCreateOptions {
   id?: string;
@@ -59,6 +60,19 @@ export interface SocietyRoomCreateOptions {
    * never fan out more concurrent activations than the deployment can bear.
    */
   limiter?: ActivationLimiter;
+  /**
+   * Restart recovery (P3): rebuild this room from a saved checkpoint instead
+   * of starting fresh. The world state, profiles, model bindings, paused
+   * seats and the event stream come from the checkpoint; sessions, memories
+   * and season dossiers rehydrate from disk.
+   */
+  restore?: {
+    worldState: WorldSerializedState;
+    rounds?: number;
+    agentBindings?: Record<string, AgentModelBinding>;
+    pausedAgents?: string[];
+    events?: SocietyRoomEventEnvelope[];
+  };
 }
 
 export interface SocietyRoomEventEnvelope {
@@ -220,10 +234,10 @@ export class SocietyRoom {
     this.apiKey = options.apiKey;
     this.baseURL = options.baseURL;
     this.season = options.season;
-    this.seasonMode = options.seasonMode ?? (options.season ? "season" : "one-shot");
+    this.seasonMode = options.restore?.worldState ? (options.seasonMode ?? "season") : (options.seasonMode ?? (options.season ? "season" : "one-shot"));
     this.modelRegistry = options.modelRegistry ?? fallbackRegistryFromEnv();
     this.roomDefaults = options.roomDefaults;
-    this.agentBindings = options.agentBindings ?? {};
+    this.agentBindings = options.restore?.agentBindings ?? options.agentBindings ?? {};
     this.limiter = options.limiter;
     this.archive = new RoomArchiveStore();
     this.director = new CinematicDirector({
@@ -240,7 +254,8 @@ export class SocietyRoom {
       roomId: this.id,
       scenarioId: options.scenarioId,
       profiles: options.profiles,
-      rounds: options.rounds
+      rounds: options.restore?.rounds ?? options.rounds,
+      ...(options.restore?.worldState ? { state: options.restore.worldState } : {})
     });
     this.world.onUpdate((snapshot) => this.onWorldUpdate(snapshot));
     for (const profile of options.profiles) {
@@ -250,6 +265,15 @@ export class SocietyRoom {
         turnCount: 0,
         totalTokens: 0
       });
+    }
+    if (options.restore) {
+      // Recovered rooms come back held: nothing runs until an observer
+      // resumes them. The event stream continues from the checkpoint seq.
+      this.status = "paused";
+      for (const actorId of options.restore.pausedAgents ?? []) this.pausedAgents.add(actorId);
+      if (options.restore.events?.length) {
+        this.events.push(...options.restore.events.map((envelope) => structuredClone(envelope)));
+      }
     }
     this.onWorldUpdate(this.world.snapshotFor());
   }
@@ -491,8 +515,26 @@ export class SocietyRoom {
       this.world.pause();
     }
     this.director.dispose();
-    this.saveCheckpoint();
+    this.saveCheckpoint(false);
     this.emit({ type: "room.status", roomId: this.id, status: this.status, detail: reason, at: now() });
+  }
+
+  /**
+   * Restart recovery (P3): after the constructor rehydrated the world from a
+   * checkpoint, build the peer agents from their durable sessions and hold
+   * the room paused. An observer resumes it explicitly; nothing runs on its
+   * own and nothing is decided for anyone.
+   */
+  recoverFromCheckpoint(): void {
+    if (this.status !== "paused") this.status = "paused";
+    for (const card of this.cards.values()) {
+      if (card.profile.controller === "human") card.status = "idle";
+      else card.status = "paused";
+      this.world.setAgentStatus(card.profile.id, card.status);
+    }
+    this.createAgents();
+    this.saveCheckpoint(true);
+    this.emit({ type: "room.status", roomId: this.id, status: "paused", detail: "已从检查点恢复，等待继续", at: now() });
   }
 
   /** Pause one agent without sinking the room: its running turn is interrupted
@@ -1016,7 +1058,7 @@ export class SocietyRoom {
     this.archiveTimer.unref?.();
   }
 
-  private saveCheckpoint(): void {
+  private saveCheckpoint(recoverable = true): void {
     if (this.archiveTimer) {
       clearTimeout(this.archiveTimer);
       this.archiveTimer = undefined;
@@ -1033,7 +1075,13 @@ export class SocietyRoom {
       snapshot: this.snapshotFor(),
       envelopes: this.events.slice(-500).map((entry) => structuredClone(entry)),
       agentMinds: Object.fromEntries([...this.agents].map(([actorId, runtime]) => [actorId, structuredClone(runtime.mind)])),
-      sessionFiles
+      sessionFiles,
+      profiles: [...this.cards.values()].map((card) => structuredClone(card.profile)),
+      worldState: this.world.exportState(),
+      agentBindings: structuredClone(this.agentBindings),
+      pausedAgents: [...this.pausedAgents],
+      seasonMode: this.seasonMode,
+      recoverable
     };
     this.archive.save(checkpoint);
   }

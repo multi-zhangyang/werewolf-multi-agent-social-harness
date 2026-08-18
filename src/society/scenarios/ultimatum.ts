@@ -47,6 +47,35 @@ export class UltimatumWorld extends SocialWorldBase {
     this.addLog("第一轮开始：提议者提出 10 点资源的分配方案，回应者可以接受，也可以用拒绝惩罚不公平。", 1);
   }
 
+  protected exportWorldState(): unknown {
+    return {
+      round: this.round,
+      phase: this.phase,
+      scores: this.mapEntries(this.scores),
+      history: structuredClone(this.history),
+      lastExperiences: this.mapEntries(this.lastExperiences),
+      discussion: this.discussion ? this.discussion.exportState() : null
+    };
+  }
+
+  protected restoreWorldState(state: unknown): void {
+    const s = state as Partial<{
+      round: number; phase: string; scores: Array<[string, number]>; history: UltimatumRound[];
+      lastExperiences: Array<[string, string]>; discussion: unknown;
+    }> | undefined;
+    if (!s) return;
+    this.round = Number(s.round ?? 1);
+    this.phase = (s.phase ?? "discussion") as Phase;
+    this.fillMap(this.scores, s.scores);
+    this.history.length = 0;
+    this.history.push(...structuredClone(s.history ?? []));
+    this.fillMap(this.lastExperiences, s.lastExperiences);
+    if (s.discussion) {
+      this.discussion = this.createDiscussion();
+      this.discussion.restoreState(s.discussion);
+    }
+  }
+
   snapshot(): WorldSnapshot {
     const [proposerId, responderId] = this.rolesForRound();
     return this.worldSnapshot({
