@@ -246,6 +246,25 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         : { contextLimit: contextLimitForModel(this.profile.model) }),
       actorLabel: this.profile.displayName,
       onCompacted: (digest, estimatedTokens, threshold, level, pressureAfter) => {
+        // §5.6 step 5-6: the compacted brief lands in episodic memory too, so
+        // the agent can recall its own consolidation instead of losing it.
+        void this.context.memory.remember({
+          text: digest.slice(0, 1_200),
+          tags: ["consolidated", `level:${level}`],
+          salience: 0.55,
+          valence: 0,
+          turn: this.context.world.snapshot().turn
+        }).then((entry) => {
+          this.context.emit({
+            type: "agent.memory.consolidated",
+            roomId: this.context.roomId,
+            actorId: this.profile.id,
+            memoryId: entry.id,
+            summary: digest.slice(0, 140),
+            at: new Date().toISOString()
+          });
+          return void syncMemories(this.context);
+        }).catch(() => {});
         this.context.emit({
           type: "agent.compacted",
           roomId: this.context.roomId,
@@ -314,6 +333,16 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       this.mind.mood.pad,
       this.profile.decisionBiases?.includes("recency-weighting") ? 1.8 : 1
     );
+    if (recentMemories.length) {
+      this.context.emit({
+        type: "agent.memory.recalled",
+        roomId: this.context.roomId,
+        actorId: this.profile.id,
+        count: recentMemories.length,
+        query: `${observation.phase} ${observation.situation}`,
+        at: new Date().toISOString()
+      });
+    }
     emitStatus(this.context, "thinking");
     this.deltaBuffer = "";
     this.lastDeltaAt = Date.now();

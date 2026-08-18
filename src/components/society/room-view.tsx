@@ -248,6 +248,15 @@ function ArenaStage({ room, cue, activity }: {
 }): ReactNode {
   const focusIds = new Set(cue?.focusAgentIds ?? []);
   const names = new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]));
+  // Suspicion-driven seat states (§8.11): the most suspect seats carry an
+  // explicit 被围攻 marker instead of relying on mood text alone.
+  const suspicionScores = (() => {
+    const root = room.world.details?.suspicion as { scores?: Record<string, number> } | undefined;
+    const scores = Object.entries(root?.scores ?? {});
+    if (!scores.length) return new Map<string, number>();
+    const top = scores.sort((a, b) => b[1] - a[1]).slice(0, 2);
+    return new Map(top);
+  })();
   return (
     <section className="rounded-xl border border-border bg-card/40 px-4 py-3 pb-6 sm:pb-3">
       <div className="mb-2 flex items-center justify-between px-1">
@@ -281,6 +290,8 @@ function ArenaStage({ room, cue, activity }: {
               ) : null}
               {dead ? (
                 <span className="absolute right-1.5 top-1.5 rounded-full border border-rose-400/30 bg-rose-400/10 px-1.5 py-px text-[9px] font-medium text-rose-300">已出局</span>
+              ) : suspicionScores.has(participant.profile.id) ? (
+                <span className="absolute right-1.5 top-1.5 rounded-full border border-orange-400/40 bg-orange-400/10 px-1.5 py-px text-[9px] font-medium text-orange-300">被围攻</span>
               ) : null}
               <AgentPresence name={participant.profile.displayName} index={index} size="xl" status={dead || room.status === "finished" ? "finished" : participant.status} />
               <p className="mt-1.5 max-w-full truncate text-xs font-semibold tracking-tight">{participant.profile.displayName}</p>

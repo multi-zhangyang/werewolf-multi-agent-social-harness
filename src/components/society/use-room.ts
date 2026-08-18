@@ -414,6 +414,28 @@ function reduceEvent(
     });
     return;
   }
+  if (event.type === "agent.memory.recalled") {
+    pushTimeline({
+      id: `recalled-${event.at}`,
+      at: event.at,
+      kind: "memory",
+      actorId: event.actorId,
+      label: "记忆检索",
+      detail: `${event.count} 条相关经历被唤起`
+    });
+    return;
+  }
+  if (event.type === "agent.memory.consolidated") {
+    pushTimeline({
+      id: `consolidated-${event.memoryId}`,
+      at: event.at,
+      kind: "memory",
+      actorId: event.actorId,
+      label: "记忆巩固",
+      detail: event.summary
+    });
+    return;
+  }
   if (event.type === "agent.context.pressure") {
     setActivity((current) => ({
       ...current,

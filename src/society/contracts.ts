@@ -587,6 +587,8 @@ export type AgentRuntimeEvent =
     }
   | { type: "agent.thought-beat"; roomId: string; actorId: string; beat: ThoughtBeat; at: string }
   | { type: "agent.compacted"; roomId: string; actorId: string; estimatedTokens: number; threshold: number; digest: string; level: string; pressureAfter: number; at: string }
+  | { type: "agent.memory.recalled"; roomId: string; actorId: string; count: number; query: string; at: string }
+  | { type: "agent.memory.consolidated"; roomId: string; actorId: string; memoryId: string; summary: string; at: string }
   | {
       type: "agent.context.pressure";
       roomId: string;

@@ -445,11 +445,9 @@ async function run() {
     void world.performDomainAction(byRole("guard")[0], "guard_tonight", {});
     void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
     void world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
-    const nightResult = world.completeActivation(night!);
-    console.log("[nightmare test] night:", night?.id, "actors:", night?.actorIds, "complete:", JSON.stringify(nightResult));
+    world.completeActivation(night!);
     skipDiscussion(world);
     const vote2 = world.activation();
-    console.log("[nightmare test] vote2:", vote2?.id);
     assert.ok(vote2 && vote2.id.endsWith(":vote"), "the next day votes open");
     const cursed = byRole("witch")[0];
     assert.ok(!vote2.actorIds.includes(cursed), "the cursed witch is not asked to vote");
