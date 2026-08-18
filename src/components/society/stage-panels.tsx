@@ -127,10 +127,14 @@ function AvalonQuestBoard({ details, room }: { details: Details; room: SocietyRo
   const team = stringList(details, "proposedTeam");
   const teamVotes = entries(details, "pendingTeamVotes");
   const ladyInspectId = str(details, "ladyInspectId") ?? null;
+  const outcome = str(details, "outcome");
   const maxQuests = 5;
   const currentQuest = successes + failures;
   return (
     <div className="space-y-2.5">
+      {outcome ? (
+        <p className="text-[11px] leading-4 text-foreground/80">{outcome}</p>
+      ) : null}
       <div className="flex items-center gap-1.5">
         {Array.from({ length: maxQuests }).map((_, i) => {
           const done = i < currentQuest;
@@ -140,7 +144,7 @@ function AvalonQuestBoard({ details, room }: { details: Details; room: SocietyRo
           );
         })}
         <span className="nums ml-1 font-mono text-[10px] text-muted-foreground/70">
-          胜 {successes} · 负 {failures} · 第 {currentQuest + 1} 个任务
+          {room.world.status === "finished" ? `胜 ${successes} · 负 ${failures} · 已终局` : `胜 ${successes} · 负 ${failures} · 第 ${currentQuest + 1} 个任务`}
         </span>
       </div>
       {team.length ? (
@@ -249,9 +253,9 @@ export function DuelStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
       <div className="flex items-stretch gap-2.5">
         <SideCard room={room} id={left} label={roleOf(left) ?? "左席"} detail={detailOf(left)} />
         <div className="flex flex-col items-center justify-center gap-1 px-0.5">
-          <span className="nums font-mono text-[11px] text-foreground/80">{leftScore ?? "—"}</span>
+          <span className="nums font-mono text-[11px] text-foreground/80">{leftScore !== undefined ? Math.round(leftScore) : "—"}</span>
           <span className="text-[9px] font-bold tracking-widest text-muted-foreground/50">VS</span>
-          <span className="nums font-mono text-[11px] text-foreground/80">{rightScore ?? "—"}</span>
+          <span className="nums font-mono text-[11px] text-foreground/80">{rightScore !== undefined ? Math.round(rightScore) : "—"}</span>
         </div>
         <SideCard room={room} id={right} label={roleOf(right) ?? "右席"} detail={detailOf(right)} />
       </div>
@@ -298,7 +302,7 @@ export function RiskStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
               <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/[0.05]">
                 <div className="h-full rounded-full bg-gradient-to-r from-emerald-400/70 to-emerald-300/60 transition-all duration-700" style={{ width: `${Math.round((score / maxScore) * 100)}%` }} />
               </div>
-              <span className="nums w-8 shrink-0 text-right font-mono text-[11px] text-foreground/85">{score}</span>
+              <span className="nums w-8 shrink-0 text-right font-mono text-[11px] text-foreground/85">{Math.round(score)}</span>
             </div>
           ))}
         </div>
@@ -337,7 +341,7 @@ export function SecretStage({ room }: { room: SocietyRoomSnapshot }): ReactNode 
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[11px] font-medium text-foreground/85">{nameOf(id)}</p>
                 <p className={cn("text-[10px]", submitted ? "text-emerald-300/80" : "text-muted-foreground/60")}>
-                  {room.world.status === "finished" ? (score !== undefined ? `分数 ${score}` : "已揭示") : submitted ? "已密封" : "待提交"}
+                  {room.world.status === "finished" ? (score !== undefined ? `分数 ${Math.round(score)}` : "已揭示") : submitted ? "已密封" : "待提交"}
                 </p>
               </div>
               {submitted ? <span className="size-1.5 shrink-0 rounded-full bg-emerald-400" /> : null}
