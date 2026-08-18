@@ -16,6 +16,9 @@ const CAPABILITY_GATE: Record<string, keyof ModelCapabilities> = {
   streaming: "streaming",
   tools: "tools",
   parallelToolCalls: "parallelToolCalls",
+  // ModelTuning expresses reasoning as `reasoningEffort`/`reasoningSummary`;
+  // both gate on the model's reasoning capability states (unknown → dropped).
+  reasoningEffort: "reasoning",
   reasoning: "reasoning",
   reasoningSummary: "reasoningSummary",
   structuredOutput: "structuredOutput",

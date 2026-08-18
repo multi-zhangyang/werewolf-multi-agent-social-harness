@@ -70,6 +70,8 @@ export interface SocietyRoomCreateOptions {
     worldState: WorldSerializedState;
     rounds?: number;
     agentBindings?: Record<string, AgentModelBinding>;
+    /** Checkpointed private minds, keyed by actor id (P3 recovery). */
+    agentMinds?: Record<string, AgentMindState>;
     pausedAgents?: string[];
     events?: SocietyRoomEventEnvelope[];
   };
@@ -201,6 +203,8 @@ export class SocietyRoom {
   private readonly modelRegistry: ModelRegistry;
   private readonly roomDefaults?: SocietyRoomCreateOptions["roomDefaults"];
   private readonly agentBindings: Record<string, AgentModelBinding>;
+  /** Checkpoint-restored private minds, keyed by actor id (P3 recovery). */
+  private readonly restoreMinds?: Record<string, AgentMindState>;
   /** Shared stateless provider clients, keyed by provider profile id. */
   private readonly providerClients = new Map<string, OpenAIProvider>();
   /** Process-wide activation pool; absent in embedded single-room use. */
@@ -238,6 +242,7 @@ export class SocietyRoom {
     this.modelRegistry = options.modelRegistry ?? fallbackRegistryFromEnv();
     this.roomDefaults = options.roomDefaults;
     this.agentBindings = options.restore?.agentBindings ?? options.agentBindings ?? {};
+    this.restoreMinds = options.restore?.agentMinds;
     this.limiter = options.limiter;
     this.archive = new RoomArchiveStore();
     this.director = new CinematicDirector({
@@ -408,7 +413,35 @@ export class SocietyRoom {
       };
     }
 
-    // omniscient (default)
+    // omniscient: the full observer seat. Living hidden roles ARE revealed
+    // (§8.3 全知第三视角: 显示角色), unlike the public seat — so the observer
+    // gets the same role map the internal world holds, overlaid onto the
+    // scoped (channel-filtered) world view.
+    if (mode === "omniscient") {
+      const reveal = structuredClone(world);
+      const internal = this.world.snapshot();
+      const roles = new Map(internal.agents.map((agent) => [agent.id, agent.observerRole]));
+      reveal.agents = reveal.agents.map((agent) => ({
+        ...agent,
+        ...(roles.get(agent.id) ? { observerRole: roles.get(agent.id) } : {})
+      }));
+      return {
+        id: this.id,
+        scenarioId: this.scenarioId,
+        title: reveal.title,
+        mode: this.humanActorId ? "human" : "ai",
+        seasonMode: this.seasonMode,
+        status: this.status,
+        createdAt: this.createdAt,
+        updatedAt: this.updatedAt,
+        world: reveal,
+        participants: this.participantCards(reveal, true),
+        ...(this.highlights.length ? { highlights: this.highlights.map((highlight) => structuredClone(highlight)) } : {}),
+        ...(this.error ? { error: this.error } : {})
+      };
+    }
+
+    // Fallback (should not be reached): omniscient default.
     return this.snapshotFor();
   }
 
@@ -742,7 +775,8 @@ export class SocietyRoom {
           provider: this.providerClientFor(config.providerProfileId),
           resolvedConfig: config,
           emit: (event) => this.handleAgentEvent(event),
-          ...(dossier ? { dossier } : {})
+          ...(dossier ? { dossier } : {}),
+          ...(this.restoreMinds?.[card.profile.id] ? { restoreMind: this.restoreMinds[card.profile.id] } : {})
         });
         this.agents.set(card.profile.id, runtime);
         card.profile.model = config.modelId;

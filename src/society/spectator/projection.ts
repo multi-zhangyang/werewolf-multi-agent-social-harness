@@ -61,8 +61,18 @@ function projectPov(event: AgentRuntimeEvent, selfId: string | undefined): Agent
     case "world.action":
     case "agent.status":
       return event.actorId === selfId ? event : undefined;
+    case "agent.message": {
+      // A POV seat may only see what the watched agent could see: public
+      // channel, its own sent messages, or private/team messages addressed
+      // to it. Other agents' private exchanges never cross this boundary.
+      const message = event.message;
+      if (message.channel === "public") return event;
+      if (message.senderId === selfId) return event;
+      if (message.recipientIds?.includes(selfId ?? "")) return event;
+      return undefined;
+    }
     default:
-      // Room-level events (snapshots, messages, tension, cues) stay visible.
+      // Room-level events (snapshots, tension, cues) stay visible.
       return event;
   }
 }

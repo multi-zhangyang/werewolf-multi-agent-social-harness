@@ -96,6 +96,7 @@ function recoverInterruptedRooms(context: ReturnType<typeof createServerContext>
           worldState: checkpoint.worldState!,
           rounds: checkpoint.snapshot.world.totalTurns,
           ...(checkpoint.agentBindings ? { agentBindings: checkpoint.agentBindings as Record<string, AgentModelBinding> } : {}),
+          ...(checkpoint.agentMinds ? { agentMinds: checkpoint.agentMinds } : {}),
           ...(checkpoint.pausedAgents ? { pausedAgents: checkpoint.pausedAgents } : {}),
           ...(checkpoint.envelopes?.length ? { events: checkpoint.envelopes } : {})
         }

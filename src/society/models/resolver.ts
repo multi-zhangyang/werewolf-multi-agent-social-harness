@@ -104,13 +104,14 @@ export function resolveAgentModelConfig(input: ModelResolutionInput): ResolvedMo
   // 5. Capability negotiation for the SDK-facing model settings.
   const negotiation = negotiateTuning(merged, modelProfile.capabilities, input.forcedCapabilities);
   const sdkModelSettings: Record<string, unknown> = { ...negotiation.allowed };
-  // Runtime plumbing fields never reach the provider as model settings.
+  // Runtime plumbing fields are consumed by the runner/HTTP layer, not sent
+  // to the provider as model settings.
   delete (sdkModelSettings as Record<string, unknown>).maxTurns;
   delete (sdkModelSettings as Record<string, unknown>).requestTimeoutMs;
   delete (sdkModelSettings as Record<string, unknown>).retryMaxAttempts;
   delete (sdkModelSettings as Record<string, unknown>).retryInitialDelayMs;
-  delete (sdkModelSettings as Record<string, unknown>).promptCacheRetention;
-  delete (sdkModelSettings as Record<string, unknown>).providerData;
+  // `promptCacheRetention` and `providerData` are genuine SDK ModelSettings
+  // fields (prompt cache lifetime / extra provider payload) and are kept.
 
   const negotiationNotes = negotiation.dropped.map((entry) =>
     `${entry.field}: ${entry.reason === "unsupported-by-provider" ? "提供商不支持" : entry.reason === "unknown-capability-forced" ? "能力未验证（用户强制发送）" : "能力未验证（未发送）"}`

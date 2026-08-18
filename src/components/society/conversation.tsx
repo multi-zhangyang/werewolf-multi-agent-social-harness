@@ -284,9 +284,11 @@ function LiveAgents({ room, activity, names }: {
 }
 
 /**
- * The model's private thinking stream, collapsed by default (§8.5): it is
- * real provider reasoning, shown only on explicit expansion, never as an
- * auto-playing feed. Public seats never receive these events server-side.
+ * The provider's reasoning SUMMARY, collapsed by default (§8.5). Only a
+ * provider-returned reasoning summary may be shown — raw chain-of-thought
+ * never crosses the wire — and it is labeled by source, shown only on
+ * explicit expansion, never as an auto-playing feed. Public seats never
+ * receive these events server-side.
  */
 function CollapsedReasoning({ text }: { text: string }): ReactNode {
   const [open, setOpen] = useState(false);
@@ -299,7 +301,7 @@ function CollapsedReasoning({ text }: { text: string }): ReactNode {
         aria-expanded={open}
       >
         <Brain className="size-3 shrink-0 text-sky-300" />
-        <span className="font-mono text-[10px] uppercase tracking-widest text-sky-300">内心推理</span>
+        <span className="font-mono text-[10px] uppercase tracking-widest text-sky-300">提供商推理摘要</span>
         <span className="truncate text-[10px] text-sky-200/50">{open ? "点击收起" : "点击展开"}</span>
         <svg viewBox="0 0 12 12" className={cn("ml-auto size-2.5 shrink-0 text-sky-300/70 transition-transform", open && "rotate-180")} fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
           <path d="M2 4l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />

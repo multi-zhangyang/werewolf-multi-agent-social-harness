@@ -25,6 +25,8 @@ import {
 } from "@openai/agents";
 import { randomUUID } from "node:crypto";
 import type {
+  AgentBelief,
+  AgentGoal,
   AgentMindState,
   AgentMoodState,
   AgentProfile,
@@ -70,6 +72,13 @@ export interface SocietyAgentOptions {
   resolvedConfig?: ResolvedModelConfig;
   /** Where this agent's durable session file lives (default data/sessions). */
   sessionDir?: string;
+  /**
+   * Checkpoint-restored mind (P3 recovery): the participant's structured
+   * inner state from the last checkpoint — relationships, beliefs,
+   * deceptions, emotion, trait adaptations and in-game memories — so a
+   * recovered room keeps the same people instead of resetting their minds.
+   */
+  restoreMind?: AgentMindState;
 }
 
 export class AutonomousSocietyAgent implements SocietyAgentRuntime {
@@ -83,6 +92,10 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   private contextManager: SessionContextManager;
   private readonly tools: Tool<SocietyAgentContext>[];
   private readonly maxTurns: number;
+  /** Per-agent request timeout (ms) from resolved tuning or env default. */
+  private readonly requestTimeoutMs: number;
+  /** Per-agent retry settings; default SDK policy unless tuning overrides. */
+  private readonly retrySettings: { retry: Record<string, unknown> };
   private deltaBuffer = "";
   private lastDeltaAt = 0;
   private reasoningBuffer = "";
@@ -90,7 +103,14 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
 
   constructor(options: SocietyAgentOptions) {
     this.profile = structuredClone(options.profile);
-    this.mind = initialMind(options.profile, options.world.snapshot().agents.map((agent) => agent.id), options.dossier);
+    // Restart recovery (P3): a restored mind carries the participant's
+    // structured inner state (relationships, beliefs, deceptions, emotion,
+    // goals, trait adaptations) and in-game memories across the restart.
+    // Fresh rooms still start from the character profile + season dossier.
+    const participantIds = options.world.snapshot().agents.map((agent) => agent.id);
+    this.mind = options.restoreMind
+      ? restoreMindState(options.restoreMind, options.profile, participantIds, options.dossier)
+      : initialMind(options.profile, participantIds, options.dossier);
     // Durable per-agent session: history survives restarts in data/sessions/.
     this.session = JsonSessionStore.open(
       `${options.roomId}:${options.profile.id}`,
@@ -103,13 +123,19 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     // Autobiographical anchors (§4.2.1) live in the store too: they are the
     // character's own formative history and must survive memory syncs.
     const identityMemories = this.mind.memories.filter((entry) => entry.tags.includes("autobiography"));
+    // A checkpoint-restored mind (P3 recovery) also brings its in-game
+    // memories back into the store, so what happened before the restart stays
+    // recallable instead of surviving only as a display snapshot.
+    const restoredGameMemories = options.restoreMind
+      ? this.mind.memories.filter((entry) => !entry.tags.includes("season") && !entry.tags.includes("autobiography"))
+      : [];
     this.context = {
       actorId: options.profile.id,
       roomId: options.roomId,
       profile: this.profile,
       world: options.world,
       mind: this.mind,
-      memory: new AssociativeMemory([...identityMemories, ...seasonMemories]),
+      memory: new AssociativeMemory([...identityMemories, ...seasonMemories, ...restoredGameMemories]),
       emit: options.emit
     };
     const provider = options.provider ?? new OpenAIProvider({
@@ -123,7 +149,35 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       tracingDisabled: true,
       sessionInputCallback: this.contextManager.sessionInputCallback
     });
-    this.maxTurns = boundedInteger(options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 10), 2, 24);
+    // Per-agent runtime backpressure (§6.6): the resolved tuning's
+    // maxTurns / requestTimeoutMs / retry fields take precedence over the
+    // process-wide env defaults, so a seat can carry its own limits.
+    const tuning = options.resolvedConfig?.tuning;
+    const resolvedMaxTurns = tuning?.maxTurns?.value;
+    const resolvedRetries = tuning?.retryMaxAttempts?.value;
+    const resolvedRetryDelay = tuning?.retryInitialDelayMs?.value;
+    this.maxTurns = boundedInteger(
+      resolvedMaxTurns ?? options.maxTurns ?? numberFromEnv("SOCIETY_AGENT_MAX_TURNS", 10),
+      2,
+      24
+    );
+    this.requestTimeoutMs = positiveInteger(
+      tuning?.requestTimeoutMs?.value ?? numberFromEnv("SOCIETY_AGENT_TURN_TIMEOUT_MS", 300_000),
+      1_000,
+      3_600_000
+    );
+    if (resolvedRetries !== undefined || resolvedRetryDelay !== undefined) {
+      this.retrySettings = {
+        ...providerRetrySettings,
+        retry: {
+          ...providerRetrySettings.retry,
+          ...(resolvedRetries !== undefined ? { maxRetries: boundedInteger(resolvedRetries, 0, 8) } : {}),
+          ...(resolvedRetryDelay !== undefined ? { backoff: { ...providerRetrySettings.retry.backoff, initialDelayMs: boundedInteger(resolvedRetryDelay, 50, 60_000) } } : {})
+        }
+      };
+    } else {
+      this.retrySettings = providerRetrySettings;
+    }
 
     const social = createSocialTools(this.context);
     const cognition = createCognitionTools(this.context);
@@ -228,7 +282,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       inputGuardrails: [createInjectionShield(this.context)] as InputGuardrail[],
       modelSettings: {
         ...modelSettingsFrom(resolvedConfig, this.profile),
-        ...providerRetrySettings
+        ...this.retrySettings
       },
       toolUseBehavior: "run_llm_again" as const,
       instructions: ({ context }) => participantInstructions(context),
@@ -271,12 +325,17 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     const toolCalls: string[] = [];
     let result: StreamedRunResult<SocietyAgentContext, SdkAgent<SocietyAgentContext, any>>;
     try {
+      // Per-agent request budget (§6.6): the resolved `requestTimeoutMs` is
+      // combined with the room's own signal so a stalled provider can't hang
+      // one seat past its configured limit.
+      const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
+      const combinedSignal = AbortSignal.any([options.signal, timeoutSignal]);
       result = await this.runner.run(this.agent, runInput, {
         context: this.context,
         session: this.session,
         stream: true,
         maxTurns: options.maxTurns ?? this.maxTurns,
-        signal: options.signal
+        signal: combinedSignal
       });
       for await (const event of result) this.consumeEvent(event, toolCalls);
       this.flushDelta();
@@ -592,6 +651,95 @@ function initialMind(profile: AgentProfile, participantIds: string[], dossier?: 
   };
 }
 
+/**
+ * Rehydrate a checkpointed mind (P3 recovery) without resetting the person.
+ *
+ * The restored state wins for every field it actually contains; identity
+ * anchors and season memories are rebuilt from a fresh baseline so they can
+ * never be lost to checkpoint age; relationships are re-keyed to the current
+ * seat list (departed players dropped, new seats neutral); and every field is
+ * validated so a truncated checkpoint degrades to defaults instead of
+ * throwing. The person stays the person — only the world around them may have
+ * changed.
+ */
+function restoreMindState(
+  restored: AgentMindState,
+  profile: AgentProfile,
+  participantIds: string[],
+  dossier?: CharacterDossier
+): AgentMindState {
+  const baseline = initialMind(profile, participantIds, dossier);
+  const restoredRelationships = new Map((restored.relationships ?? []).map((entry) => [entry.agentId, entry]));
+  const relationships = participantIds
+    .filter((id) => id !== profile.id)
+    .map((agentId) => {
+      const fallback = baseline.relationships.find((entry) => entry.agentId === agentId);
+      if (!fallback) return undefined;
+      const entry = restoredRelationships.get(agentId);
+      if (!entry) return fallback;
+      return {
+        agentId,
+        trust: finiteUnit(entry.trust, fallback.trust),
+        affinity: finiteUnit(entry.affinity, fallback.affinity),
+        respect: finiteUnit(entry.respect, fallback.respect),
+        tension: finiteUnit(entry.tension, fallback.tension),
+        familiarity: finiteUnit(entry.familiarity, fallback.familiarity),
+        updatedAtTurn: Number.isFinite(entry.updatedAtTurn) ? entry.updatedAtTurn : fallback.updatedAtTurn,
+        note: typeof entry.note === "string" && entry.note ? entry.note : fallback.note
+      };
+    })
+    .filter((entry): entry is AgentRelationship => Boolean(entry));
+  // Identity anchors and season memories always come from the baseline; the
+  // restored in-game memories ride along, deduped by id.
+  const pinned = baseline.memories.filter((entry) => entry.tags.includes("autobiography") || entry.tags.includes("season"));
+  const pinnedIds = new Set(pinned.map((entry) => entry.id));
+  const gameMemories = (restored.memories ?? [])
+    .filter((entry) => typeof entry.text === "string" && entry.text && !entry.tags.includes("autobiography") && !entry.tags.includes("season"))
+    .filter((entry) => {
+      if (pinnedIds.has(entry.id)) return false;
+      pinnedIds.add(entry.id);
+      return true;
+    });
+  return {
+    mood: validMood(restored.mood) ? restored.mood : baseline.mood,
+    attention: Array.isArray(restored.attention) && restored.attention.length > 0 ? restored.attention : baseline.attention,
+    goals: validGoals(restored.goals) ? restored.goals : baseline.goals,
+    beliefs: Array.isArray(restored.beliefs) ? restored.beliefs.filter(validBelief) : baseline.beliefs,
+    relationships,
+    memories: [...pinned, ...gameMemories].slice(0, 320),
+    ...(typeof restored.latestReflection === "string" && restored.latestReflection ? { latestReflection: restored.latestReflection } : {}),
+    cognitivePasses: Array.isArray(restored.cognitivePasses) ? restored.cognitivePasses : [],
+    deceptions: Array.isArray(restored.deceptions) ? restored.deceptions : [],
+    roleHypotheses: Array.isArray(restored.roleHypotheses) ? restored.roleHypotheses : [],
+    lastAppraisals: Array.isArray(restored.lastAppraisals) ? restored.lastAppraisals : [],
+    traitAdaptations:
+      restored.traitAdaptations && Object.keys(restored.traitAdaptations).length > 0
+        ? restored.traitAdaptations
+        : baseline.traitAdaptations
+  };
+}
+
+function finiteUnit(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? clamp(value) : fallback;
+}
+
+function validMood(mood: AgentMoodState | undefined): mood is AgentMoodState {
+  if (!mood || typeof mood !== "object") return false;
+  return typeof mood.label === "string" && typeof mood.energy === "number" && Boolean(mood.emotions && typeof mood.emotions === "object") && Boolean(mood.needs && typeof mood.needs === "object");
+}
+
+function validGoals(goals: AgentGoal[] | undefined): goals is AgentGoal[] {
+  return (
+    Array.isArray(goals) &&
+    goals.length > 0 &&
+    goals.every((goal) => typeof goal?.id === "string" && typeof goal.description === "string" && ["active", "satisfied", "abandoned"].includes(goal.status))
+  );
+}
+
+function validBelief(belief: AgentBelief): boolean {
+  return typeof belief?.subjectId === "string" && typeof belief.proposition === "string" && typeof belief.confidence === "number" && Number.isFinite(belief.confidence);
+}
+
 function affectContext(mood: AgentMoodState): string {
   return [
     `Emotional state: ${mood.label}（${mood.description}）`,
@@ -603,32 +751,49 @@ function affectContext(mood: AgentMoodState): string {
 }
 
 /**
- * Build the SDK `modelSettings` from the resolved config. Only fields that
- * survived capability negotiation are sent; legacy profile fields remain the
- * fallback when no registry resolution was provided (headless env mode).
+ * Build the SDK `modelSettings` from the resolved config. When a registry
+ * resolution exists, the capability-negotiated `sdkModelSettings` is the
+ * single source of truth: only fields that survived negotiation (yes /
+ * user-forced) are sent, and names are mapped to the SDK's own shapes
+ * (maxTokens, reasoning.effort/summary, text.verbosity). The legacy profile
+ * path remains the fallback for headless env mode with no registry.
  */
 function modelSettingsFrom(resolved: ResolvedModelConfig | undefined, profile: AgentProfile): Record<string, unknown> {
+  if (resolved) {
+    return sdkSettingsFromNegotiated(resolved.sdkModelSettings);
+  }
   const settings: Record<string, unknown> = {};
-  const tuning = resolved?.tuning;
-  if (tuning?.temperature) settings.temperature = tuning.temperature.value;
-  else if (!resolved && profile.temperature !== undefined) settings.temperature = profile.temperature;
-  if (tuning?.topP) settings.topP = tuning.topP.value;
-  if (tuning?.presencePenalty) settings.presencePenalty = tuning.presencePenalty.value;
-  if (tuning?.frequencyPenalty) settings.frequencyPenalty = tuning.frequencyPenalty.value;
-  if (tuning?.maxOutputTokens) settings.maxOutputTokens = tuning.maxOutputTokens.value;
-  // Reasoning parameters are sent only when they survived capability
-  // negotiation (or on the legacy no-registry path). Unknown = not sent.
-  const effort = tuning?.reasoningEffort?.value ?? (!resolved ? profile.reasoningEffort ?? "low" : undefined);
-  const summary = tuning?.reasoningSummary?.value;
-  if (effort || summary) settings.reasoning = summary ? { effort: effort ?? "low", summary } : { effort };
-  // Parallel tool calls default to disabled; send only when explicitly resolved.
-  if (tuning?.parallelToolCalls) settings.parallelToolCalls = tuning.parallelToolCalls.value;
-  else if (!resolved) settings.parallelToolCalls = false;
-  if (tuning?.toolChoice) settings.toolChoice = tuning.toolChoice.value;
-  if (tuning?.truncation) settings.truncation = tuning.truncation.value;
-  if (tuning?.store) settings.store = tuning.store.value;
-  if (tuning?.seed) settings.seed = tuning.seed.value;
-  if (tuning?.stop) settings.stop = tuning.stop.value;
+  if (profile.temperature !== undefined) settings.temperature = profile.temperature;
+  settings.parallelToolCalls = false;
+  const effort = profile.reasoningEffort ?? "low";
+  settings.reasoning = { effort };
+  return settings;
+}
+
+/** Map the negotiated ModelTuning-shaped allow-list onto the SDK's shapes. */
+function sdkSettingsFromNegotiated(allowed: Record<string, unknown>): Record<string, unknown> {
+  const settings: Record<string, unknown> = {};
+  const effort = allowed.reasoningEffort;
+  const summary = allowed.reasoningSummary;
+  const verbosity = allowed.verbosity;
+  for (const [key, value] of Object.entries(allowed)) {
+    if (value === undefined) continue;
+    switch (key) {
+      case "reasoningEffort":
+      case "reasoningSummary":
+      case "verbosity":
+        continue; // folded into the SDK-shaped fields below
+      case "maxOutputTokens":
+        settings.maxTokens = value;
+        continue;
+      default:
+        settings[key] = value;
+    }
+  }
+  if (effort || summary) {
+    settings.reasoning = summary ? { effort: effort ?? "low", summary } : { effort };
+  }
+  if (verbosity) settings.text = { verbosity };
   return settings;
 }
 
@@ -810,20 +975,21 @@ function textDelta(event: RunStreamEvent): string | undefined {
 }
 
 /**
- * Reasoning-capable providers stream hidden reasoning through
- * `choices[].delta.reasoning_content`, which the SDK's chat-completions
- * converter does not surface. Read it straight from the raw chunk so the
- * observer can watch the model's private thinking unfold in real time.
+ * Provider-returned reasoning SUMMARY, never raw chain-of-thought (§8.5).
+ *
+ * AGENTS.md forbids raw `reasoning_content` (the full hidden chain of
+ * thought) from entering SSE, logs, replay, checkpoints or the frontend. The
+ * only reasoning stream that may cross the wire is a provider-returned
+ * reasoning *summary* — here the Responses API's
+ * `response.reasoning_summary_text.delta` event. Chat-completions
+ * `reasoning_content` is full CoT and is deliberately not surfaced.
  */
 function reasoningDeltaFromEvent(event: RunStreamEvent): string | undefined {
-  if (!isOpenAIChatCompletionsRawModelStreamEvent(event)) return undefined;
-  const delta = event.data.event.choices?.[0]?.delta as Record<string, unknown> | undefined;
-  if (!delta) return undefined;
-  return typeof delta.reasoning_content === "string" && delta.reasoning_content
-    ? delta.reasoning_content
-    : typeof delta.reasoning === "string" && delta.reasoning
-      ? delta.reasoning
-      : undefined;
+  if (!isOpenAIResponsesRawModelStreamEvent(event)) return undefined;
+  const inner = event.data.event;
+  if (inner.type !== "response.reasoning_summary_text.delta") return undefined;
+  const delta = (inner as { delta?: string }).delta;
+  return typeof delta === "string" && delta ? delta : undefined;
 }
 
 function usageFromResult(result: unknown): AgentTurnResult["usage"] {
@@ -843,6 +1009,11 @@ function clamp(value: number): number {
 function numberFromEnv(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function positiveInteger(value: number | undefined, min: number, max: number): number {
+  if (value === undefined || !Number.isFinite(value)) return max;
+  return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
 function boundedInteger(value: number, min: number, max: number): number {
