@@ -1,7 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { ArrowLeft, Check, Copy, Clapperboard, Flame, Pause, RefreshCw } from "lucide-react";
+import { ArrowLeft, Check, Copy, Clapperboard, Flame, ListOrdered, Pause, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import type { SocietyRoomSnapshot } from "@/society/room";
@@ -139,13 +140,28 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
       </header>
 
       {stageView === "arena" ? (
-        <div className="mx-auto w-full max-w-4xl flex-1 space-y-4 px-6 py-5">
+        <div className="mx-auto w-full max-w-4xl flex-1 space-y-4 px-6 py-5 pb-20 md:pb-5">
           <ArenaStage room={room} cue={cue} activity={activity} />
           <main className="relative min-h-[56vh] overflow-hidden rounded-xl border border-border bg-card/40">
             <CueBanner cue={cue} finished={room.world.status === "finished"} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
             <Conversation room={room} activity={activity} onAction={submitAction} onReplay={onReplay} />
           </main>
-          <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} />
+          <div className="hidden md:block">
+            <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} />
+          </div>
+          <div className="fixed inset-x-0 bottom-3 z-30 flex justify-center md:hidden">
+            <Sheet>
+              <SheetTrigger asChild>
+                <Button variant="outline" className="h-10 rounded-full border-white/10 bg-black/70 px-5 text-xs text-zinc-200 shadow-lg backdrop-blur-xl hover:bg-white/10">
+                  <ListOrdered className="size-3.5" />
+                  战况 · 时间线 · 高光
+                </Button>
+              </SheetTrigger>
+              <SheetContent side="bottom" className="max-h-[70vh] overflow-y-auto rounded-t-2xl border-white/10 bg-[#0a0a0a]">
+                <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} />
+              </SheetContent>
+            </Sheet>
+          </div>
         </div>
       ) : (
       <div className="mx-auto grid w-full max-w-[1440px] flex-1 grid-cols-1 gap-5 px-6 py-5 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
