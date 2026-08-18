@@ -291,10 +291,13 @@ async function run() {
     for (const count of [5, 6, 7, 8, 9, 10]) {
       const deck = avalonDeck(count);
       assert.equal(deck.length, count, `${count}P deck size`);
-      const good = deck.filter((role) => role === "merlin" || role === "servant").length;
+      const good = deck.filter((role) => role === "merlin" || role === "percival" || role === "servant").length;
       const evil = deck.length - good;
       assert.deepEqual([good, evil], expected[count], `${count}P good/evil split`);
       assert.ok(deck.includes("merlin") && deck.includes("assassin"), `${count}P has Merlin and the Assassin`);
+      assert.ok(deck.includes("percival") && deck.includes("morgana"), `${count}P has Percival and Morgana`);
+      if (count === 7 || count === 10) assert.ok(deck.includes("oberon"), `${count}P has Oberon`);
+      if ([8, 9, 10].includes(count)) assert.ok(deck.includes("mordred"), `${count}P has Mordred`);
     }
   });
 
@@ -313,12 +316,41 @@ async function run() {
     assert.equal(questFailsNeeded(7, 1), 1, "other quests need one fail");
   });
 
-  await check("lady of the lake verdict follows the official rule (Merlin reads evil)", () => {
+  await check("lady of the lake verdict follows the official loyalty rule", () => {
     assert.equal(ladyVerdictFor("servant"), "loyal");
-    assert.equal(ladyVerdictFor("merlin"), "evil", "Merlin reads as evil through the Lady's eyes");
+    assert.equal(ladyVerdictFor("merlin"), "loyal", "the Lady reads loyalty — Merlin is loyal");
+    assert.equal(ladyVerdictFor("percival"), "loyal");
     assert.equal(ladyVerdictFor("assassin"), "evil");
     assert.equal(ladyVerdictFor("mordred"), "evil");
+    assert.equal(ladyVerdictFor("morgana"), "evil");
     assert.equal(ladyVerdictFor("minion"), "evil");
+    assert.equal(ladyVerdictFor("oberon"), "loyal", "Oberon reads as good even to the Lady");
+  });
+
+  await check("avalon knowledge follows the official setup (Merlin / Percival / Oberon)", () => {
+    const seats = profiles(7); // merlin, percival, 2 servants, morgana, assassin, oberon
+    const world = createWorld({ roomId: "r-av2", scenarioId: "avalon", profiles: seats, rounds: 5 });
+    world.start();
+    const roles = new Map<string, string>();
+    for (const seat of seats) roles.set(seat.id, String(world.observe(seat.id).self.role));
+    const byRole = (role: string): string[] => [...roles].filter(([, r]) => r === role).map(([id]) => id);
+    const context = (id: string): string => world.observe(id).privateContext;
+    const merlinId = byRole("merlin")[0];
+    const percivalId = byRole("percival")[0];
+    const oberonId = byRole("oberon")[0];
+    const mordred = byRole("mordred");
+    const merlinContext = context(merlinId);
+    const nameFor = (id: string): string => seats.find((seat) => seat.id === id)?.displayName ?? id;
+    assert.ok(merlinContext.includes("你已知的内奸"), "Merlin knows the agents of evil");
+    for (const id of [...byRole("assassin"), ...byRole("morgana")]) assert.ok(merlinContext.includes(nameFor(id)), `Merlin sees ${roles.get(id)}`);
+    assert.ok(!merlinContext.includes(nameFor(oberonId)), "Merlin does not see Oberon");
+    if (mordred[0]) assert.ok(!merlinContext.includes(nameFor(mordred[0])), "Merlin does not see Mordred");
+    const percivalContext = context(percivalId);
+    assert.ok(percivalContext.includes("看见两个人自称梅林"), "Percival sees Merlin and Morgana without telling them apart");
+    assert.ok(percivalContext.includes(nameFor(merlinId)) && percivalContext.includes(nameFor(byRole("morgana")[0])), "Percival's sights name both");
+    const oberonContext = context(oberonId);
+    assert.ok(!oberonContext.includes("你已知的内奸"), "Oberon knows no fellow agents of evil");
+    for (const id of [...byRole("assassin"), ...byRole("morgana")]) assert.ok(!context(id).includes(nameFor(oberonId)), `${roles.get(id)} does not know Oberon`);
   });
 
   await check("lady of the lake starts with the player to the right of the first leader", () => {

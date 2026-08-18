@@ -59,6 +59,13 @@ export interface ContextBudgetOptions {
   onCompacted?: (digest: string, estimatedTokens: number, threshold: number, level: ContextPressureLevel, pressureAfter: number) => void;
   /** Called when the pressure level changes (for observer UI). */
   onPressure?: (budget: ContextBudget, level: ContextPressureLevel) => void;
+  /**
+   * Rewrite the durable session to the compacted items (§5.9). Without this,
+   * the request view shrinks but the stored history keeps growing, so the
+   * next activation re-estimates the full history and re-trips the hard
+   * guard forever — the exact deadlock a long game must never hit.
+   */
+  onSessionCompacted?: (items: AgentInputItem[]) => Promise<void> | void;
 }
 
 export interface ContextBudgetInfo {
@@ -187,12 +194,20 @@ export class SessionContextManager {
 
     if (historyItems.length === 0) return [...historyItems, ...newItems];
 
-    // Hard guard: never send a request that would overrun the window.
+    // Hard guard: never send a request that would overrun the window. One
+    // last-resort emergency compaction runs first — without it, pressure can
+    // never drop and the agent deadlocks (§5.3 emergency / §5.8 fallback).
     if (budget.pressureRatio >= this.policy.hardLimitRatio) {
+      const { kept } = await this.compact(historyItems, "emergency");
+      const after = estimateTokens([digestItem(kept.digest), ...kept.recent], this.policy.heuristicSafetyMultiplier);
+      if (after / Math.max(1, this.usableInputTokens) < this.policy.hardLimitRatio) {
+        await this.options.onSessionCompacted?.([digestItem(kept.digest), ...kept.recent]);
+        return [digestItem(kept.digest), ...kept.recent, ...newItems];
+      }
       const error = new Error(
         `CONTEXT_HARD_GUARD: Input pressure ${Math.round(budget.pressureRatio * 100)}% exceeds the hard limit ` +
         `(${Math.round(this.policy.hardLimitRatio * 100)}%) of ${this.usableInputTokens.toLocaleString()} usable tokens. ` +
-        `Compaction has not relieved the pressure; the agent must not call the model until it does.`
+        `Emergency compaction could not relieve the pressure; the agent must not call the model until it does.`
       );
       (error as Error & { code?: string }).code = "CONTEXT_HARD_GUARD";
       throw error;
@@ -209,6 +224,9 @@ export class SessionContextManager {
     }
 
     const { kept, compacted } = await this.compact(historyItems, level);
+    // Persist the compacted history so the next activation estimates the
+    // shrunk session instead of the pre-compaction one.
+    if (compacted) await this.options.onSessionCompacted?.([digestItem(kept.digest), ...kept.recent]);
     return [digestItem(kept.digest), ...kept.recent, ...newItems];
   };
 

@@ -1224,6 +1224,9 @@ function friendlyFailure(error: unknown): string {
   if (/TURN_TIMEOUT/i.test(message)) return "思考时间超时";
   if (/aborted|abort/i.test(message)) return "本轮被中断";
   if (/OPENAI_API_KEY_REQUIRED/i.test(message)) return "提供商密钥未配置";
+  if (/CONTEXT_HARD_GUARD/i.test(message)) return "上下文压力达到硬上限，正在压缩";
+  if (/reused for a different invocation/i.test(message)) return "工具调用标识冲突，本轮重试";
+  if (/400\s|openai_error/i.test(message) && /400/i.test(message)) return "提供商拒绝了本次请求（400），稍后重试";
   if (/429|rate limit/i.test(message)) return "提供商限流，稍后重试";
   if (/502|503|504/i.test(message)) return "提供商暂时不可用";
   return message.replace(/^[A-Za-z_]+:\s*/, "").slice(0, 160);

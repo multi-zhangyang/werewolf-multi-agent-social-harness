@@ -333,6 +333,13 @@ export abstract class SocialWorldBase implements SocialWorld {
   }
 
   protected addLog(text: string, turn = this.currentTurn(), beat?: WorldLogEntry["beat"]): void {
+    // Consecutive identical entries (retry notes, repeated system errors) are
+    // noise for observers — collapse them into one timeline line per turn.
+    const previous = this.log.at(-1);
+    if (previous && previous.text === text && previous.turn === turn) {
+      previous.at = new Date().toISOString();
+      return;
+    }
     this.log.push({
       id: randomUUID(),
       text,

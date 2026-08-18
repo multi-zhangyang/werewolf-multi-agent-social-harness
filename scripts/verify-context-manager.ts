@@ -123,14 +123,33 @@ async function run(): Promise<void> {
     assert.equal(manager.pressure(), "normal");
   });
 
-  await check("hard guard throws instead of overrunning the window", async () => {
+  await check("hard guard runs an emergency compaction and proceeds when relief works", async () => {
+    const calls = { digest: 0 };
+    let persisted: AgentInputItem[] | undefined;
+    const manager = new SessionContextManager({
+      provider: fakeProvider(calls), model: "fake-model", actorLabel: "T",
+      resolvedConfig: resolved,
+      onSessionCompacted: (items) => { persisted = items; }
+    });
+    // history alone exceeds hardLimitRatio (0.95) of usable input.
+    const history = bigHistory(Math.floor(resolved.usableInputTokens * 0.97));
+    const result = await manager.sessionInputCallback(history, []);
+    assert.ok(calls.digest >= 1, "emergency compaction must run instead of a blind throw");
+    assert.ok(result.length < history.length, "the request view is the compacted one");
+    assert.ok(persisted && persisted.length === result.length, "the durable session follows the compacted view");
+    const pressure = manager.pressure();
+    assert.ok(["normal", "watch", "retrieval-tight", "soft-compact"].includes(pressure), `pressure relieved (${pressure})`);
+  });
+
+  await check("hard guard still throws when even emergency compaction cannot relieve", async () => {
     const calls = { digest: 0 };
     const manager = new SessionContextManager({
       provider: fakeProvider(calls), model: "fake-model", actorLabel: "T",
       resolvedConfig: resolved
     });
-    // history alone exceeds hardLimitRatio (0.95) of usable input.
-    const history = bigHistory(Math.floor(resolved.usableInputTokens * 0.97));
+    // Two enormous recent items: the keep floor (2) still exceeds the window.
+    const giant = messageItem("巨", Math.floor(resolved.usableInputTokens * 0.6));
+    const history = [giant, giant, giant, giant];
     await assert.rejects(
       () => manager.sessionInputCallback(history, []),
       /CONTEXT_HARD_GUARD/

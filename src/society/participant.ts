@@ -270,6 +270,14 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
           contextWindow: budget.contextWindow,
           at: new Date().toISOString()
         });
+      },
+      // Persist every compaction into the durable session (§5.9): the request
+      // view shrinking alone leaves the store growing, and the next
+      // activation would re-estimate the full history and re-trip the hard
+      // guard. The store must follow the compacted view.
+      onSessionCompacted: (items) => {
+        const store = this.session as Session & { replaceHistoryWithCompaction?: (replacement: typeof items) => Promise<void> };
+        return store.replaceHistoryWithCompaction?.(items);
       }
     });
   }

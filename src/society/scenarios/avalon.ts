@@ -20,24 +20,38 @@ import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
 import { roleHypothesisTool } from "../cognition";
 
-type Role = "merlin" | "servant" | "assassin" | "mordred" | "minion";
+type Role = "merlin" | "percival" | "servant" | "morgana" | "assassin" | "mordred" | "oberon" | "minion";
 
 function isEvilRole(role: Role | undefined): boolean {
-  return role === "assassin" || role === "mordred" || role === "minion";
+  return role === "morgana" || role === "assassin" || role === "mordred" || role === "oberon" || role === "minion";
 }
 
 function isLoyalRole(role: Role | undefined): boolean {
-  return role === "merlin" || role === "servant";
+  return role === "merlin" || role === "percival" || role === "servant";
 }
 
 /**
- * Lady of the Lake verdict (official rule): loyal servants read loyal, every
- * evil role reads evil, and — famously — Merlin reads as EVIL through the
- * Lady's eyes, so the holder can never use her to confirm Merlin safely.
+ * Agents of evil who know each other at setup (official rule): Morgana, the
+ * Assassin, Mordred and minions see one another. Oberon is excluded — his
+ * loyalty is invisible to the other agents of evil, and theirs to him.
+ */
+function knowsEvilAllies(role: Role | undefined): boolean {
+  return role === "morgana" || role === "assassin" || role === "mordred" || role === "minion";
+}
+
+/** Roles Merlin sees as evil at setup: every agent of evil except Mordred and Oberon. */
+function merlinSees(role: Role | undefined): boolean {
+  return role === "morgana" || role === "assassin" || role === "minion";
+}
+
+/**
+ * Lady of the Lake verdict (official rule): the Lady reads LOYALTY, not
+ * identity — loyal roles read loyal (Merlin included), evil roles read evil
+ * except Oberon, who reads as good even through the Lady's eyes.
  */
 export function ladyVerdictFor(role: Role | undefined): "loyal" | "evil" {
   if (role === undefined) return "loyal";
-  return role === "servant" ? "loyal" : "evil";
+  return role === "oberon" ? "loyal" : isEvilRole(role) ? "evil" : "loyal";
 }
 
 /**
@@ -53,15 +67,20 @@ export const QUEST_TEAM_SIZES: Record<number, number[]> = {
   10: [3, 4, 4, 5, 5]
 };
 
-/** Official good/evil split decks: Merlin and the Assassin are always present. */
+/**
+ * Official good/evil split decks with the special-character setups (Merlin
+ * and the Assassin are always present; Percival + Morgana from 5-6, Oberon
+ * at 7, Mordred at 8-9, the full house at 10 — the published recommended
+ * role sets for each count).
+ */
 export function deckForPlayerCount(count: number): Role[] {
   const decks: Record<number, Role[]> = {
-    5: ["merlin", "servant", "servant", "assassin", "minion"],
-    6: ["merlin", "servant", "servant", "servant", "assassin", "minion"],
-    7: ["merlin", "servant", "servant", "servant", "assassin", "minion", "mordred"],
-    8: ["merlin", "servant", "servant", "servant", "servant", "assassin", "minion", "mordred"],
-    9: ["merlin", "servant", "servant", "servant", "servant", "servant", "assassin", "minion", "mordred"],
-    10: ["merlin", "servant", "servant", "servant", "servant", "servant", "assassin", "minion", "mordred", "minion"]
+    5: ["merlin", "percival", "servant", "morgana", "assassin"],
+    6: ["merlin", "percival", "servant", "servant", "morgana", "assassin"],
+    7: ["merlin", "percival", "servant", "servant", "morgana", "assassin", "oberon"],
+    8: ["merlin", "percival", "servant", "servant", "servant", "morgana", "assassin", "mordred"],
+    9: ["merlin", "percival", "servant", "servant", "servant", "servant", "morgana", "assassin", "mordred"],
+    10: ["merlin", "percival", "servant", "servant", "servant", "servant", "morgana", "assassin", "mordred", "oberon"]
   };
   const deck = decks[count];
   if (!deck) throw new Error(`PLAYER_COUNT_INVALID: Avalon supports 5-10 seats, got ${count}.`);
@@ -136,7 +155,7 @@ export class AvalonWorld extends SocialWorldBase {
     // first leader (the previous seat in our rotation order).
     this.ladyHolderId = profiles.at(-1)?.id ?? profiles[0].id;
     this.discussion = this.createDiscussion();
-    this.addLog("圆桌就座。忠臣要完成任务，内奸要暗中破坏；梅林看得见刺客，但看不见莫德雷德。湖中仙女令牌从首位队长的右手边开始流转。", 1);
+    this.addLog("圆桌就座。忠臣要完成任务，内奸要暗中破坏；梅林看得见内奸，却看不见莫德雷德与奥伯伦，派西维尔眼中梅林与莫甘娜真假难辨。湖中仙女令牌从首位队长的右手边开始流转。", 1);
   }
 
   protected exportWorldState(): unknown {
@@ -234,12 +253,15 @@ export class AvalonWorld extends SocialWorldBase {
   observe(actorId: string): AgentObservation {
     const self = this.requireProfile(actorId);
     const role = this.roles.get(actorId)!;
-    const evilAllies = isEvilRole(role)
-      ? [...this.roles].filter(([id, candidate]) => id !== actorId && isEvilRole(candidate)).map(([id]) => id)
+    const evilAllies = knowsEvilAllies(role)
+      ? [...this.roles].filter(([id, candidate]) => id !== actorId && knowsEvilAllies(candidate)).map(([id]) => id)
       : [];
     const knownEvil = role === "merlin"
-      ? [...this.roles].filter(([, candidate]) => candidate === "assassin" || candidate === "minion").map(([id]) => id)
+      ? [...this.roles].filter(([, candidate]) => merlinSees(candidate)).map(([id]) => id)
       : evilAllies;
+    const merlinSeat = [...this.roles].find(([, candidate]) => candidate === "merlin")?.[0];
+    const morganaSeat = [...this.roles].find(([, candidate]) => candidate === "morgana")?.[0];
+    const percivalSights = role === "percival" ? [merlinSeat, morganaSeat].filter((id): id is string => Boolean(id)) : [];
     return {
       roomId: this.roomId,
       scenarioId: this.scenario.id,
@@ -247,18 +269,25 @@ export class AvalonWorld extends SocialWorldBase {
       phase: this.phase,
       situation: `${situationFor(this.phase, this.quest, this.totalQuests, this.successes, this.failures)}\nPublic suspicion climate: ${this.suspicion.climateText((id) => this.profiles.get(id)?.displayName ?? id)}`,
       privateContext: [
-        `Your hidden role: ${role}.`,
-        `Your objective: ${roleObjective(role)}.`,
-        knownEvil.length ? `Known evil identities: ${knownEvil.join(", ")}.` : "",
-        role === "merlin" ? "Mordred is hidden even from you." : "",
-        this.ladyHolderId === actorId ? "You hold the Lady of the Lake token: once per quest you may inspect another player's allegiance." : `The Lady of the Lake token is held by ${this.profiles.get(this.ladyHolderId)?.displayName ?? this.ladyHolderId}.`,
+        `你的隐藏身份：${roleLabel(role)}（${role}）。`,
+        `你的目标：${roleObjective(role)}。`,
+        knownEvil.length ? `你已知的内奸：${knownEvil.map((id) => this.profiles.get(id)?.displayName ?? id).join("、")}。` : "",
+        role === "merlin" ? "莫德雷德与奥伯伦连你也看不见。" : "",
+        role === "mordred" ? "梅林看不见你——保持隐身。" : "",
+        role === "oberon" ? "其他内奸不认识你，你也不认识他们。" : "",
+        role === "percival" && percivalSights.length === 2
+          ? `你看见两个人自称梅林：${percivalSights.map((id) => this.profiles.get(id)?.displayName ?? id).join(" 与 ")}。一个是梅林，一个是莫甘娜——你分不清谁是谁。`
+          : role === "percival" && percivalSights.length === 1
+            ? `你知道梅林：${this.profiles.get(percivalSights[0])?.displayName ?? percivalSights[0]}。`
+            : "",
+        this.ladyHolderId === actorId ? "你持有湖中仙女令牌：每次任务后可以查验一名玩家的阵营。" : `湖中仙女令牌在 ${this.profiles.get(this.ladyHolderId)?.displayName ?? this.ladyHolderId} 手中。`,
         this.ladyReveals.size
-          ? `Your Lady of the Lake findings: ${[...this.ladyReveals].map(([inspectedId, reveal]) => `${this.profiles.get(inspectedId)?.displayName ?? inspectedId} looked ${reveal.verdict} (quest ${reveal.quest})`).join("; ")}.`
+          ? `你的湖中仙女查验记录：${[...this.ladyReveals].map(([inspectedId, reveal]) => `${this.profiles.get(inspectedId)?.displayName ?? inspectedId} 看起来是${reveal.verdict === "loyal" ? "忠臣" : "内奸"}（第 ${reveal.quest} 次任务后）`).join("；")}。`
           : "",
-        this.phase === "proposal" ? `Current leader: ${this.leaderId}. The proposed team: ${this.proposedTeam.join(", ") || "not yet proposed"}.` : "",
-        `Your team vote: ${this.teamVotes.has(actorId) ? String(this.teamVotes.get(actorId)) : "not cast"}.`,
-        `Your quest vote: ${this.questVotes.get(actorId) ?? "not cast"}.`,
-        `Quest history: ${this.questHistory.map((record) => `Q${record.quest} team=[${record.team.join(",")}] ${record.outcome} (fails ${record.failCount})`).join("; ") || "none"}.`
+        this.phase === "proposal" ? `当前队长：${this.profiles.get(this.leaderId)?.displayName ?? this.leaderId}。候选队伍：${this.proposedTeam.length ? this.proposedTeam.map((id) => this.profiles.get(id)?.displayName ?? id).join("、") : "尚未提名"}。` : "",
+        `你的队伍表决：${this.teamVotes.has(actorId) ? String(this.teamVotes.get(actorId)) : "未投"}。`,
+        `你的任务表决：${this.questVotes.get(actorId) ?? "未投"}。`,
+        `任务历史：${this.questHistory.map((record) => `第 ${record.quest} 次任务 队伍=[${record.team.join(",")}] ${record.outcome === "success" ? "成功" : "失败"}（黑票 ${record.failCount}）`).join("；") || "暂无"}。`
       ].filter(Boolean).join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, role },
       others: this.otherProfiles(actorId).map((profile) => ({
@@ -527,14 +556,14 @@ export class AvalonWorld extends SocialWorldBase {
         targetId,
         facts: { correct, assassinId: actorId },
         detail: correct
-          ? `The Assassin found you. Your identity as Merlin was your death — but the loyal cause fell with you.`
-          : `The Assassin pointed at you, and missed. Your identity (${roleLabel(targetRole)}) stays your own.`
+          ? "刺客找到了你。你作为梅林的身份就是你的死因——忠臣的事业与你一同倒下了。"
+          : `刺客指向了你，却失手了。你的身份（${roleLabel(targetRole)}）仍属于你自己。`
       });
-      this.winners = correct ? this.factionMembers(["assassin", "mordred", "minion"]) : this.factionMembers(["merlin", "servant"]);
+      this.winners = correct ? this.factionMembers(["morgana", "assassin", "mordred", "oberon", "minion"]) : this.factionMembers(["merlin", "percival", "servant"]);
       this.outcome = correct
-        ? `${this.profiles.get(actorId)?.displayName} identified ${this.profiles.get(targetId)?.displayName} as Merlin. The loyal cause falls; evil wins.`
-        : `${this.profiles.get(actorId)?.displayName} missed — ${this.profiles.get(targetId)?.displayName} was not Merlin. The loyal side wins.`;
-      for (const id of this.profiles.keys()) this.lastExperiences.set(id, `${this.outcome} Final roles: ${[...this.roles].map(([memberId, memberRole]) => `${memberId}=${memberRole}`).join(", ")}.`);
+        ? `${this.profiles.get(actorId)?.displayName} 指认 ${this.profiles.get(targetId)?.displayName} 为梅林。忠臣的事业崩塌，内奸阵营获胜。`
+        : `${this.profiles.get(actorId)?.displayName} 失手了——${this.profiles.get(targetId)?.displayName} 并不是梅林。忠臣阵营获胜。`;
+      for (const id of this.profiles.keys()) this.lastExperiences.set(id, `${this.outcome} 最终身份：${[...this.roles].map(([memberId, memberRole]) => `${memberId}=${memberRole}`).join(", ")}。`);
       this.addLog(this.outcome, this.quest, correct ? "win" : "misplay");
       this.finish();
       return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, correct, targetId } };
@@ -709,14 +738,14 @@ export class AvalonWorld extends SocialWorldBase {
           type: "accused",
           actorId: message.senderId,
           targetId: id,
-          detail: `Quest ${this.quest} discussion: ${message.senderName} accused you at the round table — "${snippet}"`
+          detail: `第 ${this.quest} 次任务讨论：${message.senderName} 在圆桌上公开指控了你——「${snippet}」`
         });
       } else if (DEFENSE_LEXICON.test(window)) {
         this.pushEvent(id, {
           type: "defended",
           actorId: message.senderId,
           targetId: id,
-          detail: `Quest ${this.quest} discussion: ${message.senderName} stood up for you at the round table — "${snippet}"`
+          detail: `第 ${this.quest} 次任务讨论：${message.senderName} 在圆桌上为你说话——「${snippet}」`
         });
       }
     }
@@ -753,11 +782,12 @@ export class AvalonWorld extends SocialWorldBase {
     if (this.status === "finished") return true;
     const viewerRole = viewerId ? this.roles.get(viewerId) : undefined;
     const subjectRole = this.roles.get(subjectId);
-    return Boolean(viewerRole && subjectRole && isEvilRole(viewerRole) && isEvilRole(subjectRole));
+    // Only agents of evil who know each other see each other's allegiance.
+    return Boolean(viewerRole && subjectRole && knowsEvilAllies(viewerRole) && knowsEvilAllies(subjectRole));
   }
 
   protected messageChannelsFor(actorId: string): SocialChannel[] {
-    return isEvilRole(this.roles.get(actorId)) ? ["public", "private", "team"] : ["public", "private"];
+    return knowsEvilAllies(this.roles.get(actorId)) ? ["public", "private", "team"] : ["public", "private"];
   }
 
   protected redactDetails(details: Record<string, unknown>, actorId?: string): Record<string, unknown> {
@@ -777,9 +807,10 @@ export class AvalonWorld extends SocialWorldBase {
       return;
     }
     if (channel === "team") {
-      if (!isEvilRole(this.roles.get(senderId))) throw new Error("TEAM_CHANNEL_FORBIDDEN: Only minions have access to the team channel.");
-      if (recipientIds.some((id) => !isEvilRole(this.roles.get(id)))) {
-        throw new Error("TEAM_RECIPIENT_INVALID: Team messages may only target fellow minions.");
+      const senderRole = this.roles.get(senderId);
+      if (!senderRole || !knowsEvilAllies(senderRole)) throw new Error("TEAM_CHANNEL_FORBIDDEN: Only agents of evil who know each other may use the team channel.");
+      if (recipientIds.some((id) => !knowsEvilAllies(this.roles.get(id)))) {
+        throw new Error("TEAM_RECIPIENT_INVALID: Team messages may only target fellow agents of evil who know each other.");
       }
     }
   }
@@ -801,8 +832,8 @@ export class AvalonWorld extends SocialWorldBase {
     this.teamVotes.clear();
     const approved = approveCount > this.profiles.size / 2;
     const text = approved
-      ? `Quest ${this.quest}: the table approved team [${team.join(", ")}] with ${approveCount} votes.`
-      : `Quest ${this.quest}: the table rejected team [${team.join(", ")}] with ${approveCount} approvals.`;
+      ? `第 ${this.quest} 次任务：圆桌以 ${approveCount} 票通过了队伍 [${team.map((member) => this.profiles.get(member)?.displayName ?? member).join("、")}]。`
+      : `第 ${this.quest} 次任务：圆桌以 ${approveCount} 票赞成否决了队伍 [${team.map((member) => this.profiles.get(member)?.displayName ?? member).join("、")}]。`;
     this.addLog(text, this.quest, approved ? "alliance" : undefined);
     if (approved) {
       this.rejections = 0;
@@ -812,7 +843,7 @@ export class AvalonWorld extends SocialWorldBase {
     }
     this.rejections += 1;
     if (this.rejections >= MAX_REJECTIONS) {
-      this.winners = this.factionMembers(["assassin", "mordred", "minion"]);
+      this.winners = this.factionMembers(["morgana", "assassin", "mordred", "oberon", "minion"]);
       this.outcome = "连续五次组队被否决——圆桌无法达成任何共识，内奸阵营获胜。";
       this.addLog(this.outcome, this.quest, "win");
       this.endGame();
@@ -848,10 +879,10 @@ export class AvalonWorld extends SocialWorldBase {
     const failsNeeded = this.failsNeededForQuest();
     const outcome = rejected || failCount >= failsNeeded ? "fail" : "success";
     const text = rejected
-      ? `Quest ${this.quest}: consecutive proposals were rejected, so the quest failed by deadlock.`
+      ? `第 ${this.quest} 次任务：连续提案被否决，任务因僵局失败。`
       : outcome === "fail"
-        ? `Quest ${this.quest} failed with ${failCount} hidden failure vote(s) (${failsNeeded} needed).`
-        : `Quest ${this.quest} succeeded.`;
+        ? `第 ${this.quest} 次任务失败：出现 ${failCount} 张黑票（需要 ${failsNeeded} 张）。`
+        : `第 ${this.quest} 次任务成功。`;
     const record: QuestRecord = {
       quest: this.quest,
       leaderId: this.leaderId,
@@ -865,7 +896,7 @@ export class AvalonWorld extends SocialWorldBase {
     if (outcome === "fail") this.failures += 1;
     else this.successes += 1;
     for (const id of this.profiles.keys()) {
-      this.lastExperiences.set(id, `${text} Quest ${this.quest} team: ${team.join(", ")}.`);
+      this.lastExperiences.set(id, `${text} 第 ${this.quest} 次任务队伍：${team.join(", ")}。`);
       const onTeam = team.includes(id);
       if (outcome === "fail") {
         if (onTeam) {
@@ -874,14 +905,14 @@ export class AvalonWorld extends SocialWorldBase {
             type: "quest-failed",
             targetId: id,
             facts: { onTeam: true, evil: isEvilRole(this.roles.get(id)), failCount },
-            detail: `Quest ${this.quest} failed with ${failCount} hidden failure vote(s) — and you were on the team.`
+            detail: `第 ${this.quest} 次任务失败，出现 ${failCount} 张黑票——而你就在队伍里。`
           });
         } else {
           this.pushEvent(id, {
             type: "quest-failed",
             targetId: id,
             facts: { onTeam: false, failCount },
-            detail: `Quest ${this.quest} failed with ${failCount} hidden failure vote(s). The saboteurs are among: ${team.map((member) => this.profiles.get(member)?.displayName ?? member).join(", ")}.`
+            detail: `第 ${this.quest} 次任务失败，出现 ${failCount} 张黑票。破坏者就在：${team.map((member) => this.profiles.get(member)?.displayName ?? member).join("、")}。`
           });
         }
       } else {
@@ -891,14 +922,14 @@ export class AvalonWorld extends SocialWorldBase {
           targetId: id,
           facts: { onTeam },
           detail: onTeam
-            ? `Quest ${this.quest} succeeded — you were on the winning team.`
-            : `Quest ${this.quest} succeeded. The table's trust holds for now.`
+            ? `第 ${this.quest} 次任务成功——你就在胜利的队伍里。`
+            : `第 ${this.quest} 次任务成功。圆桌的信任暂时站住了。`
         });
       }
     }
     this.addLog(text, this.quest, outcome === "fail" ? "betrayal" : "promise-kept");
     if (this.failures >= 2) {
-      this.winners = this.factionMembers(["assassin", "mordred", "minion"]);
+      this.winners = this.factionMembers(["morgana", "assassin", "mordred", "oberon", "minion"]);
       this.outcome = "两次任务失败，内奸得逞，圆桌陷落。";
       this.endGame();
       return;
@@ -997,26 +1028,32 @@ export class AvalonWorld extends SocialWorldBase {
 }
 
 function roleObjective(role: Role): string {
-  if (role === "merlin") return "Help three quests succeed while hiding your identity: the Assassin gets one shot at you if the quests are won. You know the Assassin's identity but not Mordred's.";
-  if (role === "servant") return "Help three quests succeed. You know nothing at the start — trust must be built from behavior alone.";
-  if (role === "assassin") return "Fail two quests through your team. If three quests succeed anyway, assassinate Merlin with your single, final guess.";
-  if (role === "minion") return "Fail two quests through your team. You know your fellow minions and may play either a loud or a quiet saboteur.";
-  return "Fail two quests through your team. Merlin cannot see you — exploit that blindness.";
+  if (role === "merlin") return "帮助三次任务成功，同时隐藏身份：任务全胜后刺客有一次机会指认你。你看得见内奸，但看不见莫德雷德与奥伯伦。";
+  if (role === "percival") return "帮助三次任务成功。你知道梅林是谁——但莫甘娜在局时你也会看见她，无法分辨真假。保护好真正的梅林，别公开点破。";
+  if (role === "servant") return "帮助三次任务成功。开局你什么都不知道——信任只能从行为里一点点建立。";
+  if (role === "assassin") return "让两次任务失败。若三次任务仍然全胜，就用你唯一的一次猜测刺杀梅林。";
+  if (role === "morgana") return "让两次任务失败。派西维尔会把你当作第二个梅林——冒充他来迷惑忠臣。";
+  if (role === "mordred") return "让两次任务失败。梅林看不见你——利用这份隐身。";
+  if (role === "oberon") return "独自让两次任务失败：其他内奸不认识你，你也不认识他们。";
+  return "让两次任务失败。你认识其他内奸，可以做一个高调的或安静的破坏者。";
 }
 
 function situationFor(phase: Phase, quest: number, totalQuests: number, successes: number, failures: number): string {
-  if (phase === "discussion") return `Quest ${quest} of ${totalQuests} is forming. Successes: ${successes}, failures: ${failures}. Hidden loyalties are the only currency.`;
-  if (phase === "proposal") return `The leader is assembling quest ${quest}'s team. Every proposal is a public signal.`;
-  if (phase === "vote") return `The proposed team for quest ${quest} is being voted on. Everyone's vote will be revealed together.`;
-  if (phase === "quest") return `Quest ${quest} is executing. Only approved members act, and their choices stay secret.`;
-  return "Three quests succeeded. The Assassin is about to take the final shot at Merlin.";
+  if (phase === "discussion") return `第 ${quest}/${totalQuests} 次任务正在组队。成功 ${successes} 次，失败 ${failures} 次。隐藏的忠诚是这里唯一的货币。`;
+  if (phase === "proposal") return `队长正在为第 ${quest} 次任务组队。每一次提名都是公开信号。`;
+  if (phase === "vote") return `第 ${quest} 次任务的队伍正在表决。所有人的票会一起揭晓。`;
+  if (phase === "quest") return `第 ${quest} 次任务执行中。只有入选队员行动，他们的选择保密。`;
+  return "三次任务全胜。刺客即将对梅林发起最后一剑。";
 }
 
 function roleLabel(role: Role | undefined): string {
   if (role === "merlin") return "梅林";
+  if (role === "percival") return "派西维尔";
   if (role === "servant") return "忠臣";
+  if (role === "morgana") return "莫甘娜";
   if (role === "assassin") return "刺客";
   if (role === "mordred") return "莫德雷德";
+  if (role === "oberon") return "奥伯伦";
   if (role === "minion") return "爪牙";
   return "未知";
 }

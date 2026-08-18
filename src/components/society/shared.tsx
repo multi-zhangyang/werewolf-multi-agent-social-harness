@@ -224,13 +224,21 @@ export function readableModel(model: string): string {
 export function roleLabelZh(role: string | undefined): string {
   const labels: Record<string, string> = {
     wolf: "狼人",
+    "wolf-king": "狼王",
     seer: "预言家",
+    witch: "女巫",
+    hunter: "猎人",
+    guard: "守卫",
     jester: "小丑",
     villager: "村民",
     merlin: "梅林",
+    percival: "派西维尔",
     servant: "忠臣",
+    morgana: "莫甘娜",
     assassin: "刺客",
-    mordred: "莫德雷德"
+    mordred: "莫德雷德",
+    oberon: "奥伯伦",
+    minion: "爪牙"
   };
   return role ? labels[role] ?? role : "未知";
 }
@@ -238,8 +246,8 @@ export function roleLabelZh(role: string | undefined): string {
 /** Faction tint for a role badge: red for deceivers, green for loyal, gold for seers. */
 export function roleTintClass(role: string | undefined): string {
   if (!role) return "border-border bg-card text-muted-foreground";
-  const red = ["狼人", "刺客", "莫德雷德", "wolf", "assassin", "mordred"];
-  const gold = ["预言家", "梅林", "seer", "merlin"];
+  const red = ["狼人", "狼王", "女巫", "刺客", "莫德雷德", "莫甘娜", "奥伯伦", "wolf", "wolf-king", "witch", "assassin", "mordred", "morgana", "oberon"];
+  const gold = ["预言家", "梅林", "派西维尔", "seer", "merlin", "percival"];
   const violet = ["小丑", "jester"];
   if (red.includes(role)) return "border-rose-400/30 bg-rose-400/10 text-rose-300";
   if (gold.includes(role)) return "border-amber-400/30 bg-amber-400/10 text-amber-300";
