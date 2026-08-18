@@ -29,6 +29,7 @@ export type WerewolfRoleId =
   | "guard"
   | "jester"
   | "idiot"
+  | "knight"
   | "villager";
 
 export type WerewolfFaction = "wolves" | "village" | "jester";
@@ -88,6 +89,12 @@ export const WEREWOLF_ROLES: Record<WerewolfRoleId, WerewolfRoleDef> = {
     label: "白痴",
     faction: "village",
     objective: "帮助村庄找出狼人。被投票放逐时亮明白痴身份，免于一死，但从此失去投票权，只能发言帮助好人。"
+  },
+  knight: {
+    id: "knight",
+    label: "骑士",
+    faction: "village",
+    objective: "帮助村庄找出狼人。白天投票前可发起一次决斗：若目标是狼人则目标被淘汰；若目标不是狼人，你自己死亡。"
   },
   villager: {
     id: "villager",
@@ -152,8 +159,8 @@ export const WEREWOLF_DECKS: WerewolfDeck[] = [
   {
     playerCount: 12,
     name: "12 人多能力局",
-    description: "四狼（三小狼+狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 小丑 · 白痴 · 双村民：经典预女猎守满配+白痴翻牌。",
-    roles: ["wolf", "wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "guard", "jester", "idiot", "villager", "villager"]
+    description: "四狼（三小狼+狼王）· 预言家 · 女巫 · 猎人 · 骑士 · 守卫 · 小丑 · 白痴 · 村民：预女猎守+骑士决斗+小丑白痴满配。",
+    roles: ["wolf", "wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "knight", "guard", "jester", "idiot", "villager"]
   }
 ];
 
@@ -168,7 +175,7 @@ export function isWolfRole(role: WerewolfRoleId | undefined): boolean {
 }
 
 export function isVillageRole(role: WerewolfRoleId | undefined): boolean {
-  return role === "seer" || role === "witch" || role === "hunter" || role === "guard" || role === "idiot" || role === "villager";
+  return role === "seer" || role === "witch" || role === "hunter" || role === "guard" || role === "idiot" || role === "knight" || role === "villager";
 }
 
 export function roleLabel(role: WerewolfRoleId | undefined): string {

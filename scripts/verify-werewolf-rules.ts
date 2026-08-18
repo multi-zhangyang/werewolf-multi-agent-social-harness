@@ -69,6 +69,8 @@ async function run() {
       assert.ok(deck.roles.includes("seer") && deck.roles.includes("witch"), `${deck.name} must include seer and witch`);
     }
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("wolf-king"), "12P includes the wolf king");
+    assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("knight"), "12P includes the knight");
+    assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 12)!.roles.includes("idiot"), "12P includes the idiot");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 10)!.roles.includes("jester"), "10P includes the jester");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 7), "7P deck exists (生还者 board)");
     assert.ok(WEREWOLF_DECKS.find((deck) => deck.playerCount === 11), "11P deck exists (standard board)");
@@ -143,6 +145,62 @@ async function run() {
     world.completeActivation(vote2);
     const after = world.snapshot();
     assert.ok(!after.agents.find((agent) => agent.id === idiot)?.alive, "the revealed idiot dies on the second vote-out");
+  });
+
+  // --- knight rules ---
+  await check("knight duel eliminates a wolf and the vote then opens", async () => {
+    const { world, byRole } = makeWerewolf(12);
+    skipDiscussion(world);
+    const duel = world.activation();
+    assert.ok(duel && duel.id.endsWith(":knight"), "the knight's duel opens before the vote");
+    const knight = byRole("knight")[0];
+    const wolf = byRole("wolf")[0];
+    void world.performDomainAction(knight, "knight_challenge", { targetId: wolf, reason: "t" });
+    world.completeActivation(duel);
+    const after = world.snapshot();
+    assert.ok(!after.agents.find((agent) => agent.id === wolf)?.alive, "the challenged wolf is eliminated");
+    assert.ok(after.agents.find((agent) => agent.id === knight)?.alive, "the knight survives");
+    assert.equal(after.phase, "白天投票", "the vote opens after the duel");
+  });
+
+  await check("knight duel against a non-wolf kills the knight", async () => {
+    const { world, byRole } = makeWerewolf(12);
+    skipDiscussion(world);
+    const duel = world.activation();
+    const knight = byRole("knight")[0];
+    const villager = byRole("villager")[0];
+    void world.performDomainAction(knight, "knight_challenge", { targetId: villager, reason: "t" });
+    world.completeActivation(duel!);
+    const after = world.snapshot();
+    assert.ok(!after.agents.find((agent) => agent.id === knight)?.alive, "the knight dies");
+    assert.ok(after.agents.find((agent) => agent.id === villager)?.alive, "the challenged villager survives");
+    assert.equal(after.phase, "白天投票", "the vote opens after the failed duel");
+  });
+
+  await check("a knight who passes never gets a second duel", async () => {
+    const { world, byRole } = makeWerewolf(12);
+    skipDiscussion(world);
+    const duel = world.activation();
+    const knight = byRole("knight")[0];
+    void world.performDomainAction(knight, "knight_challenge", { reason: "t" });
+    world.completeActivation(duel!);
+    const after = world.snapshot();
+    assert.equal(after.phase, "白天投票", "the vote opens after the pass");
+    // A quiet night, then day two must open straight into the vote.
+    const vote = world.activation();
+    const villager = byRole("villager")[0];
+    for (const actor of vote.actorIds) void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === villager ? byRole("seer")[0] : villager, reason: "t" });
+    world.completeActivation(vote);
+    const night = world.activation();
+    const guard = byRole("guard")[0];
+    for (const wolf of [...byRole("wolf"), ...byRole("wolf-king")]) void world.performDomainAction(wolf, "choose_night_target", { targetId: guard, reason: "t" });
+    void world.performDomainAction(guard, "guard_tonight", { targetId: byRole("seer")[0] });
+    void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
+    void world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
+    world.completeActivation(night!);
+    skipDiscussion(world);
+    const next = world.activation();
+    assert.ok(next && next.id.endsWith(":vote"), "day two goes straight to the vote");
   });
 
   // --- witch rules ---

@@ -28,7 +28,7 @@ import {
   type WerewolfRoleId
 } from "./roles";
 
-type Phase = "day-discussion" | "day-vote" | "night";
+type Phase = "day-discussion" | "day-knight" | "day-vote" | "night";
 
 interface DayRecord {
   day: number;
@@ -87,6 +87,8 @@ export class WerewolfWorld extends SocialWorldBase {
   private jesterWon = false;
   /** Idiots who flipped their card: alive, but without a vote. */
   private readonly idiotRevealed = new Set<string>();
+  /** The knight's one daytime duel: once per game, before the vote. */
+  private knightUsed = false;
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
@@ -129,7 +131,8 @@ export class WerewolfWorld extends SocialWorldBase {
       lastGuardTargetId: this.lastGuardTargetId ?? null,
       pendingShots: structuredClone(this.pendingShots),
       jesterWon: this.jesterWon,
-      idiotRevealed: [...this.idiotRevealed]
+      idiotRevealed: [...this.idiotRevealed],
+      knightUsed: this.knightUsed
     };
   }
 
@@ -141,7 +144,7 @@ export class WerewolfWorld extends SocialWorldBase {
       history: DayRecord[]; lastExperiences: Array<[string, string]>; discussion: unknown; suspicion: unknown;
       winners: string[]; outcome: string; antidoteAvailable: boolean; poisonAvailable: boolean;
       witchSaveId: string | null; witchPoisonId: string | null; witchActed: boolean;
-      guardTargetId: string | null; lastGuardTargetId: string | null; pendingShots: PendingShot[]; jesterWon: boolean; idiotRevealed: string[];
+      guardTargetId: string | null; lastGuardTargetId: string | null; pendingShots: PendingShot[]; jesterWon: boolean; idiotRevealed: string[]; knightUsed: boolean;
     }> | undefined;
     if (!s) return;
     this.day = Number(s.day ?? 1);
@@ -178,6 +181,7 @@ export class WerewolfWorld extends SocialWorldBase {
     this.jesterWon = Boolean(s.jesterWon);
     this.idiotRevealed.clear();
     for (const id of s.idiotRevealed ?? []) this.idiotRevealed.add(id);
+    this.knightUsed = Boolean(s.knightUsed);
   }
 
   snapshot(): WorldSnapshot {
@@ -332,6 +336,23 @@ export class WerewolfWorld extends SocialWorldBase {
     }
     // Hidden-identity worlds get the role-probability ledger: suspicion stays
     // a distribution, not a free-text hunch.
+    if (role === "knight" && !this.knightUsed) {
+      const duel = tool({
+        name: "knight_challenge",
+        description: "Once per game, during the day before the vote, challenge one living participant to a duel. If they are a wolf, they are eliminated; if they are not a wolf, YOU die instead. Omit targetId to pass and give up the chance.",
+        parameters: z.object({
+          targetId: z.string().min(1).max(60).optional(),
+          reason: z.string().min(1).max(2_000)
+        }).strict(),
+        execute: async (input, runContext) => {
+          const context = scopedContext(runContext, actorId);
+          const commit = await this.performAction(actorId, "knight_challenge", input);
+          emitAction(context, commit.action, commit.detail);
+          return commit.result;
+        }
+      });
+      tools.push(duel as Tool<SocietyAgentContext>);
+    }
     tools.push(roleHypothesisTool(actorId));
     return tools;
   }
@@ -340,6 +361,16 @@ export class WerewolfWorld extends SocialWorldBase {
     const role = this.roles.get(actorId);
     if (!role) throw new Error(`ACTOR_NOT_FOUND: '${actorId}' is not in this room.`);
     if (!this.alive.has(actorId)) return [];
+    if (this.phase === "day-knight" && role === "knight" && !this.knightUsed) {
+      return [{
+        name: "knight_challenge",
+        label: "发起决斗",
+        description: "选择一名玩家决斗：是狼人则对方被淘汰，否则你自己死亡；也可以跳过。",
+        kind: "target",
+        field: "targetId",
+        targetFilter: "any-living"
+      }];
+    }
     if (this.phase === "day-vote" && !this.votes.has(actorId)) {
       return [{
         name: "cast_day_vote",
@@ -404,6 +435,43 @@ export class WerewolfWorld extends SocialWorldBase {
     // shooter just left the alive set.
     if (action !== "hunter_shoot" && action !== "wolf_king_shoot") this.assertActiveActor(actorId);
 
+    if (action === "knight_challenge") {
+      if (this.phase !== "day-knight" || role !== "knight" || this.knightUsed) throw new Error("KNIGHT_NOT_READY: The daytime duel is not available now.");
+      const duelTarget = recordPayload(payload)?.targetId as string | undefined;
+      if (!duelTarget) {
+        // The knight gives up the chance; the vote opens.
+        this.knightUsed = true;
+        this.phase = "day-vote";
+        this.emitUpdate();
+        return { action, detail: `${actorId}; passed`, result: { accepted: true, passed: true } };
+      }
+      this.assertLivingTarget(duelTarget);
+      if (duelTarget === actorId) throw new Error("INVALID_KNIGHT_TARGET: You may not challenge yourself.");
+      this.knightUsed = true;
+      const targetRole = this.roles.get(duelTarget);
+      const targetIsWolf = isWolfRole(targetRole);
+      const victimId = targetIsWolf ? duelTarget : actorId;
+      const knightName = this.profiles.get(actorId)?.displayName ?? actorId;
+      const targetName = this.profiles.get(duelTarget)?.displayName ?? duelTarget;
+      this.alive.delete(victimId);
+      this.pushEliminationEvents(victimId, "knight", this.roles.get(victimId));
+      const text = targetIsWolf
+        ? `${knightName} 发起决斗：${targetName} 是狼人，被当场淘汰！`
+        : `${knightName} 发起决斗：${targetName} 并不是狼人——${knightName} 力战身亡。`;
+      this.addLog(text, this.day, targetIsWolf ? "deception-exposed" : "misplay");
+      this.suspicion.noteResolved(this.day, victimId);
+      if (this.wolvesAlive().length === 0) {
+        this.endGame(this.factionMembers(["seer", "witch", "hunter", "knight", "guard", "idiot", "villager"]), "所有狼人都已出局，村庄阵营获胜。");
+        return { action, detail: `${actorId}; ${duelTarget}`, result: { accepted: true, targetId: duelTarget, targetIsWolf } };
+      }
+      if (this.wolvesHaveParity()) {
+        this.endGame(this.factionMembers(["wolf", "wolf-king"]), "狼人已经控制投票数量，狼人阵营获胜。");
+        return { action, detail: `${actorId}; ${duelTarget}`, result: { accepted: true, targetId: duelTarget, targetIsWolf } };
+      }
+      this.phase = "day-vote";
+      this.emitUpdate();
+      return { action, detail: `${actorId}; ${duelTarget}`, result: { accepted: true, targetId: duelTarget, targetIsWolf } };
+    }
     if (action === "cast_day_vote") {
       if (this.idiotRevealed.has(actorId)) throw new Error("IDIOT_CANNOT_VOTE: 白痴翻牌后失去投票权，只能发言。");
       if (!targetId) throw new Error("TARGET_REQUIRED: Select a participant.");
@@ -512,6 +580,11 @@ export class WerewolfWorld extends SocialWorldBase {
       const actors = this.discussion.nextWave();
       if (actors.length === 0) {
         this.discussion = null;
+        if (this.knightReady()) {
+          this.phase = "day-knight";
+          this.emitUpdate();
+          return this.knightActivation();
+        }
         this.phase = "day-vote";
         this.emitUpdate();
         return this.voteActivation();
@@ -529,6 +602,22 @@ export class WerewolfWorld extends SocialWorldBase {
     }
     if (this.phase === "day-vote") return this.voteActivation();
     return this.nightActivation(aliveIds);
+  }
+
+  private knightReady(): boolean {
+    if (this.knightUsed) return false;
+    return [...this.roles].some(([id, role]) => role === "knight" && this.alive.has(id));
+  }
+
+  private knightActivation(): WorldActivation {
+    const knightId = [...this.roles].find(([id, role]) => role === "knight" && this.alive.has(id))?.[0]!;
+    return {
+      id: `ww:${this.day}:knight`,
+      label: `第 ${this.day} 天骑士决斗`,
+      actorIds: [knightId],
+      mode: "sequential",
+      instructionFor: () => "讨论结束，投票开始前是你唯一的决斗时刻。可以挑战一名最可疑的存活玩家：若对方是狼人，TA 当场出局；若不是，你会倒下。也可以省略 targetId 放弃这次机会。"
+    };
   }
 
   private voteActivation(): WorldActivation {
@@ -578,6 +667,15 @@ export class WerewolfWorld extends SocialWorldBase {
           missingActorIds: [shooterId],
           retryInstruction: "Your death shot is still pending. Call your shot tool once (choose a target or hold the shot)."
         };
+      }
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":knight")) {
+      // A knight who never called the tool has given the chance up.
+      if (!this.knightUsed) {
+        this.knightUsed = true;
+        this.phase = "day-vote";
+        this.emitUpdate();
       }
       return { completed: true, missingActorIds: [] };
     }
@@ -724,6 +822,7 @@ export class WerewolfWorld extends SocialWorldBase {
   private availableActions(actorId: string, role: WerewolfRoleId): string[] {
     if (!this.alive.has(actorId)) return [];
     if (this.phase === "day-discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "update_inner_state"];
+    if (this.phase === "day-knight") return role === "knight" && !this.knightUsed ? ["knight_challenge", "remember_experience"] : [];
     if (this.phase === "day-vote") return this.idiotRevealed.has(actorId) ? ["remember_experience"] : ["cast_day_vote", "remember_experience"];
     if (isWolfRole(role)) return ["communicate:team", "choose_night_target"];
     if (role === "seer") return ["investigate_identity", "remember_experience"];
@@ -852,7 +951,7 @@ export class WerewolfWorld extends SocialWorldBase {
         return;
       }
       if (this.wolvesAlive().length === 0) {
-        this.endGame(this.factionMembers(["seer", "witch", "hunter", "guard", "idiot", "villager"]), "所有狼人都已出局，村庄阵营获胜（小丑单独获胜后离场）。");
+        this.endGame(this.factionMembers(["seer", "witch", "hunter", "knight", "guard", "idiot", "villager"]), "所有狼人都已出局，村庄阵营获胜（小丑单独获胜后离场）。");
         return;
       }
       this.phase = "night";
@@ -944,7 +1043,7 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   /** Schedule death skills and run the shared win checks after any death. */
-  private pushEliminationEvents(targetId: string, by: "vote" | "night" | "poison" | "shot", role: WerewolfRoleId | undefined): void {
+  private pushEliminationEvents(targetId: string, by: "vote" | "night" | "poison" | "shot" | "knight", role: WerewolfRoleId | undefined): void {
     const targetName = this.profiles.get(targetId)?.displayName ?? targetId;
     this.pushEvent(targetId, {
       type: "eliminated",
@@ -1022,7 +1121,7 @@ export class WerewolfWorld extends SocialWorldBase {
       return;
     }
     if (this.wolvesAlive().length === 0) {
-      this.endGame(this.factionMembers(["seer", "witch", "hunter", "guard", "idiot", "villager"]), this.jesterWon ? "所有狼人都已出局，村庄阵营获胜（小丑已单独获胜离场）。" : "所有狼人都已出局，村庄阵营获胜。");
+      this.endGame(this.factionMembers(["seer", "witch", "hunter", "knight", "guard", "idiot", "villager"]), this.jesterWon ? "所有狼人都已出局，村庄阵营获胜（小丑已单独获胜离场）。" : "所有狼人都已出局，村庄阵营获胜。");
       return;
     }
     if (this.wolvesHaveParity()) {
@@ -1035,7 +1134,7 @@ export class WerewolfWorld extends SocialWorldBase {
 
   private afterNightChecks(): void {
     if (this.wolvesAlive().length === 0) {
-      this.endGame(this.factionMembers(["seer", "witch", "hunter", "guard", "idiot", "villager"]), this.jesterWon ? "所有狼人都已出局，村庄阵营获胜（小丑已单独获胜离场）。" : "所有狼人都已出局，村庄阵营获胜。");
+      this.endGame(this.factionMembers(["seer", "witch", "hunter", "knight", "guard", "idiot", "villager"]), this.jesterWon ? "所有狼人都已出局，村庄阵营获胜（小丑已单独获胜离场）。" : "所有狼人都已出局，村庄阵营获胜。");
       return;
     }
     if (this.wolvesHaveParity()) {
@@ -1111,6 +1210,7 @@ export class WerewolfWorld extends SocialWorldBase {
 
 function situationFor(phase: Phase, role: WerewolfRoleId, aliveCount: number, wolvesAlive: number): string {
   if (phase === "day-discussion") return `${aliveCount} participants remain. Hidden objectives conflict, and public behavior may not reveal private strategy. Your role is ${roleLabel(role)}.`;
+  if (phase === "day-knight") return `The knight's daytime duel is open: one challenge, before the vote. ${wolvesAlive} wolves remain, known only to the pack.`;
   if (phase === "day-vote") return `Discussion is closed. Every living participant is choosing one binding vote. ${wolvesAlive} wolves remain, known only to the pack.`;
   return isWolfRole(role)
     ? "Night phase: coordinate privately with the pack and choose a non-wolf target."
@@ -1125,6 +1225,7 @@ function situationFor(phase: Phase, role: WerewolfRoleId, aliveCount: number, wo
 
 function phaseLabel(phase: Phase): string {
   if (phase === "day-discussion") return "白天讨论";
+  if (phase === "day-knight") return "骑士决斗";
   if (phase === "day-vote") return "白天投票";
   return "夜晚行动";
 }
