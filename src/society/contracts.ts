@@ -499,6 +499,7 @@ export interface SocialEvent {
     | "voted-with"       // someone voted for the same target as this agent
     | "eliminated"       // this agent was eliminated
     | "eliminated-other" // another participant was eliminated
+    | "revealed"        // this agent's role was publicly revealed (e.g. idiot flip)
     | "investigation"    // seer result, private
     | "night-kill"       // this agent (wolf) helped kill someone at night
     | "included"         // this agent was chosen for a quest team

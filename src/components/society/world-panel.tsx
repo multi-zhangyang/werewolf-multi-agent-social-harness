@@ -644,6 +644,7 @@ function BeatOverlay({ world, names, scenarioId }: { world: WorldSnapshot; names
 function beatText(entry: Record<string, unknown>, names: Map<string, string>, scenarioId: ScenarioId, world: WorldSnapshot): string | null {
   if (scenarioId === "werewolf") {
     const eliminated = entry.eliminatedId as string | undefined;
+    if (entry.idiotSurvived) return `${names.get(eliminated ?? "") ?? eliminated} 亮出白痴身份，免死并失去投票权`;
     if (eliminated) return `${names.get(eliminated) ?? eliminated} 被投票淘汰，身份揭晓：${roleLabelZh(String(entry.eliminatedRole))}`;
     const night = entry.nightTargetId as string | undefined;
     if (night) return `夜晚降临，${names.get(night) ?? night} 遇害，身份：${roleLabelZh(String(entry.nightTargetRole))}`;

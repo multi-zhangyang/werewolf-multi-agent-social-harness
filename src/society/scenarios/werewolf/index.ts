@@ -35,6 +35,8 @@ interface DayRecord {
   votes: Record<string, string>;
   eliminatedId?: string;
   eliminatedRole?: WerewolfRoleId;
+  /** The idiot was voted out, flipped their card, survived and lost the vote. */
+  idiotSurvived?: boolean;
   nightKillId?: string;
   nightKillRole?: WerewolfRoleId;
   poisonId?: string;
@@ -83,6 +85,8 @@ export class WerewolfWorld extends SocialWorldBase {
   /** Death skills waiting for their owner's decision (hunter / wolf-king). */
   private readonly pendingShots: PendingShot[] = [];
   private jesterWon = false;
+  /** Idiots who flipped their card: alive, but without a vote. */
+  private readonly idiotRevealed = new Set<string>();
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
@@ -124,7 +128,8 @@ export class WerewolfWorld extends SocialWorldBase {
       guardTargetId: this.guardTargetId ?? null,
       lastGuardTargetId: this.lastGuardTargetId ?? null,
       pendingShots: structuredClone(this.pendingShots),
-      jesterWon: this.jesterWon
+      jesterWon: this.jesterWon,
+      idiotRevealed: [...this.idiotRevealed]
     };
   }
 
@@ -136,7 +141,7 @@ export class WerewolfWorld extends SocialWorldBase {
       history: DayRecord[]; lastExperiences: Array<[string, string]>; discussion: unknown; suspicion: unknown;
       winners: string[]; outcome: string; antidoteAvailable: boolean; poisonAvailable: boolean;
       witchSaveId: string | null; witchPoisonId: string | null; witchActed: boolean;
-      guardTargetId: string | null; lastGuardTargetId: string | null; pendingShots: PendingShot[]; jesterWon: boolean;
+      guardTargetId: string | null; lastGuardTargetId: string | null; pendingShots: PendingShot[]; jesterWon: boolean; idiotRevealed: string[];
     }> | undefined;
     if (!s) return;
     this.day = Number(s.day ?? 1);
@@ -171,6 +176,8 @@ export class WerewolfWorld extends SocialWorldBase {
     this.pendingShots.length = 0;
     this.pendingShots.push(...structuredClone(s.pendingShots ?? []));
     this.jesterWon = Boolean(s.jesterWon);
+    this.idiotRevealed.clear();
+    for (const id of s.idiotRevealed ?? []) this.idiotRevealed.add(id);
   }
 
   snapshot(): WorldSnapshot {
@@ -398,6 +405,7 @@ export class WerewolfWorld extends SocialWorldBase {
     if (action !== "hunter_shoot" && action !== "wolf_king_shoot") this.assertActiveActor(actorId);
 
     if (action === "cast_day_vote") {
+      if (this.idiotRevealed.has(actorId)) throw new Error("IDIOT_CANNOT_VOTE: 白痴翻牌后失去投票权，只能发言。");
       if (!targetId) throw new Error("TARGET_REQUIRED: Select a participant.");
       this.assertLivingTarget(targetId);
       if (this.phase !== "day-vote") throw new Error("VOTE_NOT_OPEN: Daytime voting is not open.");
@@ -527,7 +535,7 @@ export class WerewolfWorld extends SocialWorldBase {
     return {
       id: `ww:${this.day}:vote`,
       label: `第 ${this.day} 天投票`,
-      actorIds: [...this.alive],
+      actorIds: [...this.alive].filter((id) => !this.idiotRevealed.has(id)),
       mode: "parallel",
       instructionFor: () => "The discussion is closed. You must call cast_day_vote exactly once against a living participant. Consider not only hidden roles but how every faction benefits from being suspected or eliminated."
     };
@@ -716,7 +724,7 @@ export class WerewolfWorld extends SocialWorldBase {
   private availableActions(actorId: string, role: WerewolfRoleId): string[] {
     if (!this.alive.has(actorId)) return [];
     if (this.phase === "day-discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "update_inner_state"];
-    if (this.phase === "day-vote") return ["cast_day_vote", "remember_experience"];
+    if (this.phase === "day-vote") return this.idiotRevealed.has(actorId) ? ["remember_experience"] : ["cast_day_vote", "remember_experience"];
     if (isWolfRole(role)) return ["communicate:team", "choose_night_target"];
     if (role === "seer") return ["investigate_identity", "remember_experience"];
     if (role === "witch") return ["witch_night_choice", "remember_experience"];
@@ -753,20 +761,33 @@ export class WerewolfWorld extends SocialWorldBase {
     const hasTie = ranked.length > 1 && ranked[0][1] === ranked[1][1];
     const eliminatedId = hasTie ? undefined : ranked[0]?.[0];
     const eliminatedRole = eliminatedId ? this.roles.get(eliminatedId) : undefined;
-    if (eliminatedId) this.alive.delete(eliminatedId);
-    const record: DayRecord = { day: this.day, votes: Object.fromEntries(this.votes), ...(eliminatedId ? { eliminatedId, eliminatedRole } : {}) };
+    // The idiot's flip: voted out once, they reveal, survive and lose the
+    // vote (official rule). A second vote-out eliminates them normally.
+    const idiotSurvives = eliminatedId !== undefined && eliminatedRole === "idiot" && !this.idiotRevealed.has(eliminatedId);
+    if (idiotSurvives) this.idiotRevealed.add(eliminatedId);
+    else if (eliminatedId) this.alive.delete(eliminatedId);
+    const record: DayRecord = {
+      day: this.day,
+      votes: Object.fromEntries(this.votes),
+      ...(eliminatedId ? { eliminatedId, eliminatedRole } : {}),
+      ...(idiotSurvives ? { idiotSurvived: true } : {})
+    };
     this.history.push(record);
-    const voteText = eliminatedId
-      ? `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。`
-      : "本轮平票，无人被放逐。";
+    const voteText = idiotSurvives
+      ? `${this.profiles.get(eliminatedId!)?.displayName} 被投票放逐，亮明白痴身份——免于一死，但从此失去投票权。`
+      : eliminatedId
+        ? `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。`
+        : "本轮平票，无人被放逐。";
     for (const id of this.profiles.keys()) this.lastExperiences.set(id, `第 ${this.day} 天投票：${voteText} 投票：${[...this.votes].map(([voter, target]) => `${voter}->${target}`).join(", ")}。`);
-    const voteBeat = eliminatedId
-      ? eliminatedRole === "wolf" || eliminatedRole === "wolf-king"
-        ? "deception-exposed" as const
-        : eliminatedRole === "jester"
-          ? "win" as const
-          : "misplay" as const
-      : undefined;
+    const voteBeat = idiotSurvives
+      ? undefined
+      : eliminatedId
+        ? eliminatedRole === "wolf" || eliminatedRole === "wolf-king"
+          ? "deception-exposed" as const
+          : eliminatedRole === "jester"
+            ? "win" as const
+            : "misplay" as const
+        : undefined;
     this.addLog(voteText, this.day, voteBeat);
 
     for (const [voterId, targetId] of this.votes) {
@@ -796,7 +817,25 @@ export class WerewolfWorld extends SocialWorldBase {
         }
       }
     }
-    if (eliminatedId) {
+    if (idiotSurvives && eliminatedId) {
+      for (const id of this.profiles.keys()) {
+        if (id === eliminatedId) {
+          this.pushEvent(id, {
+            type: "revealed",
+            targetId: eliminatedId,
+            facts: { role: "idiot", survived: true },
+            detail: "你被投票放逐，亮明白痴身份，免于一死，但从此失去投票权。"
+          });
+        } else {
+          this.pushEvent(id, {
+            type: "revealed",
+            targetId: eliminatedId,
+            facts: { role: "idiot", survived: true },
+            detail: `${this.profiles.get(eliminatedId)?.displayName} 亮出了白痴身份——免死，但失去投票权。`
+          });
+        }
+      }
+    } else if (eliminatedId) {
       this.pushEliminationEvents(eliminatedId, "vote", eliminatedRole);
     }
     for (const [voterId, targetId] of this.votes) this.suspicion.noteVote(this.day, voterId, targetId);
@@ -813,7 +852,7 @@ export class WerewolfWorld extends SocialWorldBase {
         return;
       }
       if (this.wolvesAlive().length === 0) {
-        this.endGame(this.factionMembers(["seer", "witch", "hunter", "guard", "villager"]), "所有狼人都已出局，村庄阵营获胜（小丑单独获胜后离场）。");
+        this.endGame(this.factionMembers(["seer", "witch", "hunter", "guard", "idiot", "villager"]), "所有狼人都已出局，村庄阵营获胜（小丑单独获胜后离场）。");
         return;
       }
       this.phase = "night";
@@ -983,7 +1022,7 @@ export class WerewolfWorld extends SocialWorldBase {
       return;
     }
     if (this.wolvesAlive().length === 0) {
-      this.endGame(this.factionMembers(["seer", "witch", "hunter", "guard", "villager"]), this.jesterWon ? "所有狼人都已出局，村庄阵营获胜（小丑已单独获胜离场）。" : "所有狼人都已出局，村庄阵营获胜。");
+      this.endGame(this.factionMembers(["seer", "witch", "hunter", "guard", "idiot", "villager"]), this.jesterWon ? "所有狼人都已出局，村庄阵营获胜（小丑已单独获胜离场）。" : "所有狼人都已出局，村庄阵营获胜。");
       return;
     }
     if (this.wolvesHaveParity()) {
@@ -996,7 +1035,7 @@ export class WerewolfWorld extends SocialWorldBase {
 
   private afterNightChecks(): void {
     if (this.wolvesAlive().length === 0) {
-      this.endGame(this.factionMembers(["seer", "witch", "hunter", "guard", "villager"]), this.jesterWon ? "所有狼人都已出局，村庄阵营获胜（小丑已单独获胜离场）。" : "所有狼人都已出局，村庄阵营获胜。");
+      this.endGame(this.factionMembers(["seer", "witch", "hunter", "guard", "idiot", "villager"]), this.jesterWon ? "所有狼人都已出局，村庄阵营获胜（小丑已单独获胜离场）。" : "所有狼人都已出局，村庄阵营获胜。");
       return;
     }
     if (this.wolvesHaveParity()) {

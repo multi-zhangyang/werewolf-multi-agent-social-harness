@@ -199,6 +199,7 @@ function eventTypeLabel(type: SocialEvent["type"]): string {
     "voted-with": "有人与你同票",
     eliminated: "被淘汰",
     "eliminated-other": "他人被淘汰",
+    revealed: "身份被公开揭示",
     investigation: "查验结果",
     "night-kill": "参与夜间行动",
     included: "被选入队伍",

@@ -230,6 +230,7 @@ export function roleLabelZh(role: string | undefined): string {
     hunter: "猎人",
     guard: "守卫",
     jester: "小丑",
+    idiot: "白痴",
     villager: "村民",
     merlin: "梅林",
     percival: "派西维尔",

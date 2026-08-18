@@ -96,6 +96,55 @@ async function run() {
     assert.equal(after.phase, "夜晚行动", "phase advances to night");
   });
 
+  // --- idiot rules ---
+  await check("idiot voted out flips, survives and loses the vote", async () => {
+    const { world, byRole } = makeWerewolf(10);
+    skipDiscussion(world);
+    const vote = world.activation();
+    assert.ok(vote && vote.id.endsWith(":vote"));
+    const idiot = byRole("idiot")[0];
+    assert.ok(vote.actorIds.includes(idiot), "the idiot votes on day one");
+    for (const actor of vote.actorIds) {
+      void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === idiot ? byRole("villager")[0] : idiot, reason: "t" });
+    }
+    world.completeActivation(vote);
+    const after = world.snapshot();
+    assert.ok(after.agents.find((agent) => agent.id === idiot)?.alive, "the idiot survives the vote-out");
+    assert.ok(after.log.some((entry) => /白痴身份/.test(entry.text)), "the flip is logged");
+    await assert.rejects(
+      world.performDomainAction(idiot, "cast_day_vote", { targetId: byRole("villager")[0], reason: "t" }),
+      /IDIOT_CANNOT_VOTE/,
+      "the revealed idiot cannot vote again"
+    );
+  });
+
+  await check("a second vote-out eliminates the revealed idiot", async () => {
+    const { world, byRole } = makeWerewolf(10);
+    skipDiscussion(world);
+    const idiot = byRole("idiot")[0];
+    const vote1 = world.activation();
+    for (const actor of vote1.actorIds) {
+      void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === idiot ? byRole("villager")[0] : idiot, reason: "t" });
+    }
+    world.completeActivation(vote1);
+    // A quiet night: wolves kill one villager, witch passes.
+    const night = world.activation();
+    for (const wolf of byRole("wolf")) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("villager")[0], reason: "t" });
+    void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
+    void world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
+    world.completeActivation(night!);
+    skipDiscussion(world);
+    const vote2 = world.activation();
+    assert.ok(vote2 && vote2.id.endsWith(":vote"));
+    assert.ok(!vote2.actorIds.includes(idiot), "the revealed idiot is not asked to vote");
+    for (const actor of vote2.actorIds) {
+      void world.performDomainAction(actor, "cast_day_vote", { targetId: idiot, reason: "t" });
+    }
+    world.completeActivation(vote2);
+    const after = world.snapshot();
+    assert.ok(!after.agents.find((agent) => agent.id === idiot)?.alive, "the revealed idiot dies on the second vote-out");
+  });
+
   // --- witch rules ---
   await check("witch cannot save herself", async () => {
     const { world, byRole } = makeWerewolf(8);

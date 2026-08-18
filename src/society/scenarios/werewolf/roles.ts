@@ -28,6 +28,7 @@ export type WerewolfRoleId =
   | "hunter"
   | "guard"
   | "jester"
+  | "idiot"
   | "villager";
 
 export type WerewolfFaction = "wolves" | "village" | "jester";
@@ -82,6 +83,12 @@ export const WEREWOLF_ROLES: Record<WerewolfRoleId, WerewolfRoleDef> = {
     faction: "jester",
     objective: "让自己在白天被投票出局。被投出即单独获胜并离场，游戏继续；被毒杀或夜间被杀不算成功。"
   },
+  idiot: {
+    id: "idiot",
+    label: "白痴",
+    faction: "village",
+    objective: "帮助村庄找出狼人。被投票放逐时亮明白痴身份，免于一死，但从此失去投票权，只能发言帮助好人。"
+  },
   villager: {
     id: "villager",
     label: "村民",
@@ -133,8 +140,8 @@ export const WEREWOLF_DECKS: WerewolfDeck[] = [
   {
     playerCount: 10,
     name: "10 人进阶局",
-    description: "三狼（含狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 小丑 · 双村民：双枪与小丑同场。",
-    roles: ["wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "guard", "jester", "villager", "villager"]
+    description: "三狼（含狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 小丑 · 白痴 · 村民：双枪、小丑与白痴翻牌同场。",
+    roles: ["wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "guard", "jester", "idiot", "villager"]
   },
   {
     playerCount: 11,
@@ -145,8 +152,8 @@ export const WEREWOLF_DECKS: WerewolfDeck[] = [
   {
     playerCount: 12,
     name: "12 人多能力局",
-    description: "四狼（三小狼+狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 小丑 · 三村民：经典预女猎守满配。",
-    roles: ["wolf", "wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "guard", "jester", "villager", "villager", "villager"]
+    description: "四狼（三小狼+狼王）· 预言家 · 女巫 · 猎人 · 守卫 · 小丑 · 白痴 · 双村民：经典预女猎守满配+白痴翻牌。",
+    roles: ["wolf", "wolf", "wolf", "wolf-king", "seer", "witch", "hunter", "guard", "jester", "idiot", "villager", "villager"]
   }
 ];
 
@@ -161,7 +168,7 @@ export function isWolfRole(role: WerewolfRoleId | undefined): boolean {
 }
 
 export function isVillageRole(role: WerewolfRoleId | undefined): boolean {
-  return role === "seer" || role === "witch" || role === "hunter" || role === "guard" || role === "villager";
+  return role === "seer" || role === "witch" || role === "hunter" || role === "guard" || role === "idiot" || role === "villager";
 }
 
 export function roleLabel(role: WerewolfRoleId | undefined): string {
