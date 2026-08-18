@@ -8,6 +8,7 @@ import type { SocietyRoomSnapshot } from "@/society/room";
 import { Conversation } from "./conversation";
 import { ParticipantsRail } from "./participants";
 import { AgentPresence, ScenarioIcon, StatusDot, StatusLabel } from "./shared";
+import { WorldStagePanel } from "./stage-panels";
 import { useRoom, type RoomConnection } from "./use-room";
 import { WorldPanel } from "./world-panel";
 
@@ -292,6 +293,7 @@ function ArenaStage({ room, cue, activity }: {
         })}
       </div>
       <DuelStrip room={room} cue={cue} names={names} />
+      <WorldStagePanel room={room} />
     </section>
   );
 }

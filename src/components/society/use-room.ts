@@ -141,7 +141,27 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
         // Ignore malformed envelopes; the next snapshot self-heals the view.
       }
     });
-    source.onerror = () => setConnection("reconnecting");
+    let retries = 0;
+    source.onerror = () => {
+      retries += 1;
+      setConnection("reconnecting");
+      // A room that left the process memory (finished or interrupted) has no
+      // live event stream — fall back to its archived checkpoint snapshot
+      // (§5.9) so the observer still gets the full read-only view.
+      if (retries >= 3) {
+        source.close();
+        if (sourceRef.current === source) sourceRef.current = null;
+        fetch(`/api/rooms/${encodeURIComponent(roomId)}`)
+          .then(async (response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const next = await response.json() as SocietyRoomSnapshot;
+            setRoom(next);
+            setFeed(next.world.messages);
+            setConnection("closed");
+          })
+          .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+      }
+    };
     return () => {
       source.close();
       if (sourceRef.current === source) sourceRef.current = null;

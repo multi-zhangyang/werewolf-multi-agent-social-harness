@@ -292,6 +292,13 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   app.get("/api/rooms/:roomId", (request, response) => {
     const room = context.rooms.get(request.params.roomId);
     if (!room) {
+      // Archive fallback (§5.9): a finished or interrupted room that left the
+      // process memory can still be viewed read-only from its checkpoint.
+      const checkpoint = context.archive.load(request.params.roomId);
+      if (checkpoint?.snapshot) {
+        response.json(checkpoint.snapshot);
+        return;
+      }
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
