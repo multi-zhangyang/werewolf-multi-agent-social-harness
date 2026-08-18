@@ -31,6 +31,16 @@ function isLoyalRole(role: Role | undefined): boolean {
 }
 
 /**
+ * Lady of the Lake verdict (official rule): loyal servants read loyal, every
+ * evil role reads evil, and — famously — Merlin reads as EVIL through the
+ * Lady's eyes, so the holder can never use her to confirm Merlin safely.
+ */
+export function ladyVerdictFor(role: Role | undefined): "loyal" | "evil" {
+  if (role === undefined) return "loyal";
+  return role === "servant" ? "loyal" : "evil";
+}
+
+/**
  * Official quest team sizes by player count (The Resistance: Avalon
  * rulebook): the 5th entry is used for any quest beyond the table.
  */
@@ -62,7 +72,7 @@ export function deckForPlayerCount(count: number): Role[] {
 export function questFailsNeeded(playerCount: number, quest: number): number {
   return quest === 4 && playerCount >= 7 ? 2 : 1;
 }
-type Phase = "discussion" | "proposal" | "vote" | "quest" | "assassination";
+type Phase = "discussion" | "proposal" | "vote" | "quest" | "lady" | "assassination";
 
 interface QuestRecord {
   quest: number;
@@ -108,6 +118,11 @@ export class AvalonWorld extends SocialWorldBase {
   private winners: string[] = [];
   private outcome = "";
   private assassinated = false;
+  /** Lady of the Lake (§7.5): the token holder may inspect one allegiance per
+   *  quest; the token then passes to the inspected player. Merlin shows evil. */
+  private ladyHolderId: string;
+  private ladyInspectId?: string;
+  private readonly ladyReveals = new Map<string, { quest: number; verdict: "loyal" | "evil" }>();
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
@@ -117,8 +132,11 @@ export class AvalonWorld extends SocialWorldBase {
     const deck = deckForPlayerCount(profiles.length);
     ids.forEach((id, index) => this.roles.set(id, deck[index]));
     this.leaderId = profiles[0].id;
+    // Official setup: the Lady starts with the player to the right of the
+    // first leader (the previous seat in our rotation order).
+    this.ladyHolderId = profiles.at(-1)?.id ?? profiles[0].id;
     this.discussion = this.createDiscussion();
-    this.addLog("圆桌就座。忠臣要完成任务，内奸要暗中破坏；梅林看得见刺客，但看不见莫德雷德。", 1);
+    this.addLog("圆桌就座。忠臣要完成任务，内奸要暗中破坏；梅林看得见刺客，但看不见莫德雷德。湖中仙女令牌从首位队长的右手边开始流转。", 1);
   }
 
   protected exportWorldState(): unknown {
@@ -133,6 +151,9 @@ export class AvalonWorld extends SocialWorldBase {
       winners: [...this.winners],
       outcome: this.outcome,
       assassinated: this.assassinated,
+      ladyHolderId: this.ladyHolderId,
+      ladyInspectId: this.ladyInspectId ?? null,
+      ladyReveals: [...this.ladyReveals.entries()].map(([inspectedId, reveal]) => [inspectedId, reveal.quest, reveal.verdict] as [string, number, "loyal" | "evil"]),
       roles: this.mapEntries(this.roles),
       questHistory: structuredClone(this.questHistory),
       teamVotes: this.mapEntries(this.teamVotes),
@@ -147,6 +168,8 @@ export class AvalonWorld extends SocialWorldBase {
     const s = state as Partial<{
       quest: number; phase: string; leaderId: string; proposedTeam: string[]; rejections: number;
       successes: number; failures: number; winners: string[]; outcome: string; assassinated: boolean;
+      ladyHolderId: string; ladyInspectId: string | null;
+      ladyReveals: Array<[string, number, "loyal" | "evil"]>;
       roles: Array<[string, Role]>; questHistory: QuestRecord[]; teamVotes: Array<[string, boolean]>;
       questVotes: Array<[string, "succeed" | "fail"]>; lastExperiences: Array<[string, string]>;
       discussion: unknown; suspicion: unknown;
@@ -162,6 +185,12 @@ export class AvalonWorld extends SocialWorldBase {
     this.winners = [...(s.winners ?? [])];
     this.outcome = String(s.outcome ?? "");
     this.assassinated = Boolean(s.assassinated);
+    this.ladyHolderId = String(s.ladyHolderId ?? this.profiles.keys().next().value ?? "");
+    this.ladyInspectId = s.ladyInspectId ?? undefined;
+    this.ladyReveals.clear();
+    for (const [inspectedId, quest, verdict] of s.ladyReveals ?? []) {
+      if (inspectedId && (verdict === "loyal" || verdict === "evil")) this.ladyReveals.set(inspectedId, { quest: Number(quest), verdict });
+    }
     this.fillMap(this.roles, s.roles);
     this.questHistory.length = 0;
     this.questHistory.push(...structuredClone(s.questHistory ?? []));
@@ -188,6 +217,8 @@ export class AvalonWorld extends SocialWorldBase {
         proposedTeam: this.proposedTeam,
         pendingTeamVotes: Object.fromEntries(this.teamVotes),
         pendingQuestVotes: Object.fromEntries(this.questVotes),
+        ladyHolderId: this.ladyHolderId,
+        ladyInspectId: this.ladyInspectId ?? null,
         rejections: this.rejections,
         successes: this.successes,
         failures: this.failures,
@@ -220,6 +251,10 @@ export class AvalonWorld extends SocialWorldBase {
         `Your objective: ${roleObjective(role)}.`,
         knownEvil.length ? `Known evil identities: ${knownEvil.join(", ")}.` : "",
         role === "merlin" ? "Mordred is hidden even from you." : "",
+        this.ladyHolderId === actorId ? "You hold the Lady of the Lake token: once per quest you may inspect another player's allegiance." : `The Lady of the Lake token is held by ${this.profiles.get(this.ladyHolderId)?.displayName ?? this.ladyHolderId}.`,
+        this.ladyReveals.size
+          ? `Your Lady of the Lake findings: ${[...this.ladyReveals].map(([inspectedId, reveal]) => `${this.profiles.get(inspectedId)?.displayName ?? inspectedId} looked ${reveal.verdict} (quest ${reveal.quest})`).join("; ")}.`
+          : "",
         this.phase === "proposal" ? `Current leader: ${this.leaderId}. The proposed team: ${this.proposedTeam.join(", ") || "not yet proposed"}.` : "",
         `Your team vote: ${this.teamVotes.has(actorId) ? String(this.teamVotes.get(actorId)) : "not cast"}.`,
         `Your quest vote: ${this.questVotes.get(actorId) ?? "not cast"}.`,
@@ -286,6 +321,23 @@ export class AvalonWorld extends SocialWorldBase {
       }
     });
     tools.push(questChoice as Tool<SocietyAgentContext>);
+    if (this.ladyHolderId === actorId) {
+      const inspect = tool({
+        name: "inspect_with_lady",
+        description: "As the Lady of the Lake, inspect another player's allegiance exactly once this quest. Merlin reads as EVIL through the Lady's eyes. The token passes to the inspected player. You may decline by simply not calling this tool — silence is a legitimate choice.",
+        parameters: z.object({
+          targetId: z.string().min(1),
+          reason: z.string().min(1).max(2_000)
+        }).strict(),
+        execute: async ({ targetId, reason }, runContext) => {
+          const context = scopedContext(runContext, actorId);
+          const commit = await this.performAction(actorId, "inspect_with_lady", { targetId, reason });
+          emitAction(context, commit.action, commit.detail);
+          return commit.result;
+        }
+      });
+      tools.push(inspect as Tool<SocietyAgentContext>);
+    }
     if (role === "assassin") {
       const assassinate = tool({
         name: "assassinate_merlin",
@@ -345,6 +397,26 @@ export class AvalonWorld extends SocialWorldBase {
         field: "choice",
         options
       }];
+    }
+    if (this.phase === "lady" && this.ladyHolderId === actorId) {
+      return [
+        {
+          name: "inspect_with_lady",
+          label: "湖中仙女查验",
+          description: "查验一名其他参与者的阵营；梅林在湖中仙女眼中显示为邪恶。令牌会交给被查验者。",
+          kind: "target",
+          field: "targetId",
+          targetFilter: "any-living"
+        },
+        {
+          name: "decline_lady",
+          label: "不使用湖中仙女",
+          description: "这一轮选择不使用湖中仙女。",
+          kind: "choice",
+          field: "confirm",
+          options: [{ value: "true", label: "确认不使用" }]
+        }
+      ];
     }
     if (this.phase === "assassination" && role === "assassin") {
       return [{
@@ -424,6 +496,21 @@ export class AvalonWorld extends SocialWorldBase {
       return { action, detail: reason ? `${choice}; ${reason}` : choice, result: { accepted: true, choice } };
     }
 
+    if (action === "inspect_with_lady") {
+      if (this.phase !== "lady") throw new Error("LADY_NOT_ACTIVE: The Lady of the Lake acts only between quests.");
+      if (this.ladyHolderId !== actorId) throw new Error("NOT_THE_HOLDER: You do not hold the Lady of the Lake token.");
+      const targetId = typeof value.targetId === "string" ? value.targetId : "";
+      if (!this.profiles.has(targetId)) throw new Error(`TARGET_NOT_FOUND: '${targetId}' is not a participant.`);
+      if (targetId === actorId) throw new Error("TARGET_INVALID: The Lady cannot inspect herself.");
+      this.ladyInspectId = targetId;
+      return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, pending: true } };
+    }
+    if (action === "decline_lady") {
+      if (this.phase !== "lady") throw new Error("LADY_NOT_ACTIVE: The Lady of the Lake acts only between quests.");
+      if (this.ladyHolderId !== actorId) throw new Error("NOT_THE_HOLDER: You do not hold the Lady of the Lake token.");
+      this.ladyInspectId = undefined;
+      return { action, detail: "不使用湖中仙女", result: { accepted: true, declined: true } };
+    }
     if (action === "assassinate_merlin") {
       if (this.assassinated) throw new Error("ASSASSINATION_ALREADY_USED: The final shot has been taken.");
       if (this.phase !== "assassination") throw new Error("ASSASSINATION_NOT_OPEN: The assassination happens only after three successful quests.");
@@ -498,6 +585,15 @@ export class AvalonWorld extends SocialWorldBase {
         instructionFor: () => "You are on the approved quest. Call cast_quest_vote exactly once. Loyal members must succeed; minions may fail the quest secretly."
       };
     }
+    if (this.phase === "lady") {
+      return {
+        id: `av:${this.quest}:lady`,
+        label: "湖中仙女",
+        actorIds: [this.ladyHolderId],
+        mode: "sequential",
+        instructionFor: () => "You hold the Lady of the Lake. You may call inspect_with_lady once against any other player — the verdict is revealed only to you, and the token passes to the inspected player. Merlin reads as EVIL through the Lady's eyes. Declining is a legitimate move: simply do not call the tool."
+      };
+    }
     const assassin = [...this.roles].find(([, candidate]) => candidate === "assassin")?.[0];
     return {
       id: `av:${this.quest}:assassination`,
@@ -547,6 +643,10 @@ export class AvalonWorld extends SocialWorldBase {
         };
       }
       this.resolveQuest();
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":lady")) {
+      this.resolveLadyPhase();
       return { completed: true, missingActorIds: [] };
     }
     if (this.assassinated) return { completed: true, missingActorIds: [] };
@@ -689,6 +789,7 @@ export class AvalonWorld extends SocialWorldBase {
     if (this.phase === "proposal") return this.leaderId === actorId ? ["propose_team", "communicate"] : [];
     if (this.phase === "vote") return this.teamVotes.has(actorId) ? [] : ["cast_team_vote", "remember_experience"];
     if (this.phase === "quest") return this.proposedTeam.includes(actorId) && !this.questVotes.has(actorId) ? ["cast_quest_vote"] : [];
+    if (this.phase === "lady") return this.ladyHolderId === actorId ? ["inspect_with_lady", "remember_experience"] : [];
     if (this.phase === "assassination") return role === "assassin" ? ["assassinate_merlin"] : [];
     return [];
   }
@@ -814,6 +915,38 @@ export class AvalonWorld extends SocialWorldBase {
       this.emitUpdate();
       return;
     }
+    // Between quests: the Lady of the Lake may act (or decline).
+    this.phase = "lady";
+    this.ladyInspectId = undefined;
+    this.emitUpdate();
+  }
+
+  /** Resolve the Lady phase: inspect (verdict stays private) or decline, then advance. */
+  private resolveLadyPhase(): void {
+    const holderName = this.profiles.get(this.ladyHolderId)?.displayName ?? this.ladyHolderId;
+    if (!this.ladyInspectId) {
+      this.addLog(`第 ${this.quest} 次任务后，${holderName} 没有使用湖中仙女。`, this.quest);
+    } else {
+      const targetId = this.ladyInspectId;
+      const targetName = this.profiles.get(targetId)?.displayName ?? targetId;
+      const verdict = ladyVerdictFor(this.roles.get(targetId));
+      this.ladyReveals.set(targetId, { quest: this.quest, verdict });
+      // The inspection is public knowledge; the verdict stays with the holder.
+      this.addLog(`湖中仙女查验了 ${targetName}。令牌已交给 ${targetName}。`, this.quest);
+      this.pushEvent(this.ladyHolderId, {
+        type: "investigation",
+        actorId: this.ladyHolderId,
+        targetId,
+        facts: { role: verdict === "evil" ? "内奸" : "好人" },
+        detail: `湖中仙女告诉你：${targetName} 的阵营是${verdict === "evil" ? "邪恶" : "忠诚"}。`
+      });
+      this.ladyHolderId = targetId;
+    }
+    this.ladyInspectId = undefined;
+    this.advanceToNextQuest();
+  }
+
+  private advanceToNextQuest(): void {
     this.quest += 1;
     this.suspicion.decay(0.8);
     this.rotateLeader();
@@ -893,6 +1026,7 @@ function phaseLabel(phase: Phase): string {
   if (phase === "proposal") return "队长组队";
   if (phase === "vote") return "全体表决";
   if (phase === "quest") return "任务执行";
+  if (phase === "lady") return "湖中仙女";
   return "最终刺杀";
 }
 

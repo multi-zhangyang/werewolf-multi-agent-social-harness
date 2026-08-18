@@ -9,7 +9,7 @@
 import { strict as assert } from "node:assert";
 import { createWorld } from "../src/society/scenarios";
 import type { AgentProfile } from "../src/society/contracts";
-import { deckForPlayerCount as avalonDeck, QUEST_TEAM_SIZES, questFailsNeeded } from "../src/society/scenarios/avalon";
+import { deckForPlayerCount as avalonDeck, QUEST_TEAM_SIZES, ladyVerdictFor, questFailsNeeded } from "../src/society/scenarios/avalon";
 import { WEREWOLF_DECKS, isVillageRole, isWolfRole } from "../src/society/scenarios/werewolf/roles";
 
 let passed = 0;
@@ -311,6 +311,23 @@ async function run() {
     for (const count of [5, 6]) assert.equal(questFailsNeeded(count, 4), 1, `${count}P quest 4`);
     for (const count of [7, 8, 9, 10]) assert.equal(questFailsNeeded(count, 4), 2, `${count}P quest 4`);
     assert.equal(questFailsNeeded(7, 1), 1, "other quests need one fail");
+  });
+
+  await check("lady of the lake verdict follows the official rule (Merlin reads evil)", () => {
+    assert.equal(ladyVerdictFor("servant"), "loyal");
+    assert.equal(ladyVerdictFor("merlin"), "evil", "Merlin reads as evil through the Lady's eyes");
+    assert.equal(ladyVerdictFor("assassin"), "evil");
+    assert.equal(ladyVerdictFor("mordred"), "evil");
+    assert.equal(ladyVerdictFor("minion"), "evil");
+  });
+
+  await check("lady of the lake starts with the player to the right of the first leader", () => {
+    const seats = profiles(5);
+    const world = createWorld({ roomId: "r-av", scenarioId: "avalon", profiles: seats, rounds: 5 });
+    world.start();
+    const state = world.exportState();
+    const worldState = state.world as { ladyHolderId: string };
+    assert.equal(worldState.ladyHolderId, seats.at(-1)!.id, "token starts right of the first leader");
   });
 
   await check("werewolf rejects out-of-range player counts with a clear error", () => {
