@@ -1,0 +1,139 @@
+/**
+ * Spectator projection checks (§8.3 / §14.4): the hard information boundary
+ * between omniscient, public and agent-pov seats, plus the world-level role
+ * visibility, must never leak private cognition or hidden identities.
+ * Run with `npx tsx scripts/verify-projection.ts`.
+ */
+import { strict as assert } from "node:assert";
+import { createWorld } from "../src/society/scenarios";
+import { projectEventFor, type SpectatorViewer } from "../src/society/spectator/projection";
+import type { AgentRuntimeEvent, AgentProfile, SocialMessage } from "../src/society/contracts";
+
+let passed = 0;
+function check(name: string, fn: () => void): void {
+  fn();
+  passed += 1;
+  console.log(`  ok  ${name}`);
+}
+
+function profiles(count: number): AgentProfile[] {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `agent-${String(index + 1).padStart(2, "0")}`,
+    displayName: `P${index + 1}`,
+    persona: "test",
+    traits: [],
+    values: [],
+    goals: [],
+    temperament: undefined,
+    decisionBiases: [],
+    voice: "",
+    model: "test",
+    controller: "agent"
+  }));
+}
+
+const at = new Date().toISOString();
+
+function message(senderId: string, channel: "public" | "private" | "team", recipientIds: string[] = []): AgentRuntimeEvent {
+  return {
+    type: "agent.message",
+    roomId: "r",
+    message: {
+      id: `m-${senderId}-${channel}`,
+      roomId: "r",
+      senderId,
+      senderName: senderId,
+      channel,
+      text: "hello",
+      turn: 1,
+      phase: "discussion",
+      createdAt: at,
+      ...(recipientIds.length ? { recipientIds } : {})
+    } satisfies SocialMessage
+  } satisfies AgentRuntimeEvent;
+}
+
+const reasoning: AgentRuntimeEvent = { type: "agent.reasoning", roomId: "r", actorId: "agent-01", delta: "secret", at };
+const thought: AgentRuntimeEvent = {
+  type: "agent.thought-beat",
+  roomId: "r",
+  actorId: "agent-01",
+  beat: { id: "b1", roomId: "r", agentId: "agent-01", activationId: "a", kind: "doubt", title: "t", summary: "s", visibility: "private", createdAt: at },
+  at
+};
+const pressure: AgentRuntimeEvent = {
+  type: "agent.context.pressure",
+  roomId: "r",
+  actorId: "agent-01",
+  level: "soft-compact",
+  pressureRatio: 0.8,
+  usableInputTokens: 1000,
+  currentInputTokens: 800,
+  contextWindow: 2000,
+  at
+};
+const tool: AgentRuntimeEvent = { type: "agent.tool", roomId: "r", actorId: "agent-01", toolCallId: "t1", toolName: "investigate_identity", phase: "succeeded", at };
+const publicTool: AgentRuntimeEvent = { type: "agent.tool", roomId: "r", actorId: "agent-01", toolCallId: "t2", toolName: "communicate", phase: "succeeded", at };
+const worldAction: AgentRuntimeEvent = { type: "world.action", roomId: "r", actorId: "agent-01", action: "cast_day_vote", detail: "x", at };
+const publicAction: AgentRuntimeEvent = { type: "world.action", roomId: "r", actorId: "agent-01", action: "message", detail: "x", at };
+const cue: AgentRuntimeEvent = { type: "cinematic.cue", roomId: "r", cue: { id: "c1", roomId: "r", camera: "wide-table", title: "t", priority: 5, focusAgentIds: [], minimumDurationMs: 1000, maximumDurationMs: 2000, skippable: true, createdAt: at }, at };
+
+const omniscient: SpectatorViewer = { mode: "omniscient" };
+const publicView: SpectatorViewer = { mode: "public" };
+const pov01: SpectatorViewer = { mode: "agent-pov", agentId: "agent-01" };
+
+check("omniscient passes everything through unchanged", () => {
+  for (const event of [reasoning, thought, pressure, tool, worldAction, cue]) {
+    assert.equal(projectEventFor(event, omniscient), event, event.type);
+  }
+});
+
+check("public seat never receives private cognition or private tools", () => {
+  assert.equal(projectEventFor(reasoning, publicView), undefined);
+  assert.equal(projectEventFor(thought, publicView), undefined);
+  assert.equal(projectEventFor(pressure, publicView), undefined);
+  assert.equal(projectEventFor(tool, publicView), undefined, "hidden tools stay hidden");
+  assert.equal(projectEventFor(publicTool, publicView), publicTool, "public speech tools flow");
+  assert.equal(projectEventFor(worldAction, publicView), undefined, "hidden world actions stay hidden");
+  assert.equal(projectEventFor(publicAction, publicView), publicAction, "public actions flow");
+  assert.equal(projectEventFor(cue, publicView), cue, "cues stay visible");
+});
+
+check("agent-pov seat only sees the watched agent's private events", () => {
+  assert.equal(projectEventFor(reasoning, pov01), reasoning, "own reasoning flows");
+  assert.equal(projectEventFor({ ...reasoning, actorId: "agent-02" }, pov01), undefined, "others' reasoning does not");
+  assert.equal(projectEventFor(thought, pov01), thought);
+  assert.equal(projectEventFor(pressure, pov01), pressure);
+  assert.equal(projectEventFor(tool, pov01), tool);
+  assert.equal(projectEventFor(cue, pov01), cue);
+});
+
+check("agent-pov message boundary: public, own, addressed-to — nothing else", () => {
+  assert.equal(projectEventFor(message("agent-02", "public"), pov01)?.type, "agent.message", "public speech visible");
+  assert.equal(projectEventFor(message("agent-01", "private", ["agent-02"]), pov01)?.type, "agent.message", "own private mail visible");
+  assert.equal(projectEventFor(message("agent-02", "private", ["agent-01"]), pov01)?.type, "agent.message", "mail addressed to the watched agent visible");
+  assert.equal(projectEventFor(message("agent-02", "private", ["agent-03"]), pov01), undefined, "others' private exchanges hidden");
+  assert.equal(projectEventFor(message("agent-02", "team", []), pov01), undefined, "team channel hidden from non-recipients");
+});
+
+check("werewolf world hides roles from the public projection and shows wolf teammates to wolves", () => {
+  const world = createWorld({ roomId: "r-ww", scenarioId: "werewolf", profiles: profiles(6), rounds: 2 });
+  world.start();
+  const internal = world.snapshot();
+  const roles = new Map<string, string>(Object.entries((internal.details.roles ?? {}) as Record<string, string>));
+  const wolves = [...roles].filter(([, role]) => role === "wolf").map(([id]) => id);
+  const publicSnap = world.snapshotFor();
+  for (const agent of publicSnap.agents) {
+    assert.equal((agent as { observerRole?: string }).observerRole, undefined, "public snapshot must not carry observer roles");
+  }
+  const wolfView = world.snapshotFor(wolves[0]);
+  const wolfSeenRoles = wolfView.agents.filter((agent) => (agent as { observerRole?: string }).observerRole);
+  assert.equal(wolfSeenRoles.length, wolves.length, "a wolf sees exactly the wolf team");
+  const villagerId = [...roles].find(([, role]) => role === "villager")![0];
+  const villagerView = world.snapshotFor(villagerId);
+  const villagerSeen = villagerView.agents.filter((agent) => (agent as { observerRole?: string }).observerRole);
+  assert.equal(villagerSeen.length, 1, "a villager sees only their own role");
+  assert.equal(villagerSeen[0].id, villagerId, "and it is their own");
+});
+
+console.log(`\nSpectator projection checks: ${passed} passed.`);
