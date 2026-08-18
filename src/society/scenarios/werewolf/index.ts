@@ -441,6 +441,7 @@ export class WerewolfWorld extends SocialWorldBase {
       if (!duelTarget) {
         // The knight gives up the chance; the vote opens.
         this.knightUsed = true;
+        this.addLog(`${this.profiles.get(actorId)?.displayName} 放弃了骑士决斗机会。`, this.day);
         this.phase = "day-vote";
         this.emitUpdate();
         return { action, detail: `${actorId}; passed`, result: { accepted: true, passed: true } };
