@@ -617,6 +617,7 @@ function BeatOverlay({ world, names, scenarioId }: { world: WorldSnapshot; names
   const seenRef = useRef<number>(0);
 
   useEffect(() => {
+    if (world.status === "finished") return; // the finale belongs to the result card
     if (history.length <= seenRef.current) return;
     seenRef.current = history.length;
     const latest = history.at(-1);
@@ -628,7 +629,7 @@ function BeatOverlay({ world, names, scenarioId }: { world: WorldSnapshot; names
     return () => window.clearTimeout(timer);
   }, [history, names, scenarioId, world]);
 
-  if (!beat) return null;
+  if (!beat || world.status === "finished") return null;
   return (
     <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" />
@@ -653,7 +654,7 @@ function beatText(entry: Record<string, unknown>, names: Map<string, string>, sc
     if (!outcome) return null;
     return outcome === "fail"
       ? `任务失败 —— ${String(entry.failCount)} 张黑票悄然出现`
-      : `任务成功 —— 忠诚经受住了考验`;
+      : `任务成功 —— 但胜负仍要等刺客的最后一剑`;
   }
   if (typeof entry.text === "string" && entry.text) return entry.text;
   return null;

@@ -31,13 +31,23 @@ interface ConversationProps {
 
 export function Conversation({ room, activity, onAction, onReplay }: ConversationProps): ReactNode {
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const shellRef = useRef<HTMLDivElement | null>(null);
   const [draft, setDraft] = useState("");
   const entries = useTimeline(room.world.messages, room.world.log);
   const names = useMemo(() => new Map(room.participants.map((p) => [p.profile.id, p.profile.displayName])), [room.participants]);
+  const finished = room.world.status === "finished";
 
   useEffect(() => {
+    if (finished) {
+      // The finale lives at the top of the list: when the world ends, bring
+      // the result hero and identity reveal into view instead of the tail.
+      shellRef.current
+        ?.querySelector('[data-slot="scroll-area-viewport"]')
+        ?.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [entries.length, room.updatedAt]);
+  }, [entries.length, room.updatedAt, finished]);
 
   const human = room.player;
   const humanAction = human?.waiting ? human.actions : [];
@@ -51,14 +61,14 @@ export function Conversation({ room, activity, onAction, onReplay }: Conversatio
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div ref={shellRef} className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-3 border-b border-border/80 bg-card/60 px-6 py-3">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium tracking-tight">{room.world.summary}</p>
         </div>
         <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="live-pulse size-1.5 rounded-full bg-emerald-400" />
-          实时直播
+          <span className={cn("size-1.5 rounded-full", finished ? "bg-amber-400" : "live-pulse bg-emerald-400")} />
+          {finished ? "对局已结束" : "实时直播"}
         </span>
       </div>
 
@@ -138,32 +148,35 @@ function ResultCard({ room, onReplay }: { room: SocietyRoomSnapshot; onReplay?: 
   const revealed = room.participants.filter((p) => p.role);
   const faction = factionTitle(room, winners);
   return (
-    <div className="reveal-up mb-8 overflow-hidden rounded-xl border border-border bg-gradient-to-b from-muted/60 to-card">
+    <div className="reveal-up mb-8 overflow-hidden rounded-xl border border-amber-400/25 bg-gradient-to-b from-muted/60 to-card shadow-lg">
       <div className="flex items-center gap-2 border-b border-border/60 px-5 py-3">
         <Trophy className="size-4 text-amber-400" />
-        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">本局终章</p>
+        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-amber-300/90">本局终章</p>
       </div>
-      <div className="px-5 py-5">
-        <p className="enter-stage text-2xl font-semibold tracking-tight" style={{ animationDelay: "80ms" }}>{faction}</p>
-        <p className="enter-stage mt-1 text-sm text-foreground/80" style={{ animationDelay: "200ms" }}>
-          {leaders.length ? `${leaders.map((id) => names.get(id) ?? id).join("、")}` : ""}
+      <div className="px-5 py-6">
+        <p className="enter-stage text-3xl font-semibold tracking-tight text-foreground" style={{ animationDelay: "80ms" }}>{faction}</p>
+        <p className="enter-stage mt-1.5 text-sm text-foreground/80" style={{ animationDelay: "200ms" }}>
+          {leaders.length ? `胜者：${leaders.map((id) => names.get(id) ?? id).join("、")}` : ""}
         </p>
-        {lastLog ? <p className="enter-stage mt-2 text-sm leading-6 text-muted-foreground" style={{ animationDelay: "320ms" }}>{lastLog}</p> : null}
+        {lastLog ? <p className="enter-stage mt-3 text-sm leading-6 text-muted-foreground" style={{ animationDelay: "320ms" }}>{lastLog}</p> : null}
         {revealed.length ? (
-          <div className="enter-stage mt-4 flex flex-wrap gap-2" style={{ animationDelay: "440ms" }}>
-            {revealed.map((participant) => (
-              <span
-                key={participant.profile.id}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs",
-                  roleTintClass(participant.role),
-                  !participant.alive && "opacity-60"
-                )}
-              >
-                {participant.profile.displayName}
-                <span className="font-medium">{roleLabelZh(participant.role)}</span>
-              </span>
-            ))}
+          <div className="enter-stage mt-5" style={{ animationDelay: "440ms" }}>
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">身份揭晓</p>
+            <div className="flex flex-wrap gap-2">
+              {revealed.map((participant) => (
+                <span
+                  key={participant.profile.id}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs",
+                    roleTintClass(participant.role),
+                    !participant.alive && "opacity-60"
+                  )}
+                >
+                  {participant.profile.displayName}
+                  <span className="font-medium">{roleLabelZh(participant.role)}</span>
+                </span>
+              ))}
+            </div>
           </div>
         ) : null}
         <div className="enter-stage mt-4 flex flex-wrap items-center gap-3" style={{ animationDelay: "560ms" }}>
@@ -190,11 +203,11 @@ function factionTitle(room: SocietyRoomSnapshot, winners?: string[]): string {
   const winning = winners?.length ? winners : [];
   const winnerRoles = winning.map((id) => roles.get(id) ?? "");
   if (winnerRoles.includes("小丑")) return "小丑达成了目标 —— 被投出去就是胜利";
-  const deceptive = ["狼人", "刺客", "莫德雷德"];
-  const faithful = ["村民", "忠臣"];
+  const deceptive = ["狼人", "狼王", "刺客", "莫德雷德", "莫甘娜", "奥伯伦", "爪牙"];
+  const faithful = ["村民", "忠臣", "女巫", "猎人", "守卫", "白痴"];
   if (winnerRoles.some((role) => deceptive.includes(role))) return "欺骗阵营胜利";
   if (winnerRoles.some((role) => faithful.includes(role))) return "忠诚阵营胜利";
-  if (winnerRoles.includes("预言家") || winnerRoles.includes("梅林")) return "忠诚阵营胜利";
+  if (winnerRoles.includes("预言家") || winnerRoles.includes("梅林") || winnerRoles.includes("派西维尔")) return "忠诚阵营胜利";
   return winners?.length ? "胜利者已经产生" : "这一局已经落幕";
 }
 

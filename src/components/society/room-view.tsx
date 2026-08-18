@@ -132,7 +132,7 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
         <div className="mx-auto w-full max-w-4xl flex-1 space-y-4 px-6 py-5">
           <ArenaStage room={room} cue={cue} activity={activity} />
           <main className="relative min-h-[56vh] overflow-hidden rounded-xl border border-border bg-card/40">
-            <CueBanner cue={cue} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
+            <CueBanner cue={cue} finished={room.world.status === "finished"} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
             <Conversation room={room} activity={activity} onAction={submitAction} onReplay={onReplay} />
           </main>
           <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} />
@@ -155,7 +155,7 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
         </aside>
 
         <main className="relative order-1 min-h-[72vh] overflow-hidden rounded-xl border border-border bg-card/40 lg:order-2 lg:min-h-0 lg:max-h-[calc(100vh-6rem)]">
-          <CueBanner cue={cue} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
+          <CueBanner cue={cue} finished={room.world.status === "finished"} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
           <Conversation room={room} activity={activity} onAction={submitAction} onReplay={onReplay} />
         </main>
 
@@ -354,7 +354,7 @@ function TensionMeter({ tension }: { tension: RoomConnection["tension"] }): Reac
   );
 }
 
-function CueBanner({ cue, names }: { cue: RoomConnection["cue"]; names: Map<string, string> }): ReactNode {
+function CueBanner({ cue, names, finished = false }: { cue: RoomConnection["cue"]; names: Map<string, string>; finished?: boolean }): ReactNode {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
     if (!cue) {
@@ -366,6 +366,9 @@ function CueBanner({ cue, names }: { cue: RoomConnection["cue"]; names: Map<stri
     return () => clearTimeout(timer);
   }, [cue]);
   if (!cue || !visible) return null;
+  // Once the world ends, only the finale-level cue (win / final misplay) may
+  // stay on stage: a mid-game quest cue would contradict the settlement.
+  if (finished && cue.priority < 11) return null;
   const focusNames = cue.focusAgentIds.map((id) => names.get(id) ?? id);
   const tone = cue.priority >= 9
     ? "border-red-400/40 bg-red-400/10 text-red-200"
