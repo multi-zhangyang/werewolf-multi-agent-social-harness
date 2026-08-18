@@ -58,7 +58,7 @@ const createRoomSchema = z.object({
   /** Legacy entry: model IDs, round-robined per seat. */
   models: z.array(z.string().min(1).max(180)).min(1).max(8).optional(),
   /** Model-profile ids, round-robined per seat (wins over `models`). */
-  modelProfileIds: z.array(z.string().min(1).max(120)).min(1).max(8).optional(),
+  modelProfileIds: z.array(z.string().min(1).max(120)).min(1).max(12).optional(),
   /** Per-seat overrides: slot index → model profile id. */
   agentModelOverrides: z.record(z.string().min(1).max(8), z.string().min(1).max(120)).optional(),
   /** Per-seat tuning overrides: slot index → temperature / effort. */
