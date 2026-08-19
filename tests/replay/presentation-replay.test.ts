@@ -12,7 +12,6 @@ import { TensionEngine, type TensionImpact } from "../../src/society/spectator/t
 import type { AgentRuntimeEvent, StoryBeatKind, WorldSnapshot } from "../../src/society/contracts";
 import { ActivationLimiter } from "../../src/society/activation-limiter";
 import { clearFastTurns, installFastTurns, testRoom, twoRoundScript, waitFor } from "../helpers/scripted-room";
-import type { SocietyRoom } from "../../src/society/room";
 
 function logEntry(text: string, beat: StoryBeatKind): WorldSnapshot["log"][number] {
   return { id: `log-${text}`, text, turn: 1, phase: "结算", at: new Date().toISOString(), beat };
@@ -79,9 +78,10 @@ describe("presentation replay (§16.5)", () => {
     ];
     const left = new TensionEngine({ tickSeconds: 10 });
     const right = new TensionEngine({ tickSeconds: 10 });
-    for (const impact of impacts) {
-      left.impact(impact, []);
-      right.impact(impact, []);
+    for (const [index, impact] of impacts.entries()) {
+      const at = Date.now();
+      left.impact(impact, `ev-${index}`, at);
+      right.impact(impact, `ev-${index}`, at);
       expect(right.snapshot()).toEqual(left.snapshot());
     }
   });
@@ -120,12 +120,12 @@ describe("room event envelopes", () => {
     try {
       void room.start();
       await waitFor(() => room.currentStatus() === "finished", 8_000);
-      const events = (room as SocietyRoom & { events: Array<{ id: string; seq: number }> }).events;
+      const events = (room as unknown as { events: Array<{ id: string; seq: number }> }).events;
       expect(events.length).toBeGreaterThan(10);
       for (let index = 1; index < events.length; index += 1) {
         expect(events[index].seq).toBeGreaterThan(events[index - 1].seq);
       }
-      expect(new Set(events.map((entry) => entry.id)).size).toBe(events.length);
+      expect(new Set(events.map((entry: { id: string; seq: number }) => entry.id)).size).toBe(events.length);
     } finally {
       clearFastTurns();
       cleanup();

@@ -750,6 +750,8 @@ export interface SocialWorld {
   eventsFor(actorId: string): SocialEvent[];
   /** Open (proposed, unsettled) commitments this participant is party to. */
   openCommitmentsFor(actorId: string): Commitment[];
+  /** Auditable decision records for binding actions; [] where none exist. */
+  decisionRecords(): DecisionRecord[];
   sendMessage(input: {
     senderId: string;
     channel: SocialChannel;

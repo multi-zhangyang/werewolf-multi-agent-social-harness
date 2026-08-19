@@ -13,10 +13,10 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
+import { ScriptedModel, modelResponse } from "@openai/agents/testing";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
 import { ActivationLimiter } from "../../src/society/activation-limiter";
 import { clearFastTurns, errorMessage, installFastTurns, lastEvents, roomError, sleep, testRoom, twoRoundScript, waitFor } from "../helpers/scripted-room";
-import type { SocietyRoom } from "../../src/society/room";
 
 /** Deterministic 32-bit PRNG so every CI run replays the same chaos. */
 function mulberry32(seed: number): () => number {
@@ -31,18 +31,21 @@ function mulberry32(seed: number): () => number {
 }
 
 /**
- * Serves the deterministic two-round script, but per call it may delay, and
- * after emitting it may hang forever (ignoring abort). When the script is
- * exhausted it goes fully silent, exactly like a wedged provider.
+ * Serves the deterministic two-round script through a real ScriptedModel, but
+ * per call it may delay before delegating, and after the response it may hang
+ * forever (ignoring abort) — a provider that delivered content but never
+ * terminated the stream.
  */
 class ChaosModel implements Model {
-  private index = 0;
+  private readonly inner: ScriptedModel;
   private readonly hooks: Array<() => void> = [];
 
   constructor(
-    private readonly script: StreamEvent[][],
+    script: Array<ReturnType<typeof modelResponse>>,
     private readonly rng: () => number
-  ) {}
+  ) {
+    this.inner = new ScriptedModel(script);
+  }
 
   releaseAll(): void {
     const hooks = this.hooks.splice(0);
@@ -53,12 +56,10 @@ class ChaosModel implements Model {
     throw new Error("UNEXPECTED_NON_STREAMING_CALL: the runner should always stream in these tests.");
   }
 
-  async *getStreamedResponse(_request: ModelRequest): AsyncIterable<StreamEvent> {
-    const response = this.script[this.index] ?? [];
-    this.index += 1;
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     if (this.rng() < 0.35) await sleep(Math.floor(this.rng() * 120));
-    for (const event of response) yield event;
-    if (response.length === 0 || this.rng() < 0.25) {
+    yield* this.inner.getStreamedResponse(request);
+    if (this.rng() < 0.25) {
       await new Promise<void>((resolve) => {
         this.hooks.push(resolve);
       });

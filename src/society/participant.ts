@@ -253,7 +253,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       // Commitment / deception references arrive with the Phase 1 spine; the
       // artifact always carries honest empties until then.
       getSourceEventIds: () => [],
-      getOpenCommitmentIds: () => [],
+      getOpenCommitmentIds: () => this.context.world.openCommitmentsFor(this.profile.id).map((commitment) => commitment.commitmentId),
       getActiveDeceptionIds: () => [],
       onArtifact: (artifact) => {
         this.lastSummaryArtifact = artifact;
@@ -333,6 +333,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   async runTurn(input: string, options: { signal: AbortSignal; turn: number; maxTurns?: number; mode?: "discussion" | "full" }): Promise<AgentTurnResult> {
     this.mind.mood = decayMood(this.mind.mood, options.turn);
     const observation = this.context.world.observe(this.profile.id);
+    const socialContext = formatSocialContext(this.mind, this.context.world, this.profile.id);
     // Pressure-first ordering (AGENTS.md §12.3): build the FIXED part of this
     // turn's input, measure THIS activation's budget against it, and only
     // then size memory retrieval by that pressure — never by the previous
@@ -340,7 +341,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     const modeLine = options.mode === "discussion"
       ? "(讨论回合：重心放在阅读局势、判断是否值得开口、观察他人立场；绑定行动不在本回合开放。沉默也是一种选择。)"
       : "(行动回合：本回合需要完成你的绑定行动。先做必要的内部判断，再调用对应工具；工具未成功前不得声称行动已完成。)";
-    const fixedInput = [input, modeLine, formatObservation(observation)].join("\n\n");
+    const fixedInput = [input, modeLine, formatObservation(observation), ...socialContext].join("\n\n");
     const fixedItem = {
       type: "message",
       role: "user",
@@ -378,6 +379,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       input,
       modeLine,
       formatObservation(observation),
+      ...socialContext,
       recentMemories.length
         ? `Relevant memories:\n${recentMemories.map((memory) => `- ${memory.text}`).join("\n")}`
         : "Relevant memories: none yet."
@@ -1013,6 +1015,52 @@ export function protocolInstructions(): string[] {
     "Do not reveal private role information unless doing so serves your strategy. Do not output hidden chain-of-thought.",
     "After the required tool succeeds, stop with a brief confirmation. Never expose hidden reasoning or narrate an action that did not happen."
   ];
+}
+
+/**
+ * The structured social-state block compiled into every turn (§12.1 /
+ * §14.6 step 13): directed relationships, relevant beliefs, and the open
+ * commitments this participant is party to. State that lived only in the
+ * mind now actually reaches the model — where it can change behavior.
+ */
+export function formatSocialContext(mind: AgentMindState, world: SocietyAgentContext["world"], actorId: string): string[] {
+  const blocks: string[] = [];
+  const snapshot = world.snapshot();
+  const others = snapshot.agents.filter((agent) => agent.id !== actorId);
+  if (others.length) {
+    const lines = ["[SOCIAL STATE] Your current feelings toward the other participants (directed, your side only):"];
+    for (const other of others) {
+      const relationship = mind.relationships.find((entry) => entry.targetCharacterId === other.characterId);
+      lines.push(
+        relationship
+          ? `- ${other.displayName}: trust ${relationship.trust.toFixed(2)} · affinity ${relationship.affinity.toFixed(2)} · tension ${relationship.tension.toFixed(2)}${relationship.note ? ` · note: ${relationship.note.slice(0, 120)}` : ""}`
+          : `- ${other.displayName}: no established relationship yet.`
+      );
+    }
+    blocks.push(lines.join("\n"));
+  }
+  const relevantBeliefs = mind.beliefs.filter((belief) =>
+    others.some((other) => other.id === belief.subjectId || other.characterId === belief.subjectId)
+  );
+  if (relevantBeliefs.length) {
+    blocks.push(
+      `[SOCIAL STATE] Your relevant beliefs about others (confidence 0-1):\n${relevantBeliefs
+        .slice(0, 6)
+        .map((belief) => `- ${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`)
+        .join("\n")}`
+    );
+  }
+  const commitments = world.openCommitmentsFor(actorId);
+  if (commitments.length) {
+    blocks.push(
+      `[SOCIAL STATE] Open commitments involving you this round:\n${commitments
+        .map((commitment) =>
+          `- [${commitment.commitmentId}] ${commitment.promisorActorId === actorId ? "You declared" : `${commitment.promisorActorId} declared`}: ${commitment.proposition} (${commitment.state})`
+        )
+        .join("\n")}`
+    );
+  }
+  return blocks;
 }
 
 function emitStatus(context: SocietyAgentContext, status: Extract<AgentRuntimeEvent, { type: "agent.status" }>["status"]): void {

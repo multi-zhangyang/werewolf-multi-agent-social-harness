@@ -5,6 +5,7 @@ import type {
   AgentProfile,
   AgentStatus,
   Commitment,
+  DecisionRecord,
   PlayerActionSpec,
   ScenarioId,
   ScenarioSummary,
@@ -246,6 +247,11 @@ export abstract class SocialWorldBase implements SocialWorld {
 
   /** Scenarios with a commitment ledger override this (§8.1 / Phase 1). */
   openCommitmentsFor(_actorId: string): Commitment[] {
+    return [];
+  }
+
+  /** Scenarios with decision records override this (§5.4 / Phase 1). */
+  decisionRecords(): DecisionRecord[] {
     return [];
   }
 

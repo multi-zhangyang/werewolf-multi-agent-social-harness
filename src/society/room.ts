@@ -450,6 +450,10 @@ export class SocietyRoom {
         ...agent,
         ...(roles.get(agent.id) ? { observerRole: roles.get(agent.id) } : {})
       }));
+      // Decision records are stripped from scoped views (§5.4); the full
+      // observer seat gets the real ledger back for the action triangle.
+      const records = this.world.decisionRecords();
+      if (records.length) reveal.details = { ...reveal.details, decisionRecords: records };
       return {
         id: this.id,
         scenarioId: this.scenarioId,

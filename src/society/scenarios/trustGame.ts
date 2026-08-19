@@ -58,7 +58,7 @@ export class TrustGameWorld extends SocialWorldBase {
   /** The commitment ledger (§8.1): promises declared through make_commitment. */
   private readonly commitments: Commitment[] = [];
   /** Auditable decision records for binding actions (§5.4, minimal slice). */
-  private readonly decisionRecords: DecisionRecord[] = [];
+  private readonly records: DecisionRecord[] = [];
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
@@ -84,7 +84,7 @@ export class TrustGameWorld extends SocialWorldBase {
       investmentCommandId: this.investmentCommandId,
       returnCommandId: this.returnCommandId,
       commitments: structuredClone(this.commitments),
-      decisionRecords: structuredClone(this.decisionRecords)
+      decisionRecords: structuredClone(this.records)
     };
   }
 
@@ -113,8 +113,8 @@ export class TrustGameWorld extends SocialWorldBase {
     this.returnCommandId = s.returnCommandId;
     this.commitments.length = 0;
     this.commitments.push(...structuredClone(s.commitments ?? []));
-    this.decisionRecords.length = 0;
-    this.decisionRecords.push(...structuredClone(s.decisionRecords ?? []));
+    this.records.length = 0;
+    this.records.push(...structuredClone(s.decisionRecords ?? []));
     if (s.discussion) {
       this.discussion = this.createDiscussion();
       this.discussion.restoreState(s.discussion);
@@ -140,7 +140,7 @@ export class TrustGameWorld extends SocialWorldBase {
         scores: Object.fromEntries(this.scores),
         history: this.history,
         commitments: this.commitments,
-        decisionRecords: this.decisionRecords,
+        decisionRecords: this.records,
         ...(this.discussion ? { discussion: this.discussion.state() } : {})
       }
     });
@@ -292,7 +292,9 @@ export class TrustGameWorld extends SocialWorldBase {
       }
       const commandId = `cmd-${randomUUID()}`;
       const commitment: Commitment = {
-        commitmentId: `commit-${randomUUID().slice(0, 8)}`,
+        // Deterministic id (round + promisor + ordinal): stable across
+        // restarts and citeable by scripts and observers (§16.5).
+        commitmentId: `commit:${this.round}:${actorId}:${ownCount + 1}`,
         round: this.round,
         promisorActorId: actorId,
         promisorCharacterId: this.profiles.get(actorId)?.characterId ?? actorId,
@@ -336,7 +338,7 @@ export class TrustGameWorld extends SocialWorldBase {
       this.investment = amount;
       const commandId = `cmd-${randomUUID()}`;
       this.investmentCommandId = commandId;
-      this.decisionRecords.push(makeDecisionRecord(this, actorId, action, commandId, amount, references));
+      this.records.push(makeDecisionRecord(this, actorId, action, commandId, amount, references));
       this.emitUpdate();
       return {
         action,
@@ -356,7 +358,7 @@ export class TrustGameWorld extends SocialWorldBase {
       this.returnedAmount = amount;
       const commandId = `cmd-${randomUUID()}`;
       this.returnCommandId = commandId;
-      this.decisionRecords.push(makeDecisionRecord(this, actorId, action, commandId, amount, references));
+      this.records.push(makeDecisionRecord(this, actorId, action, commandId, amount, references));
       this.emitUpdate();
       return {
         action,
@@ -390,6 +392,11 @@ export class TrustGameWorld extends SocialWorldBase {
     return this.commitments.filter((entry) =>
       entry.state === "proposed" && (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
     );
+  }
+
+  /** The full decision-record ledger (omniscient view; public stays redacted). */
+  decisionRecords(): DecisionRecord[] {
+    return structuredClone(this.records);
   }
 
   activation(): WorldActivation | null {

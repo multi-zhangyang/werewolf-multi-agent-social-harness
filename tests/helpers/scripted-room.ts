@@ -172,7 +172,7 @@ export function testRoom(model: Model, limiter: ActivationLimiter, options: { ro
 }
 
 /** The full 2-round trust-game script used by deterministic room runs. */
-export function twoRoundScript(): StreamEvent[][] {
+export function twoRoundScript(): Array<ReturnType<typeof modelResponse>> {
   return [
     modelResponse([assistantMessage("我会先观察这轮的投资结构。")]),
     modelResponse([assistantMessage("我不会提前承诺，但会公平地看待返还。")]),
