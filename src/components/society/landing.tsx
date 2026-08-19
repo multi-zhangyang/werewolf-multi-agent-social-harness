@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, Eraser, MessagesSquare, Play, Radio, RotateCcw, Settings2, Sparkles, Trash2, Users, Waypoints } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, Eraser, MessagesSquare, Play, Radio, RotateCcw, Settings2, Trash2, Users, Waypoints } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { ArchivedRoomSummary } from "@/society/persistence";
@@ -10,7 +10,8 @@ import type { ModelOption } from "./types";
 import { cn } from "@/lib/utils";
 
 interface SeasonSummary {
-  characterKey: string;
+  characterId: string;
+  displayName: string;
   games: Array<{ scenarioId: string; role?: string; outcome: "win" | "lose" }>;
   memoryCount: number;
   updatedAt: string;
@@ -29,7 +30,7 @@ interface LandingProps {
   onOpenAbout: () => void;
   onResetSeason: () => void;
   /** Forget one character's cross-game memory (§7.2). */
-  onForgetCharacter: (characterKey: string) => void;
+  onForgetCharacter: (characterId: string, displayName: string) => void;
   /** Stop and release a room; its history stays in the archive. */
   onRemoveRoom: (roomId: string) => void;
 }
@@ -188,10 +189,10 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
               {season.slice(0, 8).map((entry) => {
                 const wins = entry.games.filter((game) => game.outcome === "win").length;
                 return (
-                  <div key={entry.characterKey} className="group relative rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/25">
+                  <div key={entry.characterId} className="group relative rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/25">
                     <p className="flex items-center gap-2 text-sm font-semibold tracking-tight">
-                      <AgentAvatar name={entry.characterKey} index={hashIndex(entry.characterKey)} size="sm" />
-                      {entry.characterKey}
+                      <AgentAvatar name={entry.displayName} index={hashIndex(entry.characterId)} size="sm" />
+                      {entry.displayName}
                     </p>
                     <p className="nums mt-2 font-mono text-[11px] text-muted-foreground/80">
                       {entry.games.length} 局 · 胜 {wins} · 记忆 {entry.memoryCount}
@@ -202,9 +203,9 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
                     </p>
                     <button
                       type="button"
-                      aria-label={`忘记 ${entry.characterKey} 的跨局历史`}
-                      title={`让 ${entry.characterKey} 忘掉全部跨局历史，下一局从陌生人开始`}
-                      onClick={() => onForgetCharacter(entry.characterKey)}
+                      aria-label={`忘记 ${entry.displayName} 的跨局历史`}
+                      title={`让 ${entry.displayName} 忘掉全部跨局历史，下一局从陌生人开始`}
+                      onClick={() => onForgetCharacter(entry.characterId, entry.displayName)}
                       className="absolute right-2 top-2 flex size-6 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-border hover:text-red-400 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-foreground"
                     >
                       <Eraser className="size-3.5" />

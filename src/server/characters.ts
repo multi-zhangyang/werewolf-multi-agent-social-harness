@@ -10,8 +10,10 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import path from "node:path";
 import express from "express";
 import { z } from "zod";
-import type { CharacterDefinition, DecisionBias } from "../society/contracts";
+import type { CharacterDefinition } from "../society/contracts";
 import { builtinCharacter, builtinCharacters } from "../society/profiles";
+import { requireGlobalOperator } from "./auth";
+import type { ServerContext } from "./context";
 
 const MAX_CUSTOM_CHARACTERS = 100;
 const MAX_ANCHORS = 12;
@@ -82,6 +84,23 @@ export class CharacterLibrary {
 
   list(): { builtins: CharacterDefinition[]; customs: CharacterDefinition[] } {
     return { builtins: builtinCharacters(), customs: structuredClone(this.customs) };
+  }
+
+  /**
+   * All character ids registered under a display name — used by the season
+   * migration to resolve legacy display-name keys to stable character ids.
+   * Duplicates are legal (same-name characters coexist), so callers must
+   * treat an ambiguous match as unresolvable.
+   */
+  idsForDisplayName(displayName: string): string[] {
+    const ids: string[] = [];
+    for (const character of builtinCharacters()) {
+      if (character.displayName === displayName) ids.push(character.id);
+    }
+    for (const character of this.customs) {
+      if (character.displayName === displayName) ids.push(character.id);
+    }
+    return [...new Set(ids)];
   }
 
   resolve(id: string): CharacterDefinition | undefined {
@@ -157,25 +176,33 @@ export class CharacterLibrary {
   }
 }
 
-export function registerCharacterRoutes(app: express.Express, library: CharacterLibrary): void {
+export function registerCharacterRoutes(app: express.Express, context: ServerContext): void {
+  const library = context.characters;
+  const gate = (request: express.Request, response: express.Response): boolean =>
+    requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token));
+
   app.get("/api/characters", (_request, response) => {
     response.json(library.list());
   });
 
   app.post("/api/characters", (request, response) => {
+    if (!gate(request, response)) return;
     response.status(201).json(library.create(characterInputSchema.parse(request.body)));
   });
 
   app.put("/api/characters/:id", (request, response) => {
+    if (!gate(request, response)) return;
     response.json(library.update(request.params.id, characterInputSchema.parse(request.body)));
   });
 
   app.delete("/api/characters/:id", (request, response) => {
+    if (!gate(request, response)) return;
     library.remove(request.params.id);
     response.json({ deleted: true });
   });
 
   app.post("/api/characters/:id/copy", (request, response) => {
+    if (!gate(request, response)) return;
     response.status(201).json(library.copy(request.params.id));
   });
 
@@ -188,6 +215,7 @@ export function registerCharacterRoutes(app: express.Express, library: Character
   });
 
   app.post("/api/characters/import", (request, response) => {
+    if (!gate(request, response)) return;
     const { characters } = importSchema.parse(request.body);
     const added: CharacterDefinition[] = [];
     for (const input of characters) {

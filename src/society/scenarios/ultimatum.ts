@@ -12,7 +12,7 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
-import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
+import { scopedContext, SocialWorldBase } from "../world";
 import { DiscussionDirector } from "../conversation";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
 
@@ -292,7 +292,7 @@ export class UltimatumWorld extends SocialWorldBase {
   }): Promise<SocialMessage> {
     const message = await super.sendMessage(input);
     if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
-      this.discussion.onMessage({ senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
+      this.discussion.onMessage({ messageId: message.id, senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
     }
     return message;
   }

@@ -198,7 +198,7 @@ export class CinematicDirector {
     }
   }
 
-  private ingestLogBeat(entry: WorldLogEntry, at: string): void {
+  private ingestLogBeat(entry: WorldLogEntry, _at: string): void {
     if (!entry.beat) return;
     const mapping: Partial<Record<NonNullable<WorldLogEntry["beat"]>, { reason: TensionReason; camera: CameraMode; title: string; priority: number }>> = {
       betrayal: { reason: "betrayal", camera: "duel", title: "背叛", priority: 10 },

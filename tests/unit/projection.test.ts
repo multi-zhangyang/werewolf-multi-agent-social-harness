@@ -1,25 +1,23 @@
 /**
- * Spectator projection checks (§8.3 / §14.4): the hard information boundary
- * between omniscient, public and agent-pov seats, plus the world-level role
+ * Spectator projection checks: the hard information boundary between
+ * omniscient, public and agent-pov seats, plus the world-level role
  * visibility, must never leak private cognition or hidden identities.
- * Run with `npx tsx scripts/verify-projection.ts`.
  */
 import { strict as assert } from "node:assert";
-import { createWorld } from "../src/society/scenarios";
-import { projectEventFor, type SpectatorViewer } from "../src/society/spectator/projection";
-import type { AgentRuntimeEvent, AgentProfile, SocialMessage } from "../src/society/contracts";
+import { it } from "vitest";
+import { createWorld } from "../../src/society/scenarios";
+import { projectEventFor, type SpectatorViewer } from "../../src/society/spectator/projection";
+import type { AgentRuntimeEvent, AgentProfile, SocialMessage } from "../../src/society/contracts";
 
-let passed = 0;
 function check(name: string, fn: () => void): void {
-  fn();
-  passed += 1;
-  console.log(`  ok  ${name}`);
+  it(name, fn);
 }
 
 function profiles(count: number): AgentProfile[] {
   return Array.from({ length: count }, (_, index) => ({
     id: `agent-${String(index + 1).padStart(2, "0")}`,
     displayName: `P${index + 1}`,
+    characterId: `char-test-${index + 1}`,
     persona: "test",
     traits: [],
     values: [],
@@ -76,7 +74,7 @@ const tool: AgentRuntimeEvent = { type: "agent.tool", roomId: "r", actorId: "age
 const publicTool: AgentRuntimeEvent = { type: "agent.tool", roomId: "r", actorId: "agent-01", toolCallId: "t2", toolName: "communicate", phase: "succeeded", at };
 const worldAction: AgentRuntimeEvent = { type: "world.action", roomId: "r", actorId: "agent-01", action: "cast_day_vote", detail: "x", at };
 const publicAction: AgentRuntimeEvent = { type: "world.action", roomId: "r", actorId: "agent-01", action: "message", detail: "x", at };
-const cue: AgentRuntimeEvent = { type: "cinematic.cue", roomId: "r", cue: { id: "c1", roomId: "r", camera: "wide-table", title: "t", priority: 5, focusAgentIds: [], minimumDurationMs: 1000, maximumDurationMs: 2000, skippable: true, createdAt: at }, at };
+const cue: AgentRuntimeEvent = { type: "cinematic.cue", roomId: "r", cue: { id: "c1", roomId: "r", camera: "wide-table", title: "t", priority: 5, focusAgentIds: [], minimumDurationMs: 1000, maximumDurationMs: 2000, skippable: true, sourceEventIds: [], createdAt: at }, at };
 
 const omniscient: SpectatorViewer = { mode: "omniscient" };
 const publicView: SpectatorViewer = { mode: "public" };
@@ -135,5 +133,3 @@ check("werewolf world hides roles from the public projection and shows wolf team
   assert.equal(villagerSeen.length, 1, "a villager sees only their own role");
   assert.equal(villagerSeen[0].id, villagerId, "and it is their own");
 });
-
-console.log(`\nSpectator projection checks: ${passed} passed.`);

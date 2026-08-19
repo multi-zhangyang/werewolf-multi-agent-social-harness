@@ -9,17 +9,43 @@
  * conversation continue wave after wave until nobody has a reason to speak.
  * Silence is a legitimate move, not a failure.
  *
- * The director is deterministic (no LLM calls): it reads mentions, questions,
- * accusations and reply chains from the message text, then lets personality
- * (extraversion, dominance) modulate the resulting urgency. Worlds consume it
- * during discussion phases; observers can read `state()` to watch the social
- * temperature of the room.
+ * The director is deterministic (no LLM calls) and language-neutral at its
+ * core: mentions and generic interrogative markers create pressure, while
+ * game-specific social meaning (accusations, threats, offers) arrives as
+ * structured `ConversationSignal`s from the scenario layer. Worlds pass each
+ * message's stable id so the reply graph resolves to the original message's
+ * sender — never to "whoever else replied to the same message".
  */
 
+/** One utterance inside a discussion, with a stable id for reply resolution. */
 export interface DiscussionMessage {
+  messageId: string;
   senderId: string;
   text: string;
+  /** Stable id of the original message this one replies to (world message id). */
   replyTo?: string;
+}
+
+/**
+ * A structured social-meaning hint a scenario derives from its own rules or
+ * vocabulary (AGENTS.md §13.2/§13.3): the director only turns signals into
+ * response pressure; it never hardcodes any game's words.
+ */
+export interface ConversationSignal {
+  kind:
+    | "question"
+    | "accusation"
+    | "promise"
+    | "offer"
+    | "threat"
+    | "evidence"
+    | "challenge"
+    | "alliance-proposal";
+  sourceActorId: string;
+  targetActorIds: string[];
+  sourceMessageId?: string;
+  /** Pressure weight; falls back to the per-kind default when omitted. */
+  urgency?: number;
 }
 
 export interface DiscussionOptions {
@@ -55,10 +81,19 @@ export interface DiscussionSnapshot {
   spokeCounts: Record<string, number>;
 }
 
-const ACCUSATION_PATTERN =
-  /怀疑|是狼|狼人|铁狼|出局|投你|投票|说谎|撒谎|骗|小丑|预言家|查杀|金水|带节奏|站队|装好人|伪/;
-
+/** Generic interrogative markers — language surface, not game vocabulary. */
 const QUESTION_HINT = /？|\?|吗|呢|吧|怎么|为什么|凭什么|谁/;
+
+const SIGNAL_URGENCY: Record<ConversationSignal["kind"], number> = {
+  question: 1.2,
+  accusation: 1.8,
+  promise: 1.0,
+  offer: 1.4,
+  threat: 2.2,
+  evidence: 1.2,
+  challenge: 1.5,
+  "alliance-proposal": 1.4
+};
 
 export class DiscussionDirector {
   readonly actorIds: string[];
@@ -72,8 +107,11 @@ export class DiscussionDirector {
   private readonly talkativeness: (actorId: string) => number;
   private readonly dominance: (actorId: string) => number;
   private readonly sensitivity: (actorId: string) => number;
+  private readonly urgencyDecay: number;
 
   private readonly messages: DiscussionMessage[] = [];
+  /** O(1) message lookup for reply resolution (AGENTS.md §13.1). */
+  private readonly messageIndex = new Map<string, DiscussionMessage>();
   private readonly urgency = new Map<string, number>();
   private readonly spokeCounts = new Map<string, number>();
   private readonly maxUrgency = 6;
@@ -91,6 +129,7 @@ export class DiscussionDirector {
     this.talkativeness = options.talkativeness ?? (() => 0.5);
     this.dominance = options.dominance ?? (() => 0.5);
     this.sensitivity = options.sensitivity ?? (() => 0.5);
+    this.urgencyDecay = options.urgencyDecay ?? 0.6;
     // Fewer players, tighter conversations: a duet settles in 3 waves, a full
     // table needs up to 5.
     this.maxWaves = options.maxWaves ?? Math.min(5, 2 + Math.ceil(this.actorIds.length / 2));
@@ -100,17 +139,26 @@ export class DiscussionDirector {
     this.waveSizeCap = options.waveSizeCap ?? 3;
   }
 
-  /** Feed a public utterance; raises response pressure on those it concerns. */
-  onMessage(message: DiscussionMessage): void {
-    this.messages.push({ senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
+  /**
+   * Feed a public utterance with the scenario-derived signals it carries;
+   * raises response pressure on those it concerns.
+   */
+  onMessage(message: DiscussionMessage, signals: ConversationSignal[] = []): void {
+    this.messages.push({
+      messageId: message.messageId,
+      senderId: message.senderId,
+      text: message.text,
+      ...(message.replyTo ? { replyTo: message.replyTo } : {})
+    });
+    this.messageIndex.set(message.messageId, this.messages[this.messages.length - 1]);
     this.messageCount += 1;
     const spoke = this.spokeCounts.get(message.senderId) ?? 0;
     this.spokeCounts.set(message.senderId, spoke + 1);
 
     const text = message.text;
-    const replySender = message.replyTo
-      ? this.messages.find((entry) => entry.replyTo === message.replyTo)?.senderId
-      : undefined;
+    // The reply target is the ORIGINAL message's sender — resolved by its
+    // stable id, never by "another message that replied to the same thing".
+    const replySender = message.replyTo ? this.messageIndex.get(message.replyTo)?.senderId : undefined;
     for (const actorId of this.actorIds) {
       if (actorId === message.senderId) continue;
       let pressure = 0;
@@ -118,12 +166,27 @@ export class DiscussionDirector {
       if (mentioned) pressure += 2.4;
       if (replySender === actorId) pressure += 2.0;
       if (QUESTION_HINT.test(text)) pressure += mentioned ? 1.2 : 0.5;
-      if (ACCUSATION_PATTERN.test(text)) pressure += mentioned ? 1.8 : 0.4;
-      if (pressure > 0) {
-        const base = this.urgency.get(actorId) ?? 0;
-        this.urgency.set(actorId, Math.min(this.maxUrgency, base + pressure));
-      }
+      if (pressure > 0) this.raise(actorId, pressure);
     }
+    for (const signal of signals) this.raiseSignal(signal);
+  }
+
+  /**
+   * A scenario-derived social meaning (accusation, threat, offer…): raises
+   * response pressure on its targets. The director knows nothing about any
+   * game's vocabulary — the scenario supplies the meaning.
+   */
+  raiseSignal(signal: ConversationSignal): void {
+    const weight = signal.urgency ?? SIGNAL_URGENCY[signal.kind];
+    for (const actorId of signal.targetActorIds) {
+      if (actorId === signal.sourceActorId || !this.actorIds.includes(actorId)) continue;
+      this.raise(actorId, weight);
+    }
+  }
+
+  private raise(actorId: string, amount: number): void {
+    const base = this.urgency.get(actorId) ?? 0;
+    this.urgency.set(actorId, Math.min(this.maxUrgency, base + amount));
   }
 
   /**
@@ -152,9 +215,10 @@ export class DiscussionDirector {
    * residual desire to speak (extraverts linger on the floor).
    */
   endWave(): void {
+    const decay = this.urgencyDecay;
     for (const actorId of this.actorIds) {
       const residual = 0.25 + this.talkativeness(actorId) * 0.5;
-      const next = ((this.urgency.get(actorId) ?? 0) + residual * 0.4) * 0.6;
+      const next = ((this.urgency.get(actorId) ?? 0) + residual * 0.4) * decay;
       this.urgency.set(actorId, next > 0.25 ? next : 0);
     }
   }
@@ -222,8 +286,13 @@ export class DiscussionDirector {
     const value = state as Partial<ReturnType<DiscussionDirector["exportState"]>> | undefined;
     if (!value) return;
     this.messages.length = 0;
+    this.messageIndex.clear();
     for (const message of value.messages ?? []) {
-      if (message && typeof message === "object") this.messages.push({ ...message } as DiscussionMessage);
+      if (message && typeof message === "object") {
+        const restored = { ...message } as DiscussionMessage;
+        this.messages.push(restored);
+        if (restored.messageId) this.messageIndex.set(restored.messageId, restored);
+      }
     }
     this.urgency.clear();
     for (const [actorId, urgency] of value.urgency ?? []) this.urgency.set(actorId, Number(urgency));

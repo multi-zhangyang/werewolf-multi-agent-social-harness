@@ -275,7 +275,6 @@ function ArenaStage({ room, cue, activity }: {
   activity: RoomConnection["activity"];
 }): ReactNode {
   const focusIds = new Set(cue?.focusAgentIds ?? []);
-  const names = new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]));
   // Suspicion-driven seat states (§8.11): the most suspect seats carry an
   // explicit 被围攻 marker instead of relying on mood text alone.
   const suspicionScores = (() => {
@@ -336,7 +335,7 @@ function ArenaStage({ room, cue, activity }: {
           );
         })}
       </div>
-      <DuelStrip room={room} cue={cue} names={names} />
+      <DuelStrip room={room} cue={cue} />
       <WorldStagePanel room={room} />
     </section>
   );
@@ -348,10 +347,9 @@ function ArenaStage({ room, cue, activity }: {
  * their latest public statements — derived from the room's own speech, never
  * fabricated. The wide stage and banner remain the default elsewhere.
  */
-function DuelStrip({ room, cue, names }: {
+function DuelStrip({ room, cue }: {
   room: SocietyRoomSnapshot;
   cue: RoomConnection["cue"];
-  names: Map<string, string>;
 }): ReactNode {
   if (cue?.camera !== "duel" || cue.focusAgentIds.length < 2) return null;
   const sides = cue.focusAgentIds.slice(0, 2)

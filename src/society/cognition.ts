@@ -19,7 +19,6 @@ import type {
   AgentBelief,
   AgentCognitivePass,
   AgentMindState,
-  AgentRelationship,
   SocietyAgentContext,
   ThoughtBeat,
   ThoughtBeatKind
@@ -356,7 +355,7 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
       if (energyDelta !== undefined) ctx.mind.mood.energy = clampUnit(ctx.mind.mood.energy + energyDelta);
       ctx.mind.mood = refreshMood(ctx.mind.mood, turn);
       if (attention) ctx.mind.attention = [...attention];
-      if (relationship) updateRelationship(ctx.mind, relationship, turn);
+      if (relationship) updateRelationship(ctx, relationship, turn);
       if (belief) updateBelief(ctx.mind, belief, turn);
       if (goalProgress) {
         const goal = ctx.mind.goals.find((candidate) => candidate.id === goalProgress.goalId);
@@ -376,11 +375,12 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
 }
 
 function updateRelationship(
-  mind: AgentMindState,
+  ctx: SocietyAgentContext,
   input: { agentId: string; trustDelta: number; affinityDelta: number; respectDelta: number; tensionDelta: number; note: string },
   turn: number
 ): void {
-  const relationship = mind.relationships.find((candidate) => candidate.agentId === input.agentId);
+  const targetId = ctx.world.snapshot().agents.find((agent) => agent.id === input.agentId)?.characterId ?? input.agentId;
+  const relationship = ctx.mind.relationships.find((candidate) => candidate.targetCharacterId === targetId);
   if (!relationship) throw new Error(`RELATIONSHIP_NOT_FOUND: '${input.agentId}' is not another participant in this room.`);
   relationship.trust = clamp(relationship.trust + input.trustDelta);
   relationship.affinity = clamp(relationship.affinity + input.affinityDelta);

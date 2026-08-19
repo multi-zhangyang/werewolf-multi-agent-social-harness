@@ -96,7 +96,7 @@ export function Conversation({ room, activity, onAction, onReplay, jumpToAt }: C
             <ResultCard room={room} onReplay={onReplay} />
           ) : null}
 
-          <LiveAgents room={room} activity={activity} names={names} />
+          <LiveAgents room={room} activity={activity} />
 
           <div className="space-y-5">
             {entries.length === 0 ? (
@@ -272,10 +272,9 @@ function CastingSlate({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   );
 }
 
-function LiveAgents({ room, activity, names }: {
+function LiveAgents({ room, activity }: {
   room: SocietyRoomSnapshot;
   activity: Record<string, LiveAgentActivity>;
-  names: Map<string, string>;
 }): ReactNode {
   const active = room.participants.filter((participant) => {
     const state = activity[participant.profile.id];

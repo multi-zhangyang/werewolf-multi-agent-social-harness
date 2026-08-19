@@ -1,6 +1,12 @@
 import type { Agent, ModelProvider, Session, Tool } from "@openai/agents";
 import type { ResolvedModelConfig } from "./models";
 
+/**
+ * A character's permanent identity (AGENTS.md §10.2/§15): stable across
+ * rooms, seats, models and game roles. Never derived from a display name.
+ */
+export type CharacterId = string;
+
 export type ScenarioId =
   | "prisoners-dilemma"
   | "public-goods"
@@ -78,6 +84,8 @@ export type DecisionBias =
 export interface AgentProfile {
   id: string;
   displayName: string;
+  /** The permanent character behind this seat — display names may change. */
+  characterId: CharacterId;
   model: string;
   controller?: ParticipantController;
   persona: string;
@@ -194,7 +202,8 @@ export interface AgentBelief {
 }
 
 export interface AgentRelationship {
-  agentId: string;
+  /** The OTHER character this directed feeling points at (stable id). */
+  targetCharacterId: CharacterId;
   trust: number;
   affinity: number;
   respect: number;
@@ -453,6 +462,8 @@ export interface AgentObservation {
 export interface WorldAgentSnapshot {
   id: string;
   displayName: string;
+  /** The permanent character behind this seat — survives seat swaps. */
+  characterId: CharacterId;
   status: AgentStatus;
   alive: boolean;
   score?: number;
@@ -676,8 +687,10 @@ export interface SocialWorld {
  * their strongest memories, and the reputation they earned.
  */
 export interface CharacterDossier {
-  /** Stable character key (display name). */
-  characterKey: string;
+  /** The permanent character id this history belongs to (AGENTS.md §10.2). */
+  characterId: CharacterId;
+  /** Display name at the time of the latest game — for the UI, not the key. */
+  displayName: string;
   games: Array<{
     scenarioId: string;
     role?: string;
@@ -685,7 +698,7 @@ export interface CharacterDossier {
     at: string;
   }>;
   relationships: Array<{
-    agentId: string;
+    targetCharacterId: CharacterId;
     trust: number;
     affinity: number;
     respect: number;
@@ -707,13 +720,13 @@ export interface CharacterDossier {
 
 /** Cross-game memory: dossiers keyed by character, shared by a season. */
 export interface SeasonStore {
-  get(characterKey: string): CharacterDossier | undefined;
+  get(characterId: CharacterId): CharacterDossier | undefined;
   save(dossier: CharacterDossier): void;
   list(): CharacterDossier[];
   /** Forget all dossiers — the operator starts a brand-new season. */
   clear(): void;
   /** Forget one character's cross-game memory (§7.2 重置长期记忆). */
-  remove(characterKey: string): boolean;
+  remove(characterId: CharacterId): boolean;
 }
 
 export interface AgentTurnResult {

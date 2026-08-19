@@ -31,6 +31,8 @@ export interface RoomCheckpoint {
   agentBindings?: Record<string, { defaultModelProfileId?: string; tuningOverrides?: Record<string, unknown> }>;
   pausedAgents?: string[];
   seasonMode?: "season" | "one-shot";
+  /** The room's control token, persisted so recovery keeps the same owner. */
+  ownerToken?: string;
   /** False when the room was disposed on purpose — not restarted on boot. */
   recoverable?: boolean;
 }

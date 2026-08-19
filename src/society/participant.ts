@@ -13,6 +13,7 @@ import {
   Agent,
   OpenAIProvider,
   Runner,
+  type AgentInputItem,
   retryPolicies,
   isOpenAIChatCompletionsRawModelStreamEvent,
   isOpenAIResponsesRawModelStreamEvent,
@@ -43,7 +44,7 @@ import type { ResolvedModelConfig } from "./models";
 import { JsonSessionStore, defaultSessionDir } from "./persistence";
 import { clampUnit, decayMood, describeEmotions, describeNeeds, describeSocialEmotions, initialMood, refreshMood } from "./affect";
 import { appraiseEvents } from "./appraisal";
-import { SessionContextManager, contextLimitForModel } from "./context-manager";
+import { SessionContextManager, contextLimitForModel, estimateTokens, type ContextSummaryArtifact } from "./context-manager";
 import { AssociativeMemory } from "./memory";
 import { createCognitionTools, createSocialTools, formatObservation } from "./cognition";
 import { createInjectionShield } from "./guardrails";
@@ -100,6 +101,8 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   private lastDeltaAt = 0;
   private reasoningBuffer = "";
   private lastReasoningAt = 0;
+  /** Provenance of the latest compaction (AGENTS.md §12.4). */
+  private lastSummaryArtifact?: ContextSummaryArtifact;
 
   constructor(options: SocietyAgentOptions) {
     this.profile = structuredClone(options.profile);
@@ -107,10 +110,10 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     // structured inner state (relationships, beliefs, deceptions, emotion,
     // goals, trait adaptations) and in-game memories across the restart.
     // Fresh rooms still start from the character profile + season dossier.
-    const participantIds = options.world.snapshot().agents.map((agent) => agent.id);
+    const participants = options.world.snapshot().agents.map((agent) => ({ id: agent.id, characterId: agent.characterId }));
     this.mind = options.restoreMind
-      ? restoreMindState(options.restoreMind, options.profile, participantIds, options.dossier)
-      : initialMind(options.profile, participantIds, options.dossier);
+      ? restoreMindState(options.restoreMind, options.profile, participants, options.dossier)
+      : initialMind(options.profile, participants, options.dossier);
     // Durable per-agent session: history survives restarts in data/sessions/.
     this.session = JsonSessionStore.open(
       `${options.roomId}:${options.profile.id}`,
@@ -245,6 +248,16 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         ? { resolvedConfig, getPinnedFacts: () => this.pinnedFacts() }
         : { contextLimit: contextLimitForModel(this.profile.model) }),
       actorLabel: this.profile.displayName,
+      ownerCharacterId: this.profile.characterId,
+      getLogicalTime: () => this.context.world.snapshot().turn,
+      // Commitment / deception references arrive with the Phase 1 spine; the
+      // artifact always carries honest empties until then.
+      getSourceEventIds: () => [],
+      getOpenCommitmentIds: () => [],
+      getActiveDeceptionIds: () => [],
+      onArtifact: (artifact) => {
+        this.lastSummaryArtifact = artifact;
+      },
       onCompacted: (digest, estimatedTokens, threshold, level, pressureAfter) => {
         // §5.6 step 5-6: the compacted brief lands in episodic memory too, so
         // the agent can recall its own consolidation instead of losing it.
@@ -320,8 +333,21 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   async runTurn(input: string, options: { signal: AbortSignal; turn: number; maxTurns?: number; mode?: "discussion" | "full" }): Promise<AgentTurnResult> {
     this.mind.mood = decayMood(this.mind.mood, options.turn);
     const observation = this.context.world.observe(this.profile.id);
-    // Context pressure tightens memory injection: fewer, higher-salience recalls.
-    const pressure = this.contextManager.pressure();
+    // Pressure-first ordering (AGENTS.md §12.3): build the FIXED part of this
+    // turn's input, measure THIS activation's budget against it, and only
+    // then size memory retrieval by that pressure — never by the previous
+    // round's. The SDK callback re-measures the final assembled input.
+    const modeLine = options.mode === "discussion"
+      ? "(讨论回合：重心放在阅读局势、判断是否值得开口、观察他人立场；绑定行动不在本回合开放。沉默也是一种选择。)"
+      : "(行动回合：本回合需要完成你的绑定行动。先做必要的内部判断，再调用对应工具；工具未成功前不得声称行动已完成。)";
+    const fixedInput = [input, modeLine, formatObservation(observation)].join("\n\n");
+    const fixedItem = {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: fixedInput }]
+    } as unknown as AgentInputItem;
+    const history = await this.session.getItems();
+    const pressure = this.contextManager.preflight(history, estimateTokens([fixedItem]));
     const recallLimit = pressure === "retrieval-tight" || pressure === "soft-compact"
       ? 4
       : pressure === "deep-compact" || pressure === "emergency" || pressure === "hard-guard"
@@ -350,10 +376,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     this.lastReasoningAt = Date.now();
     const runInput = [
       input,
-      ...(options.mode === "discussion"
-        ? ["(讨论回合：重心放在阅读局势、判断是否值得开口、观察他人立场；绑定行动不在本回合开放。沉默也是一种选择。)"]
-        : ["(行动回合：本回合需要完成你的绑定行动。先做必要的内部判断，再调用对应工具；工具未成功前不得声称行动已完成。)"]
-      ),
+      modeLine,
       formatObservation(observation),
       recentMemories.length
         ? `Relevant memories:\n${recentMemories.map((memory) => `- ${memory.text}`).join("\n")}`
@@ -448,7 +471,8 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       .slice(0, 12)
       .map((entry) => ({ text: entry.text, salience: entry.salience, valence: entry.valence }));
     return {
-      characterKey: this.profile.displayName,
+      characterId: this.profile.characterId,
+      displayName: this.profile.displayName,
       // Every game is recorded, with or without a declared winner: the season
       // cares about history, not just victories.
       games: [{
@@ -458,7 +482,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         at: new Date().toISOString()
       }],
       relationships: this.mind.relationships.map((entry) => ({
-        agentId: entry.agentId,
+        targetCharacterId: entry.targetCharacterId,
         trust: entry.trust,
         affinity: entry.affinity,
         respect: entry.respect,
@@ -501,7 +525,14 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   async appraise(events: SocialEvent[], turn: number): Promise<void> {
     if (!events.length) return;
     const effective = effectiveTemperament(this.profile.temperament, this.mind.traitAdaptations);
-    const summary = appraiseEvents(this.mind, this.profile, events, turn, effective);
+    const summary = appraiseEvents(
+      this.mind,
+      this.profile,
+      events,
+      turn,
+      effective,
+      (actorId) => this.context.world.snapshot().agents.find((agent) => agent.id === actorId)?.characterId
+    );
     // Slow personality adaptation: repeated high-salience experiences move a
     // bounded adaptation off the baseline; single events decay back quickly.
     const adapted = adaptTraits({
@@ -608,17 +639,23 @@ export function baseUrlFromEnv(env: NodeJS.ProcessEnv = process.env): string | u
   return value ? value.replace(/\/(chat\/completions|responses)\/?$/i, "").replace(/\/$/, "") : undefined;
 }
 
-function initialMind(profile: AgentProfile, participantIds: string[], dossier?: CharacterDossier): AgentMindState {
-  const relationships = participantIds
-    .filter((id) => id !== profile.id)
-    .map<AgentRelationship>((agentId) => {
+function initialMind(
+  profile: AgentProfile,
+  participants: Array<{ id: string; characterId: string }>,
+  dossier?: CharacterDossier
+): AgentMindState {
+  // Relationships are keyed by the OTHER character's stable id, never by the
+  // current seat: a seat swap or a rename must not move history (§10.2).
+  const relationships = participants
+    .filter((participant) => participant.id !== profile.id)
+    .map<AgentRelationship>((participant) => {
       // The season remembers this character's history with the others: trust,
       // affinity, respect and tension carry over instead of resetting to
       // neutral. A betrayal last game starts this game as distrust.
-      const past = dossier?.relationships.find((entry) => entry.agentId === agentId);
+      const past = dossier?.relationships.find((entry) => entry.targetCharacterId === participant.characterId);
       if (!past) {
         return {
-          agentId,
+          targetCharacterId: participant.characterId,
           trust: 0.5,
           affinity: 0.5,
           respect: 0.5,
@@ -629,7 +666,7 @@ function initialMind(profile: AgentProfile, participantIds: string[], dossier?: 
         };
       }
       return {
-        agentId,
+        targetCharacterId: participant.characterId,
         trust: clamp(past.trust),
         affinity: clamp(past.affinity),
         respect: clamp(past.respect),
@@ -702,20 +739,28 @@ function initialMind(profile: AgentProfile, participantIds: string[], dossier?: 
 function restoreMindState(
   restored: AgentMindState,
   profile: AgentProfile,
-  participantIds: string[],
+  participants: Array<{ id: string; characterId: string }>,
   dossier?: CharacterDossier
 ): AgentMindState {
-  const baseline = initialMind(profile, participantIds, dossier);
-  const restoredRelationships = new Map((restored.relationships ?? []).map((entry) => [entry.agentId, entry]));
-  const relationships = participantIds
-    .filter((id) => id !== profile.id)
-    .map((agentId) => {
-      const fallback = baseline.relationships.find((entry) => entry.agentId === agentId);
+  const baseline = initialMind(profile, participants, dossier);
+  // Pre-CharacterId checkpoints keyed relationships by ACTOR id; resolve each
+  // legacy entry to the actor's stable character id during restore.
+  const restoredRelationships = new Map<string, AgentRelationship>();
+  for (const entry of restored.relationships ?? []) {
+    const legacy = entry as unknown as { agentId?: string };
+    const key = entry.targetCharacterId
+      ?? participants.find((participant) => participant.id === legacy.agentId)?.characterId;
+    if (key) restoredRelationships.set(key, entry);
+  }
+  const relationships = participants
+    .filter((participant) => participant.id !== profile.id)
+    .map((participant) => {
+      const fallback = baseline.relationships.find((entry) => entry.targetCharacterId === participant.characterId);
       if (!fallback) return undefined;
-      const entry = restoredRelationships.get(agentId);
+      const entry = restoredRelationships.get(participant.characterId);
       if (!entry) return fallback;
       return {
-        agentId,
+        targetCharacterId: participant.characterId,
         trust: finiteUnit(entry.trust, fallback.trust),
         affinity: finiteUnit(entry.affinity, fallback.affinity),
         respect: finiteUnit(entry.respect, fallback.respect),

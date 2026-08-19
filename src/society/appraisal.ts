@@ -67,7 +67,9 @@ export function appraiseEvents(
   profile: AgentProfile,
   events: SocialEvent[],
   turn: number,
-  effectiveTemperament?: AgentTemperament
+  effectiveTemperament?: AgentTemperament,
+  /** Resolves a world actor id to the character's stable id (AGENTS.md §10.2). */
+  resolveCharacterId?: (actorId: string) => string | undefined
 ): AppraisalSummary {
   // The effective Big Five (baseline + bounded adaptation) modulates how the
   // same event lands; the stored profile baseline stays untouched (§4.2.8).
@@ -82,7 +84,7 @@ export function appraiseEvents(
     const biased = modulateByBiases(raw, biases);
     const deltas = modulateByRegulation(biased, profile.regulation);
     changed = true;
-    apply(mind, event, deltas, turn);
+    apply(mind, event, deltas, turn, resolveCharacterId);
     const valence = estimateValence(deltas);
     memories.push({
       text: event.detail,
@@ -433,7 +435,13 @@ function appraisalFor(mind: AgentMindState, event: SocialEvent, t: AgentTemperam
   }
 }
 
-function apply(mind: AgentMindState, event: SocialEvent, deltas: Deltas, turn: number): void {
+function apply(
+  mind: AgentMindState,
+  event: SocialEvent,
+  deltas: Deltas,
+  turn: number,
+  resolveCharacterId?: (actorId: string) => string | undefined
+): void {
   if (deltas.emotions) mind.mood.emotions = applyEmotionDeltas(mind.mood.emotions, deltas.emotions);
   if (deltas.pad) mind.mood.pad = applyPadDeltas(mind.mood.pad, deltas.pad);
   if (deltas.needs) mind.mood.needs = applyNeedsDeltas(mind.mood.needs, deltas.needs);
@@ -445,7 +453,8 @@ function apply(mind: AgentMindState, event: SocialEvent, deltas: Deltas, turn: n
     }
   }
   if (deltas.relationship && event.actorId && event.actorId !== event.targetId) {
-    const relationship = mind.relationships.find((candidate) => candidate.agentId === event.actorId);
+    const targetId = resolveCharacterId?.(event.actorId) ?? event.actorId;
+    const relationship = mind.relationships.find((candidate) => candidate.targetCharacterId === targetId);
     if (relationship) {
       relationship.trust = clampUnit(relationship.trust + (deltas.relationship.trust ?? 0));
       relationship.affinity = clampUnit(relationship.affinity + (deltas.relationship.affinity ?? 0));

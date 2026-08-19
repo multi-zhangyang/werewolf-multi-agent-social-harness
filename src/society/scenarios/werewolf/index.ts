@@ -14,7 +14,7 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../../contracts";
-import { contextFromRunContext, scopedContext, SocialWorldBase } from "../../world";
+import { scopedContext, SocialWorldBase } from "../../world";
 import { DiscussionDirector } from "../../conversation";
 import { SuspicionClimate } from "../../suspicion";
 import { boundedRounds, discussionPersonality, emitAction } from "../helpers";
@@ -708,7 +708,7 @@ export class WerewolfWorld extends SocialWorldBase {
         label: wave === 1 ? `第 ${this.day} 天讨论` : `第 ${this.day} 天讨论 · 回应第 ${wave - 1} 轮`,
         actorIds: actors,
         mode: "sequential",
-        instructionFor: (actorId) => wave === 1
+        instructionFor: (_actorId) => wave === 1
           ? "Opening round of the day. Share your read of the situation: what you observed, who you trust or suspect, what you want to know. Ask questions, test others, or stay reserved — but do not cast a vote yet."
           : "The discussion is live and people have reacted. Respond to what was actually said: answer questions directed at you, defend yourself if accused, challenge weak claims, support allies, or expose contradictions. You may also stay silent if you have nothing new to add. Do not cast a vote yet."
       };
@@ -724,7 +724,8 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   private knightActivation(): WorldActivation {
-    const knightId = [...this.roles].find(([id, role]) => role === "knight" && this.alive.has(id))?.[0]!;
+    const knightEntry = [...this.roles].find(([id, role]) => role === "knight" && this.alive.has(id));
+    const knightId = knightEntry?.[0] ?? "";
     return {
       id: `ww:${this.day}:knight`,
       label: `第 ${this.day} 天骑士决斗`,
@@ -839,6 +840,7 @@ export class WerewolfWorld extends SocialWorldBase {
     const message = await super.sendMessage(input);
     if (message.channel === "public" && this.phase === "day-discussion" && this.discussion) {
       this.discussion.onMessage({
+        messageId: message.id,
         senderId: message.senderId,
         text: message.text,
         ...(message.replyTo ? { replyTo: message.replyTo } : {})
@@ -865,6 +867,14 @@ export class WerewolfWorld extends SocialWorldBase {
       const snippet = message.text.slice(0, 120);
       if (ACCUSATION_LEXICON.test(window)) {
         this.suspicion.noteAccusation(this.day, message.senderId, id);
+        // The scenario knows this was an accusation — feed it to the director
+        // as a structured signal instead of hardcoding werewolf words there.
+        this.discussion?.raiseSignal({
+          kind: "accusation",
+          sourceActorId: message.senderId,
+          targetActorIds: [id],
+          sourceMessageId: message.id
+        });
         this.pushEvent(id, {
           type: "accused",
           actorId: message.senderId,
@@ -1231,7 +1241,6 @@ export class WerewolfWorld extends SocialWorldBase {
   private resolveShot(shooterId: string, targetId: string | undefined): void {
     const index = this.pendingShots.findIndex((entry) => entry.shooterId === shooterId);
     if (index === -1) return;
-    const shot = this.pendingShots[index];
     this.pendingShots.splice(index, 1);
     const shooterName = this.profiles.get(shooterId)?.displayName ?? shooterId;
     if (!targetId) {

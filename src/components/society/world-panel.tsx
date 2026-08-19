@@ -634,7 +634,7 @@ function BeatOverlay({ world, names, scenarioId }: { world: WorldSnapshot; names
     seenRef.current = history.length;
     const latest = history.at(-1);
     if (!latest) return;
-    const text = beatText(latest, names, scenarioId, world);
+    const text = beatText(latest, names, scenarioId);
     if (!text) return;
     setBeat(text);
     const timer = window.setTimeout(() => setBeat(null), 4_200);
@@ -653,7 +653,7 @@ function BeatOverlay({ world, names, scenarioId }: { world: WorldSnapshot; names
   );
 }
 
-function beatText(entry: Record<string, unknown>, names: Map<string, string>, scenarioId: ScenarioId, world: WorldSnapshot): string | null {
+function beatText(entry: Record<string, unknown>, names: Map<string, string>, scenarioId: ScenarioId): string | null {
   if (scenarioId === "werewolf") {
     const eliminated = entry.eliminatedId as string | undefined;
     if (entry.idiotSurvived) return `${names.get(eliminated ?? "") ?? eliminated} 亮出白痴身份，免死并失去投票权`;

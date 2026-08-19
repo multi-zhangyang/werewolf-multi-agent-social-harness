@@ -1,19 +1,16 @@
 /**
- * World serialization round-trip checks (run with
- * `npx tsx scripts/verify-world-serialization.ts`). Pins restart recovery
- * (P3): every scenario's exported state must rehydrate an identical world —
- * same snapshot, same re-export. No model calls, no network.
+ * World serialization round-trip checks (recovery suite). Pins restart
+ * recovery: every scenario's exported state must rehydrate an identical
+ * world — same snapshot, same re-export. No model calls, no network.
  */
 import { strict as assert } from "node:assert";
-import { ALL_SCENARIOS, SCENARIO_METADATA, createWorld } from "../src/society/scenarios";
-import { createAgentProfiles } from "../src/society/profiles";
-import type { ScenarioId } from "../src/society/contracts";
+import { it } from "vitest";
+import { ALL_SCENARIOS, SCENARIO_METADATA, createWorld } from "../../src/society/scenarios";
+import { createAgentProfiles } from "../../src/society/profiles";
+import type { ScenarioId } from "../../src/society/contracts";
 
-let passed = 0;
 function check(name: string, fn: () => void): void {
-  fn();
-  passed += 1;
-  console.log(`  ok  ${name}`);
+  it(name, fn);
 }
 
 function seatsFor(scenarioId: ScenarioId): number {
@@ -40,7 +37,6 @@ check("every scenario round-trips its serialized state", () => {
 });
 
 check("restored worlds are held paused and resume cleanly", () => {
-  const meta = SCENARIO_METADATA["prisoners-dilemma"];
   const profiles = createAgentProfiles(["model-a"], 2);
   const first = createWorld({ roomId: "room-t", scenarioId: "prisoners-dilemma", profiles, rounds: 3 });
   first.start();
@@ -61,5 +57,3 @@ check("state mismatch across scenarios is refused loudly", () => {
     /SCENARIO_STATE_MISMATCH/
   );
 });
-
-console.log(`\nWorld-serialization checks: ${passed} passed.`);

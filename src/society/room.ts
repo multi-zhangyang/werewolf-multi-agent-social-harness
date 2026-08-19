@@ -6,7 +6,6 @@ import type {
   AgentRuntimeEvent,
   AgentStatus,
   AgentTurnResult,
-  CharacterDossier,
   DecisionBias,
   ParticipantController,
   PlayerActionSpec,
@@ -14,7 +13,6 @@ import type {
   ScenarioId,
   SeasonStore,
   SocialWorld,
-  SpectatorMode,
   WorldActionCommit,
   WorldActivation,
   WorldSnapshot
@@ -30,7 +28,7 @@ import {
   type ProviderProfile,
   type ResolvedModelConfig
 } from "./models";
-import { RoomArchiveStore, defaultRoomArchiveDir, type RoomCheckpoint } from "./persistence";
+import { RoomArchiveStore, type RoomCheckpoint } from "./persistence";
 import { CinematicDirector } from "./spectator/cinematic-director";
 import { ActivationLimiter } from "./activation-limiter";
 import type { WorldSerializedState } from "./world";
@@ -74,6 +72,8 @@ export interface SocietyRoomCreateOptions {
     agentMinds?: Record<string, AgentMindState>;
     pausedAgents?: string[];
     events?: SocietyRoomEventEnvelope[];
+    /** The room's control token survives a restart with the checkpoint. */
+    ownerToken?: string;
   };
 }
 
@@ -88,6 +88,8 @@ export interface SocietyRoomEventEnvelope {
 export interface SocietyParticipantProfile {
   id: string;
   displayName: string;
+  /** The stable character behind this seat (§10.2). */
+  characterId: string;
   model: string;
   controller: ParticipantController;
   /**
@@ -155,6 +157,8 @@ export interface SocietyRoomSnapshot {
 
 export interface SocietyRoomCreateResult {
   room: SocietyRoomSnapshot;
+  /** Control token for this room: pause/resume/remove/model switches (§18.2). */
+  ownerToken: string;
   playerActorId?: string;
   playerToken?: string;
 }
@@ -215,6 +219,8 @@ export class SocietyRoom {
   private readonly turnTimeoutMs: number;
   private readonly humanTurnTimeoutMs: number;
   private readonly humanToken?: string;
+  /** Control token for this room (owner). Persisted with the checkpoint. */
+  private readonly ownerToken: string;
   private readonly rememberedExperiences = new Map<string, string>();
   private runningPromise?: Promise<void>;
   private waitingHuman?: HumanWaiter;
@@ -255,6 +261,7 @@ export class SocietyRoom {
     if (humans.length > 1) throw new Error("HUMAN_LIMIT_EXCEEDED: A room supports at most one human participant.");
     this.humanActorId = humans[0]?.id;
     this.humanToken = this.humanActorId ? randomBytes(32).toString("base64url") : undefined;
+    this.ownerToken = options.restore?.ownerToken ?? randomBytes(32).toString("base64url");
     this.world = createWorld({
       roomId: this.id,
       scenarioId: options.scenarioId,
@@ -286,10 +293,19 @@ export class SocietyRoom {
   creationResult(): SocietyRoomCreateResult {
     return {
       room: this.snapshotFor(this.humanActorId),
+      ownerToken: this.ownerToken,
       ...(this.humanActorId && this.humanToken
         ? { playerActorId: this.humanActorId, playerToken: this.humanToken }
         : {})
     };
+  }
+
+  /** Constant-time check for the room's control token (owner). */
+  isOwnerToken(token: string): boolean {
+    if (!token) return false;
+    const expected = Buffer.from(this.ownerToken);
+    const given = Buffer.from(token);
+    return expected.length === given.length && timingSafeEqual(expected, given);
   }
 
   snapshotFor(actorId?: string): SocietyRoomSnapshot {
@@ -332,12 +348,12 @@ export class SocietyRoom {
    *  - public: no minds, public-channel messages only, living roles hidden;
    *  - omniscient: the full observer seat (private minds included);
    *  - agent-pov: the watched agent's scoped world view, no minds;
-   *  - postgame: full reveal (all roles unlocked) after the game ends.
+   *  - postgame: the world is fully revealed after the game ends, but
+   *    private minds stay behind owner/operator permission (§15.10).
    */
   snapshotForViewer(viewer: SpectatorViewer): SocietyRoomSnapshot {
     const mode = viewer.mode;
     const world = this.world.snapshotFor(mode === "agent-pov" ? viewer.agentId : undefined);
-    const includeMinds = mode === "omniscient" || mode === "postgame";
 
     if (mode === "public") {
       const publicWorld = structuredClone(world);
@@ -377,7 +393,7 @@ export class SocietyRoom {
         createdAt: this.createdAt,
         updatedAt: this.updatedAt,
         world: reveal,
-        participants: this.participantCards(reveal, true),
+        participants: this.participantCards(reveal, false),
         ...(this.highlights.length ? { highlights: this.highlights.map((highlight) => structuredClone(highlight)) } : {}),
         ...(this.error ? { error: this.error } : {})
       };
@@ -452,6 +468,7 @@ export class SocietyRoom {
         profile: {
           id: card.profile.id,
           displayName: card.profile.displayName,
+          characterId: card.profile.characterId,
           model: card.profile.model,
           controller: card.profile.controller ?? "agent",
           persona: card.profile.persona,
@@ -686,7 +703,7 @@ export class SocietyRoom {
       // Some worlds (negotiation games) do not declare winners; only record an
       // outcome when the world actually settled one.
       const outcome = winners.length > 0 ? (winners.includes(actorId) ? "win" : "lose") : undefined;
-      const previous = this.season.get(card.profile.displayName);
+      const previous = this.season.get(card.profile.characterId);
       const current = runtime.exportDossier(role, outcome);
       this.season.save({
         ...current,
@@ -767,7 +784,7 @@ export class SocietyRoom {
       const config = resolved.get(card.profile.id);
       if (!config) continue;
       try {
-        const dossier = this.season?.get(card.profile.displayName);
+        const dossier = this.season?.get(card.profile.characterId);
         const runtime = createSocietyAgent({
           profile: { ...card.profile, model: config.modelId },
           roomId: this.id,
@@ -1115,6 +1132,7 @@ export class SocietyRoom {
       agentBindings: structuredClone(this.agentBindings),
       pausedAgents: [...this.pausedAgents],
       seasonMode: this.seasonMode,
+      ownerToken: this.ownerToken,
       recoverable
     };
     this.archive.save(checkpoint);
@@ -1159,6 +1177,14 @@ export class SocietyRoomRegistry {
     return [...this.rooms.values()]
       .map((room) => room.snapshotFor())
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  /** True when the token is the owner token of any live room in the process. */
+  hasOwnerToken(token: string): boolean {
+    for (const room of this.rooms.values()) {
+      if (room.isOwnerToken(token)) return true;
+    }
+    return false;
   }
 }
 

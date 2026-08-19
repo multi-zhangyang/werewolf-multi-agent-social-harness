@@ -12,11 +12,14 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
-import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
+import { scopedContext, SocialWorldBase } from "../world";
 import { DiscussionDirector } from "../conversation";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
 
 type Phase = "discussion" | "investment" | "return";
+
+/** Checkpoint schema for the scenario-private state (AGENTS.md §14.4). */
+export const TRUST_GAME_STATE_SCHEMA_VERSION = 1;
 
 interface TrustRound {
   round: number;
@@ -51,27 +54,40 @@ export class TrustGameWorld extends SocialWorldBase {
 
   protected exportWorldState(): unknown {
     return {
+      schemaVersion: TRUST_GAME_STATE_SCHEMA_VERSION,
       round: this.round,
       phase: this.phase,
       scores: this.mapEntries(this.scores),
       history: structuredClone(this.history),
       lastExperiences: this.mapEntries(this.lastExperiences),
-      discussion: this.discussion ? this.discussion.exportState() : null
+      discussion: this.discussion ? this.discussion.exportState() : null,
+      // In-flight commitments: a restart between investment and return (or
+      // between return and settlement) must not lose the sealed action.
+      investment: this.investment,
+      returnedAmount: this.returnedAmount
     };
   }
 
   protected restoreWorldState(state: unknown): void {
     const s = state as Partial<{
-      round: number; phase: string; scores: Array<[string, number]>; history: TrustRound[];
-      lastExperiences: Array<[string, string]>; discussion: unknown;
+      schemaVersion: number; round: number; phase: string; scores: Array<[string, number]>; history: TrustRound[];
+      lastExperiences: Array<[string, string]>; discussion: unknown; investment?: number; returnedAmount?: number;
     }> | undefined;
     if (!s) return;
+    if (s.schemaVersion !== TRUST_GAME_STATE_SCHEMA_VERSION) {
+      throw new Error(
+        `SCENARIO_STATE_MIGRATION_REQUIRED: trust-game checkpoint has schema version ${s.schemaVersion === undefined ? "none (legacy)" : String(s.schemaVersion)}, ` +
+        `expected ${TRUST_GAME_STATE_SCHEMA_VERSION}. The checkpoint is rejected rather than restored into a corrupted world.`
+      );
+    }
     this.round = Number(s.round ?? 1);
     this.phase = (s.phase ?? "discussion") as Phase;
     this.fillMap(this.scores, s.scores);
     this.history.length = 0;
     this.history.push(...structuredClone(s.history ?? []));
     this.fillMap(this.lastExperiences, s.lastExperiences);
+    this.investment = s.investment;
+    this.returnedAmount = s.returnedAmount;
     if (s.discussion) {
       this.discussion = this.createDiscussion();
       this.discussion.restoreState(s.discussion);
@@ -303,7 +319,7 @@ export class TrustGameWorld extends SocialWorldBase {
   }): Promise<SocialMessage> {
     const message = await super.sendMessage(input);
     if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
-      this.discussion.onMessage({ senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
+      this.discussion.onMessage({ messageId: message.id, senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
     }
     return message;
   }

@@ -5,6 +5,7 @@ import { RoomArchiveStore } from "../society/persistence";
 import { CharacterLibrary } from "./characters";
 import { RosterTemplateStore } from "./templates";
 import { limiterFromEnv, type ActivationLimiter } from "../society/activation-limiter";
+import { createServerAuth, type ServerAuth } from "./auth";
 
 export interface ServerContext {
   rooms: SocietyRoomRegistry;
@@ -20,19 +21,25 @@ export interface ServerContext {
   templates: RosterTemplateStore;
   /** Shared provider activation pool across all rooms (P3 backpressure). */
   limiter: ActivationLimiter;
+  /** Operator/owner authorization for the API layer (§18). */
+  auth: ServerAuth;
 }
 
 export function createServerContext(): ServerContext {
   const models = loadRegistry();
   seedRegistryFromEnv(models);
+  // The season store resolves legacy display-name keys against the character
+  // library during its v1→v2 migration, so the library must exist first.
+  const characters = new CharacterLibrary();
   return {
     rooms: new SocietyRoomRegistry(),
-    season: new FileSeasonStore(defaultSeasonPath()),
+    season: new FileSeasonStore(defaultSeasonPath(), (displayName) => characters.idsForDisplayName(displayName)),
     models,
     archive: new RoomArchiveStore(),
-    characters: new CharacterLibrary(),
+    characters,
     templates: new RosterTemplateStore(),
-    limiter: limiterFromEnv()
+    limiter: limiterFromEnv(),
+    auth: createServerAuth()
   };
 }
 

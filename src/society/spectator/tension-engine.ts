@@ -63,7 +63,7 @@ export class TensionEngine {
   }
 
   /** One decay tick; returns true when the level changed. */
-  tick(now: number): boolean {
+  tick(_now: number): boolean {
     const decay = this.options.decayPerTick ?? 0.06;
     const before = this.state.level;
     this.state.score = Math.max(0, this.state.score - decay);
@@ -72,7 +72,7 @@ export class TensionEngine {
   }
 
   /** Apply one real event impact; returns the resulting state when it moved. */
-  impact(impact: TensionImpact, eventId: string, now: number): { state: TensionState; signal: TensionSignal } | undefined {
+  impact(impact: TensionImpact, eventId: string, _now: number): { state: TensionState; signal: TensionSignal } | undefined {
     const boost = impact.boost ?? REASON_BOOST[impact.reason];
     if (boost === undefined) return undefined;
     const beforeScore = this.state.score;

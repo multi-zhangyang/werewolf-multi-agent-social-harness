@@ -552,6 +552,7 @@ export function characterAgentProfile(
   return {
     id: `agent-${String(seatIndex + 1).padStart(2, "0")}`,
     displayName: character.displayName,
+    characterId: character.id,
     model: models[seatIndex] ?? models[seatIndex % models.length],
     persona: character.persona,
     traits: [...character.traits],

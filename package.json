@@ -34,7 +34,15 @@
     "build": "tsc --noEmit && vite build",
     "server": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx src/server/index.ts",
     "typecheck": "tsc --noEmit --pretty false",
-    "ci": "npm run typecheck && npm run build",
+    "lint": "eslint .",
+    "test:unit": "vitest run tests/unit",
+    "test:contract": "vitest run tests/contract",
+    "test:integration": "vitest run tests/integration",
+    "test:recovery": "vitest run tests/recovery",
+    "test:security": "vitest run tests/security",
+    "test:replay": "vitest run tests/replay",
+    "test": "npm run test:unit && npm run test:contract && npm run test:integration",
+    "ci": "npm run lint && npm run typecheck && npm run test && npm run test:recovery && npm run test:security && npm run build",
     "society:server": "npm run server"
   },
   "dependencies": {
@@ -57,11 +65,16 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.6",
     "@types/node": "^25.0.3",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "concurrently": "^9.2.4",
-    "typescript": "^6.0.3"
+    "eslint": "^10.8.1",
+    "globals": "^17.11.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^4.1.11"
   }
 }

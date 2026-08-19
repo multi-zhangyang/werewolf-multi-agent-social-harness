@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { tool, type Tool } from "@openai/agents";
 import { z } from "zod";
 import type {
@@ -13,7 +12,7 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
-import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
+import { scopedContext, SocialWorldBase } from "../world";
 import { DiscussionDirector } from "../conversation";
 import { emitAction, boundedRounds, discussionPersonality } from "./helpers";
 
@@ -236,7 +235,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
   }): Promise<SocialMessage> {
     const message = await super.sendMessage(input);
     if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
-      this.discussion.onMessage({ senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
+      this.discussion.onMessage({ messageId: message.id, senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
     }
     return message;
   }

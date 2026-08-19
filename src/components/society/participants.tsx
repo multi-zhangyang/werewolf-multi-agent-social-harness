@@ -607,9 +607,9 @@ function RelationshipsSection({ mind }: { mind: AgentMindState }): ReactNode {
       <SectionTitle>关系</SectionTitle>
       <div className="space-y-2">
         {mind.relationships.map((relationship) => (
-          <div key={relationship.agentId} className="rounded-lg border border-border bg-card p-3">
+          <div key={relationship.targetCharacterId} className="rounded-lg border border-border bg-card p-3">
             <div className="flex items-center justify-between">
-              <p className="text-sm font-medium text-foreground/90">{relationship.agentId}</p>
+              <p className="text-sm font-medium text-foreground/90">{relationship.targetCharacterId}</p>
               <p className="nums font-mono text-[10px] text-muted-foreground">信任 {Math.round(relationship.trust * 100)}%</p>
             </div>
             <div className="mt-2 grid grid-cols-3 gap-2">

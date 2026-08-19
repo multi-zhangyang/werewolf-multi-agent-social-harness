@@ -5,6 +5,7 @@
  * and controllers stay separate. Secrets never enter this store.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { apiFetch } from "@/lib/api";
 import { Copy, Download, Loader2, Pencil, Plus, Trash2, Upload, Users } from "lucide-react";
 import type { CharacterDefinition, DecisionBias } from "@/society/contracts";
 import { Badge } from "@/components/ui/badge";
@@ -118,7 +119,7 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
     setBusy(true);
     setError(undefined);
     try {
-      const response = await fetch(path, {
+      const response = await apiFetch(path, {
         method,
         headers: body === undefined ? undefined : { "Content-Type": "application/json" },
         ...(body === undefined ? {} : { body: JSON.stringify(body) })
@@ -151,7 +152,7 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
       const parsed = JSON.parse(text) as { characters?: Draft[] };
       const characters = Array.isArray(parsed?.characters) ? parsed.characters : [];
       if (!characters.length) throw new Error("文件中没有 characters 数组。");
-      const response = await fetch("/api/characters/import", {
+      const response = await apiFetch("/api/characters/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ characters })

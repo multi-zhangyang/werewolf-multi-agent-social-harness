@@ -2,12 +2,21 @@ import express from "express";
 import { z } from "zod";
 import { characterAgentProfile } from "../../society/profiles";
 import { ALL_SCENARIOS, SCENARIO_METADATA } from "../../society/scenarios";
-import type { AgentProfile, AgentRuntimeEvent, ScenarioId, ScenarioSummary, SpectatorMode } from "../../society/contracts";
+import type { AgentProfile, ScenarioId, ScenarioSummary, SpectatorMode } from "../../society/contracts";
 import { contextLabel } from "../../society/context-manager";
 import type { SocietyRoom, SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "../../society/room";
 import { defaultCapabilities, defaultContextPolicy, persistRegistry, type AgentModelBinding, type ContextPolicy, type ModelProfile } from "../../society/models";
 import { projectEventFor, type SpectatorViewer } from "../../society/spectator/projection";
 import type { ServerContext } from "../context";
+import {
+  isOperatorFor,
+  requireGlobalOperator,
+  roomAuthorityFor,
+  setTokenCookie,
+  tokenFromRequest,
+  type RoomAuthority
+} from "../auth";
+import type { RoomCheckpoint } from "../../society/persistence";
 import { getProviderSettings, publicSettings, saveProviderSettings, testProviderSettings, writeEnvKey } from "../settings";
 import { mergeProbeResult, probeCapabilities } from "../probe";
 
@@ -16,32 +25,77 @@ function sanitizeEnvName(id: string): string {
 }
 
 /**
- * Resolve the spectator seat for a request. Human players are hard-capped at
- * public / self-pov during play and may unlock the full reveal only after the
- * game ends (AGENTS.md §8.3).
+ * Resolve the spectator seat for a request (AGENTS.md §8.3 / §15.10).
+ * The anonymous default is PUBLIC — omniscient and agent-pov seats require a
+ * participant, owner or operator token. Postgame reveals the world after the
+ * game ends, but private minds stay gated behind owner/operator.
  */
-function resolveViewer(request: express.Request, room: SocietyRoom): SpectatorViewer {
+function resolveViewer(
+  request: express.Request,
+  room: SocietyRoom,
+  authority: RoomAuthority,
+  isOperator: boolean
+): SpectatorViewer {
   const raw = request.query.mode;
   const requested: SpectatorMode =
     raw === "public" || raw === "omniscient" || raw === "agent-pov" || raw === "postgame"
       ? raw
-      : "omniscient";
-  const token = queryToken(request);
-  const tokenActor = token ? room.actorForToken(token) : undefined;
-  if (tokenActor) {
-    if (requested === "postgame") {
-      return room.currentStatus() === "finished" ? { mode: "postgame" } : { mode: "public" };
-    }
-    if (requested === "omniscient") return { mode: "public" };
-    if (requested === "agent-pov") return { mode: "agent-pov", agentId: tokenActor };
-    return { mode: requested };
+      : "public";
+  if (requested === "postgame") {
+    return room.currentStatus() === "finished" ? { mode: "postgame" } : { mode: "public" };
   }
-  const agentId = typeof request.query.agent === "string" && request.query.agent.trim()
-    ? request.query.agent.trim()
-    : undefined;
+  if (requested === "omniscient") {
+    return authority.owner || isOperator ? { mode: "omniscient" } : { mode: "public" };
+  }
+  if (requested === "agent-pov") {
+    // Participants watch only their own seat; owner/operator may watch any.
+    if (authority.participantActorId) return { mode: "agent-pov", agentId: authority.participantActorId };
+    if (authority.owner || isOperator) {
+      const requestedAgent = typeof request.query.agent === "string" && request.query.agent.trim()
+        ? request.query.agent.trim()
+        : undefined;
+      return { mode: "agent-pov", ...(requestedAgent ? { agentId: requestedAgent } : {}) };
+    }
+    return { mode: "public" };
+  }
+  return { mode: "public" };
+}
+
+/** Owner / participant / strict-operator gate for room control operations. */
+function requireRoomControl(
+  request: express.Request,
+  response: express.Response,
+  room: SocietyRoom,
+  auth: ServerContext["auth"]
+): RoomAuthority | undefined {
+  const authority = roomAuthorityFor(request, room);
+  if (authority.owner || authority.participantActorId) return authority;
+  if (auth.isOperatorToken(tokenFromRequest(request))) return authority;
+  response.status(403).json({
+    error: "CONTROL_FORBIDDEN",
+    message: "A valid owner, participant or operator token is required to control this room."
+  });
+  return undefined;
+}
+
+/** Public projection of a checkpoint: no minds, private messages or roles. */
+function publicArchiveProjection(checkpoint: RoomCheckpoint): Record<string, unknown> {
+  const snapshot = checkpoint.snapshot;
   return {
-    mode: requested,
-    ...(requested === "agent-pov" && agentId ? { agentId } : {})
+    roomId: checkpoint.roomId,
+    archivedAt: checkpoint.archivedAt,
+    status: checkpoint.status,
+    seasonMode: checkpoint.seasonMode,
+    snapshot: {
+      ...snapshot,
+      world: {
+        ...snapshot.world,
+        messages: (snapshot.world.messages ?? []).filter((message) => message.channel === "public"),
+        agents: (snapshot.world.agents ?? []).map(({ observerRole: _observerRole, ...agent }) => agent),
+        details: {}
+      },
+      participants: (snapshot.participants ?? []).map(({ mind: _mind, ...participant }) => participant)
+    }
   };
 }
 
@@ -112,6 +166,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.put("/api/settings", (request, response, next) => {
+    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
     try {
       const input = settingsSchema.parse(request.body ?? {});
       response.json(saveProviderSettings(input));
@@ -120,7 +175,8 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     }
   });
 
-  app.post("/api/settings/test", (_request, response, next) => {
+  app.post("/api/settings/test", (request, response, next) => {
+    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
     void testProviderSettings()
       .then((result) => response.json(result))
       .catch(next);
@@ -147,6 +203,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.post("/api/model-config/probe", (request, response, next) => {
+    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
     const profileId = typeof request.body?.modelProfileId === "string" ? request.body.modelProfileId : "";
     const profile = context.models.modelProfile(profileId);
     if (!profile) {
@@ -171,6 +228,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.put("/api/model-config", (request, response, next) => {
+    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
     try {
       const input = modelConfigSchema.parse(request.body ?? {});
       const state = applyModelConfig(context, input);
@@ -192,13 +250,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    if (room.humanActorId) {
-      const actorId = room.actorForToken(queryToken(request) ?? bodyToken(request));
-      if (!actorId) {
-        response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "A valid player token is required to remove this room." });
-        return;
-      }
-    }
+    if (!requireRoomControl(request, response, room, context.auth)) return;
     const removed = context.rooms.remove(request.params.roomId);
     response.json({ removed: Boolean(removed), roomId: request.params.roomId, archived: context.archive.list() });
   });
@@ -209,13 +261,22 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ARCHIVE_NOT_FOUND", message: "No checkpoint exists for this room." });
       return;
     }
-    response.json(checkpoint);
+    // Public archive: a projected view. Forensic access (operator only)
+    // returns the full checkpoint minus session file paths (§16.4).
+    const operator = isOperatorFor(context.auth, request, (token) => context.rooms.hasOwnerToken(token));
+    if (operator) {
+      const { sessionFiles: _sessionFiles, ...rest } = checkpoint;
+      response.json({ ...rest, sessionCount: Object.keys(checkpoint.sessionFiles ?? {}).length });
+      return;
+    }
+    response.json(publicArchiveProjection(checkpoint));
   });
 
   app.get("/api/season", (_request, response) => {
     response.json({
       dossiers: context.season.list().map((dossier) => ({
-        characterKey: dossier.characterKey,
+        characterId: dossier.characterId,
+        displayName: dossier.displayName,
         games: dossier.games.slice(-6).map((game) => ({
           scenarioId: game.scenarioId,
           ...(game.role ? { role: game.role } : {}),
@@ -223,26 +284,30 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
         })),
         memoryCount: dossier.memories.length,
         updatedAt: dossier.updatedAt
-      }))
+      })),
+      // v1 entries that could not be mapped to a unique character id.
+      isolated: context.season.listIsolated()
     });
   });
 
   // A fresh season: forget every cross-game memory and start over.
-  app.delete("/api/season", (_request, response) => {
+  app.delete("/api/season", (request, response) => {
+    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
     context.season.clear();
     response.json({ cleared: true, dossiers: [] });
   });
 
   // Forget ONE character's cross-game memory (§7.2): their next game starts
   // from a clean slate while everyone else keeps their history.
-  app.delete("/api/season/:characterKey", (request, response) => {
-    const key = decodeURIComponent(request.params.characterKey);
-    if (!key.trim() || key.length > 60) {
-      response.status(400).json({ error: "CHARACTER_KEY_INVALID", message: "Provide a valid character key." });
+  app.delete("/api/season/:characterId", (request, response) => {
+    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
+    const characterId = decodeURIComponent(request.params.characterId);
+    if (!characterId.trim() || characterId.length > 120) {
+      response.status(400).json({ error: "CHARACTER_ID_INVALID", message: "Provide a valid character id." });
       return;
     }
-    const removed = context.season.remove(key);
-    response.json({ removed, characterKey: key, dossiers: context.season.list().length });
+    const removed = context.season.remove(characterId);
+    response.json({ removed, characterId, dossiers: context.season.list().length });
   });
 
   app.post("/api/rooms", (request, response, next) => {
@@ -283,7 +348,9 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
         ...(input.season === "season" ? { season: context.season } : {})
       });
       void room.start();
-      response.status(202).json(room.creationResult());
+      const created = room.creationResult();
+      setTokenCookie(response, created.ownerToken);
+      response.status(202).json(created);
     } catch (error) {
       next(error);
     }
@@ -302,13 +369,15 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    const token = queryToken(request);
-    const actorId = token ? room.actorForToken(token) : undefined;
-    if (token && !actorId) {
+    const authority = roomAuthorityFor(request, room);
+    const token = tokenFromRequest(request);
+    if (token && !authority.owner && !authority.participantActorId && !context.auth.isOperatorToken(token)) {
       response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "The player token is invalid." });
       return;
     }
-    response.json(room.snapshotForViewer(resolveViewer(request, room)));
+    if (token) setTokenCookie(response, token);
+    const isOperator = context.auth.isOperatorToken(token);
+    response.json(room.snapshotForViewer(resolveViewer(request, room, authority, isOperator)));
   });
 
   app.post("/api/rooms/:roomId/pause", (request, response) => {
@@ -317,13 +386,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    if (room.humanActorId) {
-      const actorId = room.actorForToken(queryToken(request) ?? bodyToken(request));
-      if (!actorId) {
-        response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "A valid player token is required to pause this room." });
-        return;
-      }
-    }
+    if (!requireRoomControl(request, response, room, context.auth)) return;
     room.pause();
     response.json(room.snapshotFor());
   });
@@ -334,13 +397,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    if (room.humanActorId) {
-      const actorId = room.actorForToken(queryToken(request) ?? bodyToken(request));
-      if (!actorId) {
-        response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "A valid player token is required to resume this room." });
-        return;
-      }
-    }
+    if (!requireRoomControl(request, response, room, context.auth)) return;
     if (room.currentStatus() !== "paused") {
       response.status(400).json({ error: "ROOM_NOT_PAUSED", message: "The room is not paused." });
       return;
@@ -355,13 +412,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    if (room.humanActorId) {
-      const actorId = room.actorForToken(queryToken(request) ?? bodyToken(request));
-      if (!actorId) {
-        response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "A valid player token is required to pause this room." });
-        return;
-      }
-    }
+    if (!requireRoomControl(request, response, room, context.auth)) return;
     try {
       const reason = typeof request.body?.reason === "string" && request.body.reason.trim()
         ? request.body.reason.trim().slice(0, 200)
@@ -379,13 +430,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    if (room.humanActorId) {
-      const actorId = room.actorForToken(queryToken(request) ?? bodyToken(request));
-      if (!actorId) {
-        response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "A valid player token is required to pause this room." });
-        return;
-      }
-    }
+    if (!requireRoomControl(request, response, room, context.auth)) return;
     room.resumeAgent(request.params.actorId);
     response.json(room.snapshotFor());
   });
@@ -398,13 +443,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    if (room.humanActorId) {
-      const actorId = room.actorForToken(queryToken(request) ?? bodyToken(request));
-      if (!actorId) {
-        response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "A valid player token is required to switch a model in this room." });
-        return;
-      }
-    }
+    if (!requireRoomControl(request, response, room, context.auth)) return;
     const input = z.object({ modelProfileId: z.string().min(1).max(120) }).strict().parse(request.body);
     void room.switchAgentModel(request.params.actorId, input.modelProfileId).then((switched) => {
       response.json({ switched, room: room.snapshotFor() });
@@ -417,7 +456,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    const token = queryToken(request) ?? bodyToken(request);
+    const token = tokenFromRequest(request) ?? bodyToken(request);
     const action = request.body?.action;
     if (typeof action !== "string" || !action.trim()) {
       response.status(400).json({ error: "ACTION_REQUIRED", message: "Provide a structured action name." });
@@ -439,13 +478,14 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    const token = queryToken(request);
-    const actorId = token ? room.actorForToken(token) : undefined;
-    if (token && !actorId) {
+    const token = tokenFromRequest(request);
+    const authority = roomAuthorityFor(request, room);
+    if (token && !authority.owner && !authority.participantActorId && !context.auth.isOperatorToken(token)) {
       response.status(401).json({ error: "PLAYER_TOKEN_INVALID", message: "The player token is invalid." });
       return;
     }
-    const viewer = resolveViewer(request, room);
+    if (token) setTokenCookie(response, token);
+    const viewer = resolveViewer(request, room, authority, context.auth.isOperatorToken(token));
     response.status(200);
     response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     response.setHeader("Cache-Control", "no-cache, no-transform");
@@ -672,7 +712,6 @@ function resolveSeatCount(scenario: ScenarioSummary, requested: number | undefin
 
 /** Model IDs for each seat: profile-based input wins, legacy env list otherwise. */
 function resolveModelIds(context: ServerContext, input: z.infer<typeof createRoomSchema>, seatCount: number): string[] {
-  const scenario = SCENARIO_METADATA[input.scenarioId];
   const profileIds = input.modelProfileIds ?? Object.values(input.agentModelOverrides ?? {});
   if (profileIds && profileIds.length) {
     const ids = profileIds
@@ -756,11 +795,6 @@ function modelCatalogForEnv(context: ServerContext): Array<{ id: string; name: s
     const contextWindow = profile?.contextWindow ?? 256_000;
     return { id, name: id, provider: "OpenAI-compatible", context: contextWindow, contextLabel: contextLabel(contextWindow) };
   });
-}
-
-function queryToken(request: express.Request): string | undefined {
-  const value = request.query.token;
-  return typeof value === "string" && value ? value : undefined;
 }
 
 function bodyToken(request: express.Request): string | undefined {

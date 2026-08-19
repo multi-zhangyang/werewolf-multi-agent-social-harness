@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { apiFetch } from "@/lib/api";
 import { History, Loader2, Play, Trash2 } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import { Badge } from "@/components/ui/badge";
@@ -122,12 +123,6 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     };
   }, [open, scenario]);
 
-  const characterForSeat = (index: number): CharacterOption | undefined => {
-    const picked = seatCharacters[String(index)];
-    if (picked) return characters.find((character) => character.id === picked);
-    return characters[index];
-  };
-
   const applyTemplate = (template: RosterTemplateOption): void => {
     setLoadedTemplateId(template.id);
     setSelectedModels(template.models.filter((id) => visibleModels.some((model) => model.id === id)));
@@ -159,7 +154,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     setSubmitting(true);
     setError(undefined);
     try {
-      const response = await fetch("/api/room-templates", {
+      const response = await apiFetch("/api/room-templates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -192,7 +187,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     setSubmitting(true);
     setError(undefined);
     try {
-      const response = await fetch(`/api/room-templates/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const response = await apiFetch(`/api/room-templates/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       setTemplates((current) => current.filter((template) => template.id !== id));
       if (loadedTemplateId === id) setLoadedTemplateId(undefined);

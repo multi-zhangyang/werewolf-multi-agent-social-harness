@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Activity, Check, Loader2, Plus, Settings2, Trash2 } from "lucide-react";
+import { apiFetch } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -107,7 +108,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
     setSaving(true);
     setError(undefined);
     try {
-      const response = await fetch("/api/model-config", {
+      const response = await apiFetch("/api/model-config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -136,7 +137,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
     setSaving(true);
     setError(undefined);
     try {
-      const response = await fetch("/api/model-config", {
+      const response = await apiFetch("/api/model-config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -239,7 +240,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
     setTesting(true);
     setTestResult(undefined);
     try {
-      const response = await fetch("/api/settings/test", { method: "POST" });
+      const response = await apiFetch("/api/settings/test", { method: "POST" });
       const payload = await response.json().catch(() => undefined) as TestResult;
       setTestResult(payload ?? { ok: false, message: `HTTP ${response.status}` });
     } catch (cause) {
@@ -253,7 +254,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
     setProbing(profileId);
     setError(undefined);
     try {
-      const response = await fetch("/api/model-config/probe", {
+      const response = await apiFetch("/api/model-config/probe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modelProfileId: profileId })

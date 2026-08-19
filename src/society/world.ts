@@ -300,6 +300,7 @@ export abstract class SocialWorldBase implements SocialWorld {
     return [...this.profiles.values()].map((profile) => ({
       id: profile.id,
       displayName: profile.displayName,
+      characterId: profile.characterId,
       status: this.statuses.get(profile.id) ?? "idle",
       alive: this.isAlive(profile.id),
       ...(this.score(profile.id) === undefined ? {} : { score: this.score(profile.id) }),

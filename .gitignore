@@ -41,3 +41,6 @@ pnpm-debug.log*
 Thumbs.db
 .idea/
 .vscode/
+
+# ZCode session workspace (plans/artifacts, machine-local)
+.zcode/

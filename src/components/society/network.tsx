@@ -115,10 +115,14 @@ function buildEdges(participants: SocietyParticipantCard[]): PairEdge[] {
     for (let right = left + 1; right < ids.length; right += 1) {
       const a = ids[left];
       const b = ids[right];
-      const mindA = participants.find((entry) => entry.profile.id === a)?.mind;
-      const mindB = participants.find((entry) => entry.profile.id === b)?.mind;
-      const relA = mindA?.relationships.find((relationship) => relationship.agentId === b);
-      const relB = mindB?.relationships.find((relationship) => relationship.agentId === a);
+      const participantA = participants.find((entry) => entry.profile.id === a);
+      const participantB = participants.find((entry) => entry.profile.id === b);
+      const mindA = participantA?.mind;
+      const mindB = participantB?.mind;
+      // Relationships are keyed by stable character ids (§10.2): match by the
+      // character behind the seat, never by the seat itself.
+      const relA = mindA?.relationships.find((relationship) => relationship.targetCharacterId === participantB?.profile.characterId);
+      const relB = mindB?.relationships.find((relationship) => relationship.targetCharacterId === participantA?.profile.characterId);
       const trust = Math.max(relA?.trust ?? 0.5, relB?.trust ?? 0.5);
       const tension = Math.max(relA?.tension ?? 0, relB?.tension ?? 0);
       const affinity = Math.max(relA?.affinity ?? 0.5, relB?.affinity ?? 0.5);

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { apiFetch } from "@/lib/api";
 import type { AgentRuntimeEvent, CinematicCue, SocialMessage, ThoughtBeatKind } from "@/society/contracts";
 import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "@/society/room";
 
@@ -98,7 +99,7 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
     if (staticMode) {
       const tokenPart = token ? `?token=${encodeURIComponent(token)}` : "";
       const query = tokenPart ? `${tokenPart}&${viewerQuery}` : `?${viewerQuery}`;
-      fetch(`/api/rooms/${encodeURIComponent(roomId)}${query}`)
+      apiFetch(`/api/rooms/${encodeURIComponent(roomId)}${query}`)
         .then(async (response) => {
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           return await response.json() as SocietyRoomSnapshot;
@@ -151,7 +152,7 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
       if (retries >= 3) {
         source.close();
         if (sourceRef.current === source) sourceRef.current = null;
-        fetch(`/api/rooms/${encodeURIComponent(roomId)}`)
+        apiFetch(`/api/rooms/${encodeURIComponent(roomId)}`)
           .then(async (response) => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const next = await response.json() as SocietyRoomSnapshot;
@@ -172,7 +173,7 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
     if (!roomId) return;
     try {
       const query = token ? `?token=${encodeURIComponent(token)}` : "";
-      const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/pause${query}`, { method: "POST" });
+      const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/pause${query}`, { method: "POST" });
       if (!response.ok) {
         const payload = await response.json().catch(() => undefined);
         throw new Error(payload?.message ?? `HTTP ${response.status}`);
@@ -186,7 +187,7 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
     if (!roomId) return;
     try {
       const query = token ? `?token=${encodeURIComponent(token)}` : "";
-      const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/resume${query}`, { method: "POST" });
+      const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/resume${query}`, { method: "POST" });
       if (!response.ok) {
         const payload = await response.json().catch(() => undefined);
         throw new Error(payload?.message ?? `HTTP ${response.status}`);
@@ -201,7 +202,7 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
     try {
       const query = token ? `?token=${encodeURIComponent(token)}` : "";
       const action = paused ? "pause" : "resume";
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(actorId)}/${action}${query}`,
         { method: "POST" }
       );
@@ -217,7 +218,7 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
   const submitAction = useCallback(async (action: string, payload: unknown): Promise<void> => {
     if (!roomId) return;
     try {
-      const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/action`, {
+      const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/action`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(token ? { "x-player-token": token } : {}) },
         body: JSON.stringify({ action, payload })

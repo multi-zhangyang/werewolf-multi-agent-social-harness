@@ -19,6 +19,7 @@
  * post-compaction pressure of 52–58% with hysteresis and cooldown. A hard
  * guard throws instead of silently overrunning the window.
  */
+import { createHash, randomUUID } from "node:crypto";
 import type { AgentInputItem, ModelProvider, SessionInputCallback } from "@openai/agents";
 import type { ContextPolicy, ResolvedModelConfig } from "./models";
 
@@ -55,6 +56,17 @@ export interface ContextBudgetOptions {
   keepRecentItems?: number;
   /** Deterministic facts that must survive every compaction. */
   getPinnedFacts?: () => string[];
+  /** The character whose history is being summarized (artifact provenance). */
+  ownerCharacterId?: string;
+  /** World events the summarized range was derived from, when known. */
+  getSourceEventIds?: () => string[];
+  /** Open commitments / active deceptions carried into the digest. */
+  getOpenCommitmentIds?: () => string[];
+  getActiveDeceptionIds?: () => string[];
+  /** Room logical time at compaction (replay-safe recency). */
+  getLogicalTime?: () => number;
+  /** Called with the full provenance artifact after each compaction. */
+  onArtifact?: (artifact: ContextSummaryArtifact) => void;
   /** Called after a compaction (for observer UI). */
   onCompacted?: (digest: string, estimatedTokens: number, threshold: number, level: ContextPressureLevel, pressureAfter: number) => void;
   /** Called when the pressure level changes (for observer UI). */
@@ -66,6 +78,30 @@ export interface ContextBudgetOptions {
    * guard forever — the exact deadlock a long game must never hit.
    */
   onSessionCompacted?: (items: AgentInputItem[]) => Promise<void> | void;
+}
+
+/**
+ * Provenance of one compaction (AGENTS.md §12.4): the digest is a trusted
+ * system-administrative context block, never player speech. The artifact
+ * travels with the digest item into the durable session, so a restart can
+ * still show what was summarized, from which range, by which model.
+ */
+export interface ContextSummaryArtifact {
+  summaryId: string;
+  ownerCharacterId: string;
+  sourceItemRange: { from: number; to: number };
+  sourceEventIds: string[];
+  sourceItemIds: string[];
+  sourceHash: string;
+  summaryModel: string;
+  summaryPromptVersion: string;
+  createdAtLogicalTime: number;
+  facts: string[];
+  unresolvedQuestions: string[];
+  openCommitmentIds: string[];
+  activeDeceptionIds: string[];
+  compressedNarrative: string;
+  schemaVersion: number;
 }
 
 export interface ContextBudgetInfo {
@@ -174,7 +210,21 @@ export class SessionContextManager {
       return historyItems;
     }
     const { kept } = await this.compact(historyItems, level === "hard-guard" ? "deep-compact" : level);
-    return [digestItem(kept.digest), ...kept.recent];
+    return [digestItem(kept.digest, kept.artifact), ...kept.recent];
+  }
+
+  /**
+   * This-round pressure BEFORE memory retrieval (AGENTS.md §12.3): estimate
+   * the session history plus the fixed part of the incoming input, so the
+   * caller sizes retrieval by THIS activation's budget instead of the
+   * previous one's.
+   */
+  preflight(historyItems: AgentInputItem[], extraTokens: number): ContextPressureLevel {
+    const estimated = estimateTokens(historyItems, this.policy.heuristicSafetyMultiplier) + Math.max(0, extraTokens);
+    this.lastEstimated = estimated;
+    const level = this.levelFor(estimated / Math.max(1, this.usableInputTokens));
+    this.reportPressure(this.budgetFor(estimated), level);
+    return level;
   }
 
   /** The SDK-native hook: combines session history with the new turn's input. */
@@ -185,10 +235,12 @@ export class SessionContextManager {
     // placeholder in the request view only — the stored session is untouched
     // and the agent keeps its own failure history.
     historyItems = sanitizeFunctionCalls(historyItems);
-    const estimated = estimateTokens(historyItems, this.policy.heuristicSafetyMultiplier);
-    this.lastEstimated = estimated;
+    // Full-candidate measurement (§12.2): the new turn's input belongs to the
+    // SAME budget calculation as the history — never appended afterwards.
+    const fullEstimate = estimateTokens([...historyItems, ...newItems], this.policy.heuristicSafetyMultiplier);
+    this.lastEstimated = fullEstimate;
     this.activationsSinceCompaction += 1;
-    const budget = this.budgetFor(estimated);
+    const budget = this.budgetFor(fullEstimate);
     const level = this.levelFor(budget.pressureRatio);
     this.reportPressure(budget, level);
 
@@ -197,12 +249,14 @@ export class SessionContextManager {
     // Hard guard: never send a request that would overrun the window. One
     // last-resort emergency compaction runs first — without it, pressure can
     // never drop and the agent deadlocks (§5.3 emergency / §5.8 fallback).
+    // The relief check includes the new input: compaction must free enough
+    // room for the whole request, not just the history.
     if (budget.pressureRatio >= this.policy.hardLimitRatio) {
       const { kept } = await this.compact(historyItems, "emergency");
-      const after = estimateTokens([digestItem(kept.digest), ...kept.recent], this.policy.heuristicSafetyMultiplier);
+      const after = estimateTokens([digestItem(kept.digest, kept.artifact), ...kept.recent, ...newItems], this.policy.heuristicSafetyMultiplier);
       if (after / Math.max(1, this.usableInputTokens) < this.policy.hardLimitRatio) {
-        await this.options.onSessionCompacted?.([digestItem(kept.digest), ...kept.recent]);
-        return [digestItem(kept.digest), ...kept.recent, ...newItems];
+        await this.options.onSessionCompacted?.([digestItem(kept.digest, kept.artifact), ...kept.recent]);
+        return [digestItem(kept.digest, kept.artifact), ...kept.recent, ...newItems];
       }
       const error = new Error(
         `CONTEXT_HARD_GUARD: Input pressure ${Math.round(budget.pressureRatio * 100)}% exceeds the hard limit ` +
@@ -226,12 +280,12 @@ export class SessionContextManager {
     const { kept, compacted } = await this.compact(historyItems, level);
     // Persist the compacted history so the next activation estimates the
     // shrunk session instead of the pre-compaction one.
-    if (compacted) await this.options.onSessionCompacted?.([digestItem(kept.digest), ...kept.recent]);
-    return [digestItem(kept.digest), ...kept.recent, ...newItems];
+    if (compacted) await this.options.onSessionCompacted?.([digestItem(kept.digest, kept.artifact), ...kept.recent]);
+    return [digestItem(kept.digest, kept.artifact), ...kept.recent, ...newItems];
   };
 
   private async compact(historyItems: AgentInputItem[], level: ContextPressureLevel): Promise<{
-    kept: { digest: string; recent: AgentInputItem[] };
+    kept: { digest: string; artifact: ContextSummaryArtifact; recent: AgentInputItem[] };
     compacted: boolean;
   }> {
     // Choose the largest recent suffix that lands us inside the post-compaction
@@ -261,13 +315,15 @@ export class SessionContextManager {
       `【历史摘要】\n${digest}`
     ].join("\n\n");
 
-    const after = estimateTokens([digestItem(digestText), ...recent], this.policy.heuristicSafetyMultiplier);
+    const artifact = artifactFor(this.options, old, pinned, digest, 0, Math.max(0, old.length - 1));
+    const after = estimateTokens([digestItem(digestText, artifact), ...recent], this.policy.heuristicSafetyMultiplier);
     const pressureAfter = after / Math.max(1, this.usableInputTokens);
     this.lastEstimated = after;
     // The compaction moved the pressure; observers must see the new level.
     this.reportPressure(this.budgetFor(after), this.levelFor(pressureAfter));
+    this.options.onArtifact?.(artifact);
     this.options.onCompacted?.(digestText, estimateTokens(historyItems, this.policy.heuristicSafetyMultiplier), Math.floor(this.usableInputTokens * this.policy.softCompactRatio), level, pressureAfter);
-    return { kept: { digest: digestText, recent }, compacted: true };
+    return { kept: { digest: digestText, artifact, recent }, compacted: true };
   }
 
   private async summarize(items: AgentInputItem[], pinned: string[], level: ContextPressureLevel): Promise<string> {
@@ -397,12 +453,55 @@ function legacyPolicy(): ContextPolicy {
   };
 }
 
-function digestItem(text: string): AgentInputItem {
+const SUMMARY_PROMPT_VERSION = "context-digest-v1";
+export const CONTEXT_SUMMARY_SCHEMA_VERSION = 1;
+
+/**
+ * The compaction digest is a TRUSTED system context block (§12.4), not a
+ * user message: it renders with an explicit administrative framing and the
+ * full provenance artifact rides on the item into the durable session.
+ */
+function digestItem(text: string, artifact: ContextSummaryArtifact): AgentInputItem {
   return {
     type: "message",
-    role: "user",
-    content: [{ type: "input_text", text }]
+    role: "system",
+    content: [{
+      type: "input_text",
+      text: `【系统管理上下文 — 压缩历史摘要，非玩家发言】
+${text}`
+    }],
+    societySummaryArtifact: artifact
   } as unknown as AgentInputItem;
+}
+
+function artifactFor(
+  options: ContextBudgetOptions,
+  old: AgentInputItem[],
+  pinned: string[],
+  digest: string,
+  fromIndex: number,
+  toIndex: number
+): ContextSummaryArtifact {
+  const rendered = old.map((item) => itemText(item)).join("\n");
+  return {
+    summaryId: `summary_${randomUUID()}`,
+    ownerCharacterId: options.ownerCharacterId ?? options.actorLabel,
+    sourceItemRange: { from: fromIndex, to: toIndex },
+    sourceEventIds: options.getSourceEventIds?.() ?? [],
+    sourceItemIds: old
+      .map((item) => (item as unknown as { id?: string }).id)
+      .filter((id): id is string => Boolean(id)),
+    sourceHash: createHash("sha256").update(rendered).digest("hex"),
+    summaryModel: options.model,
+    summaryPromptVersion: SUMMARY_PROMPT_VERSION,
+    createdAtLogicalTime: options.getLogicalTime?.() ?? 0,
+    facts: [...pinned],
+    unresolvedQuestions: [],
+    openCommitmentIds: options.getOpenCommitmentIds?.() ?? [],
+    activeDeceptionIds: options.getActiveDeceptionIds?.() ?? [],
+    compressedNarrative: digest,
+    schemaVersion: CONTEXT_SUMMARY_SCHEMA_VERSION
+  };
 }
 
 /**
@@ -435,7 +534,7 @@ export function sanitizeFunctionCalls(items: AgentInputItem[]): AgentInputItem[]
  * text ≈ 4 chars per token, plus per-item overhead, scaled by the policy's
  * heuristic safety multiplier (≥ 1.15). Deliberately conservative.
  */
-function estimateTokens(items: AgentInputItem[], multiplier = 1.15): number {
+export function estimateTokens(items: AgentInputItem[], multiplier = 1.15): number {
   let cjk = 0;
   let latin = 0;
   for (const item of items) {
@@ -477,7 +576,7 @@ function itemText(item: AgentInputItem): string {
 }
 
 function renderItems(items: AgentInputItem[]): string {
-  return items.map((item, index) => {
+  return items.map((item) => {
     const value = item as unknown as Record<string, unknown>;
     if (value.type === "message") {
       const role = value.role ?? "message";

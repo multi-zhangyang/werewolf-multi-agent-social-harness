@@ -15,8 +15,8 @@ export function createServerApp(): express.Express {
   const context = createServerContext();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "512kb" }));
-  registerCharacterRoutes(app, context.characters);
-  registerTemplateRoutes(app, context.templates);
+  registerCharacterRoutes(app, context);
+  registerTemplateRoutes(app, context);
   registerRoomRoutes(app, context);
   recoverInterruptedRooms(context);
   app.use(express.static(path.resolve(directory, "../../dist")));
@@ -86,7 +86,12 @@ function recoverInterruptedRooms(context: ReturnType<typeof createServerContext>
       const room = context.rooms.create({
         id: checkpoint.roomId,
         scenarioId: checkpoint.snapshot.scenarioId,
-        profiles: checkpoint.profiles!,
+        profiles: (checkpoint.profiles ?? []).map((profile) => ({
+          ...profile,
+          // Pre-CharacterId checkpoints: resolve the stable id from the
+          // character library, or pin a clearly-legacy id instead of guessing.
+          characterId: profile.characterId ?? resolveLegacyCharacterId(context, checkpoint.roomId, profile)
+        })),
         rounds: checkpoint.snapshot.world.totalTurns,
         seasonMode: checkpoint.seasonMode ?? "season",
         modelRegistry: context.models,
@@ -95,6 +100,7 @@ function recoverInterruptedRooms(context: ReturnType<typeof createServerContext>
         restore: {
           worldState: checkpoint.worldState!,
           rounds: checkpoint.snapshot.world.totalTurns,
+          ...(checkpoint.ownerToken ? { ownerToken: checkpoint.ownerToken } : {}),
           ...(checkpoint.agentBindings ? { agentBindings: checkpoint.agentBindings as Record<string, AgentModelBinding> } : {}),
           ...(checkpoint.agentMinds ? { agentMinds: checkpoint.agentMinds } : {}),
           ...(checkpoint.pausedAgents ? { pausedAgents: checkpoint.pausedAgents } : {}),
@@ -107,4 +113,19 @@ function recoverInterruptedRooms(context: ReturnType<typeof createServerContext>
       console.warn(`[society] could not recover room ${checkpoint.roomId}:`, errorMessage(error));
     }
   }
+}
+
+/** Stable id for a profile restored from a pre-CharacterId checkpoint. */
+function resolveLegacyCharacterId(
+  context: ReturnType<typeof createServerContext>,
+  roomId: string,
+  profile: { id: string; displayName: string }
+): string {
+  const matches = context.characters.idsForDisplayName(profile.displayName);
+  if (matches.length === 1) return matches[0];
+  console.warn(
+    `[society] checkpoint ${roomId}: no unique character id for '${profile.displayName}' ` +
+    `(matches: ${matches.join(", ") || "none"}); using a legacy id.`
+  );
+  return `legacy:${roomId}:${profile.id}`;
 }

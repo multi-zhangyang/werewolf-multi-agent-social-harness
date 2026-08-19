@@ -25,7 +25,6 @@ interface PublicSettings {
 
 const ENV_FILE = path.resolve(process.cwd(), ".env.local");
 const KEY_MAX = 400;
-const BASE_MAX = 500;
 const MODELS_MAX = 16;
 const MODEL_ID_MAX = 180;
 

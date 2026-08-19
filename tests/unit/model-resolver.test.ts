@@ -1,9 +1,10 @@
 /**
- * Model-config resolution checks (run with `npx tsx scripts/verify-model-resolver.ts`).
- * Verifies the precedence chain: system < model-profile < global < room < agent < phase,
- * capability negotiation, and context-budget arithmetic.
+ * Model-config resolution checks. Verifies the precedence chain:
+ * system < model-profile < global < room < agent < phase, capability
+ * negotiation, and context-budget arithmetic.
  */
 import { strict as assert } from "node:assert";
+import { it } from "vitest";
 import {
   ModelRegistry,
   defaultCapabilities,
@@ -11,13 +12,10 @@ import {
   negotiateTuning,
   resolveAgentModelConfig,
   type ModelProfile
-} from "../src/society/models";
+} from "../../src/society/models";
 
-let passed = 0;
 function check(name: string, fn: () => void): void {
-  fn();
-  passed += 1;
-  console.log(`  ok  ${name}`);
+  it(name, fn);
 }
 
 const registry = new ModelRegistry();
@@ -144,5 +142,3 @@ check("missing model profile raises a clear error instead of guessing", () => {
     /MODEL_PROFILE_MISSING/
   );
 });
-
-console.log(`\nAll ${passed} model-config resolution checks passed.`);

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { apiFetch, storeOwnerToken } from "@/lib/api";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { ArchivedRoomSummary } from "@/society/persistence";
@@ -22,7 +23,8 @@ interface RoomListResponse {
 
 interface SeasonResponse {
   dossiers: Array<{
-    characterKey: string;
+    characterId: string;
+    displayName: string;
     games: Array<{ scenarioId: string; role?: string; outcome: "win" | "lose" }>;
     memoryCount: number;
     updatedAt: string;
@@ -92,7 +94,7 @@ export function App(): ReactNode {
   }, []);
 
   const createRoom = useCallback(async (input: CreateRoomInput): Promise<CreateRoomResult> => {
-    const response = await fetch("/api/rooms", {
+    const response = await apiFetch("/api/rooms", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input)
@@ -100,6 +102,7 @@ export function App(): ReactNode {
     const payload = await response.json().catch(() => undefined);
     if (!response.ok) throw new Error(payload?.message ?? `HTTP ${response.status}`);
     const result = payload as { room: SocietyRoomSnapshot } & Partial<CreateRoomResult>;
+    if (result.ownerToken) storeOwnerToken(result.ownerToken);
     if (result.playerToken) {
       sessionStorage.setItem(`society:player-token:${result.room.id}`, result.playerToken);
     }
@@ -110,20 +113,20 @@ export function App(): ReactNode {
   }, []);
 
   const resetSeason = useCallback(async (): Promise<void> => {
-    const response = await fetch("/api/season", { method: "DELETE" });
+    const response = await apiFetch("/api/season", { method: "DELETE" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     setSeason([]);
   }, []);
 
-  const forgetCharacter = useCallback(async (characterKey: string): Promise<void> => {
-    if (!window.confirm(`让「${characterKey}」忘掉全部跨局历史？下一局它会像陌生人一样入场。`)) return;
+  const forgetCharacter = useCallback(async (characterId: string, displayName: string): Promise<void> => {
+    if (!window.confirm(`让「${displayName}」忘掉全部跨局历史？下一局它会像陌生人一样入场。`)) return;
     try {
-      const response = await fetch(`/api/season/${encodeURIComponent(characterKey)}`, { method: "DELETE" });
+      const response = await apiFetch(`/api/season/${encodeURIComponent(characterId)}`, { method: "DELETE" });
       if (!response.ok) {
         const payload = await response.json().catch(() => undefined);
         throw new Error(payload?.message ?? `HTTP ${response.status}`);
       }
-      setSeason((current) => current.filter((entry) => entry.characterKey !== characterKey));
+      setSeason((current) => current.filter((entry) => entry.characterId !== characterId));
     } catch (cause) {
       setError(errorMessage(cause));
     }
@@ -132,7 +135,7 @@ export function App(): ReactNode {
   const removeRoom = useCallback(async (roomId: string): Promise<void> => {
     if (!window.confirm("停止并移除这个房间？对局历史会保留在归档中。")) return;
     try {
-      const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`, { method: "DELETE" });
+      const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}`, { method: "DELETE" });
       const payload = await response.json().catch(() => undefined);
       if (!response.ok) throw new Error(payload?.message ?? `HTTP ${response.status}`);
       setRooms((current) => current.filter((room) => room.id !== roomId));
@@ -190,7 +193,7 @@ export function App(): ReactNode {
           onOpenCharacters={() => setCharactersOpen(true)}
           onOpenAbout={() => { location.hash = "#/about"; }}
           onResetSeason={() => { void resetSeason().catch((cause) => setError(errorMessage(cause))); }}
-          onForgetCharacter={(characterKey) => { void forgetCharacter(characterKey); }}
+          onForgetCharacter={(characterId, displayName) => { void forgetCharacter(characterId, displayName); }}
           onRemoveRoom={(roomId) => { void removeRoom(roomId); }}
         />
       )}
@@ -229,7 +232,7 @@ function parseHash(hash: string): Route {
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+  const response = await apiFetch(path);
   if (!response.ok) throw new Error(`HTTP ${response.status} for ${path}`);
   return await response.json() as T;
 }

@@ -1,26 +1,18 @@
 /**
- * Spectator presentation checks (run with `npx tsx scripts/verify-tension-engine.ts`).
- * The tension engine and cinematic director are deterministic and
- * presentation-only; these checks pin the engine's scoring, level thresholds,
- * decay behavior, and the director's derivation of duel cues from public
- * accusation facts. No model calls, no network.
+ * Spectator presentation checks. The tension engine and cinematic director
+ * are deterministic and presentation-only; these checks pin the engine's
+ * scoring, level thresholds, decay behavior, and the director's derivation of
+ * duel cues from public accusation facts. No model calls, no network.
  */
 import { strict as assert } from "node:assert";
-import { TensionEngine, levelFor, reasonLabel } from "../src/society/spectator/tension-engine";
-import { CinematicDirector } from "../src/society/spectator/cinematic-director";
-import { timelineContextAround } from "../src/society/spectator/projection";
-import type { AgentRuntimeEvent, WorldSnapshot } from "../src/society/contracts";
+import { it } from "vitest";
+import { TensionEngine, levelFor, reasonLabel } from "../../src/society/spectator/tension-engine";
+import { CinematicDirector } from "../../src/society/spectator/cinematic-director";
+import { timelineContextAround } from "../../src/society/spectator/projection";
+import type { AgentRuntimeEvent, WorldAgentSnapshot, WorldSnapshot } from "../../src/society/contracts";
 
-let passed = 0;
-const pending: Array<Promise<void>> = [];
 function check(name: string, fn: () => void | Promise<void>): void {
-  pending.push(Promise.resolve(fn()).then(() => {
-    passed += 1;
-    console.log(`  ok  ${name}`);
-  }).catch((cause) => {
-    console.error(`  FAIL ${name}:`, cause instanceof Error ? cause.message : cause);
-    process.exitCode = 1;
-  }));
+  it(name, fn);
 }
 
 check("starts calm at zero", () => {
@@ -72,7 +64,7 @@ check("reason labels exist for every tension reason", () => {
 
 // --- CinematicDirector: duel cues derive from public accusation facts ---
 
-function fakeWorld(input: { suspicion?: Array<{ kind: string; accuser: string; target: string }>; agents?: Array<{ id: string; displayName: string; alive: boolean }> }): WorldSnapshot {
+function fakeWorld(input: { suspicion?: Array<{ kind: string; accuser: string; target: string }>; agents?: Array<{ id: string; displayName: string; characterId: string; alive: boolean; status: WorldAgentSnapshot["status"] }> }): WorldSnapshot {
   return {
     roomId: "r", scenarioId: "werewolf", title: "t", status: "running", turn: 1, totalTurns: 4,
     phase: "day", summary: "", agents: input.agents ?? [],
@@ -86,10 +78,12 @@ check("director derives a duel cue from a public accusation entry", async () => 
   const director = new CinematicDirector({ roomId: "r", tickSeconds: 3600, emit: (event) => emitted.push(event) });
   const world = fakeWorld({
     suspicion: [{ kind: "speech", accuser: "a1", target: "a2" }],
-    agents: [{ id: "a1", displayName: "甲", alive: true }, { id: "a2", displayName: "乙", alive: true }]
+    agents: [{ id: "a1", displayName: "甲", characterId: "c1", alive: true, status: "idle" }, { id: "a2", displayName: "乙", characterId: "c2", alive: true, status: "idle" }]
   });
-  director.ingest({ type: "world.updated", roomId: "r", snapshot: world, at: new Date().toISOString() }, world);
-  const duel = emitted.find((event) => event.type === "cinematic.cue" && event.cue.camera === "duel");
+  director.ingest({ type: "world.updated", roomId: "r", snapshot: world }, world);
+  const duel = emitted.find(
+    (event): event is Extract<AgentRuntimeEvent, { type: "cinematic.cue" }> => event.type === "cinematic.cue" && event.cue.camera === "duel"
+  );
   assert.ok(duel, "an accusation must produce a duel cue");
   assert.deepEqual(duel.cue.focusAgentIds, ["a1", "a2"]);
   assert.ok(emitted.some((event) => event.type === "tension.changed" && event.reasons.includes("direct-accusation")), "accusation must raise tension");
@@ -101,14 +95,14 @@ check("director ignores non-speech suspicion entries for duel cues", async () =>
   const director = new CinematicDirector({ roomId: "r", tickSeconds: 3600, emit: (event) => emitted.push(event) });
   const world = fakeWorld({
     suspicion: [{ kind: "vote", accuser: "a1", target: "a2" }],
-    agents: [{ id: "a1", displayName: "甲", alive: true }, { id: "a2", displayName: "乙", alive: true }]
+    agents: [{ id: "a1", displayName: "甲", characterId: "c1", alive: true, status: "idle" }, { id: "a2", displayName: "乙", characterId: "c2", alive: true, status: "idle" }]
   });
-  director.ingest({ type: "world.updated", roomId: "r", snapshot: world, at: new Date().toISOString() }, world);
+  director.ingest({ type: "world.updated", roomId: "r", snapshot: world }, world);
   assert.ok(!emitted.some((event) => event.type === "cinematic.cue" && event.cue.camera === "duel"), "votes are not accusations");
   director.dispose();
 });
 
-// ── Highlight cause-and-effect window (§8.7) ────────────────────────────────
+// ── Highlight cause-and-effect window ──────────────────────────────────────
 
 const T0 = Date.parse("2026-08-17T20:00:00Z");
 function entry(secondsFromStart: number): { at: string; label: string } {
@@ -136,8 +130,4 @@ check("timelineContextAround keeps chronological order and survives a post-timel
 check("timelineContextAround tolerates empty and unparseable inputs", () => {
   assert.deepEqual(timelineContextAround([], entry(0).at), []);
   assert.deepEqual(timelineContextAround([{ at: "not-a-time", label: "x" }], entry(0).at), []);
-});
-
-void Promise.all(pending).then(() => {
-  console.log(`\nTension-engine checks: ${passed} passed.`);
 });

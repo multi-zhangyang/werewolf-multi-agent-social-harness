@@ -14,11 +14,10 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
-import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
+import { scopedContext, SocialWorldBase } from "../world";
 import { DiscussionDirector } from "../conversation";
 import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
-import { roleHypothesisTool } from "../cognition";
 
 type Role = "merlin" | "percival" | "servant" | "morgana" | "assassin" | "mordred" | "oberon" | "minion";
 
@@ -478,7 +477,6 @@ export class AvalonWorld extends SocialWorldBase {
       this.proposedTeam = [...memberIds];
       const leaderName = this.profiles.get(actorId)?.displayName ?? actorId;
       for (const id of this.profiles.keys()) {
-        const memberName = this.profiles.get(id)?.displayName ?? id;
         if (memberIds.includes(id)) {
           this.pushEvent(id, {
             type: "included",
@@ -590,7 +588,7 @@ export class AvalonWorld extends SocialWorldBase {
         label: wave === 1 ? `第 ${this.quest} 次任务讨论` : `第 ${this.quest} 次任务讨论 · 回应第 ${wave - 1} 轮`,
         actorIds: actors,
         mode: "sequential",
-        instructionFor: (actorId) => wave === 1
+        instructionFor: (_actorId) => wave === 1
           ? "Opening round at the round table. State your read of loyalties, ask sharp questions, or stay reserved — but do not propose a team or vote yet."
           : "The table is live and people have reacted. Answer questions directed at you, defend yourself if accused, test anyone dodging specifics, or stay silent if you have nothing new. Do not propose a team or vote yet."
       };
@@ -709,6 +707,7 @@ export class AvalonWorld extends SocialWorldBase {
     const message = await super.sendMessage(input);
     if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
       this.discussion.onMessage({
+        messageId: message.id,
         senderId: message.senderId,
         text: message.text,
         ...(message.replyTo ? { replyTo: message.replyTo } : {})
@@ -777,7 +776,7 @@ export class AvalonWorld extends SocialWorldBase {
     return roleLabel(this.roles.get(actorId));
   }
 
-  protected roleVisibleTo(viewerId: string | undefined, subjectId: string, alive: boolean): boolean {
+  protected roleVisibleTo(viewerId: string | undefined, subjectId: string, _alive: boolean): boolean {
     if (viewerId === subjectId) return true;
     if (this.status === "finished") return true;
     const viewerRole = viewerId ? this.roles.get(viewerId) : undefined;
@@ -826,7 +825,6 @@ export class AvalonWorld extends SocialWorldBase {
   }
 
   private resolveTeamVote(): void {
-    const votes = Object.fromEntries(this.teamVotes);
     const approveCount = [...this.teamVotes.values()].filter(Boolean).length;
     const team = [...this.proposedTeam];
     this.teamVotes.clear();

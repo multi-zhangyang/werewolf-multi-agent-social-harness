@@ -6,6 +6,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { requireGlobalOperator } from "./auth";
+import type { ServerContext } from "./context";
 import path from "node:path";
 import express from "express";
 import { z } from "zod";
@@ -91,16 +93,22 @@ export class RosterTemplateStore {
   }
 }
 
-export function registerTemplateRoutes(app: express.Express, store: RosterTemplateStore): void {
+export function registerTemplateRoutes(app: express.Express, context: ServerContext): void {
+  const store = context.templates;
+  const gate = (request: express.Request, response: express.Response): boolean =>
+    requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token));
+
   app.get("/api/room-templates", (_request, response) => {
     response.json({ templates: store.list() });
   });
 
   app.post("/api/room-templates", (request, response) => {
+    if (!gate(request, response)) return;
     response.status(201).json(store.create(templateSchema.parse(request.body)));
   });
 
   app.delete("/api/room-templates/:id", (request, response) => {
+    if (!gate(request, response)) return;
     const removed = store.remove(request.params.id);
     if (!removed) {
       response.status(404).json({ error: "TEMPLATE_NOT_FOUND", message: "No such template." });

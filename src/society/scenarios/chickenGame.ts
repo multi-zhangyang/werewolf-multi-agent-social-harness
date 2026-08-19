@@ -11,7 +11,7 @@ import type {
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
-import { contextFromRunContext, scopedContext, SocialWorldBase } from "../world";
+import { scopedContext, SocialWorldBase } from "../world";
 import { boundedRounds, emitAction } from "./helpers";
 
 type Choice = "swerve" | "straight";

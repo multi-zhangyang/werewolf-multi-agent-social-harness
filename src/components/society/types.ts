@@ -46,5 +46,7 @@ export interface CreateRoomInput {
 
 export interface CreateRoomResult {
   roomId: string;
+  /** Control token for this room (owner): pause/resume/remove/model switches. */
+  ownerToken?: string;
   playerToken?: string;
 }

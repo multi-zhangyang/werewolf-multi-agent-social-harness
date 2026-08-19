@@ -1,20 +1,18 @@
 /**
- * Character-library checks (run with `npx tsx scripts/verify-characters.ts`).
- * Pins §7.1/§7.2: built-in roster integrity, character→seat profile mapping,
- * and the local library CRUD / roster resolution. No model calls, no network.
+ * Character-library checks: built-in roster integrity, character→seat profile
+ * mapping, and the local library CRUD / roster resolution. No model calls,
+ * no network.
  */
 import { strict as assert } from "node:assert";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { builtinCharacter, builtinCharacters, characterAgentProfile } from "../src/society/profiles";
-import { CharacterLibrary } from "../src/server/characters";
+import { it } from "vitest";
+import { builtinCharacter, builtinCharacters, characterAgentProfile } from "../../src/society/profiles";
+import { CharacterLibrary } from "../../src/server/characters";
 
-let passed = 0;
 function check(name: string, fn: () => void): void {
-  fn();
-  passed += 1;
-  console.log(`  ok  ${name}`);
+  it(name, fn);
 }
 
 const tempDir = mkdtempSync(path.join(tmpdir(), "society-characters-"));
@@ -96,4 +94,3 @@ check("roster resolves picks, falls back to built-ins, and rejects unknown ids",
 });
 
 rmSync(tempDir, { recursive: true, force: true });
-console.log(`\nCharacter-library checks: ${passed} passed.`);

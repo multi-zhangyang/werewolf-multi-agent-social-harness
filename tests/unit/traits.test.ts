@@ -1,10 +1,10 @@
 /**
- * Trait-adaptation checks (run with `npx tsx scripts/verify-traits.ts`).
- * Pins the bounded slow-personality-drift engine (AGENTS.md §4.2.8):
+ * Trait-adaptation checks: pins the bounded slow-personality-drift engine —
  * step size, cap, decay, effective computation, season-boundary erosion and
  * baseline immutability. No model calls, no network.
  */
 import { strict as assert } from "node:assert";
+import { it } from "vitest";
 import {
   ADAPTATION_CAP,
   MAX_ADAPTATION_STEP,
@@ -12,16 +12,13 @@ import {
   decayAcrossSeason,
   effectiveTemperament,
   traitStatesFromTemperament
-} from "../src/society/traits";
-import type { AdaptableTrait, AgentTemperament, DecisionBias, SocialEvent } from "../src/society/contracts";
-import { createAgentProfiles } from "../src/society/profiles";
-import { modulateByBiases } from "../src/society/appraisal";
+} from "../../src/society/traits";
+import type { AdaptableTrait, AgentTemperament, DecisionBias, SocialEvent } from "../../src/society/contracts";
+import { createAgentProfiles } from "../../src/society/profiles";
+import { modulateByBiases } from "../../src/society/appraisal";
 
-let passed = 0;
 function check(name: string, fn: () => void): void {
-  fn();
-  passed += 1;
-  console.log(`  ok  ${name}`);
+  it(name, fn);
 }
 
 const TEMPERAMENT: AgentTemperament = {
@@ -138,7 +135,7 @@ check("event types outside the adaptation rules never move traits", () => {
   assert.equal(totalDrift(states), 0, "neutral events do not bend personality");
 });
 
-// ── Stable judgment biases (§4.2.7) ─────────────────────────────────────────
+// ── Stable judgment biases ──────────────────────────────────────────────────
 
 const VALID_BIASES: DecisionBias[] = [
   "confirmation",
@@ -196,7 +193,7 @@ check("recency-weighting boosts memory salience of fresh events", () => {
   assert.equal(plain.salience, 0.5, "without the bias salience is unchanged");
 });
 
-check("every built-in character carries substantive autobiographical anchors (§4.2.1)", () => {
+check("every built-in character carries substantive autobiographical anchors", () => {
   const profiles = createAgentProfiles(["model-a"], 25);
   for (const profile of profiles) {
     const anchors = profile.autobiographicalAnchors ?? [];
@@ -207,5 +204,3 @@ check("every built-in character carries substantive autobiographical anchors (§
     }
   }
 });
-
-console.log(`\nTrait-adaptation checks: ${passed} passed.`);
