@@ -597,7 +597,13 @@ check("avalon knowledge follows the official setup (Merlin / Percival / Oberon)"
   assert.ok(percivalContext.includes(nameFor(merlinId)) && percivalContext.includes(nameFor(byRole("morgana")[0])), "Percival's sights name both");
   const oberonContext = context(oberonId);
   assert.ok(!oberonContext.includes("你已知的内奸"), "Oberon knows no fellow agents of evil");
-  for (const id of [...byRole("assassin"), ...byRole("morgana")]) assert.ok(!context(id).includes(nameFor(oberonId)), `${roles.get(id)} does not know Oberon`);
+  // The evil roster line must never name Oberon; elsewhere the context may
+  // legitimately mention any player (e.g. the randomly seated Lady holder).
+  for (const id of [...byRole("assassin"), ...byRole("morgana")]) {
+    const evilLine = context(id).split("\n").find((line) => line.startsWith("你已知的内奸"));
+    assert.ok(evilLine, `${roles.get(id)} knows the agents of evil`);
+    assert.ok(!evilLine.includes(nameFor(oberonId)), `${roles.get(id)} does not know Oberon`);
+  }
 });
 
 check("lady of the lake starts with the player to the right of the first leader", () => {
