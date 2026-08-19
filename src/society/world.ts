@@ -50,6 +50,21 @@ export abstract class SocialWorldBase implements SocialWorld {
   protected status: WorldSnapshot["status"] = "lobby";
   protected listeners = new Set<(snapshot: WorldSnapshot) => void>();
 
+  /**
+   * Command epoch gate (§16.6 / §17.1). The room opens one window per
+   * activation and closes it when the activation fully settles; every
+   * command entry point checks the gate first, so a tool call that arrives
+   * late from a request the room already gave up on is rejected instead of
+   * mutating a later phase. Idempotency receipts live inside one epoch:
+   * retrying the same command returns the original receipt, while the same
+   * payload in a later epoch is a brand-new command.
+   */
+  private commandEpoch = 0;
+  private activationWindowOpen = false;
+  private activeActivationId?: string;
+  private readonly recentReceipts = new Map<string, WorldActionCommit>();
+  private static readonly RECENT_RECEIPT_LIMIT = 64;
+
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[]) {
     this.roomId = roomId;
     this.scenario = scenario;
@@ -154,13 +169,65 @@ export abstract class SocialWorldBase implements SocialWorld {
   }
 
   async performAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
+    // A late tool call must not mutate the world once the room has closed
+    // this activation's window (§16.6 / §28.7: 旧请求迟到并尝试调用工具,
+    // command gateway 依据 activation epoch 拒绝).
+    this.assertCommandGateOpen();
     this.requireProfile(actorId);
+    const receiptKey = this.idempotencyKey(actorId, action, payload);
+    const existing = this.recentReceipts.get(receiptKey);
+    if (existing) return structuredClone(existing);
+    let commit: WorldActionCommit;
     if (action === "message" || action === "communicate") {
       const input = parseMessagePayload(payload);
       const message = await this.sendMessage({ senderId: actorId, ...input });
-      return { action, detail: input.text, result: { messageId: message.id } };
+      commit = { action, detail: input.text, result: { messageId: message.id }, commandId: `msg:${message.id}` };
+    } else {
+      const raw = await this.performDomainAction(actorId, action, payload);
+      commit = { ...raw, commandId: randomUUID() };
     }
-    return this.performDomainAction(actorId, action, payload);
+    this.recentReceipts.set(receiptKey, structuredClone(commit));
+    if (this.recentReceipts.size > SocialWorldBase.RECENT_RECEIPT_LIMIT) {
+      const oldest = this.recentReceipts.keys().next().value;
+      if (oldest !== undefined) this.recentReceipts.delete(oldest);
+    }
+    return structuredClone(commit);
+  }
+
+  beginActivation(activation: WorldActivation): void {
+    this.commandEpoch += 1;
+    this.activationWindowOpen = true;
+    this.activeActivationId = activation.id;
+    this.recentReceipts.clear();
+  }
+
+  endActivation(): void {
+    this.activationWindowOpen = false;
+    this.activeActivationId = undefined;
+    this.recentReceipts.clear();
+  }
+
+  /** Current command gate state (observability / tests). */
+  commandGate(): { open: boolean; epoch: number; activationId?: string } {
+    return {
+      open: this.activationWindowOpen,
+      epoch: this.commandEpoch,
+      ...(this.activeActivationId ? { activationId: this.activeActivationId } : {})
+    };
+  }
+
+  private assertCommandGateOpen(): void {
+    if (this.activationWindowOpen) return;
+    const error = new Error(
+      "STALE_ACTIVATION_COMMAND: The activation window is closed; this command arrived after the activation ended."
+    );
+    (error as Error & { code?: string }).code = "STALE_ACTIVATION_COMMAND";
+    throw error;
+  }
+
+  /** Epoch-scoped idempotency key: same actor+action+payload, same receipt. */
+  private idempotencyKey(actorId: string, action: string, payload: unknown): string {
+    return `${this.commandEpoch}\u0000${actorId}\u0000${action}\u0000${stableJson(payload)}`;
   }
 
   abstract activation(): WorldActivation | null;
@@ -385,6 +452,23 @@ export abstract class SocialWorldBase implements SocialWorld {
       if (Array.isArray(entry) && entry.length >= 2) target.set(entry[0] as K, entry[1] as V);
     }
   }
+}
+
+/**
+ * Key-order-independent JSON for command idempotency: tool payloads built by
+ * different callers with the same semantics hash identically, so a network
+ * retry of the exact same command resolves to the original receipt.
+ */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function parseMessagePayload(payload: unknown): {

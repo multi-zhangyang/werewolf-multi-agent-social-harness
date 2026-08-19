@@ -567,6 +567,12 @@ export interface WorldActionCommit {
   action: string;
   detail: string;
   result?: unknown;
+  /**
+   * Stable command receipt (§16.6): a retry of the same command inside the
+   * same activation epoch returns the original receipt instead of applying
+   * the world action twice.
+   */
+  commandId?: string;
 }
 
 export interface ActivationCompletion {
@@ -660,6 +666,15 @@ export interface SocialWorld {
   toolsFor(actorId: string): Tool<SocietyAgentContext>[];
   playerActions(actorId: string): PlayerActionSpec[];
   performAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit>;
+  /**
+   * Command epoch gate (§16.6 / §17.1): the room opens a window for each
+   * activation (including retries and human waits). Tool calls that arrive
+   * after the window closed — e.g. from a request the room already gave up
+   * on — are rejected instead of mutating a later phase.
+   */
+  beginActivation(activation: WorldActivation): void;
+  /** Close the command window; late commands are rejected from now on. */
+  endActivation(): void;
   activation(): WorldActivation | null;
   completeActivation(activation: WorldActivation): ActivationCompletion;
   experienceFor(actorId: string): string | undefined;

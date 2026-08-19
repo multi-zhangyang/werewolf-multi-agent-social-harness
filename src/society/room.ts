@@ -58,6 +58,8 @@ export interface SocietyRoomCreateOptions {
    * never fan out more concurrent activations than the deployment can bear.
    */
   limiter?: ActivationLimiter;
+  /** Checkpoint archive directory (default data/rooms); tests inject a temp dir. */
+  archiveDir?: string;
   /**
    * Restart recovery (P3): rebuild this room from a saved checkpoint instead
    * of starting fresh. The world state, profiles, model bindings, paused
@@ -217,11 +219,17 @@ export class SocietyRoom {
   /** Per-agent abort controllers for turns that are running right now. */
   private readonly activeSignals = new Map<string, AbortController>();
   private readonly turnTimeoutMs: number;
+  /** Extra wall-clock grace for providers that swallow the abort signal. */
+  private readonly turnGraceMs: number;
   private readonly humanTurnTimeoutMs: number;
   private readonly humanToken?: string;
   /** Control token for this room (owner). Persisted with the checkpoint. */
   private readonly ownerToken: string;
   private readonly rememberedExperiences = new Map<string, string>();
+  /** §17.2: turns the room gave up on locally while the request kept running. */
+  private abandonedRunningTurns = 0;
+  /** Of those, how many have since truly settled (or were terminated). */
+  private settledAbandonedTurns = 0;
   private runningPromise?: Promise<void>;
   private waitingHuman?: HumanWaiter;
   private humanActionInFlight = false;
@@ -250,12 +258,13 @@ export class SocietyRoom {
     this.agentBindings = options.restore?.agentBindings ?? options.agentBindings ?? {};
     this.restoreMinds = options.restore?.agentMinds;
     this.limiter = options.limiter;
-    this.archive = new RoomArchiveStore();
+    this.archive = new RoomArchiveStore(options.archiveDir);
     this.director = new CinematicDirector({
       roomId: this.id,
       emit: (event) => this.emit(event)
     });
     this.turnTimeoutMs = positiveIntegerFromEnv("SOCIETY_AGENT_TURN_TIMEOUT_MS", 300_000);
+    this.turnGraceMs = positiveIntegerFromEnv("SOCIETY_AGENT_TURN_GRACE_MS", 15_000);
     this.humanTurnTimeoutMs = positiveIntegerFromEnv("SOCIETY_HUMAN_TURN_TIMEOUT_MS", 1_800_000);
     const humans = options.profiles.filter((profile) => profile.controller === "human");
     if (humans.length > 1) throw new Error("HUMAN_LIMIT_EXCEEDED: A room supports at most one human participant.");
@@ -524,6 +533,23 @@ export class SocietyRoom {
       waiter.reject(pauseError);
     }
     this.world.pause();
+    // Close the command gate so requests the room gave up on cannot mutate
+    // a later phase after a pause (§16.6).
+    this.world.endActivation();
+    this.saveCheckpoint();
+    this.emit({ type: "room.status", roomId: this.id, status: "paused", detail: reason, at: now() });
+  }
+
+  /**
+   * Pause a room that is not yet "running" (agent construction stage), where
+   * `pause()` would no-op on its status guard. The room stays paused and
+   * recoverable; an observer can fix the configuration and resume.
+   */
+  private failToPause(reason: string): void {
+    this.status = "paused";
+    if (!this.abortController.signal.aborted) this.abortController.abort(new Error(reason));
+    this.world.pause();
+    this.world.endActivation();
     this.saveCheckpoint();
     this.emit({ type: "room.status", roomId: this.id, status: "paused", detail: reason, at: now() });
   }
@@ -564,6 +590,8 @@ export class SocietyRoom {
       }
       this.world.pause();
     }
+    // Late in-flight requests must not mutate the world after removal.
+    this.world.endActivation();
     this.director.dispose();
     this.saveCheckpoint(false);
     this.emit({ type: "room.status", roomId: this.id, status: this.status, detail: reason, at: now() });
@@ -666,6 +694,21 @@ export class SocietyRoom {
     return this.status;
   }
 
+  /**
+   * §17.2 abandoned-but-running: turns the room gave up on locally (timeout
+   * or abort) whose provider request is still in flight. Each such request
+   * keeps its permit until it truly settles, so the real concurrency never
+   * exceeded the pool even when providers ignore aborts.
+   */
+  abandonedInFlight(): number {
+    return this.abandonedRunningTurns;
+  }
+
+  /** Abandoned requests that have since truly settled (permit released). */
+  settledAbandoned(): number {
+    return this.settledAbandonedTurns;
+  }
+
   async submitHumanAction(token: string, action: string, payload: unknown): Promise<WorldActionCommit> {
     const actorId = this.actorForToken(token);
     if (!actorId) throw new Error("PLAYER_TOKEN_INVALID: This token does not control a seat in the room.");
@@ -714,6 +757,9 @@ export class SocietyRoom {
 
   private async run(): Promise<void> {
     this.createAgents();
+    // Agent construction may have paused the room (configuration errors);
+    // never start the loop over an aborted controller.
+    if (this.abortController.signal.aborted) return;
     this.status = "running";
     this.world.start();
     this.emit({ type: "room.status", roomId: this.id, status: "running", at: now() });
@@ -731,7 +777,12 @@ export class SocietyRoom {
         }
         return;
       }
+      this.world.beginActivation(activation);
       await this.runActivation(activation, activation.actorIds);
+      // Command epoch gate (§16.6): the window stays open for the whole
+      // activation — retries and human waits included — and closes before
+      // the next one. Tool calls that arrive late from a request the room
+      // already gave up on are then rejected by the world.
       let completion = this.world.completeActivation(activation);
       if (!completion.completed && completion.missingActorIds.length) {
         await this.runActivation(
@@ -741,6 +792,7 @@ export class SocietyRoom {
         );
         completion = this.world.completeActivation(activation);
       }
+      this.world.endActivation();
       if (!completion.completed) {
         this.pause(`行动未完成：${completion.missingActorIds.join(", ")}。房间没有自动代打。`);
         return;
@@ -775,7 +827,10 @@ export class SocietyRoom {
         });
         resolved.set(card.profile.id, config);
       } catch (error) {
-        this.pause(`模型配置解析失败（${card.profile.displayName}）：${errorMessage(error)}`);
+        // createAgents runs before the room is "running", so pause() would
+        // no-op here; mark paused + abort directly so the room waits for a
+        // configuration fix and an observer resume instead of erroring.
+        this.failToPause(`模型配置解析失败（${card.profile.displayName}）：${errorMessage(error)}`);
         return;
       }
     }
@@ -798,7 +853,7 @@ export class SocietyRoom {
         this.agents.set(card.profile.id, runtime);
         card.profile.model = config.modelId;
       } catch (error) {
-        this.pause(`Agent 启动失败（${card.profile.displayName}）：${errorMessage(error)}`);
+        this.failToPause(`Agent 启动失败（${card.profile.displayName}）：${errorMessage(error)}`);
         return;
       }
     }
@@ -807,8 +862,13 @@ export class SocietyRoom {
   private providerClientFor(providerProfileId: string): OpenAIProvider {
     const existing = this.providerClients.get(providerProfileId);
     if (existing) return existing;
-    // A caller-supplied provider wins over the registry for this room.
-    const fallback = this.provider ?? new OpenAIProvider({
+    // A caller-supplied provider wins over the registry for this room (tests
+    // inject scripted fakes here; the registry still resolves model/tuning).
+    if (this.provider) {
+      this.providerClients.set(providerProfileId, this.provider);
+      return this.provider;
+    }
+    const fallback = new OpenAIProvider({
       apiKey: this.apiKey ?? apiKeyFromEnv(),
       baseURL: this.baseURL ?? baseUrlFromEnv(),
       useResponses: false
@@ -875,26 +935,61 @@ export class SocietyRoom {
       let failure: unknown;
       const attemptTurn = async (): Promise<AgentTurnResult> => {
         // Cross-room backpressure: wait for a provider slot before the call.
-        // Releasing happens in `finally` so aborted and timed-out turns free
-        // their slot for the next room.
+        // Releasing happens in `lease` so aborted and timed-out turns free
+        // their slot only when the underlying request truly settles.
         const release = this.limiter ? await this.limiter.acquire(signal) : undefined;
+        // Lease-until-settle (§17.1 / §26.15): the permit is bound to the
+        // real lifetime of the provider request, not to the local race. A
+        // local timeout or abort only stops waiting for THIS turn; the
+        // request keeps its slot until it truly settles (or a worker
+        // terminates it), so a stalled provider can never push real
+        // concurrency past the pool.
+        const runPromise = runtime.runTurn(`${activation.label}\n${instruction}`, {
+          signal,
+          turn: this.world.snapshot().turn,
+          ...(maxTurns ? { maxTurns } : {}),
+          mode: isDiscussion ? "discussion" : "full"
+        });
+        let abandoned = false;
+        // The settle chain is attached for its side effects only: it releases
+        // the permit and counts the abandoned turn once the underlying
+        // request truly settles, and swallows rejections so a settled-but-
+        // failed request never surfaces as an unhandled rejection.
+        void runPromise
+          .then(() => undefined, () => undefined)
+          .finally(() => {
+            release?.();
+            if (abandoned) {
+              // The request the room gave up on has now truly settled.
+              this.abandonedRunningTurns -= 1;
+              this.settledAbandonedTurns += 1;
+            }
+          });
+        // Hard timeout guard: abort signals can be swallowed by a stalled
+        // provider stream, so race the turn against a wall clock as well.
+        let graceTimer: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          graceTimer = setTimeout(
+            () => reject(new Error(`TURN_TIMEOUT after ${this.turnTimeoutMs}ms`)),
+            this.turnTimeoutMs + this.turnGraceMs
+          );
+          signal.addEventListener("abort", () => {
+            clearTimeout(graceTimer);
+            reject(new Error("TURN_ABORTED: The activation was interrupted before the provider settled."));
+          }, { once: true });
+        });
         try {
-          // Hard timeout guard: abort signals can be swallowed by a stalled
-          // provider stream, so race the turn against a wall clock as well.
-          return await Promise.race([
-            runtime.runTurn(`${activation.label}\n${instruction}`, {
-              signal,
-              turn: this.world.snapshot().turn,
-              ...(maxTurns ? { maxTurns } : {}),
-              mode: isDiscussion ? "discussion" : "full"
-            }),
-            new Promise<never>((_, reject) => {
-              const timer = setTimeout(() => reject(new Error(`TURN_TIMEOUT after ${this.turnTimeoutMs}ms`)), this.turnTimeoutMs + 15_000);
-              signal.addEventListener("abort", () => { clearTimeout(timer); }, { once: true });
-            })
-          ]);
+          return await Promise.race([runPromise, timeoutPromise]);
+        } catch (error) {
+          // The race was lost locally while the request may still be
+          // streaming; the lease stays held until the request settles.
+          abandoned = /^TURN_(TIMEOUT|ABORTED)/.test(errorMessage(error));
+          if (abandoned) this.abandonedRunningTurns += 1;
+          throw error;
         } finally {
-          release?.();
+          // §17.3: the guard timer dies on every path — success, failure,
+          // abort, retry — not just in the abort listener.
+          if (graceTimer) clearTimeout(graceTimer);
         }
       };
       // Discussion turns get one immediate retry on provider-side transient
