@@ -873,15 +873,16 @@ export class SocietyRoom {
       this.providerClients.set(providerProfileId, this.provider);
       return this.provider;
     }
+    // The bundled OpenAI client defaults to a 600s request timeout; slow
+    // thinking models exceed it on long turns. Align the client timeout
+    // with the room's own wall-clock horizon so the room (not the client)
+    // decides when a turn is abandoned (§17.1). The provider must not carry
+    // apiKey/baseURL when a client is injected — the client owns them.
+    const fallbackKey = this.apiKey ?? apiKeyFromEnv();
+    const fallbackBaseURL = this.baseURL ?? baseUrlFromEnv();
     const fallback = new OpenAIProvider({
-      apiKey: this.apiKey ?? apiKeyFromEnv(),
-      baseURL: this.baseURL ?? baseUrlFromEnv(),
       useResponses: false,
-      // The bundled OpenAI client defaults to a 600s request timeout; slow
-      // thinking models exceed it on long turns. Align the client timeout
-      // with the room's own wall-clock horizon so the room (not the client)
-      // decides when a turn is abandoned (§17.1).
-      openAIClient: this.makeOpenAIClient(this.apiKey ?? apiKeyFromEnv(), this.baseURL ?? baseUrlFromEnv())
+      openAIClient: this.makeOpenAIClient(fallbackKey, fallbackBaseURL)
     });
     if (providerProfileId === "") return fallback;
     const profile = this.modelRegistry.providerProfile(providerProfileId);
@@ -890,8 +891,6 @@ export class SocietyRoom {
       return fallback;
     }
     const client = new OpenAIProvider({
-      apiKey: apiKeyForRef(profile),
-      baseURL: profile.baseURL || baseUrlFromEnv(),
       useResponses: profile.apiMode === "responses",
       openAIClient: this.makeOpenAIClient(apiKeyForRef(profile), profile.baseURL || baseUrlFromEnv())
     });
