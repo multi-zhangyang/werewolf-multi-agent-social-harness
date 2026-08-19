@@ -175,7 +175,7 @@ function ResultCard({ room, onReplay }: { room: SocietyRoomSnapshot; onReplay?: 
         <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-amber-300/90">本局结算</p>
       </div>
       <div className="px-5 py-6">
-        <p className="enter-stage text-3xl font-semibold tracking-tight text-foreground" style={{ animationDelay: "80ms" }}>{faction}</p>
+        <p className="enter-stage text-3xl font-semibold tracking-normal text-foreground" style={{ animationDelay: "80ms" }}>{faction}</p>
         <p className="enter-stage mt-1.5 text-sm text-foreground/80" style={{ animationDelay: "200ms" }}>
           {leaders.length ? `胜者：${leaders.map((id) => names.get(id) ?? id).join("、")}` : ""}
         </p>

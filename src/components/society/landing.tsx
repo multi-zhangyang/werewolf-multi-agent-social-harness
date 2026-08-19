@@ -141,11 +141,11 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
       ) : null}
 
       <main className="mx-auto w-full max-w-6xl px-6 pb-28">
-        <section className="mx-auto max-w-3xl pt-24 pb-16 text-center sm:pt-28">
-          <Badge variant="outline" className="mb-8 rounded-full border-border bg-card px-3.5 py-1.5 text-xs font-medium tracking-wide text-foreground/70">
+        <section className="mx-auto max-w-3xl pt-14 pb-12 text-center sm:pt-20">
+          <Badge variant="outline" className="mb-8 rounded-full border-border bg-card px-3.5 py-1.5 text-xs font-medium tracking-wide text-foreground/85">
             Powered by OpenAI Agents SDK
           </Badge>
-          <h1 className="hero-ink text-5xl font-semibold tracking-tighter sm:text-7xl">
+          <h1 className="hero-ink text-5xl font-semibold tracking-normal sm:text-7xl">
             多智能体社会博弈竞技场
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-balance text-lg leading-8 text-muted-foreground sm:text-xl">
@@ -435,7 +435,7 @@ function StatCard({ value, label, live }: { value: string; label: string; live?:
   return (
     <div className="flex min-w-24 items-baseline gap-2 rounded-lg border border-border bg-card px-4 py-2.5">
       <span className="nums font-mono text-lg font-medium text-foreground">{value}</span>
-      <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+      <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground/90">
         {live ? <span className="live-pulse size-1.5 rounded-full bg-emerald-400" /> : null}
         {label}
       </span>
