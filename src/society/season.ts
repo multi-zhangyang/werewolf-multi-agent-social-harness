@@ -25,7 +25,7 @@
  * in the original file (backed up) and reported through `listIsolated()`.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CharacterDossier, CharacterId, SeasonStore } from "./contracts";
 
@@ -62,6 +62,8 @@ export class FileSeasonStore implements SeasonStore {
   private readonly dossiers = new Map<CharacterId, CharacterDossier>();
   private readonly isolated: IsolatedSeasonEntry[] = [];
   private readonly resolveCharacterIds: (displayName: string) => string[];
+  /** Unique suffix per write, so concurrent saves never share a temp file. */
+  private writeSequence = 0;
 
   constructor(filePath = defaultSeasonPath(), resolveCharacterIds: (displayName: string) => string[] = () => []) {
     this.filePath = filePath;
@@ -187,11 +189,37 @@ export class FileSeasonStore implements SeasonStore {
       dossiers: Object.fromEntries(this.dossiers),
       ...(this.isolated.length ? { isolated: structuredClone(this.isolated) } : {})
     };
-    const tmp = `${this.filePath}.tmp`;
-    mkdirSync(path.dirname(this.filePath), { recursive: true });
+    const directory = path.dirname(this.filePath);
+    mkdirSync(directory, { recursive: true });
+    const tmp = `${this.filePath}.${process.pid}.${this.writeSequence}.tmp`;
+    this.writeSequence += 1;
     writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 });
-    renameSync(tmp, this.filePath);
+    // Windows rename can fail transiently (EPERM/EBUSY) while an indexer or
+    // antivirus holds the target file open; retry briefly instead of losing
+    // the season, and surface a persistent failure instead of swallowing it.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        renameSync(tmp, this.filePath);
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        const transient = code === "EPERM" || code === "EBUSY" || code === "EACCES" || code === "ENOTEMPTY";
+        if (!transient || attempt >= 9) {
+          try {
+            unlinkSync(tmp);
+          } catch {
+            // Best effort; the original error is the one that matters.
+          }
+          throw error;
+        }
+        sleepSync(40 + attempt * 20);
+      }
+    }
   }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /** How many season games a character has played. */
