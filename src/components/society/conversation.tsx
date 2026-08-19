@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AlertTriangle, Brain, Check, Eye, HeartHandshake, RotateCcw, Send, ShieldCheck, ShieldX, Skull, Sparkles, TrendingUp, Trophy } from "lucide-react";
+import { AlertCircle, AlertTriangle, Brain, Check, Clock, Eye, Handshake, HeartHandshake, RotateCcw, Send, ShieldCheck, ShieldX, Skull, Sparkles, TrendingDown, TrendingUp, Trophy, UserMinus, Users, VenetianMask, XCircle } from "lucide-react";
 import type { SocialMessage, StoryBeatKind, WorldLogEntry } from "@/society/contracts";
 import type { SocietyPlayerState, SocietyRoomSnapshot } from "@/society/room";
 import type { LiveAgentActivity } from "./use-room";
@@ -434,7 +434,19 @@ const BEATS: Record<StoryBeatKind, { label: string; icon: typeof Trophy; chip: s
   "promise-broken": { label: "背弃承诺", icon: ShieldX, chip: "border-rose-400/40 bg-rose-400/10 text-rose-300", labelColor: "text-rose-300/80" },
   comeback: { label: "逆转", icon: TrendingUp, chip: "border-sky-400/40 bg-sky-400/10 text-sky-300", labelColor: "text-sky-300/80" },
   misplay: { label: "失手", icon: AlertTriangle, chip: "border-orange-400/40 bg-orange-400/10 text-orange-300", labelColor: "text-orange-300/80" },
-  win: { label: "决胜", icon: Sparkles, chip: "border-amber-400/40 bg-amber-400/10 text-amber-300", labelColor: "text-amber-300/80" }
+  win: { label: "决胜", icon: Sparkles, chip: "border-amber-400/40 bg-amber-400/10 text-amber-300", labelColor: "text-amber-300/80" },
+  // P0-09: neutral outcome labels get muted, low-saturation badges — the
+  // saturated colors are reserved for the evidence-backed strong labels above.
+  "cooperative-outcome": { label: "协同", icon: Handshake, chip: "border-emerald-400/30 bg-emerald-400/5 text-emerald-300/80", labelColor: "text-emerald-300/60" },
+  "high-return": { label: "高回报", icon: TrendingUp, chip: "border-sky-400/30 bg-sky-400/5 text-sky-300/80", labelColor: "text-sky-300/60" },
+  "low-return": { label: "低回报", icon: TrendingDown, chip: "border-slate-400/30 bg-slate-400/5 text-slate-300/80", labelColor: "text-slate-300/60" },
+  "commitment-unresolved": { label: "待结算", icon: Clock, chip: "border-slate-400/30 bg-slate-400/5 text-slate-300/80", labelColor: "text-slate-300/60" },
+  "unilateral-defection": { label: "单方退出", icon: UserMinus, chip: "border-amber-400/30 bg-amber-400/5 text-amber-300/80", labelColor: "text-amber-300/60" },
+  "free-riding": { label: "搭便车", icon: Users, chip: "border-slate-400/30 bg-slate-400/5 text-slate-300/80", labelColor: "text-slate-300/60" },
+  "adverse-outcome": { label: "不利结果", icon: AlertCircle, chip: "border-orange-400/30 bg-orange-400/5 text-orange-300/80", labelColor: "text-orange-300/60" },
+  "agreement-reached": { label: "达成一致", icon: Check, chip: "border-emerald-400/30 bg-emerald-400/5 text-emerald-300/80", labelColor: "text-emerald-300/60" },
+  "negotiation-failed": { label: "谈判破裂", icon: XCircle, chip: "border-orange-400/30 bg-orange-400/5 text-orange-300/80", labelColor: "text-orange-300/60" },
+  "hidden-role-revealed": { label: "身份揭晓", icon: VenetianMask, chip: "border-slate-400/30 bg-slate-400/5 text-slate-300/80", labelColor: "text-slate-300/60" }
 };
 
 function MessageRow({ entry, names, activity, fresh }: {

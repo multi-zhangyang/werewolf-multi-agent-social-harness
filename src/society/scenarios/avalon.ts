@@ -562,7 +562,7 @@ export class AvalonWorld extends SocialWorldBase {
         ? `${this.profiles.get(actorId)?.displayName} 指认 ${this.profiles.get(targetId)?.displayName} 为梅林。忠臣的事业崩塌，内奸阵营获胜。`
         : `${this.profiles.get(actorId)?.displayName} 失手了——${this.profiles.get(targetId)?.displayName} 并不是梅林。忠臣阵营获胜。`;
       for (const id of this.profiles.keys()) this.lastExperiences.set(id, `${this.outcome} 最终身份：${[...this.roles].map(([memberId, memberRole]) => `${memberId}=${memberRole}`).join(", ")}。`);
-      this.addLog(this.outcome, this.quest, correct ? "win" : "misplay");
+      this.addLog(this.outcome, this.quest, correct ? "win" : "adverse-outcome");
       this.finish();
       return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, correct, targetId } };
     }
@@ -832,7 +832,7 @@ export class AvalonWorld extends SocialWorldBase {
     const text = approved
       ? `第 ${this.quest} 次任务：圆桌以 ${approveCount} 票通过了队伍 [${team.map((member) => this.profiles.get(member)?.displayName ?? member).join("、")}]。`
       : `第 ${this.quest} 次任务：圆桌以 ${approveCount} 票赞成否决了队伍 [${team.map((member) => this.profiles.get(member)?.displayName ?? member).join("、")}]。`;
-    this.addLog(text, this.quest, approved ? "alliance" : undefined);
+    this.addLog(text, this.quest, approved ? "agreement-reached" : undefined);
     if (approved) {
       this.rejections = 0;
       this.phase = "quest";
@@ -925,7 +925,9 @@ export class AvalonWorld extends SocialWorldBase {
         });
       }
     }
-    this.addLog(text, this.quest, outcome === "fail" ? "betrayal" : "promise-kept");
+    // P0-09: a fail vote is a unilateral defection inside the quest, not a
+    // broken promise; a pass is a cooperative outcome.
+    this.addLog(text, this.quest, outcome === "fail" ? "unilateral-defection" : "cooperative-outcome");
     if (this.failures >= 2) {
       this.winners = this.factionMembers(["morgana", "assassin", "mordred", "oberon", "minion"]);
       this.outcome = "两次任务失败，内奸得逞，圆桌陷落。";

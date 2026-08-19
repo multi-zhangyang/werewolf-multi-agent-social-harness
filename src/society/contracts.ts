@@ -478,7 +478,20 @@ export type StoryBeatKind =
   | "promise-broken"    // a commitment was dropped when it mattered
   | "comeback"          // someone behind the curve turned the game
   | "misplay"           // a self-inflicted, costly error
-  | "win";              // decisive, game-changing strike
+  | "win"               // decisive, game-changing strike
+  // P0-09: neutral outcome labels. The strong labels above require social
+  // evidence (a Commitment or DeceptionEpisode); until the spine records it,
+  // scenarios report only what the world results prove.
+  | "cooperative-outcome"   // coordinated success, no promise implied
+  | "high-return"           // a payoff above the reciprocal line
+  | "low-return"            // a payoff below it
+  | "commitment-unresolved" // a known commitment that has not been settled
+  | "unilateral-defection"  // one side left a cooperative structure
+  | "free-riding"           // profiting from the group without contributing
+  | "adverse-outcome"       // a bad result that proves no one's character
+  | "agreement-reached"     // a deal was struck; not an alliance
+  | "negotiation-failed"    // talks broke down; not a misplay
+  | "hidden-role-revealed"; // a hidden identity surfaced; not a caught lie
 
 export interface WorldLogEntry {
   id: string;

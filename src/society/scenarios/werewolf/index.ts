@@ -527,7 +527,7 @@ export class WerewolfWorld extends SocialWorldBase {
       const text = targetIsWolf
         ? `${knightName} 发起决斗：${targetName} 是狼人，被当场淘汰！`
         : `${knightName} 发起决斗：${targetName} 并不是狼人——${knightName} 力战身亡。`;
-      this.addLog(text, this.day, targetIsWolf ? "deception-exposed" : "misplay");
+      this.addLog(text, this.day, targetIsWolf ? "hidden-role-revealed" : "adverse-outcome");
       this.suspicion.noteResolved(this.day, victimId);
       if (this.wolvesAlive().length === 0) {
         this.endGame(this.factionMembers(["seer", "witch", "hunter", "knight", "guard", "idiot", "villager"]), "所有狼人都已出局，村庄阵营获胜。");
@@ -1032,14 +1032,16 @@ export class WerewolfWorld extends SocialWorldBase {
             : `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。`
         : "本轮平票，无人被放逐。";
     for (const id of this.profiles.keys()) this.lastExperiences.set(id, `第 ${this.day} 天投票：${voteText} 投票：${[...this.votes].map(([voter, target]) => `${voter}->${target}`).join(", ")}。`);
+    // P0-09: eliminating a wolf reveals a hidden role, it does not prove a
+    // specific lie was caught; eliminating an innocent is an adverse outcome.
     const voteBeat = idiotSurvives
       ? undefined
       : eliminatedId
         ? eliminatedRole === "wolf" || eliminatedRole === "wolf-king"
-          ? "deception-exposed" as const
+          ? "hidden-role-revealed" as const
           : eliminatedRole === "jester"
             ? "win" as const
-            : "misplay" as const
+            : "adverse-outcome" as const
         : undefined;
     this.addLog(voteText, this.day, voteBeat);
 
@@ -1172,7 +1174,7 @@ export class WerewolfWorld extends SocialWorldBase {
         : "";
       this.lastExperiences.set(id, `第 ${this.day} 天夜晚：${nightText}${privateResult}${witchResult}`);
     }
-    this.addLog(nightText, this.day, wolfKillId || (wolfTargetId && bothOnWolfTarget) ? "betrayal" : undefined);
+    this.addLog(nightText, this.day, wolfKillId || (wolfTargetId && bothOnWolfTarget) ? "adverse-outcome" : undefined);
 
     // Appraisal + death-skill scheduling. Poisoned deaths cannot shoot.
     const deadByWolf = wolfKillId ?? (wolfTargetId && bothOnWolfTarget ? wolfTargetId : undefined);
@@ -1244,7 +1246,8 @@ export class WerewolfWorld extends SocialWorldBase {
     this.pendingShots.splice(index, 1);
     const shooterName = this.profiles.get(shooterId)?.displayName ?? shooterId;
     if (!targetId) {
-      this.addLog(`${shooterName} 选择了压枪，没有带走任何人。`, this.day, "misplay");
+      // Holding a death shot is a legal choice, not a mistake — no label.
+      this.addLog(`${shooterName} 选择了压枪，没有带走任何人。`, this.day);
       for (const id of this.profiles.keys()) {
         this.lastExperiences.set(id, `${shooterName} held their death shot.`);
       }

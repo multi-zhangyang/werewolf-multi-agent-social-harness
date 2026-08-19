@@ -208,7 +208,18 @@ export class CinematicDirector {
       alliance: { reason: "save", camera: "relationship", title: "公开结盟", priority: 6 },
       comeback: { reason: "save", camera: "wide-table", title: "逆转", priority: 8 },
       misplay: { reason: "contradiction", camera: "agent-mind", title: "失手", priority: 5 },
-      win: { reason: "win-condition-near", camera: "endgame", title: "终局", priority: 11 }
+      win: { reason: "win-condition-near", camera: "endgame", title: "终局", priority: 11 },
+      // P0-09 neutral beats keep light, low-weight presentation (role-action
+      // 0.16 instead of the betrayal/deception weights). Reveal and return
+      // beats stay unmapped: ingestWorld already covers eliminations and
+      // role flips with their own cameras.
+      "cooperative-outcome": { reason: "role-action", camera: "relationship", title: "合作达成", priority: 3 },
+      "high-return": { reason: "role-action", camera: "relationship", title: "回报丰厚", priority: 3 },
+      "unilateral-defection": { reason: "role-action", camera: "duel", title: "单方退出", priority: 4 },
+      "free-riding": { reason: "role-action", camera: "wide-table", title: "搭便车", priority: 3 },
+      "adverse-outcome": { reason: "role-action", camera: "wide-table", title: "不利结果", priority: 3 },
+      "agreement-reached": { reason: "role-action", camera: "relationship", title: "达成一致", priority: 3 },
+      "negotiation-failed": { reason: "role-action", camera: "duel", title: "谈判破裂", priority: 4 }
     };
     const mapped = mapping[entry.beat];
     if (!mapped) return;

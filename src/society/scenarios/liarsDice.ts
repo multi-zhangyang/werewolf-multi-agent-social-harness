@@ -380,6 +380,10 @@ export class LiarsDiceWorld extends SocialWorldBase {
     };
     this.history.push(outcome);
     const lastBidder = this.bids.at(-1)?.actorId;
+    // P0-09 exception: unlike hidden-role flips, a called bluff here is
+    // resolved by objective dice evidence (the world proves the bid false),
+    // so the strong label meets the §8.3 evidence bar. A DeceptionService will
+    // upgrade this into a structured deception episode later.
     this.addLog(input.text, this.round, input.challenged ? (input.loserId === lastBidder ? "deception-exposed" : "misplay") : "win");
     for (const profile of this.profiles.values()) {
       this.lastExperiences.set(

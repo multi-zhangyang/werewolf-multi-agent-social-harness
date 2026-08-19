@@ -276,7 +276,8 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     const result: RoundResult = { round: this.round, moves: { [ids[0]]: left, [ids[1]]: right }, payoffs: { [ids[0]]: payoffs[0], [ids[1]]: payoffs[1] }, text };
     this.history.push(result);
     for (const id of ids) this.lastExperiences.set(id, `${text} 你本轮选择了${moveLabel(result.moves[id])}。你的累计得分：${this.scores.get(id)}。`);
-    const beat = left === right ? (left === "cooperate" ? "promise-kept" as const : undefined) : "betrayal" as const;
+    // P0-09: the simultaneous choice is an outcome, not a promise or a betrayal.
+    const beat = left === right ? (left === "cooperate" ? "cooperative-outcome" as const : undefined) : "unilateral-defection" as const;
     this.addLog(text, this.round, beat);
     this.choices.clear();
     if (this.round >= this.totalRounds) {

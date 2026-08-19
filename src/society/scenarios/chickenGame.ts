@@ -236,7 +236,7 @@ export class ChickenGameWorld extends SocialWorldBase {
     const result: RoundResult = { round: this.round, choices: { [ids[0]]: left, [ids[1]]: right }, payoffs: { [ids[0]]: payoffs[0], [ids[1]]: payoffs[1] }, text };
     this.history.push(result);
     for (const id of ids) this.lastExperiences.set(id, `${text} 你本轮选择了${choiceLabel(result.choices[id])}。你的累计得分：${this.scores.get(id)}。`);
-    const beat = payoffs[0] === 0 && payoffs[1] === 0 ? "misplay" as const : payoffs[0] === 4 || payoffs[1] === 4 ? "win" as const : undefined;
+    const beat = payoffs[0] === 0 && payoffs[1] === 0 ? "adverse-outcome" as const : payoffs[0] === 4 || payoffs[1] === 4 ? "win" as const : undefined;
     this.addLog(text, this.round, beat);
     this.choices.clear();
     if (this.round >= this.totalRounds) {

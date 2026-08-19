@@ -278,7 +278,9 @@ export class NegotiationWorld extends SocialWorldBase {
           : `The deal collapsed this round; you took your fallback of ${result.outsideOptions[id]} instead.`
       });
     }
-    const beat = agreed ? "alliance" as const : "misplay" as const;
+    // P0-09: a deal is an agreement, not an alliance; a failed deal is a
+    // negotiation failure, not a mistake.
+    const beat = agreed ? "agreement-reached" as const : "negotiation-failed" as const;
     this.addLog(text, this.round, beat);
     this.demands.clear();
     if (this.round >= this.totalRounds) {

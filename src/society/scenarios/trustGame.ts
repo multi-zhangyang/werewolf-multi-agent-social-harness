@@ -409,14 +409,16 @@ export class TrustGameWorld extends SocialWorldBase {
         `Round ${this.round}: ${investorId} invested ${investment}, creating ${multipliedAmount}; ${trusteeId} returned ${returnedAmount}. Your payoff was ${payoffs[id]}. Roles reverse on the next round.`
       );
     }
+    // P0-09: with no Commitment record, return amounts only describe the
+    // payoff outcome — high/low/adverse — never a promise kept or broken.
     const reciprocal = investment > 0 && returnedAmount >= investment;
     const beat = investment === 0
       ? undefined
       : reciprocal
-        ? "promise-kept" as const
+        ? "high-return" as const
         : returnedAmount === 0
-          ? "betrayal" as const
-          : "promise-broken" as const;
+          ? "adverse-outcome" as const
+          : "low-return" as const;
     this.addLog(`第 ${this.round} 轮结算：投入 ${investment}，增长为 ${multipliedAmount}，返还 ${returnedAmount}。`, this.round, beat);
     this.investment = undefined;
     this.returnedAmount = undefined;

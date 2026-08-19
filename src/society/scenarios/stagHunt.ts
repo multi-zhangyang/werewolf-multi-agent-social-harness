@@ -245,9 +245,9 @@ export class StagHuntWorld extends SocialWorldBase {
     this.history.push(result);
     for (const id of ids) this.lastExperiences.set(id, `${text} 你的选择是 ${choices[id] === "stag" ? "猎鹿" : "猎兔"}。你当前得分 ${this.scores.get(id)}。`);
     const beat = allStag
-      ? "promise-kept" as const
+      ? "cooperative-outcome" as const
       : stagHunters.length > 0 && stagHunters.length < ids.length
-        ? "betrayal" as const
+        ? "unilateral-defection" as const
         : undefined;
     this.addLog(text, this.round, beat);
     this.choices.clear();
