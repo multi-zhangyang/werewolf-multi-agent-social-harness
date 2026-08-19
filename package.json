@@ -41,8 +41,9 @@
     "test:recovery": "vitest run tests/recovery",
     "test:security": "vitest run tests/security",
     "test:replay": "vitest run tests/replay",
+    "test:chaos": "vitest run tests/chaos",
     "test": "npm run test:unit && npm run test:contract && npm run test:integration",
-    "ci": "npm run lint && npm run typecheck && npm run test && npm run test:recovery && npm run test:security && npm run build",
+    "ci": "npm run lint && npm run typecheck && npm run test && npm run test:recovery && npm run test:security && npm run test:replay && npm run test:chaos && npm run build",
     "society:server": "npm run server"
   },
   "dependencies": {
