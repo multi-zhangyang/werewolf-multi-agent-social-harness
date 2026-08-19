@@ -55,6 +55,7 @@
     "clsx": "^2.1.1",
     "express": "^5.2.1",
     "lucide-react": "^1.31.0",
+    "openai": "^7.4.0",
     "radix-ui": "^1.6.7",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",

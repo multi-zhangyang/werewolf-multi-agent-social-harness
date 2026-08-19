@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { OpenAIProvider, type OpenAIProvider as OpenAIProviderType, type Session } from "@openai/agents";
+import OpenAI from "openai";
 import type {
   AgentMindState,
   AgentProfile,
@@ -875,7 +876,12 @@ export class SocietyRoom {
     const fallback = new OpenAIProvider({
       apiKey: this.apiKey ?? apiKeyFromEnv(),
       baseURL: this.baseURL ?? baseUrlFromEnv(),
-      useResponses: false
+      useResponses: false,
+      // The bundled OpenAI client defaults to a 600s request timeout; slow
+      // thinking models exceed it on long turns. Align the client timeout
+      // with the room's own wall-clock horizon so the room (not the client)
+      // decides when a turn is abandoned (§17.1).
+      openAIClient: this.makeOpenAIClient(this.apiKey ?? apiKeyFromEnv(), this.baseURL ?? baseUrlFromEnv())
     });
     if (providerProfileId === "") return fallback;
     const profile = this.modelRegistry.providerProfile(providerProfileId);
@@ -886,10 +892,20 @@ export class SocietyRoom {
     const client = new OpenAIProvider({
       apiKey: apiKeyForRef(profile),
       baseURL: profile.baseURL || baseUrlFromEnv(),
-      useResponses: profile.apiMode === "responses"
+      useResponses: profile.apiMode === "responses",
+      openAIClient: this.makeOpenAIClient(apiKeyForRef(profile), profile.baseURL || baseUrlFromEnv())
     });
     this.providerClients.set(providerProfileId, client);
     return client;
+  }
+
+  private makeOpenAIClient(apiKey: string, baseURL: string | undefined): OpenAI {
+    return new OpenAI({
+      apiKey,
+      baseURL,
+      timeout: this.turnTimeoutMs + this.turnGraceMs + 60_000,
+      maxRetries: 1
+    });
   }
 
   private async runActivation(activation: WorldActivation, actorIds: string[], overrideInstruction?: string): Promise<void> {
