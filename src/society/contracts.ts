@@ -549,6 +549,11 @@ export interface SocialEvent {
     | "quest-passed"     // a quest this agent was (or wasn't) on succeeded
     | "quest-failed"     // a quest this agent was (or wasn't) on failed
     | "assassinated"     // this agent was killed in the final assassination
+    | "commitment-proposed"  // someone declared a promise involving this agent
+    | "commitment-fulfilled" // a promise made to this agent was kept
+    | "commitment-violated"  // a promise made to this agent was broken
+    | "investment-made"      // the trust-game investment was sealed
+    | "return-made"          // the trust-game return was sealed
     | "win"              // this agent's faction won
     | "lose";            // this agent's faction lost
   turn: number;
@@ -574,6 +579,56 @@ export interface PlayerActionSpec {
   step?: number;
   channels?: SocialChannel[];
   targetFilter?: "any-living" | "other-living" | "non-wolf" | "any-dead";
+}
+
+/**
+ * A first-class promise inside a scenario (§8.1, Phase 1 minimal slice).
+ * Created only through an explicit typed tool (`make_commitment`), then
+ * settled by the world rules when the promised action's condition comes due.
+ * A commitment is the only evidence that may upgrade a neutral outcome label
+ * into promise-kept / promise-broken.
+ */
+export interface Commitment {
+  commitmentId: string;
+  round: number;
+  /** The promisor's seat and permanent character (§15.2). */
+  promisorActorId: string;
+  promisorCharacterId: string;
+  /** Who the declaration was made to. */
+  audienceActorIds: string[];
+  /** What was promised, in words the promisee can check. */
+  proposition: string;
+  promisedAction: {
+    actionType: "return-at-least" | "invest-at-least";
+    amount: number;
+    condition?: string;
+  };
+  state: "proposed" | "fulfilled" | "violated" | "void";
+  /** The idempotent command that created this commitment. */
+  createdByCommandId?: string;
+  settledByCommandId?: string;
+  createdAtTurn: number;
+  settledAtTurn?: number;
+  schemaVersion: number;
+}
+
+/**
+ * A structured, auditable decision record for one binding action (§5.4,
+ * Phase 1 minimal slice). Written by the world at command-commit time; it
+ * cites the commitments and beliefs the actor explicitly referenced, never
+ * raw chain-of-thought.
+ */
+export interface DecisionRecord {
+  decisionId: string;
+  actorId: string;
+  characterId: string;
+  turn: number;
+  phase: string;
+  action: string;
+  commandId?: string;
+  payloadSummary: string;
+  referencedCommitmentIds: string[];
+  beliefPropositions?: string[];
 }
 
 export interface WorldActionCommit {
@@ -693,6 +748,8 @@ export interface SocialWorld {
   experienceFor(actorId: string): string | undefined;
   /** Pending appraisal events for one participant; returns and clears them. */
   eventsFor(actorId: string): SocialEvent[];
+  /** Open (proposed, unsettled) commitments this participant is party to. */
+  openCommitmentsFor(actorId: string): Commitment[];
   sendMessage(input: {
     senderId: string;
     channel: SocialChannel;

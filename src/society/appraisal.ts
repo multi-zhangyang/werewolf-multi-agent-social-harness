@@ -209,6 +209,11 @@ function eventTypeLabel(type: SocialEvent["type"]): string {
     "quest-passed": "任务成功",
     "quest-failed": "任务失败",
     assassinated: "被刺杀",
+    "commitment-proposed": "有人向你公开承诺",
+    "commitment-fulfilled": "承诺兑现",
+    "commitment-violated": "承诺破裂",
+    "investment-made": "投资结算",
+    "return-made": "返还结算",
     win: "赢得本局",
     lose: "输掉本局"
   };
@@ -409,6 +414,38 @@ function appraisalFor(mind: AgentMindState, event: SocialEvent, t: AgentTemperam
         needs: { security: -0.15 },
         salience: 0.8
       };
+    }
+    case "commitment-proposed": {
+      // A declaration is only a claim until the action settles; it earns
+      // attention, not relationship credit — nothing has been kept yet.
+      return { pad: { arousal: 0.04 }, needs: { security: 0.04 }, salience: 0.45 };
+    }
+    case "commitment-fulfilled": {
+      return {
+        emotions: { joy: 0.06 },
+        social: { gratitude: mod(0.18, A, 0.8) },
+        pad: { pleasure: 0.08 },
+        needs: { security: 0.08, connection: 0.06 },
+        relationship: { trust: 0.12, affinity: 0.08, tension: -0.04 },
+        salience: 0.6
+      };
+    }
+    case "commitment-violated": {
+      return {
+        emotions: { anger: mod(0.2, N, 1.2), sadness: 0.08 },
+        social: { contempt: mod(0.1, A, -0.6) },
+        pad: { pleasure: -0.14, dominance: -0.06 },
+        needs: { security: -0.12 },
+        relationship: { trust: -0.25, affinity: -0.1, tension: 0.2, respect: -0.08 },
+        salience: 0.8
+      };
+    }
+    case "investment-made": {
+      // The actor's own sealed action; light engagement, no relationship effect.
+      return { pad: { arousal: 0.03 }, energy: -0.02, salience: 0.2 };
+    }
+    case "return-made": {
+      return { pad: { arousal: 0.03 }, salience: 0.25 };
     }
     case "win": {
       return {

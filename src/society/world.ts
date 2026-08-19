@@ -4,6 +4,7 @@ import type {
   AgentObservation,
   AgentProfile,
   AgentStatus,
+  Commitment,
   PlayerActionSpec,
   ScenarioId,
   ScenarioSummary,
@@ -184,7 +185,9 @@ export abstract class SocialWorldBase implements SocialWorld {
       commit = { action, detail: input.text, result: { messageId: message.id }, commandId: `msg:${message.id}` };
     } else {
       const raw = await this.performDomainAction(actorId, action, payload);
-      commit = { ...raw, commandId: randomUUID() };
+      // A scenario may mint its own stable receipt (e.g. for a DecisionRecord);
+      // otherwise the gate assigns one.
+      commit = { ...raw, commandId: raw.commandId ?? randomUUID() };
     }
     this.recentReceipts.set(receiptKey, structuredClone(commit));
     if (this.recentReceipts.size > SocialWorldBase.RECENT_RECEIPT_LIMIT) {
@@ -239,6 +242,11 @@ export abstract class SocialWorldBase implements SocialWorld {
     const pending = this.pendingEvents.get(actorId) ?? [];
     this.pendingEvents.delete(actorId);
     return pending;
+  }
+
+  /** Scenarios with a commitment ledger override this (§8.1 / Phase 1). */
+  openCommitmentsFor(_actorId: string): Commitment[] {
+    return [];
   }
 
   /** Queue a structured social event for one participant's appraisal engine. */
@@ -323,7 +331,7 @@ export abstract class SocialWorldBase implements SocialWorld {
   /** Remove pending/private domain state before a snapshot crosses a boundary. */
   protected redactDetails(details: Record<string, unknown>, actorId?: string): Record<string, unknown> {
     const next = structuredClone(details);
-    for (const key of ["pendingChoices", "pendingContributions", "pendingVotes", "pendingNightTargets", "pendingDemands", "pendingTeamVotes", "pendingQuestVotes", "hiddenDice", "roles"]) {
+    for (const key of ["pendingChoices", "pendingContributions", "pendingVotes", "pendingNightTargets", "pendingDemands", "pendingTeamVotes", "pendingQuestVotes", "hiddenDice", "decisionRecords", "roles"]) {
       if (!(key in next)) continue;
       if (key === "roles" && actorId) {
         const roles = next[key];
