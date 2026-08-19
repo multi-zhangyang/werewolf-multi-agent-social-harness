@@ -323,7 +323,7 @@ export abstract class SocialWorldBase implements SocialWorld {
   /** Remove pending/private domain state before a snapshot crosses a boundary. */
   protected redactDetails(details: Record<string, unknown>, actorId?: string): Record<string, unknown> {
     const next = structuredClone(details);
-    for (const key of ["pendingChoices", "pendingContributions", "pendingVotes", "pendingNightTargets", "pendingDemands", "hiddenDice", "roles"]) {
+    for (const key of ["pendingChoices", "pendingContributions", "pendingVotes", "pendingNightTargets", "pendingDemands", "pendingTeamVotes", "pendingQuestVotes", "hiddenDice", "roles"]) {
       if (!(key in next)) continue;
       if (key === "roles" && actorId) {
         const roles = next[key];
