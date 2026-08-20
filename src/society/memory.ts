@@ -12,11 +12,17 @@ export class AssociativeMemory implements AgentMemoryStore {
   }
 
   async remember(input: Omit<AgentMemoryItem, "id" | "createdAt" | "links">): Promise<AgentMemoryItem> {
+    const idempotencySource = input.sourceRefs?.find((sourceId) => sourceId.startsWith("memory-suggestion-"));
+    if (idempotencySource) {
+      const existing = this.entries.find((entry) => entry.sourceRefs?.includes(idempotencySource));
+      if (existing) return structuredClone(existing);
+    }
     const entry: AgentMemoryItem = {
       ...input,
       id: randomUUID(),
       text: input.text.trim(),
       tags: [...input.tags],
+      ...(input.sourceRefs ? { sourceRefs: [...new Set(input.sourceRefs)] } : {}),
       links: [],
       createdAt: new Date().toISOString()
     };

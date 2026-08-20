@@ -9,7 +9,7 @@
  * secrets ever reach the archive: it only holds what the SSE stream already
  * exposes to an observer.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentMindState, AgentProfile, ScenarioId } from "../contracts";
 import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "../room";
@@ -21,6 +21,8 @@ export interface RoomCheckpoint {
   status: string;
   snapshot: SocietyRoomSnapshot;
   envelopes: SocietyRoomEventEnvelope[];
+  /** Protected, low-frequency replay anchors retained beyond SSE deltas. */
+  replayEnvelopes?: SocietyRoomEventEnvelope[];
   agentMinds: Record<string, AgentMindState>;
   sessionFiles: Record<string, string>;
   /** Full participant profiles (character + controller), for recovery. */
@@ -53,8 +55,14 @@ export function defaultRoomArchiveDir(cwd: string = process.cwd()): string {
 }
 
 export class RoomArchiveStore {
+  private readonly failures: RoomArchiveFailure[] = [];
+
   constructor(private readonly dir = defaultRoomArchiveDir()) {
-    mkdirSync(dir, { recursive: true });
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch (cause) {
+      throw this.recordError("ARCHIVE_INITIALIZE_FAILED", "initialize", undefined, false, cause);
+    }
   }
 
   checkpointFile(roomId: string): string {
@@ -69,28 +77,21 @@ export class RoomArchiveStore {
       mkdirSync(path.dirname(file), { recursive: true });
       writeFileSync(temporary, JSON.stringify(checkpoint), { mode: 0o600 });
       renameSync(temporary, file);
-    } catch {
-      // Best-effort checkpoint; the room keeps running without it.
+    } catch (cause) {
+      throw this.recordError("ARCHIVE_WRITE_FAILED", "save", checkpoint.roomId, true, cause);
     }
   }
 
   load(roomId: string): RoomCheckpoint | undefined {
     const file = this.checkpointFile(roomId);
     if (!existsSync(file)) return undefined;
-    try {
-      const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RoomCheckpoint>;
-      if (typeof parsed.roomId !== "string" || !parsed.snapshot) return undefined;
-      return parsed as RoomCheckpoint;
-    } catch {
-      return undefined;
-    }
+    return this.readCheckpoint(file, roomId);
   }
 
   /** Summaries of all archived rooms, newest first (for the landing room list). */
   list(): ArchivedRoomSummary[] {
     if (!existsSync(this.dir)) return [];
-    return readdirSafe(this.dir)
-      .map((name) => readFileSafe(path.join(this.dir, name, "checkpoint.json")))
+    return this.readAll()
       .filter((checkpoint): checkpoint is RoomCheckpoint => Boolean(checkpoint))
       .map((checkpoint) => ({
         roomId: checkpoint.roomId,
@@ -116,8 +117,7 @@ export class RoomArchiveStore {
    */
   interrupted(): RoomCheckpoint[] {
     if (!existsSync(this.dir)) return [];
-    return readdirSafe(this.dir)
-      .map((name) => readFileSafe(path.join(this.dir, name, "checkpoint.json")))
+    return this.readAll()
       .filter((checkpoint): checkpoint is RoomCheckpoint => Boolean(checkpoint))
       .filter((checkpoint) => checkpoint.status === "running" || checkpoint.status === "paused")
       .filter((checkpoint) => checkpoint.recoverable !== false)
@@ -126,26 +126,83 @@ export class RoomArchiveStore {
       .filter((checkpoint) => checkpoint.snapshot.mode !== "human")
       .sort((left, right) => right.archivedAt.localeCompare(left.archivedAt));
   }
-}
 
-import { readdirSync } from "node:fs";
-function readdirSafe(dir: string): string[] {
-  try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name);
-  } catch {
-    return [];
+  diagnostics(): RoomArchiveFailure[] {
+    return this.failures.map((failure) => ({ ...failure }));
+  }
+
+  private readAll(): Array<RoomCheckpoint | undefined> {
+    let names: string[];
+    try {
+      names = readdirSync(this.dir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
+    } catch (cause) {
+      this.recordError("ARCHIVE_LIST_FAILED", "list", undefined, true, cause);
+      return [];
+    }
+    return names.map((name) => {
+      const file = path.join(this.dir, name, "checkpoint.json");
+      if (!existsSync(file)) return undefined;
+      try {
+        return this.readCheckpoint(file, name);
+      } catch {
+        return undefined;
+      }
+    });
+  }
+
+  private readCheckpoint(file: string, expectedRoomId?: string): RoomCheckpoint {
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch (cause) {
+      throw this.recordError("ARCHIVE_READ_FAILED", "load", expectedRoomId, true, cause);
+    }
+    try {
+      const parsed = JSON.parse(text) as Partial<RoomCheckpoint>;
+      if (typeof parsed.roomId !== "string" || !parsed.snapshot || (expectedRoomId && parsed.roomId !== expectedRoomId)) {
+        throw new Error("invalid checkpoint envelope");
+      }
+      return parsed as RoomCheckpoint;
+    } catch (cause) {
+      throw this.recordError("ARCHIVE_CORRUPT", "load", expectedRoomId, false, cause);
+    }
+  }
+
+  private recordError(
+    code: RoomArchiveFailure["code"],
+    operation: RoomArchiveOperation,
+    roomId: string | undefined,
+    retryable: boolean,
+    cause: unknown
+  ): RoomArchiveError {
+    const failure: RoomArchiveFailure = {
+      code,
+      operation,
+      ...(roomId ? { roomId } : {}),
+      retryable,
+      at: new Date().toISOString()
+    };
+    this.failures.push(failure);
+    if (this.failures.length > 50) this.failures.splice(0, this.failures.length - 50);
+    return new RoomArchiveError(failure, { cause });
   }
 }
 
-function readFileSafe(file: string): RoomCheckpoint | undefined {
-  if (!existsSync(file)) return undefined;
-  try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RoomCheckpoint>;
-    if (typeof parsed.roomId !== "string" || !parsed.snapshot) return undefined;
-    return parsed as RoomCheckpoint;
-  } catch {
-    return undefined;
+export type RoomArchiveOperation = "initialize" | "save" | "load" | "list";
+
+export interface RoomArchiveFailure {
+  code: "ARCHIVE_INITIALIZE_FAILED" | "ARCHIVE_WRITE_FAILED" | "ARCHIVE_READ_FAILED" | "ARCHIVE_CORRUPT" | "ARCHIVE_LIST_FAILED";
+  operation: RoomArchiveOperation;
+  roomId?: string;
+  retryable: boolean;
+  at: string;
+}
+
+export class RoomArchiveError extends Error {
+  constructor(readonly failure: RoomArchiveFailure, options?: ErrorOptions) {
+    super(failure.code, options);
+    this.name = "RoomArchiveError";
   }
 }

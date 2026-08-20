@@ -24,6 +24,8 @@ export interface DiscussionMessage {
   text: string;
   /** Stable id of the original message this one replies to (world message id). */
   replyTo?: string;
+  /** Omitted for public speech; set for private/team delivery. */
+  targetActorIds?: string[];
 }
 
 /**
@@ -34,13 +36,22 @@ export interface DiscussionMessage {
 export interface ConversationSignal {
   kind:
     | "question"
+    | "answer"
+    | "request"
     | "accusation"
+    | "defense"
     | "promise"
     | "offer"
+    | "acceptance"
+    | "rejection"
     | "threat"
     | "evidence"
     | "challenge"
-    | "alliance-proposal";
+    | "alliance-proposal"
+    | "apology"
+    | "endorsement"
+    | "warning"
+    | "disclosure";
   sourceActorId: string;
   targetActorIds: string[];
   sourceMessageId?: string;
@@ -86,13 +97,22 @@ const QUESTION_HINT = /？|\?|吗|呢|吧|怎么|为什么|凭什么|谁/;
 
 const SIGNAL_URGENCY: Record<ConversationSignal["kind"], number> = {
   question: 1.2,
+  answer: 0.75,
+  request: 1.5,
   accusation: 1.8,
+  defense: 0.9,
   promise: 1.0,
   offer: 1.4,
+  acceptance: 0.8,
+  rejection: 1.25,
   threat: 2.2,
   evidence: 1.2,
   challenge: 1.5,
-  "alliance-proposal": 1.4
+  "alliance-proposal": 1.4,
+  apology: 0.9,
+  endorsement: 0.7,
+  warning: 1.15,
+  disclosure: 1.1
 };
 
 export class DiscussionDirector {
@@ -148,7 +168,8 @@ export class DiscussionDirector {
       messageId: message.messageId,
       senderId: message.senderId,
       text: message.text,
-      ...(message.replyTo ? { replyTo: message.replyTo } : {})
+      ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+      ...(message.targetActorIds?.length ? { targetActorIds: [...message.targetActorIds] } : {})
     });
     this.messageIndex.set(message.messageId, this.messages[this.messages.length - 1]);
     this.messageCount += 1;
@@ -161,7 +182,8 @@ export class DiscussionDirector {
     const replySender = message.replyTo ? this.messageIndex.get(message.replyTo)?.senderId : undefined;
     for (const actorId of this.actorIds) {
       if (actorId === message.senderId) continue;
-      let pressure = 0;
+      if (message.targetActorIds?.length && !message.targetActorIds.includes(actorId)) continue;
+      let pressure = message.targetActorIds?.includes(actorId) ? 1.5 : 0;
       const mentioned = text.includes(this.displayName(actorId)) || text.includes(actorId);
       if (mentioned) pressure += 2.4;
       if (replySender === actorId) pressure += 2.0;
@@ -301,4 +323,26 @@ export class DiscussionDirector {
     this.wave = Number(value.wave ?? 0);
     this.messageCount = Number(value.messageCount ?? 0);
   }
+}
+
+export function conversationSignalsFromSocialActs(
+  sourceActorId: string,
+  sourceMessageId: string,
+  declarations: Array<{ kind: string; targetActorIds?: string[] }>
+): ConversationSignal[] {
+  const supported = new Set<ConversationSignal["kind"]>([
+    "question", "answer", "request", "accusation", "defense", "promise", "offer", "acceptance",
+    "rejection", "threat", "alliance-proposal", "apology", "endorsement", "warning", "disclosure"
+  ]);
+  return declarations.flatMap((declaration): ConversationSignal[] => {
+    if (!supported.has(declaration.kind as ConversationSignal["kind"])) return [];
+    const targetActorIds = [...new Set(declaration.targetActorIds ?? [])];
+    if (!targetActorIds.length) return [];
+    return [{
+      kind: declaration.kind as ConversationSignal["kind"],
+      sourceActorId,
+      targetActorIds,
+      sourceMessageId
+    }];
+  });
 }

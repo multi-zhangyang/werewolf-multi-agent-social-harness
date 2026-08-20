@@ -375,7 +375,7 @@ interface ProjectedCommitment {
   commitmentId: string;
   promisorActorId: string;
   proposition: string;
-  state: "proposed" | "fulfilled" | "violated" | "void";
+  state: "proposed" | "accepted" | "fulfilled" | "violated" | "void";
 }
 
 function CausalityCard({ room }: { room: SocietyRoomSnapshot }): ReactNode {
@@ -387,7 +387,7 @@ function CausalityCard({ room }: { room: SocietyRoomSnapshot }): ReactNode {
         return typeof value.commitmentId === "string"
           && typeof value.promisorActorId === "string"
           && typeof value.proposition === "string"
-          && ["proposed", "fulfilled", "violated", "void"].includes(String(value.state));
+          && ["proposed", "accepted", "fulfilled", "violated", "void"].includes(String(value.state));
       })
     : [];
   const commitments: ProjectedCommitment[] = projection?.commitments.length ? projection.commitments : legacyCommitments;
@@ -542,7 +542,7 @@ function deceptionStatusLabel(status: string): string {
 }
 
 function commitmentStateLabel(state: ProjectedCommitment["state"]): string {
-  return state === "proposed" ? "待结算" : state === "fulfilled" ? "已履约" : state === "violated" ? "已违约" : "已作废";
+  return state === "proposed" ? "待接受" : state === "accepted" ? "已接受" : state === "fulfilled" ? "已履约" : state === "violated" ? "已违约" : "已作废";
 }
 
 function ActivityCard({ toolCalls, names, avatarSeeds }: { toolCalls: RoomConnection["toolCalls"]; names: Map<string, string>; avatarSeeds: Map<string, string> }): ReactNode {
@@ -589,7 +589,8 @@ function TimelineCard({ timeline, names }: { timeline: TimelineEntry[]; names: M
     action: <Crosshair className="size-3.5 text-amber-400" />,
     cue: <Clapperboard className="size-3.5 text-rose-400" />,
     memory: <BrainCircuit className="size-3.5 text-teal-400" />,
-    pressure: <Flame className="size-3.5 text-orange-400" />
+    pressure: <Flame className="size-3.5 text-orange-400" />,
+    notice: <Activity className="size-3.5 text-muted-foreground" />
   };
   return (
     <div className="space-y-0.5 rounded-lg border border-border bg-card p-1.5">

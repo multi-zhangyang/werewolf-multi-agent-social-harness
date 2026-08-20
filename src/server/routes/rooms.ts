@@ -1,8 +1,9 @@
+import { timingSafeEqual } from "node:crypto";
 import express from "express";
 import { z } from "zod";
 import { characterAgentProfile } from "../../society/profiles";
 import { ALL_SCENARIOS, SCENARIO_METADATA } from "../../society/scenarios";
-import type { AgentProfile, ScenarioId, ScenarioSummary, SpectatorMode } from "../../society/contracts";
+import type { AgentProfile, ScenarioId, ScenarioSummary, SpectatorMode, WorldSnapshot } from "../../society/contracts";
 import { contextLabel } from "../../society/context-manager";
 import type { SocietyRoom, SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "../../society/room";
 import { defaultCapabilities, defaultContextPolicy, persistRegistry, type AgentModelBinding, type ContextPolicy, type ModelProfile } from "../../society/models";
@@ -16,7 +17,7 @@ import {
   tokenFromRequest,
   type RoomAuthority
 } from "../auth";
-import type { RoomCheckpoint } from "../../society/persistence";
+import { RoomArchiveError, type RoomCheckpoint } from "../../society/persistence";
 import { getProviderSettings, publicSettings, saveProviderSettings, testProviderSettings, writeEnvKey } from "../settings";
 import { mergeProbeResult, probeCapabilities } from "../probe";
 
@@ -42,7 +43,8 @@ function resolveViewer(
       ? raw
       : "public";
   if (requested === "postgame") {
-    return room.currentStatus() === "finished" ? { mode: "postgame" } : { mode: "public" };
+    const privileged = authority.owner || isOperator;
+    return room.currentStatus() === "finished" ? { mode: "postgame", privileged } : { mode: "public", privileged };
   }
   if (requested === "omniscient") {
     return authority.owner || isOperator ? { mode: "omniscient" } : { mode: "public" };
@@ -54,14 +56,14 @@ function resolveViewer(
       const requestedAgent = typeof request.query.agent === "string" && request.query.agent.trim()
         ? request.query.agent.trim()
         : undefined;
-      return { mode: "agent-pov", ...(requestedAgent ? { agentId: requestedAgent } : {}) };
+      return { mode: "agent-pov", privileged: true, ...(requestedAgent ? { agentId: requestedAgent } : {}) };
     }
     return { mode: "public" };
   }
-  return { mode: "public" };
+  return { mode: "public", privileged: authority.owner || isOperator };
 }
 
-/** Owner / participant / strict-operator gate for room control operations. */
+/** Owner / strict-operator gate for room control operations. */
 function requireRoomControl(
   request: express.Request,
   response: express.Response,
@@ -69,25 +71,100 @@ function requireRoomControl(
   auth: ServerContext["auth"]
 ): RoomAuthority | undefined {
   const authority = roomAuthorityFor(request, room);
-  if (authority.owner || authority.participantActorId) return authority;
+  if (authority.owner) return authority;
   if (auth.isOperatorToken(tokenFromRequest(request))) return authority;
   response.status(403).json({
     error: "CONTROL_FORBIDDEN",
-    message: "A valid owner, participant or operator token is required to control this room."
+    message: "A valid room-owner or operator token is required to control this room."
   });
   return undefined;
 }
 
 /** Read-only checkpoint projection: public world history, never private minds. */
-function publicArchivedSnapshot(checkpoint: RoomCheckpoint): SocietyRoomSnapshot {
-  const snapshot = structuredClone(checkpoint.snapshot);
+export function publicArchivedSnapshot(checkpoint: RoomCheckpoint): SocietyRoomSnapshot {
+  const snapshot = checkpoint.snapshot;
+  const world = snapshot.world;
   return {
-    ...snapshot,
+    id: snapshot.id,
+    scenarioId: snapshot.scenarioId,
+    title: snapshot.title,
+    mode: snapshot.mode,
+    seasonMode: snapshot.seasonMode,
+    status: snapshot.status,
+    createdAt: snapshot.createdAt,
+    updatedAt: snapshot.updatedAt,
     world: {
-      ...snapshot.world,
-      messages: (snapshot.world.messages ?? []).filter((message) => message.channel === "public")
+      roomId: world.roomId,
+      scenarioId: world.scenarioId,
+      title: world.title,
+      status: world.status,
+      turn: world.turn,
+      totalTurns: world.totalTurns,
+      phase: world.phase,
+      summary: world.summary,
+      agents: world.agents.map((agent) => ({
+        id: agent.id,
+        displayName: agent.displayName,
+        characterId: agent.characterId,
+        status: agent.status,
+        alive: agent.alive,
+        ...(agent.score === undefined ? {} : { score: agent.score })
+      })),
+      messages: (world.messages ?? [])
+        .filter((message) => message.channel === "public")
+        .map((message) => ({
+          id: message.id,
+          roomId: message.roomId,
+          senderId: message.senderId,
+          senderName: message.senderName,
+          channel: "public" as const,
+          text: message.text,
+          turn: message.turn,
+          phase: message.phase,
+          createdAt: message.createdAt,
+          ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+          ...(message.wave === undefined ? {} : { wave: message.wave })
+        })),
+      log: world.log.map((entry) => ({
+        id: entry.id,
+        text: entry.text,
+        turn: entry.turn,
+        phase: entry.phase,
+        at: entry.at,
+        ...(entry.beat ? { beat: entry.beat } : {})
+      })),
+      details: {}
     },
-    participants: (snapshot.participants ?? []).map(({ mind: _mind, ...participant }) => participant)
+    participants: (snapshot.participants ?? []).map((participant) => ({
+      profile: {
+        id: participant.profile.id,
+        displayName: participant.profile.displayName,
+        characterId: participant.profile.characterId,
+        model: participant.profile.model,
+        controller: participant.profile.controller,
+        persona: participant.profile.persona,
+        decisionBiases: participant.profile.decisionBiases,
+        voice: participant.profile.voice,
+        autobiographicalAnchors: participant.profile.autobiographicalAnchors
+      },
+      status: participant.status,
+      alive: participant.alive,
+      ...(participant.score === undefined ? {} : { score: participant.score }),
+      ...(participant.paused === undefined ? {} : { paused: participant.paused })
+    })),
+    ...(snapshot.highlights
+      ? {
+          highlights: snapshot.highlights.map((highlight) => ({
+            id: highlight.id,
+            at: highlight.at,
+            title: highlight.title,
+            ...(highlight.subtitle ? { subtitle: highlight.subtitle } : {}),
+            camera: highlight.camera,
+            priority: highlight.priority,
+            focusAgentIds: [...highlight.focusAgentIds]
+          }))
+        }
+      : {})
   };
 }
 
@@ -168,7 +245,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.put("/api/settings", (request, response, next) => {
-    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
+    if (!requireGlobalOperator(request, response, context.auth)) return;
     try {
       const input = settingsSchema.parse(request.body ?? {});
       response.json(saveProviderSettings(input));
@@ -178,7 +255,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.post("/api/settings/test", (request, response, next) => {
-    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
+    if (!requireGlobalOperator(request, response, context.auth)) return;
     void testProviderSettings()
       .then((result) => response.json(result))
       .catch(next);
@@ -205,7 +282,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.post("/api/model-config/probe", (request, response, next) => {
-    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
+    if (!requireGlobalOperator(request, response, context.auth)) return;
     const profileId = typeof request.body?.modelProfileId === "string" ? request.body.modelProfileId : "";
     const profile = context.models.modelProfile(profileId);
     if (!profile) {
@@ -230,7 +307,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.put("/api/model-config", (request, response, next) => {
-    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
+    if (!requireGlobalOperator(request, response, context.auth)) return;
     try {
       const input = modelConfigSchema.parse(request.body ?? {});
       const state = applyModelConfig(context, input);
@@ -258,16 +335,23 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.get("/api/rooms/:roomId/archive", (request, response) => {
-    const checkpoint = context.archive.load(request.params.roomId);
+    let checkpoint: RoomCheckpoint | undefined;
+    try {
+      checkpoint = context.archive.load(request.params.roomId);
+    } catch (error) {
+      const code = error instanceof RoomArchiveError ? error.failure.code : "ARCHIVE_READ_FAILED";
+      response.status(503).json({ error: code, message: "The room archive is unavailable or corrupt." });
+      return;
+    }
     if (!checkpoint) {
       response.status(404).json({ error: "ARCHIVE_NOT_FOUND", message: "No checkpoint exists for this room." });
       return;
     }
     // Public archive: a projected view. Forensic access (operator only)
     // returns the full checkpoint minus session file paths (§16.4).
-    const operator = isOperatorFor(context.auth, request, (token) => context.rooms.hasOwnerToken(token));
+    const operator = isOperatorFor(context.auth, request);
     if (operator) {
-      const { sessionFiles: _sessionFiles, ...rest } = checkpoint;
+      const { sessionFiles: _sessionFiles, ownerToken: _ownerToken, ...rest } = checkpoint;
       response.json({ ...rest, sessionCount: Object.keys(checkpoint.sessionFiles ?? {}).length });
       return;
     }
@@ -294,7 +378,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
 
   // A fresh season: forget every cross-game memory and start over.
   app.delete("/api/season", (request, response) => {
-    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
+    if (!requireGlobalOperator(request, response, context.auth)) return;
     context.season.clear();
     response.json({ cleared: true, dossiers: [] });
   });
@@ -302,7 +386,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   // Forget ONE character's cross-game memory (§7.2): their next game starts
   // from a clean slate while everyone else keeps their history.
   app.delete("/api/season/:characterId", (request, response) => {
-    if (!requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token))) return;
+    if (!requireGlobalOperator(request, response, context.auth)) return;
     const characterId = decodeURIComponent(request.params.characterId);
     if (!characterId.trim() || characterId.length > 120) {
       response.status(400).json({ error: "CHARACTER_ID_INVALID", message: "Provide a valid character id." });
@@ -363,7 +447,14 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     if (!room) {
       // Archive fallback (§5.9): a finished or interrupted room that left the
       // process memory can still be viewed read-only from its checkpoint.
-      const checkpoint = context.archive.load(request.params.roomId);
+      let checkpoint: RoomCheckpoint | undefined;
+      try {
+        checkpoint = context.archive.load(request.params.roomId);
+      } catch (error) {
+        const code = error instanceof RoomArchiveError ? error.failure.code : "ARCHIVE_READ_FAILED";
+        response.status(503).json({ error: code, message: "The room archive is unavailable or corrupt." });
+        return;
+      }
       if (checkpoint?.snapshot) {
         response.json(publicArchivedSnapshot(checkpoint));
         return;
@@ -458,7 +549,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
-    const token = tokenFromRequest(request) ?? bodyToken(request);
+    const token = tokenFromRequest(request);
     const action = request.body?.action;
     if (typeof action !== "string" || !action.trim()) {
       response.status(400).json({ error: "ACTION_REQUIRED", message: "Provide a structured action name." });
@@ -472,6 +563,82 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     void room.submitHumanAction(token!, action, request.body?.payload).then((commit) => {
       response.status(202).json({ commit, room: room.snapshotFor(actorId) });
     }).catch(next);
+  });
+
+  app.get("/api/rooms/:roomId/replay", (request, response) => {
+    const room = context.rooms.get(request.params.roomId);
+    let checkpoint: RoomCheckpoint | undefined;
+    if (!room) {
+      try {
+        checkpoint = context.archive.load(request.params.roomId);
+      } catch (error) {
+        const code = error instanceof RoomArchiveError ? error.failure.code : "ARCHIVE_READ_FAILED";
+        response.status(503).json({ error: code, message: "The room replay archive is unavailable or corrupt." });
+        return;
+      }
+      if (!checkpoint) {
+        response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist." });
+        return;
+      }
+    }
+
+    const rawMode = request.query.mode;
+    const mode = rawMode === "agent-pov" || rawMode === "omniscient" ? rawMode : "public";
+    const token = tokenFromRequest(request);
+    const operator = context.auth.isOperatorToken(token);
+    const authority = room ? roomAuthorityFor(request, room) : undefined;
+    const archivedOwner = checkpoint ? archivedOwnerTokenMatches(checkpoint, token) : false;
+    const privileged = operator || Boolean(authority?.owner) || archivedOwner;
+    let agentId: string | undefined;
+    if (mode === "agent-pov") {
+      agentId = authority?.participantActorId;
+      if (!agentId && privileged && typeof request.query.agent === "string") agentId = request.query.agent.trim();
+      const actorIds = new Set((room?.snapshotFor().participants ?? checkpoint?.snapshot.participants ?? []).map((entry) => entry.profile.id));
+      if (!agentId || !actorIds.has(agentId)) {
+        response.status(403).json({
+          error: "AGENT_POV_FORBIDDEN",
+          message: "A participant may replay only its own POV; room owners/operators must select a valid agent."
+        });
+        return;
+      }
+    } else if (mode === "omniscient" && !privileged) {
+      response.status(403).json({ error: "OMNISCIENT_FORBIDDEN", message: "Room-owner or operator authorization is required." });
+      return;
+    }
+
+    const fromSequence = nonNegativeSequence(request.query.fromSequence, 0);
+    const toSequence = nonNegativeSequence(request.query.toSequence, Number.MAX_SAFE_INTEGER);
+    if (toSequence < fromSequence) {
+      response.status(400).json({ error: "REPLAY_RANGE_INVALID", message: "toSequence must be at least fromSequence." });
+      return;
+    }
+    const source = room
+      ? room.replayEventsSince(Math.max(0, fromSequence - 1))
+      : archivedReplayEnvelopes(checkpoint!);
+    const viewer: SpectatorViewer = mode === "agent-pov"
+      ? { mode: "agent-pov", agentId, privileged }
+      : mode === "omniscient" ? { mode: "omniscient" } : { mode: "public", privileged: false };
+    const events = source
+      .filter((entry) => entry.seq >= fromSequence && entry.seq <= toSequence)
+      .flatMap((entry) => {
+        const projected = projectReplayEnvelope(entry, viewer);
+        return projected ? [projected] : [];
+      });
+    const hasReplayFrames = source.some((entry) =>
+      mode === "agent-pov"
+        ? entry.event.type === "agent.pov-frame" && entry.event.actorId === agentId
+        : mode === "omniscient" ? entry.event.type === "world.operator-frame" : entry.event.type === "world.updated"
+    );
+    response.json({
+      roomId: request.params.roomId,
+      mode,
+      ...(agentId ? { agentId } : {}),
+      fromSequence,
+      toSequence: toSequence === Number.MAX_SAFE_INTEGER ? null : toSequence,
+      completeness: hasReplayFrames ? "scoped-frames" : "legacy-limited",
+      truncatedBeforeSequence: source.length ? source[0].seq > 1 : false,
+      events
+    });
   });
 
   app.get("/api/rooms/:roomId/events", (request, response) => {
@@ -799,14 +966,6 @@ function modelCatalogForEnv(context: ServerContext): Array<{ id: string; name: s
   });
 }
 
-function bodyToken(request: express.Request): string | undefined {
-  const header = request.header("x-player-token") ?? request.header("authorization");
-  if (header?.toLowerCase().startsWith("bearer ")) return header.slice(7).trim();
-  if (header) return header.trim();
-  const value = request.body?.token;
-  return typeof value === "string" && value ? value : undefined;
-}
-
 /**
  * SSE cursor from the query string or the Last-Event-ID header that
  * EventSource re-sends automatically on reconnect. Undefined = fresh stream.
@@ -846,6 +1005,79 @@ function projectEnvelopeForViewer(
   }
   if (projected === event) return envelope;
   return { ...envelope, event: projected };
+}
+
+function projectReplayEnvelope(
+  envelope: SocietyRoomEventEnvelope,
+  viewer: SpectatorViewer
+): SocietyRoomEventEnvelope | undefined {
+  const event = envelope.event;
+  // Replay anchors are persisted in the protected room stream and fetched on
+  // demand; duplicating their full snapshots over live SSE would add noise
+  // and bandwidth without changing the current room view.
+  if (event.type === "agent.pov-frame" || event.type === "world.operator-frame" || event.type === "world.public-frame") return undefined;
+  const projected = projectEventFor(event, viewer);
+  if (!projected) return undefined;
+  if (event.type === "world.updated") {
+    // Historical world.updated envelopes were emitted from the public world
+    // projection, not from a particular participant's AuthorizedObservation.
+    // Agent replay therefore uses explicit agent.pov-frame anchors and never
+    // backfills a past POV from this less-scoped snapshot.
+    if (viewer.mode === "agent-pov") return undefined;
+    if (viewer.mode === "public") {
+      return {
+        id: envelope.id,
+        seq: envelope.seq,
+        event: { ...event, snapshot: publicHistoricalWorldSnapshot(event.snapshot) }
+      };
+    }
+  }
+  if (event.type === "agent.message" && viewer.mode === "public" && event.message.channel !== "public") {
+    return undefined;
+  }
+  if (projected === event) return structuredClone(envelope);
+  return { id: envelope.id, seq: envelope.seq, event: structuredClone(projected) };
+}
+
+function publicHistoricalWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
+  return {
+    roomId: snapshot.roomId,
+    scenarioId: snapshot.scenarioId,
+    title: snapshot.title,
+    status: snapshot.status,
+    turn: snapshot.turn,
+    totalTurns: snapshot.totalTurns,
+    phase: snapshot.phase,
+    summary: snapshot.summary,
+    agents: snapshot.agents.map((agent) => {
+      const { observerRole: _observerRole, ...publicAgent } = agent;
+      return publicAgent;
+    }),
+    messages: snapshot.messages.filter((message) => message.channel === "public").map((message) => structuredClone(message)),
+    log: snapshot.log.map((entry) => structuredClone(entry)),
+    details: {}
+  };
+}
+
+function archivedOwnerTokenMatches(checkpoint: RoomCheckpoint, token: string | undefined): boolean {
+  if (!checkpoint.ownerToken || !token) return false;
+  const expected = Buffer.from(checkpoint.ownerToken);
+  const supplied = Buffer.from(token);
+  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+}
+
+function archivedReplayEnvelopes(checkpoint: RoomCheckpoint): SocietyRoomEventEnvelope[] {
+  const byId = new Map<string, SocietyRoomEventEnvelope>();
+  for (const envelope of [...(checkpoint.replayEnvelopes ?? []), ...(checkpoint.envelopes ?? [])]) {
+    byId.set(envelope.id, envelope);
+  }
+  return [...byId.values()].sort((left, right) => left.seq - right.seq);
+}
+
+function nonNegativeSequence(value: unknown, fallback: number): number {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function writeEvent(response: express.Response, name: string, data: SocietyRoomSnapshot | unknown, id?: number): void {

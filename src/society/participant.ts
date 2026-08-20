@@ -42,7 +42,7 @@ import type {
   SocietyAgentRuntime
 } from "./contracts";
 import type { ResolvedModelConfig } from "./models";
-import { reasoningFallbackFetch } from "./models/reasoning-fallback";
+import { reasoningFallbackFetch, type ReasoningFallbackNotice } from "./models/reasoning-fallback";
 import { JsonSessionStore, defaultSessionDir } from "./persistence";
 import { clampUnit, decayMood, describeEmotions, describeNeeds, describeSocialEmotions, initialMood, refreshMood } from "./affect";
 import { appraiseEvents } from "./appraisal";
@@ -50,6 +50,8 @@ import { SessionContextManager, contextLimitForModel, estimateTokens, type Conte
 import { AssociativeMemory } from "./memory";
 import { createCognitionTools, createSocialTools, formatObservation } from "./cognition";
 import { createInjectionShield } from "./guardrails";
+import { createStrategyProfileSnapshot } from "./social/strategy-profile";
+import type { SocialCausalityProjection } from "./social/contracts";
 import { adaptTraits, decayAcrossSeason, effectiveTemperament, traitStatesFromTemperament } from "./traits";
 
 const providerRetrySettings = {
@@ -119,7 +121,20 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     // Durable per-agent session: history survives restarts in data/sessions/.
     this.session = JsonSessionStore.open(
       `${options.roomId}:${options.profile.id}`,
-      options.sessionDir ?? defaultSessionDir()
+      options.sessionDir ?? defaultSessionDir(),
+      {
+        onNotice: (notice) => options.emit({
+          type: "runtime.notice",
+          roomId: options.roomId,
+          actorId: options.profile.id,
+          category: "persistence",
+          severity: notice.severity,
+          code: notice.code,
+          message: notice.message,
+          retrying: notice.retrying,
+          at: new Date().toISOString()
+        })
+      }
     );
     // Season memories start inside the associative store, not just in the
     // initial mind view, so they survive the first memory sync and can be
@@ -143,12 +158,15 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       memory: new AssociativeMemory([...identityMemories, ...seasonMemories, ...restoredGameMemories]),
       emit: options.emit
     };
+    this.seedDirectedRelationships();
     const provider = options.provider ?? new OpenAIProvider({
       useResponses: false,
       openAIClient: new OpenAI({
         apiKey: options.apiKey ?? apiKeyFromEnv(),
         baseURL: options.baseURL ?? baseUrlFromEnv(),
-        fetch: reasoningFallbackFetch()
+        fetch: reasoningFallbackFetch({
+          onNotice: (notice) => options.emit(reasoningNoticeEvent(options.roomId, options.profile.id, notice))
+        })
       })
     });
     this.contextManager = this.buildContextManager(provider, options.resolvedConfig);
@@ -192,11 +210,47 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     const worldTools = options.world.toolsFor(this.profile.id);
     this.tools = [...social.all, ...cognition, ...worldTools];
 
+    if (options.resolvedConfig) {
+      options.world.recordStrategyProfileSnapshot(createStrategyProfileSnapshot({
+        profile: this.profile,
+        resolvedConfig: options.resolvedConfig,
+        tools: this.tools as Tool<unknown>[],
+        promptInstructions: protocolInstructions()
+      }));
+    }
+
     // One identity, one session, one agent. Discussion phases and binding
     // action phases differ only in the turn guidance passed to the same agent;
     // world tools guard their own phases, so a discussion turn cannot commit a
     // vote and a vote turn cannot open the night.
     this.agent = this.buildAgent(options.resolvedConfig);
+  }
+
+  private seedDirectedRelationships(): void {
+    const existingTargets = new Set(
+      this.context.world.socialCausalityFor(this.profile.id).directedRelationships
+        .map((relationship) => relationship.targetCharacterId)
+    );
+    const participants = this.context.world.snapshot().agents;
+    for (const relationship of this.mind.relationships) {
+      if (existingTargets.has(relationship.targetCharacterId)) continue;
+      const target = participants.find((entry) => entry.characterId === relationship.targetCharacterId);
+      if (!target) continue;
+      const current = {
+        trust: relationship.trust,
+        affinity: relationship.affinity,
+        respect: relationship.respect,
+        tension: relationship.tension,
+        familiarity: relationship.familiarity
+      };
+      this.context.world.recordRelationshipUpdate(this.profile.id, {
+        targetActorId: target.id,
+        before: current,
+        after: current,
+        note: relationship.note,
+        sourceKind: "system-inference"
+      });
+    }
   }
 
   /**
@@ -228,6 +282,12 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       sessionInputCallback: nextManager.sessionInputCallback
     });
     this.agent = this.buildAgent(next.resolvedConfig);
+    this.context.world.recordStrategyProfileSnapshot(createStrategyProfileSnapshot({
+      profile: this.profile,
+      resolvedConfig: next.resolvedConfig,
+      tools: this.tools as Tool<unknown>[],
+      promptInstructions: protocolInstructions()
+    }));
     this.context.emit({
       type: "agent.model.switched",
       roomId: this.context.roomId,
@@ -262,25 +322,9 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         this.lastSummaryArtifact = artifact;
       },
       onCompacted: (digest, estimatedTokens, threshold, level, pressureAfter) => {
-        // §5.6 step 5-6: the compacted brief lands in episodic memory too, so
-        // the agent can recall its own consolidation instead of losing it.
-        void this.context.memory.remember({
-          text: digest.slice(0, 1_200),
-          tags: ["consolidated", `level:${level}`],
-          salience: 0.55,
-          valence: 0,
-          turn: this.context.world.snapshot().turn
-        }).then((entry) => {
-          this.context.emit({
-            type: "agent.memory.consolidated",
-            roomId: this.context.roomId,
-            actorId: this.profile.id,
-            memoryId: entry.id,
-            summary: digest.slice(0, 140),
-            at: new Date().toISOString()
-          });
-          return void syncMemories(this.context);
-        }).catch(() => {});
+        // Compaction is a context artifact, not an experience. It remains in
+        // the durable session artifact and trace but cannot write long-term
+        // episodic memory without an OutcomeReconciliation/MemoryWritePolicy.
         this.context.emit({
           type: "agent.compacted",
           roomId: this.context.roomId,
@@ -357,8 +401,9 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       : pressure === "deep-compact" || pressure === "emergency" || pressure === "hard-guard"
         ? 2
         : 6;
+    const memoryQuery = buildMemoryRecallQuery(observation, this.mind);
     const recentMemories = await this.context.memory.recall(
-      `${observation.phase} ${observation.situation}`,
+      memoryQuery,
       recallLimit,
       this.mind.mood.pad,
       this.profile.decisionBiases?.includes("recency-weighting") ? 1.8 : 1
@@ -414,16 +459,9 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     }
     const finalOutput = String(result.finalOutput ?? "").trim();
     if (finalOutput) {
+      // The final model text is transient working state, not durable social
+      // memory. Long-term writes happen only after appraisal/reconciliation.
       this.mind.latestReflection = finalOutput;
-      await this.context.memory.remember({
-        text: finalOutput,
-        tags: ["decision", `turn:${options.turn}`],
-        salience: 0.58,
-        valence: 0,
-        pad: { ...this.mind.mood.pad },
-        turn: options.turn
-      });
-      await syncMemories(this.context);
     }
     this.mind.mood.energy = clampUnit(this.mind.mood.energy - 0.03);
     emitStatus(this.context, "idle");
@@ -454,12 +492,16 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
    */
   private pinnedFacts(): string[] {
     const observation = this.context.world.observe(this.profile.id);
+    const socialState = this.context.world.socialCausalityFor(this.profile.id);
+    const activeDeceptionIds = new Set(socialState.deceptions
+      .filter((episode) => episode.status !== "failed" && episode.status !== "abandoned" && episode.status !== "repaired")
+      .map((episode) => episode.deceptionId));
     const facts = [
       `我是 ${this.profile.displayName}（${this.context.actorId}）。人物底色：${this.profile.persona}`,
       ...(observation.privateContext ? [`当前局内身份与目标：${observation.privateContext}`] : []),
       `当前目标：${this.mind.goals.filter((goal) => goal.status === "active").map((goal) => `${goal.description}（${goal.progress}）`).join("；") || "（无）"}`
     ];
-    for (const plan of this.mind.deceptions.slice(-2)) {
+    for (const plan of this.mind.deceptions.filter((entry) => entry.deceptionId && activeDeceptionIds.has(entry.deceptionId)).slice(-2)) {
       facts.push(`活跃欺骗计划（${plan.type}）：想让他人相信「${plan.intendedBelief}」，公开口径「${plan.coverStory}」，被质疑时说「${plan.fallback}」`);
     }
     return facts;
@@ -508,15 +550,21 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     };
   }
 
-  async rememberOutcome(text: string, turn: number): Promise<void> {
+  async rememberOutcome(text: string, turn: number, source: {
+    suggestionId: string;
+    importance: number;
+    sourceIds: string[];
+  }): Promise<void> {
     if (!text.trim()) return;
     await this.context.memory.remember({
       text,
-      tags: ["outcome", `turn:${turn}`],
-      salience: 0.86,
+      tags: ["outcome", "reconciled", `turn:${turn}`],
+      salience: source.importance,
       valence: 0,
       pad: { ...this.mind.mood.pad },
-      turn
+      turn,
+      sourceRefs: [source.suggestionId, ...source.sourceIds],
+      sourceKind: "outcome-reconciliation" as const
     });
     await syncMemories(this.context);
   }
@@ -529,6 +577,13 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
    */
   async appraise(events: SocialEvent[], turn: number): Promise<void> {
     if (!events.length) return;
+    const relationshipBefore = new Map(this.mind.relationships.map((entry) => [entry.targetCharacterId, {
+      trust: entry.trust,
+      affinity: entry.affinity,
+      respect: entry.respect,
+      tension: entry.tension,
+      familiarity: entry.familiarity
+    }]));
     const effective = effectiveTemperament(this.profile.temperament, this.mind.traitAdaptations);
     const summary = appraiseEvents(
       this.mind,
@@ -538,6 +593,29 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       effective,
       (actorId) => this.context.world.snapshot().agents.find((agent) => agent.id === actorId)?.characterId
     );
+    const participants = this.context.world.snapshot().agents;
+    for (const relationship of this.mind.relationships) {
+      const before = relationshipBefore.get(relationship.targetCharacterId);
+      const target = participants.find((entry) => entry.characterId === relationship.targetCharacterId);
+      if (!before || !target) continue;
+      const after = {
+        trust: relationship.trust,
+        affinity: relationship.affinity,
+        respect: relationship.respect,
+        tension: relationship.tension,
+        familiarity: relationship.familiarity
+      };
+      if (Object.keys(after).every((key) => before[key as keyof typeof before] === after[key as keyof typeof after])) continue;
+      const causes = events.filter((event) => event.actorId === target.id);
+      this.context.world.recordRelationshipUpdate(this.profile.id, {
+        targetActorId: target.id,
+        before,
+        after,
+        note: relationship.note,
+        sourceEventIds: causes.flatMap((event) => event.sourceEventIds ?? [event.id]),
+        sourceKind: "authorized-observation"
+      });
+    }
     // Slow personality adaptation: repeated high-salience experiences move a
     // bounded adaptation off the baseline; single events decay back quickly.
     const adapted = adaptTraits({
@@ -551,13 +629,16 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     if (!changed) return;
     this.mind.mood = refreshMood(this.mind.mood, turn);
     for (const seed of summary.memories) {
+      if (!seed.sourceRefs.length || seed.salience < 0.6) continue;
       await this.context.memory.remember({
         text: seed.text,
         tags: seed.tags,
         salience: seed.salience,
         valence: seed.valence,
         pad: { ...this.mind.mood.pad },
-        turn
+        turn,
+        sourceRefs: seed.sourceRefs,
+        sourceKind: "appraisal"
       });
     }
     await syncMemories(this.context);
@@ -616,7 +697,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   private flushReasoning(): void {
     if (!this.reasoningBuffer) return;
     this.context.emit({
-      type: "agent.reasoning",
+      type: "agent.reasoning-summary",
       roomId: this.context.roomId,
       actorId: this.context.actorId,
       delta: this.reasoningBuffer,
@@ -1014,7 +1095,7 @@ export function protocolInstructions(): string[] {
     "Maintain your own goals, memory, beliefs about others, emotion, and relationships across turns.",
     "Promises in this world are social commitments people make with words and actions. Judge each one by the person, your relationship, and the evidence you have — never by a blanket rule. Record the promises that matter to you and revisit them when their conditions come due.",
     "You may cooperate, persuade, withhold information, challenge, repair trust, or deceive when your character and the situation justify it. How much you trust, concede, or hold back is yours to decide from your personality, relationships, and history.",
-    "If you plan a strategic deception, log it before acting and cite the returned deceptionId on the exact communicate socialAct that executes it; this keeps the private episode tied to the real message without revealing the plan to its audience.",
+    "When you choose to keep a structured record of a strategic deception, use log_deception_plan before acting and cite the returned deceptionId on the exact communicate socialAct that executes it; logging is optional, but a logged plan must stay tied to the real message without revealing it to its audience.",
     "When a message clearly asserts, questions, accuses, offers, accepts, rejects, promises or apologizes, declare that meaning in communicate.socialActs. The original message remains authoritative; socialActs only record its structured social meaning.",
     "When evidence changes a belief, update probability and confidence separately and cite visible source message IDs when available.",
     "In hidden-identity worlds, keep your role inferences as probabilities with update_role_hypotheses instead of bare hunches; renormalize when new evidence arrives.",
@@ -1037,13 +1118,24 @@ export function formatSocialContext(mind: AgentMindState, world: SocietyAgentCon
   const blocks: string[] = [];
   const snapshot = world.snapshot();
   const others = snapshot.agents.filter((agent) => agent.id !== actorId);
+  const displayNameFor = (id: string): string =>
+    snapshot.agents.find((agent) => agent.id === id || agent.characterId === id)?.displayName ?? id;
+  const activeGoals = mind.goals.filter((goal) => goal.status === "active");
+  if (activeGoals.length) {
+    blocks.push(
+      `[CURRENT OBJECTIVES]\n${activeGoals
+        .slice(0, 6)
+        .map((goal) => `- ${goal.description}${goal.progress ? ` · progress: ${goal.progress}` : ""}`)
+        .join("\n")}`
+    );
+  }
   if (others.length) {
     const lines = ["[SOCIAL STATE] Your current feelings toward the other participants (directed, your side only):"];
     for (const other of others) {
       const relationship = mind.relationships.find((entry) => entry.targetCharacterId === other.characterId);
       lines.push(
         relationship
-          ? `- ${other.displayName}: trust ${relationship.trust.toFixed(2)} · affinity ${relationship.affinity.toFixed(2)} · tension ${relationship.tension.toFixed(2)}${relationship.note ? ` · note: ${relationship.note.slice(0, 120)}` : ""}`
+          ? `- ${other.displayName}: trust ${relationship.trust.toFixed(2)} · affinity ${relationship.affinity.toFixed(2)} · respect ${relationship.respect.toFixed(2)} · tension ${relationship.tension.toFixed(2)} · familiarity ${relationship.familiarity.toFixed(2)}${relationship.note ? ` · latest impression: ${relationship.note.slice(0, 160)}` : ""}`
           : `- ${other.displayName}: no established relationship yet.`
       );
     }
@@ -1054,10 +1146,89 @@ export function formatSocialContext(mind: AgentMindState, world: SocietyAgentCon
   );
   if (relevantBeliefs.length) {
     blocks.push(
-      `[SOCIAL STATE] Your relevant beliefs about others (confidence 0-1):\n${relevantBeliefs
-        .slice(0, 6)
-        .map((belief) => `- ${belief.subjectId}: ${belief.proposition} (${belief.confidence.toFixed(2)})`)
+      `[SOCIAL STATE] Your current beliefs about others (probability and confidence are separate):\n${relevantBeliefs
+        .slice(-8)
+        .map((belief) => `- ${displayNameFor(belief.subjectId)}: ${belief.proposition} · probability ${(belief.probability ?? belief.confidence).toFixed(2)} · confidence ${belief.confidence.toFixed(2)}`)
         .join("\n")}`
+    );
+  }
+  if (mind.roleHypotheses.length) {
+    const bySubject = new Map<string, typeof mind.roleHypotheses>();
+    for (const hypothesis of mind.roleHypotheses) {
+      const list = bySubject.get(hypothesis.subjectId) ?? [];
+      list.push(hypothesis);
+      bySubject.set(hypothesis.subjectId, list);
+    }
+    blocks.push(
+      `[HIDDEN-ROLE READ] Your current private role probabilities:\n${[...bySubject.entries()]
+        .slice(0, 8)
+        .map(([subjectId, hypotheses]) => `- ${displayNameFor(subjectId)}: ${hypotheses
+          .slice()
+          .sort((left, right) => right.probability - left.probability)
+          .slice(0, 4)
+          .map((entry) => `${entry.role} ${entry.probability.toFixed(2)}`)
+          .join(" · ")}`)
+        .join("\n")}`
+    );
+  }
+  const privateSocialState = world.socialCausalityFor(actorId);
+  const propositionById = new Map(privateSocialState.propositions.map((entry) => [entry.propositionId, entry]));
+  const eventLogicalTime = new Map(privateSocialState.events.map((event) => [event.eventId, event.logicalTime]));
+  const actorModels = privateSocialState.actorModels
+    .slice()
+    .sort((left, right) => right.lastUpdatedLogicalTime - left.lastUpdatedLogicalTime)
+    .slice(0, 4);
+  if (actorModels.length) {
+    blocks.push(
+      `[YOUR READ OF THE ROOM] These are your own estimates, not hidden facts:\n${actorModels.map((model) => {
+        const goals = model.inferredGoals
+          .slice()
+          .sort((left, right) => right.probability - left.probability)
+          .slice(0, 2)
+          .map((entry) => `${entry.goal} ${entry.probability.toFixed(2)}`)
+          .join("; ") || "unclear";
+        const actions = model.predictedActions
+          .slice()
+          .sort((left, right) => right.probability - left.probability)
+          .slice(0, 2)
+          .map((entry) => `${entry.action} ${entry.probability.toFixed(2)}`)
+          .join("; ") || "unclear";
+        const knowledge = model.inferredKnowledge
+          .slice()
+          .sort((left, right) => right.probability - left.probability)
+          .slice(0, 2)
+          .map((entry) => `${propositionById.get(entry.propositionId)?.predicate ?? "unclear knowledge"} ${entry.probability.toFixed(2)}`)
+          .join("; ") || "unclear";
+        const observedFacts = privateSocialState.propositions
+          .flatMap((proposition) => {
+            if (proposition.truthStatus !== "true" || proposition.groundTruthVisibility !== "public") return [];
+            if (!propositionMentionsParticipant(proposition, model.targetActorId, model.targetCharacterId)) return [];
+            const logicalTime = Math.max(0, ...proposition.sourceEventIds.map((eventId) => eventLogicalTime.get(eventId) ?? 0));
+            if (logicalTime <= model.lastUpdatedLogicalTime) return [];
+            return [{ proposition, logicalTime }];
+          })
+          .sort((left, right) => left.logicalTime - right.logicalTime)
+          .slice(-2)
+          .map(({ proposition }) => `${proposition.predicate}${proposition.object === undefined ? "" : ` ${compactSocialValueForParticipant(proposition.object, model.targetActorId, model.targetCharacterId)}`}`)
+          .join("; ");
+        return `- ${displayNameFor(model.targetCharacterId)}: likely goals [${goals}] · likely knows [${knowledge}] · likely next moves [${actions}] · honesty ${model.perceivedHonesty.toFixed(2)} · risk tolerance ${model.perceivedRiskTolerance.toFixed(2)}${observedFacts ? ` · public results since your estimate [${observedFacts}] — compare these with your prediction before updating this model` : ""}`;
+      }).join("\n")}`
+    );
+  }
+  const decisionsById = new Map(privateSocialState.decisions.map((decision) => [decision.decisionId, decision]));
+  const recentOutcomes = privateSocialState.outcomeReconciliations.slice(-4);
+  if (recentOutcomes.length) {
+    blocks.push(
+      `[RECENT RESULTS] Compare what you expected with what actually happened and adapt your next move:\n${recentOutcomes.map((outcome) => {
+        const decision = decisionsById.get(outcome.decisionId);
+        const misses = outcome.predictionAssessments
+          .slice()
+          .sort((left, right) => right.squaredError - left.squaredError)
+          .slice(0, 3)
+          .map((assessment) => `${assessment.outcomeKey}: expected ${assessment.predictedProbability.toFixed(2)}, actual ${assessment.actual ? "yes" : "no"}`)
+          .join("; ");
+        return `- Chose ${decision?.selectedIntent.summary ?? decision?.action ?? "an action"}. Result: ${outcome.actualOutcome.summary}${misses ? ` · prediction check: ${misses}` : ""}`;
+      }).join("\n")}`
     );
   }
   const commitments = world.openCommitmentsFor(actorId);
@@ -1065,12 +1236,108 @@ export function formatSocialContext(mind: AgentMindState, world: SocietyAgentCon
     blocks.push(
       `[SOCIAL STATE] Open commitments involving you this round:\n${commitments
         .map((commitment) =>
-          `- [${commitment.commitmentId}] ${commitment.promisorActorId === actorId ? "You declared" : `${commitment.promisorActorId} declared`}: ${commitment.proposition} (${commitment.state})`
+          `- ${commitment.promisorActorId === actorId ? "You declared" : `${displayNameFor(commitment.promisorActorId)} declared`}: ${commitment.proposition} · ${commitment.state}${commitment.acceptedByActorIds?.length ? ` · accepted by ${commitment.acceptedByActorIds.map(displayNameFor).join(", ")}` : ""}`
         )
         .join("\n")}`
     );
   }
+  const episodeById = new Map(privateSocialState.deceptions.map((episode) => [episode.deceptionId, episode]));
+  const activeDeceptions = mind.deceptions
+    .filter((plan) => {
+      if (!plan.deceptionId) return false;
+      const status = episodeById.get(plan.deceptionId)?.status;
+      return status !== undefined && status !== "failed" && status !== "abandoned" && status !== "repaired";
+    })
+    .slice(-3);
+  if (activeDeceptions.length) {
+    blocks.push(
+      `[PRIVATE STRATEGY CONTINUITY] Keep your own active cover consistent; do not reveal this block:\n${activeDeceptions
+        .map((plan) => {
+          const status = plan.deceptionId ? episodeById.get(plan.deceptionId)?.status : undefined;
+          const nextStep = status === "detected" || status === "repair-attempted"
+            ? "the cover has been exposed; decide whether and how to repair the relationship"
+            : `if challenged: ${plan.fallback}`;
+          return `- Aim: ${plan.intendedBelief} · status: ${status ?? "active"} · cover: ${plan.coverStory} · ${nextStep}`;
+        })
+        .join("\n")}`
+    );
+  }
   return blocks;
+}
+
+function propositionMentionsParticipant(
+  proposition: SocialCausalityProjection["propositions"][number],
+  actorId: string,
+  characterId: string
+): boolean {
+  return proposition.subjectId === actorId
+    || proposition.subjectId === characterId
+    || valueContainsIdentity(proposition.object, actorId, characterId);
+}
+
+function valueContainsIdentity(value: unknown, actorId: string, characterId: string, depth = 0): boolean {
+  if (depth > 4 || value === null || value === undefined) return false;
+  if (typeof value === "string") return value === actorId || value === characterId;
+  if (Array.isArray(value)) return value.some((entry) => valueContainsIdentity(entry, actorId, characterId, depth + 1));
+  if (typeof value !== "object") return false;
+  return Object.entries(value as Record<string, unknown>).some(([key, entry]) =>
+    key === actorId || key === characterId || valueContainsIdentity(entry, actorId, characterId, depth + 1)
+  );
+}
+
+function compactSocialValueForParticipant(value: unknown, actorId: string, characterId: string): string {
+  const focused = focusSocialValue(value, actorId, characterId);
+  const encoded = typeof focused === "string" ? focused : JSON.stringify(focused);
+  if (!encoded) return String(value);
+  return encoded.length > 260 ? `${encoded.slice(0, 257)}...` : encoded;
+}
+
+function focusSocialValue(value: unknown, actorId: string, characterId: string): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  const directlyNamesParticipant = Object.values(record).some((entry) =>
+    entry === actorId
+    || entry === characterId
+    || (Array.isArray(entry) && entry.some((item) => item === actorId || item === characterId))
+  );
+  if (directlyNamesParticipant) return value;
+  const focused: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    if (key === actorId || key === characterId) {
+      focused[key] = entry;
+      continue;
+    }
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const nested = entry as Record<string, unknown>;
+    if (Object.hasOwn(nested, actorId)) focused[key] = { [actorId]: nested[actorId] };
+    else if (Object.hasOwn(nested, characterId)) focused[key] = { [characterId]: nested[characterId] };
+  }
+  return Object.keys(focused).length ? focused : value;
+}
+
+function buildMemoryRecallQuery(
+  observation: ReturnType<SocietyAgentContext["world"]["observe"]>,
+  mind: AgentMindState
+): string {
+  const recentConversation = observation.recentMessages
+    .slice(-5)
+    .map((message) => `${message.senderName}: ${message.text.slice(0, 180)}`);
+  const activeGoals = mind.goals
+    .filter((goal) => goal.status === "active")
+    .slice(0, 4)
+    .map((goal) => `${goal.description} ${goal.progress}`);
+  const sociallyCharged = mind.relationships
+    .slice()
+    .sort((left, right) => (right.tension + (1 - right.trust)) - (left.tension + (1 - left.trust)))
+    .slice(0, 3)
+    .flatMap((relationship) => relationship.note ? [relationship.note] : []);
+  return [
+    observation.phase,
+    observation.situation,
+    ...recentConversation,
+    ...activeGoals,
+    ...sociallyCharged
+  ].join(" \n").slice(0, 2_400);
 }
 
 function emitStatus(context: SocietyAgentContext, status: Extract<AgentRuntimeEvent, { type: "agent.status" }>["status"]): void {
@@ -1145,6 +1412,23 @@ function reasoningDeltaFromEvent(event: RunStreamEvent): string | undefined {
   if (inner.type !== "response.reasoning_summary_text.delta") return undefined;
   const delta = (inner as { delta?: string }).delta;
   return typeof delta === "string" && delta ? delta : undefined;
+}
+
+function reasoningNoticeEvent(roomId: string, actorId: string, notice: ReasoningFallbackNotice): AgentRuntimeEvent {
+  return {
+    type: "runtime.notice",
+    roomId,
+    actorId,
+    category: "reasoning",
+    severity: "warning",
+    code: notice.errorCode,
+    message: `${notice.message} 已自动从 ${notice.requestedEffort} 降级到 ${notice.effectiveEffort} 并重试。`,
+    ...(notice.modelId ? { modelId: notice.modelId } : {}),
+    requestedEffort: notice.requestedEffort,
+    effectiveEffort: notice.effectiveEffort,
+    retrying: true,
+    at: new Date().toISOString()
+  };
 }
 
 function usageFromResult(result: unknown): AgentTurnResult["usage"] {

@@ -224,6 +224,9 @@ export interface AgentMemoryItem {
   pad?: PadState;
   turn: number;
   createdAt: string;
+  /** Canonical decision/outcome/suggestion ids authorizing this write. */
+  sourceRefs?: string[];
+  sourceKind?: "agent-authored" | "outcome-reconciliation" | "appraisal" | "legacy";
   /** Links to related memories (AGENTS.md §5.4.7). Built deterministically
    *  on write; the fact layer stays stable, only interpretation links move. */
   links?: MemoryLink[];
@@ -537,9 +540,17 @@ export interface WorldActivation {
  */
 export interface SocialEvent {
   id: string;
+  /** Private canonical social-event ids that persist this observation across restart. */
+  sourceEventIds?: string[];
   type:
     | "accused"          // someone publicly accused this agent
     | "defended"         // someone publicly stood up for this agent
+    | "threatened"       // someone directly threatened this agent
+    | "endorsed"         // someone backed this agent
+    | "apologized-to"    // someone directly apologized to this agent
+    | "warning-received" // someone warned this agent about a risk
+    | "socially-accepted" // someone accepted this agent's proposal in speech
+    | "socially-rejected" // someone rejected this agent's proposal in speech
     | "vote-against"     // someone voted to eliminate this agent
     | "vote-cast"        // this agent cast a vote
     | "voted-with"       // someone voted for the same target as this agent
@@ -550,12 +561,22 @@ export interface SocialEvent {
     | "night-kill"       // this agent (wolf) helped kill someone at night
     | "included"         // this agent was chosen for a quest team
     | "excluded"         // this agent was left out of a quest team
+    | "alliance-proposed" // cooperation was proposed; no alliance exists yet
+    | "agreement-reached" // a typed offer was accepted; not an alliance
+    | "negotiation-failed" // no transaction was reached; not automatically a mistake
+    | "offer-proposed"    // a typed commercial offer was made
+    | "offer-rejected"    // a typed offer was declined
     | "quest-passed"     // a quest this agent was (or wasn't) on succeeded
     | "quest-failed"     // a quest this agent was (or wasn't) on failed
     | "assassinated"     // this agent was killed in the final assassination
     | "commitment-proposed"  // someone declared a promise involving this agent
+    | "commitment-accepted"  // a recipient explicitly accepted a proposed promise
     | "commitment-fulfilled" // a promise made to this agent was kept
     | "commitment-violated"  // a promise made to this agent was broken
+    | "opponent-cooperated"  // the other actor chose cooperation in a resolved PD round
+    | "opponent-defected"    // the other actor chose defection; no betrayal is implied
+    | "competitive-bid-received" // the next actor must answer a binding public bid
+    | "bid-challenged"       // this actor's binding bid was challenged and resolved
     | "investment-made"      // the trust-game investment was sealed
     | "return-made"          // the trust-game return was sealed
     | "win"              // this agent's faction won
@@ -602,18 +623,50 @@ export interface Commitment {
   audienceActorIds: string[];
   /** What was promised, in words the promisee can check. */
   proposition: string;
-  promisedAction: {
-    actionType: "return-at-least" | "invest-at-least";
-    amount: number;
-    condition?: string;
-  };
-  state: "proposed" | "fulfilled" | "violated" | "void";
+  promisedAction:
+    | {
+        actionType: "return-at-least" | "invest-at-least" | "contribute-at-least";
+        amount: number;
+        condition?: string;
+      }
+      | {
+          actionType: "choose-move";
+          choice: "cooperate" | "defect";
+          condition?: string;
+        }
+      | {
+          actionType: "demand-exactly";
+          amount: number;
+          condition?: string;
+        };
+  state: "proposed" | "accepted" | "fulfilled" | "violated" | "void";
+  /** Present on current records; optional only while reading legacy checkpoints. */
+  acceptedByActorIds?: string[];
+  acceptedByCommandIds?: string[];
   /** The idempotent command that created this commitment. */
   createdByCommandId?: string;
   settledByCommandId?: string;
   createdAtTurn: number;
+  acceptedAtTurn?: number;
   settledAtTurn?: number;
   schemaVersion: number;
+}
+
+export interface OpenCommitmentView {
+  commitmentId: string;
+  promisorActorId: string;
+  promisorCharacterId: string;
+  audienceActorIds: string[];
+  proposition: string;
+  promisedAction: {
+    actionType: string;
+    amount?: number;
+    choice?: string;
+    condition?: string;
+  };
+  state: Commitment["state"];
+  acceptedByActorIds?: string[];
+  acceptedByCommandIds?: string[];
 }
 
 /**
@@ -657,7 +710,23 @@ export type AgentRuntimeEvent =
   | { type: "agent.status"; roomId: string; actorId: string; status: AgentStatus; at: string }
   | { type: "agent.updated"; roomId: string; actorId: string; status: AgentStatus; mind: AgentMindState; turnCount: number; totalTokens: number; lastOutput?: string; at: string }
   | { type: "agent.delta"; roomId: string; actorId: string; delta: string; at: string }
+  | { type: "agent.reasoning-summary"; roomId: string; actorId: string; delta: string; at: string }
+  /** @deprecated Read-only compatibility for archives created before schema v3. */
   | { type: "agent.reasoning"; roomId: string; actorId: string; delta: string; at: string }
+  | {
+      type: "runtime.notice";
+      roomId: string;
+      actorId?: string;
+      category: "reasoning" | "provider" | "persistence";
+      severity: "info" | "warning" | "error";
+      code: string;
+      message: string;
+      modelId?: string;
+      requestedEffort?: "xhigh" | "high";
+      effectiveEffort?: "high" | "provider-default";
+      retrying?: boolean;
+      at: string;
+    }
   | {
       type: "agent.tool";
       roomId: string;
@@ -694,6 +763,29 @@ export type AgentRuntimeEvent =
   | { type: "agent.resumed"; roomId: string; actorId: string; at: string }
   | { type: "agent.model.switched"; roomId: string; actorId: string; previousModel: string; model: string; at: string }
   | { type: "agent.message"; roomId: string; message: SocialMessage }
+  | {
+      type: "agent.pov-frame";
+      roomId: string;
+      actorId: string;
+      activationId: string;
+      observation: AgentObservation;
+      socialCausality: import("./social/contracts").SocialCausalityProjection;
+      at: string;
+    }
+  | {
+      type: "world.operator-frame";
+      roomId: string;
+      activationId: string;
+      snapshot: WorldSnapshot;
+      at: string;
+    }
+  | {
+      type: "world.public-frame";
+      roomId: string;
+      activationId: string;
+      snapshot: WorldSnapshot;
+      at: string;
+    }
   | { type: "world.action"; roomId: string; actorId: string; action: string; detail: string; at: string }
   | { type: "world.updated"; roomId: string; snapshot: WorldSnapshot }
   | {
@@ -752,14 +844,26 @@ export interface SocialWorld {
   experienceFor(actorId: string): string | undefined;
   /** Pending appraisal events for one participant; returns and clears them. */
   eventsFor(actorId: string): SocialEvent[];
+  /** Evaluate pending reconciliation-backed memory candidates exactly once. */
+  applyMemoryWritePolicy(actorId: string): import("./social/contracts").MemoryWritePolicyResult;
+  /** True once every outcome-memory path in this scenario is reconciliation-backed. */
+  reconciliationOwnsOutcomeMemory(): boolean;
   /** Open (proposed, unsettled) commitments this participant is party to. */
-  openCommitmentsFor(actorId: string): Commitment[];
+  openCommitmentsFor(actorId: string): OpenCommitmentView[];
   /** Auditable decision records for binding actions; [] where none exist. */
   decisionRecords(): DecisionRecord[];
   /** Viewer-scoped canonical social causality; private cognition stays owner-only. */
   socialCausalityFor(actorId?: string, omniscient?: boolean): import("./social/contracts").SocialCausalityProjection;
+  /** Persist the immutable, secret-free runtime policy behind this actor's decisions. */
+  recordStrategyProfileSnapshot(input: import("./social/contracts").StrategyProfileSnapshot): import("./social/contracts").StrategyProfileSnapshot;
+  /** Persist a sanitized runtime downgrade/failure as AgentTrace, never raw provider content. */
+  recordRuntimeNotice(input: Extract<AgentRuntimeEvent, { type: "runtime.notice" }>): void;
   /** Record one actor's structured belief update with visible source checks. */
   recordBeliefUpdate(actorId: string, input: import("./social/contracts").BeliefSelfReportInput): import("./social/contracts").BeliefUpdateRecord;
+  /** Update one actor's private, evidence-linked model of another participant. */
+  recordActorModel(actorId: string, input: import("./social/contracts").ActorModelInput): import("./social/contracts").ActorModel;
+  /** Persist one actor's private A-to-B relationship change. */
+  recordRelationshipUpdate(actorId: string, input: import("./social/contracts").RelationshipUpdateInput): import("./social/contracts").RelationshipDeltaRecord;
   /** Record a private deception plan owned by this actor. */
   recordDeceptionPlan(actorId: string, input: import("./social/contracts").DeceptionPlanInput): import("./social/contracts").DeceptionEpisode;
   sendMessage(input: {
@@ -841,7 +945,11 @@ export interface SocietyAgentRuntime {
   readonly session: Session;
   readonly mind: AgentMindState;
   runTurn(input: string, options: { signal: AbortSignal; turn: number }): Promise<AgentTurnResult>;
-  rememberOutcome(text: string, turn: number): Promise<void>;
+  rememberOutcome(text: string, turn: number, source: {
+    suggestionId: string;
+    importance: number;
+    sourceIds: string[];
+  }): Promise<void>;
   /** Process world-appraisal events into emotion, relationship and memory. */
   appraise(events: SocialEvent[], turn: number): Promise<void>;
   /**

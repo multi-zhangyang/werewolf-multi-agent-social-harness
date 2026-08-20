@@ -32,12 +32,30 @@ export interface SessionStoreFile {
   checksum: string;
 }
 
+export interface SessionStoreNotice {
+  severity: "info" | "error";
+  code: "SESSION_STORE_WRITE_FAILED" | "SESSION_STORE_WRITE_RECOVERED";
+  message: string;
+  retrying: boolean;
+}
+
+export interface SessionStoreOptions {
+  onNotice?(notice: SessionStoreNotice): void;
+}
+
+export class SessionStoreWriteError extends Error {
+  constructor(options?: ErrorOptions) {
+    super("SESSION_STORE_WRITE_FAILED: Agent session history could not be written.", options);
+    this.name = "SessionStoreWriteError";
+  }
+}
+
 /** A session file that exists but fails schema/checksum validation. */
 export class SessionStoreCorruptError extends Error {
   constructor(readonly file: string, readonly reason: string) {
     super(
-      `SESSION_STORE_CORRUPT: ${file} is unreadable (${reason}). ` +
-      "The file was preserved aside as .corrupt-* instead of being silently reset."
+      `SESSION_STORE_CORRUPT: Agent session history is unreadable (${reason}). ` +
+      "The damaged data was preserved for operator recovery instead of being silently reset."
     );
     this.name = "SessionStoreCorruptError";
   }
@@ -68,20 +86,22 @@ export class JsonSessionStore implements Session {
   private items: AgentInputItem[];
   private dirty = false;
   private flushTimer?: ReturnType<typeof setTimeout>;
+  private writeFailed = false;
 
   constructor(
     private readonly sessionId: string,
-    private readonly file: string
+    private readonly file: string,
+    private readonly options: SessionStoreOptions = {}
   ) {
     const loaded = loadFile(file);
     this.items = loaded?.sessionId === sessionId ? (loaded.items ?? []) : [];
     openStores.add(new WeakRef(this));
   }
 
-  static open(sessionId: string, dir = defaultSessionDir()): JsonSessionStore {
+  static open(sessionId: string, dir = defaultSessionDir(), options: SessionStoreOptions = {}): JsonSessionStore {
     const safeId = sessionId.replace(/[^A-Za-z0-9_.:-]/g, "_");
     mkdirSync(dir, { recursive: true });
-    return new JsonSessionStore(sessionId, path.join(dir, `${safeId}.json`));
+    return new JsonSessionStore(sessionId, path.join(dir, `${safeId}.json`), options);
   }
 
   get sessionFilePath(): string {
@@ -112,14 +132,14 @@ export class JsonSessionStore implements Session {
   async replaceHistoryWithCompaction(items: AgentInputItem[]): Promise<void> {
     this.items = structuredClone(items);
     this.markDirty();
-    this.flush();
+    this.flush(true);
   }
 
   async popItem(): Promise<AgentInputItem | undefined> {
     const item = this.items.pop();
     if (item) {
       this.markDirty();
-      this.flush();
+      this.flush(true);
     }
     return item ? structuredClone(item) : undefined;
   }
@@ -127,7 +147,7 @@ export class JsonSessionStore implements Session {
   async clearSession(): Promise<void> {
     this.items = [];
     this.markDirty();
-    this.flush();
+    this.flush(true);
   }
 
   /** Force any pending writes to disk now; safe to call at any time. */
@@ -137,15 +157,19 @@ export class JsonSessionStore implements Session {
 
   private markDirty(): void {
     this.dirty = true;
+    this.scheduleFlush(1_500);
+  }
+
+  private scheduleFlush(delayMs: number): void {
     if (this.flushTimer) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = undefined;
       this.flush();
-    }, 1_500);
+    }, delayMs);
     this.flushTimer.unref?.();
   }
 
-  private flush(): void {
+  private flush(throwOnFailure = false): void {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = undefined;
@@ -164,9 +188,28 @@ export class JsonSessionStore implements Session {
       writeFileSync(temporary, JSON.stringify(payloadWithChecksum), { mode: 0o600 });
       renameSync(temporary, this.file);
       this.dirty = false;
-    } catch {
-      // A failed flush keeps the store dirty; the next write retries.
+      if (this.writeFailed) {
+        this.writeFailed = false;
+        this.options.onNotice?.({
+          severity: "info",
+          code: "SESSION_STORE_WRITE_RECOVERED",
+          message: "Agent 会话历史已恢复写入。",
+          retrying: false
+        });
+      }
+    } catch (error) {
       this.dirty = true;
+      this.scheduleFlush(5_000);
+      if (!this.writeFailed) {
+        this.writeFailed = true;
+        this.options.onNotice?.({
+          severity: "error",
+          code: "SESSION_STORE_WRITE_FAILED",
+          message: "Agent 会话历史写入失败，内存状态仍保留；系统将在后台重试。",
+          retrying: true
+        });
+      }
+      if (throwOnFailure) throw new SessionStoreWriteError({ cause: error });
     }
   }
 }

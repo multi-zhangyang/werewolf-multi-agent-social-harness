@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import type { AgentRuntimeEvent, CinematicCue, SocialMessage, ThoughtBeatKind } from "@/society/contracts";
 import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "@/society/room";
@@ -6,8 +7,8 @@ import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "@/society/ro
 export interface LiveAgentActivity {
   /** Streamed text deltas from the model while it speaks or decides. */
   text: string;
-  /** Streamed hidden reasoning from reasoning-capable providers. */
-  reasoning?: string;
+  /** Provider-returned reasoning summary; never raw hidden reasoning. */
+  reasoningSummary?: string;
   /** Latest structured ThoughtBeat produced by this agent's own cognition. */
   thought?: { kind: ThoughtBeatKind; text: string; title?: string };
   /** The SDK tool the agent is currently invoking. */
@@ -24,7 +25,7 @@ export interface LiveAgentActivity {
 export interface TimelineEntry {
   id: string;
   at: string;
-  kind: "thought" | "tool" | "message" | "action" | "cue" | "memory" | "pressure";
+  kind: "thought" | "tool" | "message" | "action" | "cue" | "memory" | "pressure" | "notice";
   actorId?: string;
   label: string;
   detail?: string;
@@ -64,7 +65,7 @@ export interface RoomConnection {
 }
 
 const DELTA_CAP = 480;
-const REASONING_CAP = 700;
+const REASONING_SUMMARY_CAP = 700;
 
 export function useRoom(roomId: string | undefined, token?: string, viewer: { mode: "public" | "omniscient" | "agent-pov" | "postgame"; agentId?: string } = { mode: "omniscient" }): RoomConnection {
   const [room, setRoom] = useState<SocietyRoomSnapshot | null>(null);
@@ -96,32 +97,36 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
 
     const staticMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("static");
     const viewerQuery = `mode=${encodeURIComponent(viewer.mode)}${viewer.mode === "agent-pov" && viewer.agentId ? `&agent=${encodeURIComponent(viewer.agentId)}` : ""}`;
-    if (staticMode) {
-      const tokenPart = token ? `?token=${encodeURIComponent(token)}` : "";
-      const query = tokenPart ? `${tokenPart}&${viewerQuery}` : `?${viewerQuery}`;
-      apiFetch(`/api/rooms/${encodeURIComponent(roomId)}${query}`)
-        .then(async (response) => {
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          return await response.json() as SocietyRoomSnapshot;
-        })
-        .then((next) => {
-          setRoom(next);
-          setFeed(next.world.messages);
-          setConnection("closed");
-        })
-        .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-      return;
-    }
+    const query = `?${viewerQuery}`;
+    let cancelled = false;
+    let source: EventSource | undefined;
 
-    const tokenPart = token ? `?token=${encodeURIComponent(token)}` : "";
-    const query = tokenPart ? `${tokenPart}&${viewerQuery}` : `?${viewerQuery}`;
-    // Reconnect recovery: the server writes `id:` per envelope and replays the
-    // backlog after the Last-Event-ID header this source re-sends on reconnect;
-    // the reducer dedupes by seq, so replays are idempotent.
-    const source = new EventSource(`/api/rooms/${encodeURIComponent(roomId)}/events${query}`);
-    sourceRef.current = source;
-    source.onopen = () => setConnection("connected");
-    source.addEventListener("snapshot", (event) => {
+    const connect = async (): Promise<void> => {
+      // EventSource cannot attach an Authorization header. Authenticate one
+      // ordinary snapshot request first; the server exchanges the accepted
+      // header for an HttpOnly same-origin cookie used by the SSE connection.
+      const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}${query}`, {
+        headers: token ? { "x-player-token": token } : undefined
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => undefined);
+        throw new Error(payload?.message ?? `HTTP ${response.status}`);
+      }
+      const initial = await response.json() as SocietyRoomSnapshot;
+      if (cancelled) return;
+      setRoom(initial);
+      setFeed(initial.world.messages);
+      if (staticMode) {
+        setConnection("closed");
+        return;
+      }
+
+      // Reconnect recovery: the server writes `id:` per envelope and replays
+      // from Last-Event-ID. No credential is ever placed in the URL.
+      source = new EventSource(`/api/rooms/${encodeURIComponent(roomId)}/events${query}`);
+      sourceRef.current = source;
+      source.onopen = () => setConnection("connected");
+      source.addEventListener("snapshot", (event) => {
       try {
         const next = JSON.parse((event as MessageEvent).data) as SocietyRoomSnapshot;
         setRoom(next);
@@ -130,7 +135,7 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
         setError("无法解析房间快照");
       }
     });
-    source.addEventListener("event", (event) => {
+      source.addEventListener("event", (event) => {
       try {
         const envelope = JSON.parse((event as MessageEvent).data) as SocietyRoomEventEnvelope;
         if (typeof envelope.seq === "number") {
@@ -142,29 +147,35 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
         // Ignore malformed envelopes; the next snapshot self-heals the view.
       }
     });
-    let retries = 0;
-    source.onerror = () => {
-      retries += 1;
-      setConnection("reconnecting");
-      // A room that left the process memory (finished or interrupted) has no
-      // live event stream — fall back to its archived checkpoint snapshot
-      // (§5.9) so the observer still gets the full read-only view.
-      if (retries >= 3) {
-        source.close();
-        if (sourceRef.current === source) sourceRef.current = null;
-        apiFetch(`/api/rooms/${encodeURIComponent(roomId)}`)
-          .then(async (response) => {
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const next = await response.json() as SocietyRoomSnapshot;
-            setRoom(next);
-            setFeed(next.world.messages);
-            setConnection("closed");
+      let retries = 0;
+      source.onerror = () => {
+        retries += 1;
+        setConnection("reconnecting");
+        // A room that left process memory has no live stream. The bootstrap
+        // cookie/header path remains valid for its viewer-safe archive.
+        if (retries >= 3) {
+          source?.close();
+          if (sourceRef.current === source) sourceRef.current = null;
+          apiFetch(`/api/rooms/${encodeURIComponent(roomId)}`, {
+            headers: token ? { "x-player-token": token } : undefined
           })
-          .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-      }
+            .then(async (fallbackResponse) => {
+              if (!fallbackResponse.ok) throw new Error(`HTTP ${fallbackResponse.status}`);
+              const next = await fallbackResponse.json() as SocietyRoomSnapshot;
+              setRoom(next);
+              setFeed(next.world.messages);
+              setConnection("closed");
+            })
+            .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+        }
+      };
     };
+    void connect().catch((cause) => {
+      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+    });
     return () => {
-      source.close();
+      cancelled = true;
+      source?.close();
       if (sourceRef.current === source) sourceRef.current = null;
     };
   }, [roomId, token, viewer.mode, viewer.agentId]);
@@ -172,8 +183,10 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
   const pause = useCallback(async (): Promise<void> => {
     if (!roomId) return;
     try {
-      const query = token ? `?token=${encodeURIComponent(token)}` : "";
-      const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/pause${query}`, { method: "POST" });
+      const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/pause`, {
+        method: "POST",
+        headers: token ? { "x-player-token": token } : undefined
+      });
       if (!response.ok) {
         const payload = await response.json().catch(() => undefined);
         throw new Error(payload?.message ?? `HTTP ${response.status}`);
@@ -186,8 +199,10 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
   const resume = useCallback(async (): Promise<void> => {
     if (!roomId) return;
     try {
-      const query = token ? `?token=${encodeURIComponent(token)}` : "";
-      const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/resume${query}`, { method: "POST" });
+      const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/resume`, {
+        method: "POST",
+        headers: token ? { "x-player-token": token } : undefined
+      });
       if (!response.ok) {
         const payload = await response.json().catch(() => undefined);
         throw new Error(payload?.message ?? `HTTP ${response.status}`);
@@ -200,11 +215,10 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
   const toggleAgentPause = useCallback(async (actorId: string, paused: boolean): Promise<void> => {
     if (!roomId) return;
     try {
-      const query = token ? `?token=${encodeURIComponent(token)}` : "";
       const action = paused ? "pause" : "resume";
       const response = await apiFetch(
-        `/api/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(actorId)}/${action}${query}`,
-        { method: "POST" }
+        `/api/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(actorId)}/${action}`,
+        { method: "POST", headers: token ? { "x-player-token": token } : undefined }
       );
       if (!response.ok) {
         const payload = await response.json().catch(() => undefined);
@@ -256,15 +270,30 @@ function reduceEvent(
     setActivity((current) => {
       const previous = current[event.actorId]?.text ?? "";
       const text = (previous + event.delta).slice(-DELTA_CAP);
-      return { ...current, [event.actorId]: { text, at: event.at, tool: current[event.actorId]?.tool, reasoning: current[event.actorId]?.reasoning } };
+      return { ...current, [event.actorId]: { text, at: event.at, tool: current[event.actorId]?.tool, reasoningSummary: current[event.actorId]?.reasoningSummary } };
     });
     return;
   }
-  if (event.type === "agent.reasoning") {
+  if (event.type === "agent.reasoning-summary" || event.type === "agent.reasoning") {
     setActivity((current) => {
-      const previous = current[event.actorId]?.reasoning ?? "";
-      const reasoning = (previous + event.delta).slice(-REASONING_CAP);
-      return { ...current, [event.actorId]: { ...current[event.actorId], reasoning, at: event.at } };
+      const previous = current[event.actorId]?.reasoningSummary ?? "";
+      const reasoningSummary = (previous + event.delta).slice(-REASONING_SUMMARY_CAP);
+      return { ...current, [event.actorId]: { ...current[event.actorId], reasoningSummary, at: event.at } };
+    });
+    return;
+  }
+  if (event.type === "runtime.notice") {
+    const description = [event.modelId, event.code].filter(Boolean).join(" · ");
+    if (event.severity === "error") toast.error(event.message, { description });
+    else if (event.severity === "warning") toast.warning(event.message, { description });
+    else toast.info(event.message, { description });
+    pushTimeline({
+      id: `${event.code}:${event.at}`,
+      at: event.at,
+      kind: "notice",
+      actorId: event.actorId,
+      label: event.category === "reasoning" ? "推理能力自动降级" : event.category === "persistence" ? "持久化状态" : "模型运行状态",
+      detail: event.message
     });
     return;
   }

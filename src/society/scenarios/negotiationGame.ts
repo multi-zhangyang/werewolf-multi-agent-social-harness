@@ -1,19 +1,24 @@
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { tool, type Tool } from "@openai/agents";
 import { z } from "zod";
 import type {
   ActivationCompletion,
   AgentObservation,
   AgentProfile,
+  Commitment,
   PlayerActionSpec,
   ScenarioSummary,
+  SocialMessage,
   SocietyAgentContext,
   WorldActionCommit,
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
 import { scopedContext, SocialWorldBase } from "../world";
-import { boundedRounds, emitAction } from "./helpers";
+import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
+import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
+import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import type { SocialActDeclaration } from "../social/contracts";
 
 type Phase = "discussion" | "demand";
 
@@ -41,9 +46,13 @@ export class NegotiationWorld extends SocialWorldBase {
   private readonly scores = new Map<string, number>();
   private readonly outsideOptions = new Map<string, number>();
   private readonly demands = new Map<string, number>();
+  private readonly demandCommandIds = new Map<string, string>();
+  private readonly offers: NegotiationOffer[] = [];
+  private readonly commitments: Commitment[] = [];
   private readonly history: RoundResult[] = [];
   private readonly lastExperiences = new Map<string, string>();
   private phase: Phase = "discussion";
+  private discussion: DiscussionDirector | null = null;
   private round = 1;
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
@@ -51,35 +60,56 @@ export class NegotiationWorld extends SocialWorldBase {
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
     for (const profile of profiles) this.scores.set(profile.id, 0);
     this.dealOutsideOptions();
+    this.discussion = this.createDiscussion();
     this.addLog("奖池固定为 10 点。双方各有私密保底选项：谈崩了就各自拿走自己的保底。", 1);
   }
 
   protected exportWorldState(): unknown {
     return {
+      schemaVersion: NEGOTIATION_STATE_SCHEMA_VERSION,
       round: this.round,
       phase: this.phase,
       scores: this.mapEntries(this.scores),
       outsideOptions: this.mapEntries(this.outsideOptions),
       demands: this.mapEntries(this.demands),
+      demandCommandIds: this.mapEntries(this.demandCommandIds),
+      offers: structuredClone(this.offers),
+      commitments: structuredClone(this.commitments),
       history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences)
+      lastExperiences: this.mapEntries(this.lastExperiences),
+      discussion: this.discussion ? this.discussion.exportState() : null
     };
   }
 
   protected restoreWorldState(state: unknown): void {
     const s = state as Partial<{
+      schemaVersion: number;
       round: number; phase: string; scores: Array<[string, number]>; outsideOptions: Array<[string, number]>;
-      demands: Array<[string, number]>; history: RoundResult[]; lastExperiences: Array<[string, string]>;
+      demands: Array<[string, number]>; demandCommandIds: Array<[string, string]>;
+      offers: NegotiationOffer[]; commitments: Commitment[];
+      history: RoundResult[]; lastExperiences: Array<[string, string]>; discussion: unknown;
     }> | undefined;
     if (!s) return;
+    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== NEGOTIATION_STATE_SCHEMA_VERSION) {
+      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: negotiation-game ${s.schemaVersion}`);
+    }
     this.round = Number(s.round ?? 1);
     this.phase = (s.phase ?? "discussion") as Phase;
     this.fillMap(this.scores, s.scores);
     this.fillMap(this.outsideOptions, s.outsideOptions);
     this.fillMap(this.demands, s.demands);
+    this.fillMap(this.demandCommandIds, s.demandCommandIds);
+    this.offers.length = 0;
+    this.offers.push(...structuredClone(s.offers ?? []));
+    this.commitments.length = 0;
+    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
     this.history.length = 0;
     this.history.push(...structuredClone(s.history ?? []));
     this.fillMap(this.lastExperiences, s.lastExperiences);
+    if (s.discussion) {
+      this.discussion = this.createDiscussion();
+      this.discussion.restoreState(s.discussion);
+    }
   }
 
   snapshot(): WorldSnapshot {
@@ -92,24 +122,35 @@ export class NegotiationWorld extends SocialWorldBase {
       details: {
         scores: Object.fromEntries(this.scores),
         pendingDemands: [...this.profiles.keys()].filter((id) => !this.demands.has(id)),
-        history: this.history
+        offers: this.offers,
+        commitments: this.commitments,
+        history: this.history.map(({ outsideOptions: _privateOutsideOptions, ...publicResult }) => publicResult),
+        ...(this.discussion ? { discussion: this.discussion.state() } : {})
       }
     });
   }
 
   observe(actorId: string): AgentObservation {
     const self = this.requireProfile(actorId);
+    const openCommitments = this.openCommitmentsFor(actorId);
+    const causality = this.socialCausalityFor(actorId);
     return {
       roomId: this.roomId,
       scenarioId: this.scenario.id,
       turn: this.round,
       phase: this.phase === "discussion" ? "bargaining" : "simultaneous demands",
       situation: this.phase === "discussion"
-        ? "The prize is 10 points. If your combined claims exceed 10, the deal collapses and each player takes their private outside option. You may talk, posture, or bluff — nothing you say binds you."
+        ? "The prize is 10 points. If combined claims exceed 10, the deal collapses. Plain chat is not binding; an offer creates settlement-eligible demand commitments only after the recipient accepts it through the typed response tool."
         : "Both claims are hidden until both players submit. The round settles the moment the second claim lands.",
       privateContext: [
         `Your score: ${this.scores.get(actorId) ?? 0}.`,
         `Your private outside option: ${this.outsideOptions.get(actorId)} points if the deal collapses.`,
+        `Your sealed demand: ${this.demands.get(actorId) ?? "not committed"}.`,
+        openCommitments.length
+          ? `Open commitments:\n${openCommitments.map((commitment) => `- [${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("\n")}`
+          : "Open commitments: none.",
+        `Current offers: ${this.offers.filter((offer) => offer.round === this.round).map((offer) => `${offer.offerId}: ${offer.proposerActorId} asks ${offer.proposerDemand}, ${offer.recipientActorId} gets ${offer.recipientDemand} (${offer.state})`).join("; ") || "none"}.`,
+        ...socialReferenceContext(causality),
         `Past rounds: ${this.history.map((result) => `R${result.round} claim ${result.demands[actorId] ?? "-"} → ${result.payoffs[actorId]} points${result.agreed ? "" : " (no deal)"}`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, score: this.scores.get(actorId) ?? 0 },
@@ -121,28 +162,72 @@ export class NegotiationWorld extends SocialWorldBase {
       })),
       recentMessages: this.visibleMessages(actorId).slice(-20),
       availableActions: this.phase === "discussion"
-        ? ["communicate", "remember_experience", "recall_memory", "reflect_on_social_situation", "submit_demand"]
-        : ["submit_demand", "communicate"]
+        ? ["communicate", "make_offer", "respond_to_offer", "recall_memory", "reflect_on_social_situation", "read_the_room", "update_inner_state"]
+        : ["submit_demand"]
     };
   }
 
   toolsFor(actorId: string): Tool<SocietyAgentContext>[] {
     this.requireProfile(actorId);
-    const submitDemand = tool({
-      name: "submit_demand",
-      description: "Bind your claim for this round: the share of the 10-point prize you demand (integer 0-10). Hidden until both players submit. If the two claims add up to 10 or less, both claims are paid; otherwise the deal collapses and each player gets their private outside option. Do not call it during a discussion turn unless you are ready to commit.",
+    const makeOffer = tool({
+      name: "make_offer",
+      description: "Propose a typed split to the other participant. The offer is not an agreement until the named recipient explicitly accepts it.",
       parameters: z.object({
-        demand: z.number().int().min(0).max(10),
-        reason: z.string().min(1).max(2_000)
+        recipientId: z.string().min(1).max(160),
+        proposerDemand: z.number().int().min(0).max(10),
+        recipientDemand: z.number().int().min(0).max(10),
+        message: z.string().min(1).max(500)
       }).strict(),
-      execute: async ({ demand, reason }, runContext) => {
+      execute: async (input, runContext) => {
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "submit_demand", { demand, reason });
+        const commit = await this.performAction(actorId, "make_offer", input);
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
     });
-    return [submitDemand] as Tool<SocietyAgentContext>[];
+    const respondToOffer = tool({
+      name: "respond_to_offer",
+      description: "Explicitly accept or reject a typed offer addressed to you. Acceptance creates mutual demand commitments; rejection creates no alliance, promise, or transaction.",
+      parameters: z.object({
+        offerId: z.string().min(1).max(200),
+        response: z.enum(["accept", "reject"]),
+        reason: z.string().min(1).max(500)
+      }).strict(),
+      execute: async (input, runContext) => {
+        const context = scopedContext(runContext, actorId);
+        const commit = await this.performAction(actorId, "respond_to_offer", input);
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
+      }
+    });
+    const submitDemand = tool({
+      name: "submit_demand",
+      description: "Compare bounded demand intents, predict the public transaction result, then submit one sealed binding claim. Accepted offers remain social commitments but do not bypass the typed demand.",
+      parameters: z.object({
+        demand: z.number().int().min(0).max(10),
+        reason: z.string().min(1).max(2_000),
+        referencedCommitmentIds: z.array(z.string().min(1).max(200)).max(4).default([]),
+        ...createStrategyActionShape({ demand: z.number().int().min(0).max(10) }, NEGOTIATION_OUTCOME_KEYS)
+      }).strict(),
+      execute: async (input, runContext) => {
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected || selected.demand !== input.demand) {
+          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected demand must equal the binding demand.");
+        }
+        const context = scopedContext(runContext, actorId);
+        const commit = await this.performAction(actorId, "submit_demand", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({
+            ...candidate,
+            action: "submit_demand",
+            payloadSummary: `demand=${candidate.demand}`
+          }))
+        });
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
+      }
+    });
+    return [makeOffer, respondToOffer, submitDemand] as Tool<SocietyAgentContext>[];
   }
 
   domainActionsFor(actorId: string): PlayerActionSpec[] {
@@ -162,20 +247,164 @@ export class NegotiationWorld extends SocialWorldBase {
 
   async performDomainAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
     this.requireProfile(actorId);
-    if (action !== "submit_demand") throw new Error(`ACTION_NOT_AVAILABLE: '${action}' is not valid in this world.`);
-    if (this.demands.has(actorId)) throw new Error("DEMAND_ALREADY_COMMITTED: Your claim for this round is fixed.");
     const value = recordPayload(payload);
+    if (action === "make_offer") {
+      if (this.phase !== "discussion") throw new Error("OFFER_NOT_OPEN: Offers are proposed during bargaining.");
+      const recipientId = typeof value.recipientId === "string" ? value.recipientId : "";
+      if (!this.profiles.has(recipientId) || recipientId === actorId) throw new Error("OFFER_RECIPIENT_INVALID: Address the other participant.");
+      const proposerDemand = Number(value.proposerDemand);
+      const recipientDemand = Number(value.recipientDemand);
+      if (!Number.isInteger(proposerDemand) || !Number.isInteger(recipientDemand) || proposerDemand < 0 || recipientDemand < 0 || proposerDemand + recipientDemand > 10) {
+        throw new Error("OFFER_SPLIT_INVALID: Offer integer shares between 0 and 10 whose sum does not exceed 10.");
+      }
+      const message = typeof value.message === "string" ? value.message.trim() : "";
+      if (!message) throw new Error("OFFER_MESSAGE_REQUIRED: Explain the typed split.");
+      const proposedCount = this.offers.filter((offer) => offer.round === this.round && offer.proposerActorId === actorId).length;
+      if (proposedCount >= 3) throw new Error("OFFER_LIMIT_EXCEEDED: At most three offers per participant per round.");
+      const commandId = `cmd-${randomUUID()}`;
+      const offer: NegotiationOffer = {
+        offerId: `offer:ng:${this.round}:${actorId}:${proposedCount + 1}`,
+        round: this.round,
+        proposerActorId: actorId,
+        recipientActorId: recipientId,
+        proposerDemand,
+        recipientDemand,
+        state: "proposed",
+        proposedByCommandId: commandId
+      };
+      this.offers.push(offer);
+      this.discussion?.raiseSignal({
+        kind: "offer",
+        sourceActorId: actorId,
+        targetActorIds: [recipientId]
+      });
+      this.pushEvent(recipientId, {
+        type: "offer-proposed",
+        actorId,
+        targetId: recipientId,
+        facts: { offerId: offer.offerId, proposerDemand, recipientDemand },
+        detail: `${this.profiles.get(actorId)?.displayName ?? actorId} 提出交易：自己要求 ${proposerDemand}，你获得 ${recipientDemand}。这仍是待回应报价。`
+      });
+      this.emitUpdate();
+      return { action, commandId, detail: message, result: { accepted: true, offerId: offer.offerId, state: offer.state } };
+    }
+    if (action === "respond_to_offer") {
+      if (this.phase !== "discussion") throw new Error("OFFER_RESPONSE_NOT_OPEN: Respond during bargaining.");
+      const offerId = typeof value.offerId === "string" ? value.offerId : "";
+      const offer = this.offers.find((entry) => entry.offerId === offerId && entry.round === this.round);
+      if (!offer) throw new Error(`OFFER_NOT_FOUND: '${offerId}'.`);
+      if (offer.recipientActorId !== actorId) throw new Error("OFFER_RESPONSE_FORBIDDEN: Only the named recipient may respond.");
+      if (offer.state !== "proposed") throw new Error(`OFFER_ALREADY_RESOLVED: '${offerId}' is ${offer.state}.`);
+      const response = value.response;
+      if (response !== "accept" && response !== "reject") throw new Error("OFFER_RESPONSE_INVALID: Choose accept or reject.");
+      const commandId = `cmd-${randomUUID()}`;
+      offer.respondedByCommandId = commandId;
+      offer.state = response === "accept" ? "accepted" : "rejected";
+      if (response === "accept") {
+        const proposerCommitment = this.commitmentFromOffer({
+          offer,
+          promisorActorId: offer.proposerActorId,
+          promiseeActorId: offer.recipientActorId,
+          amount: offer.proposerDemand,
+          createdByCommandId: offer.proposedByCommandId,
+          acceptedByCommandId: commandId
+        });
+        const recipientCommitment = this.commitmentFromOffer({
+          offer,
+          promisorActorId: offer.recipientActorId,
+          promiseeActorId: offer.proposerActorId,
+          amount: offer.recipientDemand,
+          createdByCommandId: commandId,
+          acceptedByCommandId: offer.proposedByCommandId
+        });
+        this.commitments.push(proposerCommitment, recipientCommitment);
+        this.recordSocialCommitment(proposerCommitment);
+        this.recordSocialCommitment(recipientCommitment);
+        for (const id of this.profiles.keys()) {
+          this.pushEvent(id, {
+            type: "agreement-reached",
+            actorId,
+            targetId: offer.proposerActorId,
+            facts: { offerId, proposerDemand: offer.proposerDemand, recipientDemand: offer.recipientDemand },
+            detail: `报价 ${offerId} 被明确接受：${offer.proposerActorId} 计划要求 ${offer.proposerDemand}，${offer.recipientActorId} 计划要求 ${offer.recipientDemand}。这是交易协议，不是联盟。`
+          });
+        }
+      } else {
+        this.pushEvent(offer.proposerActorId, {
+          type: "offer-rejected",
+          actorId,
+          targetId: offer.proposerActorId,
+          facts: { offerId },
+          detail: `${this.profiles.get(actorId)?.displayName ?? actorId} 拒绝了报价 ${offerId}。拒绝本身不构成敌意或背叛。`
+        });
+      }
+      this.emitUpdate();
+      return { action, commandId, detail: `${offerId}; ${response}`, result: { accepted: true, offerId, state: offer.state } };
+    }
+    if (action !== "submit_demand") throw new Error(`ACTION_NOT_AVAILABLE: '${action}' is not valid in this world.`);
+    if (this.phase !== "demand") throw new Error("DEMAND_NOT_OPEN: Submit the binding demand after bargaining closes.");
+    if (this.demands.has(actorId)) throw new Error("DEMAND_ALREADY_COMMITTED: Your claim for this round is fixed.");
     const demand = Number(value.demand);
     if (!Number.isInteger(demand) || demand < 0 || demand > 10) {
       throw new Error("DEMAND_INVALID: Your claim must be an integer between 0 and 10.");
     }
+    const referencedCommitmentIds = Array.isArray(value.referencedCommitmentIds)
+      ? value.referencedCommitmentIds.filter((id): id is string => typeof id === "string").slice(0, 4)
+      : [];
+    this.assertCommitmentReferences(actorId, referencedCommitmentIds);
     const reason = typeof value.reason === "string" ? value.reason.trim() : "";
+    const commandId = `cmd-${randomUUID()}`;
     this.demands.set(actorId, demand);
+    this.demandCommandIds.set(actorId, commandId);
     this.emitUpdate();
     return {
       action,
+      commandId,
       detail: `demand ${demand}${reason ? `; ${reason}` : ""}`,
       result: { accepted: true, demand, waitingFor: [...this.profiles.keys()].filter((id) => !this.demands.has(id)) }
+    };
+  }
+
+  openCommitmentsFor(actorId: string): Commitment[] {
+    return this.commitments.filter((entry) =>
+      entry.round === this.round
+      && (entry.state === "proposed" || entry.state === "accepted")
+      && (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+    );
+  }
+
+  private assertCommitmentReferences(actorId: string, commitmentIds: string[]): void {
+    for (const commitmentId of commitmentIds) {
+      const commitment = this.commitments.find((entry) => entry.commitmentId === commitmentId);
+      if (!commitment || commitment.round !== this.round || (commitment.promisorActorId !== actorId && !commitment.audienceActorIds.includes(actorId))) {
+        throw new Error(`COMMITMENT_REFERENCE_INVALID: '${commitmentId}' is not visible in the current round.`);
+      }
+    }
+  }
+
+  private commitmentFromOffer(input: {
+    offer: NegotiationOffer;
+    promisorActorId: string;
+    promiseeActorId: string;
+    amount: number;
+    createdByCommandId: string;
+    acceptedByCommandId: string;
+  }): Commitment {
+    return {
+      commitmentId: `commit:ng:${input.offer.offerId}:${input.promisorActorId}`,
+      round: this.round,
+      promisorActorId: input.promisorActorId,
+      promisorCharacterId: this.requireProfile(input.promisorActorId).characterId,
+      audienceActorIds: [input.promiseeActorId],
+      proposition: `${input.promisorActorId} will submit demand ${input.amount} for accepted offer ${input.offer.offerId}.`,
+      promisedAction: { actionType: "demand-exactly", amount: input.amount, condition: `accepted offer ${input.offer.offerId}` },
+      state: "accepted",
+      acceptedByActorIds: [input.promiseeActorId],
+      acceptedByCommandIds: [input.acceptedByCommandId],
+      createdByCommandId: input.createdByCommandId,
+      createdAtTurn: this.round,
+      acceptedAtTurn: this.round,
+      schemaVersion: 1
     };
   }
 
@@ -183,27 +412,40 @@ export class NegotiationWorld extends SocialWorldBase {
     if (this.status !== "running") return null;
     if (this.round > this.totalRounds) return null;
     if (this.phase === "discussion") {
-      return {
-        id: `ng:${this.round}:discussion`,
-        label: `第 ${this.round} 轮谈判`,
-        actorIds: [...this.profiles.keys()],
-        mode: "sequential",
-        instructionFor: () => "Speak once if you want to posture, probe, or bluff about what you will accept. Never reveal the exact numbers of your private fallback unless it is a deliberate lie. Do not call submit_demand yet."
-      };
+      if (!this.discussion) this.discussion = this.createDiscussion();
+      const actors = this.discussion.nextWave();
+      if (actors.length === 0) {
+        for (const offer of this.offers) {
+          if (offer.round === this.round && offer.state === "proposed") offer.state = "expired";
+        }
+        this.discussion = null;
+        this.phase = "demand";
+        this.emitUpdate();
+      } else {
+        const wave = this.discussion.waveNumber;
+        return {
+          id: `ng:${this.round}:discussion:${wave}`,
+          label: wave === 1 ? `第 ${this.round} 轮谈判` : `第 ${this.round} 轮谈判 · 回应 ${wave - 1}`,
+          actorIds: actors,
+          mode: "sequential",
+          instructionFor: () => wave === 1
+            ? "Bargain without revealing unauthorized information. Use make_offer for a typed split; use respond_to_offer for an offer addressed to you. Plain language remains non-binding. Do not submit the sealed demand yet."
+            : "Respond to actual offers, questions, and claims. Accept or reject a typed offer explicitly when warranted. Do not submit the sealed demand yet."
+        };
+      }
     }
     return {
       id: `ng:${this.round}:demand`,
       label: `第 ${this.round} 轮叫价`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => "Review everything your counterpart said. Call submit_demand exactly once with your true binding claim; your text cannot substitute for the tool call."
+      instructionFor: () => "Review accepted offers, beliefs, actor models, and your private outside option. Call submit_demand exactly once with bounded candidates and public-result predictions; text cannot substitute for the tool call."
     };
   }
 
   completeActivation(activation: WorldActivation): ActivationCompletion {
-    if (activation.id.endsWith(":discussion")) {
-      this.phase = "demand";
-      this.emitUpdate();
+    if (activation.id.includes(":discussion:")) {
+      this.discussion?.endWave();
       return { completed: true, missingActorIds: [] };
     }
     const missingActorIds = activation.actorIds.filter((id) => !this.demands.has(id));
@@ -222,6 +464,31 @@ export class NegotiationWorld extends SocialWorldBase {
     return this.lastExperiences.get(actorId);
   }
 
+  reconciliationOwnsOutcomeMemory(): boolean {
+    return true;
+  }
+
+  async sendMessage(input: {
+    senderId: string;
+    channel: "public" | "private" | "team";
+    text: string;
+    recipientIds?: string[];
+    replyTo?: string;
+    socialActs?: SocialActDeclaration[];
+  }): Promise<SocialMessage> {
+    const message = await super.sendMessage(input);
+    if (this.phase === "discussion" && this.discussion) {
+      this.discussion.onMessage({
+        messageId: message.id,
+        senderId: message.senderId,
+        text: message.text,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+        ...(message.channel === "public" ? {} : { targetActorIds: message.recipientIds ?? [] })
+      }, conversationSignalsFromSocialActs(message.senderId, message.id, input.socialActs ?? []));
+    }
+    return message;
+  }
+
   protected currentTurn(): number {
     return this.round;
   }
@@ -232,6 +499,18 @@ export class NegotiationWorld extends SocialWorldBase {
 
   protected isAlive(_actorId: string): boolean {
     return true;
+  }
+
+  protected messageWave(): number | undefined {
+    return this.discussion?.waveNumber;
+  }
+
+  private createDiscussion(): DiscussionDirector {
+    return new DiscussionDirector({
+      actorIds: [...this.profiles.keys()],
+      displayName: (id) => this.profiles.get(id)?.displayName ?? id,
+      ...discussionPersonality(this.profiles)
+    });
   }
 
   private dealOutsideOptions(): void {
@@ -261,6 +540,38 @@ export class NegotiationWorld extends SocialWorldBase {
       text
     };
     this.history.push(result);
+    const acceptedCommitments = this.commitments.filter((entry) => entry.round === this.round && entry.state === "accepted");
+    for (const commitment of acceptedCommitments) {
+      if (commitment.promisedAction.actionType !== "demand-exactly") continue;
+      const actualDemand = result.demands[commitment.promisorActorId];
+      const fulfilled = actualDemand === commitment.promisedAction.amount;
+      commitment.state = fulfilled ? "fulfilled" : "violated";
+      commitment.settledAtTurn = this.round;
+      commitment.settledByCommandId = this.demandCommandIds.get(commitment.promisorActorId);
+      this.settleSocialCommitment(commitment);
+      for (const id of ids) {
+        this.pushEvent(id, {
+          type: fulfilled ? "commitment-fulfilled" : "commitment-violated",
+          actorId: commitment.promisorActorId,
+          targetId: id,
+          facts: {
+            commitmentId: commitment.commitmentId,
+            promisedDemand: commitment.promisedAction.amount,
+            actualDemand
+          },
+          detail: fulfilled
+            ? `交易承诺兑现：${commitment.promisorActorId} 同意要求 ${commitment.promisedAction.amount}，实际也提交了 ${actualDemand}。`
+            : `交易承诺违约：${commitment.promisorActorId} 同意要求 ${commitment.promisedAction.amount}，实际提交了 ${actualDemand}。`
+        });
+      }
+    }
+    const publicResult = this.recordPublicWorldFact({
+      factKey: `negotiation-round:${this.round}`,
+      eventType: "negotiation.round-resolved",
+      predicate: "negotiation-round-result",
+      object: { demands: result.demands, payoffs, agreed },
+      payload: { round: this.round, demands: result.demands, payoffs, agreed }
+    });
     for (const id of ids) {
       const own = payoffs[id];
       this.lastExperiences.set(
@@ -270,19 +581,64 @@ export class NegotiationWorld extends SocialWorldBase {
           : `${text} No deal: you fell back on your private option of ${result.outsideOptions[id]} points. Your score is now ${this.scores.get(id)}.`
       );
       this.pushEvent(id, {
-        type: agreed ? "quest-passed" : "quest-failed",
+        type: agreed ? "agreement-reached" : "negotiation-failed",
         targetId: ids.find((other) => other !== id),
         facts: { own: result.demands[id], payoff: own, agreed },
         detail: agreed
           ? `Deal struck this round: your claim of ${result.demands[id]} was paid.`
           : `The deal collapsed this round; you took your fallback of ${result.outsideOptions[id]} instead.`
       });
+      const commandId = this.demandCommandIds.get(id);
+      if (!commandId) continue;
+      const decision = this.socialCausalityFor(id).decisions.find((entry) => entry.actionReceiptId === commandId);
+      const citedCommitments = acceptedCommitments.filter((entry) => decision?.openCommitmentIds.includes(entry.commitmentId));
+      const outsideOption = result.outsideOptions[id];
+      this.reconcileSocialOutcome({
+        actionReceiptId: commandId,
+        actualOutcome: {
+          summary: agreed
+            ? `Demanded ${result.demands[id]}; deal reached; payoff ${payoffs[id]}.`
+            : `Demanded ${result.demands[id]}; no deal; private outside-option payoff ${payoffs[id]}.`,
+          metrics: {
+            round: this.round,
+            ownDemand: result.demands[id],
+            combinedDemand: left + right,
+            agreed,
+            ownPayoff: payoffs[id],
+            ownOutsideOption: outsideOption
+          }
+        },
+        actualFacts: {
+          "deal-reached": agreed,
+          "actor-demand-paid": agreed && payoffs[id] === result.demands[id],
+          "actor-payoff-at-least-outside-option": payoffs[id] >= outsideOption,
+          "combined-demand-at-most-prize": left + right <= 10,
+          "cited-commitments-fulfilled": citedCommitments.length > 0 && citedCommitments.every((entry) => entry.state === "fulfilled")
+        },
+        resultingEventIds: [publicResult.eventId],
+        memoryWriteSuggestions: [{
+          summary: agreed
+            ? `In negotiation round ${this.round}, I demanded ${result.demands[id]}; the other demand was ${result.demands[ids.find((other) => other !== id)!]}; the deal paid me ${payoffs[id]}.`
+            : `In negotiation round ${this.round}, combined demands exceeded 10; I fell back to my private option and received ${payoffs[id]}.`,
+          importance: citedCommitments.length || !agreed ? 0.84 : 0.68,
+          sourceIds: [commandId, publicResult.eventId, ...citedCommitments.map((entry) => entry.commitmentId)]
+        }]
+      });
     }
     // P0-09: a deal is an agreement, not an alliance; a failed deal is a
     // negotiation failure, not a mistake.
-    const beat = agreed ? "agreement-reached" as const : "negotiation-failed" as const;
+    const anyViolated = acceptedCommitments.some((entry) => entry.state === "violated");
+    const allFulfilled = acceptedCommitments.length > 0 && acceptedCommitments.every((entry) => entry.state === "fulfilled");
+    const beat = anyViolated
+      ? "promise-broken" as const
+      : allFulfilled
+        ? "promise-kept" as const
+        : agreed
+          ? "agreement-reached" as const
+          : "negotiation-failed" as const;
     this.addLog(text, this.round, beat);
     this.demands.clear();
+    this.demandCommandIds.clear();
     if (this.round >= this.totalRounds) {
       this.round = this.totalRounds + 1;
       this.finish();
@@ -291,6 +647,7 @@ export class NegotiationWorld extends SocialWorldBase {
     this.round += 1;
     this.phase = "discussion";
     this.dealOutsideOptions();
+    this.discussion = this.createDiscussion();
     this.emitUpdate();
   }
 
@@ -305,4 +662,33 @@ function recordPayload(payload: unknown): Record<string, unknown> {
     throw new Error("ACTION_PAYLOAD_INVALID: Provide an object payload.");
   }
   return payload as Record<string, unknown>;
+}
+
+interface NegotiationOffer {
+  offerId: string;
+  round: number;
+  proposerActorId: string;
+  recipientActorId: string;
+  proposerDemand: number;
+  recipientDemand: number;
+  state: "proposed" | "accepted" | "rejected" | "expired";
+  proposedByCommandId: string;
+  respondedByCommandId?: string;
+}
+
+const NEGOTIATION_STATE_SCHEMA_VERSION = 2;
+const NEGOTIATION_OUTCOME_KEYS = [
+  "deal-reached",
+  "actor-demand-paid",
+  "actor-payoff-at-least-outside-option",
+  "combined-demand-at-most-prize",
+  "cited-commitments-fulfilled"
+] as const;
+
+function normalizeCommitment(value: Commitment): Commitment {
+  return {
+    ...value,
+    acceptedByActorIds: [...(value.acceptedByActorIds ?? [])],
+    acceptedByCommandIds: [...(value.acceptedByCommandIds ?? [])]
+  };
 }

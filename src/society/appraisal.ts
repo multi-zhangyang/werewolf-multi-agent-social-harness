@@ -23,6 +23,7 @@ export interface AppraisalMemorySeed {
   tags: string[];
   salience: number;
   valence: number;
+  sourceRefs: string[];
 }
 
 export interface AppraisalSummary {
@@ -90,7 +91,8 @@ export function appraiseEvents(
       text: event.detail,
       tags: [event.type, `turn:${turn}`, ...(event.actorId ? [event.actorId] : []), ...(event.targetId ? [event.targetId] : [])],
       salience: deltas.salience,
-      valence
+      valence,
+      sourceRefs: [...(event.sourceEventIds ?? []), event.id]
     });
     mind.lastAppraisals.push({
       text: `${eventTypeLabel(event.type)}：${event.detail}`,
@@ -196,6 +198,12 @@ function eventTypeLabel(type: SocialEvent["type"]): string {
   const labels: Record<SocialEvent["type"], string> = {
     accused: "被公开指控",
     defended: "被公开辩护",
+    threatened: "收到直接威胁",
+    endorsed: "得到他人支持",
+    "apologized-to": "收到道歉",
+    "warning-received": "收到风险提醒",
+    "socially-accepted": "提议获得口头接受",
+    "socially-rejected": "提议被口头拒绝",
     "vote-against": "被投票针对",
     "vote-cast": "投出一票",
     "voted-with": "有人与你同票",
@@ -206,12 +214,22 @@ function eventTypeLabel(type: SocialEvent["type"]): string {
     "night-kill": "参与夜间行动",
     included: "被选入队伍",
     excluded: "被排除在队伍外",
+    "alliance-proposed": "收到合作提议",
+    "agreement-reached": "达成交易协议",
+    "negotiation-failed": "交易未达成",
+    "offer-proposed": "收到交易报价",
+    "offer-rejected": "交易报价被拒绝",
     "quest-passed": "任务成功",
     "quest-failed": "任务失败",
     assassinated: "被刺杀",
     "commitment-proposed": "有人向你公开承诺",
+    "commitment-accepted": "承诺被明确接受",
     "commitment-fulfilled": "承诺兑现",
     "commitment-violated": "承诺破裂",
+    "opponent-cooperated": "对方选择合作",
+    "opponent-defected": "对方选择不合作",
+    "competitive-bid-received": "收到新的竞争叫价",
+    "bid-challenged": "自己的叫价受到质疑",
     "investment-made": "投资结算",
     "return-made": "返还结算",
     win: "赢得本局",
@@ -246,6 +264,110 @@ function appraisalFor(mind: AgentMindState, event: SocialEvent, t: AgentTemperam
         needs: { security: 0.08, connection: 0.08 },
         relationship: { trust: 0.06, affinity: 0.1, tension: -0.04 },
         salience: 0.55
+      };
+    }
+    case "threatened": {
+      return {
+        emotions: { fear: mod(0.18, N, 1.3), anger: mod(0.14, N, 0.9) },
+        social: { contempt: mod(0.08, A, -0.5) },
+        pad: { pleasure: -0.12, arousal: 0.14, dominance: -0.08 },
+        needs: { security: -0.16, autonomy: -0.08 },
+        relationship: { trust: -0.12, affinity: -0.06, tension: 0.18, respect: -0.03 },
+        salience: 0.72
+      };
+    }
+    case "endorsed": {
+      return {
+        emotions: { joy: 0.07 },
+        social: { gratitude: mod(0.12, A, 0.7), pride: mod(0.06, E, 0.5) },
+        pad: { pleasure: 0.08, dominance: 0.04 },
+        needs: { connection: 0.07, status: 0.06 },
+        relationship: { trust: 0.05, affinity: 0.08, respect: 0.04, tension: -0.03 },
+        salience: 0.48
+      };
+    }
+    case "apologized-to": {
+      return {
+        emotions: { surprise: 0.04 },
+        social: { relief: mod(0.1, A, 0.6) },
+        pad: { pleasure: 0.04, arousal: -0.04 },
+        needs: { connection: 0.05 },
+        relationship: { trust: 0.03, affinity: 0.05, respect: 0.04, tension: -0.09 },
+        salience: 0.52
+      };
+    }
+    case "warning-received": {
+      return {
+        emotions: { fear: mod(0.07, N, 1), surprise: 0.05 },
+        social: { gratitude: mod(0.05, A, 0.5) },
+        pad: { arousal: 0.07 },
+        needs: { security: -0.03 },
+        relationship: { trust: 0.02, respect: 0.03 },
+        salience: 0.42
+      };
+    }
+    case "socially-accepted": {
+      return {
+        emotions: { joy: 0.06 },
+        social: { gratitude: mod(0.07, A, 0.5), relief: 0.04 },
+        pad: { pleasure: 0.06, dominance: 0.03 },
+        needs: { connection: 0.05, achievement: 0.04 },
+        relationship: { trust: 0.03, affinity: 0.05, respect: 0.02, tension: -0.03 },
+        salience: 0.43
+      };
+    }
+    case "socially-rejected": {
+      return {
+        emotions: { sadness: 0.04, anger: mod(0.025, N, 0.7) },
+        pad: { pleasure: -0.04, dominance: -0.025 },
+        needs: { connection: -0.035, achievement: -0.03 },
+        relationship: { affinity: -0.025, tension: 0.035 },
+        salience: 0.4
+      };
+    }
+    case "alliance-proposed": {
+      return {
+        emotions: { joy: mod(0.04, A, 0.5), surprise: 0.04 },
+        pad: { pleasure: 0.04, arousal: 0.04 },
+        needs: { connection: 0.06, status: 0.03 },
+        relationship: { affinity: 0.04, respect: 0.02, tension: -0.02 },
+        salience: 0.45
+      };
+    }
+    case "offer-proposed": {
+      return {
+        emotions: { surprise: 0.04 },
+        pad: { arousal: 0.04, dominance: 0.02 },
+        needs: { autonomy: 0.03, achievement: 0.03 },
+        relationship: { respect: 0.01 },
+        salience: 0.4
+      };
+    }
+    case "offer-rejected": {
+      return {
+        emotions: { sadness: 0.04, anger: mod(0.03, N, 0.8) },
+        pad: { pleasure: -0.04, dominance: -0.03 },
+        needs: { achievement: -0.04 },
+        relationship: { affinity: -0.02, tension: 0.03 },
+        salience: 0.38
+      };
+    }
+    case "agreement-reached": {
+      return {
+        emotions: { joy: 0.08 },
+        social: { gratitude: mod(0.06, A, 0.5), relief: 0.05 },
+        pad: { pleasure: 0.08, dominance: 0.03 },
+        needs: { achievement: 0.07, connection: 0.04 },
+        relationship: { trust: 0.04, affinity: 0.04, respect: 0.03, tension: -0.02 },
+        salience: 0.5
+      };
+    }
+    case "negotiation-failed": {
+      return {
+        emotions: { sadness: 0.04 },
+        pad: { pleasure: -0.04 },
+        needs: { achievement: -0.05 },
+        salience: 0.38
       };
     }
     case "vote-against": {
@@ -420,6 +542,14 @@ function appraisalFor(mind: AgentMindState, event: SocialEvent, t: AgentTemperam
       // attention, not relationship credit — nothing has been kept yet.
       return { pad: { arousal: 0.04 }, needs: { security: 0.04 }, salience: 0.45 };
     }
+    case "commitment-accepted": {
+      return {
+        social: { gratitude: mod(0.05, A, 0.5) },
+        pad: { pleasure: 0.03 },
+        needs: { connection: 0.03 },
+        salience: 0.4
+      };
+    }
     case "commitment-fulfilled": {
       return {
         emotions: { joy: 0.06 },
@@ -446,6 +576,55 @@ function appraisalFor(mind: AgentMindState, event: SocialEvent, t: AgentTemperam
     }
     case "return-made": {
       return { pad: { arousal: 0.03 }, salience: 0.25 };
+    }
+    case "opponent-cooperated": {
+      return {
+        emotions: { joy: 0.07 },
+        social: { gratitude: mod(0.12, A, 0.7) },
+        pad: { pleasure: 0.08 },
+        needs: { security: 0.06, connection: 0.06 },
+        relationship: { trust: 0.1, affinity: 0.05, tension: -0.04 },
+        salience: 0.58
+      };
+    }
+    case "opponent-defected": {
+      const selfCooperated = event.facts?.selfMove === "cooperate";
+      return {
+        emotions: selfCooperated
+          ? { anger: mod(0.16, N, 1), sadness: 0.07 }
+          : { surprise: 0.03 },
+        ...(selfCooperated ? { social: { contempt: mod(0.07, A, -0.5) } } : {}),
+        pad: selfCooperated ? { pleasure: -0.11, arousal: 0.07 } : { arousal: 0.02 },
+        ...(selfCooperated ? { needs: { security: -0.1, connection: -0.05 } } : {}),
+        relationship: selfCooperated
+          ? { trust: -0.16, affinity: -0.06, tension: 0.13, respect: -0.03 }
+          : { trust: -0.04, tension: 0.03 },
+        salience: selfCooperated ? 0.74 : 0.42
+      };
+    }
+    case "competitive-bid-received": {
+      return {
+        emotions: { surprise: 0.035 },
+        pad: { arousal: 0.06, dominance: -0.02 },
+        needs: { autonomy: -0.025, achievement: 0.04 },
+        relationship: { tension: 0.025, respect: 0.01 },
+        salience: 0.34
+      };
+    }
+    case "bid-challenged": {
+      const bidWasTrue = Boolean(event.facts?.bidWasTrue);
+      return {
+        emotions: bidWasTrue
+          ? { anger: mod(0.055, N, 0.8), surprise: 0.03 }
+          : { fear: mod(0.06, N, 1), surprise: 0.055 },
+        social: bidWasTrue
+          ? { pride: mod(0.055, E, 0.6) }
+          : { shame: mod(0.075, C, 0.7) },
+        pad: { arousal: 0.085, dominance: bidWasTrue ? 0.025 : -0.06 },
+        needs: { status: bidWasTrue ? 0.025 : -0.065, security: -0.035 },
+        relationship: { tension: 0.075, respect: bidWasTrue ? -0.01 : 0.035 },
+        salience: 0.58
+      };
     }
     case "win": {
       return {

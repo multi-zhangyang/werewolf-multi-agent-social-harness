@@ -4,6 +4,7 @@ import express from "express";
 import { ZodError } from "zod";
 import { createServerContext, host, port } from "./context";
 import { registerRoomRoutes } from "./routes/rooms";
+import { registerSocialTruthRoutes } from "./routes/social-truth";
 import { registerCharacterRoutes } from "./characters";
 import { registerTemplateRoutes } from "./templates";
 import type { AgentModelBinding } from "../society/models";
@@ -18,6 +19,7 @@ export function createServerApp(): express.Express {
   registerCharacterRoutes(app, context);
   registerTemplateRoutes(app, context);
   registerRoomRoutes(app, context);
+  registerSocialTruthRoutes(app, context);
   recoverInterruptedRooms(context);
   app.use(express.static(path.resolve(directory, "../../dist")));
   app.get("*path", (_request, response) => {
@@ -104,7 +106,8 @@ function recoverInterruptedRooms(context: ReturnType<typeof createServerContext>
           ...(checkpoint.agentBindings ? { agentBindings: checkpoint.agentBindings as Record<string, AgentModelBinding> } : {}),
           ...(checkpoint.agentMinds ? { agentMinds: checkpoint.agentMinds } : {}),
           ...(checkpoint.pausedAgents ? { pausedAgents: checkpoint.pausedAgents } : {}),
-          ...(checkpoint.envelopes?.length ? { events: checkpoint.envelopes } : {})
+          ...(checkpoint.envelopes?.length ? { events: checkpoint.envelopes } : {}),
+          ...(checkpoint.replayEnvelopes?.length ? { replayEvents: checkpoint.replayEnvelopes } : {})
         }
       });
       room.recoverFromCheckpoint();

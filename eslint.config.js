@@ -23,7 +23,7 @@ export default tseslint.config(
   {
     // Standalone Node scripts (demo runners) see the Node global scope.
     files: ["scripts/**/*.mjs"],
-    languageOptions: { globals: { ...globals.node, location: "readonly" } }
+    languageOptions: { globals: { ...globals.node, location: "readonly", document: "readonly" } }
   },
   {
     files: ["**/*.ts", "**/*.tsx", "**/*.mjs", "**/*.js"],

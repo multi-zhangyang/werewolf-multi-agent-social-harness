@@ -49,7 +49,8 @@ const socialActDeclarationSchema = z.object({
     object: z.string().max(500).nullable().default(null)
   }).strict().nullable().default(null),
   confidence: z.number().min(0).max(1).default(1),
-  deceptionId: z.string().min(1).max(160).nullable().default(null)
+  deceptionId: z.string().min(1).max(160).nullable().default(null),
+  repairDeceptionId: z.string().min(1).max(160).nullable().default(null)
 }).strict();
 
 export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
@@ -58,8 +59,10 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
     description: [
       "Send one observable message to other participants. Use public for everyone, private with recipientIds for selected participants, or team only when the scenario grants a team channel.",
       "Optionally declare the concrete social acts this exact message performs (claim, question, accusation, offer, promise, acceptance, etc.). These declarations interpret the message but never replace its original text and never change binding world state.",
+      "For any act directed at a person, include that person's actor ID in targetActorIds so they can react to it. Use replyTo with the visible message ID when answering a specific message.",
       "A promise declaration is only communicated speech; when a scenario exposes a commitment tool, use that tool for a promise the world can settle.",
-      "If this message executes a private deception plan, cite the deceptionId returned by log_deception_plan on the relevant social act."
+      "If this message executes a private deception plan, cite the deceptionId returned by log_deception_plan on the relevant social act.",
+      "After a deception is detected, the deceiver may cite repairDeceptionId on an apology/disclosure; a targeted participant may cite it on an acceptance/endorsement to confirm repair."
     ].join("\n"),
     parameters: z.object({
       text: z.string().min(1).max(4_000),
@@ -84,7 +87,8 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
             }
           : {}),
         confidence: act.confidence,
-        ...(act.deceptionId ? { deceptionId: act.deceptionId } : {})
+        ...(act.deceptionId ? { deceptionId: act.deceptionId } : {}),
+        ...(act.repairDeceptionId ? { repairDeceptionId: act.repairDeceptionId } : {})
       }));
       const commit = await ctx.world.performAction(ctx.actorId, "communicate", {
         text,
@@ -95,23 +99,6 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
       });
       emitWorldAction(ctx, commit.action, commit.detail);
       return commit.result;
-    }
-  }) as Tool<SocietyAgentContext>;
-
-  const remember = tool({
-    name: "remember_experience",
-    description: "Store a personally meaningful fact, promise, betrayal, inference, or outcome for later turns, tagged with your current emotional state. Use salience near 1 only for events that should strongly influence future decisions.",
-    parameters: z.object({
-      text: z.string().min(1).max(4_000),
-      tags: z.array(z.string().min(1).max(40)).max(8).default([]),
-      salience: z.number().min(0).max(1).default(0.6),
-      valence: z.number().min(-1).max(1).default(0)
-    }).strict(),
-    execute: async ({ text, tags, salience, valence }, runContext) => {
-      const ctx = scopedContext(runContext, context.actorId, context);
-      const entry = await ctx.memory.remember({ text, tags, salience, valence, pad: { ...ctx.mind.mood.pad }, turn: ctx.world.snapshot().turn });
-      await syncMemories(ctx);
-      return { stored: true, memoryId: entry.id };
     }
   }) as Tool<SocietyAgentContext>;
 
@@ -186,7 +173,7 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
     }
   }) as Tool<SocietyAgentContext>;
 
-  return { all: [communicate, remember, recall, updateInnerState, logDeception], recall, innerState: updateInnerState };
+  return { all: [communicate, recall, updateInnerState, logDeception], recall, innerState: updateInnerState };
 }
 
 /**
@@ -208,12 +195,42 @@ export function roleHypothesisTool(actorId: string): Tool<SocietyAgentContext> {
       hypotheses: z.array(z.object({
         subjectId: z.string().min(1),
         role: z.string().min(1).max(24),
-        probability: z.number().min(0).max(1)
+        probability: z.number().min(0).max(1),
+        confidence: z.number().min(0).max(1).default(0.6),
+        source: z.string().min(1).max(500).default("role-hypothesis reflection"),
+        sourceMessageIds: z.array(z.string().min(1).max(160)).max(8).default([]),
+        sourceEvidenceIds: z.array(z.string().min(1).max(160)).max(8).default([])
       }).strict()).min(1).max(12)
     }).strict(),
     execute: async ({ hypotheses }, runContext) => {
       const ctx = scopedContext(runContext, actorId);
       const turn = ctx.world.snapshot().turn;
+      const visibleMessageIds = new Set(ctx.world.observe(actorId).recentMessages.map((message) => message.id));
+      const visibleEvidenceIds = new Set(ctx.world.socialCausalityFor(actorId).evidence.map((evidence) => evidence.evidenceId));
+      for (const entry of hypotheses) {
+        for (const messageId of entry.sourceMessageIds) {
+          if (!visibleMessageIds.has(messageId)) {
+            throw new Error(`ROLE_HYPOTHESIS_SOURCE_NOT_OBSERVED: '${messageId}' is not in the authorized observation.`);
+          }
+        }
+        for (const evidenceId of entry.sourceEvidenceIds) {
+          if (!visibleEvidenceIds.has(evidenceId)) {
+            throw new Error(`ROLE_HYPOTHESIS_EVIDENCE_NOT_OBSERVED: '${evidenceId}' is not in the authorized observation.`);
+          }
+        }
+      }
+      const beliefRecords = hypotheses.map((entry) => ctx.world.recordBeliefUpdate(actorId, {
+        subjectId: entry.subjectId,
+        proposition: "has-role",
+        kind: "identity",
+        object: entry.role,
+        probability: entry.probability,
+        confidence: entry.confidence,
+        source: entry.source,
+        sourceMessageIds: entry.sourceMessageIds,
+        sourceEvidenceIds: entry.sourceEvidenceIds,
+        supports: true
+      }));
       for (const entry of hypotheses) {
         const existing = ctx.mind.roleHypotheses.find(
           (candidate) => candidate.subjectId === entry.subjectId && candidate.role === entry.role
@@ -239,6 +256,7 @@ export function roleHypothesisTool(actorId: string): Tool<SocietyAgentContext> {
       if (ctx.mind.roleHypotheses.length > 40) ctx.mind.roleHypotheses.splice(0, ctx.mind.roleHypotheses.length - 40);
       return {
         updated: true,
+        beliefUpdateIds: beliefRecords.map((record) => record.beliefUpdateId),
         summary: subjects.size
           ? [...subjects].map((subjectId) => {
               const entries = ctx.mind.roleHypotheses
@@ -272,16 +290,7 @@ export function createCognitionTools(context: SocietyAgentContext): Tool<Society
         "Use at most one cognition pass per turn unless the situation is urgent; prefer acting once you have enough clarity."
       ].join("\n"),
       "reflection", "notice", "策略反思"),
-    cognitivePassTool(context, "read_the_room",
-      [
-        "Your own private theory-of-mind pass. For each other participant you judge relevant, note:",
-        "(1) what they most likely want this round,",
-        "(2) how trustworthy their public behavior has been,",
-        "(3) what they probably believe about you,",
-        "(4) what they may be concealing.",
-        "Separate claims from committed actions and incentives; label each inference with confidence (high / medium / low). Write a short private note. This pass cannot change the world."
-      ].join("\n"),
-      "mind-read", "hypothesis", "洞察全场"),
+    createActorModelTool(context),
     cognitivePassTool(context, "plan_social_strategy",
       [
         "Your own private planning pass. Turn your goals, beliefs, relationships and read of the room into a concrete sequence for this exact phase:",
@@ -290,6 +299,71 @@ export function createCognitionTools(context: SocietyAgentContext): Tool<Society
       ].join("\n"),
       "plan", "plan", "谋划行动")
   ];
+}
+
+function createActorModelTool(context: SocietyAgentContext): Tool<SocietyAgentContext> {
+  return tool({
+    name: "read_the_room",
+    description: [
+      "Update your private, evidence-linked model of relevant participants. This is your own theory of mind, never their true private state.",
+      "For each target, estimate goals, likely knowledge, next actions, honesty and risk tolerance. Cite only message IDs and evidence IDs present in your current authorized context.",
+      "Probabilities express uncertainty. This pass cannot change the world and cannot read another participant's private mind."
+    ].join("\n"),
+    parameters: z.object({
+      models: z.array(z.object({
+        targetActorId: z.string().min(1),
+        inferredGoals: z.array(z.object({
+          goal: z.string().min(1).max(500),
+          probability: z.number().min(0).max(1)
+        }).strict()).max(6).default([]),
+        inferredKnowledge: z.array(z.object({
+          proposition: z.string().min(1).max(500),
+          probability: z.number().min(0).max(1)
+        }).strict()).max(6).default([]),
+        predictedActions: z.array(z.object({
+          action: z.string().min(1).max(300),
+          probability: z.number().min(0).max(1)
+        }).strict()).max(6).default([]),
+        perceivedStrategy: z.array(z.string().min(1).max(240)).max(6).default([]),
+        perceivedHonesty: z.number().min(0).max(1),
+        perceivedRiskTolerance: z.number().min(0).max(1),
+        sourceMessageIds: z.array(z.string().min(1).max(160)).max(12).default([]),
+        sourceEvidenceIds: z.array(z.string().min(1).max(160)).max(12).default([]),
+        confidence: z.number().min(0).max(1)
+      }).strict()).min(1).max(4),
+      privateSummary: z.string().min(1).max(2_000)
+    }).strict(),
+    execute: async ({ models, privateSummary }, runContext) => {
+      const ctx = scopedContext(runContext, context.actorId, context);
+      const observation = ctx.world.observe(ctx.actorId);
+      const visibleActors = new Set(observation.others.map((actor) => actor.id));
+      const visibleMessages = new Set(observation.recentMessages.map((message) => message.id));
+      const visibleEvidence = new Set(ctx.world.socialCausalityFor(ctx.actorId).evidence.map((entry) => entry.evidenceId));
+      for (const model of models) {
+        if (!visibleActors.has(model.targetActorId)) {
+          throw new Error(`ACTOR_MODEL_TARGET_NOT_OBSERVED: '${model.targetActorId}' is not another visible participant.`);
+        }
+        for (const messageId of model.sourceMessageIds) {
+          if (!visibleMessages.has(messageId)) {
+            throw new Error(`ACTOR_MODEL_SOURCE_NOT_OBSERVED: '${messageId}' is not in the current authorized observation.`);
+          }
+        }
+        for (const evidenceId of model.sourceEvidenceIds) {
+          if (!visibleEvidence.has(evidenceId)) {
+            throw new Error(`ACTOR_MODEL_EVIDENCE_NOT_OBSERVED: '${evidenceId}' is not in the current authorized social context.`);
+          }
+        }
+      }
+      const records = models.map((model) => ctx.world.recordActorModel(ctx.actorId, model));
+      recordCognitivePass(ctx, "mind-read", privateSummary.trim());
+      emitThoughtBeat(ctx, "hypothesis", "洞察全场", privateSummary.trim(), models.map((model) => model.targetActorId));
+      return {
+        recorded: true,
+        kind: "mind-read",
+        actorModelIds: records.map((record) => record.modelId)
+      };
+    }
+  }) as Tool<SocietyAgentContext>;
 }
 
 function cognitivePassTool(
@@ -402,7 +476,9 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
         affinityDelta: z.number().min(-1).max(1).default(0),
         respectDelta: z.number().min(-1).max(1).default(0),
         tensionDelta: z.number().min(-1).max(1).default(0),
-        note: z.string().max(1_000)
+        note: z.string().max(1_000),
+        sourceMessageIds: z.array(z.string().min(1).max(160)).max(12).default([]),
+        sourceEvidenceIds: z.array(z.string().min(1).max(160)).max(12).default([])
       }).strict().nullable().default(null),
       belief: z.object({
         subjectId: z.string().min(1),
@@ -439,7 +515,7 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
       if (energyDelta !== null) ctx.mind.mood.energy = clampUnit(ctx.mind.mood.energy + energyDelta);
       ctx.mind.mood = refreshMood(ctx.mind.mood, turn);
       if (attention) ctx.mind.attention = [...attention];
-      if (relationship) updateRelationship(ctx, relationship, turn);
+      const relationshipRecord = relationship ? updateRelationship(ctx, relationship, turn) : undefined;
       if (belief) updateBelief(ctx.mind, {
         subjectId: belief.subjectId,
         proposition: belief.proposition,
@@ -459,7 +535,8 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
         emotions: describeEmotions(ctx.mind.mood.emotions),
         needs: describeNeeds(ctx.mind.mood.needs),
         energy: Math.round(ctx.mind.mood.energy * 100) / 100,
-        ...(beliefRecord ? { beliefUpdateId: beliefRecord.beliefUpdateId, beliefId: beliefRecord.beliefId } : {})
+        ...(beliefRecord ? { beliefUpdateId: beliefRecord.beliefUpdateId, beliefId: beliefRecord.beliefId } : {}),
+        ...(relationshipRecord ? { relationshipDeltaId: relationshipRecord.relationshipDeltaId } : {})
       };
     }
   }) as Tool<SocietyAgentContext>;
@@ -467,24 +544,53 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
 
 function updateRelationship(
   ctx: SocietyAgentContext,
-  input: { agentId: string; trustDelta: number; affinityDelta: number; respectDelta: number; tensionDelta: number; note: string },
+  input: {
+    agentId: string;
+    trustDelta: number;
+    affinityDelta: number;
+    respectDelta: number;
+    tensionDelta: number;
+    note: string;
+    sourceMessageIds: string[];
+    sourceEvidenceIds: string[];
+  },
   turn: number
-): void {
-  const targetId = ctx.world.snapshot().agents.find((agent) => agent.id === input.agentId)?.characterId ?? input.agentId;
-  const relationship = ctx.mind.relationships.find((candidate) => candidate.targetCharacterId === targetId);
+): import("./social/contracts").RelationshipDeltaRecord {
+  const target = ctx.world.snapshot().agents.find((agent) => agent.id === input.agentId || agent.characterId === input.agentId);
+  if (!target) throw new Error(`RELATIONSHIP_NOT_FOUND: '${input.agentId}' is not another participant in this room.`);
+  const relationship = ctx.mind.relationships.find((candidate) => candidate.targetCharacterId === target.characterId);
   if (!relationship) throw new Error(`RELATIONSHIP_NOT_FOUND: '${input.agentId}' is not another participant in this room.`);
-  relationship.trust = clamp(relationship.trust + input.trustDelta);
-  relationship.affinity = clamp(relationship.affinity + input.affinityDelta);
-  relationship.respect = clamp(relationship.respect + input.respectDelta);
-  relationship.tension = clamp(relationship.tension + input.tensionDelta);
-  relationship.familiarity = clamp(relationship.familiarity + 0.08);
-  relationship.updatedAtTurn = turn;
-  relationship.note = input.note;
+  const before = {
+    trust: relationship.trust,
+    affinity: relationship.affinity,
+    respect: relationship.respect,
+    tension: relationship.tension,
+    familiarity: relationship.familiarity
+  };
+  const after = {
+    trust: clamp(relationship.trust + input.trustDelta),
+    affinity: clamp(relationship.affinity + input.affinityDelta),
+    respect: clamp(relationship.respect + input.respectDelta),
+    tension: clamp(relationship.tension + input.tensionDelta),
+    familiarity: clamp(relationship.familiarity + 0.08)
+  };
+  const record = ctx.world.recordRelationshipUpdate(ctx.actorId, {
+    targetActorId: target.id,
+    before,
+    after,
+    note: input.note,
+    sourceMessageIds: input.sourceMessageIds,
+    sourceEvidenceIds: input.sourceEvidenceIds,
+    sourceKind: "agent-self-report"
+  });
+  Object.assign(relationship, after, { updatedAtTurn: turn, note: input.note });
+  return record;
 }
 
 function updateBelief(mind: AgentMindState, input: Omit<AgentBelief, "updatedAtTurn">, turn: number): void {
   const existing = mind.beliefs.find((belief) => belief.subjectId === input.subjectId && belief.proposition === input.proposition);
   if (existing) {
+    existing.probability = input.probability;
     existing.confidence = input.confidence;
     existing.source = input.source;
     existing.updatedAtTurn = turn;
@@ -510,9 +616,14 @@ function emitWorldAction(context: SocietyAgentContext, action: string, detail: s
 }
 
 export function formatObservation(observation: ReturnType<SocietyAgentContext["world"]["observe"]>): string {
-  const messages = observation.recentMessages.slice(-16).map((message) => {
+  const visibleMessages = observation.recentMessages.slice(-16);
+  const messageById = new Map(observation.recentMessages.map((message) => [message.id, message]));
+  const messages = visibleMessages.map((message) => {
     const recipients = message.recipientIds?.length ? ` -> ${message.recipientIds.join(", ")}` : "";
-    return `[${message.channel}${recipients}] ${message.senderName}: ${message.text}`;
+    const reply = message.replyTo
+      ? ` · reply to #${message.replyTo}${messageById.get(message.replyTo)?.senderName ? ` (${messageById.get(message.replyTo)?.senderName})` : ""}`
+      : "";
+    return `[#${message.id} · ${message.channel}${recipients}${reply}] ${message.senderName}: ${message.text}`;
   });
   return [
     `Turn ${observation.turn}. Phase: ${observation.phase}.`,

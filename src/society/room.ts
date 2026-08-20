@@ -27,10 +27,11 @@ import {
   seedRegistryFromEnv,
   type AgentModelBinding,
   type ProviderProfile,
+  type RegistryGlobalDefaults,
   type ResolvedModelConfig
 } from "./models";
-import { reasoningFallbackFetch } from "./models/reasoning-fallback";
-import { RoomArchiveStore, type RoomCheckpoint } from "./persistence";
+import { reasoningFallbackFetch, type ReasoningFallbackNotice } from "./models/reasoning-fallback";
+import { RoomArchiveError, RoomArchiveStore, type RoomCheckpoint } from "./persistence";
 import { CinematicDirector } from "./spectator/cinematic-director";
 import { ActivationLimiter } from "./activation-limiter";
 import type { WorldSerializedState } from "./world";
@@ -76,6 +77,7 @@ export interface SocietyRoomCreateOptions {
     agentMinds?: Record<string, AgentMindState>;
     pausedAgents?: string[];
     events?: SocietyRoomEventEnvelope[];
+    replayEvents?: SocietyRoomEventEnvelope[];
     /** The room's control token survives a restart with the checkpoint. */
     ownerToken?: string;
   };
@@ -201,6 +203,7 @@ export class SocietyRoom {
   private readonly cards = new Map<string, RuntimeCard>();
   private readonly agents = new Map<string, AutonomousSocietyAgent>();
   private readonly events: SocietyRoomEventEnvelope[] = [];
+  private readonly replayEvents: SocietyRoomEventEnvelope[] = [];
   private readonly listeners = new Set<RoomListener>();
   private abortController = new AbortController();
   private readonly provider?: OpenAIProviderType;
@@ -227,7 +230,6 @@ export class SocietyRoom {
   private readonly humanToken?: string;
   /** Control token for this room (owner). Persisted with the checkpoint. */
   private readonly ownerToken: string;
-  private readonly rememberedExperiences = new Map<string, string>();
   /** §17.2: turns the room gave up on locally while the request kept running. */
   private abandonedRunningTurns = 0;
   /** Of those, how many have since truly settled (or were terminated). */
@@ -240,6 +242,7 @@ export class SocietyRoom {
   private error?: string;
   private readonly archive: RoomArchiveStore;
   private archiveTimer?: ReturnType<typeof setTimeout>;
+  private archiveFailureCode?: string;
   /** Presentation-only spectator director: reads events, emits cues/tension. */
   private readonly director: CinematicDirector;
   /** Endgame highlights derived from high-priority cues (presentation-only). */
@@ -296,6 +299,10 @@ export class SocietyRoom {
       for (const actorId of options.restore.pausedAgents ?? []) this.pausedAgents.add(actorId);
       if (options.restore.events?.length) {
         this.events.push(...options.restore.events.map((envelope) => structuredClone(envelope)));
+      }
+      const replaySource = options.restore.replayEvents ?? options.restore.events?.filter((entry) => isReplayEvent(entry.event));
+      if (replaySource?.length) {
+        this.replayEvents.push(...dedupeEnvelopes(replaySource).map((envelope) => structuredClone(envelope)));
       }
     }
     this.onWorldUpdate(this.world.snapshotFor());
@@ -518,6 +525,13 @@ export class SocietyRoom {
     return this.events.filter((entry) => entry.seq > seq).map((entry) => structuredClone(entry));
   }
 
+  replayEventsSince(seq = 0): SocietyRoomEventEnvelope[] {
+    return dedupeEnvelopes([...this.replayEvents, ...this.events])
+      .filter((entry) => entry.seq > seq)
+      .sort((left, right) => left.seq - right.seq)
+      .map((entry) => structuredClone(entry));
+  }
+
   subscribe(listener: RoomListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -684,6 +698,7 @@ export class SocietyRoom {
       binding,
       roomDefaults: this.roomDefaults,
       globalDefaults: this.modelRegistry.globalDefaults(),
+      forcedCapabilities: explicitlyRequestedCapabilities(binding, this.roomDefaults, this.modelRegistry.globalDefaults()),
       lookup: {
         modelProfile: (id) => this.modelRegistry.modelProfile(id),
         providerProfile: (id) => this.modelRegistry.providerProfile(id),
@@ -828,6 +843,11 @@ export class SocietyRoom {
           ...(this.agentBindings[card.profile.id] ? { binding: this.agentBindings[card.profile.id] } : {}),
           roomDefaults: this.roomDefaults,
           globalDefaults: this.modelRegistry.globalDefaults(),
+          forcedCapabilities: explicitlyRequestedCapabilities(
+            this.agentBindings[card.profile.id],
+            this.roomDefaults,
+            this.modelRegistry.globalDefaults()
+          ),
           lookup: {
             modelProfile: (id) => this.modelRegistry.modelProfile(id),
             providerProfile: (id) => this.modelRegistry.providerProfile(id),
@@ -909,7 +929,7 @@ export class SocietyRoom {
       baseURL,
       timeout: this.turnTimeoutMs + this.turnGraceMs + 60_000,
       maxRetries: 1,
-      fetch: reasoningFallbackFetch()
+      fetch: reasoningFallbackFetch({ onNotice: (notice) => this.emitReasoningNotice(notice) })
     });
   }
 
@@ -937,9 +957,39 @@ export class SocietyRoom {
         if (!actorIds.length) return;
       }
     }
+    const publicFrame = this.world.snapshotFor();
+    publicFrame.messages = publicFrame.messages.filter((message) => message.channel === "public");
+    publicFrame.details = {};
+    this.emit({
+      type: "world.public-frame",
+      roomId: this.id,
+      activationId: activation.id,
+      snapshot: structuredClone(publicFrame),
+      at: now()
+    });
+    this.emit({
+      type: "world.operator-frame",
+      roomId: this.id,
+      activationId: activation.id,
+      snapshot: structuredClone(this.world.snapshot()),
+      at: now()
+    });
     const execute = async (actorId: string): Promise<void> => {
       const card = this.cards.get(actorId);
       if (!card) throw new Error(`PARTICIPANT_NOT_FOUND: '${actorId}' is not in the room.`);
+      // In sequential conversations, digest messages and social actions that
+      // arrived earlier in this same wave before this participant responds.
+      // Parallel sealed-action phases still see only state from prior phases.
+      await this.settleActorSocialState(actorId);
+      this.emit({
+        type: "agent.pov-frame",
+        roomId: this.id,
+        actorId,
+        activationId: activation.id,
+        observation: structuredClone(this.world.observe(actorId)),
+        socialCausality: structuredClone(this.world.socialCausalityFor(actorId)),
+        at: now()
+      });
       if (card.profile.controller === "human") {
         await this.waitForHuman(activation, actorId);
         return;
@@ -1038,10 +1088,23 @@ export class SocietyRoom {
       try {
         if (failure !== undefined || result === undefined) {
           const error = failure ?? new Error("AGENT_TURN_EMPTY: The turn produced no result.");
+          const safeReason = friendlyFailure(error);
+          this.emit({
+            type: "runtime.notice",
+            roomId: this.id,
+            actorId,
+            category: "provider",
+            severity: "error",
+            code: runtimeFailureCode(error),
+            message: `${runtime.profile.displayName} 的模型请求失败：${safeReason}`,
+            modelId: runtime.profile.model,
+            retrying: !isDiscussion,
+            at: now()
+          });
           // Speaking is optional: an agent that fails to produce a coherent
           // turn simply stays quiet for this wave instead of sinking the room.
           if (isDiscussion) {
-            const reason = friendlyFailure(error);
+            const reason = safeReason;
             // A budget/timeout cut ends a turn that may already have spoken —
             // say what happened instead of claiming the agent stayed silent.
             const cutShort = /行动次数已达上限|思考时间超时/.test(reason);
@@ -1125,14 +1188,23 @@ export class SocietyRoom {
    * store the round's outcome as experience.
    */
   private async settleAfterActivation(): Promise<void> {
-    await Promise.all([...this.agents].map(async ([actorId, runtime]) => {
-      const events = this.world.eventsFor(actorId);
-      if (events.length) await runtime.appraise(events, this.world.snapshot().turn);
-      const experience = this.world.experienceFor(actorId);
-      if (!experience || this.rememberedExperiences.get(actorId) === experience) return;
-      this.rememberedExperiences.set(actorId, experience);
-      await runtime.rememberOutcome(experience, this.world.snapshot().turn);
-    }));
+    await Promise.all([...this.agents.keys()].map((actorId) => this.settleActorSocialState(actorId)));
+  }
+
+  private async settleActorSocialState(actorId: string): Promise<void> {
+    const runtime = this.agents.get(actorId);
+    if (!runtime) return;
+    const events = this.world.eventsFor(actorId);
+    if (events.length) await runtime.appraise(events, this.world.snapshot().turn);
+    const memoryPolicy = this.world.applyMemoryWritePolicy(actorId);
+    if (!memoryPolicy.evaluated) return;
+    for (const write of memoryPolicy.accepted) {
+      await runtime.rememberOutcome(write.summary, this.world.snapshot().turn, {
+        suggestionId: write.suggestionId,
+        importance: write.importance,
+        sourceIds: write.sourceIds
+      });
+    }
   }
 
   private handleAgentEvent(event: AgentRuntimeEvent): void {
@@ -1166,7 +1238,9 @@ export class SocietyRoom {
       event.type === "world.action" ||
       event.type === "agent.message" ||
       event.type === "agent.delta" ||
+      event.type === "agent.reasoning-summary" ||
       event.type === "agent.reasoning" ||
+      event.type === "runtime.notice" ||
       event.type === "agent.tool" ||
       event.type === "agent.thought-beat" ||
       event.type === "agent.compacted" ||
@@ -1185,6 +1259,22 @@ export class SocietyRoom {
     this.emit({ type: "world.updated", roomId: this.id, snapshot: structuredClone(snapshot) });
   }
 
+  private emitReasoningNotice(notice: ReasoningFallbackNotice): void {
+    this.emit({
+      type: "runtime.notice",
+      roomId: this.id,
+      category: "reasoning",
+      severity: "warning",
+      code: notice.errorCode,
+      message: `${notice.message} 已自动从 ${notice.requestedEffort} 降级到 ${notice.effectiveEffort} 并重试。`,
+      ...(notice.modelId ? { modelId: notice.modelId } : {}),
+      requestedEffort: notice.requestedEffort,
+      effectiveEffort: notice.effectiveEffort,
+      retrying: true,
+      at: now()
+    });
+  }
+
   private notify(): void {
     this.updatedAt = now();
     this.emit({
@@ -1194,9 +1284,14 @@ export class SocietyRoom {
     });
   }
 
-  private emit(event: AgentRuntimeEvent): void {
+  private emit(event: AgentRuntimeEvent, checkpoint = true): void {
+    if (event.type === "runtime.notice") this.world.recordRuntimeNotice(event);
     const envelope: SocietyRoomEventEnvelope = { id: randomUUID(), seq: (this.events.at(-1)?.seq ?? 0) + 1, event };
     this.events.push(envelope);
+    if (isReplayEvent(event)) {
+      this.replayEvents.push(structuredClone(envelope));
+      if (this.replayEvents.length > 5_000) this.replayEvents.splice(0, this.replayEvents.length - 5_000);
+    }
     if (this.events.length > 500) this.events.splice(0, this.events.length - 500);
     this.updatedAt = "at" in event && typeof event.at === "string" ? event.at : now();
     for (const listener of this.listeners) listener(structuredClone(envelope));
@@ -1216,7 +1311,7 @@ export class SocietyRoom {
     // The director sees the same public event stream plus the world snapshot;
     // its own outputs are presentation events and never loop back into rules.
     this.director.ingest(event, this.world.snapshot());
-    this.scheduleCheckpoint();
+    if (checkpoint) this.scheduleCheckpoint();
   }
 
   /** Rolling checkpoint, coalesced so high-frequency streaming stays cheap. */
@@ -1245,6 +1340,7 @@ export class SocietyRoom {
       status: this.status,
       snapshot: this.snapshotFor(),
       envelopes: this.events.slice(-500).map((entry) => structuredClone(entry)),
+      replayEnvelopes: this.replayEvents.map((entry) => structuredClone(entry)),
       agentMinds: Object.fromEntries([...this.agents].map(([actorId, runtime]) => [actorId, structuredClone(runtime.mind)])),
       sessionFiles,
       profiles: [...this.cards.values()].map((card) => structuredClone(card.profile)),
@@ -1255,7 +1351,44 @@ export class SocietyRoom {
       ownerToken: this.ownerToken,
       recoverable
     };
-    this.archive.save(checkpoint);
+    try {
+      this.archive.save(checkpoint);
+      if (this.archiveFailureCode) {
+        this.archiveFailureCode = undefined;
+        this.emit({
+          type: "runtime.notice",
+          roomId: this.id,
+          category: "persistence",
+          severity: "info",
+          code: "ARCHIVE_WRITE_RECOVERED",
+          message: "房间检查点已恢复写入。",
+          retrying: false,
+          at: now()
+        }, false);
+      }
+    } catch (error) {
+      const code = error instanceof RoomArchiveError ? error.failure.code : "ARCHIVE_WRITE_FAILED";
+      if (this.archiveFailureCode !== code) {
+        this.archiveFailureCode = code;
+        this.emit({
+          type: "runtime.notice",
+          roomId: this.id,
+          category: "persistence",
+          severity: "error",
+          code,
+          message: "房间检查点写入失败，世界仍在运行；系统将在后台重试。",
+          retrying: true,
+          at: now()
+        }, false);
+      }
+      if (!this.archiveTimer) {
+        this.archiveTimer = setTimeout(() => {
+          this.archiveTimer = undefined;
+          this.saveCheckpoint(recoverable);
+        }, 5_000);
+        this.archiveTimer.unref?.();
+      }
+    }
   }
 
   private fail(error: unknown): void {
@@ -1310,6 +1443,37 @@ export class SocietyRoomRegistry {
 
 function waitingHumanLabel(waiter: HumanWaiter | undefined, actorId: string): string | undefined {
   return waiter?.actorId === actorId ? waiter.activationLabel : undefined;
+}
+
+function isReplayEvent(event: AgentRuntimeEvent): boolean {
+  switch (event.type) {
+    case "world.public-frame":
+    case "world.operator-frame":
+    case "agent.pov-frame":
+    case "agent.message":
+    case "world.action":
+    case "runtime.notice":
+    case "agent.tool":
+    case "agent.thought-beat":
+    case "agent.compacted":
+    case "agent.memory.recalled":
+    case "agent.memory.consolidated":
+    case "agent.guardrail":
+    case "agent.status":
+    case "agent.paused":
+    case "agent.resumed":
+    case "agent.model.switched":
+    case "room.status":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function dedupeEnvelopes(envelopes: SocietyRoomEventEnvelope[]): SocietyRoomEventEnvelope[] {
+  const byId = new Map<string, SocietyRoomEventEnvelope>();
+  for (const envelope of envelopes) byId.set(envelope.id, envelope);
+  return [...byId.values()];
 }
 
 /** Resolve a provider profile's apiKeyRef into the actual secret from env. */
@@ -1376,4 +1540,31 @@ function friendlyFailure(error: unknown): string {
   if (/429|rate limit/i.test(message)) return "提供商限流，稍后重试";
   if (/502|503|504/i.test(message)) return "提供商暂时不可用";
   return message.replace(/^[A-Za-z_]+:\s*/, "").slice(0, 160);
+}
+
+function explicitlyRequestedCapabilities(
+  binding: AgentModelBinding | undefined,
+  roomDefaults: SocietyRoomCreateOptions["roomDefaults"],
+  globalDefaults: RegistryGlobalDefaults
+): ReadonlySet<string> {
+  const sources: unknown[] = [
+    binding?.tuningOverrides,
+    roomDefaults?.tuning,
+    globalDefaults.tuning
+  ];
+  return sources.some((source) => Boolean(source && typeof source === "object" && "reasoningEffort" in source))
+    ? new Set(["reasoningEffort"])
+    : new Set();
+}
+
+function runtimeFailureCode(error: unknown): string {
+  const message = errorMessage(error);
+  if (/TURN_TIMEOUT/i.test(message)) return "PROVIDER_TIMEOUT";
+  if (/aborted|abort/i.test(message)) return "PROVIDER_ABORTED";
+  if (/OPENAI_API_KEY_REQUIRED|401|unauthorized|authentication/i.test(message)) return "PROVIDER_AUTH_FAILED";
+  if (/429|rate limit/i.test(message)) return "PROVIDER_RATE_LIMITED";
+  if (/CONTEXT_HARD_GUARD/i.test(message)) return "CONTEXT_HARD_GUARD";
+  if (/400|422|openai_error/i.test(message)) return "PROVIDER_REQUEST_REJECTED";
+  if (/5\d\d|ECONN|ETIMEDOUT|socket|network|fetch failed/i.test(message)) return "PROVIDER_UNAVAILABLE";
+  return "PROVIDER_TURN_FAILED";
 }

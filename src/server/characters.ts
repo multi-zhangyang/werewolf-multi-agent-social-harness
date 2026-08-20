@@ -179,7 +179,7 @@ export class CharacterLibrary {
 export function registerCharacterRoutes(app: express.Express, context: ServerContext): void {
   const library = context.characters;
   const gate = (request: express.Request, response: express.Response): boolean =>
-    requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token));
+    requireGlobalOperator(request, response, context.auth);
 
   app.get("/api/characters", (_request, response) => {
     response.json(library.list());

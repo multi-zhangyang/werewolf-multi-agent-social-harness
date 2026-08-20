@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { tool, type Tool } from "@openai/agents";
 import { z } from "zod";
 import type {
@@ -15,9 +15,11 @@ import type {
   WorldSnapshot
 } from "../contracts";
 import { scopedContext, SocialWorldBase } from "../world";
-import { DiscussionDirector } from "../conversation";
+import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
 import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
+import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import type { SocialActDeclaration } from "../social/contracts";
 
 type Role = "merlin" | "percival" | "servant" | "morgana" | "assassin" | "mordred" | "oberon" | "minion";
 
@@ -44,13 +46,11 @@ function merlinSees(role: Role | undefined): boolean {
 }
 
 /**
- * Lady of the Lake verdict (official rule): the Lady reads LOYALTY, not
- * identity — loyal roles read loyal (Merlin included), evil roles read evil
- * except Oberon, who reads as good even through the Lady's eyes.
+ * Lady of the Lake verdict: the Lady reads loyalty, not exact identity.
  */
 export function ladyVerdictFor(role: Role | undefined): "loyal" | "evil" {
   if (role === undefined) return "loyal";
-  return role === "oberon" ? "loyal" : isEvilRole(role) ? "evil" : "loyal";
+  return isEvilRole(role) ? "evil" : "loyal";
 }
 
 /**
@@ -102,9 +102,15 @@ interface QuestRecord {
   text: string;
 }
 
+interface LadyReveal {
+  targetId: string;
+  quest: number;
+  verdict: "loyal" | "evil";
+}
+
 const MAX_REJECTIONS = 5; // five consecutive rejections hand evil the win
-const ACCUSATION_LEXICON = /怀疑|是狼|内奸|刺客|莫德雷德|失败|黑票|出局|投|说谎|撒谎|骗|带节奏|站队|装好人|伪/;
-const DEFENSE_LEXICON = /相信|支持|担保|信任|不是内奸|好人|没问题|我信/;
+const AVALON_TEAM_VOTE_OUTCOME_KEYS = ["team-approved", "vote-matched-majority"] as const;
+const AVALON_QUEST_OUTCOME_KEYS = ["quest-succeeds", "quest-fails", "quest-has-fail-card"] as const;
 
 /**
  * Avalon (The Resistance), official 5-10 player tables: the good/evil split
@@ -122,7 +128,10 @@ export class AvalonWorld extends SocialWorldBase {
   private readonly roles = new Map<string, Role>();
   private readonly questHistory: QuestRecord[] = [];
   private readonly teamVotes = new Map<string, boolean>();
+  private readonly teamVoteCommandIds = new Map<string, string>();
   private readonly questVotes = new Map<string, "succeed" | "fail">();
+  private readonly questVoteCommandIds = new Map<string, string>();
+  private readonly approvedTeamVotes = new Map<string, boolean>();
   private readonly lastExperiences = new Map<string, string>();
   private phase: Phase = "discussion";
   private discussion: DiscussionDirector | null = null;
@@ -136,11 +145,13 @@ export class AvalonWorld extends SocialWorldBase {
   private winners: string[] = [];
   private outcome = "";
   private assassinated = false;
-  /** Lady of the Lake (§7.5): the token holder may inspect one allegiance per
-   *  quest; the token then passes to the inspected player. Merlin shows evil. */
+  private proposalCommandId?: string;
+  /** Lady of the Lake (§7.5): the token holder privately inspects allegiance;
+   *  the token then passes to the inspected player. */
   private ladyHolderId: string;
   private ladyInspectId?: string;
-  private readonly ladyReveals = new Map<string, { quest: number; verdict: "loyal" | "evil" }>();
+  private ladyInspectCommandId?: string;
+  private readonly ladyReveals = new Map<string, LadyReveal[]>();
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
@@ -149,6 +160,7 @@ export class AvalonWorld extends SocialWorldBase {
     const ids = shuffle(profiles.map((profile) => profile.id));
     const deck = deckForPlayerCount(profiles.length);
     ids.forEach((id, index) => this.roles.set(id, deck[index]));
+    this.registerFactionKnowledge();
     this.leaderId = profiles[0].id;
     // Official setup: the Lady starts with the player to the right of the
     // first leader (the previous seat in our rotation order).
@@ -159,6 +171,7 @@ export class AvalonWorld extends SocialWorldBase {
 
   protected exportWorldState(): unknown {
     return {
+      schemaVersion: 2,
       quest: this.quest,
       phase: this.phase,
       leaderId: this.leaderId,
@@ -171,11 +184,16 @@ export class AvalonWorld extends SocialWorldBase {
       assassinated: this.assassinated,
       ladyHolderId: this.ladyHolderId,
       ladyInspectId: this.ladyInspectId ?? null,
-      ladyReveals: [...this.ladyReveals.entries()].map(([inspectedId, reveal]) => [inspectedId, reveal.quest, reveal.verdict] as [string, number, "loyal" | "evil"]),
+      ladyInspectCommandId: this.ladyInspectCommandId ?? null,
+      ladyReveals: [...this.ladyReveals.entries()].map(([observerId, reveals]) => [observerId, structuredClone(reveals)] as [string, LadyReveal[]]),
       roles: this.mapEntries(this.roles),
       questHistory: structuredClone(this.questHistory),
       teamVotes: this.mapEntries(this.teamVotes),
+      teamVoteCommandIds: this.mapEntries(this.teamVoteCommandIds),
       questVotes: this.mapEntries(this.questVotes),
+      questVoteCommandIds: this.mapEntries(this.questVoteCommandIds),
+      approvedTeamVotes: this.mapEntries(this.approvedTeamVotes),
+      proposalCommandId: this.proposalCommandId ?? null,
       lastExperiences: this.mapEntries(this.lastExperiences),
       discussion: this.discussion ? this.discussion.exportState() : null,
       suspicion: this.suspicion.exportState()
@@ -184,15 +202,21 @@ export class AvalonWorld extends SocialWorldBase {
 
   protected restoreWorldState(state: unknown): void {
     const s = state as Partial<{
+      schemaVersion: number;
       quest: number; phase: string; leaderId: string; proposedTeam: string[]; rejections: number;
       successes: number; failures: number; winners: string[]; outcome: string; assassinated: boolean;
-      ladyHolderId: string; ladyInspectId: string | null;
-      ladyReveals: Array<[string, number, "loyal" | "evil"]>;
+      ladyHolderId: string; ladyInspectId: string | null; ladyInspectCommandId: string | null;
+      ladyReveals: Array<[string, LadyReveal[]]>;
       roles: Array<[string, Role]>; questHistory: QuestRecord[]; teamVotes: Array<[string, boolean]>;
-      questVotes: Array<[string, "succeed" | "fail"]>; lastExperiences: Array<[string, string]>;
+      teamVoteCommandIds: Array<[string, string]>; questVotes: Array<[string, "succeed" | "fail"]>;
+      questVoteCommandIds: Array<[string, string]>; approvedTeamVotes: Array<[string, boolean]>;
+      proposalCommandId: string | null; lastExperiences: Array<[string, string]>;
       discussion: unknown; suspicion: unknown;
     }> | undefined;
     if (!s) return;
+    if (s.schemaVersion !== undefined && s.schemaVersion !== 2) {
+      throw new Error(`AVALON_STATE_SCHEMA_UNSUPPORTED: ${s.schemaVersion}`);
+    }
     this.quest = Number(s.quest ?? 1);
     this.phase = (s.phase ?? "discussion") as Phase;
     this.leaderId = String(s.leaderId ?? this.profiles.keys().next().value ?? "");
@@ -205,15 +229,29 @@ export class AvalonWorld extends SocialWorldBase {
     this.assassinated = Boolean(s.assassinated);
     this.ladyHolderId = String(s.ladyHolderId ?? this.profiles.keys().next().value ?? "");
     this.ladyInspectId = s.ladyInspectId ?? undefined;
+    this.ladyInspectCommandId = s.ladyInspectCommandId ?? undefined;
     this.ladyReveals.clear();
-    for (const [inspectedId, quest, verdict] of s.ladyReveals ?? []) {
-      if (inspectedId && (verdict === "loyal" || verdict === "evil")) this.ladyReveals.set(inspectedId, { quest: Number(quest), verdict });
+    // Legacy checkpoints did not store the observer and cannot be safely
+    // attributed. Do not guess: only schema v2 entries are restored.
+    if (s.schemaVersion === 2) {
+      for (const [observerId, reveals] of s.ladyReveals ?? []) {
+        if (!this.profiles.has(observerId) || !Array.isArray(reveals)) continue;
+        const safe = reveals.filter((entry) =>
+          entry && this.profiles.has(entry.targetId) && (entry.verdict === "loyal" || entry.verdict === "evil")
+        ).map((entry) => ({ targetId: entry.targetId, quest: Number(entry.quest), verdict: entry.verdict }));
+        if (safe.length) this.ladyReveals.set(observerId, safe);
+      }
     }
     this.fillMap(this.roles, s.roles);
+    this.registerFactionKnowledge();
     this.questHistory.length = 0;
     this.questHistory.push(...structuredClone(s.questHistory ?? []));
     this.fillMap(this.teamVotes, s.teamVotes);
+    this.fillMap(this.teamVoteCommandIds, s.teamVoteCommandIds);
     this.fillMap(this.questVotes, s.questVotes);
+    this.fillMap(this.questVoteCommandIds, s.questVoteCommandIds);
+    this.fillMap(this.approvedTeamVotes, s.approvedTeamVotes);
+    this.proposalCommandId = s.proposalCommandId ?? undefined;
     this.fillMap(this.lastExperiences, s.lastExperiences);
     if (s.discussion) {
       this.discussion = this.createDiscussion();
@@ -261,6 +299,8 @@ export class AvalonWorld extends SocialWorldBase {
     const merlinSeat = [...this.roles].find(([, candidate]) => candidate === "merlin")?.[0];
     const morganaSeat = [...this.roles].find(([, candidate]) => candidate === "morgana")?.[0];
     const percivalSights = role === "percival" ? [merlinSeat, morganaSeat].filter((id): id is string => Boolean(id)) : [];
+    const causality = this.socialCausalityFor(actorId);
+    const privateLadyReveals = this.ladyReveals.get(actorId) ?? [];
     return {
       roomId: this.roomId,
       scenarioId: this.scenario.id,
@@ -280,13 +320,14 @@ export class AvalonWorld extends SocialWorldBase {
             ? `你知道梅林：${this.profiles.get(percivalSights[0])?.displayName ?? percivalSights[0]}。`
             : "",
         this.ladyHolderId === actorId ? "你持有湖中仙女令牌：每次任务后可以查验一名玩家的阵营。" : `湖中仙女令牌在 ${this.profiles.get(this.ladyHolderId)?.displayName ?? this.ladyHolderId} 手中。`,
-        this.ladyReveals.size
-          ? `你的湖中仙女查验记录：${[...this.ladyReveals].map(([inspectedId, reveal]) => `${this.profiles.get(inspectedId)?.displayName ?? inspectedId} 看起来是${reveal.verdict === "loyal" ? "忠臣" : "内奸"}（第 ${reveal.quest} 次任务后）`).join("；")}。`
+        privateLadyReveals.length
+          ? `你的湖中仙女查验记录：${privateLadyReveals.map((reveal) => `${this.profiles.get(reveal.targetId)?.displayName ?? reveal.targetId} 是${reveal.verdict === "loyal" ? "忠诚" : "邪恶"}阵营（第 ${reveal.quest} 次任务后）`).join("；")}。`
           : "",
         this.phase === "proposal" ? `当前队长：${this.profiles.get(this.leaderId)?.displayName ?? this.leaderId}。候选队伍：${this.proposedTeam.length ? this.proposedTeam.map((id) => this.profiles.get(id)?.displayName ?? id).join("、") : "尚未提名"}。` : "",
         `你的队伍表决：${this.teamVotes.has(actorId) ? String(this.teamVotes.get(actorId)) : "未投"}。`,
         `你的任务表决：${this.questVotes.get(actorId) ?? "未投"}。`,
-        `任务历史：${this.questHistory.map((record) => `第 ${record.quest} 次任务 队伍=[${record.team.join(",")}] ${record.outcome === "success" ? "成功" : "失败"}（黑票 ${record.failCount}）`).join("；") || "暂无"}。`
+        `任务历史：${this.questHistory.map((record) => `第 ${record.quest} 次任务 队伍=[${record.team.join(",")}] ${record.outcome === "success" ? "成功" : "失败"}（黑票 ${record.failCount}）`).join("；") || "暂无"}。`,
+        ...socialReferenceContext(causality)
       ].filter(Boolean).join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, role },
       others: this.otherProfiles(actorId).map((profile) => ({
@@ -321,14 +362,26 @@ export class AvalonWorld extends SocialWorldBase {
     tools.push(propose as Tool<SocietyAgentContext>);
     const vote = tool({
       name: "cast_team_vote",
-      description: "Vote publicly on the current proposed team: approve it or reject it. Votes stay hidden until every participant commits, then they are revealed together.",
+      description: "Compare bounded vote intents, predict the public team result, then approve or reject. Votes stay hidden until every participant commits and are revealed together. Cite only authorized social references.",
       parameters: z.object({
         accept: z.boolean(),
-        reason: z.string().min(1).max(2_000)
+        reason: z.string().min(1).max(2_000),
+        ...createStrategyActionShape({ accept: z.boolean() }, AVALON_TEAM_VOTE_OUTCOME_KEYS)
       }).strict(),
-      execute: async ({ accept, reason }, runContext) => {
+      execute: async (input, runContext) => {
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected || selected.accept !== input.accept) {
+          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected team vote must equal the binding vote.");
+        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "cast_team_vote", { accept, reason });
+        const commit = await this.performAction(actorId, "cast_team_vote", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({
+            ...candidate,
+            action: "cast_team_vote",
+            payloadSummary: `accept=${candidate.accept}`
+          }))
+        });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -336,14 +389,26 @@ export class AvalonWorld extends SocialWorldBase {
     tools.push(vote as Tool<SocietyAgentContext>);
     const questChoice = tool({
       name: "cast_quest_vote",
-      description: "As a member of the approved quest team, secretly decide the quest outcome: succeed or fail it. Loyal participants can only succeed; minions may choose either.",
+      description: "As a quest member, compare bounded intents, predict only public quest outcomes, then secretly choose succeed or fail. Loyal participants can only succeed. Cite only authorized social references.",
       parameters: z.object({
         choice: z.enum(["succeed", "fail"]),
-        reason: z.string().min(1).max(2_000)
+        reason: z.string().min(1).max(2_000),
+        ...createStrategyActionShape({ choice: z.enum(["succeed", "fail"]) }, AVALON_QUEST_OUTCOME_KEYS)
       }).strict(),
-      execute: async ({ choice, reason }, runContext) => {
+      execute: async (input, runContext) => {
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected || selected.choice !== input.choice) {
+          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected quest choice must equal the binding choice.");
+        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "cast_quest_vote", { choice, reason });
+        const commit = await this.performAction(actorId, "cast_quest_vote", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({
+            ...candidate,
+            action: "cast_quest_vote",
+            payloadSummary: `choice=${candidate.choice}`
+          }))
+        });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -352,7 +417,7 @@ export class AvalonWorld extends SocialWorldBase {
     if (this.ladyHolderId === actorId) {
       const inspect = tool({
         name: "inspect_with_lady",
-        description: "As the Lady of the Lake, inspect another player's allegiance exactly once this quest. Merlin reads as EVIL through the Lady's eyes. The token passes to the inspected player. You may decline by simply not calling this tool — silence is a legitimate choice.",
+        description: "As the Lady of the Lake, privately inspect another player's allegiance exactly once this quest. The token passes to the inspected player. You may decline; silence is a legitimate choice.",
         parameters: z.object({
           targetId: z.string().min(1),
           reason: z.string().min(1).max(2_000)
@@ -431,7 +496,7 @@ export class AvalonWorld extends SocialWorldBase {
         {
           name: "inspect_with_lady",
           label: "湖中仙女查验",
-          description: "查验一名其他参与者的阵营；梅林在湖中仙女眼中显示为邪恶。令牌会交给被查验者。",
+          description: "私下查验一名其他参与者的忠诚阵营；令牌会交给被查验者。",
           kind: "target",
           field: "targetId",
           targetFilter: "any-living"
@@ -475,6 +540,8 @@ export class AvalonWorld extends SocialWorldBase {
       if (!memberIds.includes(actorId)) throw new Error("TEAM_MUST_INCLUDE_LEADER: Include yourself in the proposed team.");
       for (const id of memberIds) if (!this.profiles.has(id)) throw new Error(`TEAM_MEMBER_NOT_FOUND: '${id}' is not a participant.`);
       this.proposedTeam = [...memberIds];
+      const commandId = `cmd-${randomUUID()}`;
+      this.proposalCommandId = commandId;
       const leaderName = this.profiles.get(actorId)?.displayName ?? actorId;
       for (const id of this.profiles.keys()) {
         if (memberIds.includes(id)) {
@@ -497,6 +564,7 @@ export class AvalonWorld extends SocialWorldBase {
       this.emitUpdate();
       return {
         action,
+        commandId,
         detail: reason ? `${memberIds.join(", ")}; ${reason}` : memberIds.join(", "),
         result: { accepted: true, team: this.proposedTeam }
       };
@@ -506,9 +574,11 @@ export class AvalonWorld extends SocialWorldBase {
       if (this.phase !== "vote") throw new Error("VOTE_NOT_OPEN: Team voting is not open.");
       if (this.teamVotes.has(actorId)) throw new Error("VOTE_ALREADY_CAST: Your vote is fixed.");
       const accept = value.accept === true;
+      const commandId = `cmd-${randomUUID()}`;
       this.teamVotes.set(actorId, accept);
+      this.teamVoteCommandIds.set(actorId, commandId);
       this.emitUpdate();
-      return { action, detail: reason ? `${accept}; ${reason}` : String(accept), result: { accepted: true, accept } };
+      return { action, commandId, detail: reason ? `${accept}; ${reason}` : String(accept), result: { accepted: true, accept } };
     }
 
     if (action === "cast_quest_vote") {
@@ -518,9 +588,11 @@ export class AvalonWorld extends SocialWorldBase {
       const choice = value.choice;
       if (choice !== "succeed" && choice !== "fail") throw new Error("QUEST_CHOICE_INVALID: Choose succeed or fail.");
       if (choice === "fail" && isLoyalRole(role)) throw new Error("LOYAL_MUST_SUCCEED: Loyal participants cannot fail a quest.");
+      const commandId = `cmd-${randomUUID()}`;
       this.questVotes.set(actorId, choice);
+      this.questVoteCommandIds.set(actorId, commandId);
       this.emitUpdate();
-      return { action, detail: reason ? `${choice}; ${reason}` : choice, result: { accepted: true, choice } };
+      return { action, commandId, detail: reason ? `${choice}; ${reason}` : choice, result: { accepted: true, choice } };
     }
 
     if (action === "inspect_with_lady") {
@@ -529,13 +601,16 @@ export class AvalonWorld extends SocialWorldBase {
       const targetId = typeof value.targetId === "string" ? value.targetId : "";
       if (!this.profiles.has(targetId)) throw new Error(`TARGET_NOT_FOUND: '${targetId}' is not a participant.`);
       if (targetId === actorId) throw new Error("TARGET_INVALID: The Lady cannot inspect herself.");
+      const commandId = `cmd-${randomUUID()}`;
       this.ladyInspectId = targetId;
-      return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, pending: true } };
+      this.ladyInspectCommandId = commandId;
+      return { action, commandId, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, pending: true } };
     }
     if (action === "decline_lady") {
       if (this.phase !== "lady") throw new Error("LADY_NOT_ACTIVE: The Lady of the Lake acts only between quests.");
       if (this.ladyHolderId !== actorId) throw new Error("NOT_THE_HOLDER: You do not hold the Lady of the Lake token.");
       this.ladyInspectId = undefined;
+      this.ladyInspectCommandId = undefined;
       return { action, detail: "不使用湖中仙女", result: { accepted: true, declined: true } };
     }
     if (action === "assassinate_merlin") {
@@ -563,7 +638,7 @@ export class AvalonWorld extends SocialWorldBase {
         : `${this.profiles.get(actorId)?.displayName} 失手了——${this.profiles.get(targetId)?.displayName} 并不是梅林。忠臣阵营获胜。`;
       for (const id of this.profiles.keys()) this.lastExperiences.set(id, `${this.outcome} 最终身份：${[...this.roles].map(([memberId, memberRole]) => `${memberId}=${memberRole}`).join(", ")}。`);
       this.addLog(this.outcome, this.quest, correct ? "win" : "adverse-outcome");
-      this.finish();
+      this.endGame();
       return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, correct, targetId } };
     }
 
@@ -618,7 +693,7 @@ export class AvalonWorld extends SocialWorldBase {
         label: "湖中仙女",
         actorIds: [this.ladyHolderId],
         mode: "sequential",
-        instructionFor: () => "You hold the Lady of the Lake. You may call inspect_with_lady once against any other player — the verdict is revealed only to you, and the token passes to the inspected player. Merlin reads as EVIL through the Lady's eyes. Declining is a legitimate move: simply do not call the tool."
+        instructionFor: () => "You hold the Lady of the Lake. You may call inspect_with_lady once against any other player — the loyalty verdict is revealed only to you, and the token passes to the inspected player. Declining is a legitimate move: simply do not call the tool."
       };
     }
     const assassin = [...this.roles].find(([, candidate]) => candidate === "assassin")?.[0];
@@ -697,55 +772,49 @@ export class AvalonWorld extends SocialWorldBase {
     text: string;
     recipientIds?: string[];
     replyTo?: string;
+    socialActs?: SocialActDeclaration[];
   }): Promise<SocialMessage> {
     if (input.channel === "team" && (!input.recipientIds || input.recipientIds.length === 0)) {
       input = {
         ...input,
-        recipientIds: [...this.roles].filter(([id, role]) => id !== input.senderId && (role === "assassin" || role === "mordred")).map(([id]) => id)
+        recipientIds: [...this.roles].filter(([id, role]) => id !== input.senderId && knowsEvilAllies(role)).map(([id]) => id)
       };
     }
     const message = await super.sendMessage(input);
-    if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
+    if (this.phase === "discussion" && this.discussion) {
       this.discussion.onMessage({
         messageId: message.id,
         senderId: message.senderId,
         text: message.text,
-        ...(message.replyTo ? { replyTo: message.replyTo } : {})
-      });
-      this.detectSocialActs(message);
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+        ...(message.channel === "public" ? {} : { targetActorIds: message.recipientIds ?? [] })
+      }, conversationSignalsFromSocialActs(message.senderId, message.id, input.socialActs ?? []));
+    }
+    if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
+      this.detectSocialActs(message, input.socialActs ?? []);
     }
     return message;
   }
 
-  /**
-   * Read public speech for its social meaning: who was accused, who was
-   * defended. These become appraisal events and suspicion pressure.
-   */
-  private detectSocialActs(message: SocialMessage): void {
-    for (const [id] of this.roles) {
-      if (id === message.senderId) continue;
-      const name = this.profiles.get(id)?.displayName ?? id;
-      const atName = message.text.indexOf(name);
-      const atId = message.text.indexOf(id);
-      if (atName === -1 && atId === -1) continue;
-      const at = atName !== -1 ? atName : atId;
-      const window = message.text.slice(Math.max(0, at - 16), at + 40);
-      const snippet = message.text.slice(0, 120);
-      if (ACCUSATION_LEXICON.test(window)) {
-        this.suspicion.noteAccusation(this.quest, message.senderId, id);
-        this.pushEvent(id, {
-          type: "accused",
-          actorId: message.senderId,
-          targetId: id,
-          detail: `第 ${this.quest} 次任务讨论：${message.senderName} 在圆桌上公开指控了你——「${snippet}」`
-        });
-      } else if (DEFENSE_LEXICON.test(window)) {
-        this.pushEvent(id, {
-          type: "defended",
-          actorId: message.senderId,
-          targetId: id,
-          detail: `第 ${this.quest} 次任务讨论：${message.senderName} 在圆桌上为你说话——「${snippet}」`
-        });
+  private detectSocialActs(message: SocialMessage, declarations: SocialActDeclaration[]): void {
+    for (const declaration of declarations) {
+      if (
+        declaration.kind !== "accusation"
+        && declaration.kind !== "defense"
+        && declaration.kind !== "endorsement"
+        && declaration.kind !== "alliance-proposal"
+      ) continue;
+      for (const id of [...new Set(declaration.targetActorIds ?? [])]) {
+        if (id === message.senderId || !this.profiles.has(id)) continue;
+        if (declaration.kind === "accusation") {
+          this.suspicion.noteAccusation(this.quest, message.senderId, id);
+          this.discussion?.raiseSignal({
+            kind: "accusation",
+            sourceActorId: message.senderId,
+            targetActorIds: [id],
+            sourceMessageId: message.id
+          });
+        }
       }
     }
   }
@@ -779,10 +848,7 @@ export class AvalonWorld extends SocialWorldBase {
   protected roleVisibleTo(viewerId: string | undefined, subjectId: string, _alive: boolean): boolean {
     if (viewerId === subjectId) return true;
     if (this.status === "finished") return true;
-    const viewerRole = viewerId ? this.roles.get(viewerId) : undefined;
-    const subjectRole = this.roles.get(subjectId);
-    // Only agents of evil who know each other see each other's allegiance.
-    return Boolean(viewerRole && subjectRole && knowsEvilAllies(viewerRole) && knowsEvilAllies(subjectRole));
+    return false;
   }
 
   protected messageChannelsFor(actorId: string): SocialChannel[] {
@@ -815,31 +881,101 @@ export class AvalonWorld extends SocialWorldBase {
   }
 
   private availableActions(actorId: string, role: Role): string[] {
-    if (this.phase === "discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "update_inner_state"];
+    if (this.phase === "discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "read_the_room", "log_deception_plan", "update_inner_state"];
     if (this.phase === "proposal") return this.leaderId === actorId ? ["propose_team", "communicate"] : [];
-    if (this.phase === "vote") return this.teamVotes.has(actorId) ? [] : ["cast_team_vote", "remember_experience"];
+    if (this.phase === "vote") return this.teamVotes.has(actorId) ? [] : ["cast_team_vote"];
     if (this.phase === "quest") return this.proposedTeam.includes(actorId) && !this.questVotes.has(actorId) ? ["cast_quest_vote"] : [];
-    if (this.phase === "lady") return this.ladyHolderId === actorId ? ["inspect_with_lady", "remember_experience"] : [];
+    if (this.phase === "lady") return this.ladyHolderId === actorId ? ["inspect_with_lady"] : [];
     if (this.phase === "assassination") return role === "assassin" ? ["assassinate_merlin"] : [];
     return [];
   }
 
+  reconciliationOwnsOutcomeMemory(): boolean {
+    return true;
+  }
+
+  private registerFactionKnowledge(): void {
+    for (const [actorId, role] of this.roles) this.recordIdentityAssignment(actorId, role, [actorId]);
+    for (const [subjectId, subjectRole] of this.roles) {
+      const observers = new Set<string>([subjectId]);
+      if (knowsEvilAllies(subjectRole)) {
+        for (const [observerId, observerRole] of this.roles) {
+          if (knowsEvilAllies(observerRole)) observers.add(observerId);
+        }
+      }
+      if (merlinSees(subjectRole)) {
+        const merlinId = [...this.roles].find(([, role]) => role === "merlin")?.[0];
+        if (merlinId) observers.add(merlinId);
+      }
+      this.recordFactionAssignment(subjectId, isEvilRole(subjectRole) ? "evil" : "loyal", [...observers]);
+    }
+    const percivalId = [...this.roles].find(([, role]) => role === "percival")?.[0];
+    if (!percivalId) return;
+    for (const [subjectId, role] of this.roles) {
+      if (role !== "merlin" && role !== "morgana") continue;
+      this.recordPrivateObservation({
+        observerActorId: percivalId,
+        subjectActorId: subjectId,
+        eventType: "avalon.percival-sight",
+        predicate: "is-merlin-or-morgana-candidate",
+        object: true,
+        payload: { subjectActorId: subjectId },
+        kind: "identity"
+      });
+    }
+  }
+
   private resolveTeamVote(): void {
+    const resolvedVotes = new Map(this.teamVotes);
     const approveCount = [...this.teamVotes.values()].filter(Boolean).length;
     const team = [...this.proposedTeam];
-    this.teamVotes.clear();
     const approved = approveCount > this.profiles.size / 2;
+    const publicResult = this.recordPublicWorldFact({
+      factKey: `avalon-team-vote:${this.quest}:${this.rejections}:${team.join(",")}`,
+      eventType: "avalon.team-vote-resolved",
+      predicate: "proposed-team-approved",
+      object: approved,
+      payload: { quest: this.quest, team, approveCount, totalVotes: resolvedVotes.size, approved }
+    });
+    for (const [voterId, accept] of resolvedVotes) {
+      const commandId = this.teamVoteCommandIds.get(voterId);
+      if (!commandId) continue;
+      this.reconcileSocialOutcome({
+        actionReceiptId: commandId,
+        actualOutcome: {
+          summary: `The quest ${this.quest} team was ${approved ? "approved" : "rejected"} by ${approveCount}/${resolvedVotes.size} approvals.`,
+          metrics: { quest: this.quest, approved, approveCount, totalVotes: resolvedVotes.size, ownVote: accept }
+        },
+        actualFacts: {
+          "team-approved": approved,
+          "vote-matched-majority": accept === approved
+        },
+        resultingEventIds: [publicResult.eventId],
+        memoryWriteSuggestions: [{
+          summary: `On quest ${this.quest}, I ${accept ? "approved" : "rejected"} team [${team.join(", ")}]; the table ${approved ? "approved" : "rejected"} it ${approveCount}-${resolvedVotes.size - approveCount}.`,
+          importance: 0.66,
+          sourceIds: [commandId, publicResult.eventId]
+        }]
+      });
+    }
     const text = approved
       ? `第 ${this.quest} 次任务：圆桌以 ${approveCount} 票通过了队伍 [${team.map((member) => this.profiles.get(member)?.displayName ?? member).join("、")}]。`
       : `第 ${this.quest} 次任务：圆桌以 ${approveCount} 票赞成否决了队伍 [${team.map((member) => this.profiles.get(member)?.displayName ?? member).join("、")}]。`;
     this.addLog(text, this.quest, approved ? "agreement-reached" : undefined);
     if (approved) {
+      this.approvedTeamVotes.clear();
+      for (const [actorId, vote] of resolvedVotes) this.approvedTeamVotes.set(actorId, vote);
       this.rejections = 0;
+      this.teamVotes.clear();
+      this.teamVoteCommandIds.clear();
       this.phase = "quest";
       this.emitUpdate();
       return;
     }
     this.rejections += 1;
+    this.teamVotes.clear();
+    this.teamVoteCommandIds.clear();
+    this.proposalCommandId = undefined;
     if (this.rejections >= MAX_REJECTIONS) {
       this.winners = this.factionMembers(["morgana", "assassin", "mordred", "oberon", "minion"]);
       this.outcome = "连续五次组队被否决——圆桌无法达成任何共识，内奸阵营获胜。";
@@ -855,11 +991,16 @@ export class AvalonWorld extends SocialWorldBase {
 
   private resolveQuest(): void {
     const team = [...this.proposedTeam];
-    const failCount = [...this.questVotes.values()].filter((choice) => choice === "fail").length;
+    const resolvedQuestVotes = new Map(this.questVotes);
+    const failCount = [...resolvedQuestVotes.values()].filter((choice) => choice === "fail").length;
+    const teamVotes = Object.fromEntries(this.approvedTeamVotes);
     this.questVotes.clear();
+    this.approvedTeamVotes.clear();
     this.proposedTeam = [];
     this.teamVotes.clear();
-    this.recordQuestFailure(team, {}, false, failCount);
+    this.proposalCommandId = undefined;
+    this.recordQuestFailure(team, teamVotes, false, failCount, resolvedQuestVotes);
+    this.questVoteCommandIds.clear();
   }
 
   /** The official team size for a quest at this table's player count. */
@@ -873,7 +1014,13 @@ export class AvalonWorld extends SocialWorldBase {
     return questFailsNeeded(this.profiles.size, this.quest);
   }
 
-  private recordQuestFailure(team: string[], teamVotes: Record<string, boolean>, rejected = false, failCount = 0): void {
+  private recordQuestFailure(
+    team: string[],
+    teamVotes: Record<string, boolean>,
+    rejected = false,
+    failCount = 0,
+    resolvedQuestVotes = new Map<string, "succeed" | "fail">()
+  ): void {
     const failsNeeded = this.failsNeededForQuest();
     const outcome = rejected || failCount >= failsNeeded ? "fail" : "success";
     const text = rejected
@@ -893,6 +1040,35 @@ export class AvalonWorld extends SocialWorldBase {
     this.questHistory.push(record);
     if (outcome === "fail") this.failures += 1;
     else this.successes += 1;
+    const publicResult = this.recordPublicWorldFact({
+      factKey: `avalon-quest-result:${this.quest}`,
+      eventType: "avalon.quest-resolved",
+      predicate: "quest-result",
+      object: { outcome, failCount },
+      payload: { quest: this.quest, team, outcome, failCount, failsNeeded }
+    });
+    for (const [actorId, choice] of resolvedQuestVotes) {
+      const commandId = this.questVoteCommandIds.get(actorId);
+      if (!commandId) continue;
+      this.reconcileSocialOutcome({
+        actionReceiptId: commandId,
+        actualOutcome: {
+          summary: `Quest ${this.quest} ${outcome === "success" ? "succeeded" : "failed"} with ${failCount} fail card(s).`,
+          metrics: { quest: this.quest, outcome, failCount, failsNeeded, ownChoice: choice }
+        },
+        actualFacts: {
+          "quest-succeeds": outcome === "success",
+          "quest-fails": outcome === "fail",
+          "quest-has-fail-card": failCount > 0
+        },
+        resultingEventIds: [publicResult.eventId],
+        memoryWriteSuggestions: [{
+          summary: `I played ${choice} on quest ${this.quest}; the public result was ${outcome} with ${failCount} fail card(s) from team [${team.join(", ")}].`,
+          importance: outcome === "fail" ? 0.82 : 0.68,
+          sourceIds: [commandId, publicResult.eventId]
+        }]
+      });
+    }
     for (const id of this.profiles.keys()) {
       this.lastExperiences.set(id, `${text} 第 ${this.quest} 次任务队伍：${team.join(", ")}。`);
       const onTeam = team.includes(id);
@@ -902,7 +1078,7 @@ export class AvalonWorld extends SocialWorldBase {
           this.pushEvent(id, {
             type: "quest-failed",
             targetId: id,
-            facts: { onTeam: true, evil: isEvilRole(this.roles.get(id)), failCount },
+            facts: { onTeam: true, failCount },
             detail: `第 ${this.quest} 次任务失败，出现 ${failCount} 张黑票——而你就在队伍里。`
           });
         } else {
@@ -958,15 +1134,27 @@ export class AvalonWorld extends SocialWorldBase {
     if (!this.ladyInspectId) {
       this.addLog(`第 ${this.quest} 次任务后，${holderName} 没有使用湖中仙女。`, this.quest);
     } else {
+      const observerId = this.ladyHolderId;
       const targetId = this.ladyInspectId;
       const targetName = this.profiles.get(targetId)?.displayName ?? targetId;
       const verdict = ladyVerdictFor(this.roles.get(targetId));
-      this.ladyReveals.set(targetId, { quest: this.quest, verdict });
+      const prior = this.ladyReveals.get(observerId) ?? [];
+      prior.push({ targetId, quest: this.quest, verdict });
+      this.ladyReveals.set(observerId, prior);
+      this.recordPrivateObservation({
+        observerActorId: observerId,
+        subjectActorId: targetId,
+        eventType: "avalon.lady-verdict",
+        predicate: "lady-loyalty-verdict",
+        object: verdict,
+        ...(this.ladyInspectCommandId ? { sourceCommandId: this.ladyInspectCommandId } : {}),
+        payload: { quest: this.quest, targetActorId: targetId }
+      });
       // The inspection is public knowledge; the verdict stays with the holder.
       this.addLog(`湖中仙女查验了 ${targetName}。令牌已交给 ${targetName}。`, this.quest);
-      this.pushEvent(this.ladyHolderId, {
+      this.pushEvent(observerId, {
         type: "investigation",
-        actorId: this.ladyHolderId,
+        actorId: observerId,
         targetId,
         facts: { role: verdict === "evil" ? "内奸" : "好人" },
         detail: `湖中仙女告诉你：${targetName} 的阵营是${verdict === "evil" ? "邪恶" : "忠诚"}。`
@@ -974,6 +1162,7 @@ export class AvalonWorld extends SocialWorldBase {
       this.ladyHolderId = targetId;
     }
     this.ladyInspectId = undefined;
+    this.ladyInspectCommandId = undefined;
     this.advanceToNextQuest();
   }
 
@@ -994,6 +1183,7 @@ export class AvalonWorld extends SocialWorldBase {
 
   private endGame(): void {
     this.addLog(this.outcome, this.quest);
+    for (const [actorId, role] of this.roles) this.revealIdentity(actorId, role);
     for (const id of this.profiles.keys()) {
       const won = this.winners.includes(id);
       this.pushEvent(id, {

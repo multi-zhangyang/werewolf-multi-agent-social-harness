@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { tool, type Tool } from "@openai/agents";
 import { z } from "zod";
 import type {
@@ -15,10 +15,12 @@ import type {
   WorldSnapshot
 } from "../../contracts";
 import { scopedContext, SocialWorldBase } from "../../world";
-import { DiscussionDirector } from "../../conversation";
+import { conversationSignalsFromSocialActs, DiscussionDirector } from "../../conversation";
 import { SuspicionClimate } from "../../suspicion";
 import { boundedRounds, discussionPersonality, emitAction } from "../helpers";
 import { roleHypothesisTool } from "../../cognition";
+import { createStrategyActionShape, socialReferenceContext } from "../../social/strategy-input";
+import type { SocialActDeclaration } from "../../social/contracts";
 import {
   WEREWOLF_ROLES,
   deckForPlayerCount,
@@ -29,6 +31,13 @@ import {
 } from "./roles";
 
 type Phase = "day-discussion" | "day-knight" | "day-vote" | "night";
+
+const WEREWOLF_VOTE_OUTCOME_KEYS = [
+  "target-eliminated",
+  "vote-matched-plurality",
+  "actor-survives-day",
+  "target-revealed-wolf"
+] as const;
 
 interface DayRecord {
   day: number;
@@ -55,15 +64,13 @@ interface PendingShot {
   cause: string;
 }
 
-const ACCUSATION_LEXICON = /怀疑|是狼|狼人|铁狼|狼王|出局|投|说谎|撒谎|骗|小丑|查杀|金水|装好人|带节奏|站队|伪/;
-const DEFENSE_LEXICON = /相信|支持|担保|信任|不是狼|好人|别投|我信|没问题/;
-
 export class WerewolfWorld extends SocialWorldBase {
   private readonly maxDays: number;
   private readonly deckName: string;
   private readonly roles = new Map<string, WerewolfRoleId>();
   private readonly alive = new Set<string>();
   private readonly votes = new Map<string, string>();
+  private readonly voteCommandIds = new Map<string, string>();
   private readonly wolfTargets = new Map<string, string>();
   private readonly seerKnowledge = new Map<string, Map<string, WerewolfRoleId>>();
   private readonly seerTargets = new Map<string, string>();
@@ -114,6 +121,7 @@ export class WerewolfWorld extends SocialWorldBase {
       if (role === "seer") this.seerKnowledge.set(id, new Map());
       if (role === "spirit-seer") this.spiritKnowledge.set(id, new Map());
     });
+    this.registerIdentityAssignments();
     this.discussion = this.createDiscussion();
     this.addLog(`身份已经分配（${deck.name}）。公开讨论开始，所有承诺都可能是策略。`, 1);
   }
@@ -125,6 +133,7 @@ export class WerewolfWorld extends SocialWorldBase {
       roles: this.mapEntries(this.roles),
       alive: [...this.alive],
       votes: this.mapEntries(this.votes),
+      voteCommandIds: this.mapEntries(this.voteCommandIds),
       wolfTargets: this.mapEntries(this.wolfTargets),
       seerKnowledge: [...this.seerKnowledge.entries()].map(([seerId, knowledge]) => [seerId, [...knowledge.entries()]] as [string, Array<[string, WerewolfRoleId]>]),
       seerTargets: this.mapEntries(this.seerTargets),
@@ -155,7 +164,7 @@ export class WerewolfWorld extends SocialWorldBase {
   protected restoreWorldState(state: unknown): void {
     const s = state as Partial<{
       day: number; phase: string; roles: Array<[string, WerewolfRoleId]>; alive: string[];
-      votes: Array<[string, string]>; wolfTargets: Array<[string, string]>;
+      votes: Array<[string, string]>; voteCommandIds: Array<[string, string]>; wolfTargets: Array<[string, string]>;
       seerKnowledge: Array<[string, Array<[string, WerewolfRoleId]>]>; seerTargets: Array<[string, string]>;
       history: DayRecord[]; lastExperiences: Array<[string, string]>; discussion: unknown; suspicion: unknown;
       winners: string[]; outcome: string; antidoteAvailable: boolean; poisonAvailable: boolean;
@@ -168,9 +177,11 @@ export class WerewolfWorld extends SocialWorldBase {
     this.day = Number(s.day ?? 1);
     this.phase = (s.phase ?? "day-discussion") as Phase;
     this.fillMap(this.roles, s.roles);
+    this.registerIdentityAssignments();
     this.alive.clear();
     for (const id of s.alive ?? []) this.alive.add(id);
     this.fillMap(this.votes, s.votes);
+    this.fillMap(this.voteCommandIds, s.voteCommandIds);
     this.fillMap(this.wolfTargets, s.wolfTargets);
     this.seerKnowledge.clear();
     for (const [seerId, knowledge] of s.seerKnowledge ?? []) {
@@ -241,6 +252,7 @@ export class WerewolfWorld extends SocialWorldBase {
     const knowledge = role === "seer" ? Object.fromEntries(this.seerKnowledge.get(actorId) ?? []) : {};
     const spiritKnowledge = role === "spirit-seer" ? Object.fromEntries(this.spiritKnowledge.get(actorId) ?? []) : {};
     const wolfTarget = this.currentWolfTarget();
+    const causality = this.socialCausalityFor(actorId);
     const privateContext: string[] = [
       `Your hidden role: ${roleLabel(role)}.`,
       `Your objective: ${this.rolesObjective(role)}`,
@@ -271,6 +283,8 @@ export class WerewolfWorld extends SocialWorldBase {
       ...(role === "hunter" ? ["Rules: 你被投票放逐或被狼人夜袭时可以开枪带走一名玩家；被女巫毒杀不能开枪。"] : []),
       ...(role === "wolf-king" ? ["Rules: 你被投票放逐或被猎人击杀时可以开枪带走一名玩家；被女巫毒杀不能开枪。"] : []),
       ...(role === "jester" ? ["Rules: 只有被白天投票出局你才获胜；被毒杀、被夜袭或被开枪带走都不算。"] : []),
+      "For an explicit identity claim in communicate.socialActs, use kind=identity, predicate=has-role, subjectId=the claimed actor id, and object=the role id. Link deceptionId only when executing your own recorded deception plan.",
+      ...socialReferenceContext(causality),
       `Your vote: ${this.votes.get(actorId) ?? "not cast"}.`,
       `You are ${this.alive.has(actorId) ? "alive" : "eliminated"}.`
     ];
@@ -311,12 +325,33 @@ export class WerewolfWorld extends SocialWorldBase {
         }
       }) as Tool<SocietyAgentContext>;
 
-    tools.push(bind(
-      "cast_day_vote",
-      "Cast your binding daytime vote against one living participant. Votes remain hidden until every living participant commits and cannot be changed.",
-      z.object({ targetId: z.string().min(1), reason: z.string().min(1).max(2_000) }).strict(),
-      "cast_day_vote"
-    ));
+    const vote = tool({
+      name: "cast_day_vote",
+      description: "Compare bounded vote intents, select one, predict only publicly resolvable outcomes, then cast a sealed binding vote. Cite authorized beliefs, evidence and actor models by ID.",
+      parameters: z.object({
+        targetId: z.string().min(1),
+        reason: z.string().min(1).max(2_000),
+        ...createStrategyActionShape({ targetId: z.string().min(1).max(160) }, WEREWOLF_VOTE_OUTCOME_KEYS)
+      }).strict(),
+      execute: async (input, runContext) => {
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected || selected.targetId !== input.targetId) {
+          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected vote target must equal the binding target.");
+        }
+        const context = scopedContext(runContext, actorId);
+        const commit = await this.performAction(actorId, "cast_day_vote", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({
+            ...candidate,
+            action: "cast_day_vote",
+            payloadSummary: `targetId=${candidate.targetId}`
+          }))
+        });
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
+      }
+    });
+    tools.push(vote as Tool<SocietyAgentContext>);
 
     if (isWolfRole(role)) {
       tools.push(bind(
@@ -548,9 +583,11 @@ export class WerewolfWorld extends SocialWorldBase {
       this.assertLivingTarget(targetId);
       if (this.phase !== "day-vote") throw new Error("VOTE_NOT_OPEN: Daytime voting is not open.");
       if (this.votes.has(actorId)) throw new Error("VOTE_ALREADY_CAST: Your vote is fixed.");
+      const commandId = `cmd-${randomUUID()}`;
       this.votes.set(actorId, targetId);
+      this.voteCommandIds.set(actorId, commandId);
       this.emitUpdate();
-      return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId } };
+      return { action, commandId, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId } };
     }
     if (action === "choose_night_target") {
       if (!targetId) throw new Error("TARGET_REQUIRED: Select a participant.");
@@ -572,10 +609,12 @@ export class WerewolfWorld extends SocialWorldBase {
       const targetRole = this.roles.get(targetId)!;
       // The hidden wolf reads as a villager through the seer's eyes (§7.4).
       const perceivedRole = targetRole === "hidden-wolf" ? "villager" : targetRole;
+      const commandId = `cmd-${randomUUID()}`;
       this.seerTargets.set(actorId, targetId);
       this.seerKnowledge.get(actorId)?.set(targetId, perceivedRole);
+      this.recordIdentityObservation(actorId, targetId, perceivedRole, commandId);
       this.emitUpdate();
-      return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId, role: perceivedRole } };
+      return { action, commandId, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId, role: perceivedRole } };
     }
     if (action === "investigate_dead_identity") {
       if (this.phase !== "night" || role !== "spirit-seer") throw new Error("SPIRIT_INVESTIGATION_FORBIDDEN: Only a living spirit seer can commune with the dead at night.");
@@ -585,10 +624,12 @@ export class WerewolfWorld extends SocialWorldBase {
       if (this.alive.has(targetId)) throw new Error("INVALID_SPIRIT_TARGET: The spirit seer reads the dead, not the living.");
       if (targetId === actorId) throw new Error("INVALID_SPIRIT_TARGET: You cannot commune with yourself.");
       const targetRole = this.roles.get(targetId)!;
+      const commandId = `cmd-${randomUUID()}`;
       this.spiritTargets.set(actorId, targetId);
       this.spiritKnowledge.get(actorId)?.set(targetId, targetRole);
+      this.recordIdentityObservation(actorId, targetId, targetRole, commandId);
       this.emitUpdate();
-      return { action, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId, role: targetRole } };
+      return { action, commandId, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId, role: targetRole } };
     }
     if (action === "dream_curse") {
       if (this.phase !== "night" || role !== "nightmare") throw new Error("NIGHTMARE_FORBIDDEN: Only the living nightmare may curse at night.");
@@ -830,6 +871,7 @@ export class WerewolfWorld extends SocialWorldBase {
     text: string;
     recipientIds?: string[];
     replyTo?: string;
+    socialActs?: SocialActDeclaration[];
   }): Promise<SocialMessage> {
     if (input.channel === "team" && (!input.recipientIds || input.recipientIds.length === 0)) {
       input = {
@@ -838,58 +880,47 @@ export class WerewolfWorld extends SocialWorldBase {
       };
     }
     const message = await super.sendMessage(input);
-    if (message.channel === "public" && this.phase === "day-discussion" && this.discussion) {
+    if (this.phase === "day-discussion" && this.discussion) {
       this.discussion.onMessage({
         messageId: message.id,
         senderId: message.senderId,
         text: message.text,
-        ...(message.replyTo ? { replyTo: message.replyTo } : {})
-      });
-      this.detectSocialActs(message);
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+        ...(message.channel === "public" ? {} : { targetActorIds: message.recipientIds ?? [] })
+      }, conversationSignalsFromSocialActs(message.senderId, message.id, input.socialActs ?? []));
+    }
+    if (message.channel === "public" && this.phase === "day-discussion" && this.discussion) {
+      this.detectSocialActs(message, input.socialActs ?? []);
     }
     return message;
   }
 
   /**
-   * Read public speech for its social meaning: who was accused, who was
-   * defended. These become appraisal events so the target's emotions and
-   * relationships react — an accusation is not just a line of text.
+   * Apply accusation declarations to the scenario's suspicion climate. The
+   * shared world already handles each recipient's emotional reaction.
    */
-  private detectSocialActs(message: SocialMessage): void {
-    for (const id of this.alive) {
-      if (id === message.senderId) continue;
-      const name = this.profiles.get(id)?.displayName ?? id;
-      const atName = message.text.indexOf(name);
-      const atId = message.text.indexOf(id);
-      if (atName === -1 && atId === -1) continue;
-      const at = atName !== -1 ? atName : atId;
-      const window = message.text.slice(Math.max(0, at - 16), at + 40);
-      const snippet = message.text.slice(0, 120);
-      if (ACCUSATION_LEXICON.test(window)) {
-        this.suspicion.noteAccusation(this.day, message.senderId, id);
-        // The scenario knows this was an accusation — feed it to the director
-        // as a structured signal instead of hardcoding werewolf words there.
-        this.discussion?.raiseSignal({
-          kind: "accusation",
-          sourceActorId: message.senderId,
-          targetActorIds: [id],
-          sourceMessageId: message.id
-        });
-        this.pushEvent(id, {
-          type: "accused",
-          actorId: message.senderId,
-          targetId: id,
-          detail: `Day ${this.day} discussion: ${message.senderName} accused you in public — "${snippet}"`
-        });
-      } else if (DEFENSE_LEXICON.test(window)) {
-        this.pushEvent(id, {
-          type: "defended",
-          actorId: message.senderId,
-          targetId: id,
-          detail: `Day ${this.day} discussion: ${message.senderName} stood up for you in public — "${snippet}"`
-        });
+  private detectSocialActs(message: SocialMessage, declarations: SocialActDeclaration[]): void {
+    for (const declaration of declarations) {
+      if (declaration.kind !== "accusation" && declaration.kind !== "defense" && declaration.kind !== "endorsement") continue;
+      for (const id of [...new Set(declaration.targetActorIds ?? [])]) {
+        if (id === message.senderId || !this.alive.has(id)) continue;
+        if (declaration.kind === "accusation") {
+          this.suspicion.noteAccusation(this.day, message.senderId, id);
+          // The scenario knows this was an accusation — feed it to the director
+          // as a structured signal instead of hardcoding werewolf words there.
+          this.discussion?.raiseSignal({
+            kind: "accusation",
+            sourceActorId: message.senderId,
+            targetActorIds: [id],
+            sourceMessageId: message.id
+          });
+        }
       }
     }
+  }
+
+  reconciliationOwnsOutcomeMemory(): boolean {
+    return true;
   }
 
   protected currentTurn(): number {
@@ -951,21 +982,28 @@ export class WerewolfWorld extends SocialWorldBase {
 
   private availableActions(actorId: string, role: WerewolfRoleId): string[] {
     if (!this.alive.has(actorId)) return [];
-    if (this.phase === "day-discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "update_inner_state"];
-    if (this.phase === "day-knight") return role === "knight" && !this.knightUsed ? ["knight_challenge", "remember_experience"] : [];
-    if (this.phase === "day-vote") return this.idiotRevealed.has(actorId) ? ["remember_experience"] : ["cast_day_vote", "remember_experience"];
+    if (this.phase === "day-discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "read_the_room", "log_deception_plan", "update_inner_state"];
+    if (this.phase === "day-knight") return role === "knight" && !this.knightUsed ? ["knight_challenge"] : [];
+    if (this.phase === "day-vote") return this.idiotRevealed.has(actorId) ? [] : ["cast_day_vote"];
     if (isWolfRole(role)) return ["communicate:team", "choose_night_target"];
-    if (role === "seer") return ["investigate_identity", "remember_experience"];
-    if (role === "spirit-seer") return ["investigate_dead_identity", "remember_experience"];
+    if (role === "seer") return ["investigate_identity"];
+    if (role === "spirit-seer") return ["investigate_dead_identity"];
     if (role === "nightmare") return ["communicate:team", "choose_night_target", "dream_curse"];
     if (role === "wolf-beauty") return ["communicate:team", "choose_night_target", "charm_target"];
-    if (role === "witch") return ["witch_night_choice", "remember_experience"];
-    if (role === "guard") return ["guard_tonight", "remember_experience"];
+    if (role === "witch") return ["witch_night_choice"];
+    if (role === "guard") return ["guard_tonight"];
     return [];
   }
 
   private rolesObjective(role: WerewolfRoleId): string {
     return `${WEREWOLF_ROLES[role].objective}`;
+  }
+
+  private registerIdentityAssignments(): void {
+    const wolfIds = [...this.roles].filter(([, role]) => isWolfRole(role)).map(([id]) => id);
+    for (const [id, role] of this.roles) {
+      this.recordIdentityAssignment(id, role, isWolfRole(role) ? wolfIds : [id]);
+    }
   }
 
   private nightActionCommitted(actorId: string): boolean {
@@ -1073,6 +1111,10 @@ export class WerewolfWorld extends SocialWorldBase {
       }
     }
     if (idiotSurvives && eliminatedId) {
+      const detectedDeceptions = this.revealIdentity(eliminatedId, "idiot");
+      if (detectedDeceptions.length) {
+        this.addLog(`身份揭晓证伪了 ${detectedDeceptions.length} 条带计划、带消息引用的身份欺骗。`, this.day, "deception-exposed");
+      }
       for (const id of this.profiles.keys()) {
         if (id === eliminatedId) {
           this.pushEvent(id, {
@@ -1097,7 +1139,44 @@ export class WerewolfWorld extends SocialWorldBase {
     }
     for (const [voterId, targetId] of this.votes) this.suspicion.noteVote(this.day, voterId, targetId);
     if (eliminatedId) this.suspicion.noteResolved(this.day, eliminatedId);
+    const topVoteCount = ranked[0]?.[1] ?? 0;
+    for (const [voterId, targetId] of this.votes) {
+      const commandId = this.voteCommandIds.get(voterId);
+      if (!commandId) continue;
+      const targetWasRevealed = eliminatedId === targetId && eliminatedRole !== undefined;
+      const actualFacts: Record<string, boolean> = {
+        "target-eliminated": eliminatedId === targetId && !idiotSurvives,
+        "vote-matched-plurality": (tally.get(targetId) ?? 0) === topVoteCount,
+        "actor-survives-day": this.alive.has(voterId),
+        ...(targetWasRevealed ? { "target-revealed-wolf": isWolfRole(eliminatedRole) } : {})
+      };
+      this.reconcileSocialOutcome({
+        actionReceiptId: commandId,
+        actualOutcome: {
+          summary: eliminatedId
+            ? `Voted for ${targetId}; the table eliminated ${eliminatedId}${idiotSurvives ? " but the revealed idiot survived" : ""}.`
+            : `Voted for ${targetId}; the table tied and eliminated nobody.`,
+          metrics: {
+            day: this.day,
+            targetId,
+            targetEliminated: eliminatedId === targetId && !idiotSurvives,
+            voteMatchedPlurality: (tally.get(targetId) ?? 0) === topVoteCount,
+            actorSurvived: this.alive.has(voterId),
+            ...(targetWasRevealed ? { revealedRole: eliminatedRole } : {})
+          }
+        },
+        actualFacts,
+        memoryWriteSuggestions: [{
+          summary: eliminatedId
+            ? `On day ${this.day}, I voted for ${targetId}; ${eliminatedId} was selected and revealed as ${roleLabel(eliminatedRole)}.`
+            : `On day ${this.day}, I voted for ${targetId}; the vote tied and nobody was eliminated.`,
+          importance: targetWasRevealed || eliminatedId === voterId ? 0.86 : 0.64,
+          sourceIds: [commandId]
+        }]
+      });
+    }
     this.votes.clear();
+    this.voteCommandIds.clear();
     // The nightmare's curse expires once the day's vote is settled.
     this.nightmareCurse = undefined;
 
@@ -1206,6 +1285,10 @@ export class WerewolfWorld extends SocialWorldBase {
   /** Schedule death skills and run the shared win checks after any death. */
   private pushEliminationEvents(targetId: string, by: "vote" | "night" | "poison" | "shot" | "knight" | "boom" | "charm", role: WerewolfRoleId | undefined): void {
     const targetName = this.profiles.get(targetId)?.displayName ?? targetId;
+    const detectedDeceptions = role ? this.revealIdentity(targetId, role) : [];
+    if (detectedDeceptions.length) {
+      this.addLog(`身份揭晓证伪了 ${detectedDeceptions.length} 条带计划、带消息引用的身份欺骗。`, this.day, "deception-exposed");
+    }
     this.pushEvent(targetId, {
       type: "eliminated",
       targetId,
@@ -1321,6 +1404,7 @@ export class WerewolfWorld extends SocialWorldBase {
     this.winners = winners;
     this.outcome = outcome;
     this.addLog(outcome, this.day, "win");
+    for (const [actorId, role] of this.roles) this.revealIdentity(actorId, role);
     for (const id of this.profiles.keys()) {
       const won = winners.includes(id);
       this.pushEvent(id, {

@@ -19,6 +19,8 @@ export interface SpectatorViewer {
   mode: SpectatorMode;
   /** Watched agent for `agent-pov`. */
   agentId?: string;
+  /** Authenticated owner/operator; used only for sanitized runtime notices. */
+  privileged?: boolean;
 }
 
 /** Tools whose execution is public knowledge in every world. */
@@ -27,20 +29,28 @@ const PUBLIC_TOOLS = new Set(["communicate"]);
 const PUBLIC_ACTIONS = new Set(["communicate", "message"]);
 
 export function projectEventFor(event: AgentRuntimeEvent, viewer: SpectatorViewer): AgentRuntimeEvent | undefined {
-  if (viewer.mode === "omniscient" || viewer.mode === "postgame") return event;
-  if (viewer.mode === "public") return projectPublic(event);
-  return projectPov(event, viewer.agentId);
+  // Legacy raw provider reasoning is never a viewer-facing interface, even
+  // for operators. Only the bounded reasoning-summary/ThoughtBeat paths are
+  // eligible for projection.
+  if (event.type === "agent.reasoning") return undefined;
+  if (viewer.mode === "omniscient") return event;
+  if (viewer.mode === "public" || viewer.mode === "postgame") return projectPublic(event, viewer.privileged === true);
+  return projectPov(event, viewer.agentId, viewer.privileged === true);
 }
 
-function projectPublic(event: AgentRuntimeEvent): AgentRuntimeEvent | undefined {
+function projectPublic(event: AgentRuntimeEvent, privileged: boolean): AgentRuntimeEvent | undefined {
   switch (event.type) {
     // Private cognition and state never leaves the public seat.
-    case "agent.reasoning":
+    case "agent.reasoning-summary":
+    case "agent.pov-frame":
+    case "world.operator-frame":
     case "agent.thought-beat":
     case "agent.context.pressure":
     case "agent.compacted":
     case "agent.updated":
       return undefined;
+    case "runtime.notice":
+      return privileged ? event : undefined;
     case "agent.tool":
       return PUBLIC_TOOLS.has(event.toolName) ? event : undefined;
     case "world.action":
@@ -50,9 +60,9 @@ function projectPublic(event: AgentRuntimeEvent): AgentRuntimeEvent | undefined 
   }
 }
 
-function projectPov(event: AgentRuntimeEvent, selfId: string | undefined): AgentRuntimeEvent | undefined {
+function projectPov(event: AgentRuntimeEvent, selfId: string | undefined, privileged: boolean): AgentRuntimeEvent | undefined {
   switch (event.type) {
-    case "agent.reasoning":
+    case "agent.reasoning-summary":
     case "agent.thought-beat":
     case "agent.context.pressure":
     case "agent.compacted":
@@ -61,6 +71,13 @@ function projectPov(event: AgentRuntimeEvent, selfId: string | undefined): Agent
     case "world.action":
     case "agent.status":
       return event.actorId === selfId ? event : undefined;
+    case "agent.pov-frame":
+      return event.actorId === selfId ? event : undefined;
+    case "world.operator-frame":
+    case "world.public-frame":
+      return undefined;
+    case "runtime.notice":
+      return privileged || event.actorId === selfId ? event : undefined;
     case "agent.message": {
       // A POV seat may only see what the watched agent could see: public
       // channel, its own sent messages, or private/team messages addressed

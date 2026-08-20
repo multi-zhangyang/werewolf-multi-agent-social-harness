@@ -48,8 +48,9 @@ export function scanForInjection(text: string): InjectionDetection {
 
 /**
  * SDK input guardrail attached to a participant's agent. Detects manipulation
- * attempts in the turn input (which contains other players' speech), emits an
- * observer event, and writes a memory so the character can react to it.
+ * attempts in the turn input (which contains other players' speech) and emits
+ * an observer event. A guardrail trace is not allowed to become long-term
+ * episodic memory without social/outcome provenance.
  * Never trips the run: a social turn must still complete.
  */
 export function createInjectionShield(context: SocietyAgentContext): InputGuardrail {
@@ -70,14 +71,6 @@ export function createInjectionShield(context: SocietyAgentContext): InputGuardr
         label: detection.label ?? "注入",
         snippet: detection.snippet ?? "",
         at: new Date().toISOString()
-      });
-      await ctx.memory.remember({
-        text: `你注意到有人在消息里试图植入指令（${detection.label}），你把它当作对方的话术，没有让它改变你的判断。`,
-        tags: ["guardrail", "injection", `turn:${ctx.world.snapshot().turn}`],
-        salience: 0.55,
-        valence: -0.1,
-        pad: { ...ctx.mind.mood.pad },
-        turn: ctx.world.snapshot().turn
       });
       return { tripwireTriggered: false, outputInfo: { detected: true, label: detection.label } };
     }

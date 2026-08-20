@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { tool, type Tool } from "@openai/agents";
 import { z } from "zod";
 import type {
@@ -7,13 +7,17 @@ import type {
   AgentProfile,
   PlayerActionSpec,
   ScenarioSummary,
+  SocialMessage,
   SocietyAgentContext,
   WorldActionCommit,
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
 import { scopedContext, SocialWorldBase } from "../world";
-import { boundedRounds, emitAction } from "./helpers";
+import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
+import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
+import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import type { SocialActDeclaration } from "../social/contracts";
 
 type Phase = "discussion" | "bid";
 
@@ -25,6 +29,9 @@ interface AuctionRound {
   price?: number;
   payoffs: Record<string, number>;
 }
+
+const AUCTION_STATE_SCHEMA_VERSION = 3;
+const AUCTION_OUTCOME_KEYS = ["actor-wins", "actor-positive-surplus", "price-at-most-own-value", "bid-is-highest", "actor-bid-at-most-value"] as const;
 
 /**
  * Sealed-bid second-price auction.
@@ -42,8 +49,10 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
   private readonly scores = new Map<string, number>();
   private readonly values = new Map<string, number>();
   private readonly bids = new Map<string, number>();
+  private readonly bidCommandIds = new Map<string, string>();
   private readonly history: AuctionRound[] = [];
   private readonly lastExperiences = new Map<string, string>();
+  private discussion: DiscussionDirector;
   private phase: Phase = "discussion";
   private round = 1;
 
@@ -54,6 +63,7 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
       throw new Error(`PLAYER_COUNT_INVALID: ${scenario.name} supports ${range.min}-${range.max} participants.`);
     }
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
+    this.discussion = this.createDiscussion();
     for (const profile of profiles) this.scores.set(profile.id, 0);
     this.dealValues();
     this.addLog(`拍卖开始：${profiles.length} 位竞拍者各持一份私密估值，公开讨论后同时提交密封出价。`, 1);
@@ -61,11 +71,14 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
 
   protected exportWorldState(): unknown {
     return {
+      schemaVersion: AUCTION_STATE_SCHEMA_VERSION,
       round: this.round,
       phase: this.phase,
       scores: this.mapEntries(this.scores),
       values: this.mapEntries(this.values),
       bids: this.mapEntries(this.bids),
+      bidCommandIds: this.mapEntries(this.bidCommandIds),
+      discussion: this.discussion.exportState(),
       history: structuredClone(this.history),
       lastExperiences: this.mapEntries(this.lastExperiences)
     };
@@ -73,15 +86,23 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
 
   protected restoreWorldState(state: unknown): void {
     const s = state as Partial<{
+      schemaVersion: number;
       round: number; phase: string; scores: Array<[string, number]>; values: Array<[string, number]>;
-      bids: Array<[string, number]>; history: AuctionRound[]; lastExperiences: Array<[string, string]>;
+      bids: Array<[string, number]>; bidCommandIds: Array<[string, string]>; history: AuctionRound[]; lastExperiences: Array<[string, string]>;
+      discussion: ReturnType<DiscussionDirector["exportState"]>;
     }> | undefined;
     if (!s) return;
+    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== 2 && s.schemaVersion !== AUCTION_STATE_SCHEMA_VERSION) {
+      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: sealed-bid-auction ${s.schemaVersion}`);
+    }
     this.round = Number(s.round ?? 1);
     this.phase = (s.phase ?? "discussion") as Phase;
     this.fillMap(this.scores, s.scores);
     this.fillMap(this.values, s.values);
     this.fillMap(this.bids, s.bids);
+    this.fillMap(this.bidCommandIds, s.bidCommandIds);
+    this.discussion = this.createDiscussion();
+    this.discussion.restoreState(s.discussion);
     this.history.length = 0;
     this.history.push(...structuredClone(s.history ?? []));
     this.fillMap(this.lastExperiences, s.lastExperiences);
@@ -99,7 +120,7 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
         maxBid: this.maxBid,
         scores: Object.fromEntries(this.scores),
         pendingBids: [...this.profiles.keys()].filter((id) => !this.bids.has(id)),
-        history: this.history
+        history: this.history.map(({ values: _privateValues, ...publicResult }) => publicResult)
       }
     });
   }
@@ -107,6 +128,7 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
   observe(actorId: string): AgentObservation {
     const self = this.requireProfile(actorId);
     const ownValue = this.values.get(actorId);
+    const causality = this.socialCausalityFor(actorId);
     return {
       roomId: this.roomId,
       scenarioId: this.scenario.id,
@@ -119,6 +141,7 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
         `Your private value this round: ${ownValue ?? "unknown"}.`,
         `Your cumulative score: ${this.scores.get(actorId) ?? 0}.`,
         `Your current bid: ${this.bids.get(actorId) ?? "not committed"}.`,
+        ...socialReferenceContext(causality),
         `Past rounds: ${this.history.map((entry) => `R${entry.round} value=${entry.values[actorId]} bid=${entry.bids[actorId]} payoff=${entry.payoffs[actorId]}`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, score: this.scores.get(actorId) ?? 0 },
@@ -131,7 +154,7 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
       recentMessages: this.visibleMessages(actorId).slice(-30),
       availableActions: this.phase === "discussion"
         ? ["communicate", "reflect_on_social_situation", "read_the_room", "update_inner_state"]
-        : ["submit_bid", "remember_experience"]
+        : ["submit_bid"]
     };
   }
 
@@ -139,14 +162,20 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const bid = tool({
       name: "submit_bid",
-      description: `Privately submit an integer bid from ${this.minBid} to ${this.maxBid} for the current auction round. The highest bid wins and pays the second-highest bid.`,
+      description: `Compare bounded bidding intents and predict the public auction result, then submit a sealed integer bid from ${this.minBid} to ${this.maxBid}.`,
       parameters: z.object({
         amount: z.number().int().min(this.minBid).max(this.maxBid),
-        reason: z.string().min(1).max(2_000)
+        reason: z.string().min(1).max(2_000),
+        ...createStrategyActionShape({ amount: z.number().int().min(this.minBid).max(this.maxBid) }, AUCTION_OUTCOME_KEYS)
       }).strict(),
-      execute: async ({ amount, reason }, runContext) => {
+      execute: async (input, runContext) => {
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected || selected.amount !== input.amount) throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: Selected bid must equal the binding bid.");
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "submit_bid", { amount, reason });
+        const commit = await this.performAction(actorId, "submit_bid", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({ ...candidate, action: "submit_bid", payloadSummary: `amount=${candidate.amount}` }))
+        });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -180,10 +209,13 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
       throw new Error(`BID_INVALID: Choose an integer from ${this.minBid} to ${this.maxBid}.`);
     }
     const reason = typeof value.reason === "string" ? value.reason.trim() : "";
+    const commandId = `cmd-${randomUUID()}`;
     this.bids.set(actorId, amount);
+    this.bidCommandIds.set(actorId, commandId);
     this.emitUpdate();
     return {
       action,
+      commandId,
       detail: reason ? `${amount}; ${reason}` : String(amount),
       result: { accepted: true, amount, waitingFor: [...this.profiles.keys()].filter((id) => !this.bids.has(id)) }
     };
@@ -192,27 +224,34 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
   activation(): WorldActivation | null {
     if (this.status !== "running" || this.round > this.totalRounds) return null;
     if (this.phase === "discussion") {
-      return {
-        id: `auction:${this.round}:discussion`,
-        label: `第 ${this.round} 轮讨论`,
-        actorIds: [...this.profiles.keys()],
-        mode: "sequential",
-        instructionFor: () => "Speak once if useful. You may reveal, hide, or distort your private value and intended bid. Do not submit a bid yet."
-      };
+      const actors = this.discussion.nextWave();
+      if (actors.length) {
+        const wave = this.discussion.waveNumber;
+        return {
+          id: `auction:${this.round}:discussion:${wave}`,
+          label: wave === 1 ? `第 ${this.round} 轮讨论` : `第 ${this.round} 轮讨论 · 回应 ${wave - 1}`,
+          actorIds: actors,
+          mode: "sequential",
+          instructionFor: () => wave === 1
+            ? "Reveal, hide or distort your private value and intended bid, or stay quiet. Do not submit a bid yet."
+            : "Respond to the concrete claim, warning, bluff or private message directed at you. Do not reveal more than your strategy warrants."
+        };
+      }
+      this.phase = "bid";
+      this.emitUpdate();
     }
     return {
       id: `auction:${this.round}:bid`,
       label: `第 ${this.round} 轮出价`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => `You must call submit_bid exactly once with an integer from ${this.minBid} to ${this.maxBid}. Remember the winner pays the second-highest bid.`
+      instructionFor: () => `Call submit_bid exactly once with bounded candidates and public-result predictions. Your private value remains authorized only to you; the winner pays the second-highest bid.`
     };
   }
 
   completeActivation(activation: WorldActivation): ActivationCompletion {
-    if (activation.id.endsWith(":discussion")) {
-      this.phase = "bid";
-      this.emitUpdate();
+    if (activation.id.includes(":discussion:")) {
+      this.discussion.endWave();
       return { completed: true, missingActorIds: [] };
     }
     const missingActorIds = activation.actorIds.filter((id) => !this.bids.has(id));
@@ -229,6 +268,35 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
 
   experienceFor(actorId: string): string | undefined {
     return this.lastExperiences.get(actorId);
+  }
+
+  reconciliationOwnsOutcomeMemory(): boolean {
+    return true;
+  }
+
+  async sendMessage(input: {
+    senderId: string;
+    channel: "public" | "private" | "team";
+    text: string;
+    recipientIds?: string[];
+    replyTo?: string;
+    socialActs?: SocialActDeclaration[];
+  }): Promise<SocialMessage> {
+    const message = await super.sendMessage(input);
+    if (this.phase === "discussion") {
+      this.discussion.onMessage({
+        messageId: message.id,
+        senderId: message.senderId,
+        text: message.text,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+        ...(message.channel === "public" ? {} : { targetActorIds: message.recipientIds ?? [] })
+      }, conversationSignalsFromSocialActs(message.senderId, message.id, input.socialActs ?? []));
+    }
+    return message;
+  }
+
+  protected messageWave(): number | undefined {
+    return this.phase === "discussion" ? this.discussion.waveNumber : undefined;
   }
 
   protected currentTurn(): number {
@@ -275,10 +343,45 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
       );
     }
     this.history.push({ round: this.round, values, bids, winnerId, price, payoffs });
+    const publicResult = this.recordPublicWorldFact({
+      factKey: `sealed-bid-auction-round:${this.round}`,
+      eventType: "sealed-bid-auction.round-resolved",
+      predicate: "sealed-bid-auction-round-result",
+      object: { bids, winnerId, price, payoffs },
+      payload: { round: this.round, bids, winnerId: winnerId ?? null, price, payoffs }
+    });
     const winnerName = winnerId ? this.profiles.get(winnerId)?.displayName ?? winnerId : "nobody";
     const beat = winnerId && price > (values[winnerId] ?? 0) ? "adverse-outcome" as const : "win" as const;
     this.addLog(`第 ${this.round} 轮结算：${winnerName} 以 ${price} 点拍得，支付次高价。`, this.round, beat);
+    const highestBid = ranked[0]?.[1] ?? 0;
+    for (const id of ids) {
+      const commandId = this.bidCommandIds.get(id);
+      if (!commandId) continue;
+      const ownValue = values[id];
+      const ownBid = bids[id];
+      this.reconcileSocialOutcome({
+        actionReceiptId: commandId,
+        actualOutcome: {
+          summary: `Bid ${ownBid} with private value ${ownValue}; winner=${winnerId ?? "none"}; price=${price}; payoff=${payoffs[id]}.`,
+          metrics: { round: this.round, ownValue, ownBid, winnerId: winnerId ?? "none", price, ownPayoff: payoffs[id] }
+        },
+        actualFacts: {
+          "actor-wins": winnerId === id,
+          "actor-positive-surplus": payoffs[id] > 0,
+          "price-at-most-own-value": price <= ownValue,
+          "bid-is-highest": ownBid === highestBid,
+          "actor-bid-at-most-value": ownBid <= ownValue
+        },
+        resultingEventIds: [publicResult.eventId],
+        memoryWriteSuggestions: [{
+          summary: `In auction round ${this.round}, my private value was ${ownValue}, I bid ${ownBid}, ${winnerId ?? "nobody"} won at price ${price}, and my payoff was ${payoffs[id]}.`,
+          importance: winnerId === id || ownBid > ownValue ? 0.82 : 0.66,
+          sourceIds: [commandId, publicResult.eventId]
+        }]
+      });
+    }
     this.bids.clear();
+    this.bidCommandIds.clear();
     if (this.round >= this.totalRounds) {
       this.round = this.totalRounds + 1;
       this.finish();
@@ -286,8 +389,18 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
     }
     this.round += 1;
     this.phase = "discussion";
+    this.discussion = this.createDiscussion();
     this.dealValues();
     this.emitUpdate();
+  }
+
+  private createDiscussion(): DiscussionDirector {
+    return new DiscussionDirector({
+      actorIds: [...this.profiles.keys()],
+      displayName: (id) => this.profiles.get(id)?.displayName ?? id,
+      ...discussionPersonality(this.profiles),
+      maxWaves: 4
+    });
   }
 
   private summary(): string {

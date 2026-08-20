@@ -16,8 +16,10 @@ import type {
   WorldSnapshot
 } from "../contracts";
 import { scopedContext, SocialWorldBase } from "../world";
-import { DiscussionDirector } from "../conversation";
+import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
+import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import type { SocialActDeclaration } from "../social/contracts";
 
 type Phase = "discussion" | "investment" | "return";
 
@@ -26,10 +28,17 @@ type Phase = "discussion" | "investment" | "return";
  * v2 adds the commitment ledger and decision records; v1 checkpoints are
  * rejected rather than restored into a world without that social history.
  */
-export const TRUST_GAME_STATE_SCHEMA_VERSION = 2;
+export const TRUST_GAME_STATE_SCHEMA_VERSION = 3;
 
 /** At most this many commitments per participant per round. */
 const MAX_COMMITMENTS_PER_ACTOR = 3;
+
+const TRUST_OUTCOME_KEYS = [
+  "investment-positive",
+  "return-at-least-investment",
+  "cited-commitments-fulfilled",
+  "actor-payoff-at-least-endowment"
+] as const;
 
 interface TrustRound {
   round: number;
@@ -95,7 +104,7 @@ export class TrustGameWorld extends SocialWorldBase {
       investmentCommandId?: string; returnCommandId?: string; commitments: Commitment[]; decisionRecords: DecisionRecord[];
     }> | undefined;
     if (!s) return;
-    if (s.schemaVersion !== TRUST_GAME_STATE_SCHEMA_VERSION) {
+    if (s.schemaVersion !== 2 && s.schemaVersion !== TRUST_GAME_STATE_SCHEMA_VERSION) {
       throw new Error(
         `SCENARIO_STATE_MIGRATION_REQUIRED: trust-game checkpoint has schema version ${s.schemaVersion === undefined ? "none (legacy)" : String(s.schemaVersion)}, ` +
         `expected ${TRUST_GAME_STATE_SCHEMA_VERSION}. The checkpoint is rejected rather than restored into a corrupted world.`
@@ -112,7 +121,7 @@ export class TrustGameWorld extends SocialWorldBase {
     this.investmentCommandId = s.investmentCommandId;
     this.returnCommandId = s.returnCommandId;
     this.commitments.length = 0;
-    this.commitments.push(...structuredClone(s.commitments ?? []));
+    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
     this.records.length = 0;
     this.records.push(...structuredClone(s.decisionRecords ?? []));
     if (s.discussion) {
@@ -151,6 +160,7 @@ export class TrustGameWorld extends SocialWorldBase {
     const [investorId, trusteeId] = this.rolesForRound();
     const role = actorId === investorId ? "investor" : "trustee";
     const openCommitments = this.openCommitmentsFor(actorId);
+    const causality = this.socialCausalityFor(actorId);
     return {
       roomId: this.roomId,
       scenarioId: this.scenario.id,
@@ -164,6 +174,7 @@ export class TrustGameWorld extends SocialWorldBase {
         openCommitments.length
           ? `Open commitments this round:\n${openCommitments.map((commitment) => `- ${commitment.promisorActorId === actorId ? "You declared" : `${commitment.promisorActorId} declared`}: ${commitment.proposition} (${commitment.state})`).join("\n")}`
           : "Open commitments this round: none.",
+        ...socialReferenceContext(causality),
         `Role history: ${this.history.map((entry) => `R${entry.round} ${entry.investorId === actorId ? "investor" : "trustee"}, payoff ${entry.payoffs[actorId]}`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, role, score: this.scores.get(actorId) ?? 0 },
@@ -183,7 +194,7 @@ export class TrustGameWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const commitment = tool({
       name: "make_commitment",
-      description: `During the negotiation, publicly declare a promise the world will hold you to: either that you will return at least N (you must be the trustee) or invest at least N (you must be the investor). When the round settles, the world checks your actual action against this declaration and records it fulfilled or violated.`,
+      description: `During negotiation, propose a public promise to return or invest at least N. It becomes settlement-eligible only after the recipient explicitly accepts it; then the world checks the sealed action and records fulfillment or violation.`,
       parameters: z.object({
         proposition: z.string().min(1).max(400),
         actionType: z.enum(["return-at-least", "invest-at-least"]),
@@ -197,39 +208,76 @@ export class TrustGameWorld extends SocialWorldBase {
         return commit.result;
       }
     });
+    const acceptCommitment = tool({
+      name: "accept_commitment",
+      description: "Explicitly accept one open commitment addressed to you. Only accepted commitments can later be settled as fulfilled or violated.",
+      parameters: z.object({
+        commitmentId: z.string().min(1).max(200)
+      }).strict(),
+      execute: async (input, runContext) => {
+        const context = scopedContext(runContext, actorId);
+        const commit = await this.performAction(actorId, "accept_commitment", input);
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
+      }
+    });
     const invest = tool({
       name: "make_investment",
-      description: `As the current investor, commit an integer from 0 to ${this.endowment}. The amount is multiplied by ${this.multiplier} before the trustee decides what to return.`,
+      description: `As the current investor, compare 2 to 4 bounded intents, select one, predict the round outcome, then commit an integer from 0 to ${this.endowment}. The amount is multiplied by ${this.multiplier} before the trustee decides what to return. References must be IDs present in your authorized observation.`,
       parameters: z.object({
         amount: z.number().int().min(0).max(this.endowment),
         reason: z.string().min(1).max(2_000),
         referencedCommitmentIds: z.array(z.string()).max(3).nullable().default(null),
-        beliefPropositions: z.array(z.string().min(1).max(400)).max(3).nullable().default(null)
+        beliefPropositions: z.array(z.string().min(1).max(400)).max(3).nullable().default(null),
+        ...createStrategyActionShape({ amount: z.number().int().min(0).max(this.endowment) }, TRUST_OUTCOME_KEYS)
       }).strict(),
-      execute: async ({ amount, reason, referencedCommitmentIds, beliefPropositions }, runContext) => {
+      execute: async (input, runContext) => {
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected || selected.amount !== input.amount) {
+          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected intent amount must equal the binding investment amount.");
+        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "make_investment", { amount, reason, referencedCommitmentIds, beliefPropositions });
+        const commit = await this.performAction(actorId, "make_investment", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({
+            ...candidate,
+            action: "make_investment",
+            payloadSummary: `amount=${candidate.amount}`
+          }))
+        });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
     });
     const returnFromTrust = tool({
       name: "return_from_trust",
-      description: "As the current trustee, return an integer amount to the investor from the multiplied investment. You may return none, some, or all of the available amount.",
+      description: "As the current trustee, compare 2 to 4 bounded intents, select one, predict the round outcome, then return an integer amount from the multiplied investment. References must be IDs present in your authorized observation.",
       parameters: z.object({
         amount: z.number().int().min(0),
         reason: z.string().min(1).max(2_000),
         referencedCommitmentIds: z.array(z.string()).max(3).nullable().default(null),
-        beliefPropositions: z.array(z.string().min(1).max(400)).max(3).nullable().default(null)
+        beliefPropositions: z.array(z.string().min(1).max(400)).max(3).nullable().default(null),
+        ...createStrategyActionShape({ amount: z.number().int().min(0).max((this.investment ?? 0) * this.multiplier) }, TRUST_OUTCOME_KEYS)
       }).strict(),
-      execute: async ({ amount, reason, referencedCommitmentIds, beliefPropositions }, runContext) => {
+      execute: async (input, runContext) => {
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected || selected.amount !== input.amount) {
+          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected intent amount must equal the binding return amount.");
+        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "return_from_trust", { amount, reason, referencedCommitmentIds, beliefPropositions });
+        const commit = await this.performAction(actorId, "return_from_trust", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({
+            ...candidate,
+            action: "return_from_trust",
+            payloadSummary: `amount=${candidate.amount}`
+          }))
+        });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
     });
-    return [commitment, invest, returnFromTrust] as Tool<SocietyAgentContext>[];
+    return [commitment, acceptCommitment, invest, returnFromTrust] as Tool<SocietyAgentContext>[];
   }
 
   domainActionsFor(actorId: string): PlayerActionSpec[] {
@@ -266,12 +314,47 @@ export class TrustGameWorld extends SocialWorldBase {
   async performDomainAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
     this.requireProfile(actorId);
     const value = recordPayload(payload);
+    const reason = typeof value.reason === "string" ? value.reason.trim() : "";
+    const [investorId, trusteeId] = this.rolesForRound();
+    if (action === "accept_commitment") {
+      if (this.phase !== "discussion") throw new Error("COMMITMENT_ACCEPTANCE_NOT_OPEN: Commitments can only be accepted during negotiation.");
+      const commitmentId = typeof value.commitmentId === "string" ? value.commitmentId : "";
+      const commitment = this.commitments.find((entry) => entry.commitmentId === commitmentId && entry.round === this.round);
+      if (!commitment) throw new Error(`COMMITMENT_NOT_FOUND: '${commitmentId}'.`);
+      if (commitment.promisorActorId === actorId || !commitment.audienceActorIds.includes(actorId)) {
+        throw new Error("COMMITMENT_ACCEPTOR_INVALID: Only a recipient may accept this commitment.");
+      }
+      if (commitment.state !== "proposed" && commitment.state !== "accepted") {
+        throw new Error(`COMMITMENT_NOT_OPEN: '${commitmentId}' is already ${commitment.state}.`);
+      }
+      const acceptedByActorIds = commitment.acceptedByActorIds ?? (commitment.acceptedByActorIds = []);
+      const acceptedByCommandIds = commitment.acceptedByCommandIds ?? (commitment.acceptedByCommandIds = []);
+      if (acceptedByActorIds.includes(actorId)) {
+        throw new Error(`COMMITMENT_ALREADY_ACCEPTED: '${actorId}' already accepted '${commitmentId}'.`);
+      }
+      const commandId = `cmd-${randomUUID()}`;
+      acceptedByActorIds.push(actorId);
+      acceptedByCommandIds.push(commandId);
+      const requiredRecipients = commitment.audienceActorIds.filter((id) => id !== commitment.promisorActorId);
+      if (requiredRecipients.every((id) => acceptedByActorIds.includes(id))) commitment.state = "accepted";
+      commitment.acceptedAtTurn = this.round;
+      this.acceptSocialCommitment(commitment, actorId, commandId);
+      for (const id of this.profiles.keys()) {
+        this.pushEvent(id, {
+          type: "commitment-accepted",
+          actorId,
+          targetId: commitment.promisorActorId,
+          facts: { commitmentId },
+          detail: `${actorId === id ? "你" : this.profiles.get(actorId)?.displayName ?? actorId} 接受了承诺「${commitment.proposition}」。`
+        });
+      }
+      this.emitUpdate();
+      return { action, commandId, detail: commitmentId, result: { accepted: true, commitmentId, state: commitment.state } };
+    }
     const amount = value.amount;
     if (typeof amount !== "number" || !Number.isInteger(amount)) {
       throw new Error("AMOUNT_INVALID: Choose a whole-number amount.");
     }
-    const reason = typeof value.reason === "string" ? value.reason.trim() : "";
-    const [investorId, trusteeId] = this.rolesForRound();
     if (action === "make_commitment") {
       if (this.phase !== "discussion") throw new Error("COMMITMENT_NOT_OPEN: Commitments can only be declared during the negotiation.");
       const actionType = value.actionType;
@@ -306,6 +389,8 @@ export class TrustGameWorld extends SocialWorldBase {
           ...(typeof value.condition === "string" && value.condition.trim() ? { condition: value.condition.trim() } : {})
         },
         state: "proposed",
+        acceptedByActorIds: [],
+        acceptedByCommandIds: [],
         createdByCommandId: commandId,
         createdAtTurn: this.round,
         schemaVersion: 1
@@ -391,7 +476,8 @@ export class TrustGameWorld extends SocialWorldBase {
   /** Open (proposed) commitments this participant made or received. */
   openCommitmentsFor(actorId: string): Commitment[] {
     return this.commitments.filter((entry) =>
-      entry.state === "proposed" && (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+      (entry.state === "proposed" || entry.state === "accepted") &&
+      (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
     );
   }
 
@@ -467,16 +553,27 @@ export class TrustGameWorld extends SocialWorldBase {
     return this.lastExperiences.get(actorId);
   }
 
+  reconciliationOwnsOutcomeMemory(): boolean {
+    return true;
+  }
+
   async sendMessage(input: {
     senderId: string;
     channel: "public" | "private" | "team";
     text: string;
     recipientIds?: string[];
     replyTo?: string;
+    socialActs?: SocialActDeclaration[];
   }): Promise<SocialMessage> {
     const message = await super.sendMessage(input);
-    if (message.channel === "public" && this.phase === "discussion" && this.discussion) {
-      this.discussion.onMessage({ messageId: message.id, senderId: message.senderId, text: message.text, ...(message.replyTo ? { replyTo: message.replyTo } : {}) });
+    if (this.phase === "discussion" && this.discussion) {
+      this.discussion.onMessage({
+        messageId: message.id,
+        senderId: message.senderId,
+        text: message.text,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+        ...(message.channel === "public" ? {} : { targetActorIds: message.recipientIds ?? [] })
+      }, conversationSignalsFromSocialActs(message.senderId, message.id, input.socialActs ?? []));
     }
     return message;
   }
@@ -539,9 +636,9 @@ export class TrustGameWorld extends SocialWorldBase {
   }
 
   private availableActions(actorId: string, investorId: string, trusteeId: string): string[] {
-    if (this.phase === "investment" && actorId === investorId) return ["make_investment", "remember_experience"];
-    if (this.phase === "return" && actorId === trusteeId) return ["return_from_trust", "remember_experience"];
-    return ["communicate", "make_commitment", "reflect_on_social_situation", "update_inner_state"];
+    if (this.phase === "investment" && actorId === investorId) return ["make_investment"];
+    if (this.phase === "return" && actorId === trusteeId) return ["return_from_trust"];
+    return ["communicate", "make_commitment", "accept_commitment", "reflect_on_social_situation", "update_inner_state"];
   }
 
   private rolesForRound(): [string, string] {
@@ -569,8 +666,9 @@ export class TrustGameWorld extends SocialWorldBase {
     // Settle this round's commitments against the sealed actions (§8.1):
     // only a declared promise that the world checked may earn the strong
     // promise-kept / promise-broken labels (§8.3).
-    const roundCommitments = this.commitments.filter((entry) => entry.round === this.round && entry.state === "proposed");
+    const roundCommitments = this.commitments.filter((entry) => entry.round === this.round && entry.state === "accepted");
     for (const commitment of roundCommitments) {
+      if (commitment.promisedAction.actionType !== "return-at-least" && commitment.promisedAction.actionType !== "invest-at-least") continue;
       const promisedAmount = commitment.promisedAction.amount;
       const actual = commitment.promisedAction.actionType === "return-at-least" ? returnedAmount : investment;
       const fulfilled = actual >= promisedAmount;
@@ -589,6 +687,12 @@ export class TrustGameWorld extends SocialWorldBase {
             : `承诺破裂：${commitment.promisorActorId} 承诺「${commitment.proposition}」，实际只有 ${actual}。`
         });
       }
+    }
+    const unacceptedCommitments = this.commitments.filter((entry) => entry.round === this.round && entry.state === "proposed");
+    for (const commitment of unacceptedCommitments) {
+      commitment.state = "void";
+      commitment.settledAtTurn = this.round;
+      this.settleSocialCommitment(commitment);
     }
     for (const id of this.profiles.keys()) {
       this.pushEvent(id, { type: "investment-made", actorId: investorId, targetId: id, facts: { amount: investment }, detail: `第 ${this.round} 轮投资 ${investment} 已结算。` });
@@ -609,6 +713,43 @@ export class TrustGameWorld extends SocialWorldBase {
               ? "adverse-outcome" as const
               : "low-return" as const;
     this.addLog(`第 ${this.round} 轮结算：投入 ${investment}，增长为 ${multipliedAmount}，返还 ${returnedAmount}。`, this.round, beat);
+    const reconcile = (actorId: string, commandId: string | undefined, role: "investor" | "trustee") => {
+      if (!commandId) return;
+      const citedCommitmentIds = this.records.find((record) => record.commandId === commandId)?.referencedCommitmentIds ?? [];
+      const citedCommitments = roundCommitments.filter((entry) => citedCommitmentIds.includes(entry.commitmentId));
+      const actorPayoff = payoffs[actorId];
+      this.reconcileSocialOutcome({
+        actionReceiptId: commandId,
+        actualOutcome: {
+          summary: role === "investor"
+            ? `Invested ${investment}; the trustee returned ${returnedAmount}; payoff ${actorPayoff}.`
+            : `Received control of ${multipliedAmount}; returned ${returnedAmount}; payoff ${actorPayoff}.`,
+          metrics: {
+            round: this.round,
+            role,
+            investment,
+            multipliedAmount,
+            returnedAmount,
+            actorPayoff
+          }
+        },
+        actualFacts: {
+          "investment-positive": investment > 0,
+          "return-at-least-investment": investment > 0 && returnedAmount >= investment,
+          "cited-commitments-fulfilled": citedCommitments.length > 0 && citedCommitments.every((entry) => entry.state === "fulfilled"),
+          "actor-payoff-at-least-endowment": actorPayoff >= this.endowment
+        },
+        memoryWriteSuggestions: [{
+          summary: role === "investor"
+            ? `As investor in round ${this.round}, I transferred ${investment}; ${trusteeId} returned ${returnedAmount}.`
+            : `As trustee in round ${this.round}, ${investorId} transferred ${investment}; I returned ${returnedAmount}.`,
+          importance: citedCommitments.some((entry) => entry.state === "violated") ? 0.9 : 0.65,
+          sourceIds: [commandId, ...citedCommitmentIds]
+        }]
+      });
+    };
+    reconcile(investorId, this.investmentCommandId, "investor");
+    reconcile(trusteeId, this.returnCommandId, "trustee");
     this.investment = undefined;
     this.returnedAmount = undefined;
     this.investmentCommandId = undefined;
@@ -667,6 +808,18 @@ function makeDecisionRecord(
     payloadSummary: `amount=${amount}`,
     referencedCommitmentIds: references.referencedCommitmentIds,
     ...(references.beliefPropositions.length ? { beliefPropositions: references.beliefPropositions } : {})
+  };
+}
+
+function normalizeCommitment(value: Commitment): Commitment {
+  const legacy = value as Commitment & {
+    acceptedByActorIds?: string[];
+    acceptedByCommandIds?: string[];
+  };
+  return {
+    ...value,
+    acceptedByActorIds: [...(legacy.acceptedByActorIds ?? [])],
+    acceptedByCommandIds: [...(legacy.acceptedByCommandIds ?? [])]
   };
 }
 

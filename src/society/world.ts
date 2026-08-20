@@ -6,6 +6,7 @@ import type {
   AgentStatus,
   Commitment,
   DecisionRecord,
+  OpenCommitmentView,
   PlayerActionSpec,
   ScenarioId,
   ScenarioSummary,
@@ -23,13 +24,21 @@ import type {
 import type { Tool } from "@openai/agents";
 import { SocialCausalityLedger } from "./social/ledger";
 import type {
+  ActorModel,
+  ActorModelInput,
   BeliefSelfReportInput,
   BeliefUpdateRecord,
   DeceptionEpisode,
   DeceptionPlanInput,
+  MemoryWritePolicyResult,
+  OutcomeReconciliation,
+  OutcomeReconciliationInput,
+  RelationshipDeltaRecord,
+  RelationshipUpdateInput,
   SocialActDeclaration,
   SocialCausalityProjection,
-  SocialCausalityState
+  SocialCausalityState,
+  StrategyProfileSnapshot
 } from "./social/contracts";
 
 /**
@@ -130,6 +139,13 @@ export abstract class SocialWorldBase implements SocialWorld {
     this.pendingEvents.clear();
     for (const [id, events] of state.shared.pendingEvents) this.pendingEvents.set(id, structuredClone(events));
     this.socialCausality.restoreState(state.shared.socialCausality);
+    for (const [actorId, events] of this.pendingEvents) {
+      const characterId = this.requireProfile(actorId).characterId;
+      for (const event of events) {
+        if (event.sourceEventIds?.length) continue;
+        event.sourceEventIds = [this.socialCausality.recordAppraisalObservation(actorId, characterId, event)];
+      }
+    }
     this.restoreWorldState(state.world);
   }
 
@@ -214,6 +230,7 @@ export abstract class SocialWorldBase implements SocialWorld {
       action,
       payload,
       commit,
+      characterIdFor: (targetActorId) => this.requireProfile(targetActorId).characterId,
       ...(this.activeActivationId ? { activationId: this.activeActivationId } : {})
     });
     this.recentReceipts.set(receiptKey, structuredClone(commit));
@@ -271,17 +288,173 @@ export abstract class SocialWorldBase implements SocialWorld {
     return pending;
   }
 
-  /** Scenarios with a commitment ledger override this (§8.1 / Phase 1). */
-  openCommitmentsFor(_actorId: string): Commitment[] {
-    return [];
+  openCommitmentsFor(actorId: string): OpenCommitmentView[] {
+    this.requireProfile(actorId);
+    return this.socialCausality.openCommitmentsFor(actorId).map((commitment) => ({
+      commitmentId: commitment.commitmentId,
+      promisorActorId: commitment.promisorActorId,
+      promisorCharacterId: commitment.promisorCharacterId,
+      audienceActorIds: [...commitment.audienceActorIds],
+      proposition: commitment.proposition,
+      promisedAction: structuredClone(commitment.promisedAction),
+      state: commitment.state,
+      acceptedByActorIds: [...commitment.acceptedByActorIds],
+      acceptedByCommandIds: [...commitment.acceptedByCommandIds]
+    }));
   }
 
   protected recordSocialCommitment(commitment: Commitment): void {
     this.socialCausality.recordCommitment(commitment, [...this.profiles.keys()]);
   }
 
+  protected acceptSocialCommitment(commitment: Commitment, acceptorActorId: string, commandId: string): void {
+    this.socialCausality.acceptCommitment({
+      commitment,
+      acceptorActorId,
+      acceptorCharacterId: this.requireProfile(acceptorActorId).characterId,
+      commandId,
+      allActorIds: [...this.profiles.keys()]
+    });
+  }
+
   protected settleSocialCommitment(commitment: Commitment): void {
     this.socialCausality.settleCommitment(commitment, [...this.profiles.keys()]);
+  }
+
+  protected recordIdentityAssignment(subjectActorId: string, roleId: string, observerActorIds: string[]): void {
+    const subject = this.requireProfile(subjectActorId);
+    for (const observerActorId of observerActorIds) this.requireProfile(observerActorId);
+    this.socialCausality.recordIdentityAssignment({
+      subjectActorId,
+      subjectCharacterId: subject.characterId,
+      roleId,
+      observerActorIds,
+      characterIdFor: (actorId) => this.requireProfile(actorId).characterId
+    });
+  }
+
+  recordStrategyProfileSnapshot(input: StrategyProfileSnapshot): StrategyProfileSnapshot {
+    const profile = this.requireProfile(input.actorId);
+    if (profile.characterId !== input.characterId) {
+      throw new Error("STRATEGY_PROFILE_IDENTITY_MISMATCH: Snapshot character does not own this actor.");
+    }
+    return this.socialCausality.recordStrategyProfileSnapshot(input);
+  }
+
+  recordRuntimeNotice(input: Extract<import("./contracts").AgentRuntimeEvent, { type: "runtime.notice" }>): void {
+    const characterId = input.actorId ? this.requireProfile(input.actorId).characterId : undefined;
+    this.socialCausality.recordRuntimeNotice({
+      ...(input.actorId ? { actorId: input.actorId } : {}),
+      ...(characterId ? { characterId } : {}),
+      category: input.category,
+      severity: input.severity,
+      code: input.code,
+      message: input.message,
+      ...(input.modelId ? { modelId: input.modelId } : {}),
+      ...(input.requestedEffort ? { requestedEffort: input.requestedEffort } : {}),
+      ...(input.effectiveEffort ? { effectiveEffort: input.effectiveEffort } : {}),
+      ...(input.retrying === undefined ? {} : { retrying: input.retrying })
+    });
+  }
+
+  protected recordFactionAssignment(subjectActorId: string, factionId: string, observerActorIds: string[]): void {
+    const subject = this.requireProfile(subjectActorId);
+    for (const observerActorId of observerActorIds) this.requireProfile(observerActorId);
+    this.socialCausality.recordFactionAssignment({
+      subjectActorId,
+      subjectCharacterId: subject.characterId,
+      factionId,
+      observerActorIds,
+      characterIdFor: (actorId) => this.requireProfile(actorId).characterId
+    });
+  }
+
+  protected recordFactionObservation(
+    observerActorId: string,
+    subjectActorId: string,
+    perceivedFactionId: string,
+    sourceCommandId?: string
+  ): void {
+    this.socialCausality.recordFactionObservation({
+      observerActorId,
+      observerCharacterId: this.requireProfile(observerActorId).characterId,
+      subjectActorId,
+      subjectCharacterId: this.requireProfile(subjectActorId).characterId,
+      perceivedFactionId,
+      ...(sourceCommandId ? { sourceCommandId } : {})
+    });
+  }
+
+  protected recordPrivateObservation(input: {
+    observerActorId: string;
+    subjectActorId?: string;
+    eventType: string;
+    predicate: string;
+    object?: unknown;
+    sourceCommandId?: string;
+    payload?: Record<string, unknown>;
+    kind?: import("./social/contracts").Proposition["kind"];
+  }): void {
+    this.socialCausality.recordPrivateObservation({
+      observerActorId: input.observerActorId,
+      observerCharacterId: this.requireProfile(input.observerActorId).characterId,
+      ...(input.subjectActorId ? { subjectCharacterId: this.requireProfile(input.subjectActorId).characterId } : {}),
+      eventType: input.eventType,
+      predicate: input.predicate,
+      ...(input.object === undefined ? {} : { object: input.object }),
+      ...(input.sourceCommandId ? { sourceCommandId: input.sourceCommandId } : {}),
+      ...(input.payload ? { payload: input.payload } : {}),
+      ...(input.kind ? { kind: input.kind } : {})
+    });
+  }
+
+  protected recordPublicWorldFact(input: {
+    factKey: string;
+    eventType: string;
+    subjectActorId?: string;
+    subjectId?: string;
+    predicate: string;
+    object?: unknown;
+    payload?: Record<string, unknown>;
+    kind?: import("./social/contracts").Proposition["kind"];
+  }): { eventId: string; propositionId: string; evidenceId: string } {
+    const subjectId = input.subjectActorId
+      ? this.requireProfile(input.subjectActorId).characterId
+      : input.subjectId;
+    return this.socialCausality.recordPublicWorldFact({
+      factKey: input.factKey,
+      eventType: input.eventType,
+      ...(subjectId ? { subjectId } : {}),
+      predicate: input.predicate,
+      ...(input.object === undefined ? {} : { object: input.object }),
+      ...(input.payload ? { payload: input.payload } : {}),
+      ...(input.kind ? { kind: input.kind } : {})
+    });
+  }
+
+  protected recordIdentityObservation(
+    observerActorId: string,
+    subjectActorId: string,
+    perceivedRoleId: string,
+    sourceCommandId?: string
+  ): void {
+    this.socialCausality.recordIdentityObservation({
+      observerActorId,
+      observerCharacterId: this.requireProfile(observerActorId).characterId,
+      subjectActorId,
+      subjectCharacterId: this.requireProfile(subjectActorId).characterId,
+      perceivedRoleId,
+      ...(sourceCommandId ? { sourceCommandId } : {})
+    });
+  }
+
+  protected revealIdentity(subjectActorId: string, actualRoleId: string): string[] {
+    return this.socialCausality.revealIdentity({
+      subjectActorId,
+      subjectCharacterId: this.requireProfile(subjectActorId).characterId,
+      actualRoleId,
+      actorIdForCharacter: (characterId) => [...this.profiles.values()].find((profile) => profile.characterId === characterId)?.id
+    }).detectedDeceptionIds;
   }
 
   /** Scenarios with decision records override this (§5.4 / Phase 1). */
@@ -306,7 +479,61 @@ export abstract class SocialWorldBase implements SocialWorld {
         throw new Error(`BELIEF_SOURCE_NOT_VISIBLE: '${messageId}' is not visible to '${actorId}'.`);
       }
     }
-    return this.socialCausality.recordBeliefUpdate(actorId, profile.characterId, input);
+    const visibleEvidenceIds = new Set(this.socialCausalityFor(actorId).evidence.map((entry) => entry.evidenceId));
+    for (const evidenceId of input.sourceEvidenceIds ?? []) {
+      if (!visibleEvidenceIds.has(evidenceId)) {
+        throw new Error(`BELIEF_EVIDENCE_NOT_VISIBLE: '${evidenceId}' is not visible to '${actorId}'.`);
+      }
+    }
+    const subjectCharacterId = this.profiles.get(input.subjectId)?.characterId ?? input.subjectId;
+    return this.socialCausality.recordBeliefUpdate(actorId, profile.characterId, {
+      ...input,
+      subjectId: subjectCharacterId
+    });
+  }
+
+  recordActorModel(actorId: string, input: ActorModelInput): ActorModel {
+    const profile = this.requireProfile(actorId);
+    const target = this.requireProfile(input.targetActorId);
+    if (target.id === actorId) throw new Error("ACTOR_MODEL_TARGET_INVALID: An actor model must describe another participant.");
+    const visibleMessageIds = new Set(this.visibleMessages(actorId).map((message) => message.id));
+    for (const messageId of input.sourceMessageIds ?? []) {
+      if (!visibleMessageIds.has(messageId)) {
+        throw new Error(`ACTOR_MODEL_SOURCE_NOT_VISIBLE: '${messageId}' is not visible to '${actorId}'.`);
+      }
+    }
+    const visibleEvidenceIds = new Set(this.socialCausalityFor(actorId).evidence.map((entry) => entry.evidenceId));
+    for (const evidenceId of input.sourceEvidenceIds ?? []) {
+      if (!visibleEvidenceIds.has(evidenceId)) {
+        throw new Error(`ACTOR_MODEL_EVIDENCE_NOT_VISIBLE: '${evidenceId}' is not visible to '${actorId}'.`);
+      }
+    }
+    return this.socialCausality.recordActorModel(actorId, profile.characterId, target.characterId, input);
+  }
+
+  recordRelationshipUpdate(actorId: string, input: RelationshipUpdateInput): RelationshipDeltaRecord {
+    const profile = this.requireProfile(actorId);
+    const target = this.requireProfile(input.targetActorId);
+    if (target.id === actorId) throw new Error("RELATIONSHIP_TARGET_INVALID: A relationship must point to another participant.");
+    const visibleMessageIds = new Set(this.visibleMessages(actorId).map((message) => message.id));
+    for (const messageId of input.sourceMessageIds ?? []) {
+      if (!visibleMessageIds.has(messageId)) {
+        throw new Error(`RELATIONSHIP_SOURCE_NOT_VISIBLE: '${messageId}' is not visible to '${actorId}'.`);
+      }
+    }
+    const visibleEvidenceIds = new Set(this.socialCausalityFor(actorId).evidence.map((entry) => entry.evidenceId));
+    for (const evidenceId of input.sourceEvidenceIds ?? []) {
+      if (!visibleEvidenceIds.has(evidenceId)) {
+        throw new Error(`RELATIONSHIP_EVIDENCE_NOT_VISIBLE: '${evidenceId}' is not visible to '${actorId}'.`);
+      }
+    }
+    const visibleEventIds = new Set(this.socialCausalityFor(actorId).events.map((event) => event.eventId));
+    for (const eventId of input.sourceEventIds ?? []) {
+      if (!visibleEventIds.has(eventId)) {
+        throw new Error(`RELATIONSHIP_EVENT_NOT_VISIBLE: '${eventId}' is not visible to '${actorId}'.`);
+      }
+    }
+    return this.socialCausality.recordRelationshipUpdate(actorId, profile.characterId, target.characterId, input);
   }
 
   recordDeceptionPlan(actorId: string, input: DeceptionPlanInput): DeceptionEpisode {
@@ -316,7 +543,26 @@ export abstract class SocialWorldBase implements SocialWorld {
       this.requireProfile(target);
       if (target === actorId) throw new Error("DECEPTION_TARGET_INVALID: An actor cannot target itself.");
     }
-    return this.socialCausality.recordDeceptionPlan(actorId, profile.characterId, { ...input, targetActorIds: targets });
+    return this.socialCausality.recordDeceptionPlan(
+      actorId,
+      profile.characterId,
+      { ...input, targetActorIds: targets },
+      (targetActorId) => this.requireProfile(targetActorId).characterId
+    );
+  }
+
+  /** Connect a committed action to the deterministic result without writing memory directly. */
+  protected reconcileSocialOutcome(input: OutcomeReconciliationInput): OutcomeReconciliation {
+    return this.socialCausality.recordOutcomeReconciliation(input);
+  }
+
+  applyMemoryWritePolicy(actorId: string): MemoryWritePolicyResult {
+    this.requireProfile(actorId);
+    return this.socialCausality.applyMemoryWritePolicy(actorId);
+  }
+
+  reconciliationOwnsOutcomeMemory(): boolean {
+    return false;
   }
 
   /** Queue a structured social event for one participant's appraisal engine. */
@@ -327,6 +573,11 @@ export abstract class SocialWorldBase implements SocialWorld {
       turn: this.currentTurn(),
       phase: this.currentPhase()
     };
+    event.sourceEventIds = [this.socialCausality.recordAppraisalObservation(
+      actorId,
+      this.requireProfile(actorId).characterId,
+      event
+    )];
     const list = this.pendingEvents.get(actorId) ?? [];
     list.push(event);
     if (list.length > 60) list.splice(0, list.length - 60);
@@ -346,6 +597,7 @@ export abstract class SocialWorldBase implements SocialWorld {
     if (!text) throw new Error("MESSAGE_EMPTY: Provide a non-empty message before retrying.");
     const recipientIds = [...new Set(input.recipientIds ?? [])];
     this.validateMessage(input.senderId, input.channel, recipientIds);
+    if (input.replyTo) this.validateReply(input.senderId, input.channel, recipientIds, input.replyTo);
     const message: SocialMessage = {
       id: randomUUID(),
       roomId: this.roomId,
@@ -367,9 +619,50 @@ export abstract class SocialWorldBase implements SocialWorld {
       characterIdFor: (actorId) => this.requireProfile(actorId).characterId
     });
     this.messages.push(message);
+    this.queueMessageAppraisals(message, input.socialActs ?? []);
     if (this.messages.length > 500) this.messages.splice(0, this.messages.length - 500);
     this.emitUpdate();
     return structuredClone(message);
+  }
+
+  private queueMessageAppraisals(message: SocialMessage, declarations: SocialActDeclaration[]): void {
+    const eventTypeFor = (kind: SocialActDeclaration["kind"]): SocialEvent["type"] | undefined => {
+      switch (kind) {
+        case "accusation": return "accused";
+        case "defense": return "defended";
+        case "threat": return "threatened";
+        case "endorsement": return "endorsed";
+        case "apology": return "apologized-to";
+        case "warning": return "warning-received";
+        case "acceptance": return "socially-accepted";
+        case "rejection": return "socially-rejected";
+        case "alliance-proposal": return "alliance-proposed";
+        case "offer": return "offer-proposed";
+        case "promise": return "commitment-proposed";
+        default: return undefined;
+      }
+    };
+    for (const declaration of declarations) {
+      const type = eventTypeFor(declaration.kind);
+      if (!type) continue;
+      for (const targetId of new Set(declaration.targetActorIds ?? [])) {
+        if (targetId === message.senderId) continue;
+        const duplicateThisPhase = (this.pendingEvents.get(targetId) ?? []).some((event) =>
+          event.type === type
+          && event.actorId === message.senderId
+          && event.turn === message.turn
+          && event.phase === message.phase
+        );
+        if (duplicateThisPhase) continue;
+        this.pushEvent(targetId, {
+          type,
+          actorId: message.senderId,
+          targetId,
+          facts: { messageId: message.id, socialActKind: declaration.kind },
+          detail: `${message.senderName}: ${message.text.slice(0, 500)}`
+        });
+      }
+    }
   }
 
   setAgentStatus(actorId: string, status: AgentStatus): void {
@@ -440,6 +733,24 @@ export abstract class SocialWorldBase implements SocialWorld {
     if (channel === "team") throw new Error("TEAM_CHANNEL_UNAVAILABLE: Use public or private in this scenario.");
   }
 
+  private validateReply(senderId: string, channel: SocialChannel, recipientIds: string[], replyTo: string): void {
+    const original = this.messages.find((message) => message.id === replyTo);
+    if (!original || !this.visibleMessages(senderId).some((message) => message.id === replyTo)) {
+      throw new Error(`MESSAGE_REPLY_NOT_VISIBLE: '${replyTo}' is not a message visible to '${senderId}'.`);
+    }
+    if (original.channel === "public") return;
+    if (channel === "public") {
+      throw new Error("MESSAGE_REPLY_VISIBILITY_INVALID: A public message cannot expose a private or team reply link.");
+    }
+    const originalAudience = new Set([original.senderId, ...(original.recipientIds ?? [])]);
+    const replyAudience = new Set([senderId, ...recipientIds]);
+    for (const actorId of replyAudience) {
+      if (!originalAudience.has(actorId)) {
+        throw new Error(`MESSAGE_REPLY_AUDIENCE_INVALID: '${actorId}' could not see the original message.`);
+      }
+    }
+  }
+
   protected visibleMessages(actorId: string): SocialMessage[] {
     return this.messages.filter((message) => {
       if (message.channel === "public") return true;
@@ -507,6 +818,7 @@ export abstract class SocialWorldBase implements SocialWorld {
   }
 
   protected finish(): void {
+    this.socialCausality.closeOpenDeceptions();
     this.status = "finished";
     for (const id of this.profiles.keys()) this.statuses.set(id, "finished");
     this.emitUpdate();
@@ -650,12 +962,16 @@ function parseSocialActDeclarations(value: unknown): SocialActDeclaration[] {
     if (entry.deceptionId !== undefined && typeof entry.deceptionId !== "string") {
       throw new Error(`SOCIAL_ACT_DECEPTION_INVALID: socialActs[${index}].deceptionId must be a deception id.`);
     }
+    if (entry.repairDeceptionId !== undefined && typeof entry.repairDeceptionId !== "string") {
+      throw new Error(`SOCIAL_ACT_REPAIR_DECEPTION_INVALID: socialActs[${index}].repairDeceptionId must be a deception id.`);
+    }
     return {
       kind: entry.kind as SocialActDeclaration["kind"],
       ...(targets.length ? { targetActorIds: [...new Set(targets as string[])] } : {}),
       ...(proposition ? { proposition } : {}),
       ...(typeof entry.confidence === "number" ? { confidence: entry.confidence } : {}),
-      ...(typeof entry.deceptionId === "string" ? { deceptionId: entry.deceptionId } : {})
+      ...(typeof entry.deceptionId === "string" ? { deceptionId: entry.deceptionId } : {}),
+      ...(typeof entry.repairDeceptionId === "string" ? { repairDeceptionId: entry.repairDeceptionId } : {})
     };
   });
 }

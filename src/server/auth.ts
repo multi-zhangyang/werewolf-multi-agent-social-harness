@@ -8,14 +8,12 @@
  *  - room owner: the per-room control token returned at creation — pause,
  *    resume, remove, model switches, omniscient viewing of that room;
  *  - operator: `SOCIETY_OPERATOR_TOKEN` — global operations (season reset,
- *    model config / settings writes, forensic archive). When no operator
- *    token is configured (self-hosted single-owner deployments), a valid
- *    room owner token acts as operator instead (dual-track fallback).
+ *    model config / settings writes, forensic archive). Room ownership never
+ *    escalates into global operator authority.
  *
  * Tokens are read from `Authorization: Bearer`, the `x-player-token` header,
  * or the `society_token` HttpOnly cookie (set for SSE/EventSource clients).
- * A legacy query-string fallback remains for EventSource convenience, but
- * query tokens are never the primary channel and never appear in logs.
+ * Tokens are deliberately never accepted from the URL or request body.
  */
 import type { Request } from "express";
 import { timingSafeEqual } from "node:crypto";
@@ -42,9 +40,7 @@ export function tokenFromRequest(request: Request): string | undefined {
   const cookie = request.header("cookie");
   const cookieMatch = cookie?.match(/(?:^|;\s*)society_token=([^;]+)/);
   if (cookieMatch) return decodeURIComponent(cookieMatch[1]);
-  // Legacy EventSource convenience fallback — never the primary channel.
-  const query = request.query.token;
-  return typeof query === "string" && query ? query : undefined;
+  return undefined;
 }
 
 /** Set the HttpOnly cookie EventSource-based SSE clients can send back. */
@@ -73,17 +69,10 @@ export function roomAuthorityFor(request: Request, room: SocietyRoom): RoomAutho
   };
 }
 
-/**
- * Operator for global operations, with the dual-track fallback: without a
- * configured SOCIETY_OPERATOR_TOKEN, a valid owner token of ANY live room
- * counts as operator (self-hosted single-owner deployments).
- */
-export function isOperatorFor(auth: ServerAuth, request: Request, anyOwnerToken: (token: string) => boolean): boolean {
+/** Global authority is always an explicitly configured operator token. */
+export function isOperatorFor(auth: ServerAuth, request: Request): boolean {
   const token = tokenFromRequest(request);
-  if (!token) return false;
-  if (auth.isOperatorToken(token)) return true;
-  if (!auth.operatorTokenConfigured()) return anyOwnerToken(token);
-  return false;
+  return auth.isOperatorToken(token);
 }
 
 function safeEqual(left: string, right: string): boolean {
@@ -99,13 +88,14 @@ function safeEqual(left: string, right: string): boolean {
 export function requireGlobalOperator(
   request: Request,
   response: import("express").Response,
-  auth: ServerAuth,
-  anyOwnerToken: (token: string) => boolean
+  auth: ServerAuth
 ): boolean {
-  if (isOperatorFor(auth, request, anyOwnerToken)) return true;
+  if (isOperatorFor(auth, request)) return true;
   response.status(403).json({
     error: "OPERATOR_REQUIRED",
-    message: "A valid operator token is required (self-hosted mode also accepts a room owner token)."
+    message: auth.operatorTokenConfigured()
+      ? "A valid operator token is required."
+      : "Global operations are disabled until SOCIETY_OPERATOR_TOKEN is configured."
   });
   return false;
 }

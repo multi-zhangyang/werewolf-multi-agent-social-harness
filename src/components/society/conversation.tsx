@@ -281,7 +281,7 @@ function LiveAgents({ room, activity }: {
   const active = room.participants.filter((participant) => {
     const state = activity[participant.profile.id];
     const status = participant.status;
-    return (status === "thinking" || status === "acting" || status === "speaking") || Boolean(state?.text || state?.reasoning || state?.thought || state?.tool);
+    return (status === "thinking" || status === "acting" || status === "speaking") || Boolean(state?.text || state?.reasoningSummary || state?.thought || state?.tool);
   });
   if (!active.length) return null;
   return (
@@ -296,7 +296,7 @@ function LiveAgents({ room, activity }: {
               ? "正在行动"
               : state?.text
                 ? "斟酌措辞中"
-                : state?.thought || state?.reasoning
+                : state?.thought || state?.reasoningSummary
                   ? "心中盘算"
                   : "思考中";
         return (
@@ -312,7 +312,7 @@ function LiveAgents({ room, activity }: {
               </div>
               <span className="nums font-mono text-[10px] text-muted-foreground/50">{formatTime(state?.at ?? new Date().toISOString())}</span>
             </div>
-            {state?.reasoning ? <CollapsedReasoning text={state.reasoning} /> : null}
+            {state?.reasoningSummary ? <CollapsedReasoning text={state.reasoningSummary} /> : null}
             {state?.thought ? (
               <div className="mx-4 mb-3 rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
                 <p className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">

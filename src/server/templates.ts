@@ -96,7 +96,7 @@ export class RosterTemplateStore {
 export function registerTemplateRoutes(app: express.Express, context: ServerContext): void {
   const store = context.templates;
   const gate = (request: express.Request, response: express.Response): boolean =>
-    requireGlobalOperator(request, response, context.auth, (token) => context.rooms.hasOwnerToken(token));
+    requireGlobalOperator(request, response, context.auth);
 
   app.get("/api/room-templates", (_request, response) => {
     response.json({ templates: store.list() });

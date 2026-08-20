@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { tool, type Tool } from "@openai/agents";
 import { z } from "zod";
 import type {
@@ -14,11 +14,14 @@ import type {
 } from "../contracts";
 import { scopedContext, SocialWorldBase } from "../world";
 import { boundedRounds, emitAction } from "./helpers";
+import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
 
 interface Bid {
   actorId: string;
   quantity: number;
   face: number;
+  commandId?: string;
+  publicEventId?: string;
 }
 
 interface RoundOutcome {
@@ -33,8 +36,8 @@ interface RoundOutcome {
 
 const LIVES = 3;
 const MAX_BIDS_PER_ROUND = 8;
-/** Quantity cap: the true die count plus one, so pure bluffs are possible. */
-const QUANTITY_CAP = 4;
+const LIARS_DICE_STATE_SCHEMA_VERSION = 3;
+const LIARS_DICE_OUTCOME_KEYS = ["current-bid-true", "actor-wins-round", "actor-loses-life", "round-ends-this-move", "next-actor-challenges"] as const;
 
 /**
  * Liar's Dice — the table game of pure bluffing (Borg 1963; formalized as a
@@ -61,6 +64,7 @@ export class LiarsDiceWorld extends SocialWorldBase {
   private expectedActorId = "";
   private awaitingMove = false;
   private pendingHumanQuantity?: number;
+  private pendingRoundReconciliation?: PendingRoundReconciliation;
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[], rounds?: number) {
     super(roomId, scenario, profiles);
@@ -81,12 +85,14 @@ export class LiarsDiceWorld extends SocialWorldBase {
 
   protected exportWorldState(): unknown {
     return {
+      schemaVersion: LIARS_DICE_STATE_SCHEMA_VERSION,
       round: this.round,
       bidCount: this.bidCount,
       starterId: this.starterId,
       expectedActorId: this.expectedActorId,
       awaitingMove: this.awaitingMove,
       pendingHumanQuantity: this.pendingHumanQuantity ?? null,
+      pendingRoundReconciliation: this.pendingRoundReconciliation ? structuredClone(this.pendingRoundReconciliation) : null,
       lives: this.mapEntries(this.lives),
       scores: this.mapEntries(this.scores),
       dice: this.mapEntries(this.dice),
@@ -98,20 +104,29 @@ export class LiarsDiceWorld extends SocialWorldBase {
 
   protected restoreWorldState(state: unknown): void {
     const s = state as Partial<{
+      schemaVersion: number;
       round: number; bidCount: number; starterId: string; expectedActorId: string; awaitingMove: boolean;
       pendingHumanQuantity: number | null; lives: Array<[string, number]>; scores: Array<[string, number]>;
+      pendingRoundReconciliation: PendingRoundReconciliation | null;
       dice: Array<[string, number]>; bids: Bid[]; history: RoundOutcome[]; lastExperiences: Array<[string, string]>;
     }> | undefined;
     if (!s) return;
+    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== 2 && s.schemaVersion !== LIARS_DICE_STATE_SCHEMA_VERSION) {
+      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: liars-dice ${s.schemaVersion}`);
+    }
     this.round = Number(s.round ?? 1);
     this.bidCount = Number(s.bidCount ?? 0);
     this.starterId = String(s.starterId ?? "");
     this.expectedActorId = String(s.expectedActorId ?? "");
     this.awaitingMove = Boolean(s.awaitingMove);
-    this.pendingHumanQuantity = s.pendingHumanQuantity === null ? undefined : Number(s.pendingHumanQuantity);
+    this.pendingHumanQuantity = s.pendingHumanQuantity == null ? undefined : Number(s.pendingHumanQuantity);
+    this.pendingRoundReconciliation = s.pendingRoundReconciliation ? structuredClone(s.pendingRoundReconciliation) : undefined;
     this.fillMap(this.lives, s.lives);
     this.fillMap(this.scores, s.scores);
     this.fillMap(this.dice, s.dice);
+    for (const actorId of [...this.dice.keys()]) {
+      if (!this.isAlive(actorId)) this.dice.delete(actorId);
+    }
     this.bids = structuredClone(s.bids ?? []);
     this.history.length = 0;
     this.history.push(...structuredClone(s.history ?? []));
@@ -119,6 +134,7 @@ export class LiarsDiceWorld extends SocialWorldBase {
   }
 
   snapshot(): WorldSnapshot {
+    const currentBid = this.currentBid();
     return this.worldSnapshot({
       title: this.scenario.name,
       turn: this.round,
@@ -129,8 +145,12 @@ export class LiarsDiceWorld extends SocialWorldBase {
         lives: Object.fromEntries(this.lives),
         scores: Object.fromEntries(this.scores),
         hiddenDice: Object.fromEntries(this.dice),
-        currentBid: this.currentBid(),
-        history: this.history
+        currentBid: currentBid ? this.publicBid(currentBid) : undefined,
+        history: this.history.map((outcome) => ({
+          ...outcome,
+          bids: outcome.bids.map((bid) => this.publicBid(bid)),
+          dice: outcome.challenged ? outcome.dice : {}
+        }))
       }
     });
   }
@@ -138,6 +158,7 @@ export class LiarsDiceWorld extends SocialWorldBase {
   observe(actorId: string): AgentObservation {
     const self = this.requireProfile(actorId);
     const current = this.currentBid();
+    const causality = this.socialCausalityFor(actorId);
     return {
       roomId: this.roomId,
       scenarioId: this.scenario.id,
@@ -145,10 +166,11 @@ export class LiarsDiceWorld extends SocialWorldBase {
       phase: "bidding",
       situation: this.expectedActorId === actorId
         ? `It is your call. ${current ? `${current.actorId} bid "at least ${current.quantity} dice show ${current.face}". Raise it or call it a lie.` : "You open the round: name a quantity and a face."}`
-        : `Waiting on ${this.profiles.get(this.expectedActorId)?.displayName}. Watch every bid — the table has ${this.totalDice()} dice and every player guards one.`,
+        : `Waiting on ${this.profiles.get(this.expectedActorId)?.displayName}. Watch every bid — the table has ${this.totalDice()} active dice and every living player guards one.`,
       privateContext: [
         `Your die: ${this.dice.get(actorId)}.`,
         `Your lives: ${this.lives.get(actorId)} / ${LIVES}. Your score: ${this.scores.get(actorId) ?? 0}.`,
+        ...socialReferenceContext(causality),
         `Bids so far: ${this.bids.map((bid) => `${this.profiles.get(bid.actorId)?.displayName}: ${bid.quantity}×${bid.face}`).join(" → ") || "none"}.`
       ].join("\n"),
       self: {
@@ -164,35 +186,82 @@ export class LiarsDiceWorld extends SocialWorldBase {
         status: this.statuses.get(profile.id) ?? "idle"
       })),
       recentMessages: this.visibleMessages(actorId).slice(-20),
-      availableActions: ["communicate", "liars_move", "remember_experience", "recall_memory"]
+      availableActions: ["communicate", "liars_move", "recall_memory"]
     };
   }
 
   toolsFor(actorId: string): Tool<SocietyAgentContext>[] {
     this.requireProfile(actorId);
+    const quantityCap = this.quantityCap();
     const move = tool({
       name: "liars_move",
       description: [
         "Your one binding move on your turn. Either raise the current bid or call the previous bidder a liar.",
-        "- bid: quantity dice showing face. To be legal the bid must rise: a higher quantity (any face), or the same quantity with a higher face. Quantity must be 1..4 (the table has 3 dice, so 4 means you claim an impossible roll — a pure bluff).",
+        `- bid: quantity dice showing face. To be legal the bid must rise: a higher quantity (any face), or the same quantity with a higher face. Quantity must be 1..${quantityCap} (the table has ${this.totalDice()} active dice, so ${quantityCap} claims an impossible roll).`,
         "- challenge: only when a bid exists. All dice are revealed; if the real count of that face is below the bid, the bidder loses a life and you score; otherwise you lose a life and the bidder scores. A challenge ends the round.",
-        "The table has 3 dice. Speak first if you want to sell your bluff — words are free, this tool is not."
+        `The table has ${this.totalDice()} active dice. Speak first if you want to shape expectations — words are free, this tool is not.`
       ].join("\n"),
       parameters: z.object({
         move: z.enum(["bid", "challenge"]),
-        quantity: z.number().int().min(1).max(QUANTITY_CAP).nullable().default(null),
-        face: z.number().int().min(1).max(6).nullable().default(null)
+        quantity: z.number().int().min(1).max(quantityCap).nullable().default(null),
+        face: z.number().int().min(1).max(6).nullable().default(null),
+        ...createStrategyActionShape({
+          moveChoice: z.enum(["bid", "challenge"]),
+          quantity: z.number().int().min(1).max(quantityCap).nullable().default(null),
+          face: z.number().int().min(1).max(6).nullable().default(null)
+        }, LIARS_DICE_OUTCOME_KEYS)
       }).strict().superRefine((input, issueContext) => {
-        if (input.move === "bid" && (input.quantity === undefined || input.face === undefined)) {
+        if (input.move === "bid" && (input.quantity == null || input.face == null)) {
           issueContext.addIssue({ code: z.ZodIssueCode.custom, path: ["quantity"], message: "A bid needs both quantity and face." });
         }
-        if (input.move === "challenge" && (input.quantity !== undefined || input.face !== undefined)) {
+        if (input.move === "challenge" && (input.quantity != null || input.face != null)) {
           issueContext.addIssue({ code: z.ZodIssueCode.custom, path: ["quantity"], message: "A challenge takes no quantity or face." });
         }
+        input.candidateIntents.forEach((candidate, index) => {
+          if (candidate.moveChoice === "bid" && (candidate.quantity == null || candidate.face == null)) {
+            issueContext.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["candidateIntents", index, "quantity"],
+              message: "A bid candidate needs both quantity and face."
+            });
+          }
+          if (candidate.moveChoice === "challenge" && (candidate.quantity != null || candidate.face != null)) {
+            issueContext.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["candidateIntents", index, "quantity"],
+              message: "A challenge candidate takes no quantity or face."
+            });
+          }
+        });
       }),
       execute: async (input, runContext) => {
+        const currentBid = this.currentBid();
+        for (const candidate of input.candidateIntents) {
+          if (candidate.moveChoice === "challenge" && !currentBid) {
+            throw new Error("STRATEGY_CANDIDATE_ILLEGAL: A challenge candidate requires a current bid.");
+          }
+          if (candidate.moveChoice === "bid" && !this.isLegalRaise(candidate.quantity!, candidate.face!)) {
+            throw new Error("STRATEGY_CANDIDATE_ILLEGAL: Every bid candidate must be a legal raise from the current bid.");
+          }
+        }
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected || selected.moveChoice !== input.move) {
+          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: Selected Liar's Dice intent must equal the binding move.");
+        }
+        if (input.move === "bid" && (selected.quantity !== input.quantity || selected.face !== input.face)) {
+          throw new Error("STRATEGY_SELECTION_BID_MISMATCH: Selected bid quantity and face must equal the binding bid.");
+        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "liars_move", input);
+        const commit = await this.performAction(actorId, "liars_move", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({
+            ...candidate,
+            action: "liars_move",
+            payloadSummary: candidate.moveChoice === "challenge"
+              ? "move=challenge"
+              : `move=bid; quantity=${candidate.quantity}; face=${candidate.face}`
+          }))
+        });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -217,11 +286,11 @@ export class LiarsDiceWorld extends SocialWorldBase {
     actions.push({
       name: "liars_bid_quantity",
       label: "喊个数",
-      description: "先选个数（1–4），再选点数，组成你的新叫价。",
+      description: `先选个数（1–${this.quantityCap()}），再选点数，组成你的新叫价。`,
       kind: "number",
       field: "quantity",
       min: 1,
-      max: QUANTITY_CAP,
+      max: this.quantityCap(),
       step: 1
     });
     actions.push({
@@ -251,8 +320,8 @@ export class LiarsDiceWorld extends SocialWorldBase {
     if (action === "liars_challenge") return this.commitChallenge(actorId);
     if (action === "liars_bid_quantity") {
       const quantity = Number(value.quantity);
-      if (!Number.isInteger(quantity) || quantity < 1 || quantity > QUANTITY_CAP) {
-        throw new Error(`QUANTITY_INVALID: quantity must be an integer between 1 and ${QUANTITY_CAP}.`);
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > this.quantityCap()) {
+        throw new Error(`QUANTITY_INVALID: quantity must be an integer between 1 and ${this.quantityCap()}.`);
       }
       this.pendingHumanQuantity = quantity;
       this.emitUpdate();
@@ -290,6 +359,7 @@ export class LiarsDiceWorld extends SocialWorldBase {
   }
 
   completeActivation(activation: WorldActivation): ActivationCompletion {
+    if (!this.awaitingMove) this.reconcilePendingRound();
     if (this.awaitingMove) {
       return {
         completed: false,
@@ -325,27 +395,45 @@ export class LiarsDiceWorld extends SocialWorldBase {
       throw new Error("BID_INVALID: quantity and face must be integers.");
     }
     const current = this.currentBid();
-    if (quantity < 1 || quantity > QUANTITY_CAP || face < 1 || face > 6) {
-      throw new Error(`BID_INVALID: quantity 1..${QUANTITY_CAP}, face 1..6.`);
+    if (quantity < 1 || quantity > this.quantityCap() || face < 1 || face > 6) {
+      throw new Error(`BID_INVALID: quantity 1..${this.quantityCap()}, face 1..6.`);
     }
-    if (current) {
-      const rises = quantity > current.quantity || (quantity === current.quantity && face > current.face);
-      if (!rises) {
-        throw new Error(`BID_MUST_RISE: The current bid is ${current.quantity}×${current.face}; yours must raise it (higher quantity, or same quantity with a higher face).`);
-      }
+    if (current && !this.isLegalRaise(quantity, face)) {
+      throw new Error(`BID_MUST_RISE: The current bid is ${current.quantity}×${current.face}; yours must raise it (higher quantity, or same quantity with a higher face).`);
     }
-    this.bids.push({ actorId, quantity, face });
+    const commandId = `cmd-${randomUUID()}`;
+    const publicBid = this.recordPublicWorldFact({
+      factKey: `liars-dice-bid:${this.round}:${this.bidCount + 1}`,
+      eventType: "liars-dice.bid-placed",
+      subjectActorId: actorId,
+      predicate: "placed-liars-dice-bid",
+      object: { round: this.round, ordinal: this.bidCount + 1, quantity, face },
+      payload: { round: this.round, ordinal: this.bidCount + 1, actorId, quantity, face },
+      kind: "past-action"
+    });
+    this.bids.push({ actorId, quantity, face, commandId, publicEventId: publicBid.eventId });
     this.bidCount += 1;
     this.awaitingMove = false;
     this.pendingHumanQuantity = undefined;
     this.addLog(`${this.profiles.get(actorId)?.displayName} 叫价：至少 ${quantity} 个 ${face}。`, this.round);
     if (this.bidCount >= MAX_BIDS_PER_ROUND) {
       this.endRound({ challenged: false, winnerId: actorId, text: `${this.profiles.get(actorId)?.displayName} 的 ${quantity}×${face} 无人敢质疑，直接拿下本局。` });
-      return { action: "liars_move", detail: `bid ${quantity}×${face}; uncontested`, result: { accepted: true, uncontested: true } };
+      return { action: "liars_move", commandId, detail: `bid ${quantity}×${face}; uncontested`, result: { accepted: true, uncontested: true } };
     }
     this.expectedActorId = this.nextActorAfter(actorId);
+    this.pushEvent(this.expectedActorId, {
+      type: "competitive-bid-received",
+      actorId,
+      targetId: this.expectedActorId,
+      facts: { quantity, face, bidEventId: publicBid.eventId },
+      detail: `${this.profiles.get(actorId)?.displayName} 叫价至少 ${quantity} 个 ${face}，现在轮到你回应。`
+    });
     this.emitUpdate();
-    return { action: "liars_move", detail: `bid ${quantity}×${face}`, result: { accepted: true, nextActor: this.expectedActorId } };
+    return { action: "liars_move", commandId, detail: `bid ${quantity}×${face}`, result: { accepted: true, nextActor: this.expectedActorId } };
+  }
+
+  reconciliationOwnsOutcomeMemory(): boolean {
+    return true;
   }
 
   private commitChallenge(actorId: string): WorldActionCommit {
@@ -353,6 +441,7 @@ export class LiarsDiceWorld extends SocialWorldBase {
     if (!current) throw new Error("NOTHING_TO_CHALLENGE: No bid is on the table yet.");
     const count = [...this.dice.values()].filter((die) => die === current.face).length;
     const bidderCaught = count < current.quantity;
+    const commandId = `cmd-${randomUUID()}`;
     const loserId = bidderCaught ? current.actorId : actorId;
     const winnerId = bidderCaught ? actorId : current.actorId;
     this.lives.set(loserId, (this.lives.get(loserId) ?? 0) - 1);
@@ -364,11 +453,36 @@ export class LiarsDiceWorld extends SocialWorldBase {
     const text = bidderCaught
       ? `${challengerName} 质疑 ${bidderName} 的 ${current.quantity}×${current.face} —— 开盅只有 ${count} 个：${bidderName} 输掉一条命，${challengerName} 得 1 分。`
       : `${challengerName} 质疑 ${bidderName} 的 ${current.quantity}×${current.face} —— 开盅确有 ${count} 个：${challengerName} 输掉一条命，${bidderName} 得 1 分。`;
-    this.endRound({ challenged: true, loserId, winnerId, text });
-    return { action: "liars_move", detail: `challenge; ${text}`, result: { accepted: true, revealed: Object.fromEntries(this.dice), loserId, winnerId } };
+    this.pushEvent(current.actorId, {
+      type: "bid-challenged",
+      actorId,
+      targetId: current.actorId,
+      facts: {
+        quantity: current.quantity,
+        face: current.face,
+        actualCount: count,
+        bidWasTrue: !bidderCaught,
+        ...(current.publicEventId ? { bidEventId: current.publicEventId } : {})
+      },
+      detail: text
+    });
+    this.endRound({
+      challenged: true,
+      loserId,
+      winnerId,
+      text,
+      challenge: { actorId, commandId, challengedBid: structuredClone(current), challengedBidTrue: !bidderCaught }
+    });
+    return { action: "liars_move", commandId, detail: `challenge; ${text}`, result: { accepted: true, revealed: Object.fromEntries(this.dice), loserId, winnerId } };
   }
 
-  private endRound(input: { challenged: boolean; loserId?: string; winnerId?: string; text: string }): void {
+  private endRound(input: {
+    challenged: boolean;
+    loserId?: string;
+    winnerId?: string;
+    text: string;
+    challenge?: PendingRoundReconciliation["challenge"];
+  }): void {
     const outcome: RoundOutcome = {
       round: this.round,
       bids: [...this.bids],
@@ -379,12 +493,41 @@ export class LiarsDiceWorld extends SocialWorldBase {
       text: input.text
     };
     this.history.push(outcome);
-    const lastBidder = this.bids.at(-1)?.actorId;
-    // P0-09 exception: unlike hidden-role flips, a called bluff here is
-    // resolved by objective dice evidence (the world proves the bid false),
-    // so the strong label meets the §8.3 evidence bar. A DeceptionService will
-    // upgrade this into a structured deception episode later.
-    this.addLog(input.text, this.round, input.challenged ? (input.loserId === lastBidder ? "deception-exposed" : "misplay") : "win");
+    const publicBids = outcome.bids.map((bid) => this.publicBid(bid));
+    const publicResult = this.recordPublicWorldFact({
+      factKey: `liars-dice-round:${this.round}`,
+      eventType: "liars-dice.round-resolved",
+      predicate: "liars-dice-round-result",
+      object: {
+        bids: publicBids,
+        challenged: input.challenged,
+        ...(input.loserId ? { loserId: input.loserId } : {}),
+        ...(input.winnerId ? { winnerId: input.winnerId } : {}),
+        ...(input.challenge ? {
+          challengedBid: this.publicBid(input.challenge.challengedBid),
+          challengedBidTrue: input.challenge.challengedBidTrue,
+          dice: outcome.dice
+        } : {})
+      },
+      payload: {
+        round: this.round,
+        bids: publicBids,
+        challenged: input.challenged,
+        ...(input.loserId ? { loserId: input.loserId } : {}),
+        ...(input.winnerId ? { winnerId: input.winnerId } : {}),
+        ...(input.challenge ? {
+          challengedBid: this.publicBid(input.challenge.challengedBid),
+          challengedBidTrue: input.challenge.challengedBidTrue,
+          dice: outcome.dice
+        } : {})
+      }
+    });
+    this.pendingRoundReconciliation = {
+      outcome: structuredClone(outcome),
+      publicResultEventId: publicResult.eventId,
+      ...(input.challenge ? { challenge: structuredClone(input.challenge) } : {})
+    };
+    this.addLog(input.text, this.round, input.challenged ? "adverse-outcome" : "win");
     for (const profile of this.profiles.values()) {
       this.lastExperiences.set(
         profile.id,
@@ -392,15 +535,17 @@ export class LiarsDiceWorld extends SocialWorldBase {
       );
       if (profile.id === input.loserId) {
         this.pushEvent(profile.id, {
-          type: "eliminated",
+          type: "lose",
           actorId: input.winnerId,
-          facts: { revealed: outcome.dice },
+          facts: input.challenged ? { revealed: outcome.dice, lostLife: true } : { lostLife: false },
           detail: input.text
         });
       } else if (profile.id === input.winnerId) {
-        this.pushEvent(profile.id, { type: "win", detail: input.text });
-      } else {
-        this.pushEvent(profile.id, { type: "eliminated-other", targetId: input.loserId, facts: { revealed: outcome.dice }, detail: input.text });
+        this.pushEvent(profile.id, {
+          type: "win",
+          facts: input.challenged ? { revealed: outcome.dice } : { uncontested: true },
+          detail: input.text
+        });
       }
     }
     this.bids = [];
@@ -421,8 +566,91 @@ export class LiarsDiceWorld extends SocialWorldBase {
     this.emitUpdate();
   }
 
+  private reconcilePendingRound(): void {
+    const pending = this.pendingRoundReconciliation;
+    if (!pending) return;
+    const { outcome, challenge } = pending;
+    const finalBidIndex = outcome.bids.length - 1;
+    for (const [index, bid] of outcome.bids.entries()) {
+      if (!bid.commandId) continue;
+      const bidTrue = outcome.challenged
+        ? Object.values(outcome.dice).filter((die) => die === bid.face).length >= bid.quantity
+        : undefined;
+      const actualFacts: Record<string, boolean> = {
+        "actor-wins-round": outcome.winnerId === bid.actorId,
+        "actor-loses-life": outcome.loserId === bid.actorId,
+        "round-ends-this-move": !outcome.challenged && index === finalBidIndex,
+        "next-actor-challenges": outcome.challenged && index === finalBidIndex
+      };
+      if (bidTrue !== undefined) actualFacts["current-bid-true"] = bidTrue;
+      this.reconcileSocialOutcome({
+        actionReceiptId: bid.commandId,
+        actualOutcome: {
+          summary: outcome.challenged
+            ? `Bid ${bid.quantity}x${bid.face}; the revealed count made it ${bidTrue ? "true" : "false"}; round winner=${outcome.winnerId}; loser=${outcome.loserId}.`
+            : `Bid ${bid.quantity}x${bid.face}; the round ended uncontested after ${outcome.bids.length} bids; winner=${outcome.winnerId}.`,
+          metrics: {
+            round: outcome.round,
+            move: "bid",
+            quantity: bid.quantity,
+            face: bid.face,
+            challenged: outcome.challenged,
+            ...(bidTrue === undefined ? {} : { bidTrue }),
+            wonRound: outcome.winnerId === bid.actorId,
+            lostLife: outcome.loserId === bid.actorId
+          }
+        },
+        actualFacts,
+        resultingEventIds: [...new Set([pending.publicResultEventId, ...(bid.publicEventId ? [bid.publicEventId] : [])])],
+        memoryWriteSuggestions: [{
+          summary: outcome.challenged
+            ? `In Liar's Dice round ${outcome.round}, I bid ${bid.quantity}x${bid.face}; after a challenge the bid was ${bidTrue ? "true" : "false"}, and ${outcome.winnerId} won the round.`
+            : `In Liar's Dice round ${outcome.round}, I bid ${bid.quantity}x${bid.face}; the bidding cap ended the round uncontested and ${outcome.winnerId} won.`,
+          importance: outcome.loserId === bid.actorId || outcome.winnerId === bid.actorId ? 0.82 : 0.62,
+          sourceIds: [bid.commandId, pending.publicResultEventId]
+        }]
+      });
+    }
+    if (challenge) {
+      const actualFacts: Record<string, boolean> = {
+        "current-bid-true": challenge.challengedBidTrue,
+        "actor-wins-round": outcome.winnerId === challenge.actorId,
+        "actor-loses-life": outcome.loserId === challenge.actorId,
+        "round-ends-this-move": true
+      };
+      this.reconcileSocialOutcome({
+        actionReceiptId: challenge.commandId,
+        actualOutcome: {
+          summary: `Challenged ${challenge.challengedBid.quantity}x${challenge.challengedBid.face}; the bid was ${challenge.challengedBidTrue ? "true" : "false"}; winner=${outcome.winnerId}; loser=${outcome.loserId}.`,
+          metrics: {
+            round: outcome.round,
+            move: "challenge",
+            quantity: challenge.challengedBid.quantity,
+            face: challenge.challengedBid.face,
+            challengedBidTrue: challenge.challengedBidTrue,
+            wonRound: outcome.winnerId === challenge.actorId,
+            lostLife: outcome.loserId === challenge.actorId
+          }
+        },
+        actualFacts,
+        resultingEventIds: [...new Set([
+          pending.publicResultEventId,
+          ...(challenge.challengedBid.publicEventId ? [challenge.challengedBid.publicEventId] : [])
+        ])],
+        memoryWriteSuggestions: [{
+          summary: `In Liar's Dice round ${outcome.round}, I challenged ${challenge.challengedBid.quantity}x${challenge.challengedBid.face}; it was ${challenge.challengedBidTrue ? "true" : "false"}, so I ${outcome.winnerId === challenge.actorId ? "won" : "lost"} the round.`,
+          importance: 0.86,
+          sourceIds: [challenge.commandId, pending.publicResultEventId]
+        }]
+      });
+    }
+    this.pendingRoundReconciliation = undefined;
+  }
+
   private rollDice(): void {
+    this.dice.clear();
     for (const profile of this.profiles.values()) {
+      if (!this.isAlive(profile.id)) continue;
       this.dice.set(profile.id, randomInt(1, 7));
     }
   }
@@ -431,8 +659,21 @@ export class LiarsDiceWorld extends SocialWorldBase {
     return this.dice.size;
   }
 
+  private quantityCap(): number {
+    return this.totalDice() + 1;
+  }
+
   private currentBid(): Bid | undefined {
     return this.bids.at(-1);
+  }
+
+  private isLegalRaise(quantity: number, face: number): boolean {
+    const current = this.currentBid();
+    return !current || quantity > current.quantity || (quantity === current.quantity && face > current.face);
+  }
+
+  private publicBid(bid: Bid): Omit<Bid, "commandId" | "publicEventId"> {
+    return { actorId: bid.actorId, quantity: bid.quantity, face: bid.face };
   }
 
   private aliveActors(): string[] {
@@ -465,4 +706,10 @@ function recordPayload(payload: unknown): Record<string, unknown> {
     throw new Error("ACTION_PAYLOAD_INVALID: Provide an object payload.");
   }
   return payload as Record<string, unknown>;
+}
+
+interface PendingRoundReconciliation {
+  outcome: RoundOutcome;
+  publicResultEventId: string;
+  challenge?: { actorId: string; commandId: string; challengedBid: Bid; challengedBidTrue: boolean };
 }

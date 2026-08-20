@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { tool, type Tool } from "@openai/agents";
 import { z } from "zod";
 import type {
@@ -6,13 +7,17 @@ import type {
   AgentProfile,
   PlayerActionSpec,
   ScenarioSummary,
+  SocialMessage,
   SocietyAgentContext,
   WorldActionCommit,
   WorldActivation,
   WorldSnapshot
 } from "../contracts";
 import { scopedContext, SocialWorldBase } from "../world";
-import { boundedRounds, emitAction } from "./helpers";
+import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
+import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
+import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import type { SocialActDeclaration } from "../social/contracts";
 
 type Phase = "discussion" | "choice";
 
@@ -24,6 +29,9 @@ interface BeautyRound {
   winnerIds: string[];
   text: string;
 }
+
+const BEAUTY_CONTEST_STATE_SCHEMA_VERSION = 3;
+const BEAUTY_CONTEST_OUTCOME_KEYS = ["actor-wins", "choice-below-average", "choice-within-five-of-target", "target-below-thirty"] as const;
 
 /**
  * Keynesian Beauty Contest.
@@ -39,8 +47,10 @@ export class BeautyContestWorld extends SocialWorldBase {
   private readonly targetRatio = 2 / 3;
   private readonly scores = new Map<string, number>();
   private readonly choices = new Map<string, number>();
+  private readonly choiceCommandIds = new Map<string, string>();
   private readonly history: BeautyRound[] = [];
   private readonly lastExperiences = new Map<string, string>();
+  private discussion: DiscussionDirector;
   private phase: Phase = "discussion";
   private round = 1;
 
@@ -51,16 +61,20 @@ export class BeautyContestWorld extends SocialWorldBase {
       throw new Error(`PLAYER_COUNT_INVALID: ${scenario.name} supports ${range.min}-${range.max} participants.`);
     }
     this.totalRounds = boundedRounds(rounds, scenario.defaultRounds, scenario.maxRounds, scenario.minRounds);
+    this.discussion = this.createDiscussion();
     for (const profile of profiles) this.scores.set(profile.id, 0);
     this.addLog("选美博弈开始：每人私下选择 0–100 的整数，最接近所有人平均值 2/3 的人获胜。", 1);
   }
 
   protected exportWorldState(): unknown {
     return {
+      schemaVersion: BEAUTY_CONTEST_STATE_SCHEMA_VERSION,
       round: this.round,
       phase: this.phase,
       scores: this.mapEntries(this.scores),
       choices: this.mapEntries(this.choices),
+      choiceCommandIds: this.mapEntries(this.choiceCommandIds),
+      discussion: this.discussion.exportState(),
       history: structuredClone(this.history),
       lastExperiences: this.mapEntries(this.lastExperiences)
     };
@@ -68,14 +82,23 @@ export class BeautyContestWorld extends SocialWorldBase {
 
   protected restoreWorldState(state: unknown): void {
     const s = state as Partial<{
+      schemaVersion: number;
       round: number; phase: string; scores: Array<[string, number]>; choices: Array<[string, number]>;
+      choiceCommandIds: Array<[string, string]>;
+      discussion: ReturnType<DiscussionDirector["exportState"]>;
       history: BeautyRound[]; lastExperiences: Array<[string, string]>;
     }> | undefined;
     if (!s) return;
+    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== 2 && s.schemaVersion !== BEAUTY_CONTEST_STATE_SCHEMA_VERSION) {
+      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: beauty-contest ${s.schemaVersion}`);
+    }
     this.round = Number(s.round ?? 1);
     this.phase = (s.phase ?? "discussion") as Phase;
     this.fillMap(this.scores, s.scores);
     this.fillMap(this.choices, s.choices);
+    this.fillMap(this.choiceCommandIds, s.choiceCommandIds);
+    this.discussion = this.createDiscussion();
+    this.discussion.restoreState(s.discussion);
     this.history.length = 0;
     this.history.push(...structuredClone(s.history ?? []));
     this.fillMap(this.lastExperiences, s.lastExperiences);
@@ -101,6 +124,7 @@ export class BeautyContestWorld extends SocialWorldBase {
 
   observe(actorId: string): AgentObservation {
     const self = this.requireProfile(actorId);
+    const causality = this.socialCausalityFor(actorId);
     return {
       roomId: this.roomId,
       scenarioId: this.scenario.id,
@@ -112,6 +136,7 @@ export class BeautyContestWorld extends SocialWorldBase {
       privateContext: [
         `Your cumulative score: ${this.scores.get(actorId) ?? 0}.`,
         `Your current choice: ${this.choices.get(actorId) ?? "not committed"}.`,
+        ...socialReferenceContext(causality),
         `Past rounds: ${this.history.map((entry) => `R${entry.round} avg=${entry.average.toFixed(1)} target=${entry.target.toFixed(1)} winner=${entry.winnerIds.map((id) => this.profiles.get(id)?.displayName ?? id).join(",")}`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, score: this.scores.get(actorId) ?? 0 },
@@ -124,7 +149,7 @@ export class BeautyContestWorld extends SocialWorldBase {
       recentMessages: this.visibleMessages(actorId).slice(-30),
       availableActions: this.phase === "discussion"
         ? ["communicate", "reflect_on_social_situation", "read_the_room", "update_inner_state"]
-        : ["choose_number", "remember_experience"]
+        : ["choose_number"]
     };
   }
 
@@ -132,14 +157,20 @@ export class BeautyContestWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const choose = tool({
       name: "choose_number",
-      description: `Privately choose an integer from ${this.minChoice} to ${this.maxChoice} for this round. The winner is closest to ${Math.round(this.targetRatio * 100)}% of the group average. The choice is binding and hidden until everyone commits.`,
+      description: `Compare bounded higher-order intents and predict the public aggregate, then privately choose an integer from ${this.minChoice} to ${this.maxChoice}.`,
       parameters: z.object({
         number: z.number().int().min(this.minChoice).max(this.maxChoice),
-        reason: z.string().min(1).max(2_000)
+        reason: z.string().min(1).max(2_000),
+        ...createStrategyActionShape({ number: z.number().int().min(this.minChoice).max(this.maxChoice) }, BEAUTY_CONTEST_OUTCOME_KEYS)
       }).strict(),
-      execute: async ({ number, reason }, runContext) => {
+      execute: async (input, runContext) => {
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected || selected.number !== input.number) throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: Selected number must equal the binding choice.");
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "choose_number", { number, reason });
+        const commit = await this.performAction(actorId, "choose_number", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({ ...candidate, action: "choose_number", payloadSummary: `number=${candidate.number}` }))
+        });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -173,10 +204,13 @@ export class BeautyContestWorld extends SocialWorldBase {
       throw new Error(`CHOICE_INVALID: Choose an integer from ${this.minChoice} to ${this.maxChoice}.`);
     }
     const reason = typeof value.reason === "string" ? value.reason.trim() : "";
+    const commandId = `cmd-${randomUUID()}`;
     this.choices.set(actorId, number);
+    this.choiceCommandIds.set(actorId, commandId);
     this.emitUpdate();
     return {
       action,
+      commandId,
       detail: reason ? `${number}; ${reason}` : String(number),
       result: { accepted: true, number, waitingFor: [...this.profiles.keys()].filter((id) => !this.choices.has(id)) }
     };
@@ -185,27 +219,34 @@ export class BeautyContestWorld extends SocialWorldBase {
   activation(): WorldActivation | null {
     if (this.status !== "running" || this.round > this.totalRounds) return null;
     if (this.phase === "discussion") {
-      return {
-        id: `bc:${this.round}:discussion`,
-        label: `第 ${this.round} 轮讨论`,
-        actorIds: [...this.profiles.keys()],
-        mode: "sequential",
-        instructionFor: () => "Speak once if useful. Discuss the game, test theories, or mislead others. Do not commit your number yet."
-      };
+      const actors = this.discussion.nextWave();
+      if (actors.length) {
+        const wave = this.discussion.waveNumber;
+        return {
+          id: `bc:${this.round}:discussion:${wave}`,
+          label: wave === 1 ? `第 ${this.round} 轮讨论` : `第 ${this.round} 轮讨论 · 回应 ${wave - 1}`,
+          actorIds: actors,
+          mode: "sequential",
+          instructionFor: () => wave === 1
+            ? "Discuss the likely group reasoning, test a theory, mislead, or stay quiet. Do not commit your number yet."
+            : "Respond to the concrete theory, question, challenge or private message directed at you. Avoid repeating your opening view."
+        };
+      }
+      this.phase = "choice";
+      this.emitUpdate();
     }
     return {
       id: `bc:${this.round}:choice`,
       label: `第 ${this.round} 轮选择`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => `You must call choose_number exactly once with an integer from ${this.minChoice} to ${this.maxChoice}. Think about what others believe before you choose.`
+      instructionFor: () => `Call choose_number exactly once with bounded candidates and aggregate-result predictions. Use your authorized actor models to reason about what others believe.`
     };
   }
 
   completeActivation(activation: WorldActivation): ActivationCompletion {
-    if (activation.id.endsWith(":discussion")) {
-      this.phase = "choice";
-      this.emitUpdate();
+    if (activation.id.includes(":discussion:")) {
+      this.discussion.endWave();
       return { completed: true, missingActorIds: [] };
     }
     const missingActorIds = activation.actorIds.filter((id) => !this.choices.has(id));
@@ -222,6 +263,35 @@ export class BeautyContestWorld extends SocialWorldBase {
 
   experienceFor(actorId: string): string | undefined {
     return this.lastExperiences.get(actorId);
+  }
+
+  reconciliationOwnsOutcomeMemory(): boolean {
+    return true;
+  }
+
+  async sendMessage(input: {
+    senderId: string;
+    channel: "public" | "private" | "team";
+    text: string;
+    recipientIds?: string[];
+    replyTo?: string;
+    socialActs?: SocialActDeclaration[];
+  }): Promise<SocialMessage> {
+    const message = await super.sendMessage(input);
+    if (this.phase === "discussion") {
+      this.discussion.onMessage({
+        messageId: message.id,
+        senderId: message.senderId,
+        text: message.text,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+        ...(message.channel === "public" ? {} : { targetActorIds: message.recipientIds ?? [] })
+      }, conversationSignalsFromSocialActs(message.senderId, message.id, input.socialActs ?? []));
+    }
+    return message;
+  }
+
+  protected messageWave(): number | undefined {
+    return this.phase === "discussion" ? this.discussion.waveNumber : undefined;
   }
 
   protected currentTurn(): number {
@@ -258,6 +328,13 @@ export class BeautyContestWorld extends SocialWorldBase {
     const text = `平均 ${average.toFixed(2)}，目标 ${target.toFixed(2)}，获胜：${winnerIds.map((id) => this.profiles.get(id)?.displayName ?? id).join("、")}`;
     const entry: BeautyRound = { round: this.round, choices, average, target, winnerIds, text };
     this.history.push(entry);
+    const publicResult = this.recordPublicWorldFact({
+      factKey: `beauty-contest-round:${this.round}`,
+      eventType: "beauty-contest.round-resolved",
+      predicate: "beauty-contest-round-result",
+      object: { choices, average, target, winnerIds },
+      payload: { round: this.round, choices, average, target, winnerIds }
+    });
     for (const id of ids) {
       this.lastExperiences.set(
         id,
@@ -265,7 +342,33 @@ export class BeautyContestWorld extends SocialWorldBase {
       );
     }
     this.addLog(`第 ${this.round} 轮结算：${text}`, this.round);
+    for (const id of ids) {
+      const commandId = this.choiceCommandIds.get(id);
+      if (!commandId) continue;
+      const ownChoice = choices[id] ?? 0;
+      const distance = Math.abs(ownChoice - target);
+      this.reconcileSocialOutcome({
+        actionReceiptId: commandId,
+        actualOutcome: {
+          summary: `Chose ${ownChoice}; average ${average.toFixed(2)}; target ${target.toFixed(2)}; distance ${distance.toFixed(2)}; won=${winnerIds.includes(id)}.`,
+          metrics: { round: this.round, ownChoice, average, target, distance, won: winnerIds.includes(id) }
+        },
+        actualFacts: {
+          "actor-wins": winnerIds.includes(id),
+          "choice-below-average": ownChoice < average,
+          "choice-within-five-of-target": distance <= 5,
+          "target-below-thirty": target < 30
+        },
+        resultingEventIds: [publicResult.eventId],
+        memoryWriteSuggestions: [{
+          summary: `In beauty-contest round ${this.round}, I chose ${ownChoice}; group average was ${average.toFixed(2)}, target ${target.toFixed(2)}, and I ${winnerIds.includes(id) ? "won" : "did not win"}.`,
+          importance: winnerIds.includes(id) || distance <= 5 ? 0.74 : 0.62,
+          sourceIds: [commandId, publicResult.eventId]
+        }]
+      });
+    }
     this.choices.clear();
+    this.choiceCommandIds.clear();
     if (this.round >= this.totalRounds) {
       this.round = this.totalRounds + 1;
       this.finish();
@@ -273,7 +376,17 @@ export class BeautyContestWorld extends SocialWorldBase {
     }
     this.round += 1;
     this.phase = "discussion";
+    this.discussion = this.createDiscussion();
     this.emitUpdate();
+  }
+
+  private createDiscussion(): DiscussionDirector {
+    return new DiscussionDirector({
+      actorIds: [...this.profiles.keys()],
+      displayName: (id) => this.profiles.get(id)?.displayName ?? id,
+      ...discussionPersonality(this.profiles),
+      maxWaves: 4
+    });
   }
 
   private summary(): string {
