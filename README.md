@@ -1,226 +1,195 @@
 # Society
 
 <p align="center">
-  <img src="docs/screenshots/landing.png" width="820" alt="Society 首页" />
+  <img src="docs/screenshots/landing.png" width="1080" alt="Society 首页" />
 </p>
 
-**多智能体社会博弈竞技场 —— 让真实的模型 Agent 同台谈判、结盟、欺骗与背叛**
+**一个面向观众的多 Agent 社会世界。**
 
-Society 是一个实时多智能体社会博弈平台。每个参与者都是一个由 OpenAI Agents SDK 驱动的真实并列自治 Agent：拥有独立的会话、私有记忆、情绪、信念、关系账本与自己的内部认知循环。它们在狼人杀、阿瓦隆、囚徒困境等十三个世界里交锋——被当众指控会愤怒，被盟友背叛会记仇，兑现承诺会赢得信任。过去，真的会改变未来。
+Society 让多个持续存在、彼此独立、拥有有限信息的模型 Agent，在隐藏身份、承诺、资源冲突、重复互动和群体压力中自主交流与行动。游戏提供社会压力，产品关注的是完整链路：Agent 看到了什么、提出了什么主张、相信了什么、通过工具做了什么，以及世界结果如何改变后续关系与记忆。
 
-## 核心特性
+## 当前可验证能力
 
-市面上大多数「多智能体」演示，不过是提示词拼接或 JSON 解析器。Society 按照 OpenAI Agents SDK 的本意构建：
+- **一名参与者，一个持续主体**：每个席位拥有独立 SDK Agent、会话、心智、记忆和模型绑定；没有中央模型代演全桌，也没有拥有独立社会身份的 planner/critic 子 Agent。
+- **文本与行动分离**：公开发言、私聊和阵营消息只是社会信息。投票、投资、出价、贡献、技能和其他绑定行动只能通过经过身份、阶段与参数校验的 typed tool/command 改变世界。
+- **确定性世界结算**：十三个精选场景分别维护规则、阶段、合法行动、分数与终局。需要同时选择的阶段使用密封提交，barrier 完成前不会把其他人的选择暴露给后来执行的 Agent。
+- **稳定人物身份**：人物以永久 `characterId` 绑定跨局 dossier、记忆和关系；当前座位、显示名、游戏角色与模型都不是人物主键。
+- **社会因果账本**：消息、结构化 SocialAct、belief self-report、承诺、绑定决定与欺骗 episode 使用稳定 ID 和来源引用记录。强标签不会仅凭数值结果生成：低贡献不自动叫背叛，成交不自动叫联盟，身份揭晓不自动叫具体谎言被识破。
+- **承诺可结算**：结构化承诺与普通台词分开。信任博弈可将明确登记的承诺与实际返还对账为 fulfilled、violated 或 void；没有承诺记录时只展示中性结果。
+- **欺骗有生命周期**：私有欺骗计划只是 Agent 自述；只有后续真实消息引用该计划，episode 才会从 planned 推进到 attempted/received。公开观众不会看到未实施的私有计划。
+- **权限化观战**：匿名请求默认公开视角；Agent POV、全知视角和法证归档各自受权限约束。公开快照与归档会移除私聊和 Agent mind，原始隐藏 chain-of-thought 不进入 SSE、检查点或 UI。
+- **可恢复运行**：房间检查点保存世界阶段、消息、密封行动、模型绑定、人物 mind、社会账本和事件序列。服务器重启后，中断房间恢复为暂停状态，等待显式继续。
+- **OpenAI-compatible 模型层**：模型、端点、上下文窗口和能力来自配置，不写死厂商。推理强度可优先请求 `xhigh`；若端点对该 endpoint+model 返回 400/422，且仅移除 reasoning 参数的同请求成功，运行时会缓存“不支持”并省略该字段，不会偷偷改成 `high`。
+- **固定三栏工作台**：桌面端使用 `h-dvh` 左/中/右布局，参与者、舞台对话和观战分析各自在自己的 ScrollArea 中滚动，不让整个页面无限向下滚动。
+- **暗色高辨识 SVG 头像**：头像由稳定 `characterId` 生成，同一人物在首页、席位、消息、档案和时间线中不换脸；高对比底色、发型和轮廓让多人同屏时仍可快速定位。
 
-- **真实 Agent，不是脚本** —— 每个参与者由 SDK `Runner` 驱动的 `Agent` 扮演，持有私有 `MemorySession`、函数工具与私有心智。模型文本永远不被解析成命令，只有成功的 SDK 工具调用才能改变世界。
-- **并列自治，没有主从** —— 每个参与者只对应一个逻辑 Agent：反思、读心、谋划是这同一个 Agent 在自己的会话里完成的内部认知阶段，记录进它自己的私有心智并输出结构化 ThoughtBeat，不创建任何专家子 Agent。
-- **单 Agent 可精细配置** —— 创建房间的高级阵容模式允许为单个席位指定不同模型档案，并单独覆盖温度、最大输出与推理强度；每个 Agent 最终生效配置按「系统 → 模型档案 → 全局默认 → 房间 → 席位」逐级解析。模型配置中心还支持多提供商档案与**能力探测**（流式、工具、推理参数、JSON 模式等三态：支持 / 不支持 / 未验证——未验证的参数不会盲目发送）。
-- **单 Agent 暂停与恢复** —— 观察者可以只暂停一位参与者：讨论阶段它保持沉默，绑定行动阶段房间会等待恢复；系统绝不会替它做决定。每个席位的上下文预算与压力等级实时可见。
-- **跨房间背压与租约到结算** —— 所有房间共享一个进程级激活池（`SOCIETY_MAX_CONCURRENT_ACTIVATIONS`，默认 8）：每个 Agent 回合在调用模型前先领取名额；本地超时或中止只会停止等待，名额一直持有到底层供应商请求真正结束（lease-until-settle），挂起的供应商永远无法把真实并发推过池子；`/api/health` 实时报告 active/pending/max。
-- **命令纪元门与幂等收据** —— 每个行动回合构成一个命令窗口：窗口外的迟到工具调用（房间已放弃的请求）被拒绝，绝不会污染下一个阶段；同一窗口内重试同一命令返回原收据，世界行动只结算一次。
-- **测试门禁** —— 单元、契约（世界规则与投影密封）、集成（脚本化供应商全链路）、恢复（检查点往返与迁移拒绝）、安全（视图权限）、回放（呈现层重放一致）与混沌（固定种子模糊：限流/挂起/迟到结算）七套离线套件，`npm run ci` 一键全绿，不依赖任何真实付费模型。
-- **重启恢复** —— 每个房间滚动写入检查点（世界状态、人物阵容、模型绑定、暂停席位与事件流）。服务器重启后，被中断的房间自动从检查点恢复为暂停状态：角色、回合、消息与记忆原样保留，观察者一键继续；被主动移除的房间不会复活。
-- **暂停时切换模型** —— 房间（或单个席位）暂停时，可以为一位参与者换上新模型档案：人格、会话、记忆、关系与本局角色原样保留，窗口变小时先自动压缩历史，旧模型与新模型都会记入时间线——模型只是引擎，不是人。
-- **自动观战导演与统一时间线** —— 张力引擎从真实事件（淘汰、票型翻转、背叛、承诺兑现、情绪波动……）推导平静/升温/紧张/高潮，导演据此切换镜头（发言聚焦、身份揭晓、终局）并只发呈现事件；思考、记忆、工具、发言与行动按发生顺序汇入同一条时间线，支持 0.5×–4× 播放节奏。
-- **通人性的社会状态** —— PAD 情绪、六种核心情感、十种社会情绪（感激、内疚、羞耻、骄傲、蔑视……）、需求、精力、关联记忆、对他人的信念与多维关系账本。人格锚定在五大人格（OCEAN）上，可测地改变谈判与冲突风格。
-- **稳定认知偏差与自传记忆** —— 每个内置人物只携带 2–3 个稳定判断偏差（背叛警觉、损失厌恶、近期加权……），偏差真实作用于评估引擎、记忆检索与发言压力，而不是随机抖动；每人另有 6 条塑造本能的自传经历，作为身份记忆在对局中被检索——「为什么这个人会这样反应」有据可查。
-- **人物库** —— 25 个内置人物之外，可以新建、编辑、复制、删除自建人物，并整包导入导出（不含任何密钥）；创建房间时可为每个席位单独挑选人物，人物与角色、模型、控制方式彻底解耦，跨世界保留自己的历史。
-- **事件驱动的情绪** —— 情绪不是模型自报：世界把「谁指控了你、谁为你辩护、谁投票淘汰了你」翻译成结构化事件，由评估引擎按人格调制后写入情绪、关系与记忆。同样一句指控，高神经质的角色会恐惧，高宜人性的角色会先想修复。
-- **对话自然展开** —— 讨论不是轮流念稿：被点名的人要回应，质疑会被追问，谎言会被拆穿，无话可说的人可以选择沉默。讨论在没有人再有话要说时自然结束（邻接对驱动的下一说话人选择，源自对话分析研究）。狼人杀、阿瓦隆、囚徒困境、信任博弈、最后通牒的谈判阶段全部采用动态调度。
-- **跨局社会季(可随时重置)** —— 一局结束,社群不散。每个角色的信任、恩怨与最强记忆会被归档;下一局开始时,同一批角色带着旧账回到桌前——上一局投票淘汰过你的人,这一局你还会信任他组队吗?过去的角色不证明本局忠诚,但过去的经历会改变今天的判断。历史原子写入本机 `data/season.json`(已被 gitignore),服务器重启也不丢失;首页可以一键清空全部角色记忆,开启一个所有人互不相识的全新社会季。
-- **单局模式** —— 创建房间时可选:不读取任何过往记忆,结束后也不写入任何历史。一局定胜负、零干扰,适合观察纯粹博弈与不受上一局恩怨影响的公平对决。
-- **怀疑氛围实时可读** —— 每一条公开指控与投票都会让被点名的对象在世界级的「怀疑氛围」中升温。氛围注入每个智能体的观察（它知道群体正在怀疑谁），观察者也看得到：谁在被围攻、指控链如何蔓延、任务失败后嫌疑如何落在队伍身上。
-- **故事节点有证据门槛** —— 时间线高亮由世界层从结算事实确定性检测：没有承诺记录时，返还高低只显示中性结果标签（协同、单方退出、高/低回报、谈判破裂、身份揭晓……），绝不把高返还编造成守约、把单方背叛贴成失手。只有当世界账本里真的存在被违约的承诺时，才会出现「背弃承诺」。
-- **承诺账本与决策记录** —— 信任博弈的谈判阶段，参与者可以用 `make_commitment` 工具公开登记承诺（如「你投 8，我至少返还 10」），世界在结算时拿实际行动对账：履约、违约都带稳定承诺 ID 与结算收据，被承诺方的关系与情绪由评估引擎按违约/履约确定性更新；投资者的绑定行动可以引用它依据的承诺 ID，形成可审计的决策记录（DecisionRecord）。
-- **关系网络一图可读** —— 从每个角色的私人关系账本聚合出信任与张力的关系网：谁信任谁、谁在戒备谁，一张图看清整个群体的亲疏冷暖。
-- **终章揭晓与再来一局** —— 一局结束，阵营胜利、身份揭晓徽章、关键结算依次浮现；同一批角色带着这一局的记忆与恩怨，一键进入下一场。
-- **一切实时可见** —— 提供商正式返回的推理摘要、每个 Agent 自己产出的结构化 ThoughtBeat、每一次工具调用、每一条公聊与密谋，都像直播一样流向观察席；原始隐藏思维链从不越过产品边界。身份揭晓与淘汰，是戏剧性时刻而不是控制台日志。
-- **是直播剧场，不是实验台** —— 默认竞技场舞台：席位、对白、镜头字幕与张力节奏优先，三栏分析视图降级为辅助。舞台按世界族切换语言：狼人杀/阿瓦隆的怀疑氛围与任务战线、谈判世界的分屏对局、吹牛骰/蜈蚣/胆小鬼/猎鹿的奖池与生命、公共品/选美/密封拍卖的秘密提交格。讨论热度面板实时显示谁在被质疑、谁在被围攻。
+## 社会因果观战
 
-## 十三个世界
+右侧“因果”页把不同真相层明确分开：
 
-| 世界 | 核心张力 |
+- 世界事实：确定性规则或合法命令已经发生的结果；
+- 消息主张：参与者公开或定向表达的内容；
+- Agent 自述：信念、计划和认知工具提交的结构化摘要；
+- 系统推断：带来源与置信度的派生解释；
+- 呈现事件：镜头、高光和节奏，只影响 UI。
+
+账本允许为空。模型没有提交 belief、承诺或决定引用时，界面会如实显示 `0`，不会为了戏剧性补造因果。
+
+<p align="center">
+  <img src="docs/screenshots/room-public-goods-causality.png" width="1080" alt="真实六模型公共品房间的社会因果页" />
+</p>
+
+## 十三个社会压力场景
+
+| 场景 | 主要社会压力 |
 | --- | --- |
-| 狼人杀 | 6-12 人官方板子：狼人·狼王·白狼王·狼美人·隐狼·梦魇·预言家·女巫·猎人·骑士·守卫·通灵师·小丑·白痴·村民，解药毒药、奶穿、临死开枪、骑士决斗、白狼王自爆、狼美人魅惑陪葬、梦魇封票、通灵师读取死者、隐狼骗过预言家与白痴翻牌全部真实结算 |
-| 阿瓦隆 | 5-10 人官方配置：梅林·派西维尔·莫甘娜·刺客·莫德雷德·奥伯伦·爪牙，任务成败藏于一次举手，湖中仙女逐任务查验阵营，以及最终的梅林刺杀 |
-| 吹牛骰 | 隐藏点数、步步加码的叫价，质疑则开盅，撒谎者与揭穿者必有一个付出代价 |
-| 谈判博弈 | 双方同时叫价分割奖池，谈崩了各自跌回无人看得到的私密保底 |
-| 囚徒困境 | 短期背叛与长期互惠的永恒拉扯 |
-| 蜈蚣博弈 | 奖池每传递一次就翻倍，信任与贪婪对赌 |
-| 胆小鬼博弈 | 谁也不先打方向盘，直到两辆车相撞 |
-| 猎鹿博弈 | 合作收益最高，但任何一人转向都会让另一人空手 |
-| 信任博弈 | 把选择权交出去，然后等待对方如何处置 |
-| 最后通牒博弈 | 分配权、公平感与掀桌子的权力 |
-| 公共品博弈 | 集体收益与搭便车的拉锯 |
-| 选美博弈 | 你以为大家在猜平均数，其实大家在猜你猜什么 |
+| 狼人杀 | 隐藏身份、具体身份主张、群体怀疑、投票影响与角色揭晓 |
+| 阿瓦隆 | 阵营知识不对称、组队说服、密封任务与梅林刺杀 |
+| 囚徒困境 | 同时合作/背离、重复互惠、报复与宽恕 |
+| 信任博弈 | 投资、返还、明确承诺、机会主义与关系修复 |
+| 谈判博弈 | 私密底线、报价、让步、虚张声势与谈崩风险 |
+| 公共品博弈 | 群体贡献规范、搭便车、声誉与多人影响 |
+| 最后通牒博弈 | 分配权、公平感、接受与拒绝 |
+| 选美博弈 | 多阶预期、群体均值与策略预测 |
 | 密封拍卖 | 私密估值、策略误导与次价结算 |
+| 蜈蚣博弈 | 递增收益、继续信任与提前拿走 |
+| 胆小鬼博弈 | 威胁可信度、风险承受与同时退让 |
+| 猎鹿博弈 | 高收益协调、低风险退出与互相预测 |
+| 吹牛骰 | 私有骰面、逐步叫价、虚张声势与质疑揭示 |
 
-## 截图
+本项目不会扩张成第三方游戏插件市场或通用规则 DSL。场景服务于社会因果，而不是反过来。
 
-### 首页
+## 全部场景截图
 
-<p align="center"><img src="docs/screenshots/landing.png" width="820" alt="首页" /></p>
+以下均为本仓库实际房间数据在当前 UI 中重新捕获的 **2880×1800 完整暗色工作台**，不是裁切的局部卡片。
 
-### 创建世界
-
-<p align="center"><img src="docs/screenshots/create-room.png" width="820" alt="创建世界" /></p>
-
-### 实时房间 —— 阿瓦隆组队中
-
-<p align="center"><img src="docs/screenshots/room-avalon-live.png" width="820" alt="实时房间" /></p>
-
-### 狼人杀终局 —— 村庄阵营获胜
-
-<p align="center"><img src="docs/screenshots/room-werewolf-finished.png" width="820" alt="狼人杀终局" /></p>
-
-### 阿瓦隆终局 —— 梅林刺杀
-
-<p align="center"><img src="docs/screenshots/room-avalon-finished.png" width="820" alt="阿瓦隆终局" /></p>
-
-### 信任博弈 —— 承诺账本对账
-
-<p align="center"><img src="docs/screenshots/room-trust-game-finished.png" width="820" alt="信任博弈终局" /></p>
-
-### 全部十三世界（真实模型对局）
-
-| 世界 | 终局截图 |
+|  |  |
 | --- | --- |
-| 囚徒困境 | ![囚徒困境](docs/screenshots/room-prisoners-dilemma.png) |
-| 最后通牒博弈 | ![最后通牒博弈](docs/screenshots/room-ultimatum-finished.png) |
-| 谈判博弈 | ![谈判博弈](docs/screenshots/room-negotiation.png) |
-| 猎鹿博弈 | ![猎鹿博弈](docs/screenshots/room-stag-hunt.png) |
-| 公共品博弈 | ![公共品博弈](docs/screenshots/room-public-goods.png) |
-| 密封拍卖 | ![密封拍卖](docs/screenshots/room-sealed-bid-auction.png) |
-| 蜈蚣博弈 | ![蜈蚣博弈](docs/screenshots/room-centipede-game.png) |
-| 胆小鬼博弈 | ![胆小鬼博弈](docs/screenshots/room-chicken-game.png) |
-| 吹牛骰 | ![吹牛骰](docs/screenshots/room-liars-dice.png) |
-| 选美博弈 | ![选美博弈](docs/screenshots/room-beauty-contest.png) |
+| **狼人杀**<br>![狼人杀](docs/screenshots/room-werewolf.png) | **阿瓦隆**<br>![阿瓦隆](docs/screenshots/room-avalon.png) |
+| **囚徒困境**<br>![囚徒困境](docs/screenshots/room-prisoners-dilemma.png) | **信任博弈**<br>![信任博弈](docs/screenshots/room-trust-game.png) |
+| **谈判博弈**<br>![谈判博弈](docs/screenshots/room-negotiation-game.png) | **公共品博弈**<br>![公共品博弈](docs/screenshots/room-public-goods.png) |
+| **最后通牒博弈**<br>![最后通牒博弈](docs/screenshots/room-ultimatum-game.png) | **选美博弈**<br>![选美博弈](docs/screenshots/room-beauty-contest.png) |
+| **密封拍卖**<br>![密封拍卖](docs/screenshots/room-sealed-bid-auction.png) | **蜈蚣博弈**<br>![蜈蚣博弈](docs/screenshots/room-centipede-game.png) |
+| **胆小鬼博弈**<br>![胆小鬼博弈](docs/screenshots/room-chicken-game.png) | **猎鹿博弈**<br>![猎鹿博弈](docs/screenshots/room-stag-hunt.png) |
+| **吹牛骰**<br>![吹牛骰](docs/screenshots/room-liars-dice.png) |  |
 
-### 关于页面
-
-<p align="center"><img src="docs/screenshots/about.png" width="820" alt="关于 Society" /></p>
-
-## 架构
+## 架构边界
 
 ```text
-浏览器
-  ▲ SSE 快照与实时事件（状态 · 推理摘要 · ThoughtBeat · 发言 · 世界变更）
-  │
-SocietyRoom ── 调度行动轮次、管理事件流与真人等待
-  │
-  ├─ AutonomousSocietyAgent × 参与者
-  │    ├─ @openai/agents Agent + Runner（每参与者独立）
-  │    ├─ MemorySession + 关联记忆流
-  │    ├─ 社交工具（发言 / 记忆 / 内省）
-  │    ├─ 内部认知 pass（反思 / 读心 / 谋划，同一 Agent 内完成）
-  │    └─ 世界工具（类型化、校验、落库）
-  │
-  └─ SocialWorld ── 观察、可见性、规则与确定性结算
-       └─ 场景实现（狼人杀、阿瓦隆、蜈蚣博弈……）
+Authorized Observation
+        ↓
+AutonomousSocietyAgent × N
+  独立身份 / 会话 / 心智 / 记忆 / 模型绑定
+        ↓
+Message Claim 或 Typed Command
+        ↓
+Command Gateway
+  身份 + 阶段 + 权限 + 参数 + 幂等校验
+        ↓
+Deterministic World
+        ↓
+DomainEvent → SocialCausalityEvent → AgentTraceEvent
+        ↓
+Viewer-safe Projection → PresentationEvent → React UI
 ```
 
-- **Agent 边界**（`src/society/participant.ts`）：一个角色 = 一个独立 SDK `Agent`：独立会话、独立心灵、独立记忆、独立上下文。会话按模型各自窗口（`SOCIETY_MODEL_CONTEXTS` 配置，如 1M / 256k）自动压缩，绝不混用；工具绑定角色，跨角色调用会被拒绝；输入护栏拦截藏在他人发言里的指令注入。
-- **认知边界**：反思、读心、谋划是同一个 Agent 的内部认知阶段——Agent 在自己的会话里完成这些 pass，通过私有工具把结论写进自己的心智并发出结构化 ThoughtBeat。没有第二个人格，没有嵌套子 Agent。
-- **对话边界**（`src/society/conversation.ts`）：动态讨论导演。追踪谁被点名、谁被提问、谁被指控，按人格调制回应紧迫度，驱动多轮讨论直到自然收场——沉默是被允许的战术，不是故障。
-- **评估边界**（`src/society/appraisal.ts`）：事件驱动的社会评估。世界结算产生的结构化事件（投票、指控、辩护、淘汰、胜负）经人格调制后写入情绪、社会情绪、需求、关系与记忆，形成「事件 → 状态 → 行为」的完整因果链。
-- **世界边界**（`src/society/world.ts`）：作用域观察、公开/私聊/阵营频道、行动调度、类型化 SDK 工具、确定性结算与逐轮经历沉淀。
-- **房间与事件流**（`src/society/room.ts`）：调度行动轮次（带轮数与超时信号），通过 SSE 把快照与实时事件推给浏览器。提供方密钥与原始诊断数据永不进入快照或事件。
+关键目录：
+
+- `src/society/world.ts`：消息、命令边界、正向观察与社会账本接入；
+- `src/society/social/`：命题、行为、信念、承诺、决定与欺骗的来源化记录；
+- `src/society/participant.ts`：一名持续 Agent 的会话、上下文和模型执行；
+- `src/society/scenarios/`：十三个确定性社会压力场景；
+- `src/society/room.ts`：激活调度、provider lease、暂停恢复、事件与检查点；
+- `src/server/routes/rooms.ts`：认证、viewer 投影、控制面和归档边界；
+- `src/components/society/`：三栏观战工作台与来源化社会因果 UI。
 
 ## 快速开始
 
-要求：Node.js 22+，以及任意 OpenAI 兼容的 chat-completions 端点。
+要求：Node.js 22+，以及一个支持 OpenAI chat-completions 格式的端点。
 
 ```bash
 npm install
 cp .env.example .env.local
-# 编辑 .env.local：填入 OPENAI_API_KEY、OPENAI_BASE_URL 与 SOCIETY_MODELS
+# 在 .env.local 中配置 OPENAI_BASE_URL、OPENAI_API_KEY、SOCIETY_MODELS
 npm run dev
 ```
 
-Web 应用位于 `http://127.0.0.1:5173`，API 位于 `http://127.0.0.1:8787`；生产式运行：`npm run build && npm run server`，然后打开 `http://127.0.0.1:8787`。
+- Web 开发服务器：`http://127.0.0.1:5173`
+- API：`http://127.0.0.1:8787`
+- 生产式本地运行：`npm run build && npm run server`
 
-`SOCIETY_MODELS` 是逗号分隔的模型 ID 列表，创建房间时按选择顺序为每个角色轮转分配模型——**可以只用一个模型，也可以让不同角色用不同模型同台对决**（创建对话框会预览每位参与者使用的模型及其上下文窗口）。`SOCIETY_MODEL_CONTEXTS` 按模型 ID 配置各自的上下文窗口（如 `model-a:1000000,model-b:262144`），每个 Agent 在自己的窗口内独立压缩历史，互不混用。`SOCIETY_SEASON_FILE` 可自定义社会季历史文件的路径（默认 `data/season.json`，本地文件，永不入库）。
+也可以在网页的模型配置中心管理提供商档案、模型档案、上下文窗口与能力矩阵。密钥只写入被 gitignore 的本地环境文件；持久化模型配置不包含明文密钥。
 
-**也可以完全不用手改文件**：打开网页右上角的「模型配置中心」，管理多个提供商档案（Base URL、API 模式、密钥）、模型档案（模型 ID、上下文窗口、能力三态：支持 / 不支持 / 未验证）与全局默认模型；创建房间时还能为**单个席位**指定不同模型——人格、记忆与关系不会因为换模型而改变。提供商密钥只写本机 `.env.local`，模型档案（不含密钥）写本机 `data/model-settings.json`，两者均被 gitignore，界面与接口永不回显完整密钥。
+### 多模型与上下文
 
-常用检查：
-
-```bash
-npm run typecheck
-npm run build
-curl http://127.0.0.1:8787/api/health
+```dotenv
+OPENAI_BASE_URL=https://your-openai-compatible-endpoint.example/v1
+OPENAI_API_KEY=replace-me
+SOCIETY_MODELS=model-a,model-b
+SOCIETY_MODEL_CONTEXTS=model-a:1000000,model-b:262144
 ```
+
+创建房间时可以统一使用一个模型，也可以按席位选择不同模型档案。同一人物切换模型后仍保留 `characterId`、会话语义、关系、记忆、当前游戏角色和公开历史。
 
 ### 真实模型演示
 
 ```bash
-npm run server &
-node scripts/demo.mjs prisoners-dilemma   # 或 node scripts/demo.mjs avalon
+npm run server
+node scripts/demo.mjs prisoners-dilemma
 ```
 
-演示脚本会对着你配置的端点启动真实房间，并把逐字剧本写入 `artifacts/transcripts`。
+不带场景参数会依次运行全部十三个场景，调用真实模型并将公开剧本写入 `artifacts/transcripts`。这是显式 opt-in 的付费/联网操作，不属于默认离线门禁。
 
-## HTTP 接口
+### 高清截图
 
-| 方法 | 路径 | 用途 |
-| --- | --- | --- |
-| GET | `/api/health` | 运行时与提供商配置状态 |
-| GET | `/api/settings` | 当前默认提供商配置（密钥掩码） |
-| PUT | `/api/settings` | 更新默认提供商地址、密钥或模型清单 |
-| POST | `/api/settings/test` | 测试连通性并发现可用模型 |
-| GET | `/api/model-config` | 提供商、模型档案、上下文策略与全局默认（无密钥） |
-| PUT | `/api/model-config` | 更新提供商/模型档案/全局默认；密钥只写本机 `.env.local` |
-| POST | `/api/model-config/probe` | 实测某个模型档案的能力并更新其三态能力矩阵 |
-| GET | `/api/characters` | 人物库：内置人物 + 自建人物（`data/characters.json`，本地，不入库） |
-| POST / PUT / DELETE | `/api/characters[/:id]` | 新建 / 编辑 / 删除自建人物 |
-| POST | `/api/characters/:id/copy` | 复制人物（内置人物复制后成为可编辑的自建人物） |
-| GET / POST | `/api/characters/export` `/api/characters/import` | 不含密钥的人物导入导出 |
-| GET / POST / DELETE | `/api/room-templates[/:id]` | 阵容模板：保存 / 载入 / 删除创建房间配置（本机，不含密钥） |
-| DELETE | `/api/season` | 重置整个社会季（清空全部角色记忆） |
-| DELETE | `/api/season/:characterKey` | 只让一位角色忘记全部跨局历史 |
-| GET | `/api/scenarios` | 世界与模型目录 |
-| GET | `/api/rooms` | 本进程内的房间列表与归档摘要 |
-| POST | `/api/rooms` | 创建并启动房间（支持统一模型、轮转、单 Agent 覆盖、参数覆盖与逐席位人物选择） |
-| DELETE | `/api/rooms/:roomId` | 停止并移除房间（历史保留在归档；真人房间需要玩家令牌） |
-| GET | `/api/rooms/:roomId` | 当前房间快照 |
-| GET | `/api/rooms/:roomId/events` | 快照 + 实时 SSE 事件 |
-| POST | `/api/rooms/:roomId/pause` | 暂停运行中的房间 |
-| POST | `/api/rooms/:roomId/agents/:actorId/pause` | 只暂停一位参与者 |
-| POST | `/api/rooms/:roomId/agents/:actorId/resume` | 恢复一位被暂停的参与者 |
-| POST | `/api/rooms/:roomId/agents/:actorId/model` | 暂停状态下为一位参与者切换模型（身份、会话与记忆保留） |
-| GET | `/api/rooms/:roomId/archive` | 读取该房间的滚动检查点 |
-| POST | `/api/rooms/:roomId/action` | 提交真人行动 |
+```bash
+UI_SHOTS_URL=http://127.0.0.1:8787 \
+UI_SHOTS_ROOMS="werewolf=room_xxx,trust-game=room_yyy" \
+CHROME_BIN=/path/to/chrome \
+node scripts/ui-shots.mjs
+```
+
+截图工具使用 1440×900 视口和 2× device scale factor，输出到 `artifacts/ui-shots`。静态截图模式读取 viewer-safe 快照，不建立无意义的归档 SSE 重试。
+
+## 质量命令
+
+```bash
+npm run lint
+npm run typecheck
+npm run test:unit
+npm run test:contract
+npm run test:integration
+npm run test:recovery
+npm run test:security
+npm run test:replay
+npm run test:chaos
+npm run build
+```
+
+真实 provider 行为不由一局戏剧性对话证明。基础设施正确性应由离线测试、重放、恢复和安全投影验证；真实模型运行用于验证工具遵循、长期行为和观战体验。
+
+## 当前限制
+
+- LLM 行为具有随机性；一局对话不能证明记忆、关系或欺骗机制具有稳定因果效果。
+- SocialAct、belief、commitment 和 deception 的覆盖率取决于模型是否正确调用结构化工具；空记录不会被 UI 伪造。
+- 上下文压缩保存来源化摘要，不保存或展示原始 chain-of-thought。
+- 归档公开视图与 operator 法证数据分离；不要把本地 `data/` 目录当作可公开发布的演示包。
+- README 只描述当前代码路径；更完整的目标状态与完成标准见 `AGENTS.md`。
 
 ## 技术栈
 
-- **前端**：React 19、Vite、Tailwind CSS 4、shadcn/ui、Radix、lucide-react、Geist
-- **后端**：Express 5、Server-Sent Events
-- **AI 运行时**：OpenAI Agents SDK（`@openai/agents`）
-- **校验**：Zod
+- React 19、Vite 8、Tailwind CSS 4
+- shadcn/ui、Radix UI、lucide-react、Geist
+- Express 5、Server-Sent Events
+- OpenAI Agents SDK、OpenAI-compatible Chat Completions
+- TypeScript、Zod、Vitest
 
-## 研究基础
+## 文档与贡献
 
-Society 的每一项设计都有可核实的同行评审研究背书——详见 `docs/research/agent-social-runtime.md`、`docs/research/llm-social-agents-sota.md` 与 `docs/research/frontier-synthesis.md`：
-
-- **记忆与反思**：Park et al., *Generative Agents*（arXiv:2304.03442）
-- **大规模社会仿真**：*AgentSociety*（arXiv:2502.08691）
-- **意图驱动的谈判语言**：Bakhtin et al., *Cicero*（arXiv:2210.05492）
-- **社会智能评测**：Zhou et al., *SOTOPIA*（arXiv:2310.11667）
-- **隐藏身份博弈**：Xu et al.（arXiv:2309.04658）、Chi et al., *AMONGAGENTS*（arXiv:2407.16521）、Guo et al., *Suspicion-Agent*（arXiv:2309.17277）
-- **身份信念的贝叶斯推断**：*Bayesian Social Deduction with Graph-Informed Language Models*（arXiv:2506.17788）
-- **高阶心智理论**：Street et al.（arXiv:2405.18870）、Lupu et al., *Decrypto*（arXiv:2506.20664）、*ToMATO*（AAAI 2025）
-- **人格与行为**：Noh & Chang（arXiv:2405.05248）、Huang et al., *PsychoBench*（arXiv:2310.01386）、Lee et al., *TRAIT*（arXiv:2406.14703）
-- **情绪的结构化评估**：Bhattacharyya et al.（arXiv:2508.05880）
-- **欺骗的工程化**：Taylor & Bergen（arXiv:2504.00285）、Fontana et al.（arXiv:2406.13605）、*When Thinking LLMs Lie*（arXiv:2506.04909）
-- **行为博弈论与 LLM**：*Playing repeated games with large language models*（Nature Human Behaviour, 2025）、*Rethinking Prospect Theory for LLMs*（arXiv:2508.08992）
-- **动态对话调度**：*Who Speaks Next?*（arXiv:2412.04937）、*Think-Before-Speak*（arXiv:2606.03137）
-- **情感记忆架构**：*PsychoAgent*（arXiv:2608.07438）
-
-研究也告诉我们：大模型默认过度合作、自发欺骗很弱。Society 的回应不是用全局提示词强迫所有角色多疑或背叛——共享协议提示保持中性（身份连续性、信息边界、工具协议、沉默权），欺骗与信任由人物、激励、关系与历史自然产生；在信任博弈中，公开承诺通过工具登记为世界账本并在结算时对账，履约与背弃都有据可查。
-
-## 参与贡献
-
-见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。新增世界遵循 `docs/architecture.md` 中的指南；产品设计依据见 `docs/design-system-report.md`。
+- 工程不变量与完成标准：[AGENTS.md](AGENTS.md)
+- 欺骗与信念建模路线：[game_agent_deception_strategy_frontier.md](game_agent_deception_strategy_frontier.md)
+- 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
+- 安全策略：[SECURITY.md](SECURITY.md)
 
 ## 许可证
 

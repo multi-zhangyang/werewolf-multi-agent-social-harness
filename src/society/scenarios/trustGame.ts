@@ -188,7 +188,7 @@ export class TrustGameWorld extends SocialWorldBase {
         proposition: z.string().min(1).max(400),
         actionType: z.enum(["return-at-least", "invest-at-least"]),
         amount: z.number().int().min(0).max(this.endowment * this.multiplier),
-        condition: z.string().min(1).max(400).optional()
+        condition: z.string().min(1).max(400).nullable().default(null)
       }).strict(),
       execute: async (input, runContext) => {
         const context = scopedContext(runContext, actorId);
@@ -203,8 +203,8 @@ export class TrustGameWorld extends SocialWorldBase {
       parameters: z.object({
         amount: z.number().int().min(0).max(this.endowment),
         reason: z.string().min(1).max(2_000),
-        referencedCommitmentIds: z.array(z.string()).max(3).optional(),
-        beliefPropositions: z.array(z.string().min(1).max(400)).max(3).optional()
+        referencedCommitmentIds: z.array(z.string()).max(3).nullable().default(null),
+        beliefPropositions: z.array(z.string().min(1).max(400)).max(3).nullable().default(null)
       }).strict(),
       execute: async ({ amount, reason, referencedCommitmentIds, beliefPropositions }, runContext) => {
         const context = scopedContext(runContext, actorId);
@@ -219,8 +219,8 @@ export class TrustGameWorld extends SocialWorldBase {
       parameters: z.object({
         amount: z.number().int().min(0),
         reason: z.string().min(1).max(2_000),
-        referencedCommitmentIds: z.array(z.string()).max(3).optional(),
-        beliefPropositions: z.array(z.string().min(1).max(400)).max(3).optional()
+        referencedCommitmentIds: z.array(z.string()).max(3).nullable().default(null),
+        beliefPropositions: z.array(z.string().min(1).max(400)).max(3).nullable().default(null)
       }).strict(),
       execute: async ({ amount, reason, referencedCommitmentIds, beliefPropositions }, runContext) => {
         const context = scopedContext(runContext, actorId);
@@ -311,6 +311,7 @@ export class TrustGameWorld extends SocialWorldBase {
         schemaVersion: 1
       };
       this.commitments.push(commitment);
+      this.recordSocialCommitment(commitment);
       for (const id of this.profiles.keys()) {
         this.pushEvent(id, {
           type: "commitment-proposed",
@@ -576,6 +577,7 @@ export class TrustGameWorld extends SocialWorldBase {
       commitment.state = fulfilled ? "fulfilled" : "violated";
       commitment.settledAtTurn = this.round;
       commitment.settledByCommandId = commitment.promisedAction.actionType === "return-at-least" ? this.returnCommandId : this.investmentCommandId;
+      this.settleSocialCommitment(commitment);
       for (const id of this.profiles.keys()) {
         this.pushEvent(id, {
           type: fulfilled ? "commitment-fulfilled" : "commitment-violated",

@@ -59,7 +59,7 @@ async function main() {
       modelProfileIds: roster,
       rounds: Math.max(meta.minRounds, Math.min(rounds, meta.maxRounds)),
       mode: "ai",
-      reasoningEffort: "low",
+      reasoningEffort: process.env.DEMO_REASONING_EFFORT ?? "xhigh",
       ...(players > 0 ? { players } : {})
     });
     const roomId = created.room.id;

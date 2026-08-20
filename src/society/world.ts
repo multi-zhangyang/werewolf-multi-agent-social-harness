@@ -21,6 +21,16 @@ import type {
   WorldSnapshot
 } from "./contracts";
 import type { Tool } from "@openai/agents";
+import { SocialCausalityLedger } from "./social/ledger";
+import type {
+  BeliefSelfReportInput,
+  BeliefUpdateRecord,
+  DeceptionEpisode,
+  DeceptionPlanInput,
+  SocialActDeclaration,
+  SocialCausalityProjection,
+  SocialCausalityState
+} from "./social/contracts";
 
 /**
  * Serializable world state for restart recovery (P3). The base class owns the
@@ -36,6 +46,7 @@ export interface WorldSerializedState {
     messages: SocialMessage[];
     log: WorldLogEntry[];
     pendingEvents: Array<[string, SocialEvent[]]>;
+    socialCausality?: SocialCausalityState;
   };
   world: unknown;
 }
@@ -49,6 +60,7 @@ export abstract class SocialWorldBase implements SocialWorld {
   protected readonly messages: SocialMessage[] = [];
   protected readonly log: WorldLogEntry[] = [];
   protected readonly pendingEvents = new Map<string, SocialEvent[]>();
+  protected readonly socialCausality: SocialCausalityLedger;
   protected status: WorldSnapshot["status"] = "lobby";
   protected listeners = new Set<(snapshot: WorldSnapshot) => void>();
 
@@ -70,6 +82,7 @@ export abstract class SocialWorldBase implements SocialWorld {
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[]) {
     this.roomId = roomId;
     this.scenario = scenario;
+    this.socialCausality = new SocialCausalityLedger(roomId);
     this.profiles = new Map(profiles.map((profile) => [profile.id, structuredClone(profile)]));
     for (const profile of profiles) this.statuses.set(profile.id, "lobby");
   }
@@ -95,7 +108,8 @@ export abstract class SocialWorldBase implements SocialWorld {
         statuses: [...this.statuses.entries()],
         messages: structuredClone(this.messages),
         log: structuredClone(this.log),
-        pendingEvents: [...this.pendingEvents.entries()].map(([id, events]) => [id, structuredClone(events)] as [string, SocialEvent[]])
+        pendingEvents: [...this.pendingEvents.entries()].map(([id, events]) => [id, structuredClone(events)] as [string, SocialEvent[]]),
+        socialCausality: this.socialCausality.exportState()
       },
       world: this.exportWorldState()
     };
@@ -115,6 +129,7 @@ export abstract class SocialWorldBase implements SocialWorld {
     this.log.push(...structuredClone(state.shared.log));
     this.pendingEvents.clear();
     for (const [id, events] of state.shared.pendingEvents) this.pendingEvents.set(id, structuredClone(events));
+    this.socialCausality.restoreState(state.shared.socialCausality);
     this.restoreWorldState(state.world);
   }
 
@@ -137,7 +152,10 @@ export abstract class SocialWorldBase implements SocialWorld {
         ...(roleVisible && observerRole ? { observerRole } : {})
       };
     });
-    const details = this.redactDetails(raw.details, actorId);
+    const details = {
+      ...this.redactDetails(raw.details, actorId),
+      socialCausality: this.socialCausalityFor(actorId)
+    };
     const messages = actorId
       ? this.visibleMessages(actorId).slice(-120)
       : this.messages.slice(-120);
@@ -190,6 +208,14 @@ export abstract class SocialWorldBase implements SocialWorld {
       // otherwise the gate assigns one.
       commit = { ...raw, commandId: raw.commandId ?? randomUUID() };
     }
+    this.socialCausality.recordAction({
+      actorId,
+      characterId: this.requireProfile(actorId).characterId,
+      action,
+      payload,
+      commit,
+      ...(this.activeActivationId ? { activationId: this.activeActivationId } : {})
+    });
     this.recentReceipts.set(receiptKey, structuredClone(commit));
     if (this.recentReceipts.size > SocialWorldBase.RECENT_RECEIPT_LIMIT) {
       const oldest = this.recentReceipts.keys().next().value;
@@ -250,9 +276,47 @@ export abstract class SocialWorldBase implements SocialWorld {
     return [];
   }
 
+  protected recordSocialCommitment(commitment: Commitment): void {
+    this.socialCausality.recordCommitment(commitment, [...this.profiles.keys()]);
+  }
+
+  protected settleSocialCommitment(commitment: Commitment): void {
+    this.socialCausality.settleCommitment(commitment, [...this.profiles.keys()]);
+  }
+
   /** Scenarios with decision records override this (§5.4 / Phase 1). */
   decisionRecords(): DecisionRecord[] {
     return [];
+  }
+
+  socialCausalityFor(actorId?: string, omniscient = false): SocialCausalityProjection {
+    const characterId = actorId ? this.requireProfile(actorId).characterId : undefined;
+    return this.socialCausality.project({
+      ...(actorId ? { actorId } : {}),
+      ...(characterId ? { characterId } : {}),
+      ...(omniscient ? { omniscient: true } : {})
+    });
+  }
+
+  recordBeliefUpdate(actorId: string, input: BeliefSelfReportInput): BeliefUpdateRecord {
+    const profile = this.requireProfile(actorId);
+    const visibleMessageIds = new Set(this.visibleMessages(actorId).map((message) => message.id));
+    for (const messageId of input.sourceMessageIds ?? []) {
+      if (!visibleMessageIds.has(messageId)) {
+        throw new Error(`BELIEF_SOURCE_NOT_VISIBLE: '${messageId}' is not visible to '${actorId}'.`);
+      }
+    }
+    return this.socialCausality.recordBeliefUpdate(actorId, profile.characterId, input);
+  }
+
+  recordDeceptionPlan(actorId: string, input: DeceptionPlanInput): DeceptionEpisode {
+    const profile = this.requireProfile(actorId);
+    const targets = [...new Set(input.targetActorIds)];
+    for (const target of targets) {
+      this.requireProfile(target);
+      if (target === actorId) throw new Error("DECEPTION_TARGET_INVALID: An actor cannot target itself.");
+    }
+    return this.socialCausality.recordDeceptionPlan(actorId, profile.characterId, { ...input, targetActorIds: targets });
   }
 
   /** Queue a structured social event for one participant's appraisal engine. */
@@ -275,6 +339,7 @@ export abstract class SocialWorldBase implements SocialWorld {
     text: string;
     recipientIds?: string[];
     replyTo?: string;
+    socialActs?: SocialActDeclaration[];
   }): Promise<SocialMessage> {
     const sender = this.requireProfile(input.senderId);
     const text = input.text.trim();
@@ -295,6 +360,12 @@ export abstract class SocialWorldBase implements SocialWorld {
       ...(input.replyTo ? { replyTo: input.replyTo } : {}),
       ...(this.messageWave() === undefined ? {} : { wave: this.messageWave() })
     };
+    this.socialCausality.recordMessage({
+      message,
+      declarations: input.socialActs ?? [],
+      allActorIds: [...this.profiles.keys()],
+      characterIdFor: (actorId) => this.requireProfile(actorId).characterId
+    });
     this.messages.push(message);
     if (this.messages.length > 500) this.messages.splice(0, this.messages.length - 500);
     this.emitUpdate();
@@ -422,14 +493,16 @@ export abstract class SocialWorldBase implements SocialWorld {
       previous.at = new Date().toISOString();
       return;
     }
-    this.log.push({
+    const entry: WorldLogEntry = {
       id: randomUUID(),
       text,
       turn,
       phase: this.currentPhase(),
       at: new Date().toISOString(),
       ...(beat ? { beat } : {})
-    });
+    };
+    this.log.push(entry);
+    this.socialCausality.recordWorldLog(entry);
     this.emitUpdate();
   }
 
@@ -490,6 +563,7 @@ function parseMessagePayload(payload: unknown): {
   channel: SocialChannel;
   recipientIds?: string[];
   replyTo?: string;
+  socialActs?: SocialActDeclaration[];
 } {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("MESSAGE_PAYLOAD_INVALID: Provide text, channel and optional recipientIds.");
@@ -510,12 +584,80 @@ function parseMessagePayload(payload: unknown): {
   if (value.replyTo !== undefined && typeof value.replyTo !== "string") {
     throw new Error("MESSAGE_REPLY_INVALID: replyTo must be a message id.");
   }
+  const socialActs = parseSocialActDeclarations(value.socialActs);
   return {
     text: value.text,
     channel,
     ...(recipients.length ? { recipientIds: recipients } : {}),
-    ...(typeof value.replyTo === "string" ? { replyTo: value.replyTo } : {})
+    ...(typeof value.replyTo === "string" ? { replyTo: value.replyTo } : {}),
+    ...(socialActs.length ? { socialActs } : {})
   };
+}
+
+const SOCIAL_ACT_KINDS = new Set<SocialActDeclaration["kind"]>([
+  "assertion", "denial", "question", "answer", "promise", "offer", "acceptance", "rejection",
+  "request", "threat", "accusation", "defense", "apology", "alliance-proposal", "disclosure",
+  "endorsement", "warning", "silence"
+]);
+
+const PROPOSITION_KINDS = new Set([
+  "world-state", "identity", "past-action", "future-action", "preference", "intention",
+  "relationship", "norm", "evaluation"
+]);
+
+function parseSocialActDeclarations(value: unknown): SocialActDeclaration[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 6) {
+    throw new Error("SOCIAL_ACTS_INVALID: socialActs must be an array with at most 6 declarations.");
+  }
+  return value.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error(`SOCIAL_ACT_INVALID: socialActs[${index}] must be an object.`);
+    }
+    const entry = raw as Record<string, unknown>;
+    if (typeof entry.kind !== "string" || !SOCIAL_ACT_KINDS.has(entry.kind as SocialActDeclaration["kind"])) {
+      throw new Error(`SOCIAL_ACT_KIND_INVALID: socialActs[${index}].kind is not supported.`);
+    }
+    const targets = entry.targetActorIds ?? [];
+    if (!Array.isArray(targets) || targets.length > 20 || targets.some((target) => typeof target !== "string")) {
+      throw new Error(`SOCIAL_ACT_TARGETS_INVALID: socialActs[${index}].targetActorIds must contain participant ids.`);
+    }
+    let proposition: SocialActDeclaration["proposition"];
+    if (entry.proposition !== undefined) {
+      if (!entry.proposition || typeof entry.proposition !== "object" || Array.isArray(entry.proposition)) {
+        throw new Error(`SOCIAL_ACT_PROPOSITION_INVALID: socialActs[${index}].proposition must be an object.`);
+      }
+      const candidate = entry.proposition as Record<string, unknown>;
+      if (typeof candidate.predicate !== "string" || !candidate.predicate.trim() || candidate.predicate.length > 500) {
+        throw new Error(`SOCIAL_ACT_PREDICATE_INVALID: socialActs[${index}].proposition.predicate is required.`);
+      }
+      if (candidate.kind !== undefined && (typeof candidate.kind !== "string" || !PROPOSITION_KINDS.has(candidate.kind))) {
+        throw new Error(`SOCIAL_ACT_PROPOSITION_KIND_INVALID: socialActs[${index}].proposition.kind is not supported.`);
+      }
+      if (candidate.subjectId !== undefined && typeof candidate.subjectId !== "string") {
+        throw new Error(`SOCIAL_ACT_SUBJECT_INVALID: socialActs[${index}].proposition.subjectId must be a string.`);
+      }
+      proposition = {
+        ...(typeof candidate.kind === "string" ? { kind: candidate.kind as NonNullable<SocialActDeclaration["proposition"]>["kind"] } : {}),
+        ...(typeof candidate.subjectId === "string" ? { subjectId: candidate.subjectId } : {}),
+        predicate: candidate.predicate.trim(),
+        ...(candidate.object === undefined ? {} : { object: structuredClone(candidate.object) })
+      };
+    }
+    if (entry.confidence !== undefined && (typeof entry.confidence !== "number" || !Number.isFinite(entry.confidence) || entry.confidence < 0 || entry.confidence > 1)) {
+      throw new Error(`SOCIAL_ACT_CONFIDENCE_INVALID: socialActs[${index}].confidence must be between 0 and 1.`);
+    }
+    if (entry.deceptionId !== undefined && typeof entry.deceptionId !== "string") {
+      throw new Error(`SOCIAL_ACT_DECEPTION_INVALID: socialActs[${index}].deceptionId must be a deception id.`);
+    }
+    return {
+      kind: entry.kind as SocialActDeclaration["kind"],
+      ...(targets.length ? { targetActorIds: [...new Set(targets as string[])] } : {}),
+      ...(proposition ? { proposition } : {}),
+      ...(typeof entry.confidence === "number" ? { confidence: entry.confidence } : {}),
+      ...(typeof entry.deceptionId === "string" ? { deceptionId: entry.deceptionId } : {})
+    };
+  });
 }
 
 export function contextFromRunContext(

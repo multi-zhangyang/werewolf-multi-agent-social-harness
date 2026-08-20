@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Activity, BarChart3, BrainCircuit, Clapperboard, Crosshair, Flame, History, ListOrdered, MessageSquare, Network, Radio, Sparkles, Wrench } from "lucide-react";
+import { Activity, BarChart3, BrainCircuit, Clapperboard, Crosshair, Flame, GitBranch, History, ListOrdered, MessageSquare, Network, Radio, Sparkles, Wrench } from "lucide-react";
 import type { ScenarioId, WorldSnapshot } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
+import type { SocialCausalityProjection } from "@/society/social/contracts";
+import { Badge } from "@/components/ui/badge";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import type { RoomConnection, TimelineEntry } from "./use-room";
 import { AgentAvatar, StatusDot, StatusLabel, eventLabel, roleLabelZh } from "./shared";
 import { RelationshipNetwork } from "./network";
 import { timelineContextAround } from "@/society/spectator/projection";
+import { toast } from "sonner";
 
 interface DiscussionState {
   wave: number;
@@ -25,9 +29,10 @@ interface SuspicionState {
 export function WorldPanel({ room, toolCalls = [], timeline = [], onJumpToAt }: { room: SocietyRoomSnapshot; toolCalls?: RoomConnection["toolCalls"]; timeline?: TimelineEntry[]; onJumpToAt?: (at: string) => void }): ReactNode {
   const world = room.world;
   const names = new Map(world.agents.map((agent) => [agent.id, agent.displayName]));
+  const avatarSeeds = new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.characterId]));
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-3">
       <section>
         <div className="px-1 pb-3">
           <div className="flex items-center justify-between">
@@ -40,7 +45,7 @@ export function WorldPanel({ room, toolCalls = [], timeline = [], onJumpToAt }: 
               <StatusLabel status={world.status} />
             </span>
           </div>
-          <div className="mt-3 flex items-end justify-between">
+          <div className="mt-2 flex items-end justify-between">
             <div>
               <p className="text-lg font-semibold tracking-tight">{world.phase}</p>
               <p className="nums mt-1 font-mono text-xs text-muted-foreground/80">第 {world.turn} / {world.totalTurns} 轮</p>
@@ -54,30 +59,34 @@ export function WorldPanel({ room, toolCalls = [], timeline = [], onJumpToAt }: 
         <SuspicionPanel world={world} names={names} />
 
         <Tabs defaultValue="network">
-          <TabsList className="justify-start gap-1 bg-transparent p-0">
-            <TabsTrigger value="network" className="rounded-lg border border-transparent px-3 py-1 text-xs data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground">
-              <Network className="size-3.5" />
+          <TabsList className="grid h-auto w-full grid-cols-4 gap-1 bg-transparent p-0">
+            <TabsTrigger value="network">
+              <Network />
               关系
             </TabsTrigger>
-            <TabsTrigger value="scores" className="rounded-lg border border-transparent px-3 py-1 text-xs data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground">
-              <BarChart3 className="size-3.5" />
+            <TabsTrigger value="scores">
+              <BarChart3 />
               战况
             </TabsTrigger>
-            <TabsTrigger value="activity" className="rounded-lg border border-transparent px-3 py-1 text-xs data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground">
-              <Radio className="size-3.5" />
+            <TabsTrigger value="activity">
+              <Radio />
               动态
             </TabsTrigger>
-            <TabsTrigger value="timeline" className="rounded-lg border border-transparent px-3 py-1 text-xs data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground">
-              <ListOrdered className="size-3.5" />
+            <TabsTrigger value="timeline">
+              <ListOrdered />
               时间线
             </TabsTrigger>
-            <TabsTrigger value="highlights" className="rounded-lg border border-transparent px-3 py-1 text-xs data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground">
-              <Sparkles className="size-3.5" />
+            <TabsTrigger value="highlights">
+              <Sparkles />
               高光
             </TabsTrigger>
-            <TabsTrigger value="history" className="rounded-lg border border-transparent px-3 py-1 text-xs data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground">
-              <History className="size-3.5" />
+            <TabsTrigger value="history">
+              <History />
               进程
+            </TabsTrigger>
+            <TabsTrigger value="causality">
+              <GitBranch />
+              因果
             </TabsTrigger>
           </TabsList>
           <TabsContent value="network" className="pt-3">
@@ -87,7 +96,7 @@ export function WorldPanel({ room, toolCalls = [], timeline = [], onJumpToAt }: 
             <ScoreCard world={world} />
           </TabsContent>
           <TabsContent value="activity" className="pt-3">
-            <ActivityCard toolCalls={toolCalls} names={names} />
+            <ActivityCard toolCalls={toolCalls} names={names} avatarSeeds={avatarSeeds} />
           </TabsContent>
           <TabsContent value="timeline" className="pt-3">
             <TimelineCard timeline={timeline} names={names} />
@@ -97,6 +106,9 @@ export function WorldPanel({ room, toolCalls = [], timeline = [], onJumpToAt }: 
           </TabsContent>
           <TabsContent value="history" className="pt-3">
             <HistoryCard world={world} names={names} scenarioId={room.scenarioId} />
+          </TabsContent>
+          <TabsContent value="causality" className="pt-3">
+            <CausalityCard room={room} />
           </TabsContent>
         </Tabs>
       </section>
@@ -359,7 +371,181 @@ function ScoreCard({ world }: { world: WorldSnapshot }): ReactNode {
   );
 }
 
-function ActivityCard({ toolCalls, names }: { toolCalls: RoomConnection["toolCalls"]; names: Map<string, string> }): ReactNode {
+interface ProjectedCommitment {
+  commitmentId: string;
+  promisorActorId: string;
+  proposition: string;
+  state: "proposed" | "fulfilled" | "violated" | "void";
+}
+
+function CausalityCard({ room }: { room: SocietyRoomSnapshot }): ReactNode {
+  const projection = room.world.details.socialCausality as SocialCausalityProjection | undefined;
+  const legacyCommitments = Array.isArray(room.world.details.commitments)
+    ? room.world.details.commitments.filter((entry): entry is ProjectedCommitment => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+        const value = entry as Record<string, unknown>;
+        return typeof value.commitmentId === "string"
+          && typeof value.promisorActorId === "string"
+          && typeof value.proposition === "string"
+          && ["proposed", "fulfilled", "violated", "void"].includes(String(value.state));
+      })
+    : [];
+  const commitments: ProjectedCommitment[] = projection?.commitments.length ? projection.commitments : legacyCommitments;
+  const actorNames = new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]));
+  const characterNames = new Map(room.participants.map((participant) => [participant.profile.characterId, participant.profile.displayName]));
+  const propositions = new Map((projection?.propositions ?? []).map((proposition) => [proposition.propositionId, proposition]));
+  const socialActs = (projection?.socialActs ?? []).slice(-5).reverse();
+  const beliefUpdates = (projection?.beliefUpdates ?? []).slice(-4).reverse();
+  const deceptions = (projection?.deceptions ?? []).slice(-3).reverse();
+  const decisions = (projection?.decisions ?? []).slice(-3).reverse();
+  const hasRecords = commitments.length + socialActs.length + beliefUpdates.length + deceptions.length + decisions.length > 0;
+
+  if (!hasRecords) {
+    return (
+      <Empty className="min-h-48">
+        <EmptyHeader>
+          <EmptyMedia variant="icon"><GitBranch /></EmptyMedia>
+          <EmptyTitle>等待第一条因果记录</EmptyTitle>
+          <EmptyDescription>消息、信念和绑定行动发生后，这里会显示来源与后果。</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-3 gap-1.5">
+        <CausalityMetric label="行为" value={projection?.socialActs.length ?? 0} />
+        <CausalityMetric label="信念" value={projection?.beliefUpdates.length ?? 0} />
+        <CausalityMetric label="决定" value={projection?.decisions.length ?? 0} />
+      </div>
+
+      {deceptions.length ? (
+        <CausalitySection title="欺骗生命周期" provenance="Agent 自述">
+          {deceptions.map((episode) => (
+            <div key={episode.deceptionId} className="rounded-md border border-border bg-card px-3 py-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <p className="truncate text-xs font-medium">{actorNames.get(episode.deceiverActorId) ?? episode.deceiverActorId}</p>
+                <Badge variant="outline">{deceptionStatusLabel(episode.status)}</Badge>
+              </div>
+              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                {episode.intendedFalseBeliefIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；") || episode.mode}
+              </p>
+              <p className="mt-1 font-mono text-[9px] text-muted-foreground/70">
+                消息 {episode.executionMessageIds.length} · 识破证据 {episode.detectionEventIds.length}
+              </p>
+            </div>
+          ))}
+        </CausalitySection>
+      ) : null}
+
+      {commitments.length ? (
+        <CausalitySection title="承诺结算" provenance="世界事实">
+          {commitments.slice(-4).reverse().map((commitment) => (
+            <div key={commitment.commitmentId} className="rounded-md border border-border bg-card px-3 py-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <p className="truncate text-xs font-medium">{actorNames.get(commitment.promisorActorId) ?? commitment.promisorActorId}</p>
+                <Badge variant={commitment.state === "violated" ? "destructive" : "outline"}>{commitmentStateLabel(commitment.state)}</Badge>
+              </div>
+              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{commitment.proposition}</p>
+            </div>
+          ))}
+        </CausalitySection>
+      ) : null}
+
+      {beliefUpdates.length ? (
+        <CausalitySection title="信念变化" provenance="Agent 自述">
+          {beliefUpdates.map((belief) => (
+            <div key={belief.beliefUpdateId} className="rounded-md border border-border bg-card px-3 py-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <p className="truncate text-xs font-medium">{characterNames.get(belief.ownerCharacterId) ?? belief.ownerCharacterId}</p>
+                <span className="font-mono text-[10px] text-muted-foreground">{Math.round(belief.beforeProbability * 100)} → {Math.round(belief.afterProbability * 100)}%</span>
+              </div>
+              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{propositions.get(belief.propositionId)?.predicate ?? belief.propositionId}</p>
+              <p className="mt-1 font-mono text-[9px] text-muted-foreground/70">置信 {Math.round(belief.confidence * 100)}% · 证据 {belief.addedEvidenceIds.length}</p>
+            </div>
+          ))}
+        </CausalitySection>
+      ) : null}
+
+      {socialActs.length ? (
+        <CausalitySection title="消息行为" provenance="消息主张">
+          {socialActs.map((act) => (
+            <div key={act.socialActId} className="flex items-start gap-2 rounded-md border border-border bg-card px-3 py-2.5">
+              <Badge variant="secondary">{socialActLabel(act.kind)}</Badge>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-medium">{actorNames.get(act.actorId) ?? act.actorId}</p>
+                <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                  {act.propositionIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；") || `面向 ${act.audienceActorIds.length} 人`}
+                </p>
+              </div>
+            </div>
+          ))}
+        </CausalitySection>
+      ) : null}
+
+      {decisions.length ? (
+        <CausalitySection title="绑定决定" provenance="Agent 自述">
+          {decisions.map((decision) => (
+            <div key={decision.decisionId} className="rounded-md border border-border bg-card px-3 py-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <p className="truncate text-xs font-medium">{actorNames.get(decision.actorId) ?? decision.actorId}</p>
+                <Badge variant="outline">{eventLabel(decision.action)}</Badge>
+              </div>
+              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{decision.selectedIntent.summary}</p>
+            </div>
+          ))}
+        </CausalitySection>
+      ) : null}
+    </div>
+  );
+}
+
+function CausalityMetric({ label, value }: { label: string; value: number }): ReactNode {
+  return (
+    <div className="rounded-md border border-border bg-card px-2.5 py-2">
+      <p className="font-mono text-base text-foreground">{String(value).padStart(2, "0")}</p>
+      <p className="text-[10px] text-muted-foreground">{label}</p>
+    </div>
+  );
+}
+
+function CausalitySection({ title, provenance, children }: { title: string; provenance: string; children: ReactNode }): ReactNode {
+  return (
+    <section className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between px-0.5">
+        <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">{title}</p>
+        <Badge variant="outline">{provenance}</Badge>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function socialActLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    assertion: "主张", denial: "否认", question: "提问", answer: "回应", promise: "承诺",
+    offer: "提议", acceptance: "接受", rejection: "拒绝", request: "请求", threat: "威胁",
+    accusation: "指控", defense: "辩护", apology: "道歉", "alliance-proposal": "结盟",
+    disclosure: "披露", endorsement: "背书", warning: "警告", silence: "沉默"
+  };
+  return labels[kind] ?? kind;
+}
+
+function deceptionStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    planned: "计划中", attempted: "已执行", received: "已接收", believed: "已相信",
+    "behaviorally-effective": "已影响行动", failed: "未奏效", abandoned: "已放弃",
+    detected: "已识破", repaired: "已修复"
+  };
+  return labels[status] ?? status;
+}
+
+function commitmentStateLabel(state: ProjectedCommitment["state"]): string {
+  return state === "proposed" ? "待结算" : state === "fulfilled" ? "已履约" : state === "violated" ? "已违约" : "已作废";
+}
+
+function ActivityCard({ toolCalls, names, avatarSeeds }: { toolCalls: RoomConnection["toolCalls"]; names: Map<string, string>; avatarSeeds: Map<string, string> }): ReactNode {
   if (!toolCalls.length) {
     return (
       <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-xs text-muted-foreground/80">
@@ -372,7 +558,7 @@ function ActivityCard({ toolCalls, names }: { toolCalls: RoomConnection["toolCal
     <div className="space-y-0.5 rounded-lg border border-border bg-card p-1.5">
       {toolCalls.slice(0, 20).map((call, index) => (
         <div key={`${call.at}-${index}`} className="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
-          <AgentAvatar name={call.actorName || names.get(call.actorId) || call.actorId} index={indexOf(call.actorId)} size="sm" />
+          <AgentAvatar name={call.actorName || names.get(call.actorId) || call.actorId} index={indexOf(call.actorId)} seed={avatarSeeds.get(call.actorId)} size="sm" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-muted-foreground">
               <span className="font-medium text-foreground/90">{names.get(call.actorId) ?? call.actorId}</span>
@@ -625,7 +811,6 @@ function roundLabel(entry: Record<string, unknown>): string {
 /** Cinematic beat: dim the stage for a second and announce the latest outcome. */
 function BeatOverlay({ world, names, scenarioId }: { world: WorldSnapshot; names: Map<string, string>; scenarioId: ScenarioId }): ReactNode {
   const history = (world.details.history ?? []) as Array<Record<string, unknown>>;
-  const [beat, setBeat] = useState<string | null>(null);
   const seenRef = useRef<number>(0);
 
   useEffect(() => {
@@ -636,21 +821,10 @@ function BeatOverlay({ world, names, scenarioId }: { world: WorldSnapshot; names
     if (!latest) return;
     const text = beatText(latest, names, scenarioId);
     if (!text) return;
-    setBeat(text);
-    const timer = window.setTimeout(() => setBeat(null), 4_200);
-    return () => window.clearTimeout(timer);
+    toast(text, { id: `world-beat-${scenarioId}-${history.length}`, duration: 3_200 });
   }, [history, names, scenarioId, world]);
 
-  if (!beat || world.status === "finished") return null;
-  return (
-    <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" />
-      <div className="reveal-up relative mx-6 max-w-md rounded-xl border border-border bg-card px-10 py-8 text-center shadow-2xl shadow-black/10">
-        <Sparkles className="mx-auto size-5 text-amber-500" />
-        <p className="mt-3 text-lg font-medium leading-7 tracking-tight text-foreground">{beat}</p>
-      </div>
-    </div>
-  );
+  return null;
 }
 
 function beatText(entry: Record<string, unknown>, names: Map<string, string>, scenarioId: ScenarioId): string | null {

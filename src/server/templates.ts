@@ -26,13 +26,13 @@ const templateSchema = z.object({
   agentModelOverrides: z.record(z.string().min(1).max(4), z.string().min(1).max(120)).optional(),
   agentTuning: z.record(z.string().min(1).max(4), z.object({
     temperature: z.number().min(0).max(2).optional(),
-    reasoningEffort: z.enum(["low", "medium", "high"]).optional()
+    reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).optional()
   }).strict()).optional(),
   players: z.number().int().positive().max(12).optional(),
   characterIds: z.array(z.string().min(1).max(120)).max(12).optional(),
   rounds: z.number().int().positive().max(20).optional(),
   mode: z.enum(["ai", "human"]).default("ai"),
-  reasoningEffort: z.enum(["low", "medium", "high"]).default("low"),
+  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("xhigh"),
   season: z.enum(["season", "one-shot"]).default("season")
 }).strict();
 

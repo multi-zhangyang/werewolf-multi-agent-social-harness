@@ -271,7 +271,7 @@ function CharacterRow({ character, onCopy, onEdit, onDelete, busy }: {
   const index = Math.abs([...character.displayName].reduce((sum, char) => sum + (char.codePointAt(0) ?? 0), 0));
   return (
     <div className="flex items-start gap-2.5 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
-      <AgentAvatar name={character.displayName} index={index} size="sm" />
+      <AgentAvatar name={character.displayName} index={index} seed={character.id} size="sm" />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <p className="truncate text-sm font-semibold tracking-tight">{character.displayName}</p>

@@ -8,6 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue
@@ -40,7 +41,7 @@ export function ParticipantsRail({ participants, humanActorId, activity, onToggl
   const [selected, setSelected] = useState<SocietyParticipantCard | null>(null);
   const leaderId = [...participants].sort((left, right) => (right.score ?? -1) - (left.score ?? -1))[0]?.profile.id;
   return (
-    <div className="space-y-1.5">
+    <div className="flex flex-col gap-1">
       {participants.map((participant, index) => {
         const isHuman = humanActorId === participant.profile.id;
         const dead = !participant.alive;
@@ -49,28 +50,28 @@ export function ParticipantsRail({ participants, humanActorId, activity, onToggl
         const live = participant.status === "thinking" || participant.status === "acting" || participant.status === "speaking";
         const pressure = activity?.[participant.profile.id]?.pressure;
         return (
-          <button
+          <Button
             key={participant.profile.id}
+            variant={isHuman ? "secondary" : "ghost"}
             onClick={() => setSelected(participant)}
             className={cn(
-              "group relative w-full rounded-lg border border-transparent bg-card/60 px-3 py-2.5 text-left transition-all hover:border-border hover:bg-card",
+              "group relative h-auto w-full justify-start px-2 py-2 text-left",
               dead && "opacity-45",
-              isHuman && "border-border bg-card",
-              live && "border-emerald-400/40",
-              paused && "border-amber-400/40 bg-amber-400/5",
-              leader && "leader-wash"
+              live && "ring-1 ring-foreground/60",
+              paused && "opacity-60",
+              leader && "bg-muted/60"
             )}
           >
             <span
               className={cn(
                 "absolute inset-y-2 left-0 w-0.5 rounded-full transition-opacity",
-                live ? "bg-emerald-400 opacity-100" : paused ? "bg-amber-400 opacity-100" : "opacity-0"
+                live ? "bg-foreground opacity-100" : paused ? "bg-muted-foreground opacity-100" : "opacity-0"
               )}
               aria-hidden
             />
             <div className="flex items-center gap-2.5">
               <div className="relative">
-                <AgentPresence name={participant.profile.displayName} index={index} size="lg" status={dead ? "finished" : participant.status} />
+                <AgentPresence name={participant.profile.displayName} index={index} seed={participant.profile.characterId} size="lg" status={dead ? "finished" : participant.status} />
                 {dead ? (
                   <span className="absolute -bottom-1 -right-1 flex size-5 items-center justify-center rounded-full bg-background text-muted-foreground ring-1 ring-border">
                     <Skull className="size-3" />
@@ -81,16 +82,16 @@ export function ParticipantsRail({ participants, humanActorId, activity, onToggl
                 <div className="flex items-center gap-1.5">
                   <span className="truncate text-sm font-semibold tracking-tight">{participant.profile.displayName}</span>
                   {isHuman ? (
-                    <span className="rounded bg-foreground px-1.5 py-px text-[9px] font-bold text-background">你</span>
+                    <Badge>你</Badge>
                   ) : null}
                   {paused ? (
-                    <span className="rounded border border-amber-400/50 bg-amber-400/10 px-1.5 py-px text-[9px] font-medium text-amber-300">已暂停</span>
+                    <Badge variant="outline">暂停</Badge>
                   ) : null}
                   {participant.mind?.memories.some((memory) => memory.tags.includes("season")) ? (
-                    <span className="rounded border border-border bg-card px-1.5 py-px text-[9px] font-medium text-muted-foreground">老面孔</span>
+                    <Badge variant="outline">旧识</Badge>
                   ) : null}
                   {participant.role ? (
-                    <span className={cn("rounded border px-1.5 py-px text-[9px]", roleTintClass(participant.role))}>{participant.role}</span>
+                    <Badge variant="outline" className={roleTintClass(participant.role)}>{participant.role}</Badge>
                   ) : null}
                 </div>
                 <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -99,9 +100,9 @@ export function ParticipantsRail({ participants, humanActorId, activity, onToggl
                 </div>
                 {pressure && pressure.level !== "normal" ? (
                   <div className="mt-1 flex items-center gap-1.5" title={`上下文压力 ${Math.round(pressure.ratio * 100)}%（${pressure.current.toLocaleString()} / ${pressure.usable.toLocaleString()} tokens）`}>
-                    <Gauge className={cn("size-3", pressure.level === "hard-guard" ? "text-red-400" : pressure.level === "emergency" || pressure.level === "deep-compact" ? "text-orange-400" : "text-amber-400")} />
+                    <Gauge className="size-3 text-muted-foreground" />
                     <div className="h-1 w-20 overflow-hidden rounded-full bg-muted">
-                      <div className={cn("h-full rounded-full", pressure.level === "hard-guard" ? "bg-red-400" : pressure.level === "emergency" || pressure.level === "deep-compact" ? "bg-orange-400" : "bg-amber-400")} style={{ width: `${Math.min(100, Math.round(pressure.ratio * 100))}%` }} />
+                      <div className="h-full rounded-full bg-foreground" style={{ width: `${Math.min(100, Math.round(pressure.ratio * 100))}%` }} />
                     </div>
                     <span className="nums font-mono text-[9px]">{Math.round(pressure.ratio * 100)}%</span>
                   </div>
@@ -110,7 +111,7 @@ export function ParticipantsRail({ participants, humanActorId, activity, onToggl
               <div className="text-right">
                 {participant.score !== undefined ? (
                   <div className="nums flex items-center justify-end gap-1 font-mono text-base text-foreground">
-                    {leader ? <Crown className="size-3.5 text-amber-400" /> : null}
+                    {leader ? <Crown className="size-3.5 text-muted-foreground" /> : null}
                     {participant.score}
                   </div>
                 ) : null}
@@ -122,7 +123,7 @@ export function ParticipantsRail({ participants, humanActorId, activity, onToggl
                 ) : null}
               </div>
             </div>
-          </button>
+          </Button>
         );
       })}
       <MindSheet
@@ -191,7 +192,7 @@ function MindSheet({ participant, activity, roomPaused, roomId, onToggleAgentPau
           <>
             <SheetHeader className="border-b border-border/60">
               <div className="flex items-center gap-3">
-                <AgentPresence name={participant.profile.displayName} index={participant.profile.id.length} size="lg" status={participant.status} />
+                <AgentPresence name={participant.profile.displayName} index={participant.profile.id.length} seed={participant.profile.characterId} size="lg" status={participant.status} />
                 <div className="min-w-0">
                   <SheetTitle className="text-lg tracking-tight">{participant.profile.displayName}</SheetTitle>
                   <SheetDescription className="flex flex-wrap items-center gap-2">
@@ -227,10 +228,12 @@ function MindSheet({ participant, activity, roomPaused, roomId, onToggleAgentPau
                         <SelectValue placeholder={`当前：${participant.profile.model}`} />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="__none" disabled>当前：{participant.profile.model}</SelectItem>
-                        {modelProfiles.map((profile) => (
-                          <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
-                        ))}
+                        <SelectGroup>
+                          <SelectItem value="__none" disabled>当前：{participant.profile.model}</SelectItem>
+                          {modelProfiles.map((profile) => (
+                            <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
+                          ))}
+                        </SelectGroup>
                       </SelectContent>
                     </Select>
                     <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">

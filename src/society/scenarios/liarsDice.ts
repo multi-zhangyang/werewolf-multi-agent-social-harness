@@ -180,8 +180,8 @@ export class LiarsDiceWorld extends SocialWorldBase {
       ].join("\n"),
       parameters: z.object({
         move: z.enum(["bid", "challenge"]),
-        quantity: z.number().int().min(1).max(QUANTITY_CAP).optional(),
-        face: z.number().int().min(1).max(6).optional()
+        quantity: z.number().int().min(1).max(QUANTITY_CAP).nullable().default(null),
+        face: z.number().int().min(1).max(6).nullable().default(null)
       }).strict().superRefine((input, issueContext) => {
         if (input.move === "bid" && (input.quantity === undefined || input.face === undefined)) {
           issueContext.addIssue({ code: z.ZodIssueCode.custom, path: ["quantity"], message: "A bid needs both quantity and face." });

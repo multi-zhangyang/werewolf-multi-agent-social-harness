@@ -25,6 +25,7 @@ import {
   type Tool
 } from "@openai/agents";
 import { randomUUID } from "node:crypto";
+import OpenAI from "openai";
 import type {
   AgentBelief,
   AgentGoal,
@@ -41,6 +42,7 @@ import type {
   SocietyAgentRuntime
 } from "./contracts";
 import type { ResolvedModelConfig } from "./models";
+import { reasoningFallbackFetch } from "./models/reasoning-fallback";
 import { JsonSessionStore, defaultSessionDir } from "./persistence";
 import { clampUnit, decayMood, describeEmotions, describeNeeds, describeSocialEmotions, initialMood, refreshMood } from "./affect";
 import { appraiseEvents } from "./appraisal";
@@ -142,9 +144,12 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       emit: options.emit
     };
     const provider = options.provider ?? new OpenAIProvider({
-      apiKey: options.apiKey ?? apiKeyFromEnv(),
-      baseURL: options.baseURL ?? baseUrlFromEnv(),
-      useResponses: false
+      useResponses: false,
+      openAIClient: new OpenAI({
+        apiKey: options.apiKey ?? apiKeyFromEnv(),
+        baseURL: options.baseURL ?? baseUrlFromEnv(),
+        fetch: reasoningFallbackFetch()
+      })
     });
     this.contextManager = this.buildContextManager(provider, options.resolvedConfig);
     this.runner = new Runner({
@@ -250,11 +255,9 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       actorLabel: this.profile.displayName,
       ownerCharacterId: this.profile.characterId,
       getLogicalTime: () => this.context.world.snapshot().turn,
-      // Commitment / deception references arrive with the Phase 1 spine; the
-      // artifact always carries honest empties until then.
-      getSourceEventIds: () => [],
+      getSourceEventIds: () => this.context.world.socialCausalityFor(this.profile.id).events.slice(-24).map((event) => event.eventId),
       getOpenCommitmentIds: () => this.context.world.openCommitmentsFor(this.profile.id).map((commitment) => commitment.commitmentId),
-      getActiveDeceptionIds: () => [],
+      getActiveDeceptionIds: () => this.mind.deceptions.flatMap((plan) => plan.deceptionId ? [plan.deceptionId] : []),
       onArtifact: (artifact) => {
         this.lastSummaryArtifact = artifact;
       },
@@ -714,6 +717,7 @@ function initialMind(
     beliefs: (dossier?.beliefs ?? []).slice(0, 6).map((belief) => ({
       subjectId: belief.subjectId,
       proposition: belief.proposition,
+      probability: clamp(belief.confidence),
       confidence: clamp(belief.confidence),
       updatedAtTurn: 0,
       source: "previous games"
@@ -821,7 +825,11 @@ function validGoals(goals: AgentGoal[] | undefined): goals is AgentGoal[] {
 }
 
 function validBelief(belief: AgentBelief): boolean {
-  return typeof belief?.subjectId === "string" && typeof belief.proposition === "string" && typeof belief.confidence === "number" && Number.isFinite(belief.confidence);
+  return typeof belief?.subjectId === "string"
+    && typeof belief.proposition === "string"
+    && typeof belief.confidence === "number"
+    && Number.isFinite(belief.confidence)
+    && (belief.probability === undefined || (typeof belief.probability === "number" && Number.isFinite(belief.probability)));
 }
 
 function affectContext(mood: AgentMoodState): string {
@@ -1006,7 +1014,9 @@ export function protocolInstructions(): string[] {
     "Maintain your own goals, memory, beliefs about others, emotion, and relationships across turns.",
     "Promises in this world are social commitments people make with words and actions. Judge each one by the person, your relationship, and the evidence you have — never by a blanket rule. Record the promises that matter to you and revisit them when their conditions come due.",
     "You may cooperate, persuade, withhold information, challenge, repair trust, or deceive when your character and the situation justify it. How much you trust, concede, or hold back is yours to decide from your personality, relationships, and history.",
-    "If you plan a strategic deception, you may log it with log_deception_plan (type, audience, the belief you want them to hold, your cover story and your fallback) so you can keep it consistent across turns.",
+    "If you plan a strategic deception, log it before acting and cite the returned deceptionId on the exact communicate socialAct that executes it; this keeps the private episode tied to the real message without revealing the plan to its audience.",
+    "When a message clearly asserts, questions, accuses, offers, accepts, rejects, promises or apologizes, declare that meaning in communicate.socialActs. The original message remains authoritative; socialActs only record its structured social meaning.",
+    "When evidence changes a belief, update probability and confidence separately and cite visible source message IDs when available.",
     "In hidden-identity worlds, keep your role inferences as probabilities with update_role_hypotheses instead of bare hunches; renormalize when new evidence arrives.",
     "Your cognition is your own — one mind, one session. In high-stakes moments, perform brief internal passes and record each with its tool: reflect_on_social_situation for appraising incentives and options, read_the_room for what others want, believe and hide, plan_social_strategy for a concrete next step. These notes stay private and shape your later choices.",
     "Use at most one cognition pass per turn unless the situation is urgent; prefer acting once you have enough clarity.",

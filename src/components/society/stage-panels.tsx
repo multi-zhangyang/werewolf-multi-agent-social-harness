@@ -46,12 +46,14 @@ function historyOf(details: Details): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-function useNames(room: SocietyRoomSnapshot): { nameOf: (id: string) => string; indexOf: (id: string) => number } {
+function useNames(room: SocietyRoomSnapshot): { nameOf: (id: string) => string; indexOf: (id: string) => number; seedOf: (id: string) => string | undefined } {
   const names = new Map(room.participants.map((p) => [p.profile.id, p.profile.displayName]));
   const index = new Map(room.participants.map((p, i) => [p.profile.id, i]));
+  const seeds = new Map(room.participants.map((p) => [p.profile.id, p.profile.characterId]));
   return {
     nameOf: (id) => names.get(id) ?? id,
-    indexOf: (id) => index.get(id) ?? 0
+    indexOf: (id) => index.get(id) ?? 0,
+    seedOf: (id) => seeds.get(id)
   };
 }
 
@@ -121,7 +123,7 @@ function VoteHistory({ details, room }: { details: Details; room: SocietyRoomSna
 }
 
 function AvalonQuestBoard({ details, room }: { details: Details; room: SocietyRoomSnapshot }): ReactNode {
-  const { nameOf, indexOf } = useNames(room);
+  const { nameOf, indexOf, seedOf } = useNames(room);
   const successes = num(details, "successes") ?? 0;
   const failures = num(details, "failures") ?? 0;
   const team = stringList(details, "proposedTeam");
@@ -152,7 +154,7 @@ function AvalonQuestBoard({ details, room }: { details: Details; room: SocietyRo
           <span className="text-[10px] uppercase tracking-widest text-muted-foreground/60">队伍</span>
           {team.map((id) => (
             <span key={id} className="flex items-center gap-1 rounded-full border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[10px]">
-              <AgentAvatar name={nameOf(id)} index={indexOf(id)} size="sm" />
+              <AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} size="sm" />
               {nameOf(id)}
             </span>
           ))}
@@ -199,11 +201,11 @@ export function HiddenIdentityStage({ room }: { room: SocietyRoomSnapshot }): Re
  * ------------------------------------------------------------------ */
 
 function SideCard({ room, id, label, detail }: { room: SocietyRoomSnapshot; id: string; label: string; detail?: string }): ReactNode {
-  const { nameOf, indexOf } = useNames(room);
+  const { nameOf, indexOf, seedOf } = useNames(room);
   return (
     <div className="min-w-0 flex-1 rounded-xl border border-white/[0.07] bg-white/[0.015] px-3.5 py-3">
       <div className="flex items-center gap-2">
-        <AgentAvatar name={nameOf(id)} index={indexOf(id)} />
+        <AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} />
         <div className="min-w-0">
           <p className="truncate text-[13px] font-semibold tracking-tight">{nameOf(id)}</p>
           <p className="text-[10px] text-muted-foreground/75">{label}</p>
@@ -269,7 +271,7 @@ export function DuelStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
 
 export function RiskStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   const details = room.world.details as Details;
-  const { nameOf, indexOf } = useNames(room);
+  const { nameOf, indexOf, seedOf } = useNames(room);
   if (room.scenarioId === "liars-dice") {
     const lives = entries(details, "lives");
     return (
@@ -277,7 +279,7 @@ export function RiskStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
         <div className="flex flex-wrap gap-1.5">
           {Object.entries(lives).map(([id, livesLeft]) => (
             <span key={id} className={cn("flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]", livesLeft > 0 ? "border-white/[0.08] bg-white/[0.02] text-foreground/85" : "border-rose-400/30 bg-rose-400/[0.06] text-rose-300/80 line-through")}>
-              <AgentAvatar name={nameOf(id)} index={indexOf(id)} size="sm" />
+              <AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} size="sm" />
               {nameOf(id)}
               <span className="nums font-mono text-[10px] text-muted-foreground/75">{livesLeft} ❤</span>
             </span>
@@ -297,7 +299,7 @@ export function RiskStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
         <div className="space-y-1.5">
           {Object.entries(scores).map(([id, score]) => (
             <div key={id} className="flex items-center gap-2.5">
-              <AgentAvatar name={nameOf(id)} index={indexOf(id)} size="sm" />
+              <AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} size="sm" />
               <span className="w-12 shrink-0 truncate text-[11px] text-foreground/85">{nameOf(id)}</span>
               <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/[0.05]">
                 <div className="h-full rounded-full bg-gradient-to-r from-emerald-400/70 to-emerald-300/60 transition-all duration-700" style={{ width: `${Math.round((score / maxScore) * 100)}%` }} />
@@ -317,7 +319,7 @@ export function RiskStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
 
 export function SecretStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   const details = room.world.details as Details;
-  const { nameOf, indexOf } = useNames(room);
+  const { nameOf, indexOf, seedOf } = useNames(room);
   const pendingKey = room.scenarioId === "sealed-bid-auction" ? "pendingBids" : room.scenarioId === "public-goods" ? "pendingContributions" : "pendingChoices";
   const pending = stringList(details, pendingKey);
   const submittedIds = new Set(room.participants.map((p) => p.profile.id).filter((id) => !pending.includes(id)));
@@ -337,7 +339,7 @@ export function SecretStage({ room }: { room: SocietyRoomSnapshot }): ReactNode 
           const score = scoreOf(details, id);
           return (
             <div key={id} className={cn("flex items-center gap-2 rounded-lg border px-2.5 py-1.5", submitted ? "border-emerald-400/25 bg-emerald-400/[0.04]" : "border-white/[0.07] bg-white/[0.015]")}>
-              <AgentAvatar name={nameOf(id)} index={indexOf(id)} size="sm" />
+              <AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} size="sm" />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[11px] font-medium text-foreground/85">{nameOf(id)}</p>
                 <p className={cn("text-[10px]", submitted ? "text-emerald-300/80" : "text-muted-foreground/60")}>

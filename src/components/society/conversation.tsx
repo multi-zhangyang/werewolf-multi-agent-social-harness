@@ -35,6 +35,7 @@ export function Conversation({ room, activity, onAction, onReplay, jumpToAt }: C
   const [draft, setDraft] = useState("");
   const entries = useTimeline(room.world.messages, room.world.log);
   const names = useMemo(() => new Map(room.participants.map((p) => [p.profile.id, p.profile.displayName])), [room.participants]);
+  const avatarSeeds = useMemo(() => new Map(room.participants.map((p) => [p.profile.id, p.profile.characterId])), [room.participants]);
   const finished = room.world.status === "finished";
 
   useEffect(() => {
@@ -110,7 +111,7 @@ export function Conversation({ room, activity, onAction, onReplay, jumpToAt }: C
                 return (
                   <div key={entry.id} className="space-y-5" data-msg-at={Date.parse(entry.message.createdAt) || undefined}>
                     {waveTurn ? <WaveDivider wave={entry.message.wave ?? 1} /> : null}
-                    <MessageRow entry={entry} names={names} activity={activity} fresh={index >= entries.length - 3 && entry.message.turn === room.world.turn} />
+                    <MessageRow entry={entry} names={names} avatarSeeds={avatarSeeds} activity={activity} fresh={index >= entries.length - 3 && entry.message.turn === room.world.turn} />
                   </div>
                 );
               })
@@ -263,6 +264,7 @@ function CastingSlate({ room }: { room: SocietyRoomSnapshot }): ReactNode {
             key={participant.profile.id}
             name={participant.profile.displayName}
             index={index}
+            seed={participant.profile.characterId}
             size={index === 2 ? "lg" : "md"}
           />
         ))}
@@ -300,7 +302,7 @@ function LiveAgents({ room, activity }: {
         return (
           <div key={participant.profile.id} className="enter-stage overflow-hidden rounded-lg border border-border bg-card">
             <div className="flex items-center gap-3 px-4 py-3">
-              <AgentPresence name={participant.profile.displayName} index={indexOf(participant.profile.id)} size="md" status={participant.status} />
+              <AgentPresence name={participant.profile.displayName} index={indexOf(participant.profile.id)} seed={participant.profile.characterId} size="md" status={participant.status} />
               <div className="min-w-0 flex-1">
                 <p className="flex items-center gap-2 text-sm font-medium">
                   {participant.profile.displayName}
@@ -449,9 +451,10 @@ const BEATS: Record<StoryBeatKind, { label: string; icon: typeof Trophy; chip: s
   "hidden-role-revealed": { label: "身份揭晓", icon: VenetianMask, chip: "border-slate-400/30 bg-slate-400/5 text-slate-300/80", labelColor: "text-slate-300/60" }
 };
 
-function MessageRow({ entry, names, activity, fresh }: {
+function MessageRow({ entry, names, avatarSeeds, activity, fresh }: {
   entry: Extract<TimelineEntry, { kind: "message" }>;
   names: Map<string, string>;
+  avatarSeeds: Map<string, string>;
   activity: Record<string, LiveAgentActivity>;
   fresh: boolean;
 }): ReactNode {
@@ -460,7 +463,7 @@ function MessageRow({ entry, names, activity, fresh }: {
   const senderLive = Boolean(activity[message.senderId]?.text) && fresh;
   return (
     <div className={cn("group flex gap-3.5", fresh && "enter-stage")}>
-      <AgentAvatar name={message.senderName} index={indexOf(message.senderId)} />
+      <AgentAvatar name={message.senderName} index={indexOf(message.senderId)} seed={avatarSeeds.get(message.senderId)} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold tracking-tight">{message.senderName}</span>
@@ -469,7 +472,7 @@ function MessageRow({ entry, names, activity, fresh }: {
             <span className="flex items-center gap-1 text-muted-foreground/80">
               <span className="font-mono text-[10px]">{privateChat ? "私发给" : "对"}</span>
               {message.recipientIds.map((id) => (
-                <AgentAvatar key={id} name={names.get(id) ?? id} index={indexOf(id)} size="sm" />
+                <AgentAvatar key={id} name={names.get(id) ?? id} index={indexOf(id)} seed={avatarSeeds.get(id)} size="sm" />
               ))}
             </span>
           ) : null}

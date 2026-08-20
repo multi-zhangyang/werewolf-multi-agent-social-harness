@@ -32,19 +32,67 @@ export interface SocialToolkit {
   innerState: Tool<SocietyAgentContext>;
 }
 
+const socialActDeclarationSchema = z.object({
+  kind: z.enum([
+    "assertion", "denial", "question", "answer", "promise", "offer", "acceptance", "rejection",
+    "request", "threat", "accusation", "defense", "apology", "alliance-proposal", "disclosure",
+    "endorsement", "warning"
+  ]),
+  targetActorIds: z.array(z.string().min(1)).max(8).default([]),
+  proposition: z.object({
+    kind: z.enum([
+      "world-state", "identity", "past-action", "future-action", "preference", "intention",
+      "relationship", "norm", "evaluation"
+    ]).nullable().default(null),
+    subjectId: z.string().min(1).nullable().default(null),
+    predicate: z.string().min(1).max(500),
+    object: z.string().max(500).nullable().default(null)
+  }).strict().nullable().default(null),
+  confidence: z.number().min(0).max(1).default(1),
+  deceptionId: z.string().min(1).max(160).nullable().default(null)
+}).strict();
+
 export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
   const communicate = tool({
     name: "communicate",
-    description: "Send one observable message to other participants. Use public for everyone, private with recipientIds for selected participants, or team only when the scenario grants a team channel. This changes what other agents can observe.",
+    description: [
+      "Send one observable message to other participants. Use public for everyone, private with recipientIds for selected participants, or team only when the scenario grants a team channel.",
+      "Optionally declare the concrete social acts this exact message performs (claim, question, accusation, offer, promise, acceptance, etc.). These declarations interpret the message but never replace its original text and never change binding world state.",
+      "A promise declaration is only communicated speech; when a scenario exposes a commitment tool, use that tool for a promise the world can settle.",
+      "If this message executes a private deception plan, cite the deceptionId returned by log_deception_plan on the relevant social act."
+    ].join("\n"),
     parameters: z.object({
       text: z.string().min(1).max(4_000),
       channel: z.enum(["public", "private", "team"]).default("public"),
       recipientIds: z.array(z.string().min(1)).max(8).default([]),
-      replyTo: z.string().max(120).optional()
+      replyTo: z.string().max(120).nullable().default(null),
+      socialActs: z.array(socialActDeclarationSchema).max(6).default([])
     }).strict(),
-    execute: async ({ text, channel, recipientIds, replyTo }, runContext) => {
+    execute: async ({ text, channel, recipientIds, replyTo, socialActs }, runContext) => {
       const ctx = scopedContext(runContext, context.actorId, context);
-      const commit = await ctx.world.performAction(ctx.actorId, "communicate", { text, channel, recipientIds, replyTo });
+      const declarations = socialActs.map((act) => ({
+        kind: act.kind,
+        ...(act.targetActorIds.length ? { targetActorIds: act.targetActorIds } : {}),
+        ...(act.proposition
+          ? {
+              proposition: {
+                ...(act.proposition.kind ? { kind: act.proposition.kind } : {}),
+                ...(act.proposition.subjectId ? { subjectId: act.proposition.subjectId } : {}),
+                predicate: act.proposition.predicate,
+                ...(act.proposition.object === null ? {} : { object: act.proposition.object })
+              }
+            }
+          : {}),
+        confidence: act.confidence,
+        ...(act.deceptionId ? { deceptionId: act.deceptionId } : {})
+      }));
+      const commit = await ctx.world.performAction(ctx.actorId, "communicate", {
+        text,
+        channel,
+        recipientIds,
+        ...(replyTo ? { replyTo } : {}),
+        socialActs: declarations
+      });
       emitWorldAction(ctx, commit.action, commit.detail);
       return commit.result;
     }
@@ -99,20 +147,42 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
     parameters: z.object({
       type: z.enum(["lying", "bluff", "paltering", "omission", "false-promise"]),
       targetIds: z.array(z.string().min(1)).max(8),
+      truePropositions: z.array(z.string().min(1).max(1_000)).max(6).default([]),
       intendedBelief: z.string().min(1).max(1_000),
       coverStory: z.string().min(1).max(1_000),
-      fallback: z.string().min(1).max(1_000)
+      fallback: z.string().min(1).max(1_000),
+      motive: z.string().min(1).max(500).nullable().default(null),
+      expectedGain: z.string().min(1).max(500).nullable().default(null),
+      perceivedDetectionRisk: z.number().min(0).max(1).nullable().default(null)
     }).strict(),
     execute: async (input, runContext) => {
       const ctx = scopedContext(runContext, context.actorId, context);
+      const episode = ctx.world.recordDeceptionPlan(ctx.actorId, {
+        mode: input.type === "lying" ? "direct-lie"
+          : input.type === "bluff" ? "false-implication"
+            : input.type === "paltering" ? "selective-truth"
+              : input.type === "false-promise" ? "feigned-commitment"
+                : "omission",
+        targetActorIds: input.targetIds,
+        truePropositions: input.truePropositions,
+        intendedBelief: input.intendedBelief,
+        ...(input.motive ? { motive: input.motive } : {}),
+        ...(input.expectedGain ? { expectedGain: input.expectedGain } : {}),
+        ...(input.perceivedDetectionRisk === null ? {} : { perceivedDetectionRisk: input.perceivedDetectionRisk })
+      });
       const plan = {
-        ...input,
+        deceptionId: episode.deceptionId,
+        type: input.type,
+        targetIds: input.targetIds,
+        intendedBelief: input.intendedBelief,
+        coverStory: input.coverStory,
+        fallback: input.fallback,
         turn: ctx.world.snapshot().turn,
         at: new Date().toISOString()
       };
       ctx.mind.deceptions.push(plan);
       if (ctx.mind.deceptions.length > 10) ctx.mind.deceptions.splice(0, ctx.mind.deceptions.length - 10);
-      return { logged: true, type: input.type, targets: input.targetIds };
+      return { logged: true, deceptionId: episode.deceptionId, type: input.type, targets: input.targetIds };
     }
   }) as Tool<SocietyAgentContext>;
 
@@ -311,21 +381,21 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
         fear: z.number().min(-1).max(1).default(0),
         surprise: z.number().min(-1).max(1).default(0),
         disgust: z.number().min(-1).max(1).default(0)
-      }).strict().optional(),
+      }).strict().nullable().default(null),
       padDelta: z.object({
         pleasure: z.number().min(-1).max(1).default(0),
         arousal: z.number().min(-1).max(1).default(0),
         dominance: z.number().min(-1).max(1).default(0)
-      }).strict().optional(),
+      }).strict().nullable().default(null),
       needsDelta: z.object({
         security: z.number().min(-1).max(1).default(0),
         connection: z.number().min(-1).max(1).default(0),
         status: z.number().min(-1).max(1).default(0),
         autonomy: z.number().min(-1).max(1).default(0),
         achievement: z.number().min(-1).max(1).default(0)
-      }).strict().optional(),
-      energyDelta: z.number().min(-0.3).max(0.3).optional(),
-      attention: z.array(z.string().min(1).max(240)).max(5).optional(),
+      }).strict().nullable().default(null),
+      energyDelta: z.number().min(-0.3).max(0.3).nullable().default(null),
+      attention: z.array(z.string().min(1).max(240)).max(5).nullable().default(null),
       relationship: z.object({
         agentId: z.string().min(1),
         trustDelta: z.number().min(-1).max(1).default(0),
@@ -333,30 +403,50 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
         respectDelta: z.number().min(-1).max(1).default(0),
         tensionDelta: z.number().min(-1).max(1).default(0),
         note: z.string().max(1_000)
-      }).strict().optional(),
+      }).strict().nullable().default(null),
       belief: z.object({
         subjectId: z.string().min(1),
         proposition: z.string().min(1).max(1_000),
+        probability: z.number().min(0).max(1),
         confidence: z.number().min(0).max(1),
-        source: z.string().min(1).max(1_000)
-      }).strict().optional(),
+        source: z.string().min(1).max(1_000),
+        sourceMessageIds: z.array(z.string().min(1).max(160)).max(12).default([]),
+        supports: z.boolean().default(true)
+      }).strict().nullable().default(null),
       goalProgress: z.object({
         goalId: z.string().min(1),
         progress: z.string().min(1).max(2_000),
         status: z.enum(["active", "satisfied", "abandoned"]).default("active")
-      }).strict().optional()
+      }).strict().nullable().default(null)
     }).strict(),
     execute: async ({ emotionDelta, padDelta, needsDelta, energyDelta, attention, relationship, belief, goalProgress }, runContext) => {
       const ctx = scopedContext(runContext, context.actorId, context);
       const turn = ctx.world.snapshot().turn;
+      const beliefRecord = belief
+        ? ctx.world.recordBeliefUpdate(ctx.actorId, {
+            subjectId: belief.subjectId,
+            proposition: belief.proposition,
+            probability: belief.probability,
+            confidence: belief.confidence,
+            source: belief.source,
+            sourceMessageIds: belief.sourceMessageIds,
+            supports: belief.supports
+          })
+        : undefined;
       if (emotionDelta) ctx.mind.mood.emotions = applyEmotionDeltas(ctx.mind.mood.emotions, emotionDelta);
       if (padDelta) ctx.mind.mood.pad = applyPadDeltas(ctx.mind.mood.pad, padDelta);
       if (needsDelta) ctx.mind.mood.needs = applyNeedsDeltas(ctx.mind.mood.needs, needsDelta);
-      if (energyDelta !== undefined) ctx.mind.mood.energy = clampUnit(ctx.mind.mood.energy + energyDelta);
+      if (energyDelta !== null) ctx.mind.mood.energy = clampUnit(ctx.mind.mood.energy + energyDelta);
       ctx.mind.mood = refreshMood(ctx.mind.mood, turn);
       if (attention) ctx.mind.attention = [...attention];
       if (relationship) updateRelationship(ctx, relationship, turn);
-      if (belief) updateBelief(ctx.mind, belief, turn);
+      if (belief) updateBelief(ctx.mind, {
+        subjectId: belief.subjectId,
+        proposition: belief.proposition,
+        probability: belief.probability,
+        confidence: belief.confidence,
+        source: belief.source
+      }, turn);
       if (goalProgress) {
         const goal = ctx.mind.goals.find((candidate) => candidate.id === goalProgress.goalId);
         if (!goal) throw new Error(`GOAL_NOT_FOUND: '${goalProgress.goalId}' is not one of your active goals.`);
@@ -368,7 +458,8 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
         mood: ctx.mind.mood.label,
         emotions: describeEmotions(ctx.mind.mood.emotions),
         needs: describeNeeds(ctx.mind.mood.needs),
-        energy: Math.round(ctx.mind.mood.energy * 100) / 100
+        energy: Math.round(ctx.mind.mood.energy * 100) / 100,
+        ...(beliefRecord ? { beliefUpdateId: beliefRecord.beliefUpdateId, beliefId: beliefRecord.beliefId } : {})
       };
     }
   }) as Tool<SocietyAgentContext>;

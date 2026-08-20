@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, Check, Copy, Clapperboard, Flame, ListOrdered, Pause, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Conversation } from "./conversation";
@@ -21,7 +24,7 @@ interface RoomViewProps {
 }
 
 export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): ReactNode {
-  const [viewerMode, setViewerMode] = useState<"public" | "omniscient" | "agent-pov" | "postgame">(token ? "public" : "omniscient");
+  const [viewerMode, setViewerMode] = useState<"public" | "omniscient" | "agent-pov" | "postgame">("public");
   const [autoSwitchedToPostgame, setAutoSwitchedToPostgame] = useState(false);
   const [povAgentId, setPovAgentId] = useState<string>();
   const [stageView, setStageView] = useState<"arena" | "analysis">("arena");
@@ -60,50 +63,50 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
   }, [tension?.level]);
   if (!room) {
     return (
-      <div className="flex min-h-screen flex-col">
+      <div className="flex h-dvh min-h-0 flex-col overflow-hidden">
         <RoomHeaderSkeleton onBack={onBack} />
-        <div className="mx-auto grid w-full max-w-[1440px] flex-1 grid-cols-1 gap-5 px-6 py-8 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
-          <div className="space-y-3"><Skeleton className="h-24 rounded-lg" /><Skeleton className="h-24 rounded-lg" /></div>
-          <div className="space-y-3"><Skeleton className="h-32 rounded-lg" /><Skeleton className="h-80 rounded-lg" /></div>
-          <div className="space-y-3"><Skeleton className="h-32 rounded-lg" /><Skeleton className="h-64 rounded-lg" /></div>
+        <div className="mx-auto grid min-h-0 w-full max-w-[1800px] flex-1 grid-cols-1 gap-3 overflow-hidden p-3 lg:grid-cols-[260px_minmax(0,1fr)_360px]">
+          <div className="hidden flex-col gap-3 lg:flex"><Skeleton className="h-24 rounded-lg" /><Skeleton className="h-24 rounded-lg" /></div>
+          <div className="flex min-h-0 flex-col gap-3"><Skeleton className="h-40 rounded-lg" /><Skeleton className="min-h-0 flex-1 rounded-lg" /></div>
+          <div className="hidden flex-col gap-3 lg:flex"><Skeleton className="h-32 rounded-lg" /><Skeleton className="min-h-0 flex-1 rounded-lg" /></div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-background" style={{ "--pace": String(pace) } as React.CSSProperties}>
-      <header className="sticky top-0 z-20 border-b border-border/80 bg-background/70 backdrop-blur-xl">
-        <div className="mx-auto flex min-h-16 w-full max-w-[1440px] flex-wrap items-center gap-3 gap-y-2 px-6 py-2">
-          <Button variant="ghost" size="icon-sm" aria-label="返回" className="text-muted-foreground hover:bg-muted hover:text-foreground" onClick={onBack}>
-            <ArrowLeft className="size-4" />
+    <div className="flex h-dvh min-h-0 flex-col overflow-hidden bg-background" style={{ "--pace": String(pace) } as React.CSSProperties}>
+      <header className="shrink-0 border-b bg-background">
+        <div className="mx-auto flex h-14 w-full max-w-[1920px] items-center gap-2 px-3">
+          <Button variant="ghost" size="icon-sm" aria-label="返回" onClick={onBack}>
+            <ArrowLeft />
           </Button>
-          <span className="flex size-9 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground">
-            <ScenarioIcon id={room.scenarioId} className="size-4" />
+          <span className="flex size-8 items-center justify-center rounded-md border bg-muted text-muted-foreground">
+            <ScenarioIcon id={room.scenarioId} />
           </span>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <p className="truncate text-sm font-semibold tracking-tight">{room.title}</p>
+              <p className="max-w-52 truncate text-sm font-semibold tracking-tight xl:max-w-72">{room.title}</p>
               {room.mode === "human" ? (
-                <span className="rounded-full border border-border bg-card px-2 py-0.5 text-[10px] font-medium text-muted-foreground">真人模式</span>
+                <Badge variant="outline">真人</Badge>
               ) : null}
               {room.seasonMode === "one-shot" ? (
-                <span className="rounded-full border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[10px] font-medium text-amber-300">单局模式</span>
+                <Badge variant="outline">单局</Badge>
               ) : null}
             </div>
-            <p className="flex items-center gap-2 text-xs text-muted-foreground">
+            <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
               <StatusDot status={room.status} />
               <StatusLabel status={room.status} />
               {connection === "reconnecting" ? (
-                <span className="ml-1 flex items-center gap-1 text-amber-400">
-                  <RefreshCw className="size-3 animate-spin" />
+                <span className="ml-1 flex items-center gap-1">
+                  <RefreshCw className="animate-spin" />
                   重连中
                 </span>
               ) : null}
             </p>
           </div>
 
-          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          <div className="ml-auto flex min-w-0 items-center justify-end gap-1.5">
             <ViewModeSwitcher
               mode={viewerMode}
               isPlayer={Boolean(token)}
@@ -111,39 +114,40 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
               onChange={setViewerMode}
             />
             {viewerMode === "agent-pov" && !token ? (
-              <select
-                value={povAgentId ?? ""}
-                onChange={(event) => setPovAgentId(event.target.value)}
-                className="h-8 rounded-lg border border-border bg-card px-2 font-mono text-[11px] text-muted-foreground"
-                aria-label="跟随的参与者"
-              >
-                <option value="">选择跟随的参与者…</option>
-                {room.participants.map((participant) => (
-                  <option key={participant.profile.id} value={participant.profile.id}>{participant.profile.displayName}</option>
-                ))}
-              </select>
+              <Select value={povAgentId ?? ""} onValueChange={setPovAgentId}>
+                <SelectTrigger className="hidden w-32 md:flex" aria-label="跟随的参与者">
+                  <SelectValue placeholder="选择视角" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {room.participants.map((participant) => (
+                      <SelectItem key={participant.profile.id} value={participant.profile.id}>{participant.profile.displayName}</SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             ) : null}
-            {room.status !== "finished" ? <TensionMeter tension={tension} /> : null}
-            <div className="flex items-center gap-3 rounded-full border border-border bg-card px-4 py-1.5">
-              <span className={cn("size-1.5 rounded-full", room.world.status === "finished" ? "bg-muted-foreground/40" : "bg-emerald-400")} />
-              <span className="text-xs font-medium text-foreground/90">{room.world.phase}</span>
+            <div className="hidden h-8 items-center gap-2 rounded-md border bg-card px-3 lg:flex">
+              <span className={cn("size-1.5 rounded-full", room.world.status === "finished" ? "bg-muted-foreground/40" : "bg-foreground")} />
+              <span className="max-w-28 truncate text-xs font-medium">{room.world.phase}</span>
               <span className="nums font-mono text-[11px] text-muted-foreground">
                 {room.world.turn} / {room.world.totalTurns}
               </span>
               <ActBar turn={room.world.turn} total={room.world.totalTurns} finished={room.world.status === "finished"} />
             </div>
+            {room.status !== "finished" ? <TensionMeter tension={tension} /> : null}
             {room.status !== "finished" ? <PaceControl pace={pace} onChange={setPace} /> : null}
             <ShareButton roomId={room.id} />
             {room.status === "running" ? (
-              <Button variant="outline" size="sm" aria-label="暂停房间" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => void pause()}>
-                <Pause className="size-3.5" />
-                暂停
+              <Button variant="outline" size="sm" aria-label="暂停房间" onClick={() => void pause()}>
+                <Pause data-icon="inline-start" />
+                <span className="hidden xl:inline">暂停</span>
               </Button>
             ) : null}
             {room.status === "paused" ? (
-              <Button variant="outline" size="sm" aria-label="恢复房间" className="rounded-lg border-amber-400/40 bg-amber-400/10 text-amber-300 hover:bg-amber-400/15 hover:text-amber-200" onClick={() => void resume()}>
-                <RefreshCw className="size-3.5" />
-                恢复
+              <Button variant="default" size="sm" aria-label="恢复房间" onClick={() => void resume()}>
+                <RefreshCw data-icon="inline-start" />
+                <span className="hidden xl:inline">恢复</span>
               </Button>
             ) : null}
             <ViewToggle view={stageView} onChange={setStageView} />
@@ -151,57 +155,63 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
         </div>
       </header>
 
-      {stageView === "arena" ? (
-        <div className="mx-auto w-full max-w-4xl flex-1 space-y-4 px-6 py-5 pb-20 md:pb-5">
-          <ArenaStage room={room} cue={cue} activity={activity} />
-          <main className="relative min-h-[56vh] overflow-hidden rounded-xl border border-border bg-card/40">
+      <div className="mx-auto grid min-h-0 w-full max-w-[1920px] flex-1 grid-cols-1 overflow-hidden border-x lg:grid-cols-[248px_minmax(0,1fr)_352px]">
+        <aside className="hidden min-h-0 overflow-hidden border-r bg-card/20 lg:flex lg:flex-col">
+          <div className="flex h-11 shrink-0 items-center justify-between border-b px-4">
+            <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">持续人物</p>
+            <span className="nums font-mono text-[11px] text-muted-foreground">{room.participants.length}P</span>
+          </div>
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="p-2">
+              <ParticipantsRail
+                participants={room.participants}
+                humanActorId={room.player?.actorId}
+                activity={activity}
+                roomPaused={room.status === "paused"}
+                roomId={room.id}
+                onToggleAgentPause={(actorId, paused) => { void toggleAgentPause(actorId, paused); }}
+              />
+            </div>
+          </ScrollArea>
+        </aside>
+
+        <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+          {stageView === "arena" ? (
+            <div className="max-h-[32vh] shrink-0 overflow-y-auto border-b">
+              <ArenaStage room={room} cue={cue} activity={activity} />
+            </div>
+          ) : null}
+          <main className="relative min-h-0 flex-1 overflow-hidden bg-card/20">
             <CueBanner cue={cue} finished={room.world.status === "finished"} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
             <Conversation room={room} activity={activity} onAction={submitAction} onReplay={onReplay} jumpToAt={jumpToAt} />
           </main>
-          <div className="hidden md:block">
-            <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
-          </div>
-          <div className="fixed inset-x-0 bottom-3 z-30 flex justify-center md:hidden">
-            <Sheet>
-              <SheetTrigger asChild>
-                <Button variant="outline" className="h-10 rounded-full border-white/10 bg-black/70 px-5 text-xs text-zinc-200 shadow-lg backdrop-blur-xl hover:bg-white/10">
-                  <ListOrdered className="size-3.5" />
-                  战况 · 时间线 · 高光
-                </Button>
-              </SheetTrigger>
-              <SheetContent side="bottom" className="max-h-[70vh] overflow-y-auto rounded-t-2xl border-white/10 bg-[#0a0a0a]">
-                <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
-              </SheetContent>
-            </Sheet>
-          </div>
+        </section>
+
+        <aside className="hidden min-h-0 overflow-hidden border-l bg-card/10 lg:block">
+          <ScrollArea className="h-full">
+            <div className="p-3">
+              <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
+            </div>
+          </ScrollArea>
+        </aside>
+
+        <div className="fixed inset-x-0 bottom-3 flex justify-center lg:hidden">
+          <Sheet>
+            <SheetTrigger asChild>
+              <Button variant="outline" className="h-10 rounded-full px-5 text-xs shadow-lg backdrop-blur-xl">
+                <ListOrdered data-icon="inline-start" />
+                战况 · 时间线 · 高光
+              </Button>
+            </SheetTrigger>
+            <SheetContent side="bottom" className="max-h-[76vh] overflow-y-auto rounded-t-2xl">
+              <SheetHeader>
+                <SheetTitle>实时战况与社会时间线</SheetTitle>
+              </SheetHeader>
+              <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
+            </SheetContent>
+          </Sheet>
         </div>
-      ) : (
-      <div className="mx-auto grid w-full max-w-[1440px] flex-1 grid-cols-1 gap-5 px-6 py-5 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
-        <aside className="order-2 lg:order-1 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto">
-          <div className="mb-3 flex items-center justify-between px-1">
-            <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">参与者</p>
-            <span className="nums font-mono text-[11px] text-muted-foreground">{room.participants.length}P</span>
-          </div>
-          <ParticipantsRail
-            participants={room.participants}
-            humanActorId={room.player?.actorId}
-            activity={activity}
-            roomPaused={room.status === "paused"}
-            roomId={room.id}
-            onToggleAgentPause={(actorId, paused) => { void toggleAgentPause(actorId, paused); }}
-          />
-        </aside>
-
-        <main className="relative order-1 min-h-[72vh] overflow-hidden rounded-xl border border-border bg-card/40 lg:order-2 lg:min-h-0 lg:max-h-[calc(100vh-6rem)]">
-          <CueBanner cue={cue} finished={room.world.status === "finished"} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
-          <Conversation room={room} activity={activity} onAction={submitAction} onReplay={onReplay} jumpToAt={jumpToAt} />
-        </main>
-
-        <aside className="order-3 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto">
-          <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
-        </aside>
       </div>
-      )}
 
       {error ? (
         <div className="fixed inset-x-0 bottom-4 z-30 mx-auto w-fit rounded-full border border-red-400/30 bg-card px-5 py-2 text-xs text-red-400 shadow-lg">
@@ -225,22 +235,18 @@ function ViewModeSwitcher({ mode, isPlayer, finished, onChange }: {
     { value: "postgame", label: "终局", disabled: !finished, hint: finished ? "终局解锁全部真相与高光" : "对局结束后解锁" }
   ];
   return (
-    <div className="flex items-center overflow-x-auto rounded-full border border-border bg-card p-0.5">
+    <div className="hidden items-center rounded-md border bg-card p-0.5 md:flex">
       {options.map((option) => (
         <Tooltip key={option.value}>
           <TooltipTrigger asChild>
-            <span className="inline-flex" tabIndex={0} aria-disabled={option.disabled}>
-              <button
-                disabled={option.disabled}
-                onClick={() => onChange(option.value)}
-                className={cn(
-                  "rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-35",
-                  mode === option.value ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {option.label}
-              </button>
-            </span>
+            <Button
+              variant={mode === option.value ? "secondary" : "ghost"}
+              size="xs"
+              disabled={option.disabled}
+              onClick={() => onChange(option.value)}
+            >
+              {option.label}
+            </Button>
           </TooltipTrigger>
           <TooltipContent>{option.hint}</TooltipContent>
         </Tooltip>
@@ -251,19 +257,21 @@ function ViewModeSwitcher({ mode, isPlayer, finished, onChange }: {
 
 function ViewToggle({ view, onChange }: { view: "arena" | "analysis"; onChange: (view: "arena" | "analysis") => void }): ReactNode {
   return (
-    <div className="flex items-center rounded-full border border-border bg-card p-0.5" title="舞台优先；分析视图保留完整三栏">
-      <button
+    <div className="hidden items-center rounded-md border bg-card p-0.5 2xl:flex" title="舞台优先；分析视图保留完整三栏">
+      <Button
+        variant={view === "arena" ? "secondary" : "ghost"}
+        size="xs"
         onClick={() => onChange("arena")}
-        className={cn("rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors", view === "arena" ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground")}
       >
         舞台
-      </button>
-      <button
+      </Button>
+      <Button
+        variant={view === "analysis" ? "secondary" : "ghost"}
+        size="xs"
         onClick={() => onChange("analysis")}
-        className={cn("rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors", view === "analysis" ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground")}
       >
         分析
-      </button>
+      </Button>
     </div>
   );
 }
@@ -285,8 +293,8 @@ function ArenaStage({ room, cue, activity }: {
     return new Map(top);
   })();
   return (
-    <section className="rounded-xl border border-border bg-card/40 px-4 py-3 pb-6 sm:pb-3">
-      <div className="mb-2 flex items-center justify-between px-1">
+    <section className="bg-card/20 px-4 py-3">
+      <div className="mb-2 flex items-center justify-between">
         <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-foreground/65">舞台席位</p>
         <span className="nums font-mono text-[11px] text-muted-foreground">
           {room.participants.some((participant) => !participant.alive)
@@ -294,9 +302,8 @@ function ArenaStage({ room, cue, activity }: {
             : `${room.participants.length} 人在场`}
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(104px,1fr))] gap-1.5">
         {room.participants.map((participant, index) => {
-          const orphan = index === room.participants.length - 1 && room.participants.length % 2 === 1;
           const state = activity[participant.profile.id];
           const speaking = participant.status === "speaking" || participant.status === "acting";
           const focused = focusIds.has(participant.profile.id);
@@ -305,30 +312,29 @@ function ArenaStage({ room, cue, activity }: {
             <div
               key={participant.profile.id}
               className={cn(
-                "relative flex flex-col items-center rounded-lg border px-2 py-2.5 transition-all",
-                orphan && "col-span-2",
-                dead ? "border-border/50 opacity-45" : "border-border bg-card",
-                speaking && "border-emerald-400/50",
-                focused && "ring-2 ring-amber-400/60"
+                "relative flex min-w-0 flex-col items-center rounded-md border px-2 py-2 transition-all",
+                dead ? "opacity-40" : "bg-card",
+                speaking && "border-foreground/60",
+                focused && "ring-1 ring-foreground"
               )}
             >
               {focused ? (
-                <span className="absolute -top-2 left-1/2 -translate-x-1/2 rounded-full border border-amber-400/50 bg-card px-1.5 py-px text-[9px] font-medium text-amber-300">焦点</span>
+                <Badge className="absolute -top-2 left-1/2 -translate-x-1/2" variant="secondary">焦点</Badge>
               ) : null}
               {dead ? (
-                <span className="absolute right-1.5 top-1.5 rounded-full border border-rose-400/30 bg-rose-400/10 px-1.5 py-px text-[9px] font-medium text-rose-300">已出局</span>
+                <Badge className="absolute right-1 top-1" variant="outline">出局</Badge>
               ) : suspicionScores.has(participant.profile.id) ? (
-                <span className="absolute right-1.5 top-1.5 rounded-full border border-orange-400/40 bg-orange-400/10 px-1.5 py-px text-[9px] font-medium text-orange-300">被围攻</span>
+                <Badge className="absolute right-1 top-1" variant="outline">焦点</Badge>
               ) : null}
-              <AgentPresence name={participant.profile.displayName} index={index} size="xl" status={dead || room.status === "finished" ? "finished" : participant.status} />
-              <p className="mt-1.5 max-w-full truncate text-xs font-semibold tracking-tight">{participant.profile.displayName}</p>
+              <AgentPresence name={participant.profile.displayName} index={index} seed={participant.profile.characterId} size="lg" status={dead || room.status === "finished" ? "finished" : participant.status} />
+              <p className="mt-1 max-w-full truncate text-xs font-semibold tracking-tight">{participant.profile.displayName}</p>
               <p className="flex max-w-full items-center gap-1 text-[10px] text-foreground/60">
                 <StatusDot status={dead ? "finished" : participant.status} />
                 <span className="truncate">{participant.role ?? participant.mood ?? "—"}</span>
               </p>
               {state?.thought ? (
-                <p className="mt-1 line-clamp-1 w-full text-center text-[10px] leading-4 text-muted-foreground/70" title={state.thought.text}>
-                  {state.thought.title}：{state.thought.text}
+                <p className="mt-0.5 w-full truncate text-center text-[9px] leading-4 text-muted-foreground" title={state.thought.text}>
+                  {state.thought.title}
                 </p>
               ) : null}
             </div>
@@ -409,16 +415,14 @@ function SwordsIcon({ className }: { className?: string }): ReactNode {
 function TensionMeter({ tension }: { tension: RoomConnection["tension"] }): ReactNode {
   const score = tension?.score ?? 0;
   const level = tension?.level ?? "calm";
-  const tone = level === "climax" ? "text-red-400" : level === "tense" ? "text-orange-400" : level === "warm" ? "text-amber-400" : "text-muted-foreground";
-  const bar = level === "climax" ? "bg-red-400" : level === "tense" ? "bg-orange-400" : level === "warm" ? "bg-amber-400" : "bg-muted-foreground/40";
   const label = level === "climax" ? "高潮" : level === "tense" ? "紧张" : level === "warm" ? "升温" : "平静";
   return (
-    <div className="hidden items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 md:flex" title={tension?.reasons.length ? tension.reasons.join(" · ") : "张力由真实事件推导"}>
-      <Flame className={cn("size-3.5", tone)} />
-      <div className="h-1 w-14 overflow-hidden rounded-full bg-muted">
-        <div className={cn("h-full rounded-full transition-all duration-700", bar)} style={{ width: `${Math.round(score * 100)}%` }} />
+    <div className="hidden h-8 items-center gap-2 rounded-md border bg-card px-2.5 xl:flex" title={tension?.reasons.length ? tension.reasons.join(" · ") : "张力由真实事件推导"}>
+      <Flame className="text-muted-foreground" />
+      <div className="h-1 w-10 overflow-hidden rounded-full bg-muted">
+        <div className="h-full rounded-full bg-foreground transition-all duration-700" style={{ width: `${Math.round(score * 100)}%` }} />
       </div>
-      <span className={cn("text-[11px] font-medium", tone)}>{label}</span>
+      <span className="text-[10px] font-medium text-muted-foreground">{label}</span>
     </div>
   );
 }
@@ -439,23 +443,16 @@ function CueBanner({ cue, names, finished = false }: { cue: RoomConnection["cue"
   // stay on stage: a mid-game quest cue would contradict the settlement.
   if (finished && cue.priority < 11) return null;
   const focusNames = cue.focusAgentIds.map((id) => names.get(id) ?? id);
-  const tone = cue.priority >= 9
-    ? "border-red-400/40 bg-red-400/10 text-red-200"
-    : cue.priority >= 7
-      ? "border-orange-400/40 bg-orange-400/10 text-orange-200"
-      : cue.priority >= 5
-        ? "border-amber-400/40 bg-amber-400/10 text-amber-200"
-        : "border-border bg-card/90 text-foreground";
   return (
-    <div key={cue.id} className="pointer-events-auto absolute inset-x-0 top-12 z-10 flex justify-center px-3">
+    <div key={cue.id} className="pointer-events-auto absolute inset-x-0 top-12 flex justify-center px-3">
       <div
         role="button"
         tabIndex={0}
         aria-label="关闭此镜头字幕"
         onClick={() => setVisible(false)}
         onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setVisible(false); }}
-        className={cn("cue-enter flex max-w-xl cursor-pointer items-center gap-2.5 rounded-xl border px-4 py-2.5 shadow-lg backdrop-blur", tone)}>
-        <Clapperboard className="size-4 shrink-0" />
+        className="cue-enter flex max-w-xl cursor-pointer items-center gap-2.5 rounded-md border bg-popover px-4 py-2.5 shadow-xl">
+        <Clapperboard className="shrink-0" />
         <div className="min-w-0">
           <p className="text-[13px] font-semibold leading-4">{cue.title}</p>
           {cue.subtitle || focusNames.length ? (
@@ -480,7 +477,7 @@ function ActBar({ turn, total, finished }: { turn: number; total: number; finish
             finished || index < turn
               ? "w-5 bg-foreground/70"
               : index === turn
-                ? "w-5 bg-emerald-400"
+                ? "w-5 bg-foreground"
                 : "w-2 bg-border"
           )}
         />
@@ -492,18 +489,16 @@ function ActBar({ turn, total, finished }: { turn: number; total: number; finish
 function PaceControl({ pace, onChange }: { pace: 0.5 | 1 | 2 | 4; onChange: (pace: 0.5 | 1 | 2 | 4) => void }): ReactNode {
   const options: Array<0.5 | 1 | 2 | 4> = [0.5, 1, 2, 4];
   return (
-    <div className="hidden items-center rounded-full border border-border bg-card p-0.5 md:flex" title="播放节奏：只作用于观战动画与流式光标，不改变对局本身">
+    <div className="hidden items-center rounded-md border bg-card p-0.5 2xl:flex" title="播放节奏：只作用于观战动画与流式光标，不改变对局本身">
       {options.map((option) => (
-        <button
+        <Button
           key={option}
+          variant={pace === option ? "secondary" : "ghost"}
+          size="xs"
           onClick={() => onChange(option)}
-          className={cn(
-            "rounded-full px-2 py-1 font-mono text-[10px] transition-colors",
-            pace === option ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
-          )}
         >
           {option}×
-        </button>
+        </Button>
       ))}
     </div>
   );
@@ -523,8 +518,8 @@ function ShareButton({ roomId }: { roomId: string }): ReactNode {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Button variant="outline" size="icon-sm" aria-label={copied ? "已复制" : "复制房间链接"} className="min-h-10 min-w-10 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => void copy()}>
-          {copied ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
+        <Button variant="outline" size="icon-sm" aria-label={copied ? "已复制" : "复制房间链接"} onClick={() => void copy()}>
+          {copied ? <Check /> : <Copy />}
         </Button>
       </TooltipTrigger>
       <TooltipContent>{copied ? "已复制" : "复制房间链接"}</TooltipContent>

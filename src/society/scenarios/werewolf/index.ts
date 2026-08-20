@@ -339,8 +339,8 @@ export class WerewolfWorld extends SocialWorldBase {
         "witch_night_choice",
         "As the living witch, decide tonight's potions. Use saveTargetId to save the wolf victim (not yourself; cannot be you). Use poisonTargetId to kill one living participant. You may pass (no fields), but you cannot use both potions in the same night. A saved-and-poisoned same target dies (poison wins).",
         z.object({
-          saveTargetId: z.string().min(1).optional(),
-          poisonTargetId: z.string().min(1).optional()
+          saveTargetId: z.string().min(1).nullable().default(null),
+          poisonTargetId: z.string().min(1).nullable().default(null)
         }).strict(),
         "witch_night_choice"
       ));
@@ -350,8 +350,8 @@ export class WerewolfWorld extends SocialWorldBase {
         "guard_tonight",
         "As the living guard, choose one player to protect from the wolf kill tonight. You may guard yourself or skip (omit targetId). You cannot guard the same target as the previous night. Guarding does not stop poison.",
         z.object({
-          targetId: z.string().min(1).optional(),
-          reason: z.string().min(1).max(2_000).optional()
+          targetId: z.string().min(1).nullable().default(null),
+          reason: z.string().min(1).max(2_000).nullable().default(null)
         }).strict(),
         "guard_tonight"
       ));
@@ -360,7 +360,7 @@ export class WerewolfWorld extends SocialWorldBase {
       tools.push(bind(
         "hunter_shoot",
         "You are dying. Shoot one living participant, or pass (omit targetId). A hunter who is poisoned cannot shoot. A shot resolves immediately.",
-        z.object({ targetId: z.string().min(1).optional(), reason: z.string().min(1).max(2_000).optional() }).strict(),
+        z.object({ targetId: z.string().min(1).nullable().default(null), reason: z.string().min(1).max(2_000).nullable().default(null) }).strict(),
         "hunter_shoot"
       ));
     }
@@ -368,7 +368,7 @@ export class WerewolfWorld extends SocialWorldBase {
       tools.push(bind(
         "wolf_king_shoot",
         "You are dying (not by poison). Take one living participant with you, or pass (omit targetId). The shot resolves immediately.",
-        z.object({ targetId: z.string().min(1).optional(), reason: z.string().min(1).max(2_000).optional() }).strict(),
+        z.object({ targetId: z.string().min(1).nullable().default(null), reason: z.string().min(1).max(2_000).nullable().default(null) }).strict(),
         "wolf_king_shoot"
       ));
     }
@@ -379,7 +379,7 @@ export class WerewolfWorld extends SocialWorldBase {
         name: "knight_challenge",
         description: "Once per game, during the day before the vote, challenge one living participant to a duel. If they are a wolf, they are eliminated; if they are not a wolf, YOU die instead. Omit targetId to pass and give up the chance.",
         parameters: z.object({
-          targetId: z.string().min(1).max(60).optional(),
+          targetId: z.string().min(1).max(60).nullable().default(null),
           reason: z.string().min(1).max(2_000)
         }).strict(),
         execute: async (input, runContext) => {

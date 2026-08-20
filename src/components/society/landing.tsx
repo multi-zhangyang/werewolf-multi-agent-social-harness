@@ -191,7 +191,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
                 return (
                   <div key={entry.characterId} className="group relative rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/25">
                     <p className="flex items-center gap-2 text-sm font-semibold tracking-tight">
-                      <AgentAvatar name={entry.displayName} index={hashIndex(entry.characterId)} size="sm" />
+                      <AgentAvatar name={entry.displayName} index={hashIndex(entry.characterId)} seed={entry.characterId} size="sm" />
                       {entry.displayName}
                     </p>
                     <p className="nums mt-2 font-mono text-[11px] text-muted-foreground/80">
@@ -380,7 +380,12 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
 
 /** A quiet stage: the same characters reappear across games, connected by history. */
 function HeroStage(): ReactNode {
-  const cast = ["林默", "苏遥", "陈策", "唐妍"];
+  const cast = [
+    { name: "林默", characterId: "builtin-01" },
+    { name: "苏遥", characterId: "builtin-02" },
+    { name: "陈策", characterId: "builtin-03" },
+    { name: "唐妍", characterId: "builtin-06" }
+  ];
   return (
     <div className="relative mx-auto mt-12 flex h-28 w-fit items-start justify-center px-10 pt-2" aria-hidden>
       <svg className="absolute inset-x-0 top-2 h-full w-full" viewBox="0 0 300 96" preserveAspectRatio="none">
@@ -389,16 +394,16 @@ function HeroStage(): ReactNode {
         <path d="M36 34 C 80 2, 220 2, 264 34" fill="none" stroke="currentColor" strokeOpacity="0.12" strokeWidth="1" />
       </svg>
       <div className="relative flex items-start gap-9">
-        {cast.map((name, index) => (
-          <span key={name} className={cn("relative flex flex-col items-center gap-2 rounded-lg", index % 2 === 1 && "translate-y-3")}>
+        {cast.map((character, index) => (
+          <span key={character.characterId} className={cn("relative flex flex-col items-center gap-2 rounded-lg", index % 2 === 1 && "translate-y-3")}>
             <span className="relative">
-              <AgentAvatar name={name} index={index} size="lg" />
+              <AgentAvatar name={character.name} index={index} seed={character.characterId} size="lg" />
               <span
                 className="live-pulse absolute -right-1 -top-1 size-2 rounded-full bg-emerald-400"
                 style={{ animationDelay: `${index * 420}ms` }}
               />
             </span>
-            <span className="font-mono text-[10px] text-muted-foreground/70">{name}</span>
+            <span className="font-mono text-[10px] text-muted-foreground/70">{character.name}</span>
           </span>
         ))}
       </div>

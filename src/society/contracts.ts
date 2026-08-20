@@ -26,7 +26,7 @@ export type SocialChannel = "public" | "private" | "team";
 export type AgentStatus = "lobby" | "thinking" | "acting" | "speaking" | "idle" | "paused" | "finished" | "error";
 export type ParticipantController = "agent" | "human";
 export type PlayerActionKind = "message" | "choice" | "number" | "target" | "team";
-export type ReasoningEffort = "low" | "medium" | "high";
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
 /**
  * Spectator information modes (AGENTS.md §8.3). Visibility projection happens
@@ -196,6 +196,8 @@ export interface AgentMoodState {
 export interface AgentBelief {
   subjectId: string;
   proposition: string;
+  /** Subjective probability and confidence are distinct (§6.3). */
+  probability?: number;
   confidence: number;
   updatedAtTurn: number;
   source: string;
@@ -314,6 +316,8 @@ export interface ThoughtBeat {
  * cover story, cost review).
  */
 export interface AgentDeceptionPlan {
+  /** Canonical private episode id; cite it when a later message executes the plan. */
+  deceptionId?: string;
   type: "lying" | "bluff" | "paltering" | "omission" | "false-promise";
   targetIds: string[];
   intendedBelief: string;
@@ -752,12 +756,19 @@ export interface SocialWorld {
   openCommitmentsFor(actorId: string): Commitment[];
   /** Auditable decision records for binding actions; [] where none exist. */
   decisionRecords(): DecisionRecord[];
+  /** Viewer-scoped canonical social causality; private cognition stays owner-only. */
+  socialCausalityFor(actorId?: string, omniscient?: boolean): import("./social/contracts").SocialCausalityProjection;
+  /** Record one actor's structured belief update with visible source checks. */
+  recordBeliefUpdate(actorId: string, input: import("./social/contracts").BeliefSelfReportInput): import("./social/contracts").BeliefUpdateRecord;
+  /** Record a private deception plan owned by this actor. */
+  recordDeceptionPlan(actorId: string, input: import("./social/contracts").DeceptionPlanInput): import("./social/contracts").DeceptionEpisode;
   sendMessage(input: {
     senderId: string;
     channel: SocialChannel;
     text: string;
     recipientIds?: string[];
     replyTo?: string;
+    socialActs?: import("./social/contracts").SocialActDeclaration[];
   }): Promise<SocialMessage>;
   setAgentStatus(actorId: string, status: AgentStatus): void;
   /** Append a public world-log entry (shown in the observer timeline). */

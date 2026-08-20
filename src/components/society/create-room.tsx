@@ -14,6 +14,7 @@ import {
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue
@@ -41,24 +42,24 @@ interface RosterTemplateOption {
   models: string[];
   modelProfileIds?: string[];
   agentModelOverrides?: Record<string, string>;
-  agentTuning?: Record<string, { temperature?: number; reasoningEffort?: "low" | "medium" | "high" }>;
+  agentTuning?: Record<string, { temperature?: number; reasoningEffort?: "low" | "medium" | "high" | "xhigh" }>;
   players?: number;
   characterIds?: string[];
   rounds?: number;
-  reasoningEffort?: "low" | "medium" | "high";
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   season?: "season" | "one-shot";
 }
 
 export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [seatOverrides, setSeatOverrides] = useState<Record<string, string>>({});
-  const [seatTuning, setSeatTuning] = useState<Record<string, { temperature?: number; reasoningEffort?: "low" | "medium" | "high" }>>({});
+  const [seatTuning, setSeatTuning] = useState<Record<string, { temperature?: number; reasoningEffort?: "low" | "medium" | "high" | "xhigh" }>>({});
   const [advanced, setAdvanced] = useState(false);
   const [rounds, setRounds] = useState<number>(5);
   const [players, setPlayers] = useState<number>(6);
   const [mode, setMode] = useState<"ai" | "human">("ai");
   const [playerName, setPlayerName] = useState("");
-  const [reasoningEffort, setReasoningEffort] = useState<"low" | "medium" | "high">("low");
+  const [reasoningEffort, setReasoningEffort] = useState<"low" | "medium" | "high" | "xhigh">("xhigh");
   const [seasonMode, setSeasonMode] = useState<"season" | "one-shot">("season");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
@@ -82,7 +83,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
 
   useEffect(() => {
     if (!open) return;
-    setSelectedModels(visibleModels.slice(0, Math.min(4, visibleModels.length)).map((model) => model.id));
+    setSelectedModels(visibleModels.map((model) => model.id));
     setSeatOverrides({});
     setSeatTuning({});
     setSeatCharacters({});
@@ -91,7 +92,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     setPlayers(scenario?.players ?? 2);
     setMode("ai");
     setPlayerName("");
-    setReasoningEffort("low");
+    setReasoningEffort("xhigh");
     setSeasonMode("season");
     setError(undefined);
   }, [open, scenario, maxRounds, visibleModels]);
@@ -130,7 +131,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     setSeatTuning(template.agentTuning ?? {});
     if (template.players !== undefined) setPlayers(template.players);
     if (template.rounds !== undefined) setRounds(template.rounds);
-    setReasoningEffort(template.reasoningEffort ?? "low");
+    setReasoningEffort(template.reasoningEffort ?? "xhigh");
     setSeasonMode(template.season ?? "season");
     if (characters.length && template.characterIds?.length) {
       const picks: Record<string, string> = {};
@@ -281,9 +282,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
             <div className="space-y-6 p-6">
               <section>
                 <p className="mb-2.5 text-[13px] font-medium text-foreground/80">模型</p>
-                <p className="mb-3 text-xs leading-5 text-muted-foreground/80">
-                  每个参与者都是一个独立 Agent。选择一个模型给所有人，或选择多个模型让不同角色使用不同模型同台对决（按顺序轮转分配）。需要的话，可在「参与者阵容」里为单个席位指定不同模型。
-                </p>
+                <p className="mb-3 text-xs text-muted-foreground">多选时按席位轮转；高级阵容可单独覆盖。</p>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" data-model>
                   {visibleModels.map((model) => {
                     const active = selectedModels.includes(model.id);
@@ -373,14 +372,17 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                 </div>
                 <div>
                   <p className="mb-2.5 text-[13px] font-medium text-foreground/80">推理强度</p>
-                  <Select value={reasoningEffort} onValueChange={(value) => setReasoningEffort(value as "low" | "medium" | "high")}>
+                  <Select value={reasoningEffort} onValueChange={(value) => setReasoningEffort(value as "low" | "medium" | "high" | "xhigh")}>
                     <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="low">轻量</SelectItem>
-                      <SelectItem value="medium">标准</SelectItem>
-                      <SelectItem value="high">深度</SelectItem>
+                      <SelectGroup>
+                        <SelectItem value="low">轻量</SelectItem>
+                        <SelectItem value="medium">标准</SelectItem>
+                        <SelectItem value="high">深度</SelectItem>
+                        <SelectItem value="xhigh">极限 · xhigh</SelectItem>
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
                 </div>
@@ -436,12 +438,14 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                                       <SelectValue />
                                     </SelectTrigger>
                                     <SelectContent>
-                                      <SelectItem value="__default">按顺序内置人物</SelectItem>
-                                      {characters.map((character) => (
-                                        <SelectItem key={character.id} value={character.id}>
-                                          {character.displayName}{character.builtIn ? "" : " · 自建"}
-                                        </SelectItem>
-                                      ))}
+                                      <SelectGroup>
+                                        <SelectItem value="__default">按顺序内置人物</SelectItem>
+                                        {characters.map((character) => (
+                                          <SelectItem key={character.id} value={character.id}>
+                                            {character.displayName}{character.builtIn ? "" : " · 自建"}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectGroup>
                                     </SelectContent>
                                   </Select>
                                 ) : (
@@ -464,12 +468,14 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
-                                    <SelectItem value="__inherit">轮转继承（{selectedModels[index % selectedModels.length]}）</SelectItem>
-                                    {visibleModels.filter((model) => model.profileId).map((model) => (
-                                      <SelectItem key={model.profileId} value={model.profileId!}>
-                                        {model.name}
-                                      </SelectItem>
-                                    ))}
+                                    <SelectGroup>
+                                      <SelectItem value="__inherit">轮转继承（{selectedModels[index % selectedModels.length]}）</SelectItem>
+                                      {visibleModels.filter((model) => model.profileId).map((model) => (
+                                        <SelectItem key={model.profileId} value={model.profileId!}>
+                                          {model.name}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectGroup>
                                   </SelectContent>
                                 </Select>
                               ) : (
@@ -515,17 +521,20 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                                       if (Object.keys(entry).length) next[String(index)] = entry;
                                       else delete next[String(index)];
                                     } else {
-                                      next[String(index)] = { ...(next[String(index)] ?? {}), reasoningEffort: value as "low" | "medium" | "high" };
+                                      next[String(index)] = { ...(next[String(index)] ?? {}), reasoningEffort: value as "low" | "medium" | "high" | "xhigh" };
                                     }
                                     return next;
                                   })}
                                 >
                                   <SelectTrigger className="h-7 w-24 rounded-md border-border bg-card text-[11px]"><SelectValue /></SelectTrigger>
                                   <SelectContent>
-                                    <SelectItem value="__inherit">继承</SelectItem>
-                                    <SelectItem value="low">轻量</SelectItem>
-                                    <SelectItem value="medium">标准</SelectItem>
-                                    <SelectItem value="high">深度</SelectItem>
+                                    <SelectGroup>
+                                      <SelectItem value="__inherit">继承</SelectItem>
+                                      <SelectItem value="low">轻量</SelectItem>
+                                      <SelectItem value="medium">标准</SelectItem>
+                                      <SelectItem value="high">深度</SelectItem>
+                                      <SelectItem value="xhigh">极限</SelectItem>
+                                    </SelectGroup>
                                   </SelectContent>
                                 </Select>
                               </div>
@@ -621,10 +630,12 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="__none" disabled>{loadedTemplateId ? `已载入：${templates.find((entry) => entry.id === loadedTemplateId)?.name ?? ""}` : "载入模板…"}</SelectItem>
-                        {templates.map((template) => (
-                          <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>
-                        ))}
+                        <SelectGroup>
+                          <SelectItem value="__none" disabled>{loadedTemplateId ? `已载入：${templates.find((entry) => entry.id === loadedTemplateId)?.name ?? ""}` : "载入模板…"}</SelectItem>
+                          {templates.map((template) => (
+                            <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>
+                          ))}
+                        </SelectGroup>
                       </SelectContent>
                     </Select>
                   ) : null}

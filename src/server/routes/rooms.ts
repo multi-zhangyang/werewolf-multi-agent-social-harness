@@ -78,24 +78,26 @@ function requireRoomControl(
   return undefined;
 }
 
-/** Public projection of a checkpoint: no minds, private messages or roles. */
+/** Read-only checkpoint projection: public world history, never private minds. */
+function publicArchivedSnapshot(checkpoint: RoomCheckpoint): SocietyRoomSnapshot {
+  const snapshot = structuredClone(checkpoint.snapshot);
+  return {
+    ...snapshot,
+    world: {
+      ...snapshot.world,
+      messages: (snapshot.world.messages ?? []).filter((message) => message.channel === "public")
+    },
+    participants: (snapshot.participants ?? []).map(({ mind: _mind, ...participant }) => participant)
+  };
+}
+
 function publicArchiveProjection(checkpoint: RoomCheckpoint): Record<string, unknown> {
-  const snapshot = checkpoint.snapshot;
   return {
     roomId: checkpoint.roomId,
     archivedAt: checkpoint.archivedAt,
     status: checkpoint.status,
     seasonMode: checkpoint.seasonMode,
-    snapshot: {
-      ...snapshot,
-      world: {
-        ...snapshot.world,
-        messages: (snapshot.world.messages ?? []).filter((message) => message.channel === "public"),
-        agents: (snapshot.world.agents ?? []).map(({ observerRole: _observerRole, ...agent }) => agent),
-        details: {}
-      },
-      participants: (snapshot.participants ?? []).map(({ mind: _mind, ...participant }) => participant)
-    }
+    snapshot: publicArchivedSnapshot(checkpoint)
   };
 }
 
@@ -118,7 +120,7 @@ const createRoomSchema = z.object({
   /** Per-seat tuning overrides: slot index → temperature / effort. */
   agentTuning: z.record(z.string().min(1).max(8), z.object({
     temperature: z.number().min(0).max(2).optional(),
-    reasoningEffort: z.enum(["low", "medium", "high"]).optional()
+    reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).optional()
   }).strict()).optional(),
   rounds: z.number().int().positive().max(20).optional(),
   /** Seat count for this room; defaults to the scenario's default. */
@@ -128,7 +130,7 @@ const createRoomSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   mode: z.enum(["ai", "human"]).default("ai"),
   playerName: z.string().trim().min(1).max(40).optional(),
-  reasoningEffort: z.enum(["low", "medium", "high"]).default("low"),
+  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("xhigh"),
   season: z.enum(["season", "one-shot"]).default("season")
 }).strict().superRefine((input, issueContext) => {
   if (input.mode === "human" && !input.playerName) {
@@ -363,7 +365,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       // process memory can still be viewed read-only from its checkpoint.
       const checkpoint = context.archive.load(request.params.roomId);
       if (checkpoint?.snapshot) {
-        response.json(checkpoint.snapshot);
+        response.json(publicArchivedSnapshot(checkpoint));
         return;
       }
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });

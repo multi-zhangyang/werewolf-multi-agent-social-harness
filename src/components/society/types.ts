@@ -30,7 +30,7 @@ export interface CreateRoomInput {
   /** Per-seat tuning: slot index → temperature / effort. */
   agentTuning?: Record<string, {
     temperature?: number;
-    reasoningEffort?: "low" | "medium" | "high";
+    reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   }>;
   rounds: number;
   /** Seat count for worlds that support more than their default table size. */
@@ -39,7 +39,7 @@ export interface CreateRoomInput {
   characterIds?: string[];
   mode: "ai" | "human";
   playerName?: string;
-  reasoningEffort: "low" | "medium" | "high";
+  reasoningEffort: "low" | "medium" | "high" | "xhigh";
   /** season = characters carry cross-game history; one-shot = no memory. */
   season: "season" | "one-shot";
 }

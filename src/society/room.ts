@@ -29,6 +29,7 @@ import {
   type ProviderProfile,
   type ResolvedModelConfig
 } from "./models";
+import { reasoningFallbackFetch } from "./models/reasoning-fallback";
 import { RoomArchiveStore, type RoomCheckpoint } from "./persistence";
 import { CinematicDirector } from "./spectator/cinematic-director";
 import { ActivationLimiter } from "./activation-limiter";
@@ -455,6 +456,10 @@ export class SocietyRoom {
       // observer seat gets the real ledger back for the action triangle.
       const records = this.world.decisionRecords();
       if (records.length) reveal.details = { ...reveal.details, decisionRecords: records };
+      reveal.details = {
+        ...reveal.details,
+        socialCausality: this.world.socialCausalityFor(undefined, true)
+      };
       return {
         id: this.id,
         scenarioId: this.scenarioId,
@@ -903,7 +908,8 @@ export class SocietyRoom {
       apiKey,
       baseURL,
       timeout: this.turnTimeoutMs + this.turnGraceMs + 60_000,
-      maxRetries: 1
+      maxRetries: 1,
+      fetch: reasoningFallbackFetch()
     });
   }
 
