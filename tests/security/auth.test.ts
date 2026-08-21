@@ -1,9 +1,18 @@
 /**
- * API security checks (AGENTS.md §18 / P0-05): anonymous viewers stay PUBLIC,
- * omniscient / agent-pov need real authority, control ops need owner or
- * operator tokens, archives split public from forensic, and global writes are
- * operator-gated with the dual-track owner fallback. HTTP-level tests against
- * the real route stack — no model calls, no network.
+ * API security checks (AGENTS.md §18 / P0-05), rewritten against the strict
+ * operator model that actually ships in src/server/auth.ts:
+ *
+ *  - anonymous viewers stay PUBLIC, always;
+ *  - the room owner token unlocks omniscient viewing + control of THAT room
+ *    only (cross-room tokens are refused);
+ *  - global operations (season reset, settings, characters, templates) and
+ *    the forensic archive require SOCIETY_OPERATOR_TOKEN — ownership never
+ *    escalates into operator authority, and with no token configured every
+ *    global write is refused (fail closed);
+ *  - archives split public from forensic: minds never leave via the public
+ *    projection; session file paths never cross either wire.
+ *
+ * HTTP-level tests against the real route stack — no model calls, no network.
  */
 import { strict as assert } from "node:assert";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -170,19 +179,18 @@ describe("archive layering", () => {
     assert.deepEqual(snapshot.world.details, {}, "world internals (roles etc.) are stripped");
   });
 
-  it("the operator's forensic archive keeps minds but never file paths", async () => {
+  it("an owner token does not unlock the forensic archive (§18.1)", async () => {
     const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}/archive`, {
-      headers: withBearer(harness.roomAToken) // dual-track fallback: owner acts as operator
+      headers: withBearer(harness.roomAToken)
     });
     assert.equal(response.status, 200);
     const archive = await response.json() as Record<string, unknown>;
-    assert.ok(archive.agentMinds, "the forensic archive keeps minds");
-    assert.equal(archive.sessionFiles, undefined, "session file paths never cross the wire");
-    assert.ok(typeof archive.sessionCount === "number");
+    assert.equal(archive.agentMinds, undefined, "ownership never escalates into forensic authority");
+    assert.equal(archive.sessionFiles, undefined);
   });
 });
 
-describe("global operations under the dual-track fallback", () => {
+describe("global writes fail closed without an operator token", () => {
   let harness: Harness;
   beforeAll(async () => { harness = await startHarness({}); });
   afterAll(async () => { await stopHarness(harness); });
@@ -201,23 +209,19 @@ describe("global operations under the dual-track fallback", () => {
     })).status, 403);
   });
 
-  it("without an operator token configured, an owner token acts as operator", async () => {
-    assert.equal((await fetch(`${harness.base}/api/season`, {
+  it("an owner token cannot perform global operations either", async () => {
+    const season = await fetch(`${harness.base}/api/season`, {
       method: "DELETE",
       headers: withBearer(harness.roomAToken)
-    })).status, 200, "season reset via owner fallback");
+    });
+    assert.equal(season.status, 403, "ownership never escalates into operator authority");
+
     const characters = await fetch(`${harness.base}/api/characters`, {
       method: "POST",
       headers: { ...withBearer(harness.roomAToken), "Content-Type": "application/json" },
-      body: JSON.stringify({ displayName: "房主自建", persona: "一位通过房主回退权限创建的人物。", traits: ["测试"], values: ["验证"], goals: ["通过"] })
+      body: JSON.stringify({ displayName: "房主自建", persona: "一位试图通过房主令牌越权的人物。", traits: ["测试"], values: ["验证"], goals: ["越权"] })
     });
-    assert.equal(characters.status, 201, "character creation via owner fallback");
-    const templates = await fetch(`${harness.base}/api/room-templates`, {
-      method: "POST",
-      headers: { ...withBearer(harness.roomAToken), "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "tpl", scenarioId: "trust-game" })
-    });
-    assert.ok(templates.status === 201 || templates.status === 400, "template write gate passes (schema may reject the stub body)");
+    assert.equal(characters.status, 403, "character creation is operator-gated");
   });
 });
 
@@ -250,5 +254,7 @@ describe("strict operator mode (SOCIETY_OPERATOR_TOKEN configured)", () => {
     assert.equal(response.status, 200);
     const archive = await response.json() as Record<string, unknown>;
     assert.ok(archive.agentMinds, "operator archive includes minds");
+    assert.equal(archive.sessionFiles, undefined, "session file paths never cross the wire");
+    assert.ok(typeof archive.sessionCount === "number");
   });
 });
