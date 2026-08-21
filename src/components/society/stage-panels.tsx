@@ -9,6 +9,12 @@
  *   secret-submit    — public-goods / beauty-contest / sealed-bid: submission grid + reveal
  */
 import { type ReactNode } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Item, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
+import { Progress } from "@/components/ui/progress";
+import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { AgentAvatar } from "./shared";
@@ -59,13 +65,13 @@ function useNames(room: SocietyRoomSnapshot): { nameOf: (id: string) => string; 
 
 function PanelShell({ title, hint, children }: { title: string; hint?: string; children: ReactNode }): ReactNode {
   return (
-    <div className="mt-3 rounded-xl border border-white/[0.07] bg-[#080808] p-3.5">
-      <div className="mb-2.5 flex items-center justify-between px-0.5">
-        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-foreground/65">{title}</p>
-        {hint ? <span className="nums font-mono text-[10px] text-muted-foreground/70">{hint}</span> : null}
-      </div>
-      {children}
-    </div>
+    <Card className="mt-3 gap-2.5 rounded-xl py-3.5 shadow-none">
+      <CardHeader className="px-3.5">
+        <CardTitle className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">{title}</CardTitle>
+        {hint ? <CardAction><span className="nums font-mono text-[10px] text-muted-foreground">{hint}</span></CardAction> : null}
+      </CardHeader>
+      <CardContent className="px-3.5">{children}</CardContent>
+    </Card>
   );
 }
 
@@ -78,20 +84,26 @@ function SuspicionBars({ suspicion, room }: { suspicion: Record<string, number>;
   const rows = Object.entries(suspicion)
     .filter(([, score]) => score > 0)
     .sort((a, b) => b[1] - a[1]);
-  if (!rows.length) return <p className="text-[11px] text-muted-foreground/60">群体怀疑尚未升温。</p>;
+  if (!rows.length) return <p className="text-[11px] text-muted-foreground">群体怀疑尚未升温。</p>;
   const max = Math.max(...rows.map(([, score]) => score), 1);
   return (
     <div className="space-y-1.5">
       {rows.map(([id, score]) => (
         <div key={id} className="flex items-center gap-2.5">
           <span className="w-14 shrink-0 truncate text-[11px] text-foreground/85">{nameOf(id)}</span>
-          <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/[0.05]">
-            <div
-              className={cn("h-full rounded-full transition-all duration-700", score / max > 0.66 ? "bg-rose-400/80" : score / max > 0.33 ? "bg-amber-400/70" : "bg-orange-400/50")}
-              style={{ width: `${Math.round((score / max) * 100)}%` }}
-            />
-          </div>
-          <span className="nums w-8 shrink-0 text-right font-mono text-[10px] text-muted-foreground/70">{score.toFixed(1)}</span>
+          <Progress
+            value={Math.round((score / max) * 100)}
+            className={cn(
+              "h-1.5 min-w-0 flex-1",
+              score / max > 0.66
+                ? "[&>[data-slot=progress-indicator]]:bg-rose-400/80"
+                : score / max > 0.33
+                  ? "[&>[data-slot=progress-indicator]]:bg-amber-400/70"
+                  : "[&>[data-slot=progress-indicator]]:bg-orange-400/50"
+            )}
+            aria-label={`${nameOf(id)} 被怀疑程度 ${score.toFixed(1)}`}
+          />
+          <span className="nums w-8 shrink-0 text-right font-mono text-[10px] text-muted-foreground">{score.toFixed(1)}</span>
         </div>
       ))}
     </div>
@@ -107,15 +119,16 @@ function VoteHistory({ details, room }: { details: Details; room: SocietyRoomSna
   for (const target of Object.values(votes)) tally.set(target, (tally.get(target) ?? 0) + 1);
   const rows = [...tally].sort((a, b) => b[1] - a[1]);
   return (
-    <div className="mt-3 border-t border-white/[0.05] pt-2.5">
-      <p className="mb-1.5 text-[10px] font-medium uppercase tracking-widest text-muted-foreground/60">最近投票 · 第 {last.day} 天</p>
+    <div className="mt-3">
+      <Separator className="mb-2.5" />
+      <p className="mb-1.5 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">最近投票 · 第 {last.day} 天</p>
       <div className="flex flex-wrap gap-1.5">
         {rows.map(([targetId, count]) => (
-          <span key={targetId} className="flex items-center gap-1 rounded-full border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[10px] text-foreground/80">
+          <Badge key={targetId} variant="outline" className="gap-1 rounded-full px-2 py-0.5 text-[10px] font-normal text-foreground/80">
             <span className="size-1.5 rounded-full bg-rose-400/70" />
             {nameOf(targetId)}
-            <span className="nums font-mono text-muted-foreground/70">{count} 票</span>
-          </span>
+            <span className="nums font-mono text-muted-foreground">{count} 票</span>
+          </Badge>
         ))}
       </div>
     </div>
@@ -142,31 +155,31 @@ function AvalonQuestBoard({ details, room }: { details: Details; room: SocietyRo
           const done = i < currentQuest;
           const failed = i < failures;
           return (
-            <span key={i} className={cn("h-1.5 w-6 rounded-full", failed ? "bg-rose-400/80" : done ? "bg-emerald-400/80" : "bg-white/[0.07]")} />
+            <span key={i} className={cn("h-1.5 w-6 rounded-full", failed ? "bg-rose-400/80" : done ? "bg-emerald-400/80" : "bg-muted")} />
           );
         })}
-        <span className="nums ml-1 font-mono text-[10px] text-muted-foreground/70">
+        <span className="nums ml-1 font-mono text-[10px] text-muted-foreground">
           {room.world.status === "finished" ? `胜 ${successes} · 负 ${failures} · 已终局` : `胜 ${successes} · 负 ${failures} · 第 ${currentQuest + 1} 个任务`}
         </span>
       </div>
       {team.length ? (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] uppercase tracking-widest text-muted-foreground/60">队伍</span>
+          <span className="text-[10px] uppercase tracking-widest text-muted-foreground">队伍</span>
           {team.map((id) => (
-            <span key={id} className="flex items-center gap-1 rounded-full border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[10px]">
+            <Badge key={id} variant="outline" className="gap-1 rounded-full px-2 py-0.5 text-[10px] font-normal">
               <AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} size="sm" />
               {nameOf(id)}
-            </span>
+            </Badge>
           ))}
         </div>
       ) : null}
       {Object.keys(teamVotes).length ? (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] uppercase tracking-widest text-muted-foreground/60">表决</span>
+          <span className="text-[10px] uppercase tracking-widest text-muted-foreground">表决</span>
           {Object.entries(teamVotes).map(([id, v]) => (
-            <span key={id} className={cn("rounded-full border px-2 py-0.5 text-[10px]", v > 0 ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-300" : "border-rose-400/30 bg-rose-400/10 text-rose-300")}>
+            <Badge key={id} variant="outline" className={cn("rounded-full px-2 py-0.5 text-[10px] font-normal", v > 0 ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-300" : "border-rose-400/30 bg-rose-400/10 text-rose-300")}>
               {nameOf(id)} {v > 0 ? "赞成" : "反对"}
-            </span>
+            </Badge>
           ))}
         </div>
       ) : null}
@@ -203,16 +216,14 @@ export function HiddenIdentityStage({ room }: { room: SocietyRoomSnapshot }): Re
 function SideCard({ room, id, label, detail }: { room: SocietyRoomSnapshot; id: string; label: string; detail?: string }): ReactNode {
   const { nameOf, indexOf, seedOf } = useNames(room);
   return (
-    <div className="min-w-0 flex-1 rounded-xl border border-white/[0.07] bg-white/[0.015] px-3.5 py-3">
-      <div className="flex items-center gap-2">
-        <AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} />
-        <div className="min-w-0">
-          <p className="truncate text-[13px] font-semibold tracking-tight">{nameOf(id)}</p>
-          <p className="text-[10px] text-muted-foreground/75">{label}</p>
-        </div>
-      </div>
-      {detail ? <p className="mt-2 line-clamp-2 text-[11px] leading-4 text-foreground/80">{detail}</p> : null}
-    </div>
+    <Item variant="outline" className="min-w-0 flex-1 gap-2.5 rounded-xl px-3.5 py-3">
+      <ItemMedia><AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} /></ItemMedia>
+      <ItemContent>
+        <ItemTitle className="truncate text-[13px]">{nameOf(id)}</ItemTitle>
+        <ItemDescription>{label}</ItemDescription>
+        {detail ? <ItemDescription className="line-clamp-2 text-foreground/80">{detail}</ItemDescription> : null}
+      </ItemContent>
+    </Item>
   );
 }
 
@@ -256,7 +267,7 @@ export function DuelStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
         <SideCard room={room} id={left} label={roleOf(left) ?? "左席"} detail={detailOf(left)} />
         <div className="flex flex-col items-center justify-center gap-1 px-0.5">
           <span className="nums font-mono text-[11px] text-foreground/80">{leftScore !== undefined ? Math.round(leftScore) : "—"}</span>
-          <span className="text-[9px] font-bold tracking-widest text-muted-foreground/50">VS</span>
+          <span className="text-[9px] font-bold tracking-widest text-muted-foreground">VS</span>
           <span className="nums font-mono text-[11px] text-foreground/80">{rightScore !== undefined ? Math.round(rightScore) : "—"}</span>
         </div>
         <SideCard room={room} id={right} label={roleOf(right) ?? "右席"} detail={detailOf(right)} />
@@ -278,11 +289,11 @@ export function RiskStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
       <PanelShell title="赌注与生命" hint={room.world.phase}>
         <div className="flex flex-wrap gap-1.5">
           {Object.entries(lives).map(([id, livesLeft]) => (
-            <span key={id} className={cn("flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]", livesLeft > 0 ? "border-white/[0.08] bg-white/[0.02] text-foreground/85" : "border-rose-400/30 bg-rose-400/[0.06] text-rose-300/80 line-through")}>
+            <Badge key={id} variant="outline" className={cn("gap-1.5 px-2.5 py-1 text-[11px] font-normal", livesLeft > 0 ? "text-foreground/85" : "border-rose-400/30 bg-rose-400/10 text-rose-300 line-through")}>
               <AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} size="sm" />
               {nameOf(id)}
-              <span className="nums font-mono text-[10px] text-muted-foreground/75">{livesLeft} ❤</span>
-            </span>
+              <span className="nums font-mono text-[10px] text-muted-foreground">{livesLeft} ❤</span>
+            </Badge>
           ))}
         </div>
       </PanelShell>
@@ -294,16 +305,20 @@ export function RiskStage({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   return (
     <PanelShell title="奖池与分数" hint={pot !== undefined ? `当前奖池 ${pot}` : room.world.phase}>
       {Object.keys(scores).length === 0 ? (
-        <p className="text-[11px] text-muted-foreground/60">尚未结算。</p>
+        <Empty className="min-h-20">
+          <EmptyHeader>
+            <EmptyMedia variant="icon"><span className="nums font-mono text-sm">0</span></EmptyMedia>
+            <EmptyTitle>尚未结算</EmptyTitle>
+            <EmptyDescription>首轮结算后这里会显示各人分数。</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       ) : (
         <div className="space-y-1.5">
           {Object.entries(scores).map(([id, score]) => (
             <div key={id} className="flex items-center gap-2.5">
               <AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} size="sm" />
               <span className="w-12 shrink-0 truncate text-[11px] text-foreground/85">{nameOf(id)}</span>
-              <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/[0.05]">
-                <div className="h-full rounded-full bg-gradient-to-r from-emerald-400/70 to-emerald-300/60 transition-all duration-700" style={{ width: `${Math.round((score / maxScore) * 100)}%` }} />
-              </div>
+              <Progress value={Math.round((score / maxScore) * 100)} className="h-1.5 min-w-0 flex-1 [&>[data-slot=progress-indicator]]:bg-emerald-400/70" aria-label={`${nameOf(id)} 分数 ${Math.round(score)}`} />
               <span className="nums w-8 shrink-0 text-right font-mono text-[11px] text-foreground/85">{Math.round(score)}</span>
             </div>
           ))}
@@ -337,17 +352,17 @@ export function SecretStage({ room }: { room: SocietyRoomSnapshot }): ReactNode 
           const id = p.profile.id;
           const submitted = submittedIds.has(id);
           const score = scoreOf(details, id);
+          const status = room.world.status === "finished"
+            ? (score !== undefined ? `分数 ${Math.round(score)}` : "已揭示")
+            : submitted ? "已密封" : "待提交";
           return (
-            <div key={id} className={cn("flex items-center gap-2 rounded-lg border px-2.5 py-1.5", submitted ? "border-emerald-400/25 bg-emerald-400/[0.04]" : "border-white/[0.07] bg-white/[0.015]")}>
-              <AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} size="sm" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-[11px] font-medium text-foreground/85">{nameOf(id)}</p>
-                <p className={cn("text-[10px]", submitted ? "text-emerald-300/80" : "text-muted-foreground/60")}>
-                  {room.world.status === "finished" ? (score !== undefined ? `分数 ${Math.round(score)}` : "已揭示") : submitted ? "已密封" : "待提交"}
-                </p>
-              </div>
-              {submitted ? <span className="size-1.5 shrink-0 rounded-full bg-emerald-400" /> : null}
-            </div>
+            <Item key={id} size="sm" variant={submitted ? "muted" : "outline"} className={cn("gap-2 rounded-lg px-2.5 py-1.5", submitted && "border-emerald-400/25 bg-emerald-400/[0.04]")}>
+              <ItemMedia><AgentAvatar name={nameOf(id)} index={indexOf(id)} seed={seedOf(id)} size="sm" /></ItemMedia>
+              <ItemContent>
+                <ItemTitle className="truncate text-[11px]">{nameOf(id)}</ItemTitle>
+                <ItemDescription className={cn(submitted && "text-emerald-300/80")}>{status}</ItemDescription>
+              </ItemContent>
+            </Item>
           );
         })}
       </div>

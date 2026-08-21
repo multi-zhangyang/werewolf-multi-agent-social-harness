@@ -76,17 +76,6 @@ export function AgentPresence({ name, index = 0, seed, size = "md", status, clas
   );
 }
 
-/** Three animated bars — the universal "on the record, speaking now" signal. */
-export function SpeechBars({ className }: { className?: string }): ReactNode {
-  return (
-    <span className={cn("flex h-3 items-end gap-[3px]", className)} aria-hidden>
-      {[0, 1, 2].map((bar) => (
-        <span key={bar} className="wave-bar w-[3px] rounded-full bg-foreground" style={{ height: `${[8, 12, 6][bar]}px`, animationDelay: `${bar * 140}ms` }} />
-      ))}
-    </span>
-  );
-}
-
 export function StatusDot({ status, className }: { status: AgentStatus | "running" | "paused" | "finished" | "error"; className?: string }): ReactNode {
   const live = status === "running" || status === "thinking" || status === "acting" || status === "speaking";
   const tone = status === "error"

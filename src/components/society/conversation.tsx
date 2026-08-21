@@ -2,15 +2,25 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertCircle, AlertTriangle, Brain, Check, Clock, Eye, Handshake, HeartHandshake, RotateCcw, Send, ShieldCheck, ShieldX, Skull, Sparkles, TrendingDown, TrendingUp, Trophy, UserMinus, Users, VenetianMask, XCircle } from "lucide-react";
 import type { SocialMessage, StoryBeatKind, WorldLogEntry } from "@/society/contracts";
 import type { SocietyPlayerState, SocietyRoomSnapshot } from "@/society/room";
-import type { LiveAgentActivity } from "./use-room";
+import type { LiveAgentActivity, LiveAgentProcessStep } from "./use-room";
+import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
+import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
+import { Shimmer } from "@/components/ai-elements/shimmer";
+import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolPart } from "@/components/ai-elements/tool";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
 import {
   AgentAvatar,
   AgentPresence,
   ChannelBadge,
-  SpeechBars,
   channelSurface,
   eventLabel,
   formatTime,
@@ -131,15 +141,15 @@ export function Conversation({ room, activity, onAction, onReplay, jumpToAt }: C
           <div className="space-y-3">
             {messageAction ? (
               <div className="flex items-center gap-2">
-                <input
+                <Input
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => { if (event.key === "Enter") void submit(); }}
                   placeholder="发言…"
-                  className="h-11 flex-1 rounded-lg border border-input bg-card px-5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:border-ring focus:outline-none"
+                  className="flex-1"
                 />
-                <Button size="icon" className="size-11 rounded-lg bg-foreground text-background hover:bg-foreground/85" disabled={!draft.trim()} onClick={() => void submit()}>
-                  <Send className="size-4" />
+                <Button size="icon-lg" disabled={!draft.trim()} onClick={() => void submit()}>
+                  <Send />
                 </Button>
               </div>
             ) : null}
@@ -278,96 +288,223 @@ function LiveAgents({ room, activity }: {
   room: SocietyRoomSnapshot;
   activity: Record<string, LiveAgentActivity>;
 }): ReactNode {
-  const active = room.participants.filter((participant) => {
+  const active = useMemo(() => room.participants.filter((participant) => {
     const state = activity[participant.profile.id];
     const status = participant.status;
-    return (status === "thinking" || status === "acting" || status === "speaking") || Boolean(state?.text || state?.reasoningSummary || state?.thought || state?.tool);
-  });
+    return (status === "thinking" || status === "acting" || status === "speaking") || Boolean(state?.processSteps?.length || state?.text || state?.reasoningContent?.text || state?.reasoningSummary || state?.thought || state?.tool);
+  }), [activity, room.participants]);
+  const running = useMemo(
+    () => active.filter((participant) => !activity[participant.profile.id]?.completedAt),
+    [active, activity]
+  );
+  const preferredId = running[0]?.profile.id ?? active[0]?.profile.id ?? "";
+  const [selectedId, setSelectedId] = useState(preferredId);
+  const manuallySelected = useRef(false);
+
+  useEffect(() => {
+    if (!active.some((participant) => participant.profile.id === selectedId)) {
+      manuallySelected.current = false;
+      setSelectedId(preferredId);
+      return;
+    }
+    const selected = active.find((participant) => participant.profile.id === selectedId);
+    if (!manuallySelected.current && selected && activity[selected.profile.id]?.completedAt && running.length) {
+      setSelectedId(running[0].profile.id);
+    }
+  }, [active, activity, preferredId, running, selectedId]);
+
   if (!active.length) return null;
   return (
-    <div className="mb-8 space-y-3">
-      {active.map((participant) => {
-        const state = activity[participant.profile.id];
-        const caption = state?.tool
-          ? `正在调用 ${eventLabel(state.tool)}`
-          : participant.status === "speaking"
-            ? "正在发言"
-            : participant.status === "acting"
-              ? "正在行动"
-              : state?.text
-                ? "斟酌措辞中"
-                : state?.thought || state?.reasoningSummary
-                  ? "心中盘算"
-                  : "思考中";
-        return (
-          <div key={participant.profile.id} className="enter-stage overflow-hidden rounded-lg border border-border bg-card">
-            <div className="flex items-center gap-3 px-4 py-3">
-              <AgentPresence name={participant.profile.displayName} index={indexOf(participant.profile.id)} seed={participant.profile.characterId} size="md" status={participant.status} />
-              <div className="min-w-0 flex-1">
-                <p className="flex items-center gap-2 text-sm font-medium">
-                  {participant.profile.displayName}
-                  {participant.status === "speaking" ? <SpeechBars /> : <span className="live-pulse size-1.5 rounded-full bg-emerald-400" />}
-                </p>
-                <p className="truncate text-xs text-muted-foreground">{caption}</p>
-              </div>
-              <span className="nums font-mono text-[10px] text-muted-foreground/50">{formatTime(state?.at ?? new Date().toISOString())}</span>
-            </div>
-            {state?.reasoningSummary ? <CollapsedReasoning text={state.reasoningSummary} /> : null}
-            {state?.thought ? (
-              <div className="mx-4 mb-3 rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
-                <p className="mb-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
-                  <Brain className="size-3" /> {thoughtLabel(state.thought.kind)}
-                </p>
-                <p className="stream-caret line-clamp-4 text-xs leading-5 text-muted-foreground">{state.thought.text}</p>
-              </div>
-            ) : null}
-            {state?.text ? (
-              <div className="mx-4 mb-3 rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
-                <p className="stream-caret line-clamp-3 text-xs leading-5 text-foreground/80">{state.text}</p>
-              </div>
-            ) : null}
-            {state?.compacted ? (
-              <div className="mx-4 mb-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3.5 py-2">
-                <p className="font-mono text-[10px] uppercase tracking-widest text-amber-300">记忆压缩</p>
-                <p className="mt-0.5 text-xs leading-5 text-amber-100/80">{state.compacted}</p>
-              </div>
-            ) : null}
-          </div>
-        );
-      })}
+    <Tabs
+      value={active.some((participant) => participant.profile.id === selectedId) ? selectedId : preferredId}
+      onValueChange={(value) => {
+        manuallySelected.current = true;
+        setSelectedId(value);
+      }}
+      className="mb-8"
+    >
+      <Card className="gap-0 overflow-hidden py-0">
+        <CardHeader className="border-b py-3">
+          <CardTitle className="text-xs">Agent 实时过程</CardTitle>
+          <CardDescription>{running.length} 执行中 · {active.length - running.length} 已完成</CardDescription>
+        </CardHeader>
+        <CardContent className="border-b px-3 py-2">
+          <TabsList variant="line" className="h-8 min-w-0 justify-end overflow-x-auto">
+            {active.map((participant) => {
+              const state = activity[participant.profile.id];
+              return (
+                <TabsTrigger key={participant.profile.id} value={participant.profile.id} className="shrink-0 px-2" aria-label={`查看 ${participant.profile.displayName} 的运行过程`}>
+                  <AgentAvatar name={participant.profile.displayName} index={indexOf(participant.profile.id)} seed={participant.profile.characterId} size="sm" />
+                  <span className="max-w-20 truncate">{participant.profile.displayName}</span>
+                  {state?.completedAt ? <Check /> : <Badge variant="secondary">运行</Badge>}
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
+        </CardContent>
+        {active.map((participant) => (
+          <TabsContent key={participant.profile.id} value={participant.profile.id} className="mt-0">
+            <CardContent className="p-0">
+              <AgentActivityPanel participant={participant} state={activity[participant.profile.id]} />
+            </CardContent>
+          </TabsContent>
+        ))}
+      </Card>
+    </Tabs>
+  );
+}
+
+function AgentActivityPanel({
+  participant,
+  state
+}: {
+  participant: SocietyRoomSnapshot["participants"][number];
+  state?: LiveAgentActivity;
+}): ReactNode {
+  const caption = state?.completedAt
+    ? "本轮调用已完成"
+    : state?.tool
+      ? `正在调用 ${eventLabel(state.tool)}`
+      : participant.status === "speaking"
+        ? "正在发言"
+        : participant.status === "acting"
+          ? "正在行动"
+          : state?.text
+            ? "正在生成输出"
+            : "思考中";
+  return (
+    <div className="py-3">
+      <div className="flex items-center gap-3 px-4 pb-3">
+        <AgentPresence name={participant.profile.displayName} index={indexOf(participant.profile.id)} seed={participant.profile.characterId} size="md" status={participant.status} />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">
+            {participant.profile.displayName}
+          </p>
+          <p className="truncate text-xs text-muted-foreground">
+            {participant.status === "speaking" ? <Shimmer as="span">正在发言</Shimmer> : caption}
+          </p>
+        </div>
+        <span className="nums font-mono text-[10px] text-muted-foreground">{formatTime(state?.at ?? new Date().toISOString())}</span>
+      </div>
+      {state?.processSteps?.length ? <AgentProcessTrace steps={state.processSteps} /> : null}
+      {!state?.processSteps?.length && (state?.reasoningContent?.text || state?.reasoningSummary) ? (
+        <div className="px-4">
+          <ReasoningStep
+            step={{
+              id: `reasoning-fallback:${participant.profile.id}`,
+              kind: "reasoning",
+              text: state.reasoningContent?.text ?? state.reasoningSummary ?? "",
+              elapsedMs: state.reasoningContent?.elapsedMs ?? 0,
+              done: state.reasoningContent?.done ?? true,
+              startedAt: state.at,
+              updatedAt: state.at
+            }}
+          />
+        </div>
+      ) : null}
+      {state?.thought ? (
+        <Alert className="mx-4 mb-3 w-auto">
+          <Brain />
+          <AlertTitle>{thoughtLabel(state.thought.kind)}</AlertTitle>
+          <AlertDescription className="line-clamp-4">{state.thought.text}</AlertDescription>
+        </Alert>
+      ) : null}
+      {!state?.processSteps?.length && state?.text ? (
+        <div className="px-4">
+          <OutputStep step={{ id: `output-fallback:${participant.profile.id}`, kind: "output", text: state.text, streaming: !state.completedAt, startedAt: state.at, updatedAt: state.at }} />
+        </div>
+      ) : null}
+      {state?.compacted ? (
+        <Alert className="mx-4 mb-3 w-auto">
+          <Brain />
+          <AlertTitle>上下文已压缩</AlertTitle>
+          <AlertDescription>{state.compacted}</AlertDescription>
+        </Alert>
+      ) : null}
     </div>
   );
 }
 
-/**
- * The provider's reasoning SUMMARY, collapsed by default (§8.5). Only a
- * provider-returned reasoning summary may be shown — raw chain-of-thought
- * never crosses the wire — and it is labeled by source, shown only on
- * explicit expansion, never as an auto-playing feed. Public seats never
- * receive these events server-side.
- */
-function CollapsedReasoning({ text }: { text: string }): ReactNode {
-  const [open, setOpen] = useState(false);
+function AgentProcessTrace({ steps }: { steps: LiveAgentProcessStep[] }): ReactNode {
   return (
-    <div className="mx-4 mb-3 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3.5 py-2.5">
-      <button
-        type="button"
-        onClick={() => setOpen((current) => !current)}
-        className="flex w-full items-center gap-1.5 text-left"
-        aria-expanded={open}
-      >
-        <Brain className="size-3 shrink-0 text-sky-300" />
-        <span className="font-mono text-[10px] uppercase tracking-widest text-sky-300">提供商推理摘要</span>
-        <span className="truncate text-[10px] text-sky-200/50">{open ? "点击收起" : "点击展开"}</span>
-        <svg viewBox="0 0 12 12" className={cn("ml-auto size-2.5 shrink-0 text-sky-300/70 transition-transform", open && "rotate-180")} fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-          <path d="M2 4l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-      {open ? (
-        <p className="stream-caret mt-1.5 whitespace-pre-wrap break-words font-mono text-xs leading-5 text-sky-100/80">{text}</p>
-      ) : null}
+    <div className="mx-4 mb-3 flex flex-col gap-3">
+      <Separator />
+      <div className="flex flex-col gap-3">
+        {steps.map((step) => {
+          if (step.kind === "reasoning") return <ReasoningStep key={step.id} step={step} />;
+          if (step.kind === "output") return <OutputStep key={step.id} step={step} />;
+          return <ToolStep key={step.id} step={step} />;
+        })}
+      </div>
     </div>
   );
+}
+
+function ReasoningStep({ step }: { step: Extract<LiveAgentProcessStep, { kind: "reasoning" }> }): ReactNode {
+  const seconds = Math.max(1, Math.ceil(step.elapsedMs / 1_000));
+  return (
+    <Reasoning className="mb-0" defaultOpen={false} duration={seconds} isStreaming={!step.done}>
+      <ReasoningTrigger
+        getThinkingMessage={(isStreaming, duration) => (
+          <span>{isStreaming ? `思考过程 · 已持续 ${formatDuration(duration ?? seconds)}` : `思考过程 · 持续 ${formatDuration(duration ?? seconds)}`}</span>
+        )}
+      />
+      <ReasoningContent className="text-xs leading-5" viewportClassName="h-44">{step.text}</ReasoningContent>
+    </Reasoning>
+  );
+}
+
+function OutputStep({ step }: { step: Extract<LiveAgentProcessStep, { kind: "output" }> }): ReactNode {
+  return (
+    <Message className="max-w-full" from="assistant">
+      <p className="text-xs font-medium text-muted-foreground">{step.streaming ? "输出中" : "模型输出"}</p>
+      <MessageContent className="w-full">
+        <ScrollArea className={step.text.length > 600 ? "h-44" : undefined}>
+          <MessageResponse className={cn("pr-3 text-xs leading-5", step.streaming && "stream-caret")} isAnimating={step.streaming}>
+            {step.text}
+          </MessageResponse>
+        </ScrollArea>
+      </MessageContent>
+    </Message>
+  );
+}
+
+function ToolStep({ step }: { step: Extract<LiveAgentProcessStep, { kind: "tool" }> }): ReactNode {
+  const state = toolPartState(step.phase);
+  const input = parseToolSummary(step.safeInputSummary);
+  const output = parseToolSummary(step.safeOutputSummary);
+  return (
+    <Tool defaultOpen={step.phase === "started" || step.phase === "streaming" || step.phase === "failed"} className="mb-0">
+      <ToolHeader title={step.label ?? eventLabel(step.toolName)} toolName={step.toolName} type="dynamic-tool" state={state} />
+      <ToolContent>
+        {input !== undefined ? <ToolInput input={input} /> : null}
+        <ToolOutput output={output} errorText={step.phase === "failed" ? step.errorCode ?? "工具执行失败" : undefined} />
+      </ToolContent>
+    </Tool>
+  );
+}
+
+function toolPartState(phase: Extract<LiveAgentProcessStep, { kind: "tool" }>["phase"]): ToolPart["state"] {
+  if (phase === "queued" || phase === "streaming") return "input-streaming";
+  if (phase === "started") return "input-available";
+  if (phase === "failed") return "output-error";
+  return "output-available";
+}
+
+function parseToolSummary(summary: string | undefined): unknown {
+  if (summary === undefined) return undefined;
+  try {
+    return JSON.parse(summary);
+  } catch {
+    return summary;
+  }
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes} 分 ${remainder} 秒` : `${minutes} 分钟`;
 }
 
 function thoughtLabel(kind: string): string {
@@ -517,20 +654,20 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
 
   if (action.kind === "choice") {
     return (
-      <div className="flex items-center gap-2">
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        size="sm"
+        onValueChange={(next) => {
+          if (next) void run({ [action.field ?? "choice"]: next === "true" });
+        }}
+      >
         {action.options?.map((option) => (
-          <Button
-            key={option.value}
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={() => void run({ [action.field ?? "choice"]: option.value === "true" })}
-            className="h-9 rounded-lg border-border bg-card px-4 text-foreground/80 hover:bg-muted hover:text-foreground"
-          >
+          <ToggleGroupItem key={option.value} value={option.value} disabled={busy}>
             {option.label}
-          </Button>
+          </ToggleGroupItem>
         ))}
-      </div>
+      </ToggleGroup>
     );
   }
 
@@ -539,16 +676,16 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
     const max = action.max ?? 10;
     return (
       <div className="flex items-center gap-2">
-        <input
+        <Input
           type="number"
           min={min}
           max={max}
           step={action.step ?? 1}
           value={value}
           onChange={(event) => setValue(event.target.value)}
-          className="h-10 w-28 rounded-lg border border-input bg-card px-4 font-mono text-sm text-foreground focus:border-ring focus:outline-none"
+          className="w-28 font-mono"
         />
-        <Button size="sm" disabled={busy} onClick={() => void run({ [action.field ?? "value"]: Number(value) })} className="h-10 rounded-lg bg-foreground px-5 text-background hover:bg-foreground/85">
+        <Button disabled={busy} onClick={() => void run({ [action.field ?? "value"]: Number(value) })}>
           {action.label}
         </Button>
       </div>
@@ -558,13 +695,19 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
   if (action.kind === "target") {
     const targets = room.world.agents.filter((agent) => agent.id !== room.player?.actorId && agent.alive);
     return (
-      <div className="flex flex-wrap items-center gap-2">
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        size="sm"
+        className="flex-wrap"
+        onValueChange={(next) => { if (next) void run({ [action.field ?? "targetId"]: next }); }}
+      >
         {targets.map((target) => (
-          <Button key={target.id} size="sm" variant="outline" disabled={busy} onClick={() => void run({ [action.field ?? "targetId"]: target.id })} className="h-9 rounded-lg border-border bg-card px-4 text-foreground/80 hover:bg-muted hover:text-foreground">
+          <ToggleGroupItem key={target.id} value={target.id} disabled={busy}>
             {target.displayName}
-          </Button>
+          </ToggleGroupItem>
         ))}
-      </div>
+      </ToggleGroup>
     );
   }
 
@@ -572,39 +715,26 @@ function ActionButton({ action, room, onAction }: { action: SocietyPlayerState["
     const members = room.world.agents.filter((agent) => agent.alive);
     const min = action.min ?? 1;
     const max = action.max ?? members.length;
-    const toggle = (id: string): void => {
-      setTeam((current) => current.includes(id)
-        ? current.filter((entry) => entry !== id)
-        : [...current, id].slice(0, max));
-    };
     return (
       <div className="flex flex-wrap items-center gap-2">
-        {members.map((member) => {
-          const selected = team.includes(member.id);
-          return (
-            <Button
-              key={member.id}
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => toggle(member.id)}
-              className={cn(
-                "h-9 rounded-lg border px-4",
-                selected
-                  ? "border-foreground/70 bg-foreground text-background hover:bg-foreground/85"
-                  : "border-border bg-card text-foreground/80 hover:bg-muted"
-              )}
-            >
-              {selected ? <Check className="mr-1 size-3" /> : null}
+        <ToggleGroup
+          type="multiple"
+          value={team}
+          variant="outline"
+          size="sm"
+          className="flex-wrap"
+          onValueChange={(next) => setTeam(next.slice(0, max))}
+        >
+          {members.map((member) => (
+            <ToggleGroupItem key={member.id} value={member.id} disabled={busy || (!team.includes(member.id) && team.length >= max)}>
               {member.displayName}
-            </Button>
-          );
-        })}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
         <Button
           size="sm"
           disabled={busy || team.length < min}
           onClick={() => void run({ [action.field ?? "memberIds"]: team })}
-          className="h-9 rounded-lg bg-foreground px-5 text-background hover:bg-foreground/85"
         >
           提出队伍（{team.length}/{max}）
         </Button>

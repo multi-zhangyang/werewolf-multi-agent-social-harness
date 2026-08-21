@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Activity, BarChart3, BrainCircuit, Clapperboard, Crosshair, Flame, GitBranch, History, ListOrdered, MessageSquare, Network, Radio, Sparkles, Wrench } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, BrainCircuit, ChevronDown, Clapperboard, Crosshair, Flame, GitBranch, ListOrdered, MessageSquare, Network, Radio, Sparkles, Wrench } from "lucide-react";
 import type { ScenarioId, WorldSnapshot } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
-import type { SocialCausalityProjection } from "@/society/social/contracts";
+import type { InfluenceLink, OutcomeReconciliation, SocialCausalityProjection } from "@/society/social/contracts";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from "@/components/ui/item";
+import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import type { RoomConnection, TimelineEntry } from "./use-room";
@@ -58,8 +63,12 @@ export function WorldPanel({ room, toolCalls = [], timeline = [], onJumpToAt }: 
         <SuspicionGraph world={world} names={names} />
         <SuspicionPanel world={world} names={names} />
 
-        <Tabs defaultValue="network">
+        <Tabs defaultValue="causality">
           <TabsList className="grid h-auto w-full grid-cols-4 gap-1 bg-transparent p-0">
+            <TabsTrigger value="causality">
+              <GitBranch />
+              社会
+            </TabsTrigger>
             <TabsTrigger value="network">
               <Network />
               关系
@@ -68,47 +77,40 @@ export function WorldPanel({ room, toolCalls = [], timeline = [], onJumpToAt }: 
               <BarChart3 />
               战况
             </TabsTrigger>
-            <TabsTrigger value="activity">
-              <Radio />
-              动态
-            </TabsTrigger>
-            <TabsTrigger value="timeline">
+            <TabsTrigger value="records">
               <ListOrdered />
-              时间线
-            </TabsTrigger>
-            <TabsTrigger value="highlights">
-              <Sparkles />
-              高光
-            </TabsTrigger>
-            <TabsTrigger value="history">
-              <History />
-              进程
-            </TabsTrigger>
-            <TabsTrigger value="causality">
-              <GitBranch />
-              因果
+              记录
             </TabsTrigger>
           </TabsList>
-          <TabsContent value="network" className="pt-3">
-            <RelationshipNetwork participants={room.participants} />
-          </TabsContent>
-          <TabsContent value="scores" className="pt-3">
-            <ScoreCard world={world} />
-          </TabsContent>
-          <TabsContent value="activity" className="pt-3">
-            <ActivityCard toolCalls={toolCalls} names={names} avatarSeeds={avatarSeeds} />
-          </TabsContent>
-          <TabsContent value="timeline" className="pt-3">
-            <TimelineCard timeline={timeline} names={names} />
-          </TabsContent>
-          <TabsContent value="highlights" className="pt-3">
-            <HighlightsCard highlights={room.highlights ?? []} timeline={timeline} names={names} onJumpToAt={onJumpToAt} />
-          </TabsContent>
-          <TabsContent value="history" className="pt-3">
-            <HistoryCard world={world} names={names} scenarioId={room.scenarioId} />
-          </TabsContent>
           <TabsContent value="causality" className="pt-3">
             <CausalityCard room={room} />
+          </TabsContent>
+          <TabsContent value="network" className="pt-3">
+            <RelationshipNetwork room={room} />
+          </TabsContent>
+          <TabsContent value="scores" className="pt-3">
+            <div className="flex flex-col gap-3">
+              <ScoreCard world={world} />
+              <HistoryCard world={world} names={names} scenarioId={room.scenarioId} />
+            </div>
+          </TabsContent>
+          <TabsContent value="records" className="pt-3">
+            <Tabs defaultValue="timeline">
+              <TabsList variant="line" className="grid w-full grid-cols-3">
+                <TabsTrigger value="timeline"><ListOrdered />时间线</TabsTrigger>
+                <TabsTrigger value="activity"><Radio />工具</TabsTrigger>
+                <TabsTrigger value="highlights"><Sparkles />高光</TabsTrigger>
+              </TabsList>
+              <TabsContent value="timeline" className="pt-3">
+                <TimelineCard timeline={timeline} names={names} />
+              </TabsContent>
+              <TabsContent value="activity" className="pt-3">
+                <ActivityCard toolCalls={toolCalls} names={names} avatarSeeds={avatarSeeds} />
+              </TabsContent>
+              <TabsContent value="highlights" className="pt-3">
+                <HighlightsCard highlights={room.highlights ?? []} timeline={timeline} names={names} onJumpToAt={onJumpToAt} />
+              </TabsContent>
+            </Tabs>
           </TabsContent>
         </Tabs>
       </section>
@@ -129,34 +131,24 @@ function DiscussionHeat({ world, names }: { world: WorldSnapshot; names: Map<str
     .sort((left, right) => right[1] - left[1])
     .filter(([, value]) => value > 0);
   return (
-    <div className="mb-3 rounded-lg border border-border bg-card p-3.5">
-      <div className="flex items-center justify-between">
-        <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-          <Flame className={cn("size-3.5", discussion.open ? "text-orange-500" : "text-muted-foreground/50")} />
-          讨论热度
-        </p>
-        <span className="nums font-mono text-[10px] text-muted-foreground/80">
-          {discussion.open ? `第 ${discussion.wave} 轮 · ${discussion.messageCount} 条` : "已收场"}
-        </span>
-      </div>
+    <Card className="mb-3 gap-3 py-3 shadow-none">
+      <CardHeader className="px-3">
+        <CardTitle className="flex items-center gap-1.5 text-xs"><Flame />讨论热度</CardTitle>
+        <CardAction><Badge variant="outline">{discussion.open ? `第 ${discussion.wave} 轮 · ${discussion.messageCount} 条` : "已收场"}</Badge></CardAction>
+      </CardHeader>
       {entries.length ? (
-        <div className="mt-2.5 space-y-1.5">
+        <CardContent className="flex flex-col gap-2 px-3">
           {entries.map(([id, value]) => (
             <div key={id} className="flex items-center gap-2">
               <span className="w-14 truncate text-[11px] text-muted-foreground">{names.get(id) ?? id}</span>
-              <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
-                <div
-                  className={cn("h-full rounded-full transition-all duration-500", value > 0.55 ? "bg-orange-400" : value > 0.25 ? "bg-amber-400" : "bg-muted-foreground/40")}
-                  style={{ width: `${Math.max(6, value * 100)}%` }}
-                />
-              </div>
+              <Progress value={Math.max(6, value * 100)} className="h-1 flex-1" aria-label={`${names.get(id) ?? id} 讨论热度 ${Math.round(value * 100)}%`} />
             </div>
           ))}
-        </div>
+        </CardContent>
       ) : (
-        <p className="mt-2 text-[11px] text-muted-foreground/80">没有人被点名，对话趋于平静</p>
+        <CardContent className="px-3 text-xs text-muted-foreground">没有人被点名，对话趋于平静</CardContent>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -169,89 +161,38 @@ function DiscussionHeat({ world, names }: { world: WorldSnapshot; names: Map<str
 function SuspicionGraph({ world, names }: { world: WorldSnapshot; names: Map<string, string> }): ReactNode {
   const suspicion = world.details.suspicion as SuspicionState | undefined;
   if (!suspicion) return null;
-  const ids = world.agents.map((agent) => agent.id);
-  const n = Math.max(2, ids.length);
-  const cx = 100;
-  const cy = 90;
-  const radius = 62;
-  const position = (id: string): { x: number; y: number } => {
-    const index = ids.indexOf(id);
-    if (index === -1) return { x: cx, y: cy };
-    const angle = -Math.PI / 2 + (index * 2 * Math.PI) / n;
-    return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
-  };
-  const entries = suspicion.entries.slice(-14);
-  const edgeColor: Record<string, string> = { speech: "#f59e0b", vote: "#e11d48", outcome: "#a1a1aa" };
+  const entries = suspicion.entries.slice(-8).reverse();
   return (
-    <div className="mb-3 rounded-lg border border-border bg-card p-3.5">
-      <div className="flex items-center justify-between">
-        <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-          <Network className="size-3.5 text-muted-foreground/80" />
-          怀疑网络
-        </p>
-        <span className="nums font-mono text-[10px] text-muted-foreground/80">{entries.length} 条指控</span>
-      </div>
-      <svg viewBox="0 0 200 184" className="mt-1 w-full" role="img" aria-label="谁指控谁">
-        <defs>
-          <marker id="arrow-speech" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-            <path d="M0,0 L6,3 L0,6 Z" fill="#f59e0b" />
-          </marker>
-          <marker id="arrow-vote" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-            <path d="M0,0 L6,3 L0,6 Z" fill="#e11d48" />
-          </marker>
-        </defs>
-        {entries.map((entry, index) => {
-          if (!ids.includes(entry.accuser)) return null;
-          const from = position(entry.accuser);
-          const to = position(entry.target);
-          const opacity = 0.25 + 0.75 * ((index + 1) / entries.length);
-          return (
-            <line
-              key={index}
-              x1={from.x}
-              y1={from.y}
-              x2={to.x}
-              y2={to.y}
-              stroke={edgeColor[entry.kind] ?? "#a1a1aa"}
-              strokeOpacity={opacity}
-              strokeWidth={1.4}
-              markerEnd={entry.kind === "vote" ? "url(#arrow-vote)" : "url(#arrow-speech)"}
-            />
-          );
-        })}
-        {ids.map((id) => {
-          const point = position(id);
-          const score = suspicion.scores[id] ?? 0;
-          const ring = score > 0.5 ? "#e11d48" : score > 0.25 ? "#f59e0b" : "#d4d4d8";
-          return (
-            <g key={id}>
-              <circle
-                cx={point.x}
-                cy={point.y}
-                r={score > 0 ? 13 : 10.5}
-                fill="#0a0a0a"
-                stroke={ring}
-                strokeWidth={score > 0 ? 2.2 : 1.2}
-              />
-              <text
-                x={point.x}
-                y={point.y + 24}
-                textAnchor="middle"
-                fontSize="8.5"
-                className="fill-white/55"
-              >
-                {names.get(id) ?? id}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
-      <div className="mt-1 flex items-center gap-3 text-[10px] text-muted-foreground/80">
-        <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-amber-400" />指控</span>
-        <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-rose-400" />投票</span>
-        <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-muted-foreground/40" />结果</span>
-      </div>
-    </div>
+    <Card className="mb-3 gap-3 py-3 shadow-none">
+      <CardHeader className="px-3">
+        <CardTitle className="flex items-center gap-1.5 text-xs"><Network />公开指向</CardTitle>
+        <CardDescription>最近的指控、投票与结果，不与私有关系混合。</CardDescription>
+        <CardAction><Badge variant="outline">{entries.length} 条</Badge></CardAction>
+      </CardHeader>
+      <CardContent className="px-3">
+        {entries.length ? (
+          <ItemGroup>
+            {entries.map((entry, index) => (
+              <Item key={`${entry.turn}:${entry.accuser}:${entry.target}:${index}`} size="sm" variant="muted">
+                <ItemContent>
+                  <ItemTitle>
+                    <span className="truncate">{names.get(entry.accuser) ?? entry.accuser}</span>
+                    <ArrowRight />
+                    <span className="truncate">{names.get(entry.target) ?? entry.target}</span>
+                  </ItemTitle>
+                  <ItemDescription>第 {entry.turn} 轮公开记录</ItemDescription>
+                </ItemContent>
+                <ItemActions><Badge variant={entry.kind === "vote" ? "secondary" : "outline"}>{entry.kind === "vote" ? "投票" : entry.kind === "outcome" ? "结果" : "指控"}</Badge></ItemActions>
+              </Item>
+            ))}
+          </ItemGroup>
+        ) : (
+          <Empty className="min-h-28">
+            <EmptyHeader><EmptyMedia variant="icon"><Network /></EmptyMedia><EmptyTitle>暂无公开指向</EmptyTitle></EmptyHeader>
+          </Empty>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -268,106 +209,78 @@ function SuspicionPanel({ world, names }: { world: WorldSnapshot; names: Map<str
     .filter(([, value]) => value > 0);
   const feed = suspicion.entries.slice(-6).reverse();
   return (
-    <div className="mb-3 rounded-lg border border-border bg-card p-3.5">
-      <div className="flex items-center justify-between">
-        <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-          <Crosshair className={cn("size-3.5", ranked.length ? "text-rose-400" : "text-muted-foreground/50")} />
-          怀疑氛围
-        </p>
-        <span className="nums font-mono text-[10px] text-muted-foreground/80">
-          {ranked.length ? `${ranked.length} 人被点名` : "风平浪静"}
-        </span>
-      </div>
+    <Card className="mb-3 gap-3 py-3 shadow-none">
+      <CardHeader className="px-3">
+        <CardTitle className="flex items-center gap-1.5 text-xs"><Crosshair />怀疑氛围</CardTitle>
+        <CardAction><Badge variant="outline">{ranked.length ? `${ranked.length} 人被点名` : "风平浪静"}</Badge></CardAction>
+      </CardHeader>
       {ranked.length ? (
-        <div className="mt-2.5 space-y-1.5">
+        <CardContent className="flex flex-col gap-2 px-3">
           {ranked.slice(0, 5).map(([id, value]) => (
             <div key={id} className="flex items-center gap-2">
               <span className="w-14 truncate text-[11px] text-muted-foreground">{names.get(id) ?? id}</span>
-              <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
-                <div
-                  className={cn("h-full rounded-full transition-all duration-500", value > 0.55 ? "bg-rose-400" : value > 0.25 ? "bg-orange-400" : "bg-muted-foreground/40")}
-                  style={{ width: `${Math.max(6, value * 100)}%` }}
-                />
-              </div>
+              <Progress value={Math.max(6, value * 100)} className="h-1 flex-1" aria-label={`${names.get(id) ?? id} 被怀疑程度 ${Math.round(value * 100)}%`} />
             </div>
           ))}
-        </div>
+        </CardContent>
       ) : (
-        <p className="mt-2 text-[11px] text-muted-foreground/80">还没有公开指控或异常票型</p>
+        <CardContent className="px-3 text-xs text-muted-foreground">还没有公开指控或异常票型</CardContent>
       )}
       {feed.length ? (
-        <div className="mt-3 space-y-1 border-t border-border/60 pt-2.5">
+        <CardContent className="px-3">
+          <ItemGroup>
           {feed.map((entry, index) => {
             const accuser = names.get(entry.accuser) ?? entry.accuser;
             const target = names.get(entry.target) ?? entry.target;
             const kindLabel = entry.kind === "vote" ? "投票" : entry.kind === "outcome" ? "结果" : "指控";
             return (
-              <p key={index} className="truncate text-[11px] text-muted-foreground/80">
-                <span className="text-muted-foreground">{accuser}</span>
-                <span className="mx-1 text-muted-foreground/50">→</span>
-                <span className="text-rose-400/90">{target}</span>
-                <span className={cn("ml-1.5 rounded px-1 py-px font-mono text-[9px]", entry.kind === "vote" ? "bg-muted text-muted-foreground" : entry.kind === "outcome" ? "bg-orange-400/10 text-orange-400" : "bg-rose-400/10 text-rose-400")}>
-                  {kindLabel}
-                </span>
-              </p>
+              <Item key={`${entry.turn}:${entry.accuser}:${entry.target}:${index}`} size="sm">
+                <ItemContent><ItemTitle>{accuser}<ArrowRight />{target}</ItemTitle></ItemContent>
+                <ItemActions><Badge variant="outline">{kindLabel}</Badge></ItemActions>
+              </Item>
             );
           })}
-        </div>
+          </ItemGroup>
+        </CardContent>
       ) : null}
-    </div>
+    </Card>
   );
 }
 
 function ActBar({ turn, total, finished }: { turn: number; total: number; finished: boolean }): ReactNode {
-  return (
-    <div className="flex items-center gap-1">
-      {Array.from({ length: Math.max(1, total) }).map((_, index) => (
-        <span
-          key={index}
-          className={cn(
-            "h-1 rounded-full transition-all duration-500",
-            finished || index < turn
-              ? "w-5 bg-foreground/70"
-              : index === turn
-                ? "w-5 bg-emerald-400"
-                : "w-2 bg-border"
-          )}
-        />
-      ))}
-    </div>
-  );
+  const progress = finished ? 100 : Math.round((Math.max(0, turn) / Math.max(1, total)) * 100);
+  return <Progress value={progress} className="h-1 w-20" aria-label={`第 ${turn} / ${total} 轮`} />;
 }
 
 function ScoreCard({ world }: { world: WorldSnapshot }): ReactNode {
   const scored = world.agents.filter((agent) => agent.score !== undefined);
   if (!scored.length) {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-xs text-muted-foreground/80">
-        <Activity className="size-3.5" />
-        本场景暂无公开分数
-      </div>
+      <Empty className="min-h-32">
+        <EmptyHeader><EmptyMedia variant="icon"><Activity /></EmptyMedia><EmptyTitle>本场景暂无公开分数</EmptyTitle></EmptyHeader>
+      </Empty>
     );
   }
   const sorted = [...scored].sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
   const max = sorted[0]?.score ?? 0;
   return (
-    <div className="space-y-3 rounded-lg border border-border bg-card p-3">
-      {sorted.map((agent, index) => (
-        <div key={agent.id} className={cn("flex items-center gap-3 rounded-md px-2 py-1.5", index === 0 && "leader-wash")}>
-          <span className={cn("nums w-5 font-mono text-xs", index === 0 ? "text-amber-400" : "text-muted-foreground/80")}>
-            {index + 1}
-          </span>
-          <span className="w-20 truncate text-sm text-foreground/80">{agent.displayName}</span>
-          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full rounded-full bg-foreground/70 transition-all duration-700"
-              style={{ width: `${max > 0 ? ((agent.score ?? 0) / max) * 100 : 0}%` }}
-            />
-          </div>
-          <span className="nums w-10 text-right font-mono text-sm text-foreground">{agent.score}</span>
-        </div>
-      ))}
-    </div>
+    <Card className="gap-2 py-3 shadow-none">
+      <CardHeader className="px-3"><CardTitle className="text-xs">公开排名</CardTitle></CardHeader>
+      <CardContent className="px-3">
+        <ItemGroup>
+          {sorted.map((agent, index) => (
+            <Item key={agent.id} size="sm" variant={index === 0 ? "muted" : "default"}>
+              <Badge variant={index === 0 ? "secondary" : "outline"}>{index + 1}</Badge>
+              <ItemContent>
+                <ItemTitle>{agent.displayName}</ItemTitle>
+                <Progress value={max > 0 ? ((agent.score ?? 0) / max) * 100 : 0} className="h-1" aria-label={`${agent.displayName} 得分 ${agent.score ?? 0}`} />
+              </ItemContent>
+              <ItemActions><Badge variant="outline">{agent.score}</Badge></ItemActions>
+            </Item>
+          ))}
+        </ItemGroup>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -396,9 +309,29 @@ function CausalityCard({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   const propositions = new Map((projection?.propositions ?? []).map((proposition) => [proposition.propositionId, proposition]));
   const socialActs = (projection?.socialActs ?? []).slice(-5).reverse();
   const beliefUpdates = (projection?.beliefUpdates ?? []).slice(-4).reverse();
+  const actorModels = (projection?.actorModels ?? []).slice(-4).reverse();
   const deceptions = (projection?.deceptions ?? []).slice(-3).reverse();
   const decisions = (projection?.decisions ?? []).slice(-3).reverse();
-  const hasRecords = commitments.length + socialActs.length + beliefUpdates.length + deceptions.length + decisions.length > 0;
+  const reconciliations = (projection?.outcomeReconciliations ?? []).slice(-4).reverse();
+  const influenceLinks = (projection?.influenceLinks ?? []).slice(-4).reverse();
+  // Thread 决策 → 影响 → 结果 by the same decisionId: influence links may
+  // arrive without an explicit decisionId, in which case the resulting action
+  // receipt resolves back to the owning decision.
+  const decisionById = new Map((projection?.decisions ?? []).map((decision) => [decision.decisionId, decision]));
+  const decisionByReceipt = new Map((projection?.decisions ?? []).map((decision) => [decision.actionReceiptId, decision]));
+  const influencesByDecision = new Map<string, InfluenceLink[]>();
+  for (const link of projection?.influenceLinks ?? []) {
+    const owner = link.decisionId
+      ?? (link.resultingActionReceiptId ? decisionByReceipt.get(link.resultingActionReceiptId)?.decisionId : undefined);
+    if (!owner) continue;
+    const list = influencesByDecision.get(owner) ?? [];
+    list.push(link);
+    influencesByDecision.set(owner, list);
+  }
+  const reconciliationByDecision = new Map<string, OutcomeReconciliation>(
+    (projection?.outcomeReconciliations ?? []).map((reconciliation) => [reconciliation.decisionId, reconciliation])
+  );
+  const hasRecords = commitments.length + socialActs.length + beliefUpdates.length + actorModels.length + deceptions.length + decisions.length + reconciliations.length + influenceLinks.length > 0;
 
   if (!hasRecords) {
     return (
@@ -414,112 +347,211 @@ function CausalityCard({ room }: { room: SocietyRoomSnapshot }): ReactNode {
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="grid grid-cols-3 gap-1.5">
+      <div className="grid grid-cols-4 gap-1.5">
         <CausalityMetric label="行为" value={projection?.socialActs.length ?? 0} />
         <CausalityMetric label="信念" value={projection?.beliefUpdates.length ?? 0} />
         <CausalityMetric label="决定" value={projection?.decisions.length ?? 0} />
+        <CausalityMetric label="结果" value={projection?.outcomeReconciliations.length ?? 0} />
       </div>
+      <Tabs defaultValue="beliefs">
+        <TabsList variant="line" className="grid w-full grid-cols-5">
+          <TabsTrigger value="beliefs">信念</TabsTrigger>
+          <TabsTrigger value="commitments">承诺</TabsTrigger>
+          <TabsTrigger value="deceptions">欺骗</TabsTrigger>
+          <TabsTrigger value="decisions">决策</TabsTrigger>
+          <TabsTrigger value="outcomes">结果</TabsTrigger>
+        </TabsList>
 
-      {deceptions.length ? (
-        <CausalitySection title="欺骗生命周期" provenance="Agent 自述">
-          {deceptions.map((episode) => (
-            <div key={episode.deceptionId} className="rounded-md border border-border bg-card px-3 py-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <p className="truncate text-xs font-medium">{actorNames.get(episode.deceiverActorId) ?? episode.deceiverActorId}</p>
-                <Badge variant="outline">{deceptionStatusLabel(episode.status)}</Badge>
-              </div>
-              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                {episode.intendedFalseBeliefIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；") || episode.mode}
-              </p>
-              <p className="mt-1 font-mono text-[9px] text-muted-foreground/70">
-                消息 {episode.executionMessageIds.length} · 识破证据 {episode.detectionEventIds.length}
-              </p>
-            </div>
-          ))}
-        </CausalitySection>
-      ) : null}
+        <TabsContent value="beliefs" className="pt-3">
+          <div className="flex flex-col gap-2">
+            {beliefUpdates.map((belief) => (
+              <Card key={belief.beliefUpdateId} className="gap-2 py-3 shadow-none">
+                <CardHeader className="px-3">
+                  <CardTitle className="text-xs">{characterNames.get(belief.ownerCharacterId) ?? belief.ownerCharacterId}</CardTitle>
+                  <CardDescription className="line-clamp-2 text-xs">{propositions.get(belief.propositionId)?.predicate ?? belief.propositionId}</CardDescription>
+                  <CardAction><Badge variant="outline">{Math.round(belief.beforeProbability * 100)} → {Math.round(belief.afterProbability * 100)}%</Badge></CardAction>
+                </CardHeader>
+                <CardContent className="flex flex-wrap gap-1.5 px-3">
+                  <Badge variant="secondary">置信 {Math.round(belief.confidence * 100)}%</Badge>
+                  <Badge variant="outline">{belief.addedEvidenceIds.length} 证据</Badge>
+                </CardContent>
+              </Card>
+            ))}
+            {actorModels.map((model) => (
+              <Card key={model.modelId} className="gap-2 py-3 shadow-none">
+                <CardHeader className="px-3">
+                  <CardTitle className="text-xs">{characterNames.get(model.ownerCharacterId) ?? model.ownerCharacterId} 对 {characterNames.get(model.targetCharacterId) ?? model.targetCharacterId} 的判断</CardTitle>
+                  <CardDescription className="line-clamp-2 text-xs">{model.perceivedStrategy.join(" · ") || "尚未归纳策略"}</CardDescription>
+                  <CardAction><Badge variant="outline">诚实 {Math.round(model.perceivedHonesty * 100)}%</Badge></CardAction>
+                </CardHeader>
+              </Card>
+            ))}
+            {!beliefUpdates.length && !actorModels.length ? <CausalityEmpty title="暂无可见信念" /> : null}
+          </div>
+        </TabsContent>
 
-      {commitments.length ? (
-        <CausalitySection title="承诺结算" provenance="世界事实">
-          {commitments.slice(-4).reverse().map((commitment) => (
-            <div key={commitment.commitmentId} className="rounded-md border border-border bg-card px-3 py-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <p className="truncate text-xs font-medium">{actorNames.get(commitment.promisorActorId) ?? commitment.promisorActorId}</p>
-                <Badge variant={commitment.state === "violated" ? "destructive" : "outline"}>{commitmentStateLabel(commitment.state)}</Badge>
-              </div>
-              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{commitment.proposition}</p>
-            </div>
-          ))}
-        </CausalitySection>
-      ) : null}
+        <TabsContent value="commitments" className="pt-3">
+          <div className="flex flex-col gap-2">
+            {commitments.slice(-4).reverse().map((commitment) => (
+              <Card key={commitment.commitmentId} className="gap-2 py-3 shadow-none">
+                <CardHeader className="px-3">
+                  <CardTitle className="text-xs">{actorNames.get(commitment.promisorActorId) ?? commitment.promisorActorId}</CardTitle>
+                  <CardDescription className="line-clamp-3 text-xs">{commitment.proposition}</CardDescription>
+                  <CardAction><Badge variant={commitment.state === "violated" ? "destructive" : "outline"}>{commitmentStateLabel(commitment.state)}</Badge></CardAction>
+                </CardHeader>
+              </Card>
+            ))}
+            {!commitments.length ? <CausalityEmpty title="暂无可见承诺" /> : null}
+          </div>
+        </TabsContent>
 
-      {beliefUpdates.length ? (
-        <CausalitySection title="信念变化" provenance="Agent 自述">
-          {beliefUpdates.map((belief) => (
-            <div key={belief.beliefUpdateId} className="rounded-md border border-border bg-card px-3 py-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <p className="truncate text-xs font-medium">{characterNames.get(belief.ownerCharacterId) ?? belief.ownerCharacterId}</p>
-                <span className="font-mono text-[10px] text-muted-foreground">{Math.round(belief.beforeProbability * 100)} → {Math.round(belief.afterProbability * 100)}%</span>
-              </div>
-              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{propositions.get(belief.propositionId)?.predicate ?? belief.propositionId}</p>
-              <p className="mt-1 font-mono text-[9px] text-muted-foreground/70">置信 {Math.round(belief.confidence * 100)}% · 证据 {belief.addedEvidenceIds.length}</p>
-            </div>
-          ))}
-        </CausalitySection>
-      ) : null}
+        <TabsContent value="deceptions" className="pt-3">
+          <div className="flex flex-col gap-2">
+            {deceptions.map((episode) => (
+              <Card key={episode.deceptionId} className="gap-2 py-3 shadow-none">
+                <CardHeader className="px-3">
+                  <CardTitle className="text-xs">{actorNames.get(episode.deceiverActorId) ?? episode.deceiverActorId}</CardTitle>
+                  <CardDescription className="line-clamp-3 text-xs">{episode.intendedFalseBeliefIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；") || episode.mode}</CardDescription>
+                  <CardAction><Badge variant="outline">{deceptionStatusLabel(episode.status)}</Badge></CardAction>
+                </CardHeader>
+                <CardContent className="flex flex-wrap gap-1.5 px-3">
+                  <Badge variant="secondary">{episode.executionMessageIds.length} 消息</Badge>
+                  <Badge variant="outline">{episode.believedByCharacterIds.length} 相信</Badge>
+                  <Badge variant="outline">{episode.detectionEventIds.length} 识破事件</Badge>
+                </CardContent>
+              </Card>
+            ))}
+            {!deceptions.length ? <CausalityEmpty title="暂无可见欺骗" /> : null}
+          </div>
+        </TabsContent>
 
-      {socialActs.length ? (
-        <CausalitySection title="消息行为" provenance="消息主张">
-          {socialActs.map((act) => (
-            <div key={act.socialActId} className="flex items-start gap-2 rounded-md border border-border bg-card px-3 py-2.5">
-              <Badge variant="secondary">{socialActLabel(act.kind)}</Badge>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-xs font-medium">{actorNames.get(act.actorId) ?? act.actorId}</p>
-                <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
-                  {act.propositionIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；") || `面向 ${act.audienceActorIds.length} 人`}
-                </p>
-              </div>
-            </div>
-          ))}
-        </CausalitySection>
-      ) : null}
+        <TabsContent value="decisions" className="pt-3">
+          <div className="flex flex-col gap-2">
+            {decisions.map((decision) => {
+              const links = influencesByDecision.get(decision.decisionId) ?? [];
+              const reconciliation = reconciliationByDecision.get(decision.decisionId);
+              return (
+                <Card key={decision.decisionId} className="gap-2 py-3 shadow-none">
+                  <CardHeader className="px-3">
+                    <CardTitle className="text-xs">{actorNames.get(decision.actorId) ?? decision.actorId}</CardTitle>
+                    <CardDescription className="line-clamp-3 text-xs">{decision.selectedIntent.summary}</CardDescription>
+                    <CardAction><Badge variant="outline">{eventLabel(decision.action)}</Badge></CardAction>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-1.5 px-3">
+                    <div className="flex flex-wrap gap-1.5">
+                      <Badge variant="secondary">{decision.candidateIntentIds.length} 候选意图</Badge>
+                      <Badge variant="outline">{decision.evidenceRefs.length} 证据</Badge>
+                      <Badge variant="outline">{decision.predictedConsequences.length} 预测</Badge>
+                    </div>
+                    {links.length || reconciliation ? (
+                      <div className="flex flex-col gap-1 rounded-lg border border-border/60 bg-muted/30 p-2.5">
+                        {links.map((link) => (
+                          <p key={link.influenceId} className="text-[11px] leading-4 text-muted-foreground">
+                            影响 {characterNames.get(link.targetCharacterId) ?? link.targetCharacterId} · {influenceBasisLabel(link.basis)} · 置信 {Math.round(link.confidence * 100)}%
+                          </p>
+                        ))}
+                        {reconciliation ? (
+                          <p className="text-[11px] leading-4 text-muted-foreground">结果:{reconciliation.actualOutcome.summary}</p>
+                        ) : (
+                          <p className="text-[11px] leading-4 text-muted-foreground/60">结果尚未对账</p>
+                        )}
+                      </div>
+                    ) : null}
+                  </CardContent>
+                </Card>
+              );
+            })}
+            {socialActs.map((act) => (
+              <Card key={act.socialActId} className="gap-2 py-3 shadow-none">
+                <CardHeader className="px-3">
+                  <CardTitle className="text-xs">{actorNames.get(act.actorId) ?? act.actorId}</CardTitle>
+                  <CardDescription className="line-clamp-2 text-xs">{act.propositionIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；") || `面向 ${act.audienceActorIds.length} 人`}</CardDescription>
+                  <CardAction><Badge variant="secondary">{socialActLabel(act.kind)}</Badge></CardAction>
+                </CardHeader>
+              </Card>
+            ))}
+            {!decisions.length && !socialActs.length ? <CausalityEmpty title="暂无可见决策" /> : null}
+          </div>
+        </TabsContent>
 
-      {decisions.length ? (
-        <CausalitySection title="绑定决定" provenance="Agent 自述">
-          {decisions.map((decision) => (
-            <div key={decision.decisionId} className="rounded-md border border-border bg-card px-3 py-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <p className="truncate text-xs font-medium">{actorNames.get(decision.actorId) ?? decision.actorId}</p>
-                <Badge variant="outline">{eventLabel(decision.action)}</Badge>
-              </div>
-              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{decision.selectedIntent.summary}</p>
-            </div>
-          ))}
-        </CausalitySection>
-      ) : null}
+        <TabsContent value="outcomes" className="pt-3">
+          <div className="flex flex-col gap-2">
+            {reconciliations.map((reconciliation) => {
+              const decision = decisionById.get(reconciliation.decisionId);
+              return (
+                <Card key={reconciliation.reconciliationId} className="gap-2 py-3 shadow-none">
+                  <CardHeader className="px-3">
+                    <CardTitle className="text-xs">{actorNames.get(reconciliation.actorId) ?? reconciliation.actorId}</CardTitle>
+                    <CardDescription className="line-clamp-3 text-xs">
+                      {decision ? `${eventLabel(decision.action)} · ${decision.selectedIntent.summary}` : reconciliation.actualOutcome.summary}
+                    </CardDescription>
+                    <CardAction><Badge variant="outline">{reconciliation.calibrationError === undefined ? "已对账" : `误差 ${reconciliation.calibrationError.toFixed(2)}`}</Badge></CardAction>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-1.5 px-3">
+                    <p className="text-[11px] leading-4 text-muted-foreground">结果:{reconciliation.actualOutcome.summary}</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      <Badge variant="secondary">{reconciliation.predictionAssessments.length} 预测结算</Badge>
+                      <Badge variant="outline">{reconciliation.influenceIds.length} 影响链</Badge>
+                      <Badge variant="outline">{reconciliation.memoryWriteSuggestions.length} 记忆候选</Badge>
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+            {influenceLinks.map((link) => {
+              const sourceDecision = link.decisionId ? decisionById.get(link.decisionId) : undefined;
+              return (
+                <Card key={link.influenceId} className="gap-2 py-3 shadow-none">
+                  <CardHeader className="px-3">
+                    <CardTitle className="text-xs">可能影响了 {characterNames.get(link.targetCharacterId) ?? link.targetCharacterId}</CardTitle>
+                    <CardDescription className="text-xs">
+                      {influenceBasisLabel(link.basis)}
+                      {sourceDecision ? ` · 源自 ${characterNames.get(sourceDecision.actorId) ?? sourceDecision.actorId} 的${eventLabel(sourceDecision.action)}` : ""}
+                    </CardDescription>
+                    <CardAction><Badge variant="outline">{Math.round(link.confidence * 100)}%</Badge></CardAction>
+                  </CardHeader>
+                </Card>
+              );
+            })}
+            {!reconciliations.length && !influenceLinks.length ? <CausalityEmpty title="暂无结果对账" /> : null}
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
 
 function CausalityMetric({ label, value }: { label: string; value: number }): ReactNode {
   return (
-    <div className="rounded-md border border-border bg-card px-2.5 py-2">
-      <p className="font-mono text-base text-foreground">{String(value).padStart(2, "0")}</p>
-      <p className="text-[10px] text-muted-foreground">{label}</p>
-    </div>
+    <Card className="gap-1 py-2 shadow-none">
+      <CardHeader className="gap-1 px-2.5">
+        <CardTitle className="font-mono text-base">{String(value).padStart(2, "0")}</CardTitle>
+        <CardDescription className="text-[10px]">{label}</CardDescription>
+      </CardHeader>
+    </Card>
   );
 }
 
-function CausalitySection({ title, provenance, children }: { title: string; provenance: string; children: ReactNode }): ReactNode {
+function CausalityEmpty({ title }: { title: string }): ReactNode {
   return (
-    <section className="flex flex-col gap-1.5">
-      <div className="flex items-center justify-between px-0.5">
-        <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">{title}</p>
-        <Badge variant="outline">{provenance}</Badge>
-      </div>
-      {children}
-    </section>
+    <Empty className="min-h-36">
+      <EmptyHeader>
+        <EmptyMedia variant="icon"><GitBranch /></EmptyMedia>
+        <EmptyTitle>{title}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
   );
+}
+
+function influenceBasisLabel(basis: string): string {
+  const labels: Record<string, string> = {
+    "agent-cited": "Agent 明确引用",
+    "direct-commitment-reference": "直接引用承诺",
+    "temporal-association": "时间关联",
+    "counterfactual-replay": "反事实重放",
+    "observer-inferred": "系统推断"
+  };
+  return labels[basis] ?? basis;
 }
 
 function socialActLabel(kind: string): string {
@@ -548,67 +580,58 @@ function commitmentStateLabel(state: ProjectedCommitment["state"]): string {
 function ActivityCard({ toolCalls, names, avatarSeeds }: { toolCalls: RoomConnection["toolCalls"]; names: Map<string, string>; avatarSeeds: Map<string, string> }): ReactNode {
   if (!toolCalls.length) {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-xs text-muted-foreground/80">
-        <Radio className="size-3.5" />
-        等待智能体活动…
-      </div>
+      <Empty className="min-h-32">
+        <EmptyHeader><EmptyMedia variant="icon"><Radio /></EmptyMedia><EmptyTitle>等待 Agent 活动</EmptyTitle></EmptyHeader>
+      </Empty>
     );
   }
   return (
-    <div className="space-y-0.5 rounded-lg border border-border bg-card p-1.5">
+    <ItemGroup>
       {toolCalls.slice(0, 20).map((call, index) => (
-        <div key={`${call.at}-${index}`} className="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
-          <AgentAvatar name={call.actorName || names.get(call.actorId) || call.actorId} index={indexOf(call.actorId)} seed={avatarSeeds.get(call.actorId)} size="sm" />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-muted-foreground">
-              <span className="font-medium text-foreground/90">{names.get(call.actorId) ?? call.actorId}</span>
-              <span className="mx-1 text-muted-foreground/50">·</span>
-              {eventLabel(call.toolName)}
-            </p>
-          </div>
-          <span className={cn("size-1.5 rounded-full", call.phase === "started" ? "bg-emerald-400" : "bg-muted-foreground/40")} />
-        </div>
+        <Item key={`${call.at}-${index}`} size="sm" variant="muted">
+          <ItemMedia><AgentAvatar name={call.actorName || names.get(call.actorId) || call.actorId} index={indexOf(call.actorId)} seed={avatarSeeds.get(call.actorId)} size="sm" /></ItemMedia>
+          <ItemContent>
+            <ItemTitle>{names.get(call.actorId) ?? call.actorId}</ItemTitle>
+            <ItemDescription>{eventLabel(call.toolName)}</ItemDescription>
+          </ItemContent>
+          <ItemActions><Badge variant={call.phase === "started" ? "secondary" : "outline"}>{call.phase === "started" ? "执行中" : "已完成"}</Badge></ItemActions>
+        </Item>
       ))}
-    </div>
+    </ItemGroup>
   );
 }
 
 function TimelineCard({ timeline, names }: { timeline: TimelineEntry[]; names: Map<string, string> }): ReactNode {
   if (!timeline.length) {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-xs text-muted-foreground/80">
-        <ListOrdered className="size-3.5" />
-        思考、记忆、工具与行动会按发生顺序汇聚到这里…
-      </div>
+      <Empty className="min-h-32">
+        <EmptyHeader><EmptyMedia variant="icon"><ListOrdered /></EmptyMedia><EmptyTitle>等待时间线事件</EmptyTitle><EmptyDescription>思考、记忆、工具与行动会按顺序出现。</EmptyDescription></EmptyHeader>
+      </Empty>
     );
   }
   const ICONS: Record<TimelineEntry["kind"], ReactNode> = {
-    thought: <BrainCircuit className="size-3.5 text-violet-400" />,
-    tool: <Wrench className="size-3.5 text-sky-400" />,
-    message: <MessageSquare className="size-3.5 text-emerald-400" />,
-    action: <Crosshair className="size-3.5 text-amber-400" />,
-    cue: <Clapperboard className="size-3.5 text-rose-400" />,
-    memory: <BrainCircuit className="size-3.5 text-teal-400" />,
-    pressure: <Flame className="size-3.5 text-orange-400" />,
-    notice: <Activity className="size-3.5 text-muted-foreground" />
+    thought: <BrainCircuit />,
+    tool: <Wrench />,
+    message: <MessageSquare />,
+    action: <Crosshair />,
+    cue: <Clapperboard />,
+    memory: <BrainCircuit />,
+    pressure: <Flame />,
+    notice: <Activity />
   };
   return (
-    <div className="space-y-0.5 rounded-lg border border-border bg-card p-1.5">
+    <ItemGroup>
       {timeline.slice(0, 40).map((entry) => (
-        <div key={entry.id} className="flex items-start gap-2.5 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
-          <span className="mt-0.5 shrink-0">{ICONS[entry.kind]}</span>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-muted-foreground">
-              {entry.actorId ? <span className="font-medium text-foreground/90">{names.get(entry.actorId) ?? entry.actorId}</span> : null}
-              {entry.actorId ? <span className="mx-1 text-muted-foreground/50">·</span> : null}
-              {entry.label}
-            </p>
-            {entry.detail ? <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground/70">{entry.detail}</p> : null}
-          </div>
-          <span className="nums mt-0.5 shrink-0 font-mono text-[10px] text-muted-foreground/50">{formatTime(entry.at)}</span>
-        </div>
+        <Item key={entry.id} size="sm">
+          <ItemMedia variant="icon">{ICONS[entry.kind]}</ItemMedia>
+          <ItemContent>
+            <ItemTitle>{entry.actorId ? `${names.get(entry.actorId) ?? entry.actorId} · ` : ""}{entry.label}</ItemTitle>
+            {entry.detail ? <ItemDescription>{entry.detail}</ItemDescription> : null}
+          </ItemContent>
+          <ItemActions><Badge variant="outline">{formatTime(entry.at)}</Badge></ItemActions>
+        </Item>
       ))}
-    </div>
+    </ItemGroup>
   );
 }
 
@@ -621,73 +644,51 @@ function HighlightsCard({ highlights, timeline, names, onJumpToAt }: { highlight
   const [expandedId, setExpandedId] = useState<string>();
   if (!highlights?.length) {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-xs text-muted-foreground/80">
-        <Sparkles className="size-3.5" />
-        高光由高优先级镜头自动生成（淘汰、背叛、谎言揭穿、终局）——它们只会来自真实事件。
-      </div>
+      <Empty className="min-h-32">
+        <EmptyHeader><EmptyMedia variant="icon"><Sparkles /></EmptyMedia><EmptyTitle>等待高光事件</EmptyTitle><EmptyDescription>高优先级镜头出现后会汇聚到这里。</EmptyDescription></EmptyHeader>
+      </Empty>
     );
   }
   const contextAround = (at: string): TimelineEntry[] => timelineContextAround(timeline, at);
   return (
-    <div className="space-y-1.5">
+    <div className="flex flex-col gap-2">
       {[...highlights].reverse().map((highlight) => {
         const open = expandedId === highlight.id;
         const context = open ? contextAround(highlight.at) : [];
         return (
-          <div key={highlight.id} className="rounded-lg border border-border bg-card px-3 py-2.5">
-            <button
-              type="button"
-              onClick={() => setExpandedId(open ? undefined : highlight.id)}
-              className="flex w-full items-center gap-2 text-left"
-              aria-expanded={open}
-              title={open ? "收起前因后果" : "展开前因后果"}
-            >
-              <Clapperboard className="size-3.5 shrink-0 text-rose-400" />
-              <span className="min-w-0 flex-1">
-                <span className="block text-[13px] font-semibold text-foreground/90">{highlight.title}</span>
-                {!open && highlight.subtitle ? <span className="mt-0.5 block truncate text-xs leading-5 text-muted-foreground">{highlight.subtitle}</span> : null}
-              </span>
-              <span className="nums shrink-0 font-mono text-[10px] font-normal text-muted-foreground/60">{formatTime(highlight.at)}</span>
-              {onJumpToAt ? (
-                <span
-                  role="button"
-                  tabIndex={0}
-                  aria-label="定位到对话"
-                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-sky-300/80 transition-colors hover:bg-sky-400/10 hover:text-sky-200"
-                  onClick={(e) => { e.stopPropagation(); onJumpToAt(highlight.at); }}
-                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); onJumpToAt(highlight.at); } }}
-                >
-                  定位
-                </span>
-              ) : null}
-              <span className={cn("shrink-0 text-[10px] text-muted-foreground/70 transition-transform", open && "rotate-180")}>▾</span>
-            </button>
-            {open ? (
-              <div className="mt-2 border-t border-border/60 pt-2">
-                {highlight.subtitle ? <p className="text-xs leading-5 text-muted-foreground">{highlight.subtitle}</p> : null}
-                {highlight.focusAgentIds.length ? (
-                  <p className="mt-1 text-[11px] text-muted-foreground/70">焦点：{highlight.focusAgentIds.map((id) => names.get(id) ?? id).join("、")}</p>
-                ) : null}
-                {context.length ? (
-                  <div className="mt-2 space-y-1">
-                    <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground/60">前因后果</p>
-                    {context.map((entry) => (
-                      <div key={`${entry.id}-${entry.at}`} className="flex items-start gap-2 rounded-md bg-muted/40 px-2 py-1.5">
-                        <span className="nums mt-px shrink-0 font-mono text-[9px] text-muted-foreground/60">{formatTime(entry.at)}</span>
-                        <span className="min-w-0 text-[11px] leading-4 text-muted-foreground">
-                          {entry.actorId && names.get(entry.actorId) ? <span className="text-foreground/75">{names.get(entry.actorId)} · </span> : null}
-                          <span className="font-medium text-foreground/75">{entry.label}</span>
-                          {entry.detail ? <span className="text-muted-foreground"> — {entry.detail}</span> : null}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-2 text-[11px] text-muted-foreground/60">时间线缓冲区里没有更早的条目（较早事件已被窗口裁剪）。</p>
-                )}
-              </div>
-            ) : null}
-          </div>
+          <Collapsible key={highlight.id} open={open} onOpenChange={(next) => setExpandedId(next ? highlight.id : undefined)}>
+            <Card className="gap-3 py-3 shadow-none">
+              <CardHeader className="px-3">
+                <CardTitle className="flex items-center gap-2 text-xs"><Clapperboard />{highlight.title}</CardTitle>
+                <CardDescription className="line-clamp-2">{highlight.subtitle ?? `发生于 ${formatTime(highlight.at)}`}</CardDescription>
+                <CardAction className="flex items-center gap-1">
+                  {onJumpToAt ? <Button variant="ghost" size="xs" onClick={() => onJumpToAt(highlight.at)}>定位</Button> : null}
+                  <CollapsibleTrigger asChild>
+                    <Button variant="ghost" size="icon-xs" aria-label={open ? "收起前因后果" : "展开前因后果"}>
+                      <ChevronDown className={cn("transition-transform", open && "rotate-180")} />
+                    </Button>
+                  </CollapsibleTrigger>
+                </CardAction>
+              </CardHeader>
+              <CollapsibleContent>
+                <CardContent className="flex flex-col gap-2 px-3">
+                  {highlight.focusAgentIds.length ? <Badge variant="outline">焦点：{highlight.focusAgentIds.map((id) => names.get(id) ?? id).join("、")}</Badge> : null}
+                  {context.length ? (
+                    <ItemGroup>
+                      {context.map((entry) => (
+                        <Item key={`${entry.id}-${entry.at}`} size="sm" variant="muted">
+                          <ItemContent><ItemTitle>{entry.actorId && names.get(entry.actorId) ? `${names.get(entry.actorId)} · ` : ""}{entry.label}</ItemTitle>{entry.detail ? <ItemDescription>{entry.detail}</ItemDescription> : null}</ItemContent>
+                          <ItemActions><Badge variant="outline">{formatTime(entry.at)}</Badge></ItemActions>
+                        </Item>
+                      ))}
+                    </ItemGroup>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">时间线窗口中没有更早条目。</p>
+                  )}
+                </CardContent>
+              </CollapsibleContent>
+            </Card>
+          </Collapsible>
         );
       })}
     </div>
@@ -704,104 +705,58 @@ function HistoryCard({ world, names, scenarioId }: { world: WorldSnapshot; names
   const history = (world.details.history ?? []) as Array<Record<string, unknown>>;
   if (!history.length) {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-xs text-muted-foreground/80">
-        <Activity className="size-3.5" />
-        还没有历史回合
-      </div>
+      <Empty className="min-h-32">
+        <EmptyHeader><EmptyMedia variant="icon"><Activity /></EmptyMedia><EmptyTitle>还没有历史回合</EmptyTitle></EmptyHeader>
+      </Empty>
     );
   }
   return (
-    <div className="space-y-1 rounded-lg border border-border bg-card p-1.5">
-      {history.map((entry, index) => (
-        <HistoryRow key={index} entry={entry} names={names} scenarioId={scenarioId} />
-      ))}
-    </div>
+    <Card className="gap-2 py-3 shadow-none">
+      <CardHeader className="px-3"><CardTitle className="text-xs">回合历史</CardTitle></CardHeader>
+      <CardContent className="px-3">
+        <ItemGroup>
+          {history.map((entry, index) => (
+            <HistoryRow key={index} entry={entry} names={names} scenarioId={scenarioId} />
+          ))}
+        </ItemGroup>
+      </CardContent>
+    </Card>
   );
 }
 
 function HistoryRow({ entry, names, scenarioId }: { entry: Record<string, unknown>; names: Map<string, string>; scenarioId: ScenarioId }): ReactNode {
+  let title: string | undefined;
+  let description: string | undefined;
   if (scenarioId === "werewolf") {
     const eliminated = entry.eliminatedId as string | undefined;
     const night = entry.nightTargetId as string | undefined;
-    return (
-      <div className="flex items-start gap-2 rounded-md px-2 py-2 text-xs leading-5 hover:bg-muted">
-        <span className="nums mt-0.5 font-mono text-[10px] text-muted-foreground/80">D{String(entry.day)}</span>
-        <div className="flex-1 text-muted-foreground">
-          {eliminated ? (
-            <p><span className="font-medium text-foreground/90">{names.get(eliminated) ?? eliminated}</span> 被投票淘汰（{roleLabelZh(String(entry.eliminatedRole))}）</p>
-          ) : (
-            <p className="text-muted-foreground/80">投票平局，无人淘汰</p>
-          )}
-          {night ? (
-            <p className="mt-0.5 text-muted-foreground/80">夜晚：<span className="font-medium text-rose-400">{names.get(night) ?? night}</span> 被淘汰（{roleLabelZh(String(entry.nightTargetRole))}）</p>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-  if (scenarioId === "sealed-bid-auction") {
+    title = eliminated ? `${names.get(eliminated) ?? eliminated} 被投票淘汰（${roleLabelZh(String(entry.eliminatedRole))}）` : "投票平局，无人淘汰";
+    description = night ? `夜晚：${names.get(night) ?? night} 被淘汰（${roleLabelZh(String(entry.nightTargetRole))}）` : undefined;
+  } else if (scenarioId === "sealed-bid-auction") {
     const winnerId = entry.winnerId as string | undefined;
     const price = entry.price as number | undefined;
     const bids = entry.bids as Record<string, number> | undefined;
-    return (
-      <div className="flex items-start gap-2 rounded-md px-2 py-2 text-xs leading-5 hover:bg-muted">
-        <span className="nums mt-0.5 font-mono text-[10px] text-muted-foreground/80">R{String(entry.round)}</span>
-        <div className="flex-1">
-          <p className="text-muted-foreground">
-            {winnerId ? <span className="font-medium text-foreground/90">{names.get(winnerId) ?? winnerId}</span> : "无人"} 以 <span className="nums font-mono text-foreground/90">{price}</span> 点拍得
-          </p>
-          {bids ? (
-            <p className="nums mt-0.5 font-mono text-[10px] text-muted-foreground/80">
-              {Object.entries(bids).map(([id, value]) => `${names.get(id) ?? id} ${value}`).join(" · ")}
-            </p>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-  if (scenarioId === "prisoners-dilemma" || scenarioId === "trust-game" || scenarioId === "ultimatum-game" || scenarioId === "chicken-game" || scenarioId === "stag-hunt") {
+    title = `${winnerId ? names.get(winnerId) ?? winnerId : "无人"} 以 ${price ?? "—"} 点拍得`;
+    description = bids ? Object.entries(bids).map(([id, value]) => `${names.get(id) ?? id} ${value}`).join(" · ") : undefined;
+  } else if (scenarioId === "prisoners-dilemma" || scenarioId === "trust-game" || scenarioId === "ultimatum-game" || scenarioId === "chicken-game" || scenarioId === "stag-hunt") {
     const payoffs = entry.payoffs as Record<string, number> | undefined;
     const detail = entry.text as string | undefined;
-    return (
-      <div className="flex items-start gap-2 rounded-md px-2 py-2 text-xs leading-5 hover:bg-muted">
-        <span className="nums mt-0.5 font-mono text-[10px] text-muted-foreground/80">R{String(entry.round)}</span>
-        <div className="flex-1">
-          {detail ? <p className="text-muted-foreground">{detail}</p> : null}
-          {payoffs ? (
-            <p className="nums mt-0.5 font-mono text-[10px] text-muted-foreground/80">
-              {Object.entries(payoffs).map(([id, value]) => `${names.get(id) ?? id} ${value}`).join(" · ")}
-            </p>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-  if (scenarioId === "public-goods") {
+    title = detail ?? "本轮已结算";
+    description = payoffs ? Object.entries(payoffs).map(([id, value]) => `${names.get(id) ?? id} ${value}`).join(" · ") : undefined;
+  } else if (scenarioId === "public-goods") {
     const contributions = entry.contributions as Record<string, number> | undefined;
-    return (
-      <div className="flex items-start gap-2 rounded-md px-2 py-2 text-xs leading-5 hover:bg-muted">
-        <span className="nums mt-0.5 font-mono text-[10px] text-muted-foreground/80">R{String(entry.round)}</span>
-        <div className="flex-1 text-muted-foreground">
-          <p>公共池 {String(entry.pool)} · 每人返还 {String(entry.share)}</p>
-          {contributions ? (
-            <p className="nums mt-0.5 font-mono text-[10px] text-muted-foreground/80">
-              {Object.entries(contributions).map(([id, value]) => `${names.get(id) ?? id} ${value}`).join(" · ")}
-            </p>
-          ) : null}
-        </div>
-      </div>
-    );
+    title = `公共池 ${String(entry.pool)} · 每人返还 ${String(entry.share)}`;
+    description = contributions ? Object.entries(contributions).map(([id, value]) => `${names.get(id) ?? id} ${value}`).join(" · ") : undefined;
+  } else if (typeof entry.text === "string") {
+    title = entry.text;
   }
-  const text = typeof entry.text === "string" ? entry.text : undefined;
-  if (text) {
-    return (
-      <div className="flex items-start gap-2 rounded-md px-2 py-2 text-xs leading-5 text-muted-foreground hover:bg-muted">
-        <span className="nums mt-0.5 font-mono text-[10px] text-muted-foreground/80">{roundLabel(entry)}</span>
-        <div className="flex-1">{text}</div>
-      </div>
-    );
-  }
-  return null;
+  if (!title) return null;
+  return (
+    <Item size="sm">
+      <Badge variant="outline">{scenarioId === "werewolf" ? `D${String(entry.day)}` : `R${roundLabel(entry)}`}</Badge>
+      <ItemContent><ItemTitle>{title}</ItemTitle>{description ? <ItemDescription>{description}</ItemDescription> : null}</ItemContent>
+    </Item>
+  );
 }
 
 function roundLabel(entry: Record<string, unknown>): string {

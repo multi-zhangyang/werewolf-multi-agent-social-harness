@@ -170,17 +170,6 @@ body {
   animation: halo 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
-/* Audio-style bars for "speaking" */
-@keyframes wave {
-  0%, 100% { transform: scaleY(.35); }
-  50% { transform: scaleY(1); }
-}
-
-.wave-bar {
-  transform-origin: bottom;
-  animation: wave 0.9s ease-in-out infinite;
-}
-
 /* Entrance for newly appended messages */
 @keyframes enter-stage {
   from { opacity: 0; transform: translateY(10px) scale(.985); }

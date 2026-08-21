@@ -4,6 +4,8 @@ import type { AgentMindState, DecisionBias } from "@/society/contracts";
 import type { SocietyParticipantCard, SocietyParticipantProfile } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -13,6 +15,11 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select";
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle
+} from "@/components/ui/alert";
 import {
   Sheet,
   SheetContent,
@@ -101,9 +108,7 @@ export function ParticipantsRail({ participants, humanActorId, activity, onToggl
                 {pressure && pressure.level !== "normal" ? (
                   <div className="mt-1 flex items-center gap-1.5" title={`上下文压力 ${Math.round(pressure.ratio * 100)}%（${pressure.current.toLocaleString()} / ${pressure.usable.toLocaleString()} tokens）`}>
                     <Gauge className="size-3 text-muted-foreground" />
-                    <div className="h-1 w-20 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full bg-foreground" style={{ width: `${Math.min(100, Math.round(pressure.ratio * 100))}%` }} />
-                    </div>
+                    <Progress value={Math.min(100, Math.round(pressure.ratio * 100))} className="h-1 w-20 [&>[data-slot=progress-indicator]]:bg-foreground" aria-label={`上下文压力 ${Math.round(pressure.ratio * 100)}%`} />
                     <span className="nums font-mono text-[9px]">{Math.round(pressure.ratio * 100)}%</span>
                   </div>
                 ) : null}
@@ -216,9 +221,11 @@ function MindSheet({ participant, activity, roomPaused, roomId, onToggleAgentPau
             <ScrollArea className="flex-1">
               <div className="space-y-5 p-5">
                 {paused ? (
-                  <section className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3">
-                    <p className="text-xs leading-5 text-amber-200/90">该参与者已被暂停：讨论阶段它会保持沉默，绑定行动阶段房间会停下来等待恢复——系统不会替它做任何决定。</p>
-                  </section>
+                  <Alert>
+                    <Pause />
+                    <AlertTitle>该参与者已被暂停</AlertTitle>
+                    <AlertDescription>讨论阶段它会保持沉默，绑定行动阶段房间会停下来等待恢复——系统不会替它做任何决定。</AlertDescription>
+                  </Alert>
                 ) : null}
                 {canSwitchModel && participant ? (
                   <section>
@@ -239,7 +246,11 @@ function MindSheet({ participant, activity, roomPaused, roomId, onToggleAgentPau
                     <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
                       人物不变，只换引擎：会话、记忆、关系与本局角色都会保留；新模型窗口更小时会先自动压缩历史。
                     </p>
-                    {switchError ? <p className="mt-1 text-[11px] text-red-400">{switchError}</p> : null}
+                    {switchError ? (
+                      <Alert variant="destructive" className="mt-2">
+                        <AlertDescription>{switchError}</AlertDescription>
+                      </Alert>
+                    ) : null}
                   </section>
                 ) : null}
                 <CharacterSection profile={participant.profile} />
@@ -258,11 +269,13 @@ function MindSheet({ participant, activity, roomPaused, roomId, onToggleAgentPau
                     <MemoriesSection mind={mind} />
                   </>
                 ) : (
-                  <div className="flex flex-col items-center justify-center py-16 text-center">
-                    <Brain className="size-8 text-muted-foreground/50" />
-                    <p className="mt-3 text-sm text-muted-foreground">等待智能体更新内心状态</p>
-                    <p className="mt-1 text-xs text-muted-foreground/70">第一次行动后这里会显示情绪、目标、信念与记忆。</p>
-                  </div>
+                  <Empty className="min-h-40">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon"><Brain /></EmptyMedia>
+                      <EmptyTitle>等待智能体更新内心状态</EmptyTitle>
+                      <EmptyDescription>第一次行动后这里会显示情绪、目标、信念与记忆。</EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
                 )}
               </div>
             </ScrollArea>
@@ -295,9 +308,22 @@ function ContextSection({ activity, model }: { activity?: RoomConnection["activi
           <span className={cn("text-[13px] font-semibold", tone)}>{pressureLabel(level)}</span>
           <span className="nums font-mono text-xs text-muted-foreground">{Math.round(ratio * 100)}%</span>
         </div>
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
-          <div className={cn("h-full rounded-full transition-all", level === "hard-guard" ? "bg-red-400" : level === "emergency" || level === "deep-compact" ? "bg-orange-400" : level === "soft-compact" || level === "retrieval-tight" ? "bg-amber-400" : level === "watch" ? "bg-sky-400" : "bg-emerald-400")} style={{ width: `${Math.min(100, Math.round(ratio * 100))}%` }} />
-        </div>
+        <Progress
+          value={Math.min(100, Math.round(ratio * 100))}
+          className={cn(
+            "mt-2 h-1.5",
+            level === "hard-guard"
+              ? "[&>[data-slot=progress-indicator]]:bg-red-400"
+              : level === "emergency" || level === "deep-compact"
+                ? "[&>[data-slot=progress-indicator]]:bg-orange-400"
+                : level === "soft-compact" || level === "retrieval-tight"
+                  ? "[&>[data-slot=progress-indicator]]:bg-amber-400"
+                  : level === "watch"
+                    ? "[&>[data-slot=progress-indicator]]:bg-sky-400"
+                    : "[&>[data-slot=progress-indicator]]:bg-emerald-400"
+          )}
+          aria-label={`上下文压力 ${pressureLabel(level)} ${Math.round(ratio * 100)}%`}
+        />
         {pressure ? (
           <p className="nums mt-2 font-mono text-[10px] leading-4 text-muted-foreground">
             当前 {pressure.current.toLocaleString()} / 可用 {pressure.usable.toLocaleString()} tokens（窗口 {pressure.window.toLocaleString()}）
@@ -343,9 +369,9 @@ function CharacterSection({ profile }: { profile: SocietyParticipantProfile }): 
           <div>
             <div className="flex flex-wrap gap-1.5">
               {profile.decisionBiases.map((bias) => (
-                <span key={bias} className="rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground" title={biasNote(bias)}>
+                <Badge key={bias} variant="outline" className="px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground" title={biasNote(bias)}>
                   {biasLabel(bias)}
-                </span>
+                </Badge>
               ))}
             </div>
             <p className="mt-1.5 text-[10px] leading-4 text-muted-foreground/60">稳定的认知倾向，属于人物底色：它们让同一件事在不同人眼里不一样，但不决定任何一次行动。</p>
@@ -458,9 +484,11 @@ function TraitDriftSection({ mind }: { mind: AgentMindState }): ReactNode {
                   {up ? "↑" : "↓"} {Math.round(state.baseline * 100)}% → {Math.round(state.effective * 100)}%
                 </span>
               </div>
-              <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
-                <div className={cn("h-full rounded-full", up ? "bg-emerald-400/70" : "bg-rose-400/70")} style={{ width: `${Math.min(100, Math.abs(state.adaptation) * 400)}%` }} />
-              </div>
+              <Progress
+                value={Math.min(100, Math.abs(state.adaptation) * 400)}
+                className={cn("mt-1.5 h-1", up ? "[&>[data-slot=progress-indicator]]:bg-emerald-400/70" : "[&>[data-slot=progress-indicator]]:bg-rose-400/70")}
+                aria-label={`${traitLabel(trait)}偏移 ${Math.round(state.baseline * 100)}% → ${Math.round(state.effective * 100)}%`}
+              />
               {state.lastCauses.length ? (
                 <p className="mt-1.5 text-xs leading-4 text-muted-foreground">因为:{state.lastCauses[0]}</p>
               ) : null}
@@ -502,9 +530,7 @@ function RoleHypothesesSection({ mind }: { mind: AgentMindState }): ReactNode {
               {[...entries].sort((left, right) => right.probability - left.probability).map((entry) => (
                 <div key={entry.role} className="flex items-center gap-2">
                   <span className="w-16 truncate text-[11px] text-muted-foreground">{entry.role}</span>
-                  <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
-                    <div className="h-full rounded-full bg-violet-400/80 transition-all" style={{ width: `${Math.round(entry.probability * 100)}%` }} />
-                  </div>
+                  <Progress value={Math.round(entry.probability * 100)} className="h-1 min-w-0 flex-1 [&>[data-slot=progress-indicator]]:bg-violet-400/80" aria-label={`${subjectId} 是 ${entry.role} 的概率 ${Math.round(entry.probability * 100)}%`} />
                   <span className="nums w-9 text-right font-mono text-[10px] text-muted-foreground">{Math.round(entry.probability * 100)}%</span>
                 </div>
               ))}
@@ -673,15 +699,14 @@ function SectionTitle({ children }: { children: ReactNode }): ReactNode {
 }
 
 function Bar({ label, value }: { label: string; value: number }): ReactNode {
+  const pct = Math.max(0, Math.min(100, Math.round(value * 100)));
   return (
     <div>
       <div className="nums mb-1 flex items-center justify-between text-[11px]">
         <span className="text-muted-foreground">{label}</span>
         <span className="font-mono text-muted-foreground/80">{Math.round(value * 100)}%</span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full bg-foreground/80 transition-all" style={{ width: `${Math.max(0, Math.min(100, value * 100))}%` }} />
-      </div>
+      <Progress value={pct} className="h-1.5 [&>[data-slot=progress-indicator]]:bg-foreground/80" aria-label={`${label} ${pct}%`} />
     </div>
   );
 }

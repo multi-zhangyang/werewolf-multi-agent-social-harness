@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, Check, Copy, Clapperboard, Flame, ListOrdered, Pause, RefreshCw } from "lucide-react";
+import { ArrowLeft, Check, Copy, Clapperboard, Flame, ListOrdered, Pause, RefreshCw, Swords, Users } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Progress } from "@/components/ui/progress";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Conversation } from "./conversation";
@@ -24,6 +30,7 @@ interface RoomViewProps {
 }
 
 export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): ReactNode {
+  const isDesktop = useMediaQuery("(min-width: 1024px)");
   const [viewerMode, setViewerMode] = useState<"public" | "omniscient" | "agent-pov" | "postgame">("public");
   const [autoSwitchedToPostgame, setAutoSwitchedToPostgame] = useState(false);
   const [povAgentId, setPovAgentId] = useState<string>();
@@ -35,6 +42,10 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
     token,
     { mode: viewerMode, agentId: viewerMode === "agent-pov" ? povAgentId : undefined }
   );
+
+  useEffect(() => {
+    if (error) toast.error("房间连接失败", { id: `room-error:${roomId}`, description: error });
+  }, [error, roomId]);
 
   useEffect(() => {
     if (viewerMode === "agent-pov" && !povAgentId && room?.player?.actorId) {
@@ -81,9 +92,9 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
           <Button variant="ghost" size="icon-sm" aria-label="返回" onClick={onBack}>
             <ArrowLeft />
           </Button>
-          <span className="flex size-8 items-center justify-center rounded-md border bg-muted text-muted-foreground">
+          <Badge variant="outline" className="size-8 justify-center p-0">
             <ScenarioIcon id={room.scenarioId} />
-          </span>
+          </Badge>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <p className="max-w-52 truncate text-sm font-semibold tracking-tight xl:max-w-72">{room.title}</p>
@@ -107,13 +118,15 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
           </div>
 
           <div className="ml-auto flex min-w-0 items-center justify-end gap-1.5">
-            <ViewModeSwitcher
-              mode={viewerMode}
-              isPlayer={Boolean(token)}
-              finished={room.status === "finished"}
-              onChange={setViewerMode}
-            />
-            {viewerMode === "agent-pov" && !token ? (
+            {isDesktop ? (
+              <ViewModeSwitcher
+                mode={viewerMode}
+                isPlayer={Boolean(token)}
+                finished={room.status === "finished"}
+                onChange={setViewerMode}
+              />
+            ) : null}
+            {isDesktop && viewerMode === "agent-pov" && !token ? (
               <Select value={povAgentId ?? ""} onValueChange={setPovAgentId}>
                 <SelectTrigger className="hidden w-32 md:flex" aria-label="跟随的参与者">
                   <SelectValue placeholder="选择视角" />
@@ -127,14 +140,14 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
                 </SelectContent>
               </Select>
             ) : null}
-            <div className="hidden h-8 items-center gap-2 rounded-md border bg-card px-3 lg:flex">
+            <Badge variant="outline" className="hidden h-8 items-center gap-2 px-3 lg:flex">
               <span className={cn("size-1.5 rounded-full", room.world.status === "finished" ? "bg-muted-foreground/40" : "bg-foreground")} />
               <span className="max-w-28 truncate text-xs font-medium">{room.world.phase}</span>
               <span className="nums font-mono text-[11px] text-muted-foreground">
                 {room.world.turn} / {room.world.totalTurns}
               </span>
               <ActBar turn={room.world.turn} total={room.world.totalTurns} finished={room.world.status === "finished"} />
-            </div>
+            </Badge>
             {room.status !== "finished" ? <TensionMeter tension={tension} /> : null}
             {room.status !== "finished" ? <PaceControl pace={pace} onChange={setPace} /> : null}
             <ShareButton roomId={room.id} />
@@ -155,70 +168,207 @@ export function RoomView({ roomId, token, onBack, onReplay }: RoomViewProps): Re
         </div>
       </header>
 
-      <div className="mx-auto grid min-h-0 w-full max-w-[1920px] flex-1 grid-cols-1 overflow-hidden border-x lg:grid-cols-[248px_minmax(0,1fr)_352px]">
-        <aside className="hidden min-h-0 overflow-hidden border-r bg-card/20 lg:flex lg:flex-col">
-          <div className="flex h-11 shrink-0 items-center justify-between border-b px-4">
-            <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">持续人物</p>
-            <span className="nums font-mono text-[11px] text-muted-foreground">{room.participants.length}P</span>
-          </div>
-          <ScrollArea className="min-h-0 flex-1">
-            <div className="p-2">
-              <ParticipantsRail
-                participants={room.participants}
-                humanActorId={room.player?.actorId}
-                activity={activity}
-                roomPaused={room.status === "paused"}
-                roomId={room.id}
-                onToggleAgentPause={(actorId, paused) => { void toggleAgentPause(actorId, paused); }}
-              />
-            </div>
-          </ScrollArea>
-        </aside>
-
-        <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-          {stageView === "arena" ? (
-            <div className="max-h-[32vh] shrink-0 overflow-y-auto border-b">
-              <ArenaStage room={room} cue={cue} activity={activity} />
-            </div>
-          ) : null}
-          <main className="relative min-h-0 flex-1 overflow-hidden bg-card/20">
-            <CueBanner cue={cue} finished={room.world.status === "finished"} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
-            <Conversation room={room} activity={activity} onAction={submitAction} onReplay={onReplay} jumpToAt={jumpToAt} />
-          </main>
-        </section>
-
-        <aside className="hidden min-h-0 overflow-hidden border-l bg-card/10 lg:block">
-          <ScrollArea className="h-full">
-            <div className="p-3">
-              <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
-            </div>
-          </ScrollArea>
-        </aside>
-
-        <div className="fixed inset-x-0 bottom-3 flex justify-center lg:hidden">
-          <Sheet>
-            <SheetTrigger asChild>
-              <Button variant="outline" className="h-10 rounded-full px-5 text-xs shadow-lg backdrop-blur-xl">
-                <ListOrdered data-icon="inline-start" />
-                战况 · 时间线 · 高光
-              </Button>
-            </SheetTrigger>
-            <SheetContent side="bottom" className="max-h-[76vh] overflow-y-auto rounded-t-2xl">
-              <SheetHeader>
-                <SheetTitle>实时战况与社会时间线</SheetTitle>
-              </SheetHeader>
-              <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
-            </SheetContent>
-          </Sheet>
+      {isDesktop ? (
+        <ResizablePanelGroup orientation="horizontal" className="mx-auto min-h-0 w-full max-w-[1920px] flex-1 border-x">
+          <ResizablePanel defaultSize="14%" minSize="12%" maxSize="22%">
+            <ParticipantsPanel
+              room={room}
+              activity={activity}
+              onToggleAgentPause={toggleAgentPause}
+            />
+          </ResizablePanel>
+          <ResizableHandle withHandle />
+          <ResizablePanel defaultSize="64%" minSize="45%">
+            <RoomCenter
+              room={room}
+              stageView={stageView}
+              cue={cue}
+              activity={activity}
+              onAction={submitAction}
+              onReplay={onReplay}
+              jumpToAt={jumpToAt}
+            />
+          </ResizablePanel>
+          <ResizableHandle withHandle />
+          <ResizablePanel defaultSize="22%" minSize="18%" maxSize="30%">
+            <WorldPanelRail room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <RoomCenter
+            room={room}
+            stageView={stageView}
+            cue={cue}
+            activity={activity}
+            onAction={submitAction}
+            onReplay={onReplay}
+            jumpToAt={jumpToAt}
+          />
         </div>
-      </div>
+      )}
 
-      {error ? (
-        <div className="fixed inset-x-0 bottom-4 z-30 mx-auto w-fit rounded-full border border-red-400/30 bg-card px-5 py-2 text-xs text-red-400 shadow-lg">
-          {error}
-        </div>
+      {!isDesktop ? (
+        <footer className="shrink-0 border-t p-2">
+          <ButtonGroup className="w-full">
+            <Sheet>
+              <SheetTrigger asChild>
+                <Button variant="outline" className="flex-1">
+                  <Users data-icon="inline-start" />
+                  人物
+                </Button>
+              </SheetTrigger>
+              <SheetContent side="left" className="w-[90vw]">
+                <SheetHeader>
+                  <SheetTitle>持续人物</SheetTitle>
+                </SheetHeader>
+                <ScrollArea className="min-h-0 flex-1 px-2 pb-4">
+                  <ParticipantsRail
+                    participants={room.participants}
+                    humanActorId={room.player?.actorId}
+                    activity={activity}
+                    roomPaused={room.status === "paused"}
+                    roomId={room.id}
+                    onToggleAgentPause={(actorId, paused) => { void toggleAgentPause(actorId, paused); }}
+                  />
+                </ScrollArea>
+              </SheetContent>
+            </Sheet>
+            <Sheet>
+              <SheetTrigger asChild>
+                <Button variant="outline" className="flex-1">
+                  <ListOrdered data-icon="inline-start" />
+                  社会
+                </Button>
+              </SheetTrigger>
+              <SheetContent side="bottom" className="h-[78dvh]">
+                <SheetHeader>
+                  <SheetTitle>社会状态与战况</SheetTitle>
+                </SheetHeader>
+                <ScrollArea className="min-h-0 flex-1 px-3 pb-4">
+                  <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={setJumpToAt} />
+                </ScrollArea>
+              </SheetContent>
+            </Sheet>
+            <Sheet>
+              <SheetTrigger asChild>
+                <Button variant="outline" className="flex-1">
+                  <Clapperboard data-icon="inline-start" />
+                  视角
+                </Button>
+              </SheetTrigger>
+              <SheetContent side="bottom">
+                <SheetHeader>
+                  <SheetTitle>观战视角</SheetTitle>
+                </SheetHeader>
+                <div className="flex flex-col gap-3 px-4 pb-4">
+                  <ViewModeSwitcher
+                    mode={viewerMode}
+                    isPlayer={Boolean(token)}
+                    finished={room.status === "finished"}
+                    onChange={setViewerMode}
+                  />
+                  {viewerMode === "agent-pov" && !token ? (
+                    <Select value={povAgentId ?? ""} onValueChange={setPovAgentId}>
+                      <SelectTrigger aria-label="跟随的参与者">
+                        <SelectValue placeholder="选择视角" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          {room.participants.map((participant) => (
+                            <SelectItem key={participant.profile.id} value={participant.profile.id}>{participant.profile.displayName}</SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  ) : null}
+                </div>
+              </SheetContent>
+            </Sheet>
+          </ButtonGroup>
+        </footer>
       ) : null}
     </div>
+  );
+}
+
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => typeof window !== "undefined" && window.matchMedia(query).matches);
+  useEffect(() => {
+    const mediaQuery = window.matchMedia(query);
+    const update = (): void => setMatches(mediaQuery.matches);
+    update();
+    mediaQuery.addEventListener("change", update);
+    return () => mediaQuery.removeEventListener("change", update);
+  }, [query]);
+  return matches;
+}
+
+function ParticipantsPanel({ room, activity, onToggleAgentPause }: {
+  room: SocietyRoomSnapshot;
+  activity: RoomConnection["activity"];
+  onToggleAgentPause: (actorId: string, paused: boolean) => Promise<void>;
+}): ReactNode {
+  return (
+    <aside className="flex h-full min-h-0 flex-col overflow-hidden bg-card/20">
+      <div className="flex h-11 shrink-0 items-center justify-between border-b px-4">
+        <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">持续人物</p>
+        <Badge variant="outline">{room.participants.length}P</Badge>
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="p-2">
+          <ParticipantsRail
+            participants={room.participants}
+            humanActorId={room.player?.actorId}
+            activity={activity}
+            roomPaused={room.status === "paused"}
+            roomId={room.id}
+            onToggleAgentPause={(actorId, paused) => { void onToggleAgentPause(actorId, paused); }}
+          />
+        </div>
+      </ScrollArea>
+    </aside>
+  );
+}
+
+function RoomCenter({ room, stageView, cue, activity, onAction, onReplay, jumpToAt }: {
+  room: SocietyRoomSnapshot;
+  stageView: "arena" | "analysis";
+  cue: RoomConnection["cue"];
+  activity: RoomConnection["activity"];
+  onAction: (action: string, payload: unknown) => Promise<void>;
+  onReplay?: () => void;
+  jumpToAt?: string;
+}): ReactNode {
+  return (
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+      {stageView === "arena" ? (
+        <ScrollArea className="max-h-[32vh] shrink-0 border-b">
+          <ArenaStage room={room} cue={cue} activity={activity} />
+        </ScrollArea>
+      ) : null}
+      <main className="relative min-h-0 flex-1 overflow-hidden bg-card/20">
+        <CueBanner cue={cue} finished={room.world.status === "finished"} names={new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.displayName]))} />
+        <Conversation room={room} activity={activity} onAction={onAction} onReplay={onReplay} jumpToAt={jumpToAt} />
+      </main>
+    </section>
+  );
+}
+
+function WorldPanelRail({ room, toolCalls, timeline, onJumpToAt }: {
+  room: SocietyRoomSnapshot;
+  toolCalls: RoomConnection["toolCalls"];
+  timeline: RoomConnection["timeline"];
+  onJumpToAt: (at: string) => void;
+}): ReactNode {
+  return (
+    <aside className="h-full min-h-0 overflow-hidden bg-card/10">
+      <ScrollArea className="h-full">
+        <div className="p-3">
+          <WorldPanel room={room} toolCalls={toolCalls} timeline={timeline} onJumpToAt={onJumpToAt} />
+        </div>
+      </ScrollArea>
+    </aside>
   );
 }
 
@@ -235,44 +385,46 @@ function ViewModeSwitcher({ mode, isPlayer, finished, onChange }: {
     { value: "postgame", label: "终局", disabled: !finished, hint: finished ? "终局解锁全部真相与高光" : "对局结束后解锁" }
   ];
   return (
-    <div className="hidden items-center rounded-md border bg-card p-0.5 md:flex">
+    <ToggleGroup
+      type="single"
+      value={mode}
+      variant="outline"
+      size="sm"
+      className="w-full"
+      onValueChange={(value) => { if (value) onChange(value as typeof mode); }}
+    >
       {options.map((option) => (
         <Tooltip key={option.value}>
           <TooltipTrigger asChild>
-            <Button
-              variant={mode === option.value ? "secondary" : "ghost"}
-              size="xs"
+            <ToggleGroupItem
+              value={option.value}
+              className="flex-1"
               disabled={option.disabled}
-              onClick={() => onChange(option.value)}
             >
               {option.label}
-            </Button>
+            </ToggleGroupItem>
           </TooltipTrigger>
           <TooltipContent>{option.hint}</TooltipContent>
         </Tooltip>
       ))}
-    </div>
+    </ToggleGroup>
   );
 }
 
 function ViewToggle({ view, onChange }: { view: "arena" | "analysis"; onChange: (view: "arena" | "analysis") => void }): ReactNode {
   return (
-    <div className="hidden items-center rounded-md border bg-card p-0.5 2xl:flex" title="舞台优先；分析视图保留完整三栏">
-      <Button
-        variant={view === "arena" ? "secondary" : "ghost"}
-        size="xs"
-        onClick={() => onChange("arena")}
-      >
-        舞台
-      </Button>
-      <Button
-        variant={view === "analysis" ? "secondary" : "ghost"}
-        size="xs"
-        onClick={() => onChange("analysis")}
-      >
-        分析
-      </Button>
-    </div>
+    <ToggleGroup
+      type="single"
+      value={view}
+      variant="outline"
+      size="sm"
+      className="hidden 2xl:flex"
+      title="舞台优先；分析视图保留完整三栏"
+      onValueChange={(value) => { if (value) onChange(value as typeof view); }}
+    >
+      <ToggleGroupItem value="arena">舞台</ToggleGroupItem>
+      <ToggleGroupItem value="analysis">分析</ToggleGroupItem>
+    </ToggleGroup>
   );
 }
 
@@ -309,35 +461,37 @@ function ArenaStage({ room, cue, activity }: {
           const focused = focusIds.has(participant.profile.id);
           const dead = !participant.alive;
           return (
-            <div
+            <Card
               key={participant.profile.id}
               className={cn(
-                "relative flex min-w-0 flex-col items-center rounded-md border px-2 py-2 transition-all",
-                dead ? "opacity-40" : "bg-card",
+                "relative min-w-0 gap-0 py-2 shadow-none transition-all",
+                dead && "opacity-40",
                 speaking && "border-foreground/60",
                 focused && "ring-1 ring-foreground"
               )}
             >
-              {focused ? (
-                <Badge className="absolute -top-2 left-1/2 -translate-x-1/2" variant="secondary">焦点</Badge>
-              ) : null}
-              {dead ? (
-                <Badge className="absolute right-1 top-1" variant="outline">出局</Badge>
-              ) : suspicionScores.has(participant.profile.id) ? (
-                <Badge className="absolute right-1 top-1" variant="outline">焦点</Badge>
-              ) : null}
-              <AgentPresence name={participant.profile.displayName} index={index} seed={participant.profile.characterId} size="lg" status={dead || room.status === "finished" ? "finished" : participant.status} />
-              <p className="mt-1 max-w-full truncate text-xs font-semibold tracking-tight">{participant.profile.displayName}</p>
-              <p className="flex max-w-full items-center gap-1 text-[10px] text-foreground/60">
-                <StatusDot status={dead ? "finished" : participant.status} />
-                <span className="truncate">{participant.role ?? participant.mood ?? "—"}</span>
-              </p>
-              {state?.thought ? (
-                <p className="mt-0.5 w-full truncate text-center text-[9px] leading-4 text-muted-foreground" title={state.thought.text}>
-                  {state.thought.title}
+              <CardContent className="flex flex-col items-center px-2">
+                {focused ? (
+                  <Badge className="absolute -top-2 left-1/2 -translate-x-1/2" variant="secondary">焦点</Badge>
+                ) : null}
+                {dead ? (
+                  <Badge className="absolute right-1 top-1" variant="outline">出局</Badge>
+                ) : suspicionScores.has(participant.profile.id) ? (
+                  <Badge className="absolute right-1 top-1" variant="outline">焦点</Badge>
+                ) : null}
+                <AgentPresence name={participant.profile.displayName} index={index} seed={participant.profile.characterId} size="lg" status={dead || room.status === "finished" ? "finished" : participant.status} />
+                <p className="mt-1 max-w-full truncate text-xs font-semibold tracking-tight">{participant.profile.displayName}</p>
+                <p className="flex max-w-full items-center gap-1 text-[10px] text-foreground/60">
+                  <StatusDot status={dead ? "finished" : participant.status} />
+                  <span className="truncate">{participant.role ?? participant.mood ?? "—"}</span>
                 </p>
-              ) : null}
-            </div>
+                {state?.thought ? (
+                  <p className="mt-0.5 w-full truncate text-center text-[9px] leading-4 text-muted-foreground" title={state.thought.text}>
+                    {state.thought.title}
+                  </p>
+                ) : null}
+              </CardContent>
+            </Card>
           );
         })}
       </div>
@@ -369,46 +523,35 @@ function DuelStrip({ room, cue }: {
   return (
     <div className="mt-3 grid grid-cols-[1fr_auto_1fr] items-stretch gap-2">
       {sides[0] ? (
-        <div
-          className="rounded-lg border border-red-400/30 bg-red-400/5 px-3 py-2 text-left"
-        >
-          <p className="flex items-center gap-1.5 text-xs font-semibold tracking-tight">
-            <SwordsIcon className="size-3 text-red-400" />
-            {sides[0].participant.profile.displayName}
-            {sides[0].participant.mood ? <span className="text-[10px] font-normal text-muted-foreground">· {sides[0].participant.mood}</span> : null}
-          </p>
-          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground/90">
-            {sides[0].lastPublic ? `「${sides[0].lastPublic.text.slice(0, 160)}」` : "尚未公开发言"}
-          </p>
-        </div>
+        <Card className="gap-0 py-2 shadow-none">
+          <CardContent className="px-3 text-left">
+            <p className="flex items-center gap-1.5 text-xs font-semibold tracking-tight">
+              <Swords />
+              {sides[0].participant.profile.displayName}
+              {sides[0].participant.mood ? <span className="text-[10px] font-normal text-muted-foreground">· {sides[0].participant.mood}</span> : null}
+            </p>
+            <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+              {sides[0].lastPublic ? `「${sides[0].lastPublic.text.slice(0, 160)}」` : "尚未公开发言"}
+            </p>
+          </CardContent>
+        </Card>
       ) : null}
       <div className="flex items-center justify-center self-center text-[10px] font-bold tracking-widest text-muted-foreground/60">VS</div>
       {sides[1] ? (
-        <div
-          className="rounded-lg border border-sky-400/30 bg-sky-400/5 px-3 py-2 text-right"
-        >
-          <p className="flex items-center justify-end gap-1.5 text-xs font-semibold tracking-tight">
-            {sides[1].participant.profile.displayName}
-            {sides[1].participant.mood ? <span className="text-[10px] font-normal text-muted-foreground">· {sides[1].participant.mood}</span> : null}
-            <SwordsIcon className="size-3 text-sky-400" />
-          </p>
-          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground/90">
-            {sides[1].lastPublic ? `「${sides[1].lastPublic.text.slice(0, 160)}」` : "尚未公开发言"}
-          </p>
-        </div>
+        <Card className="gap-0 py-2 shadow-none">
+          <CardContent className="px-3 text-right">
+            <p className="flex items-center justify-end gap-1.5 text-xs font-semibold tracking-tight">
+              {sides[1].participant.profile.displayName}
+              {sides[1].participant.mood ? <span className="text-[10px] font-normal text-muted-foreground">· {sides[1].participant.mood}</span> : null}
+              <Swords />
+            </p>
+            <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+              {sides[1].lastPublic ? `「${sides[1].lastPublic.text.slice(0, 160)}」` : "尚未公开发言"}
+            </p>
+          </CardContent>
+        </Card>
       ) : null}
     </div>
-  );
-}
-
-function SwordsIcon({ className }: { className?: string }): ReactNode {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden>
-      <polyline points="14.5 17.5 3 6 3 3 6 3 17.5 14.5" />
-      <line x1="13" y1="19" x2="19" y2="13" />
-      <line x1="16" y1="16" x2="20" y2="20" />
-      <line x1="19" y1="21" x2="21" y2="19" />
-    </svg>
   );
 }
 
@@ -417,13 +560,11 @@ function TensionMeter({ tension }: { tension: RoomConnection["tension"] }): Reac
   const level = tension?.level ?? "calm";
   const label = level === "climax" ? "高潮" : level === "tense" ? "紧张" : level === "warm" ? "升温" : "平静";
   return (
-    <div className="hidden h-8 items-center gap-2 rounded-md border bg-card px-2.5 xl:flex" title={tension?.reasons.length ? tension.reasons.join(" · ") : "张力由真实事件推导"}>
+    <Badge variant="outline" className="hidden h-8 items-center gap-2 px-2.5 xl:flex" title={tension?.reasons.length ? tension.reasons.join(" · ") : "张力由真实事件推导"}>
       <Flame className="text-muted-foreground" />
-      <div className="h-1 w-10 overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full bg-foreground transition-all duration-700" style={{ width: `${Math.round(score * 100)}%` }} />
-      </div>
+      <Progress value={Math.round(score * 100)} className="h-1 w-10" aria-label={`当前张力 ${Math.round(score * 100)}%`} />
       <span className="text-[10px] font-medium text-muted-foreground">{label}</span>
-    </div>
+    </Badge>
   );
 }
 
@@ -467,40 +608,31 @@ function CueBanner({ cue, names, finished = false }: { cue: RoomConnection["cue"
 }
 
 function ActBar({ turn, total, finished }: { turn: number; total: number; finished: boolean }): ReactNode {
-  return (
-    <div className="flex items-center gap-1" aria-label={`第 ${turn} / ${total} 轮`}>
-      {Array.from({ length: Math.max(1, total) }).map((_, index) => (
-        <span
-          key={index}
-          className={cn(
-            "h-1 rounded-full transition-all duration-500",
-            finished || index < turn
-              ? "w-5 bg-foreground/70"
-              : index === turn
-                ? "w-5 bg-foreground"
-                : "w-2 bg-border"
-          )}
-        />
-      ))}
-    </div>
-  );
+  const progress = finished ? 100 : Math.round((Math.max(0, turn) / Math.max(1, total)) * 100);
+  return <Progress value={progress} className="h-1 w-14" aria-label={`第 ${turn} / ${total} 轮`} />;
 }
 
 function PaceControl({ pace, onChange }: { pace: 0.5 | 1 | 2 | 4; onChange: (pace: 0.5 | 1 | 2 | 4) => void }): ReactNode {
   const options: Array<0.5 | 1 | 2 | 4> = [0.5, 1, 2, 4];
   return (
-    <div className="hidden items-center rounded-md border bg-card p-0.5 2xl:flex" title="播放节奏：只作用于观战动画与流式光标，不改变对局本身">
+    <ToggleGroup
+      type="single"
+      value={String(pace)}
+      variant="outline"
+      size="sm"
+      className="hidden 2xl:flex"
+      title="播放节奏：只作用于观战动画与流式光标，不改变对局本身"
+      onValueChange={(value) => {
+        const next = Number(value);
+        if (next === 0.5 || next === 1 || next === 2 || next === 4) onChange(next);
+      }}
+    >
       {options.map((option) => (
-        <Button
-          key={option}
-          variant={pace === option ? "secondary" : "ghost"}
-          size="xs"
-          onClick={() => onChange(option)}
-        >
+        <ToggleGroupItem key={option} value={String(option)}>
           {option}×
-        </Button>
+        </ToggleGroupItem>
       ))}
-    </div>
+    </ToggleGroup>
   );
 }
 

@@ -4,15 +4,53 @@ import { apiFetch } from "@/lib/api";
 import type { AgentRuntimeEvent, CinematicCue, SocialMessage, ThoughtBeatKind } from "@/society/contracts";
 import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "@/society/room";
 
+export type LiveAgentProcessStep =
+  | {
+      id: string;
+      kind: "reasoning";
+      text: string;
+      elapsedMs: number;
+      done: boolean;
+      startedAt: string;
+      updatedAt: string;
+    }
+  | {
+      id: string;
+      kind: "output";
+      text: string;
+      streaming: boolean;
+      startedAt: string;
+      updatedAt: string;
+    }
+  | {
+      id: string;
+      kind: "tool";
+      toolCallId: string;
+      toolName: string;
+      label?: string;
+      phase: "queued" | "started" | "streaming" | "succeeded" | "failed";
+      safeInputSummary?: string;
+      safeOutputSummary?: string;
+      errorCode?: string;
+      startedAt: string;
+      updatedAt: string;
+    };
+
 export interface LiveAgentActivity {
   /** Streamed text deltas from the model while it speaks or decides. */
   text: string;
+  /** Provider-returned reasoning channel for the current activation. */
+  reasoningContent?: { text: string; elapsedMs: number; done: boolean; completedAt?: string };
   /** Provider-returned reasoning summary; never raw hidden reasoning. */
   reasoningSummary?: string;
   /** Latest structured ThoughtBeat produced by this agent's own cognition. */
   thought?: { kind: ThoughtBeatKind; text: string; title?: string };
   /** The SDK tool the agent is currently invoking. */
   tool?: string;
+  /** Ordered, live-only model/reasoning/tool trace for the current activation. */
+  processSteps?: LiveAgentProcessStep[];
+  liveStatus?: "lobby" | "idle" | "thinking" | "acting" | "speaking" | "paused" | "error" | "finished";
+  completedAt?: string;
   /** Latest context-compaction digest (the agent's long-term memory was compressed). */
   compacted?: string;
   /** Latest context pressure state (budget + level). */
@@ -64,8 +102,11 @@ export interface RoomConnection {
   submitAction: (action: string, payload: unknown) => Promise<void>;
 }
 
-const DELTA_CAP = 480;
+const DELTA_CAP = 8_000;
 const REASONING_SUMMARY_CAP = 700;
+const REASONING_CONTENT_CAP = 12_000;
+const PROCESS_STEP_CAP = 16;
+const LIVE_TRACE_RETENTION_MS = 20_000;
 
 export function useRoom(roomId: string | undefined, token?: string, viewer: { mode: "public" | "omniscient" | "agent-pov" | "postgame"; agentId?: string } = { mode: "omniscient" }): RoomConnection {
   const [room, setRoom] = useState<SocietyRoomSnapshot | null>(null);
@@ -249,6 +290,104 @@ export function useRoom(roomId: string | undefined, token?: string, viewer: { mo
   return { room, connection, error, activity, toolCalls, feed, tension, cue, timeline, pause, resume, toggleAgentPause, submitAction };
 }
 
+function appendOutputStep(steps: LiveAgentProcessStep[], delta: string, at: string): LiveAgentProcessStep[] {
+  const next = finishOpenSteps(steps, at, "output");
+  const last = next.at(-1);
+  if (last?.kind === "output" && last.streaming) {
+    next[next.length - 1] = {
+      ...last,
+      text: (last.text + delta).slice(-DELTA_CAP),
+      updatedAt: at
+    };
+    return next;
+  }
+  return trimProcessSteps([
+    ...next,
+    { id: `output:${at}`, kind: "output", text: delta.slice(-DELTA_CAP), streaming: true, startedAt: at, updatedAt: at }
+  ]);
+}
+
+function appendReasoningStep(
+  steps: LiveAgentProcessStep[],
+  delta: string,
+  elapsedMs: number,
+  done: boolean,
+  at: string
+): LiveAgentProcessStep[] {
+  const last = steps.at(-1);
+  if (last?.kind === "reasoning" && !last.done) {
+    const next = steps.slice();
+    next[next.length - 1] = {
+      ...last,
+      text: (last.text + delta).slice(-REASONING_CONTENT_CAP),
+      elapsedMs,
+      done,
+      updatedAt: at
+    };
+    return next;
+  }
+  if (!delta) return steps;
+  return trimProcessSteps([
+    ...finishOpenSteps(steps, at),
+    { id: `reasoning:${at}`, kind: "reasoning", text: delta.slice(-REASONING_CONTENT_CAP), elapsedMs, done, startedAt: at, updatedAt: at }
+  ]);
+}
+
+function upsertToolStep(
+  steps: LiveAgentProcessStep[],
+  event: Extract<AgentRuntimeEvent, { type: "agent.tool" }>
+): LiveAgentProcessStep[] {
+  const index = steps.findIndex((step) => step.kind === "tool" && step.toolCallId === event.toolCallId);
+  if (index >= 0) {
+    const current = steps[index];
+    if (current.kind !== "tool") return steps;
+    const next = steps.slice();
+    next[index] = {
+      ...current,
+      toolName: event.toolName,
+      phase: event.phase,
+      ...(event.label ? { label: event.label } : {}),
+      ...(event.safeInputSummary ? { safeInputSummary: event.safeInputSummary } : {}),
+      ...(event.safeOutputSummary ? { safeOutputSummary: event.safeOutputSummary } : {}),
+      ...(event.errorCode ? { errorCode: event.errorCode } : {}),
+      updatedAt: event.at
+    };
+    return next;
+  }
+  return trimProcessSteps([
+    ...finishOpenSteps(steps, event.at),
+    {
+      id: `tool:${event.toolCallId}`,
+      kind: "tool",
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      phase: event.phase,
+      ...(event.label ? { label: event.label } : {}),
+      ...(event.safeInputSummary ? { safeInputSummary: event.safeInputSummary } : {}),
+      ...(event.safeOutputSummary ? { safeOutputSummary: event.safeOutputSummary } : {}),
+      ...(event.errorCode ? { errorCode: event.errorCode } : {}),
+      startedAt: event.at,
+      updatedAt: event.at
+    }
+  ]);
+}
+
+function finishOpenSteps(steps: LiveAgentProcessStep[], at: string, except?: LiveAgentProcessStep["kind"]): LiveAgentProcessStep[] {
+  return steps.map((step) => {
+    if (step.kind === "reasoning" && !step.done && except !== "reasoning") return { ...step, done: true, updatedAt: at };
+    if (step.kind === "output" && step.streaming && except !== "output") return { ...step, streaming: false, updatedAt: at };
+    return step;
+  });
+}
+
+function finishProcessSteps(steps: LiveAgentProcessStep[], at: string): LiveAgentProcessStep[] {
+  return finishOpenSteps(steps, at);
+}
+
+function trimProcessSteps(steps: LiveAgentProcessStep[]): LiveAgentProcessStep[] {
+  return steps.slice(-PROCESS_STEP_CAP);
+}
+
 function reduceEvent(
   event: AgentRuntimeEvent,
   setRoom: React.Dispatch<React.SetStateAction<SocietyRoomSnapshot | null>>,
@@ -268,17 +407,57 @@ function reduceEvent(
   }
   if (event.type === "agent.delta") {
     setActivity((current) => {
-      const previous = current[event.actorId]?.text ?? "";
-      const text = (previous + event.delta).slice(-DELTA_CAP);
-      return { ...current, [event.actorId]: { text, at: event.at, tool: current[event.actorId]?.tool, reasoningSummary: current[event.actorId]?.reasoningSummary } };
+      const state = current[event.actorId];
+      const text = ((state?.text ?? "") + event.delta).slice(-DELTA_CAP);
+      return {
+        ...current,
+        [event.actorId]: {
+          ...state,
+          text,
+          at: event.at,
+          processSteps: appendOutputStep(state?.processSteps ?? [], event.delta, event.at)
+        }
+      };
+    });
+    return;
+  }
+  if (event.type === "agent.reasoning-content") {
+    setActivity((current) => {
+      const state = current[event.actorId];
+      const previous = state?.reasoningContent?.text ?? "";
+      return {
+        ...current,
+        [event.actorId]: {
+          ...state,
+          text: state?.text ?? "",
+          reasoningContent: {
+            text: (previous + event.delta).slice(-REASONING_CONTENT_CAP),
+            elapsedMs: event.elapsedMs,
+            done: event.done,
+            ...(event.done ? { completedAt: event.at } : {})
+          },
+          processSteps: appendReasoningStep(state?.processSteps ?? [], event.delta, event.elapsedMs, event.done, event.at),
+          at: event.at
+        }
+      };
     });
     return;
   }
   if (event.type === "agent.reasoning-summary" || event.type === "agent.reasoning") {
     setActivity((current) => {
-      const previous = current[event.actorId]?.reasoningSummary ?? "";
+      const state = current[event.actorId];
+      const previous = state?.reasoningSummary ?? "";
       const reasoningSummary = (previous + event.delta).slice(-REASONING_SUMMARY_CAP);
-      return { ...current, [event.actorId]: { ...current[event.actorId], reasoningSummary, at: event.at } };
+      return {
+        ...current,
+        [event.actorId]: {
+          ...state,
+          text: state?.text ?? "",
+          reasoningSummary,
+          processSteps: appendReasoningStep(state?.processSteps ?? [], event.delta, 0, false, event.at),
+          at: event.at
+        }
+      };
     });
     return;
   }
@@ -319,10 +498,46 @@ function reduceEvent(
   if (event.type === "agent.status") {
     setActivity((current) => {
       const previous = current[event.actorId];
-      if (event.status === "thinking" && previous && !previous.tool) return { ...current, [event.actorId]: { text: "", at: event.at } };
-      if (event.status === "idle" || event.status === "finished") return { ...current, [event.actorId]: { text: "", at: event.at, tool: previous?.tool } };
-      return { ...current, [event.actorId]: { text: previous?.text ?? "", at: event.at, tool: previous?.tool } };
+      const startsActivation = event.status === "thinking"
+        && (!previous || !previous.liveStatus || previous.liveStatus === "lobby" || previous.liveStatus === "paused" || previous.liveStatus === "idle" || previous.liveStatus === "finished" || previous.liveStatus === "error");
+      if (startsActivation) {
+        return { ...current, [event.actorId]: { text: "", processSteps: [], liveStatus: event.status, at: event.at } };
+      }
+      if (event.status === "idle" || event.status === "finished" || event.status === "error") {
+        return {
+          ...current,
+          [event.actorId]: {
+            ...previous,
+            text: "",
+            at: event.at,
+            tool: undefined,
+            liveStatus: event.status,
+            completedAt: event.at,
+            processSteps: finishProcessSteps(previous?.processSteps ?? [], event.at)
+          }
+        };
+      }
+      return {
+        ...current,
+        [event.actorId]: {
+          ...previous,
+          text: previous?.text ?? "",
+          at: event.at,
+          liveStatus: event.status
+        }
+      };
     });
+    if (event.status === "idle" || event.status === "finished" || event.status === "error") {
+      const completedAt = event.at;
+      window.setTimeout(() => {
+        setActivity((current) => {
+          if (current[event.actorId]?.completedAt !== completedAt) return current;
+          const next = { ...current };
+          delete next[event.actorId];
+          return next;
+        });
+      }, LIVE_TRACE_RETENTION_MS);
+    }
     return;
   }
   if (event.type === "agent.model.switched") {
@@ -349,14 +564,19 @@ function reduceEvent(
     return;
   }
   if (event.type === "agent.tool") {
-    setActivity((current) => ({
-      ...current,
-      [event.actorId]: {
-        text: current[event.actorId]?.text ?? "",
-        tool: event.phase === "started" ? event.toolName : undefined,
-        at: event.at
-      }
-    }));
+    setActivity((current) => {
+      const state = current[event.actorId];
+      return {
+        ...current,
+        [event.actorId]: {
+          ...state,
+          text: state?.text ?? "",
+          tool: event.phase === "queued" || event.phase === "started" || event.phase === "streaming" ? event.toolName : undefined,
+          processSteps: upsertToolStep(state?.processSteps ?? [], event),
+          at: event.at
+        }
+      };
+    });
     setToolCalls((current) => [
       {
         actorId: event.actorId,
@@ -429,6 +649,7 @@ function reduceEvent(
     setActivity((current) => ({
       ...current,
       [event.actorId]: {
+        ...current[event.actorId],
         text: current[event.actorId]?.text ?? "",
         compacted: `上下文已压缩：${event.estimatedTokens.toLocaleString()} → 摘要（阈值 ${event.threshold.toLocaleString()}，压缩后压力 ${Math.round(event.pressureAfter * 100)}%）`,
         at: event.at

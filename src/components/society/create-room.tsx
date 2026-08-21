@@ -59,7 +59,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
   const [players, setPlayers] = useState<number>(6);
   const [mode, setMode] = useState<"ai" | "human">("ai");
   const [playerName, setPlayerName] = useState("");
-  const [reasoningEffort, setReasoningEffort] = useState<"low" | "medium" | "high" | "xhigh">("xhigh");
+  const [reasoningEffort, setReasoningEffort] = useState<"low" | "medium" | "high" | "xhigh">("high");
   const [seasonMode, setSeasonMode] = useState<"season" | "one-shot">("season");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
@@ -92,7 +92,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     setPlayers(scenario?.players ?? 2);
     setMode("ai");
     setPlayerName("");
-    setReasoningEffort("xhigh");
+    setReasoningEffort("high");
     setSeasonMode("season");
     setError(undefined);
   }, [open, scenario, maxRounds, visibleModels]);
@@ -131,7 +131,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     setSeatTuning(template.agentTuning ?? {});
     if (template.players !== undefined) setPlayers(template.players);
     if (template.rounds !== undefined) setRounds(template.rounds);
-    setReasoningEffort(template.reasoningEffort ?? "xhigh");
+    setReasoningEffort(template.reasoningEffort ?? "high");
     setSeasonMode(template.season ?? "season");
     if (characters.length && template.characterIds?.length) {
       const picks: Record<string, string> = {};

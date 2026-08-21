@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
-import { Activity, Check, Loader2, Plus, Settings2, Trash2 } from "lucide-react";
+import { Activity, Check, CircleAlert, Loader2, Plus, Settings2, Trash2 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue
@@ -40,6 +42,7 @@ interface ModelProfileView {
   contextWindowSource: string;
   enabled: boolean;
   capabilities: Record<string, string>;
+  defaults?: { reasoningEffort?: ReasoningEffort };
 }
 
 interface ModelConfigView {
@@ -52,7 +55,19 @@ interface TestResult {
   ok: boolean;
   message: string;
   modelIds?: string[];
+  capabilities?: Record<string, string>;
+  requestedReasoningEffort?: ReasoningEffortSelection;
+  effectiveReasoningEffort?: ReasoningEffortSelection;
+  reasoningFallbacks?: Array<{
+    from: "xhigh" | "high";
+    to: "high" | "provider-default";
+    status: number;
+    reason: string;
+  }>;
 }
+
+type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+type ReasoningEffortSelection = ReasoningEffort | "provider-default";
 
 interface SettingsDialogProps {
   open: boolean;
@@ -81,11 +96,19 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
   const [loaded, setLoaded] = useState(false);
   const [globalModel, setGlobalModel] = useState<string>("");
   const [providerDraft, setProviderDraft] = useState({ name: "", baseURL: "", apiKey: "", apiMode: "chat-completions" });
-  const [modelDraft, setModelDraft] = useState({ name: "", modelId: "", contextWindow: "", providerProfileId: "", reasoning: true, streaming: true, tools: true });
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<TestResult>();
+  const [modelDraft, setModelDraft] = useState({
+    name: "",
+    modelId: "",
+    contextWindow: "",
+    providerProfileId: "",
+    reasoningEffort: "high" as ReasoningEffort,
+    reasoning: true,
+    streaming: true,
+    tools: true
+  });
   const [probing, setProbing] = useState<string>();
   const [probeResults, setProbeResults] = useState<Record<string, TestResult>>({});
+  const [savingEffort, setSavingEffort] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -188,6 +211,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
             modelId: modelDraft.modelId.trim(),
             contextWindow,
             enabled: true,
+            defaults: { reasoningEffort: modelDraft.reasoningEffort },
             capabilities: {
               streaming: modelDraft.streaming ? "yes" : "unknown",
               tools: modelDraft.tools ? "yes" : "unknown",
@@ -208,7 +232,16 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
       const payload = await response.json().catch(() => undefined) as ModelConfigView | { message?: string };
       if (!response.ok) throw new Error((payload as { message?: string })?.message ?? `HTTP ${response.status}`);
       setConfig(payload as ModelConfigView);
-      setModelDraft({ name: "", modelId: "", contextWindow: "", providerProfileId: "", reasoning: true, streaming: true, tools: true });
+      setModelDraft({
+        name: "",
+        modelId: "",
+        contextWindow: "",
+        providerProfileId: "",
+        reasoningEffort: "high",
+        reasoning: true,
+        streaming: true,
+        tools: true
+      });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -236,28 +269,53 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
     }
   };
 
-  const test = async (): Promise<void> => {
-    setTesting(true);
-    setTestResult(undefined);
+  const saveReasoningEffort = async (
+    profile: ModelProfileView,
+    reasoningEffort: ReasoningEffortSelection
+  ): Promise<void> => {
+    setSavingEffort(profile.id);
+    setError(undefined);
     try {
-      const response = await apiFetch("/api/settings/test", { method: "POST" });
-      const payload = await response.json().catch(() => undefined) as TestResult;
-      setTestResult(payload ?? { ok: false, message: `HTTP ${response.status}` });
+      const response = await apiFetch("/api/model-config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          modelProfiles: [{
+            id: profile.id,
+            name: profile.name,
+            providerProfileId: profile.providerProfileId,
+            modelId: profile.modelId,
+            contextWindow: profile.contextWindow,
+            enabled: profile.enabled,
+            capabilities: profile.capabilities,
+            defaults: reasoningEffort === "provider-default" ? {} : { reasoningEffort }
+          }]
+        })
+      });
+      const payload = await response.json().catch(() => undefined) as ModelConfigView | { message?: string };
+      if (!response.ok) throw new Error((payload as { message?: string })?.message ?? `HTTP ${response.status}`);
+      setConfig(payload as ModelConfigView);
+      setProbeResults((current) => {
+        const next = { ...current };
+        delete next[profile.id];
+        return next;
+      });
+      onSaved();
     } catch (cause) {
-      setTestResult({ ok: false, message: cause instanceof Error ? cause.message : String(cause) });
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setTesting(false);
+      setSavingEffort(undefined);
     }
   };
 
-  const probe = async (profileId: string): Promise<void> => {
+  const probe = async (profileId: string, reasoningEffort?: ReasoningEffort): Promise<void> => {
     setProbing(profileId);
     setError(undefined);
     try {
       const response = await apiFetch("/api/model-config/probe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelProfileId: profileId })
+        body: JSON.stringify({ modelProfileId: profileId, ...(reasoningEffort ? { reasoningEffort } : {}) })
       });
       const payload = await response.json().catch(() => undefined) as TestResult & { capabilities?: Record<string, string> };
       if (!response.ok) throw new Error(payload?.message ?? `HTTP ${response.status}`);
@@ -337,9 +395,11 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                     <Select value={providerDraft.apiMode} onValueChange={(value) => setProviderDraft({ ...providerDraft, apiMode: value })}>
                       <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="chat-completions">chat-completions</SelectItem>
-                        <SelectItem value="responses">responses</SelectItem>
-                        <SelectItem value="auto">auto</SelectItem>
+                        <SelectGroup>
+                          <SelectItem value="chat-completions">chat-completions</SelectItem>
+                          <SelectItem value="responses">responses</SelectItem>
+                          <SelectItem value="auto">auto</SelectItem>
+                        </SelectGroup>
                       </SelectContent>
                     </Select>
                   </label>
@@ -378,19 +438,37 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                             ))}
                           </p>
                         ) : (
-                          <p className="mt-0.5 text-[10px] text-muted-foreground/50">能力未验证——参数不会盲目发送；点击「探测」实测。</p>
+                          <p className="mt-0.5 text-[10px] text-muted-foreground/50">能力未验证；点击「测试模型」后发起真实请求。</p>
                         )}
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5">
+                        <Select
+                          value={profile.defaults?.reasoningEffort ?? "provider-default"}
+                          disabled={savingEffort === profile.id || probing === profile.id}
+                          onValueChange={(value) => void saveReasoningEffort(profile, value as ReasoningEffortSelection)}
+                        >
+                          <SelectTrigger className="h-7 w-32 rounded-lg border-border bg-card text-[11px]" aria-label={`${profile.name} 的思考强度`}>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              <SelectItem value="provider-default">提供商默认</SelectItem>
+                              <SelectItem value="low">低 · low</SelectItem>
+                              <SelectItem value="medium">中 · medium</SelectItem>
+                              <SelectItem value="high">高 · high</SelectItem>
+                              <SelectItem value="xhigh">极高 · xhigh</SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
                         <Button
                           variant="outline"
                           size="sm"
                           className="h-7 rounded-lg border-border bg-card px-2 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
-                          disabled={Boolean(probing)}
-                          onClick={() => void probe(profile.id)}
+                          disabled={Boolean(probing) || savingEffort === profile.id}
+                          onClick={() => void probe(profile.id, profile.defaults?.reasoningEffort)}
                         >
-                          {probing === profile.id ? <Loader2 className="size-3 animate-spin" /> : null}
-                          探测
+                          {probing === profile.id ? <Loader2 className="animate-spin" /> : <Activity />}
+                          测试模型
                         </Button>
                         <Button
                           variant="ghost"
@@ -405,9 +483,18 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                       </div>
                     </div>
                     {probeResults[profile.id] ? (
-                      <p className={cn("mt-1.5 text-[11px]", probeResults[profile.id].ok ? "text-emerald-400" : "text-red-400")}>
-                        {probeResults[profile.id].message}
-                      </p>
+                      <Alert variant={probeResults[profile.id].ok ? "default" : "destructive"} className="mt-2">
+                        {probeResults[profile.id].ok ? <Check /> : <CircleAlert />}
+                        <AlertTitle>{probeResults[profile.id].ok ? "测试通过" : "测试失败"}</AlertTitle>
+                        <AlertDescription>
+                          <p>{probeResults[profile.id].message}</p>
+                          {probeResults[profile.id].reasoningFallbacks?.map((fallback, index) => (
+                            <p key={`${fallback.from}-${fallback.to}-${index}`}>
+                              {fallback.from} → {fallback.to}（HTTP {fallback.status}）：{fallback.reason}
+                            </p>
+                          ))}
+                        </AlertDescription>
+                      </Alert>
                     ) : null}
                   </div>
                 ))}
@@ -418,14 +505,29 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                   <Select value={modelDraft.providerProfileId} onValueChange={(value) => setModelDraft({ ...modelDraft, providerProfileId: value })}>
                     <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue placeholder="所属提供商" /></SelectTrigger>
                     <SelectContent>
-                      {config.providers.filter((provider) => provider.enabled).map((provider) => (
-                        <SelectItem key={provider.id} value={provider.id}>{provider.name}</SelectItem>
-                      ))}
+                      <SelectGroup>
+                        {config.providers.filter((provider) => provider.enabled).map((provider) => (
+                          <SelectItem key={provider.id} value={provider.id}>{provider.name}</SelectItem>
+                        ))}
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
                   <Input value={modelDraft.modelId} onChange={(event) => setModelDraft({ ...modelDraft, modelId: event.target.value })} placeholder="模型 ID（如 org/model-name）" spellCheck={false} />
                   <Input value={modelDraft.contextWindow} onChange={(event) => setModelDraft({ ...modelDraft, contextWindow: event.target.value })} placeholder="上下文窗口（tokens，如 262144）" spellCheck={false} />
                   <Input value={modelDraft.name} onChange={(event) => setModelDraft({ ...modelDraft, name: event.target.value })} placeholder="显示名称（可选）" spellCheck={false} />
+                  <Select value={modelDraft.reasoningEffort} onValueChange={(value) => setModelDraft({ ...modelDraft, reasoningEffort: value as ReasoningEffort })}>
+                    <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90" aria-label="新模型默认思考强度">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="low">低 · low</SelectItem>
+                        <SelectItem value="medium">中 · medium</SelectItem>
+                        <SelectItem value="high">高 · high（默认）</SelectItem>
+                        <SelectItem value="xhigh">极高 · xhigh</SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {QUICK_CAPABILITIES.map(({ key, label }) => (
@@ -450,13 +552,15 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
             <section>
               <p className="mb-2.5 text-[13px] font-medium text-foreground/80">全局默认</p>
               <div className="flex items-center gap-3">
-                <Select value={globalModel} onValueChange={setGlobalModel}>
+                <Select value={globalModel || "__automatic__"} onValueChange={(value) => setGlobalModel(value === "__automatic__" ? "" : value)}>
                   <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue placeholder="新房间默认模型" /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">（不指定：使用第一个启用的模型）</SelectItem>
-                    {config.modelProfiles.filter((profile) => profile.enabled).map((profile) => (
-                      <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
-                    ))}
+                    <SelectGroup>
+                      <SelectItem value="__automatic__">（不指定：使用第一个启用的模型）</SelectItem>
+                      {config.modelProfiles.filter((profile) => profile.enabled).map((profile) => (
+                        <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
+                      ))}
+                    </SelectGroup>
                   </SelectContent>
                 </Select>
                 <Button variant="outline" size="sm" className="shrink-0 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={() => void save()}>
@@ -469,24 +573,12 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
               </p>
             </section>
 
-            {testResult ? (
-              <section className={cn("rounded-2xl border p-4", testResult.ok ? "border-emerald-400/30 bg-emerald-400/10" : "border-red-400/30 bg-red-400/10")}>
-                <p className={cn("text-[13px]", testResult.ok ? "text-emerald-700" : "text-red-400")}>
-                  {testResult.ok ? <Check className="mr-1 inline size-3.5" /> : null}
-                  {testResult.message}
-                </p>
-              </section>
-            ) : null}
-
             {error ? <p className="text-[13px] text-red-400">{error}</p> : null}
           </div>
           </div>
 
           <div className="flex items-center justify-between border-t border-border/60 bg-card px-6 py-4">
-            <Button variant="outline" size="sm" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={testing || saving} onClick={() => void test()}>
-              {testing ? <Loader2 className="size-3.5 animate-spin" /> : <Activity className="size-3.5" />}
-              测试默认提供商连接
-            </Button>
+            <p className="text-xs text-muted-foreground">模型测试仅在你点击“测试模型”时发起。</p>
             <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={() => { setLoaded(false); onOpenChange(false); }}>
               关闭
             </Button>
