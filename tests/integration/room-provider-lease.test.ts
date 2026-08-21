@@ -303,29 +303,64 @@ describe("normal scripted flow", () => {
   it("runs a full 1-round trust game with no abandoned requests and a clean permit pool", async () => {
     process.env.SOCIETY_AGENT_TURN_TIMEOUT_MS = FAST_TURNS.SOCIETY_AGENT_TURN_TIMEOUT_MS;
     process.env.SOCIETY_AGENT_TURN_GRACE_MS = FAST_TURNS.SOCIETY_AGENT_TURN_GRACE_MS;
-    // Discussion wave 1 (investor, then trustee), investment with its
-    // tool-result round, return with its tool-result round.
+    // Discussion wave 1 (investor, then trustee) plus its decay turn,
+    // investment with its tool-result round, return with its tool-result
+    // round. Binding tools carry the full strategy shape the SDK validates.
+    const investIntents = (amount: number) => [
+      { goal: "g", summary: `invest ${amount}`, publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount },
+      { goal: "g2", summary: "invest 0", publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount: 0 }
+    ];
+    const returnIntents = (amount: number) => [
+      { goal: "g", summary: `return ${amount}`, publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount },
+      { goal: "g2", summary: "return 0", publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount: 0 }
+    ];
     const script = new ScriptedModel([
-      // Round 1: discussion wave (苏遥, 林默), investment, return.
+      // Round 1: discussion wave (苏遥, 林默) + decay turn, investment, return.
       modelResponse([assistantMessage("我会先观察这轮的投资结构。")]),
       modelResponse([assistantMessage("我不会提前承诺，但会公平地看待返还。")]),
-      modelResponse([functionCall("make_investment", { amount: 8, reason: "相信对方会公平返还" }, { callId: "call-inv-1" })]),
+      modelResponse([assistantMessage("好。")]),
+      modelResponse([functionCall("make_investment", {
+        amount: 8,
+        reason: "相信对方会公平返还",
+        candidateIntents: investIntents(8),
+        selectedIntentIndex: 0,
+        predictedConsequences: [{ outcomeKey: "investment-positive", proposition: "对方会公平返还", probability: 0.8, horizon: "round" }]
+      }, { callId: "call-inv-1" })]),
       modelResponse([assistantMessage("已完成投资。")]),
-      modelResponse([functionCall("return_from_trust", { amount: 8, reason: "按约返还" }, { callId: "call-ret-1" })]),
+      modelResponse([functionCall("return_from_trust", {
+        amount: 8,
+        reason: "按约返还",
+        candidateIntents: returnIntents(8),
+        selectedIntentIndex: 0,
+        predictedConsequences: [{ outcomeKey: "return-at-least-investment", proposition: "全额返还", probability: 0.9, horizon: "round" }]
+      }, { callId: "call-ret-1" })]),
       modelResponse([assistantMessage("已完成返还。")]),
-      // Round 2 (roles swap): discussion wave (林默, 苏遥), investment, return.
+      // Round 2 (roles swap): discussion wave + decay turn, investment, return.
       modelResponse([assistantMessage("这轮换我来观察对方如何对待信任。")]),
       modelResponse([assistantMessage("我会根据上一轮的真实返还来决定这轮的投资。")]),
-      modelResponse([functionCall("make_investment", { amount: 6, reason: "对方上轮返还合理" }, { callId: "call-inv-2" })]),
+      modelResponse([assistantMessage("好。")]),
+      modelResponse([functionCall("make_investment", {
+        amount: 6,
+        reason: "对方上轮返还合理",
+        candidateIntents: investIntents(6),
+        selectedIntentIndex: 0,
+        predictedConsequences: [{ outcomeKey: "investment-positive", proposition: "对方会公平返还", probability: 0.8, horizon: "round" }]
+      }, { callId: "call-inv-2" })]),
       modelResponse([assistantMessage("已完成投资。")]),
-      modelResponse([functionCall("return_from_trust", { amount: 10, reason: "继续维持公平" }, { callId: "call-ret-2" })]),
+      modelResponse([functionCall("return_from_trust", {
+        amount: 10,
+        reason: "继续维持公平",
+        candidateIntents: returnIntents(10),
+        selectedIntentIndex: 0,
+        predictedConsequences: [{ outcomeKey: "return-at-least-investment", proposition: "全额返还", probability: 0.9, horizon: "round" }]
+      }, { callId: "call-ret-2" })]),
       modelResponse([assistantMessage("已完成返还。")])
     ]);
     const limiter = new ActivationLimiter(1);
     const { room, cleanup } = testRoom(script, limiter);
     try {
       void room.start();
-await waitFor(() => room.currentStatus() === "finished", 6_000).catch((error) => {
+await waitFor(() => room.currentStatus() === "finished", 15_000).catch((error) => {
         const snapshot = room.snapshotForViewer({ mode: "omniscient" });
         throw new Error(`${errorMessage(error)}; status=${room.currentStatus()}; limiter=${limiter.concurrency()}/${limiter.pending()}; abandoned=${room.abandonedInFlight()}; scriptCalls=${script.calls.length}; log=${snapshot.world.log.slice(-6).map((entry) => entry.text).join(" | ")}; events=${lastEvents(room, 12).join(" | ")}`);
       });

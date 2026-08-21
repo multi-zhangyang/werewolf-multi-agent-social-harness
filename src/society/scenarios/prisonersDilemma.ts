@@ -245,7 +245,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
         round: this.round,
         promisorActorId: actorId,
         promisorCharacterId: this.requireProfile(actorId).characterId,
-        audienceActorIds: [...this.profiles.keys()],
+        audienceActorIds: [...this.profiles.keys()].filter((id) => id !== actorId),
         proposition,
         promisedAction: {
           actionType: "choose-move",
@@ -402,10 +402,6 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     return this.lastExperiences.get(actorId);
   }
 
-  reconciliationOwnsOutcomeMemory(): boolean {
-    return true;
-  }
-
   async sendMessage(input: {
     senderId: string;
     channel: "public" | "private" | "team";
@@ -494,6 +490,14 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
       commitment.settledAtTurn = this.round;
       this.settleSocialCommitment(commitment);
     }
+    const publicResult = this.recordPublicWorldFact({
+      factKey: `prisoners-dilemma-round:${this.round}`,
+      eventType: "prisoners-dilemma.round-resolved",
+      predicate: "prisoners-dilemma-round-result",
+      object: { moves: result.moves, payoffs: result.payoffs },
+      payload: { round: this.round, moves: result.moves, payoffs: result.payoffs },
+      kind: "past-action"
+    });
     for (const actorId of ids) {
       const opponentId = ids.find((id) => id !== actorId)!;
       const opponentMove = result.moves[opponentId];
@@ -501,7 +505,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
         type: opponentMove === "cooperate" ? "opponent-cooperated" : "opponent-defected",
         actorId: opponentId,
         targetId: actorId,
-        facts: { selfMove: result.moves[actorId], opponentMove, payoff: result.payoffs[actorId] },
+        facts: { selfMove: result.moves[actorId], opponentMove, payoff: result.payoffs[actorId], resultEventId: publicResult.eventId },
         detail: `${this.profiles.get(opponentId)?.displayName ?? opponentId} 本轮选择了${moveLabel(opponentMove)}；你选择了${moveLabel(result.moves[actorId])}。`
       });
     }
@@ -544,7 +548,8 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
           summary: `In PD round ${this.round}, I chose ${result.moves[actorId]}; ${opponentId} chose ${result.moves[opponentId]}; payoff ${result.payoffs[actorId]}.`,
           importance: result.moves[actorId] !== result.moves[opponentId] || citedCommitments.length ? 0.84 : 0.64,
           sourceIds: [commandId, ...citedCommitments.map((entry) => entry.commitmentId)]
-        }]
+        }],
+        resultingEventIds: [publicResult.eventId]
       });
     }
     this.choices.clear();

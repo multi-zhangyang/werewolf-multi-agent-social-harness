@@ -333,6 +333,8 @@ export interface DeceptionEpisode {
   executionMessageIds: string[];
   receivedByCharacterIds: string[];
   believedByCharacterIds: string[];
+  rejectedByCharacterIds: string[];
+  detectedByCharacterIds: string[];
   repairMessageIds: string[];
   repairAcceptedByCharacterIds: string[];
   supportingActionReceiptIds: string[];

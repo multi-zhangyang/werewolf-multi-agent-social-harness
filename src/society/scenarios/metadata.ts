@@ -89,8 +89,8 @@ export const SCENARIO_METADATA: Record<ScenarioSummary["id"], ScenarioSummary> =
     description: "5-10 名玩家按官方比例分成忠臣与内奸争夺三次任务：队长组队、全体表决、队员暗中决定任务成败。梅林看得到内奸却看不见莫德雷德与奥伯伦；派西维尔眼中梅林与莫甘娜真假难辨；任务全胜后，刺客用最后一剑赌上梅林的身份。",
         players: 7,
     playerRange: { min: 5, max: 10 },
-    defaultRounds: 4,
-    minRounds: 2,
+    defaultRounds: 5,
+    minRounds: 5,
     maxRounds: 5,
     capabilities: ["隐藏阵营", "组队与表决", "暗中破坏", "最终刺杀"]
   },

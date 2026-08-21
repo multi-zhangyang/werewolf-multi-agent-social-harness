@@ -269,13 +269,15 @@ export class SocialCausalityLedger {
     action: string;
     payload: unknown;
     commit: WorldActionCommit;
+    observationThroughSequence: number;
     activationId?: string;
     characterIdFor(actorId: string): string;
   }): SocialDecisionRecord {
     const committedMessageId = shortText(asRecord(input.commit.result).messageId, 160);
-    const observationRefs = this.recentVisibleEventIds(input.actorId, 12, committedMessageId
-      ? (event) => shortText(asRecord(event.payload).messageId, 160) !== committedMessageId
-      : undefined);
+    const observationRefs = this.recentVisibleEventIds(input.actorId, 12, (event) =>
+      event.sequence <= input.observationThroughSequence
+      && (!committedMessageId || shortText(asRecord(event.payload).messageId, 160) !== committedMessageId)
+    );
     const receiptId = input.commit.commandId ?? `receipt-${randomUUID()}`;
     const envelope = this.append("domain", "command.committed", {
       action: input.action,
@@ -403,6 +405,10 @@ export class SocialCausalityLedger {
       turn: log.turn,
       phase: log.phase
     }, { visibility: { kind: "public" } });
+  }
+
+  observationCursor(): number {
+    return this.sequence;
   }
 
   recordAppraisalObservation(
@@ -606,6 +612,26 @@ export class SocialCausalityLedger {
     payload?: Record<string, unknown>;
     kind?: Proposition["kind"];
   }): EvidenceRecord {
+    // Restores replay scenario constructors (avalon's faction knowledge, for
+    // example) against a ledger that already holds the original observations.
+    // Re-appending would duplicate private events and break re-export
+    // stability, so an identical recorded observation returns its evidence.
+    const existingEvent = this.events.find((event) => {
+      if (event.type !== input.eventType) return false;
+      const payload = asRecord(event.payload);
+      if (payload.predicate !== input.predicate) return false;
+      const payloadSubject = typeof payload.subjectActorId === "string" ? payload.subjectActorId : undefined;
+      const inputSubject = input.payload?.subjectActorId;
+      return payloadSubject === undefined || inputSubject === undefined || payloadSubject === inputSubject;
+    });
+    if (existingEvent && input.subjectCharacterId) {
+      const observerCharacterId = input.observerCharacterId;
+      const existingEvidence = this.evidence.find((entry) =>
+        entry.sourceEventId === existingEvent.eventId
+        && entry.observerCharacterId === observerCharacterId
+      );
+      if (existingEvidence) return structuredClone(existingEvidence);
+    }
     const envelope = this.append("domain", input.eventType, {
       predicate: input.predicate,
       ...(input.object === undefined ? {} : { object: structuredClone(input.object) }),
@@ -809,7 +835,9 @@ export class SocialCausalityLedger {
       throw new Error(`COMMITMENT_ALREADY_RECORDED: '${commitment.commitmentId}'.`);
     }
     const audience = [...new Set(commitment.audienceActorIds)];
-    const isPublic = allActorIds.every((actorId) => audience.includes(actorId));
+    const isPublic = allActorIds.every((actorId) =>
+      actorId === commitment.promisorActorId || audience.includes(actorId)
+    );
     const visibility: VisibilityPolicy = isPublic
       ? { kind: "public" }
       : { kind: "actors", actorIds: [...new Set([commitment.promisorActorId, ...audience])] };
@@ -897,7 +925,9 @@ export class SocialCausalityLedger {
       throw new Error(`COMMITMENT_NOT_OPEN: '${commitment.commitmentId}' is already ${record.state}.`);
     }
     const audience = [...new Set(commitment.audienceActorIds)];
-    const isPublic = allActorIds.every((actorId) => audience.includes(actorId));
+    const isPublic = allActorIds.every((actorId) =>
+      actorId === commitment.promisorActorId || audience.includes(actorId)
+    );
     const visibility: VisibilityPolicy = isPublic
       ? { kind: "public" }
       : { kind: "actors", actorIds: [...new Set([commitment.promisorActorId, ...audience])] };
@@ -935,7 +965,9 @@ export class SocialCausalityLedger {
       throw new Error(`COMMITMENT_NOT_SETTLED: '${commitment.commitmentId}'.`);
     }
     const audience = [...new Set(commitment.audienceActorIds)];
-    const isPublic = allActorIds.every((actorId) => audience.includes(actorId));
+    const isPublic = allActorIds.every((actorId) =>
+      actorId === commitment.promisorActorId || audience.includes(actorId)
+    );
     const visibility: VisibilityPolicy = isPublic
       ? { kind: "public" }
       : { kind: "actors", actorIds: [...new Set([commitment.promisorActorId, ...audience])] };
@@ -1261,6 +1293,8 @@ export class SocialCausalityLedger {
       executionMessageIds: [],
       receivedByCharacterIds: [],
       believedByCharacterIds: [],
+      rejectedByCharacterIds: [],
+      detectedByCharacterIds: [],
       repairMessageIds: [],
       repairAcceptedByCharacterIds: [],
       supportingActionReceiptIds: [],
@@ -1273,7 +1307,7 @@ export class SocialCausalityLedger {
       status: "planned",
       detectionEventIds: [],
       consequenceEventIds: [],
-      schemaVersion: 2
+      schemaVersion: 3
     };
     this.deceptions.set(episode.deceptionId, episode);
     this.append("social", "deception.planned", { deceptionId: episode.deceptionId, mode: episode.mode }, {
@@ -1313,8 +1347,13 @@ export class SocialCausalityLedger {
   recordOutcomeReconciliation(input: OutcomeReconciliationInput): OutcomeReconciliation {
     const existing = this.outcomeReconciliations.find((entry) => entry.actionReceiptId === input.actionReceiptId);
     if (existing) return structuredClone(existing);
-    const decision = this.decisions.find((entry) => entry.actionReceiptId === input.actionReceiptId);
-    if (!decision) throw new Error(`DECISION_NOT_FOUND_FOR_RECEIPT: '${input.actionReceiptId}'.`);
+    // Preferred path: the command gateway recorded a DecisionRecord for this
+    // receipt (room-driven actions). Deterministic scenario settlements that
+    // bypass the gateway (tests, scripted rooms) still own their receipts, so
+    // a bounded world-fact decision is synthesized instead of failing the
+    // whole settlement — the reconciliation stays auditable either way.
+    let decision = this.decisions.find((entry) => entry.actionReceiptId === input.actionReceiptId);
+    if (!decision) decision = this.recordWorldFactDecision(input);
     const outcomeEvent = this.append("domain", "outcome.observed", structuredClone(input.actualOutcome), {
       actorId: decision.actorId,
       characterId: decision.characterId,
@@ -1397,6 +1436,52 @@ export class SocialCausalityLedger {
     return structuredClone(reconciliation);
   }
 
+  /**
+   * Bounded stand-in DecisionRecord for a receipt that never passed the
+   * command gateway. It cites only the world's own reconciliation inputs —
+   * no candidate intents, no strategy selection — so downstream UI can still
+   * join decision → reconciliation by `decisionId` without inventing agent
+   * cognition that did not happen.
+   */
+  private recordWorldFactDecision(input: OutcomeReconciliationInput): SocialDecisionRecord {
+    const envelope = this.append("domain", "decision.world-fact", {
+      actionReceiptId: input.actionReceiptId,
+      summary: input.actualOutcome.summary
+    }, {
+      correlationId: input.actionReceiptId,
+      visibility: { kind: "public" }
+    });
+    const record: SocialDecisionRecord = {
+      decisionId: `world-decision-${randomUUID()}`,
+      actorId: "world",
+      characterId: "world",
+      logicalTime: envelope.logicalTime,
+      observationRefs: [],
+      evidenceRefs: [],
+      relevantBeliefIds: [],
+      relevantActorModelIds: [],
+      relevantRelationshipIds: [],
+      openCommitmentIds: [],
+      activeDeceptionIds: [],
+      candidateIntentIds: [],
+      strategySelectionId: "world-fact",
+      selectedIntent: { intentId: "world-fact", summary: input.actualOutcome.summary },
+      predictedConsequences: [],
+      action: "world-settlement",
+      actionReceiptId: input.actionReceiptId,
+      resultingEventIds: [envelope.eventId],
+      provenance: {
+        sourceKind: "world-fact",
+        sourceIds: [envelope.eventId, input.actionReceiptId],
+        confidence: 1,
+        createdAtLogical: envelope.logicalTime,
+        schemaVersion: 1
+      }
+    };
+    this.decisions.push(record);
+    return record;
+  }
+
   applyMemoryWritePolicy(actorId: string): MemoryWritePolicyResult {
     const reconciliations = this.outcomeReconciliations.filter((entry) => entry.actorId === actorId);
     if (!reconciliations.length) return { evaluated: false, accepted: [] };
@@ -1438,6 +1523,11 @@ export class SocialCausalityLedger {
   project(viewer: ViewerContext = {}): SocialCausalityProjection {
     const events = this.events.filter((event) => this.canView(event.visibility, viewer));
     const eventIds = new Set(events.map((event) => event.eventId));
+    const visibleMessageIds = new Set(events.flatMap((event) => {
+      if (event.type !== "message.sent") return [];
+      const messageId = shortText(asRecord(event.payload).messageId, 160);
+      return messageId ? [messageId] : [];
+    }));
     const actorId = viewer.actorId;
     const characterId = viewer.characterId;
     const omniscient = viewer.omniscient === true;
@@ -1514,7 +1604,20 @@ export class SocialCausalityLedger {
       influenceLinks: this.influenceLinks.filter((entry) => omniscient || entry.targetCharacterId === characterId).map((entry) => structuredClone(entry)),
       outcomeReconciliations: structuredClone(outcomeReconciliations),
       deceptions: [...this.deceptions.values()].flatMap((entry): DeceptionEpisode[] => {
-        if (omniscient || entry.deceiverActorId === actorId) return [structuredClone(entry)];
+        if (omniscient) return [structuredClone(entry)];
+        if (entry.deceiverActorId === actorId) {
+          const safe = structuredClone(entry);
+          safe.audienceBeliefsBefore = [];
+          safe.audienceBeliefsAfter = [];
+          safe.believedByCharacterIds = [];
+          safe.rejectedByCharacterIds = [];
+          safe.inducedDecisionIds = [];
+          safe.inducedActionReceiptIds = [];
+          if (safe.status === "believed" || safe.status === "behaviorally-effective") {
+            safe.status = safe.receivedByCharacterIds.length ? "received" : "attempted";
+          }
+          return [safe];
+        }
         const exposed = entry.status === "detected" || entry.status === "repair-attempted" || entry.status === "repaired";
         const visible = entry.exposureVisibility === "public"
           || (entry.exposureVisibility === "targets" && Boolean(actorId && entry.targetAudienceIds.includes(actorId)));
@@ -1525,10 +1628,22 @@ export class SocialCausalityLedger {
         safe.motiveGoalIds = [];
         safe.audienceBeliefsBefore = [];
         safe.audienceBeliefsAfter = [];
+        safe.targetAudienceIds = actorId && safe.targetAudienceIds.includes(actorId) ? [actorId] : [];
         safe.targetAudienceCharacterIds = [];
         safe.receivedByCharacterIds = [];
         safe.believedByCharacterIds = [];
+        safe.rejectedByCharacterIds = [];
+        safe.detectedByCharacterIds = characterId && safe.detectedByCharacterIds.includes(characterId)
+          ? [characterId]
+          : [];
         safe.repairAcceptedByCharacterIds = [];
+        safe.executionMessageIds = safe.executionMessageIds.filter((messageId) => visibleMessageIds.has(messageId));
+        safe.maintenanceMessageIds = safe.maintenanceMessageIds.filter((messageId) => visibleMessageIds.has(messageId));
+        safe.repairMessageIds = safe.repairMessageIds.filter((messageId) => visibleMessageIds.has(messageId));
+        safe.supportingActionReceiptIds = [];
+        safe.contradictionEventIds = safe.contradictionEventIds.filter((eventId) => eventIds.has(eventId));
+        safe.detectionEventIds = safe.detectionEventIds.filter((eventId) => eventIds.has(eventId));
+        safe.consequenceEventIds = safe.consequenceEventIds.filter((eventId) => eventIds.has(eventId));
         safe.inducedDecisionIds = [];
         safe.inducedActionReceiptIds = [];
         delete safe.expectedGain;
@@ -1628,6 +1743,11 @@ export class SocialCausalityLedger {
       evidenceRefs: remapEvidenceIds(decision.evidenceRefs)
     }));
     for (const decision of restoredDecisions) {
+      // World-fact decisions (scenario settlements that never passed the
+      // command gateway) carry no agent cognition, so restoring must not
+      // synthesize candidate intents or strategy selections for them — the
+      // restored ledger would diverge from the exported one.
+      if (decision.actorId !== "world") {
       if (!this.candidateIntents.some((entry) => entry.intentId === decision.selectedIntent.intentId)) {
         this.candidateIntents.push({
           intentId: decision.selectedIntent.intentId,
@@ -1663,6 +1783,7 @@ export class SocialCausalityLedger {
           schemaVersion: 1
         });
       }
+      }
     }
     this.decisions.splice(0, this.decisions.length, ...structuredClone(restoredDecisions));
     this.influenceLinks.splice(0, this.influenceLinks.length, ...structuredClone(state.influenceLinks ?? []));
@@ -1689,11 +1810,17 @@ export class SocialCausalityLedger {
       restored.believedByCharacterIds = Array.isArray(restored.believedByCharacterIds)
         ? restored.believedByCharacterIds
         : [];
+      restored.rejectedByCharacterIds = Array.isArray(restored.rejectedByCharacterIds)
+        ? restored.rejectedByCharacterIds
+        : [];
+      restored.detectedByCharacterIds = Array.isArray(restored.detectedByCharacterIds)
+        ? restored.detectedByCharacterIds
+        : [];
       restored.repairMessageIds = Array.isArray(restored.repairMessageIds) ? restored.repairMessageIds : [];
       restored.repairAcceptedByCharacterIds = Array.isArray(restored.repairAcceptedByCharacterIds)
         ? restored.repairAcceptedByCharacterIds
         : [];
-      restored.schemaVersion = Math.max(2, restored.schemaVersion ?? 1);
+      restored.schemaVersion = Math.max(3, restored.schemaVersion ?? 1);
       this.deceptions.set(restored.deceptionId, restored);
     }
   }
@@ -1808,8 +1935,30 @@ export class SocialCausalityLedger {
         entry.characterId === ownerCharacterId && entry.beliefId === belief.beliefId
       )?.probability ?? belief.beforeProbability;
       if (belief.afterProbability >= 0.6 && belief.afterProbability - before >= 0.1) {
-        if (!episode.believedByCharacterIds.includes(ownerCharacterId)) episode.believedByCharacterIds.push(ownerCharacterId);
+        if (!episode.believedByCharacterIds.includes(ownerCharacterId)) {
+          episode.believedByCharacterIds.push(ownerCharacterId);
+          this.append("social", "deception.audience-believed", {
+            deceptionId: episode.deceptionId,
+            audienceCharacterId: ownerCharacterId,
+            beliefId: belief.beliefId
+          }, {
+            correlationId: episode.deceptionId,
+            visibility: { kind: "operator" }
+          });
+        }
         advanceDeceptionStatus(episode, "believed");
+      } else if (belief.afterProbability <= 0.4 && before - belief.afterProbability >= 0.1) {
+        if (!episode.rejectedByCharacterIds.includes(ownerCharacterId)) {
+          episode.rejectedByCharacterIds.push(ownerCharacterId);
+          this.append("social", "deception.audience-rejected", {
+            deceptionId: episode.deceptionId,
+            audienceCharacterId: ownerCharacterId,
+            beliefId: belief.beliefId
+          }, {
+            correlationId: episode.deceptionId,
+            visibility: { kind: "operator" }
+          });
+        }
       }
     }
   }
@@ -1870,9 +2019,11 @@ export class SocialCausalityLedger {
     if (!episode.repairAcceptedByCharacterIds.includes(acceptorCharacterId)) {
       episode.repairAcceptedByCharacterIds.push(acceptorCharacterId);
     }
-    const affected = episode.receivedByCharacterIds.length
-      ? episode.receivedByCharacterIds
-      : episode.targetAudienceCharacterIds;
+    const affected = episode.detectedByCharacterIds.length
+      ? episode.detectedByCharacterIds
+      : episode.receivedByCharacterIds.length
+        ? episode.receivedByCharacterIds
+        : episode.targetAudienceCharacterIds;
     const fullyAccepted = affected.length > 0
       && affected.every((characterId) => episode.repairAcceptedByCharacterIds.includes(characterId));
     if (fullyAccepted) advanceDeceptionStatus(episode, "repaired");
@@ -1934,6 +2085,7 @@ export class SocialCausalityLedger {
       if (!episode.supportingActionReceiptIds.includes(commitment.createdByCommandId)) continue;
       if (!episode.contradictionEventIds.includes(violationEventId)) episode.contradictionEventIds.push(violationEventId);
       if (!episode.detectionEventIds.includes(violationEventId)) episode.detectionEventIds.push(violationEventId);
+      markDetectedAudience(episode);
       episode.exposureVisibility = visibility.kind === "public" ? "public" : "targets";
       advanceDeceptionStatus(episode, "detected");
       const detection = this.append("social", "deception.detected", {
@@ -1969,6 +2121,7 @@ export class SocialCausalityLedger {
       detected.add(episode.deceptionId);
       if (!episode.detectionEventIds.includes(revealEventId)) episode.detectionEventIds.push(revealEventId);
       if (!episode.contradictionEventIds.includes(revealEventId)) episode.contradictionEventIds.push(revealEventId);
+      markDetectedAudience(episode);
       advanceDeceptionStatus(episode, "detected");
       const messageEvent = this.events.find((event) => {
         const payload = asRecord(event.payload);
@@ -2270,6 +2423,24 @@ function propositionKindFor(kind: SocialActDeclaration["kind"]): Proposition["ki
   return "evaluation";
 }
 
+function markDetectedAudience(episode: DeceptionEpisode): void {
+  const affected = episode.receivedByCharacterIds.length
+    ? episode.receivedByCharacterIds
+    : episode.targetAudienceCharacterIds;
+  let added = false;
+  for (const characterId of affected) {
+    if (episode.detectedByCharacterIds.includes(characterId)) continue;
+    episode.detectedByCharacterIds.push(characterId);
+    added = true;
+  }
+  if (added && episode.status === "repaired") {
+    const allDetectedAccepted = episode.detectedByCharacterIds.every((characterId) =>
+      episode.repairAcceptedByCharacterIds.includes(characterId)
+    );
+    if (!allDetectedAccepted) episode.status = "detected";
+  }
+}
+
 function advanceDeceptionStatus(episode: DeceptionEpisode, next: DeceptionEpisode["status"]): void {
   if (episode.status === "repaired") return;
   if (next === "detected") {
@@ -2375,6 +2546,7 @@ function normalizeDecisionRecord(value: SocialDecisionRecord): SocialDecisionRec
   };
   const intentId = legacy.selectedIntent?.intentId ?? `legacy-intent:${legacy.decisionId}`;
   const summary = legacy.selectedIntent?.summary?.trim() || legacy.action;
+  const isWorldFact = legacy.actorId === "world";
   return {
     ...structuredClone(value),
     observationRefs: [...(legacy.observationRefs ?? [])],
@@ -2384,7 +2556,11 @@ function normalizeDecisionRecord(value: SocialDecisionRecord): SocialDecisionRec
     relevantRelationshipIds: [...(legacy.relevantRelationshipIds ?? [])],
     openCommitmentIds: [...(legacy.openCommitmentIds ?? [])],
     activeDeceptionIds: [...(legacy.activeDeceptionIds ?? [])],
-    candidateIntentIds: legacy.candidateIntentIds?.length ? [...legacy.candidateIntentIds] : [intentId],
+    candidateIntentIds: isWorldFact
+      ? []
+      : legacy.candidateIntentIds?.length
+        ? [...legacy.candidateIntentIds]
+        : [intentId],
     strategySelectionId: legacy.strategySelectionId ?? `legacy-selection:${legacy.decisionId}`,
     ...(legacy.strategyProfileSnapshotId ? { strategyProfileSnapshotId: legacy.strategyProfileSnapshotId } : {}),
     selectedIntent: {

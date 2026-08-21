@@ -243,7 +243,6 @@ export class CentipedeGameWorld extends SocialWorldBase {
 
   activation(): WorldActivation | null {
     if (this.status !== "running" || this.ended) return null;
-    const ids = [...this.profiles.keys()];
     if (this.phase === "discussion") {
       const actors = this.discussion.nextWave();
       if (actors.length) {
@@ -292,10 +291,6 @@ export class CentipedeGameWorld extends SocialWorldBase {
 
   experienceFor(actorId: string): string | undefined {
     return this.lastExperiences.get(actorId);
-  }
-
-  reconciliationOwnsOutcomeMemory(): boolean {
-    return true;
   }
 
   async sendMessage(input: {

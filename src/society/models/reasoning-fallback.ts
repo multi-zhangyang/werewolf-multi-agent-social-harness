@@ -16,6 +16,8 @@ export interface ReasoningFallbackNotice {
 export interface ReasoningFallbackOptions {
   fetchImpl?: typeof fetch;
   onNotice?(notice: ReasoningFallbackNotice): void;
+  /** Capability tests can opt out so every user-initiated test is a fresh request. */
+  useCapabilityCache?: boolean;
 }
 
 const effectiveEffortByScope = new Map<string, EffectiveReasoningEffort>();
@@ -28,6 +30,7 @@ const capabilityNoticeByScope = new Map<string, Omit<ReasoningFallbackNotice, "m
  */
 export function reasoningFallbackFetch(options: ReasoningFallbackOptions = {}): typeof fetch {
   const fetchImpl = options.fetchImpl ?? fetch;
+  const useCapabilityCache = options.useCapabilityCache !== false;
   return async (input, init) => {
     const payload = jsonBody(init?.body);
     if (!payload) return fetchImpl(input, init);
@@ -35,7 +38,7 @@ export function reasoningFallbackFetch(options: ReasoningFallbackOptions = {}): 
     if (requested !== "xhigh" && requested !== "high") return fetchImpl(input, init);
 
     const scope = capabilityScope(input, payload);
-    const cached = effectiveEffortByScope.get(scope);
+    const cached = useCapabilityCache ? effectiveEffortByScope.get(scope) : undefined;
     if (requested === "xhigh" && cached === "high") {
       notifyCached(options.onNotice, payload, scope, "xhigh", "high");
       return fetchImpl(input, withReasoningEffort(init, payload, "high"));
@@ -45,11 +48,13 @@ export function reasoningFallbackFetch(options: ReasoningFallbackOptions = {}): 
       return fetchImpl(input, withoutReasoningEffort(init, payload));
     }
 
-    if (requested === "high") return tryHighThenDefault(fetchImpl, input, init, payload, scope, options.onNotice);
+    if (requested === "high") {
+      return tryHighThenDefault(fetchImpl, input, init, payload, scope, options.onNotice, useCapabilityCache);
+    }
 
     const xhighResponse = await fetchImpl(input, init);
     if (xhighResponse.ok) {
-      effectiveEffortByScope.set(scope, "xhigh");
+      if (useCapabilityCache) effectiveEffortByScope.set(scope, "xhigh");
       return xhighResponse;
     }
     const xhighError = await reasoningCapabilityError(xhighResponse, "xhigh");
@@ -66,8 +71,8 @@ export function reasoningFallbackFetch(options: ReasoningFallbackOptions = {}): 
       retrying: true
     };
     notify(options.onNotice, xhighNotice);
-    capabilityNoticeByScope.set(scope, noticeBasis(xhighNotice));
-    return tryHighThenDefault(fetchImpl, input, init, payload, scope, options.onNotice);
+    if (useCapabilityCache) capabilityNoticeByScope.set(scope, noticeBasis(xhighNotice));
+    return tryHighThenDefault(fetchImpl, input, init, payload, scope, options.onNotice, useCapabilityCache);
   };
 }
 
@@ -83,11 +88,12 @@ async function tryHighThenDefault(
   init: RequestInit | undefined,
   payload: JsonObject,
   scope: string,
-  onNotice: ReasoningFallbackOptions["onNotice"]
+  onNotice: ReasoningFallbackOptions["onNotice"],
+  useCapabilityCache: boolean
 ): Promise<Response> {
   const highResponse = await fetchImpl(input, withReasoningEffort(init, payload, "high"));
   if (highResponse.ok) {
-    effectiveEffortByScope.set(scope, "high");
+    if (useCapabilityCache) effectiveEffortByScope.set(scope, "high");
     return highResponse;
   }
   const highError = await reasoningCapabilityError(highResponse, "high");
@@ -103,9 +109,9 @@ async function tryHighThenDefault(
     retrying: true
   };
   notify(onNotice, notice);
-  capabilityNoticeByScope.set(scope, noticeBasis(notice));
+  if (useCapabilityCache) capabilityNoticeByScope.set(scope, noticeBasis(notice));
   const defaultResponse = await fetchImpl(input, withoutReasoningEffort(init, payload));
-  if (defaultResponse.ok) effectiveEffortByScope.set(scope, "provider-default");
+  if (defaultResponse.ok && useCapabilityCache) effectiveEffortByScope.set(scope, "provider-default");
   return defaultResponse;
 }
 
@@ -201,10 +207,14 @@ async function reasoningCapabilityError(
   const namesReasoning = /reasoning|reasoning_effort|effort/.test(searchable);
   const namesEffort = searchable.includes(effort);
   const namesCapability = /unsupported|not supported|invalid value|unknown value|not allowed|unrecognized|enum/.test(searchable);
-  if (!(namesCapability && (namesReasoning || namesEffort))) return undefined;
+  const genericRejection = /^(openai_error|bad request|invalid request|request rejected)[\s.:_-]*$/i.test(error.rawMessage.trim())
+    || /^(openai_error|bad_request|invalid_request_error)$/i.test(error.code || error.type);
+  if (!(namesCapability && (namesReasoning || namesEffort)) && !genericRejection) return undefined;
   return {
-    code: error.code || `HTTP_${response.status}_REASONING_UNSUPPORTED`,
-    message: sanitizeMessage(error.rawMessage, effort)
+    code: error.code || (genericRejection ? `HTTP_${response.status}_REASONING_REJECTED` : `HTTP_${response.status}_REASONING_UNSUPPORTED`),
+    message: genericRejection
+      ? `Provider returned a generic HTTP ${response.status} rejection while '${effort}' was requested; retrying with a lower reasoning effort.`
+      : sanitizeMessage(error.rawMessage, effort)
   };
 }
 

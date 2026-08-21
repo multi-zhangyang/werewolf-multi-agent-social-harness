@@ -14,7 +14,7 @@ import type {
   OpponentPoolEntry
 } from "./contracts";
 
-const EVALUATION_STORE_SCHEMA_VERSION = 3;
+const EVALUATION_STORE_SCHEMA_VERSION = 4;
 
 export class SocialTruthStore {
   private readonly state: EvaluationStoreState;
@@ -244,6 +244,30 @@ function compileRun(
         entry.status === "repair-attempted" || entry.status === "repaired"
       ).length,
       repairedDeceptionCount: deceptions.filter((entry) => entry.status === "repaired").length,
+      deceptionAudienceCount: deceptions.reduce(
+        (sum, entry) => sum + uniqueCount(entry.targetAudienceCharacterIds),
+        0
+      ),
+      deceptionReceivedAudienceCount: deceptions.reduce(
+        (sum, entry) => sum + uniqueCount(entry.receivedByCharacterIds),
+        0
+      ),
+      deceptionBelievedAudienceCount: deceptions.reduce(
+        (sum, entry) => sum + uniqueCount(entry.believedByCharacterIds),
+        0
+      ),
+      deceptionRejectedAudienceCount: deceptions.reduce(
+        (sum, entry) => sum + uniqueCount(entry.rejectedByCharacterIds),
+        0
+      ),
+      deceptionDetectedAudienceCount: deceptions.reduce(
+        (sum, entry) => sum + uniqueCount(entry.detectedByCharacterIds),
+        0
+      ),
+      deceptionRepairAcceptedAudienceCount: deceptions.reduce(
+        (sum, entry) => sum + uniqueCount(entry.repairAcceptedByCharacterIds),
+        0
+      ),
       shadowSelectionCount: (causality?.strategySelections ?? []).filter((entry) => Boolean(entry.shadowRecommendation)).length,
       shadowAgreementCount: (causality?.strategySelections ?? []).filter((entry) => entry.shadowRecommendation?.agreedWithAgent).length
     },
@@ -252,7 +276,7 @@ function compileRun(
       ...(spec?.errorCode ? [spec.errorCode] : [])
     ])],
     createdAt: spec?.finishedAt ?? checkpoint.archivedAt,
-    schemaVersion: 1
+    schemaVersion: 2
   };
 }
 
@@ -292,12 +316,18 @@ function compileMissingRun(plan: CrossPlayPlan, spec: CrossPlayRunSpec): CrossPl
       detectedDeceptionCount: 0,
       repairAttemptedDeceptionCount: 0,
       repairedDeceptionCount: 0,
+      deceptionAudienceCount: 0,
+      deceptionReceivedAudienceCount: 0,
+      deceptionBelievedAudienceCount: 0,
+      deceptionRejectedAudienceCount: 0,
+      deceptionDetectedAudienceCount: 0,
+      deceptionRepairAcceptedAudienceCount: 0,
       shadowSelectionCount: 0,
       shadowAgreementCount: 0
     },
     failureCodes: [spec.errorCode ?? missingRunFailureCode(spec.status)],
     createdAt: spec.finishedAt ?? spec.createdAt,
-    schemaVersion: 1
+    schemaVersion: 2
   };
 }
 
@@ -350,6 +380,12 @@ function buildEvaluation(runs: CrossPlayRun[], pool: FrozenOpponentPool, planId?
     accumulator.detectedDeceptions += metrics.detectedDeceptionCount;
     accumulator.repairAttemptedDeceptions += metrics.repairAttemptedDeceptionCount;
     accumulator.repairedDeceptions += metrics.repairedDeceptionCount;
+    accumulator.deceptionAudience += metrics.deceptionAudienceCount;
+    accumulator.deceptionReceivedAudience += metrics.deceptionReceivedAudienceCount;
+    accumulator.deceptionBelievedAudience += metrics.deceptionBelievedAudienceCount;
+    accumulator.deceptionRejectedAudience += metrics.deceptionRejectedAudienceCount;
+    accumulator.deceptionDetectedAudience += metrics.deceptionDetectedAudienceCount;
+    accumulator.deceptionRepairAcceptedAudience += metrics.deceptionRepairAcceptedAudienceCount;
     accumulator.shadowSelections += metrics.shadowSelectionCount;
     accumulator.shadowAgreements += metrics.shadowAgreementCount;
     return accumulator;
@@ -365,6 +401,12 @@ function buildEvaluation(runs: CrossPlayRun[], pool: FrozenOpponentPool, planId?
     detectedDeceptions: 0,
     repairAttemptedDeceptions: 0,
     repairedDeceptions: 0,
+    deceptionAudience: 0,
+    deceptionReceivedAudience: 0,
+    deceptionBelievedAudience: 0,
+    deceptionRejectedAudience: 0,
+    deceptionDetectedAudience: 0,
+    deceptionRepairAcceptedAudience: 0,
     shadowSelections: 0,
     shadowAgreements: 0
   });
@@ -400,6 +442,21 @@ function buildEvaluation(runs: CrossPlayRun[], pool: FrozenOpponentPool, planId?
           ? ratio(totals.repairAttemptedDeceptions, totals.detectedDeceptions)
           : null,
         deceptionRepair: totals.detectedDeceptions ? ratio(totals.repairedDeceptions, totals.detectedDeceptions) : null,
+        deceptionDelivery: totals.deceptionAudience
+          ? ratio(totals.deceptionReceivedAudience, totals.deceptionAudience)
+          : null,
+        deceptionBelief: totals.deceptionReceivedAudience
+          ? ratio(totals.deceptionBelievedAudience, totals.deceptionReceivedAudience)
+          : null,
+        deceptionRejection: totals.deceptionReceivedAudience
+          ? ratio(totals.deceptionRejectedAudience, totals.deceptionReceivedAudience)
+          : null,
+        deceptionAudienceDetection: totals.deceptionReceivedAudience
+          ? ratio(totals.deceptionDetectedAudience, totals.deceptionReceivedAudience)
+          : null,
+        deceptionRepairAcceptance: totals.deceptionDetectedAudience
+          ? ratio(totals.deceptionRepairAcceptedAudience, totals.deceptionDetectedAudience)
+          : null,
         shadowAgreement: totals.shadowSelections ? ratio(totals.shadowAgreements, totals.shadowSelections) : null
       },
       reasoningDowngrades: runs.reduce((sum, run) => sum + run.downgradeEventIds.length, 0),
@@ -412,7 +469,7 @@ function buildEvaluation(runs: CrossPlayRun[], pool: FrozenOpponentPool, planId?
       failedRuns: runs.filter((run) => run.status === "failed").length
     },
     createdAt: new Date().toISOString(),
-    schemaVersion: 1
+    schemaVersion: 2
   };
 }
 
@@ -484,6 +541,10 @@ function expectedCalibrationError(bins: CrossPlayRun["calibrationBins"], predict
 
 function ratio(numerator: number, denominator: number): number {
   return denominator ? numerator / denominator : 0;
+}
+
+function uniqueCount(values: string[]): number {
+  return new Set(values).size;
 }
 
 function average(values: number[]): number {
@@ -583,6 +644,39 @@ function normalizeDistribution(values: number[]): number[] {
   return values.map((value) => Math.max(0, value) / total);
 }
 
+function migrateEvaluation(evaluation: CrossPlayEvaluation): CrossPlayEvaluation {
+  const runs = evaluation.runs.map((run): CrossPlayRun => ({
+    ...run,
+    socialCausality: {
+      ...run.socialCausality,
+      deceptionAudienceCount: run.socialCausality.deceptionAudienceCount ?? 0,
+      deceptionReceivedAudienceCount: run.socialCausality.deceptionReceivedAudienceCount ?? 0,
+      deceptionBelievedAudienceCount: run.socialCausality.deceptionBelievedAudienceCount ?? 0,
+      deceptionRejectedAudienceCount: run.socialCausality.deceptionRejectedAudienceCount ?? 0,
+      deceptionDetectedAudienceCount: run.socialCausality.deceptionDetectedAudienceCount ?? 0,
+      deceptionRepairAcceptedAudienceCount: run.socialCausality.deceptionRepairAcceptedAudienceCount ?? 0
+    },
+    schemaVersion: 2
+  }));
+  const coverage = evaluation.aggregate.socialCausalityCoverage;
+  return {
+    ...evaluation,
+    runs,
+    aggregate: {
+      ...evaluation.aggregate,
+      socialCausalityCoverage: {
+        ...coverage,
+        deceptionDelivery: coverage.deceptionDelivery ?? null,
+        deceptionBelief: coverage.deceptionBelief ?? null,
+        deceptionRejection: coverage.deceptionRejection ?? null,
+        deceptionAudienceDetection: coverage.deceptionAudienceDetection ?? null,
+        deceptionRepairAcceptance: coverage.deceptionRepairAcceptance ?? null
+      }
+    },
+    schemaVersion: 2
+  };
+}
+
 function readState(file: string): EvaluationStoreState {
   if (!existsSync(file)) return {
     schemaVersion: EVALUATION_STORE_SCHEMA_VERSION,
@@ -599,7 +693,7 @@ function readState(file: string): EvaluationStoreState {
       crossPlayPlans: Array.isArray(parsed.crossPlayPlans)
         ? parsed.crossPlayPlans.map(interruptRunningPlan)
         : [],
-      evaluations: Array.isArray(parsed.evaluations) ? parsed.evaluations : [],
+      evaluations: Array.isArray(parsed.evaluations) ? parsed.evaluations.map(migrateEvaluation) : [],
       metaStrategies: Array.isArray(parsed.metaStrategies) ? parsed.metaStrategies : []
     };
   } catch {

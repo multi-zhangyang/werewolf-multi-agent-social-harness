@@ -30,6 +30,7 @@ import type {
   BeliefUpdateRecord,
   DeceptionEpisode,
   DeceptionPlanInput,
+  EvidenceRecord,
   MemoryWritePolicyResult,
   OutcomeReconciliation,
   OutcomeReconciliationInput,
@@ -213,6 +214,7 @@ export abstract class SocialWorldBase implements SocialWorld {
     const receiptKey = this.idempotencyKey(actorId, action, payload);
     const existing = this.recentReceipts.get(receiptKey);
     if (existing) return structuredClone(existing);
+    const observationThroughSequence = this.socialCausality.observationCursor();
     let commit: WorldActionCommit;
     if (action === "message" || action === "communicate") {
       const input = parseMessagePayload(payload);
@@ -230,6 +232,7 @@ export abstract class SocialWorldBase implements SocialWorld {
       action,
       payload,
       commit,
+      observationThroughSequence,
       characterIdFor: (targetActorId) => this.requireProfile(targetActorId).characterId,
       ...(this.activeActivationId ? { activationId: this.activeActivationId } : {})
     });
@@ -394,8 +397,8 @@ export abstract class SocialWorldBase implements SocialWorld {
     sourceCommandId?: string;
     payload?: Record<string, unknown>;
     kind?: import("./social/contracts").Proposition["kind"];
-  }): void {
-    this.socialCausality.recordPrivateObservation({
+  }): EvidenceRecord {
+    return this.socialCausality.recordPrivateObservation({
       observerActorId: input.observerActorId,
       observerCharacterId: this.requireProfile(input.observerActorId).characterId,
       ...(input.subjectActorId ? { subjectCharacterId: this.requireProfile(input.subjectActorId).characterId } : {}),
@@ -561,8 +564,14 @@ export abstract class SocialWorldBase implements SocialWorld {
     return this.socialCausality.applyMemoryWritePolicy(actorId);
   }
 
+  /**
+   * Outcome memory flows through the social reconciliation ledger
+   * (recordOutcomeReconciliation → applyMemoryWritePolicy), not through
+   * scenario free-text experiences. The room consults this before writing
+   * settlement memories so the two paths never double-write.
+   */
   reconciliationOwnsOutcomeMemory(): boolean {
-    return false;
+    return true;
   }
 
   /** Queue a structured social event for one participant's appraisal engine. */

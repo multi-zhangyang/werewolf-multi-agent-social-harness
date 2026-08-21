@@ -143,6 +143,12 @@ export interface CrossPlayRun {
     detectedDeceptionCount: number;
     repairAttemptedDeceptionCount: number;
     repairedDeceptionCount: number;
+    deceptionAudienceCount: number;
+    deceptionReceivedAudienceCount: number;
+    deceptionBelievedAudienceCount: number;
+    deceptionRejectedAudienceCount: number;
+    deceptionDetectedAudienceCount: number;
+    deceptionRepairAcceptedAudienceCount: number;
     shadowSelectionCount: number;
     shadowAgreementCount: number;
   };
@@ -174,6 +180,11 @@ export interface CrossPlayEvaluation {
       deceptionDetection: number | null;
       deceptionRepairAttempt: number | null;
       deceptionRepair: number | null;
+      deceptionDelivery: number | null;
+      deceptionBelief: number | null;
+      deceptionRejection: number | null;
+      deceptionAudienceDetection: number | null;
+      deceptionRepairAcceptance: number | null;
       shadowAgreement: number | null;
     };
     reasoningDowngrades: number;

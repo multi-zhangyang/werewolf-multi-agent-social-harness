@@ -81,9 +81,12 @@ const publicView: SpectatorViewer = { mode: "public" };
 const pov01: SpectatorViewer = { mode: "agent-pov", agentId: "agent-01" };
 
 check("omniscient passes everything through unchanged", () => {
-  for (const event of [reasoning, thought, pressure, tool, worldAction, cue]) {
+  // Legacy raw provider reasoning is never viewer-facing (§12), even for the
+  // omniscient seat; every other event type passes through unchanged.
+  for (const event of [thought, pressure, tool, worldAction, cue]) {
     assert.equal(projectEventFor(event, omniscient), event, event.type);
   }
+  assert.equal(projectEventFor(reasoning, omniscient), undefined, "raw reasoning never projects");
 });
 
 check("public seat never receives private cognition or private tools", () => {
@@ -91,15 +94,16 @@ check("public seat never receives private cognition or private tools", () => {
   assert.equal(projectEventFor(thought, publicView), undefined);
   assert.equal(projectEventFor(pressure, publicView), undefined);
   assert.equal(projectEventFor(tool, publicView), undefined, "hidden tools stay hidden");
-  assert.equal(projectEventFor(publicTool, publicView), publicTool, "public speech tools flow");
+  assert.equal(projectEventFor(publicTool, publicView), undefined, "tool traces stay private in public");
   assert.equal(projectEventFor(worldAction, publicView), undefined, "hidden world actions stay hidden");
   assert.equal(projectEventFor(publicAction, publicView), publicAction, "public actions flow");
   assert.equal(projectEventFor(cue, publicView), cue, "cues stay visible");
 });
 
 check("agent-pov seat only sees the watched agent's private events", () => {
-  assert.equal(projectEventFor(reasoning, pov01), reasoning, "own reasoning flows");
-  assert.equal(projectEventFor({ ...reasoning, actorId: "agent-02" }, pov01), undefined, "others' reasoning does not");
+  // Raw provider reasoning stays unprojectable even in its own POV; the
+  // bounded reasoning-summary/thought-beat paths are the private interface.
+  assert.equal(projectEventFor(reasoning, pov01), undefined, "raw reasoning never projects");
   assert.equal(projectEventFor(thought, pov01), thought);
   assert.equal(projectEventFor(pressure, pov01), pressure);
   assert.equal(projectEventFor(tool, pov01), tool);

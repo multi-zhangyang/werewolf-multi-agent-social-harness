@@ -527,7 +527,7 @@ export class SocietyRoom {
 
   replayEventsSince(seq = 0): SocietyRoomEventEnvelope[] {
     return dedupeEnvelopes([...this.replayEvents, ...this.events])
-      .filter((entry) => entry.seq > seq)
+      .filter((entry) => entry.seq > seq && entry.event.type !== "agent.reasoning-content")
       .sort((left, right) => left.seq - right.seq)
       .map((entry) => structuredClone(entry));
   }
@@ -1238,6 +1238,7 @@ export class SocietyRoom {
       event.type === "world.action" ||
       event.type === "agent.message" ||
       event.type === "agent.delta" ||
+      event.type === "agent.reasoning-content" ||
       event.type === "agent.reasoning-summary" ||
       event.type === "agent.reasoning" ||
       event.type === "runtime.notice" ||
@@ -1339,7 +1340,10 @@ export class SocietyRoom {
       archivedAt: now(),
       status: this.status,
       snapshot: this.snapshotFor(),
-      envelopes: this.events.slice(-500).map((entry) => structuredClone(entry)),
+      envelopes: this.events
+        .filter((entry) => entry.event.type !== "agent.reasoning-content")
+        .slice(-500)
+        .map((entry) => structuredClone(entry)),
       replayEnvelopes: this.replayEvents.map((entry) => structuredClone(entry)),
       agentMinds: Object.fromEntries([...this.agents].map(([actorId, runtime]) => [actorId, structuredClone(runtime.mind)])),
       sessionFiles,

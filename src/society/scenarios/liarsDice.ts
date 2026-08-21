@@ -432,10 +432,6 @@ export class LiarsDiceWorld extends SocialWorldBase {
     return { action: "liars_move", commandId, detail: `bid ${quantity}×${face}`, result: { accepted: true, nextActor: this.expectedActorId } };
   }
 
-  reconciliationOwnsOutcomeMemory(): boolean {
-    return true;
-  }
-
   private commitChallenge(actorId: string): WorldActionCommit {
     const current = this.currentBid();
     if (!current) throw new Error("NOTHING_TO_CHALLENGE: No bid is on the table yet.");

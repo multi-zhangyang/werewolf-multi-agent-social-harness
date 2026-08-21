@@ -8,6 +8,7 @@ import { it } from "vitest";
 import { formatSocialContext } from "../../src/society/participant";
 import { initialMood } from "../../src/society/affect";
 import type { AgentMindState, Commitment, SocialWorld, WorldSnapshot } from "../../src/society/contracts";
+import type { SocialCausalityProjection } from "../../src/society/social/contracts";
 
 function mind(): AgentMindState {
   return {
@@ -66,9 +67,32 @@ const commitment: Commitment = {
   schemaVersion: 1
 };
 
+const emptyCausality = {
+  schemaVersion: 6,
+  lastSequence: 0,
+  events: [],
+  propositions: [],
+  socialActs: [],
+  evidence: [],
+  beliefUpdates: [],
+  actorModels: [],
+  directedRelationships: [],
+  relationshipDeltas: [],
+  commitments: [],
+  candidateIntents: [],
+  strategyProfileSnapshots: [],
+  activeStrategyProfileSnapshotIds: {},
+  strategySelections: [],
+  decisions: [],
+  influenceLinks: [],
+  outcomeReconciliations: [],
+  deceptions: []
+} as unknown as SocialCausalityProjection;
+
 const world = {
   snapshot: () => snapshot,
-  openCommitmentsFor: (actorId: string) => (actorId === "agent-01" || actorId === "agent-02" ? [commitment] : [])
+  openCommitmentsFor: (actorId: string) => (actorId === "agent-01" || actorId === "agent-02" ? [commitment] : []),
+  socialCausalityFor: () => emptyCausality
 } as unknown as SocialWorld;
 
 it("compiles directed relationships, beliefs and open commitments into the turn input", () => {
@@ -76,16 +100,19 @@ it("compiles directed relationships, beliefs and open commitments into the turn 
   const text = blocks.join("\n");
   assert.ok(text.includes("[SOCIAL STATE]"), "blocks carry the social-state marker");
   assert.ok(text.includes("林默: trust 0.70"), "the directed relationship reaches the input");
-  assert.ok(text.includes("林默会返还至少 10 (0.62)"), "the relevant belief reaches the input");
-  assert.ok(text.includes("commit:1:agent-02:1"), "the open commitment id reaches the input");
-  assert.ok(text.includes("agent-02 declared"), "the promise is attributed to its promisor");
+  assert.ok(text.includes("林默会返还至少 10 · probability 0.62 · confidence 0.62"), "the relevant belief reaches the input");
+  assert.ok(
+    text.includes("林默 declared: 你投 8，我至少返还 10。 · proposed"),
+    "the open commitment reaches the input with its promisor and state"
+  );
 });
 
 it("stays honest when the mind and world carry nothing", () => {
   const emptyMind = { ...mind(), relationships: [], beliefs: [] };
   const emptyWorld = {
     snapshot: () => ({ ...snapshot, agents: [snapshot.agents[0]] }),
-    openCommitmentsFor: () => []
+    openCommitmentsFor: () => [],
+    socialCausalityFor: () => emptyCausality
   } as unknown as SocialWorld;
   const blocks = formatSocialContext(emptyMind, emptyWorld, "agent-01");
   assert.deepEqual(blocks, [], "no invented state is injected");

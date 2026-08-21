@@ -252,7 +252,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
         round: this.round,
         promisorActorId: actorId,
         promisorCharacterId: this.requireProfile(actorId).characterId,
-        audienceActorIds: [...this.profiles.keys()],
+        audienceActorIds: [...this.profiles.keys()].filter((id) => id !== actorId),
         proposition,
         promisedAction: {
           actionType: "contribute-at-least",
@@ -408,10 +408,6 @@ export class PublicGoodsWorld extends SocialWorldBase {
 
   experienceFor(actorId: string): string | undefined {
     return this.lastExperiences.get(actorId);
-  }
-
-  reconciliationOwnsOutcomeMemory(): boolean {
-    return true;
   }
 
   async sendMessage(input: {

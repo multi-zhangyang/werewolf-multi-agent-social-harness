@@ -23,8 +23,6 @@ export interface SpectatorViewer {
   privileged?: boolean;
 }
 
-/** Tools whose execution is public knowledge in every world. */
-const PUBLIC_TOOLS = new Set(["communicate"]);
 /** World actions whose effect is public knowledge in every world. */
 const PUBLIC_ACTIONS = new Set(["communicate", "message"]);
 
@@ -41,6 +39,8 @@ export function projectEventFor(event: AgentRuntimeEvent, viewer: SpectatorViewe
 function projectPublic(event: AgentRuntimeEvent, privileged: boolean): AgentRuntimeEvent | undefined {
   switch (event.type) {
     // Private cognition and state never leaves the public seat.
+    case "agent.delta":
+    case "agent.reasoning-content":
     case "agent.reasoning-summary":
     case "agent.pov-frame":
     case "world.operator-frame":
@@ -52,7 +52,7 @@ function projectPublic(event: AgentRuntimeEvent, privileged: boolean): AgentRunt
     case "runtime.notice":
       return privileged ? event : undefined;
     case "agent.tool":
-      return PUBLIC_TOOLS.has(event.toolName) ? event : undefined;
+      return undefined;
     case "world.action":
       return PUBLIC_ACTIONS.has(event.action) ? event : undefined;
     default:
@@ -62,6 +62,8 @@ function projectPublic(event: AgentRuntimeEvent, privileged: boolean): AgentRunt
 
 function projectPov(event: AgentRuntimeEvent, selfId: string | undefined, privileged: boolean): AgentRuntimeEvent | undefined {
   switch (event.type) {
+    case "agent.delta":
+    case "agent.reasoning-content":
     case "agent.reasoning-summary":
     case "agent.thought-beat":
     case "agent.context.pressure":

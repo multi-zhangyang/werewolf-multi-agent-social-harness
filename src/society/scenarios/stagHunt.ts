@@ -252,10 +252,6 @@ export class StagHuntWorld extends SocialWorldBase {
     return this.lastExperiences.get(actorId);
   }
 
-  reconciliationOwnsOutcomeMemory(): boolean {
-    return true;
-  }
-
   async sendMessage(input: {
     senderId: string;
     channel: "public" | "private" | "team";

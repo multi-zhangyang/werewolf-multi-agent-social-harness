@@ -15,37 +15,85 @@ describe("trust-game commitment slice (§14.6)", () => {
   it("promise → cited decision → violation → relationship change → next round", async () => {
     installFastTurns();
     // Round 1: agent-01 invests, agent-02 is the trustee. The trustee
-    // declares a binding promise; the investor cites it; the trustee returns
-    // zero. Round 2 swaps the roles and the script keeps cooperating.
+    // declares a binding promise during the negotiation; the investor accepts
+    // it (§8.3: settlement only judges accepted commitments) and cites it;
+    // the trustee returns zero. Round 2 swaps the roles and the script keeps
+    // cooperating. Binding tools carry the full strategy shape the SDK
+    // validates (candidate intents + predictions).
+    const investIntents = (amount: number) => [
+      { goal: "g", summary: `invest ${amount}`, publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount },
+      { goal: "g2", summary: "invest 0", publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount: 0 }
+    ];
+    const returnIntents = (amount: number) => [
+      { goal: "g", summary: `return ${amount}`, publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount },
+      { goal: "g2", summary: "return 0", publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount: 0 }
+    ];
     const script = new ScriptedModel([
+      // Wave 1: the investor opens; the trustee announces and declares the
+      // promise inside the same turn.
+      modelResponse([functionCall("communicate", { text: "这轮我想听听你的想法。", channel: "public" }, { callId: "call-msg-1" })]),
       modelResponse([assistantMessage("我先看看对方是否愿意给出承诺。")]),
-      modelResponse([functionCall("make_commitment", {
-        proposition: "你投 8，我至少返还 10。",
-        actionType: "return-at-least",
-        amount: 10
-      }, { callId: "call-commit-1" })]),
+      modelResponse([
+        functionCall("communicate", { text: "林默，我打算承诺返还。", channel: "public" }, { callId: "call-msg-2" }),
+        functionCall("make_commitment", {
+          proposition: "你投 8，我至少返还 10。",
+          actionType: "return-at-least",
+          amount: 10
+        }, { callId: "call-commit-1" })
+      ]),
       modelResponse([assistantMessage("承诺已登记，我会按约履行。")]),
+      // Wave 2: the investor accepts the promise.
+      modelResponse([functionCall("accept_commitment", { commitmentId: "commit:1:agent-02:1" }, { callId: "call-accept-1" })]),
+      modelResponse([assistantMessage("我接受这个承诺。")]),
+      // Wave 3: the discussion decays; a plain closing turn.
+      modelResponse([assistantMessage("好。")]),
+      // Investment phase.
       modelResponse([functionCall("make_investment", {
         amount: 8,
         reason: "相信对方的公开承诺",
-        referencedCommitmentIds: ["commit:1:agent-02:1"]
+        referencedCommitmentIds: ["commit:1:agent-02:1"],
+        candidateIntents: investIntents(8),
+        selectedIntentIndex: 0,
+        predictedConsequences: [{ outcomeKey: "investment-positive", proposition: "对方会返还至少 10", probability: 0.8, horizon: "round" }]
       }, { callId: "call-inv-1" })]),
       modelResponse([assistantMessage("已完成投资。")]),
-      modelResponse([functionCall("return_from_trust", { amount: 0, reason: "改变主意" }, { callId: "call-ret-1" })]),
+      // Return phase: the trustee breaks the promise.
+      modelResponse([functionCall("return_from_trust", {
+        amount: 0,
+        reason: "改变主意",
+        candidateIntents: returnIntents(0),
+        selectedIntentIndex: 0,
+        predictedConsequences: [{ outcomeKey: "return-at-least-investment", proposition: "返还低于承诺", probability: 0.2, horizon: "round" }]
+      }, { callId: "call-ret-1" })]),
       modelResponse([assistantMessage("已完成返还。")]),
-      // Round 2: roles swapped.
+      // Round 2: roles swapped; plain cooperation without declarations.
+      modelResponse([functionCall("communicate", { text: "这轮我会公平。", channel: "public" }, { callId: "call-msg-3" })]),
       modelResponse([assistantMessage("这轮轮到我看你如何对待承诺。")]),
+      modelResponse([functionCall("communicate", { text: "好的。", channel: "public" }, { callId: "call-msg-4" })]),
       modelResponse([assistantMessage("我会按自己的判断行事。")]),
-      modelResponse([functionCall("make_investment", { amount: 4, reason: "t" }, { callId: "call-inv-2" })]),
+      modelResponse([assistantMessage("好。")]),
+      modelResponse([functionCall("make_investment", {
+        amount: 4,
+        reason: "t",
+        candidateIntents: investIntents(4),
+        selectedIntentIndex: 0,
+        predictedConsequences: [{ outcomeKey: "investment-positive", proposition: "对方会公平返还", probability: 0.7, horizon: "round" }]
+      }, { callId: "call-inv-2" })]),
       modelResponse([assistantMessage("已完成投资。")]),
-      modelResponse([functionCall("return_from_trust", { amount: 4, reason: "t" }, { callId: "call-ret-2" })]),
+      modelResponse([functionCall("return_from_trust", {
+        amount: 4,
+        reason: "t",
+        candidateIntents: returnIntents(4),
+        selectedIntentIndex: 0,
+        predictedConsequences: [{ outcomeKey: "return-at-least-investment", proposition: "全额返还", probability: 0.7, horizon: "round" }]
+      }, { callId: "call-ret-2" })]),
       modelResponse([assistantMessage("已完成返还。")])
     ]);
     const limiter = new ActivationLimiter(1);
     const { room, cleanup } = testRoom(script, limiter);
     try {
       void room.start();
-      await waitFor(() => room.currentStatus() === "finished", 10_000).catch((error) => {
+      await waitFor(() => room.currentStatus() === "finished", 30_000).catch((error) => {
         const snapshot = room.snapshotForViewer({ mode: "omniscient" });
         throw new Error(`${String(error instanceof Error ? error.message : error)}; error=${roomError(room) ?? "none"}; log=${snapshot.world.log.slice(-6).map((entry) => entry.text).join(" | ")}`);
       });

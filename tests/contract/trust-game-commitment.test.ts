@@ -41,6 +41,16 @@ async function playRound(
   returned: number,
   investmentRefs: string[] = []
 ): Promise<void> {
+  // Settlement only checks accepted promises (§8.3): the recipient must take
+  // the promise during the negotiation, so the helper accepts every open
+  // declaration addressed to it before closing the discussion — exactly what
+  // a live recipient would do.
+  const investorId = world.snapshot().agents[0]?.id ?? "";
+  for (const commitment of commitments(world)) {
+    if (commitment.state !== "proposed") continue;
+    if (!commitment.audienceActorIds.includes(investorId)) continue;
+    await world.performDomainAction(investorId, "accept_commitment", { commitmentId: commitment.commitmentId });
+  }
   driveDiscussion(world);
   const invest = world.activation();
   assert.ok(invest && invest.id.endsWith(":investment"));
@@ -78,7 +88,7 @@ it("a trustee can declare a return-at-least promise during the negotiation", asy
   assert.equal(ledger.length, 1);
   assert.equal(ledger[0].promisorActorId, TRUSTEE_R1);
   assert.equal(ledger[0].state, "proposed");
-  assert.deepEqual(ledger[0].audienceActorIds, [INVESTOR_R1, TRUSTEE_R1]);
+  assert.deepEqual(ledger[0].audienceActorIds, [INVESTOR_R1]);
   assert.equal(commit.commandId, ledger[0].createdByCommandId, "the receipt is the creation command");
   // The promisee gets a structured appraisal event, not just text.
   const events = world.eventsFor(INVESTOR_R1);
@@ -140,6 +150,9 @@ it("a partial return below the promise is a violation, not a half-kept promise",
 it("an investor promise is checked against the investment", async () => {
   const world = makeWorld();
   await declare(world, INVESTOR_R1, "invest-at-least", 8, "我会投至少 8。");
+  // The investor's own promise is addressed to the trustee; the trustee accepts.
+  const trusteeId = world.snapshot().agents[1]?.id ?? "";
+  await world.performDomainAction(trusteeId, "accept_commitment", { commitmentId: commitments(world)[0].commitmentId });
   await playRound(world, 8, 5);
   assert.equal(commitments(world)[0].state, "fulfilled");
   assert.equal(lastBeat(world), "promise-kept");
@@ -208,9 +221,9 @@ it("v1 checkpoints without the commitment ledger are rejected loudly", () => {
   legacy.world.schemaVersion = 1;
   assert.throws(
     () => createWorld({ roomId: "room-c", scenarioId: "trust-game", profiles, rounds: 2, state: legacy as unknown as WorldSerializedState }),
-    /SCENARIO_STATE_MIGRATION_REQUIRED.*expected 2/
+    /SCENARIO_STATE_MIGRATION_REQUIRED.*expected 3/
   );
-  assert.equal(TRUST_GAME_STATE_SCHEMA_VERSION, 2);
+  assert.equal(TRUST_GAME_STATE_SCHEMA_VERSION, 3);
 });
 
 // --- role reversal: the next round sees the settled history ---

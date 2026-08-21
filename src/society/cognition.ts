@@ -600,10 +600,6 @@ function updateBelief(mind: AgentMindState, input: Omit<AgentBelief, "updatedAtT
   if (mind.beliefs.length > 80) mind.beliefs.splice(0, mind.beliefs.length - 80);
 }
 
-async function syncMemories(context: SocietyAgentContext): Promise<void> {
-  context.mind.memories = await context.memory.list(80);
-}
-
 function emitWorldAction(context: SocietyAgentContext, action: string, detail: string): void {
   context.emit({
     type: "world.action",

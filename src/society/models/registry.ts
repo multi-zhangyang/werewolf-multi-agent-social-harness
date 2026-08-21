@@ -190,7 +190,7 @@ export function seedRegistryFromEnv(registry: ModelRegistry, env: NodeJS.Process
       contextWindow,
       contextWindowSource: contextMap.has(modelId) ? "manual" : "known-profile",
       capabilities: defaultCapabilities(),
-      defaults: {},
+      defaults: { reasoningEffort: "high" },
       contextPolicyId: DEFAULT_CONTEXT_POLICY_ID,
       enabled: true
     });

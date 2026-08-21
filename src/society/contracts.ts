@@ -710,6 +710,7 @@ export type AgentRuntimeEvent =
   | { type: "agent.status"; roomId: string; actorId: string; status: AgentStatus; at: string }
   | { type: "agent.updated"; roomId: string; actorId: string; status: AgentStatus; mind: AgentMindState; turnCount: number; totalTokens: number; lastOutput?: string; at: string }
   | { type: "agent.delta"; roomId: string; actorId: string; delta: string; at: string }
+  | { type: "agent.reasoning-content"; roomId: string; actorId: string; delta: string; elapsedMs: number; done: boolean; at: string }
   | { type: "agent.reasoning-summary"; roomId: string; actorId: string; delta: string; at: string }
   /** @deprecated Read-only compatibility for archives created before schema v3. */
   | { type: "agent.reasoning"; roomId: string; actorId: string; delta: string; at: string }

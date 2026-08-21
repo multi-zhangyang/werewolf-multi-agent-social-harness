@@ -104,7 +104,9 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   private deltaBuffer = "";
   private lastDeltaAt = 0;
   private reasoningBuffer = "";
+  private reasoningStartedAt = 0;
   private lastReasoningAt = 0;
+  private reasoningActive = false;
   /** Provenance of the latest compaction (AGENTS.md §12.4). */
   private lastSummaryArtifact?: ContextSummaryArtifact;
 
@@ -422,7 +424,9 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     this.deltaBuffer = "";
     this.lastDeltaAt = Date.now();
     this.reasoningBuffer = "";
+    this.reasoningStartedAt = 0;
     this.lastReasoningAt = Date.now();
+    this.reasoningActive = false;
     const runInput = [
       input,
       modeLine,
@@ -449,11 +453,11 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       });
       for await (const event of result) this.consumeEvent(event, toolCalls);
       this.flushDelta();
-      this.flushReasoning();
+      this.flushReasoning(true);
       await result.completed;
     } catch (error) {
       this.flushDelta();
-      this.flushReasoning();
+      this.flushReasoning(true);
       emitStatus(this.context, "error");
       throw error;
     }
@@ -658,27 +662,40 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     if (event.type === "run_item_stream_event") {
       const item = event.item as unknown as Record<string, unknown>;
       if (event.name === "tool_called") {
+        this.flushReasoning(true);
         const name = toolName(item) ?? "unknown_tool";
         toolCalls.push(name);
         emitStatus(this.context, name === "communicate" ? "speaking" : "acting");
-        emitTool(this.context, toolCallId(item), name, "started");
+        emitTool(this.context, toolCallId(item), name, "started", toolInput(item));
       } else if (event.name === "tool_output") {
-        emitTool(this.context, toolCallId(item), toolName(item) ?? toolCalls.at(-1) ?? "unknown_tool", "succeeded", toolOutput(item));
+        emitTool(
+          this.context,
+          toolCallId(item),
+          toolName(item) ?? toolCalls.at(-1) ?? "unknown_tool",
+          "succeeded",
+          undefined,
+          toolOutput(item)
+        );
       } else if (event.name === "message_output_created") {
         emitStatus(this.context, "thinking");
       }
       return;
     }
     if (event.type !== "raw_model_stream_event") return;
-    const reasoningDelta = reasoningDeltaFromEvent(event);
+    const reasoningDelta = reasoningContentFromEvent(event);
     if (reasoningDelta) {
+      if (!this.reasoningActive) {
+        this.reasoningActive = true;
+        this.reasoningStartedAt = Date.now();
+      }
       this.reasoningBuffer += reasoningDelta;
-      if (this.reasoningBuffer.length >= 160 || Date.now() - this.lastReasoningAt > 700) this.flushReasoning();
+      if (this.reasoningBuffer.length >= 96 || Date.now() - this.lastReasoningAt > 250) this.flushReasoning(false);
     }
     const delta = textDelta(event);
     if (!delta) return;
+    this.flushReasoning(true);
     this.deltaBuffer += delta;
-    if (this.deltaBuffer.length >= 140 || Date.now() - this.lastDeltaAt > 450) this.flushDelta();
+    if (this.deltaBuffer.length >= 48 || Date.now() - this.lastDeltaAt > 120) this.flushDelta();
   }
 
   private flushDelta(): void {
@@ -694,17 +711,20 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     this.lastDeltaAt = Date.now();
   }
 
-  private flushReasoning(): void {
-    if (!this.reasoningBuffer) return;
+  private flushReasoning(done: boolean): void {
+    if (!this.reasoningActive || (!this.reasoningBuffer && !done)) return;
     this.context.emit({
-      type: "agent.reasoning-summary",
+      type: "agent.reasoning-content",
       roomId: this.context.roomId,
       actorId: this.context.actorId,
       delta: this.reasoningBuffer,
+      elapsedMs: Math.max(0, Date.now() - this.reasoningStartedAt),
+      done,
       at: new Date().toISOString()
     });
     this.reasoningBuffer = "";
     this.lastReasoningAt = Date.now();
+    if (done) this.reasoningActive = false;
   }
 }
 
@@ -1349,6 +1369,7 @@ function emitTool(
   toolCallId: string | undefined,
   toolName: string,
   phase: "started" | "succeeded",
+  safeInputSummary?: string,
   safeOutputSummary?: string
 ): void {
   context.emit({
@@ -1358,6 +1379,7 @@ function emitTool(
     toolCallId: toolCallId ?? randomUUID(),
     toolName,
     phase,
+    ...(safeInputSummary ? { safeInputSummary } : {}),
     ...(safeOutputSummary ? { safeOutputSummary } : {}),
     at: new Date().toISOString()
   });
@@ -1381,8 +1403,51 @@ function toolCallId(item: Record<string, unknown>): string | undefined {
 function toolOutput(item: Record<string, unknown>): string | undefined {
   const raw = item.rawItem as Record<string, unknown> | undefined;
   const output = item.output ?? raw?.output;
-  if (output === undefined) return undefined;
-  return (typeof output === "string" ? output : JSON.stringify(output)).slice(0, 220);
+  return output === undefined ? undefined : safeToolSummary(output);
+}
+
+function toolInput(item: Record<string, unknown>): string | undefined {
+  const raw = item.rawItem as Record<string, unknown> | undefined;
+  const input = item.input ?? item.arguments ?? raw?.arguments ?? raw?.input ?? raw?.action;
+  return input === undefined ? undefined : safeToolSummary(input);
+}
+
+const SENSITIVE_TOOL_FIELD = /(^|[-_])(authorization|api[-_]?key|token|secret|password|cookie|headers?|system[-_]?prompt|instructions?|context)([-_]|$)/i;
+
+function safeToolSummary(input: unknown): string {
+  let value = input;
+  if (typeof input === "string") {
+    try {
+      value = JSON.parse(input);
+    } catch {
+      value = input;
+    }
+  }
+  const sanitized = sanitizeToolValue(value, 0);
+  const rendered = typeof sanitized === "string" ? sanitized : JSON.stringify(sanitized, null, 2);
+  return redactSecrets(rendered).slice(0, 1_600);
+}
+
+function sanitizeToolValue(value: unknown, depth: number): unknown {
+  if (depth >= 5) return "[truncated]";
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return redactSecrets(value).slice(0, 800);
+  if (Array.isArray(value)) {
+    const entries = value.slice(0, 20).map((entry) => sanitizeToolValue(entry, depth + 1));
+    return value.length > entries.length ? [...entries, `[${value.length - entries.length} more]`] : entries;
+  }
+  if (typeof value !== "object") return String(value);
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .slice(0, 30)
+      .map(([key, entry]) => [key, SENSITIVE_TOOL_FIELD.test(key) ? "[redacted]" : sanitizeToolValue(entry, depth + 1)])
+  );
+}
+
+function redactSecrets(value: string): string {
+  return value
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[redacted-key]")
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, "$1[redacted]");
 }
 
 function textDelta(event: RunStreamEvent): string | undefined {
@@ -1396,22 +1461,23 @@ function textDelta(event: RunStreamEvent): string | undefined {
   return undefined;
 }
 
-/**
- * Provider-returned reasoning SUMMARY, never raw chain-of-thought (§8.5).
- *
- * AGENTS.md forbids raw `reasoning_content` (the full hidden chain of
- * thought) from entering SSE, logs, replay, checkpoints or the frontend. The
- * only reasoning stream that may cross the wire is a provider-returned
- * reasoning *summary* — here the Responses API's
- * `response.reasoning_summary_text.delta` event. Chat-completions
- * `reasoning_content` is full CoT and is deliberately not surfaced.
- */
-function reasoningDeltaFromEvent(event: RunStreamEvent): string | undefined {
-  if (!isOpenAIResponsesRawModelStreamEvent(event)) return undefined;
-  const inner = event.data.event;
-  if (inner.type !== "response.reasoning_summary_text.delta") return undefined;
-  const delta = (inner as { delta?: string }).delta;
-  return typeof delta === "string" && delta ? delta : undefined;
+function reasoningContentFromEvent(event: RunStreamEvent): string | undefined {
+  if (isOpenAIChatCompletionsRawModelStreamEvent(event)) {
+    const delta = event.data.event.choices?.[0]?.delta as {
+      reasoning_content?: unknown;
+      reasoning?: unknown;
+    } | undefined;
+    if (typeof delta?.reasoning_content === "string" && delta.reasoning_content) return delta.reasoning_content;
+    if (typeof delta?.reasoning === "string" && delta.reasoning) return delta.reasoning;
+    return undefined;
+  }
+  if (isOpenAIResponsesRawModelStreamEvent(event)) {
+    const inner = event.data.event;
+    if (inner.type !== "response.reasoning_summary_text.delta") return undefined;
+    const delta = (inner as { delta?: string }).delta;
+    return typeof delta === "string" && delta ? delta : undefined;
+  }
+  return undefined;
 }
 
 function reasoningNoticeEvent(roomId: string, actorId: string, notice: ReasoningFallbackNotice): AgentRuntimeEvent {

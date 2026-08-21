@@ -122,7 +122,7 @@ export class NegotiationWorld extends SocialWorldBase {
       details: {
         scores: Object.fromEntries(this.scores),
         pendingDemands: [...this.profiles.keys()].filter((id) => !this.demands.has(id)),
-        offers: this.offers,
+        offers: this.offers.map(({ proposedByCommandId: _proposedReceipt, respondedByCommandId: _responseReceipt, ...offer }) => offer),
         commitments: this.commitments,
         history: this.history.map(({ outsideOptions: _privateOutsideOptions, ...publicResult }) => publicResult),
         ...(this.discussion ? { discussion: this.discussion.state() } : {})
@@ -171,31 +171,65 @@ export class NegotiationWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const makeOffer = tool({
       name: "make_offer",
-      description: "Propose a typed split to the other participant. The offer is not an agreement until the named recipient explicitly accepts it.",
+      description: "Compare bounded split proposals, then submit one typed offer to the other participant. The offer is not an agreement until the named recipient explicitly accepts it.",
       parameters: z.object({
         recipientId: z.string().min(1).max(160),
         proposerDemand: z.number().int().min(0).max(10),
         recipientDemand: z.number().int().min(0).max(10),
-        message: z.string().min(1).max(500)
+        message: z.string().min(1).max(500),
+        ...createStrategyActionShape({
+          recipientId: z.string().min(1).max(160),
+          proposerDemand: z.number().int().min(0).max(10),
+          recipientDemand: z.number().int().min(0).max(10)
+        }, NEGOTIATION_OFFER_OUTCOME_KEYS)
       }).strict(),
       execute: async (input, runContext) => {
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected
+          || selected.recipientId !== input.recipientId
+          || selected.proposerDemand !== input.proposerDemand
+          || selected.recipientDemand !== input.recipientDemand) {
+          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected split must equal the binding offer.");
+        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "make_offer", input);
+        const commit = await this.performAction(actorId, "make_offer", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({
+            ...candidate,
+            action: "make_offer",
+            payloadSummary: `recipientId=${candidate.recipientId}; proposerDemand=${candidate.proposerDemand}; recipientDemand=${candidate.recipientDemand}`
+          }))
+        });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
     });
     const respondToOffer = tool({
       name: "respond_to_offer",
-      description: "Explicitly accept or reject a typed offer addressed to you. Acceptance creates mutual demand commitments; rejection creates no alliance, promise, or transaction.",
+      description: "Compare bounded responses, then explicitly accept or reject a typed offer addressed to you. Acceptance creates mutual demand commitments; rejection creates no alliance, promise, or transaction.",
       parameters: z.object({
         offerId: z.string().min(1).max(200),
         response: z.enum(["accept", "reject"]),
-        reason: z.string().min(1).max(500)
+        reason: z.string().min(1).max(500),
+        ...createStrategyActionShape({
+          offerId: z.string().min(1).max(200),
+          response: z.enum(["accept", "reject"])
+        }, NEGOTIATION_OFFER_OUTCOME_KEYS)
       }).strict(),
       execute: async (input, runContext) => {
+        const selected = input.candidateIntents[input.selectedIntentIndex];
+        if (!selected || selected.offerId !== input.offerId || selected.response !== input.response) {
+          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected response must equal the binding response.");
+        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "respond_to_offer", input);
+        const commit = await this.performAction(actorId, "respond_to_offer", {
+          ...input,
+          candidateIntents: input.candidateIntents.map((candidate) => ({
+            ...candidate,
+            action: "respond_to_offer",
+            payloadSummary: `offerId=${candidate.offerId}; response=${candidate.response}`
+          }))
+        });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -306,20 +340,20 @@ export class NegotiationWorld extends SocialWorldBase {
           promisorActorId: offer.proposerActorId,
           promiseeActorId: offer.recipientActorId,
           amount: offer.proposerDemand,
-          createdByCommandId: offer.proposedByCommandId,
-          acceptedByCommandId: commandId
+          createdByCommandId: offer.proposedByCommandId
         });
         const recipientCommitment = this.commitmentFromOffer({
           offer,
           promisorActorId: offer.recipientActorId,
           promiseeActorId: offer.proposerActorId,
           amount: offer.recipientDemand,
-          createdByCommandId: commandId,
-          acceptedByCommandId: offer.proposedByCommandId
+          createdByCommandId: commandId
         });
         this.commitments.push(proposerCommitment, recipientCommitment);
         this.recordSocialCommitment(proposerCommitment);
         this.recordSocialCommitment(recipientCommitment);
+        this.acceptNegotiatedCommitment(proposerCommitment, offer.recipientActorId, commandId);
+        this.acceptNegotiatedCommitment(recipientCommitment, offer.proposerActorId, offer.proposedByCommandId);
         for (const id of this.profiles.keys()) {
           this.pushEvent(id, {
             type: "agreement-reached",
@@ -388,7 +422,6 @@ export class NegotiationWorld extends SocialWorldBase {
     promiseeActorId: string;
     amount: number;
     createdByCommandId: string;
-    acceptedByCommandId: string;
   }): Commitment {
     return {
       commitmentId: `commit:ng:${input.offer.offerId}:${input.promisorActorId}`,
@@ -398,14 +431,21 @@ export class NegotiationWorld extends SocialWorldBase {
       audienceActorIds: [input.promiseeActorId],
       proposition: `${input.promisorActorId} will submit demand ${input.amount} for accepted offer ${input.offer.offerId}.`,
       promisedAction: { actionType: "demand-exactly", amount: input.amount, condition: `accepted offer ${input.offer.offerId}` },
-      state: "accepted",
-      acceptedByActorIds: [input.promiseeActorId],
-      acceptedByCommandIds: [input.acceptedByCommandId],
+      state: "proposed",
+      acceptedByActorIds: [],
+      acceptedByCommandIds: [],
       createdByCommandId: input.createdByCommandId,
       createdAtTurn: this.round,
-      acceptedAtTurn: this.round,
       schemaVersion: 1
     };
+  }
+
+  private acceptNegotiatedCommitment(commitment: Commitment, acceptorActorId: string, commandId: string): void {
+    commitment.state = "accepted";
+    commitment.acceptedByActorIds = [acceptorActorId];
+    commitment.acceptedByCommandIds = [commandId];
+    commitment.acceptedAtTurn = this.round;
+    this.acceptSocialCommitment(commitment, acceptorActorId, commandId);
   }
 
   activation(): WorldActivation | null {
@@ -462,10 +502,6 @@ export class NegotiationWorld extends SocialWorldBase {
 
   experienceFor(actorId: string): string | undefined {
     return this.lastExperiences.get(actorId);
-  }
-
-  reconciliationOwnsOutcomeMemory(): boolean {
-    return true;
   }
 
   async sendMessage(input: {
@@ -572,6 +608,7 @@ export class NegotiationWorld extends SocialWorldBase {
       object: { demands: result.demands, payoffs, agreed },
       payload: { round: this.round, demands: result.demands, payoffs, agreed }
     });
+    this.reconcileOfferOutcomes(result, publicResult.eventId);
     for (const id of ids) {
       const own = payoffs[id];
       this.lastExperiences.set(
@@ -651,6 +688,118 @@ export class NegotiationWorld extends SocialWorldBase {
     this.emitUpdate();
   }
 
+  private reconcileOfferOutcomes(result: RoundResult, roundResultEventId: string): void {
+    for (const offer of this.offers.filter((entry) => entry.round === this.round)) {
+      const offerCommitments = this.commitments.filter((commitment) =>
+        commitment.commitmentId === `commit:ng:${offer.offerId}:${offer.proposerActorId}`
+        || commitment.commitmentId === `commit:ng:${offer.offerId}:${offer.recipientActorId}`
+      );
+      const offerAccepted = offer.state === "accepted";
+      const offerImplemented = offerAccepted
+        && offerCommitments.length === 2
+        && offerCommitments.every((commitment) => commitment.state === "fulfilled");
+      const offerResult = this.recordPublicWorldFact({
+        factKey: `negotiation-offer:${offer.offerId}`,
+        eventType: "negotiation.offer-resolved",
+        subjectActorId: offer.proposerActorId,
+        predicate: "negotiation-offer-result",
+        object: {
+          state: offer.state,
+          implemented: offerImplemented,
+          dealReached: result.agreed
+        },
+        payload: {
+          round: this.round,
+          offerId: offer.offerId,
+          proposerActorId: offer.proposerActorId,
+          recipientActorId: offer.recipientActorId,
+          proposerDemand: offer.proposerDemand,
+          recipientDemand: offer.recipientDemand,
+          state: offer.state,
+          implemented: offerImplemented,
+          dealReached: result.agreed
+        }
+      });
+      const resultingEventIds = [offerResult.eventId, roundResultEventId];
+      this.reconcileOfferDecision({
+        actorId: offer.proposerActorId,
+        commandId: offer.proposedByCommandId,
+        offer,
+        result,
+        offerAccepted,
+        offerImplemented,
+        resultingEventIds,
+        perspective: "proposer"
+      });
+      if (offer.respondedByCommandId) {
+        this.reconcileOfferDecision({
+          actorId: offer.recipientActorId,
+          commandId: offer.respondedByCommandId,
+          offer,
+          result,
+          offerAccepted,
+          offerImplemented,
+          resultingEventIds,
+          perspective: "recipient"
+        });
+      }
+    }
+  }
+
+  private reconcileOfferDecision(input: {
+    actorId: string;
+    commandId: string;
+    offer: NegotiationOffer;
+    result: RoundResult;
+    offerAccepted: boolean;
+    offerImplemented: boolean;
+    resultingEventIds: string[];
+    perspective: "proposer" | "recipient";
+  }): void {
+    const hasDecision = this.socialCausalityFor(input.actorId).decisions.some(
+      (decision) => decision.actionReceiptId === input.commandId
+    );
+    if (!hasDecision) return;
+    const actorDemand = input.result.demands[input.actorId];
+    const actorPayoff = input.result.payoffs[input.actorId];
+    const responseSummary = input.offer.state === "expired"
+      ? "expired without a response"
+      : input.offer.state === "accepted"
+        ? "was accepted"
+        : "was rejected";
+    this.reconcileSocialOutcome({
+      actionReceiptId: input.commandId,
+      actualOutcome: {
+        summary: input.perspective === "proposer"
+          ? `Offer ${input.offer.offerId} ${responseSummary}; ${input.offerImplemented ? "both promised demands were submitted" : "the proposed split was not fully implemented"}; ${input.result.agreed ? "a deal was reached" : "the round ended without a deal"}.`
+          : `${input.offer.state === "accepted" ? "Accepted" : "Rejected"} offer ${input.offer.offerId}; ${input.offerImplemented ? "both promised demands were submitted" : "the proposed split was not fully implemented"}; ${input.result.agreed ? "a deal was reached" : "the round ended without a deal"}.`,
+        metrics: {
+          round: this.round,
+          offerId: input.offer.offerId,
+          offerState: input.offer.state,
+          offerAccepted: input.offerAccepted,
+          offerImplemented: input.offerImplemented,
+          dealReached: input.result.agreed,
+          actorDemand,
+          actorPayoff
+        }
+      },
+      actualFacts: {
+        "offer-accepted": input.offerAccepted,
+        "offer-implemented": input.offerImplemented,
+        "deal-reached": input.result.agreed
+      },
+      resultingEventIds: input.resultingEventIds,
+      memoryWriteSuggestions: [{
+        summary: input.perspective === "proposer"
+          ? `In negotiation round ${this.round}, my offer ${input.offer.offerId} ${responseSummary}; it ${input.offerImplemented ? "was" : "was not"} implemented in the sealed demands.`
+          : `In negotiation round ${this.round}, I ${input.offer.state === "accepted" ? "accepted" : "rejected"} offer ${input.offer.offerId}; it ${input.offerImplemented ? "was" : "was not"} implemented in the sealed demands.`,
+        importance: input.offerAccepted ? (input.offerImplemented ? 0.88 : 0.92) : 0.66,
+        sourceIds: [input.commandId, ...input.resultingEventIds]
+      }]
+    });
+  }
+
   private summary(): string {
     const scores = [...this.scores].map(([id, score]) => `${this.profiles.get(id)?.displayName}: ${score}`).join(" · ");
     return `${this.round > this.totalRounds ? "已结束" : `第 ${this.round} / ${this.totalRounds} 轮`} · ${scores}`;
@@ -677,6 +826,7 @@ interface NegotiationOffer {
 }
 
 const NEGOTIATION_STATE_SCHEMA_VERSION = 2;
+const NEGOTIATION_OFFER_OUTCOME_KEYS = ["offer-accepted", "offer-implemented", "deal-reached"] as const;
 const NEGOTIATION_OUTCOME_KEYS = [
   "deal-reached",
   "actor-demand-paid",

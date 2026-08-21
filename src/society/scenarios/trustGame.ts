@@ -257,7 +257,11 @@ export class TrustGameWorld extends SocialWorldBase {
         reason: z.string().min(1).max(2_000),
         referencedCommitmentIds: z.array(z.string()).max(3).nullable().default(null),
         beliefPropositions: z.array(z.string().min(1).max(400)).max(3).nullable().default(null),
-        ...createStrategyActionShape({ amount: z.number().int().min(0).max((this.investment ?? 0) * this.multiplier) }, TRUST_OUTCOME_KEYS)
+        // Tools are built once per agent (participant.ts), so the per-intent
+        // cap cannot read the live investment — it would freeze at 0 and make
+        // any nonzero return impossible. The binding amount carries the real
+        // constraint; intents use the widest legal bound instead.
+        ...createStrategyActionShape({ amount: z.number().int().min(0).max(this.endowment * this.multiplier) }, TRUST_OUTCOME_KEYS)
       }).strict(),
       execute: async (input, runContext) => {
         const selected = input.candidateIntents[input.selectedIntentIndex];
@@ -381,7 +385,7 @@ export class TrustGameWorld extends SocialWorldBase {
         round: this.round,
         promisorActorId: actorId,
         promisorCharacterId: this.profiles.get(actorId)?.characterId ?? actorId,
-        audienceActorIds: [...this.profiles.keys()],
+        audienceActorIds: [...this.profiles.keys()].filter((id) => id !== actorId),
         proposition,
         promisedAction: {
           actionType,
@@ -553,10 +557,6 @@ export class TrustGameWorld extends SocialWorldBase {
     return this.lastExperiences.get(actorId);
   }
 
-  reconciliationOwnsOutcomeMemory(): boolean {
-    return true;
-  }
-
   async sendMessage(input: {
     senderId: string;
     channel: "public" | "private" | "team";
@@ -694,9 +694,17 @@ export class TrustGameWorld extends SocialWorldBase {
       commitment.settledAtTurn = this.round;
       this.settleSocialCommitment(commitment);
     }
+    const publicResult = this.recordPublicWorldFact({
+      factKey: `trust-game-round:${this.round}`,
+      eventType: "trust-game.round-resolved",
+      predicate: "trust-game-round-result",
+      object: { investorId, trusteeId, investment, multipliedAmount, returnedAmount, payoffs },
+      payload: { round: this.round, investorId, trusteeId, investment, multipliedAmount, returnedAmount, payoffs },
+      kind: "past-action"
+    });
     for (const id of this.profiles.keys()) {
-      this.pushEvent(id, { type: "investment-made", actorId: investorId, targetId: id, facts: { amount: investment }, detail: `第 ${this.round} 轮投资 ${investment} 已结算。` });
-      this.pushEvent(id, { type: "return-made", actorId: trusteeId, targetId: id, facts: { amount: returnedAmount }, detail: `第 ${this.round} 轮返还 ${returnedAmount} 已结算。` });
+      this.pushEvent(id, { type: "investment-made", actorId: investorId, targetId: id, facts: { amount: investment, resultEventId: publicResult.eventId }, detail: `第 ${this.round} 轮投资 ${investment} 已结算。` });
+      this.pushEvent(id, { type: "return-made", actorId: trusteeId, targetId: id, facts: { amount: returnedAmount, resultEventId: publicResult.eventId }, detail: `第 ${this.round} 轮返还 ${returnedAmount} 已结算。` });
     }
     const violated = roundCommitments.some((entry) => entry.state === "violated");
     const allFulfilled = roundCommitments.length > 0 && roundCommitments.every((entry) => entry.state === "fulfilled");
@@ -745,7 +753,8 @@ export class TrustGameWorld extends SocialWorldBase {
             : `As trustee in round ${this.round}, ${investorId} transferred ${investment}; I returned ${returnedAmount}.`,
           importance: citedCommitments.some((entry) => entry.state === "violated") ? 0.9 : 0.65,
           sourceIds: [commandId, ...citedCommitmentIds]
-        }]
+        }],
+        resultingEventIds: [publicResult.eventId]
       });
     };
     reconcile(investorId, this.investmentCommandId, "investor");
