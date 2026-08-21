@@ -32,7 +32,7 @@ const templateSchema = z.object({
   characterIds: z.array(z.string().min(1).max(120)).max(12).optional(),
   rounds: z.number().int().positive().max(20).optional(),
   mode: z.enum(["ai", "human"]).default("ai"),
-  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("xhigh"),
+  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
   season: z.enum(["season", "one-shot"]).default("season")
 }).strict();
 

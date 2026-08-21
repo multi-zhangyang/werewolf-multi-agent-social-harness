@@ -189,7 +189,7 @@ Society 是一个面向观众的、可观察的多 Agent 社会世界。
 - 把 Agent 调成统一的理性博弈机器人；
 - 把每局都导演成高潮不断的戏剧；
 - 用更长的内心独白代替可验证的决策因果；
-- 暴露原始 chain-of-thought；
+- 向 public/postgame 视角暴露 provider reasoning，或将其写入持久化历史；
 - 让导演安排谁应该指控谁、结盟或背叛；
 - 让基础设施 Agent 替参与者做战略判断；
 - 用正则从自然语言中猜测绑定行动；
@@ -404,7 +404,16 @@ observe(worldState, viewerContext) -> AuthorizedObservation
 
 ## 12. 推理隐私不变量
 
-不得存储或展示原始隐藏 chain-of-thought。
+不得将 provider reasoning 内容写入长期记忆、checkpoint、归档或 replay，也不得尝试提取 provider 没有返回的内部隐藏状态。
+
+当 provider 在专用字段或专用流事件中明确返回 `reasoning_content`、`reasoning` 或等价内容时，允许将其作为**仅当前连接有效的实时界面数据**展示，但必须满足：
+
+- 仅全知观察席或该 Agent 自己的 POV 可见；
+- public 与 postgame 视角不可见；
+- 与最终输出、ThoughtBeat、DecisionRecord 和工具输出明确分区；
+- 默认折叠，内容区域独立滚动；
+- 不进入持久化、回放、长期记忆、世界事件或社会因果账本；
+- 连接结束或短暂保留期结束后清除。
 
 允许保存和展示：
 
@@ -736,7 +745,7 @@ interface Provenance {
 
 Agent 运行、检索、上下文、工具、延迟和安全摘要。
 
-不得包含原始隐藏 chain-of-thought。
+持久化的 AgentTraceEvent 不得包含 provider reasoning 内容；实时 reasoning 使用独立、非持久化事件。
 
 ### 18.4 PresentationEvent
 
@@ -3858,7 +3867,7 @@ measure full candidate context
 
 - [ ] 明确标注来源类型；
 - [ ] public 与 omniscient 展示不同；
-- [ ] 不展示原始 chain-of-thought；
+- [ ] provider reasoning 仅向全知观察席或对应 Agent POV 实时展示；
 - [ ] 不用当前全局状态伪造历史 POV；
 - [ ] 有方向关系不被合并；
 - [ ] 强社会标签有 canonical record；
@@ -3866,6 +3875,7 @@ measure full candidate context
 - [ ] director 只创建 presentation event；
 - [ ] UI 缓存不会跨 viewer 泄漏；
 - [ ] 回放顺序使用 logical sequence。
+- [ ] 实时 reasoning 默认折叠，且不进入 checkpoint、归档和 replay。
 
 ## 24.12 故障修复
 

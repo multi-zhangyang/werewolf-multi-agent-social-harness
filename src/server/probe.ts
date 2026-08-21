@@ -11,11 +11,20 @@
  * `maxOutputTokens` capability stays "unknown" — nothing depends on it.
  */
 import type { CapabilityState, ModelCapabilities } from "../society/models";
+import {
+  reasoningFallbackFetch,
+  type EffectiveReasoningEffort,
+  type ReasoningFallbackNotice
+} from "../society/models/reasoning-fallback";
+
+export type ProbeReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type ProbeEffectiveReasoningEffort = ProbeReasoningEffort | "provider-default";
 
 export interface CapabilityProbeInput {
   baseURL: string;
   apiKey: string;
   modelId: string;
+  reasoningEffort?: ProbeReasoningEffort;
 }
 
 export interface CapabilityProbeResult {
@@ -23,6 +32,14 @@ export interface CapabilityProbeResult {
   message: string;
   capabilities: ModelCapabilities;
   detail: Array<{ probe: string; result: string }>;
+  requestedReasoningEffort: ProbeEffectiveReasoningEffort;
+  effectiveReasoningEffort: ProbeEffectiveReasoningEffort;
+  reasoningFallbacks: Array<{
+    from: "xhigh" | "high";
+    to: "high" | "provider-default";
+    status: number;
+    reason: string;
+  }>;
 }
 
 const TIMEOUT = 25_000;
@@ -43,21 +60,67 @@ export async function probeCapabilities(input: CapabilityProbeInput): Promise<Ca
     maxOutputTokens: "unknown"
   };
   const detail: CapabilityProbeResult["detail"] = [];
+  const failures: string[] = [];
+  const requestedReasoningEffort = input.reasoningEffort ?? "provider-default";
+  const fallbackNotices: ReasoningFallbackNotice[] = [];
+  const negotiatedFetch = reasoningFallbackFetch({
+    useCapabilityCache: false,
+    onNotice: (notice) => fallbackNotices.push(notice)
+  });
+  const requestedTuning = reasoningTuning(requestedReasoningEffort);
 
   const minimal = await chat(input, {
-    messages: [{ role: "user", content: "ping" }]
+    messages: [{ role: "user", content: "ping" }],
+    ...requestedTuning
+  }, negotiatedFetch);
+  const effectiveReasoningEffort = resolveEffectiveReasoningEffort(
+    requestedReasoningEffort,
+    fallbackNotices
+  );
+  const effectiveTuning = reasoningTuning(effectiveReasoningEffort);
+  const reasoningFallbacks = fallbackNotices.map((notice) => ({
+    from: notice.requestedEffort,
+    to: notice.effectiveEffort,
+    status: notice.status,
+    reason: notice.message
+  }));
+  detail.push({
+    probe: "reasoning_effort",
+    result: requestedReasoningEffort === effectiveReasoningEffort
+      ? `accepted: ${effectiveReasoningEffort}`
+      : `requested ${requestedReasoningEffort}, using ${effectiveReasoningEffort}`
   });
   if (minimal.status === 200) {
-    capabilities.streaming = "yes";
+    capabilities.reasoning = requestedReasoningEffort === "provider-default"
+      ? "unknown"
+      : effectiveReasoningEffort === "provider-default"
+        ? "no"
+        : "yes";
     detail.push({ probe: "minimal", result: "ok" });
     if (minimal.body.usage) detail.push({ probe: "usage", result: "returned" });
     else detail.push({ probe: "usage", result: "absent" });
   } else if (minimal.status === 400 || minimal.status === 404 || minimal.status === 422) {
     detail.push({ probe: "minimal", result: `HTTP ${minimal.status}` });
-    return { ok: false, message: `最小补全请求被拒绝（HTTP ${minimal.status}）：${minimal.text.slice(0, 160)}`, capabilities, detail };
+    return {
+      ok: false,
+      message: `最小补全请求被拒绝（HTTP ${minimal.status}）：${sanitizeProviderError(minimal.text)}`,
+      capabilities,
+      detail,
+      requestedReasoningEffort,
+      effectiveReasoningEffort,
+      reasoningFallbacks
+    };
   } else {
     detail.push({ probe: "minimal", result: `HTTP ${minimal.status}` });
-    return { ok: false, message: `最小补全请求失败（HTTP ${minimal.status}）：${minimal.text.slice(0, 160)}`, capabilities, detail };
+    return {
+      ok: false,
+      message: `最小补全请求失败（HTTP ${minimal.status}）：${sanitizeProviderError(minimal.text)}`,
+      capabilities,
+      detail,
+      requestedReasoningEffort,
+      effectiveReasoningEffort,
+      reasoningFallbacks
+    };
   }
 
   // Tools: the agent runtime's core capability.
@@ -71,50 +134,42 @@ export async function probeCapabilities(input: CapabilityProbeInput): Promise<Ca
         parameters: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] }
       }
     }],
-    tool_choice: "required"
+    tool_choice: "required",
+    ...effectiveTuning
   });
   if (tooled.status === 200) {
     const calls = tooled.body.choices?.[0]?.message?.tool_calls;
     capabilities.tools = calls?.length ? "yes" : "unknown";
     detail.push({ probe: "tools", result: calls?.length ? "tool_calls returned" : "no tool call" });
+    if (!calls?.length) failures.push("工具请求成功，但响应中没有 tool_calls");
   } else {
     capabilities.tools = "no";
     detail.push({ probe: "tools", result: `HTTP ${tooled.status}` });
+    failures.push(`工具调用 HTTP ${tooled.status}：${sanitizeProviderError(tooled.text)}`);
   }
 
   // Streaming: read at least one chunk from a streamed completion.
   const streamed = await chatStream(input, {
     messages: [{ role: "user", content: "Say hello." }],
     stream: true,
-    stream_options: { include_usage: true }
+    stream_options: { include_usage: true },
+    ...effectiveTuning
   });
   if (streamed.ok) {
     capabilities.streaming = streamed.sawDelta ? "yes" : "unknown";
     detail.push({ probe: "streaming", result: streamed.sawDelta ? "delta streamed" : "no delta" });
+    if (!streamed.sawDelta) failures.push("流式请求成功，但没有收到文字 delta");
   } else {
     capabilities.streaming = streamed.rejectedByParam ? "no" : "unknown";
     detail.push({ probe: "streaming", result: streamed.text.slice(0, 80) });
-  }
-
-  // Reasoning-effort parameter acceptance.
-  const reasoning = await chat(input, {
-    messages: [{ role: "user", content: "ping" }],
-    reasoning_effort: "low"
-  });
-  if (reasoning.status === 200) {
-    capabilities.reasoning = "yes";
-    detail.push({ probe: "reasoning_effort", result: "accepted" });
-  } else if (reasoning.status === 400 || reasoning.status === 422) {
-    capabilities.reasoning = "no";
-    detail.push({ probe: "reasoning_effort", result: `HTTP ${reasoning.status}` });
-  } else {
-    detail.push({ probe: "reasoning_effort", result: `HTTP ${reasoning.status}` });
+    failures.push(`流式输出失败：${sanitizeProviderError(streamed.text)}`);
   }
 
   // Structured output (JSON mode).
   const json = await chat(input, {
     messages: [{ role: "user", content: "Return {\"ok\": true} as JSON." }],
-    response_format: { type: "json_object" }
+    response_format: { type: "json_object" },
+    ...effectiveTuning
   });
   if (json.status === 200) {
     capabilities.structuredOutput = "yes";
@@ -126,24 +181,31 @@ export async function probeCapabilities(input: CapabilityProbeInput): Promise<Ca
     detail.push({ probe: "json_mode", result: `HTTP ${json.status}` });
   }
 
-  const ok = capabilities.tools !== "no";
+  const ok = capabilities.tools === "yes" && capabilities.streaming === "yes";
   return {
     ok,
     message: ok
-      ? "探测完成：最小补全、工具调用、流式、推理参数与 JSON 模式均已验证。"
-      : "探测完成：该模型对工具调用的支持未能确认，Agent 需要工具才能行动。",
+      ? `测试通过：补全、工具与流式请求已完成。思考强度请求 ${requestedReasoningEffort}，实际使用 ${effectiveReasoningEffort}。`
+      : `测试失败：${failures.join("；") || "模型没有完成必要的工具与流式响应"}。思考强度请求 ${requestedReasoningEffort}，实际使用 ${effectiveReasoningEffort}。`,
     capabilities,
-    detail
+    detail,
+    requestedReasoningEffort,
+    effectiveReasoningEffort,
+    reasoningFallbacks
   };
 }
 
-async function chat(input: CapabilityProbeInput, body: Record<string, unknown>): Promise<{
+async function chat(
+  input: CapabilityProbeInput,
+  body: Record<string, unknown>,
+  fetchImpl: typeof fetch = fetch
+): Promise<{
   status: number;
   text: string;
   body: Record<string, any>;
 }> {
   try {
-    const response = await fetch(`${input.baseURL}/chat/completions`, {
+    const response = await fetchImpl(`${input.baseURL}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -163,14 +225,18 @@ async function chat(input: CapabilityProbeInput, body: Record<string, unknown>):
   }
 }
 
-async function chatStream(input: CapabilityProbeInput, body: Record<string, unknown>): Promise<{
+async function chatStream(
+  input: CapabilityProbeInput,
+  body: Record<string, unknown>,
+  fetchImpl: typeof fetch = fetch
+): Promise<{
   ok: boolean;
   sawDelta: boolean;
   rejectedByParam: boolean;
   text: string;
 }> {
   try {
-    const response = await fetch(`${input.baseURL}/chat/completions`, {
+    const response = await fetchImpl(`${input.baseURL}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -258,4 +324,27 @@ export function capabilitySummary(capabilities: ModelCapabilities): string {
 
 export function capabilityStateLabel(state: CapabilityState): string {
   return state === "yes" ? "支持" : state === "no" ? "不支持" : "未验证";
+}
+
+function reasoningTuning(effort: ProbeEffectiveReasoningEffort): Record<string, unknown> {
+  return effort === "provider-default" ? {} : { reasoning_effort: effort };
+}
+
+function resolveEffectiveReasoningEffort(
+  requested: ProbeEffectiveReasoningEffort,
+  notices: ReasoningFallbackNotice[]
+): ProbeEffectiveReasoningEffort {
+  const fallback = notices.at(-1)?.effectiveEffort as EffectiveReasoningEffort | undefined;
+  return fallback ?? requested;
+}
+
+function sanitizeProviderError(message: string): string {
+  const cleaned = message
+    .replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]")
+    .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]")
+    .replace(/https?:\/\/[^\s"']+/g, "[endpoint]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+  return cleaned || "提供商没有返回可读的错误信息。";
 }

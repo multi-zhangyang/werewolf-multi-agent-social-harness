@@ -207,7 +207,7 @@ const createRoomSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   mode: z.enum(["ai", "human"]).default("ai"),
   playerName: z.string().trim().min(1).max(40).optional(),
-  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("xhigh"),
+  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
   season: z.enum(["season", "one-shot"]).default("season")
 }).strict().superRefine((input, issueContext) => {
   if (input.mode === "human" && !input.playerName) {
@@ -283,8 +283,15 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
 
   app.post("/api/model-config/probe", (request, response, next) => {
     if (!requireGlobalOperator(request, response, context.auth)) return;
-    const profileId = typeof request.body?.modelProfileId === "string" ? request.body.modelProfileId : "";
-    const profile = context.models.modelProfile(profileId);
+    const probeInput = z.object({
+      modelProfileId: z.string().min(1).max(120),
+      reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).optional()
+    }).strict().safeParse(request.body ?? {});
+    if (!probeInput.success) {
+      response.status(400).json({ error: "MODEL_TEST_INPUT_INVALID", message: "模型测试参数无效。" });
+      return;
+    }
+    const profile = context.models.modelProfile(probeInput.data.modelProfileId);
     if (!profile) {
       response.status(404).json({ error: "MODEL_PROFILE_MISSING", message: "The requested model profile does not exist." });
       return;
@@ -297,7 +304,8 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     void probeCapabilities({
       baseURL: provider.baseURL,
       apiKey: resolveKeyRef(provider.apiKeyRef),
-      modelId: profile.modelId
+      modelId: profile.modelId,
+      reasoningEffort: probeInput.data.reasoningEffort
     }).then((result) => {
       const merged = { ...profile, capabilities: mergeProbeResult(profile.capabilities, result.capabilities) };
       context.models.upsertModelProfile(merged);
@@ -725,6 +733,9 @@ const modelConfigSchema = z.object({
     modelId: z.string().min(1).max(180),
     contextWindow: z.number().int().positive().max(100_000_000),
     enabled: z.boolean(),
+    defaults: z.object({
+      reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).optional()
+    }).strict().optional(),
     capabilities: z.object({
       streaming: z.enum(["yes", "no", "unknown"]),
       tools: z.enum(["yes", "no", "unknown"]),
@@ -826,7 +837,13 @@ function applyModelConfig(context: ServerContext, input: z.infer<typeof modelCon
     for (const update of input.modelProfiles) {
       const existing = context.models.modelProfile(update.id);
       const merged: ModelProfile = existing
-        ? { ...existing, ...update }
+        ? {
+            ...existing,
+            ...update,
+            defaults: update.defaults
+              ? mergeReasoningDefaults(existing.defaults, update.defaults)
+              : existing.defaults
+          }
         : {
             id: update.id,
             name: update.name,
@@ -835,7 +852,9 @@ function applyModelConfig(context: ServerContext, input: z.infer<typeof modelCon
             contextWindow: update.contextWindow,
             contextWindowSource: "manual",
             capabilities: defaultCapabilities(),
-            defaults: {},
+            defaults: update.defaults
+              ? mergeReasoningDefaults({ reasoningEffort: "high" }, update.defaults)
+              : { reasoningEffort: "high" },
             contextPolicyId: "policy-balanced-auto",
             enabled: update.enabled
           };
@@ -863,6 +882,16 @@ function applyModelConfig(context: ServerContext, input: z.infer<typeof modelCon
   }
   persistRegistry(context.models);
   return publicModelConfig(context);
+}
+
+function mergeReasoningDefaults(
+  current: ModelProfile["defaults"],
+  update: { reasoningEffort?: "low" | "medium" | "high" | "xhigh" }
+): ModelProfile["defaults"] {
+  const next = { ...current };
+  if (update.reasoningEffort) next.reasoningEffort = update.reasoningEffort;
+  else delete next.reasoningEffort;
+  return next;
 }
 
 function resolveKeyRef(ref: string | undefined): string {

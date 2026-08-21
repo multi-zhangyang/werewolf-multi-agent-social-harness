@@ -53,7 +53,7 @@ Authorized Observation
 4. 欺骗是否发生、是否被相信、是否改变行动，必须由社会因果链证明；
 5. CFR、PSRO 和 MCTS 只用于运行时策略选择、有限搜索或评测，不更新模型权重；
 6. 所有策略和评测都绑定不可变配置快照，而不是所谓“模型 checkpoint”；
-7. 不保存或展示原始 chain-of-thought；
+7. provider 明确返回的 reasoning 内容只做受限、默认折叠的实时展示，不保存、不回放；
 8. 不以单局胜率、精彩台词或模型自述证明机制有效。
 
 ---
@@ -101,10 +101,16 @@ Society 是一个面向观众的、可观察的多 Agent 社会世界。游戏�
 - provider 返回的安全 reasoning summary；
 - 结果对账和有来源的经验。
 
+允许仅在当前连接中实时展示、但禁止记录：
+
+- Chat Completions 明确返回的 `reasoning_content` 或 `reasoning`；
+- Responses API 明确返回的 reasoning 流事件；
+- 仅全知观察席或对应 Agent POV 可见，默认折叠，连接结束后清除。
+
 禁止记录：
 
 - 原始隐藏 chain-of-thought；
-- Chat Completions 的 `reasoning_content`；
+- provider 未返回、需要绕过接口提取的内部状态；
 - 未授权人物的私有心智；
 - 把模型自由文本当作世界事实；
 - 把导演标题或 UI 标签反写到规范历史。
@@ -194,9 +200,9 @@ Society 是一个面向观众的、可观察的多 Agent 社会世界。游戏�
 | 全局权限回退 | 未配置 operator token 时，任意有效 room owner token 可获得全局 operator 能力 | 明确部署模式；生产模式必须使用独立 operator |
 | 归档失败吞错 | `RoomArchiveStore.save/load` 对异常静默返回 | 写入失败可观测、dirty 不清除、损坏状态可诊断 |
 | 关系图无向合并 | `network.tsx` 使用两侧关系的 `Math.max` 合并边 | 展示 A→B 与 B→A 两条独立关系 |
-| reasoning 语义 | 当前代码不会转发 Chat Completions 原始 `reasoning_content`，只接收 Responses reasoning summary；但事件仍命名为 `agent.reasoning` | 重命名或显式标记为 summary，并持续验证 SSE、归档和 POV 权限 |
+| reasoning 语义 | 当前代码通过独立 `agent.reasoning-content` 事件实时转发 provider 明确返回的 reasoning 字段；public/postgame 过滤，checkpoint/replay 排除 | 保持默认折叠、短暂保留、视角隔离和非持久化边界 |
 
-最后一项是对旧审计表述的重要修正：**“当前仍暴露原始 reasoning”不是 `0af7a6a` 可由源码证实的事实。** 当前风险是命名、权限和持久化语义可能使安全摘要被误认作原始推理，而不是已经确认的原始 CoT 泄漏。
+reasoning 内容是临时观战数据，不属于世界事实、Agent 记忆或可恢复历史。provider 没有返回的内部状态不得通过其他手段提取。
 
 ### 3.5 当前门禁状态
 
@@ -1059,7 +1065,7 @@ U_i
 - participant、owner、operator 权限彻底分离；
 - archive 写入失败可观测且可恢复；
 - 停止把每个 `finalOutput` 自动写入长期记忆；
-- 将 `agent.reasoning` 收口为明确的 reasoning-summary 语义；
+- 将实时 provider reasoning 收口为独立、受限且不进入归档/replay 的事件；
 - 修复 lint、unit、security 门禁，使 CI 全绿。
 
 退出标准：安全、恢复、权限和推理隐私没有已知 P0 失败。
@@ -1176,7 +1182,7 @@ message
 
 ### 14.6 把长推理当作可观测性
 
-原始 CoT 既不安全也不可作为稳定接口。应展示有限 ThoughtBeat、证据、候选意图和结果对账。
+provider 明确返回的 reasoning 内容可以作为临时观战数据展示，但不能成为稳定事实接口或持久化历史。UI 默认折叠，并与 ThoughtBeat、证据、候选意图和结果对账分区。
 
 ### 14.7 在真实隐藏状态上做搜索
 

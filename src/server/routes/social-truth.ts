@@ -13,7 +13,7 @@ const crossPlayPlanSchema = z.object({
   strategyProfileSnapshotIds: z.array(z.string().trim().min(1).max(180)).min(2).max(64).optional(),
   repetitions: z.number().int().min(1).max(8).default(1),
   roundsByScenario: z.record(z.enum(scenarioIds), z.number().int().min(1).max(20)).optional(),
-  requestedReasoningEffort: z.enum(["xhigh", "high", "provider-default"]).default("xhigh"),
+  requestedReasoningEffort: z.enum(["xhigh", "high", "provider-default"]).default("high"),
   budget: z.object({
     maxRuns: z.number().int().min(1).max(400).default(120),
     maxConcurrentRooms: z.number().int().min(1).max(8).default(1),
