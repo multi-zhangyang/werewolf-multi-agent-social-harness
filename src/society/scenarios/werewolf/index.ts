@@ -298,6 +298,15 @@ export class WerewolfWorld extends SocialWorldBase {
     });
   }
 
+  /**
+   * Hidden-choice phases seal the public token stream (§8.3): a wolf's night
+   * deliberation or a voter's reasoning would reveal the unresolved choice to
+   * spectators. Only the open day discussion streams publicly.
+   */
+  publicStreamingAllowed(): boolean {
+    return this.phase === "day-discussion";
+  }
+
   observe(actorId: string): AgentObservation {
     const self = this.requireProfile(actorId);
     const role = this.roles.get(actorId)!;

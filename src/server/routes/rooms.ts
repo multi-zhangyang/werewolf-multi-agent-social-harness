@@ -19,7 +19,7 @@ import {
 } from "../auth";
 import { RoomArchiveError, type RoomCheckpoint } from "../../society/persistence";
 import { getProviderSettings, publicSettings, saveProviderSettings, testProviderSettings, writeEnvKey } from "../settings";
-import { mergeProbeResult, probeCapabilities } from "../probe";
+import { fetchRemoteModels, mergeProbeResult, probeCapabilities } from "../probe";
 
 function sanitizeEnvName(id: string): string {
   return id.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase();
@@ -61,6 +61,19 @@ function resolveViewer(
     return { mode: "public" };
   }
   return { mode: "public", privileged: authority.owner || isOperator };
+}
+
+/** What the UI should display as this connection's real information boundary. */
+function viewerDescription(viewer: SpectatorViewer): {
+  mode: SpectatorMode;
+  privileged: boolean;
+  agentId?: string;
+} {
+  return {
+    mode: viewer.mode,
+    privileged: viewer.privileged === true,
+    ...(viewer.agentId ? { agentId: viewer.agentId } : {})
+  };
 }
 
 /** Owner / strict-operator gate for room control operations. */
@@ -281,6 +294,20 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     response.json(publicModelConfig(context));
   });
 
+  // Live model catalog from the provider itself (GET {baseURL}/models) so the
+  // settings UI can offer a pick list instead of hand-typed model ids.
+  app.get("/api/model-config/providers/:providerId/remote-models", (request, response) => {
+    if (!requireGlobalOperator(request, response, context.auth)) return;
+    const provider = context.models.providerProfile(request.params.providerId);
+    if (!provider) {
+      response.status(404).json({ error: "PROVIDER_PROFILE_MISSING", message: "The requested provider does not exist." });
+      return;
+    }
+    void fetchRemoteModels({ baseURL: provider.baseURL, apiKey: resolveKeyRef(provider.apiKeyRef) })
+      .then((result) => response.status(result.ok ? 200 : 502).json(result))
+      .catch(() => response.status(502).json({ ok: false, modelIds: [], message: "获取模型列表失败，请稍后重试。" }));
+  });
+
   app.post("/api/model-config/probe", (request, response, next) => {
     if (!requireGlobalOperator(request, response, context.auth)) return;
     const probeInput = z.object({
@@ -478,7 +505,11 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     }
     if (token) setTokenCookie(response, token);
     const isOperator = context.auth.isOperatorToken(token);
-    response.json(room.snapshotForViewer(resolveViewer(request, room, authority, isOperator)));
+    const viewer = resolveViewer(request, room, authority, isOperator);
+    // The effective viewer rides along with every snapshot so the UI shows
+    // the boundary actually granted — never the one requested and silently
+    // downgraded (§18.2).
+    response.json({ ...room.snapshotForViewer(viewer), viewer: viewerDescription(viewer) });
   });
 
   app.post("/api/rooms/:roomId/pause", (request, response) => {
@@ -687,7 +718,10 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     const writeSnapshot = (): void => {
       if (response.writableEnded) return;
       lastSnapshotAt = Date.now();
-      writeEvent(response, "snapshot", room.snapshotForViewer(viewer));
+      writeEvent(response, "snapshot", {
+        ...room.snapshotForViewer(viewer),
+        viewer: viewerDescription(viewer)
+      });
     };
     writeSnapshot();
 

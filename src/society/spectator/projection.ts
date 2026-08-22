@@ -38,8 +38,11 @@ export function projectEventFor(event: AgentRuntimeEvent, viewer: SpectatorViewe
 
 function projectPublic(event: AgentRuntimeEvent, privileged: boolean): AgentRuntimeEvent | undefined {
   switch (event.type) {
-    // Private cognition and state never leaves the public seat.
+    // Private cognition and state never leaves the public seat. Token streams
+    // are public during open phases (watching the speech being written is the
+    // product) but sealed while a hidden choice is being made (§8.3).
     case "agent.delta":
+      return event.sealed ? undefined : event;
     case "agent.reasoning-content":
     case "agent.reasoning-summary":
     case "agent.pov-frame":
@@ -52,7 +55,12 @@ function projectPublic(event: AgentRuntimeEvent, privileged: boolean): AgentRunt
     case "runtime.notice":
       return privileged ? event : undefined;
     case "agent.tool":
-      return undefined;
+      // Open phases: the pulse of "a binding action is running" is public,
+      // but tool names/summaries stay privileged (they can hint at private
+      // strategies, e.g. a logged deception plan). Sealed phases hide it all.
+      return event.sealed
+        ? undefined
+        : { ...event, toolName: "", label: undefined, safeInputSummary: undefined, safeOutputSummary: undefined };
     case "world.action":
       return PUBLIC_ACTIONS.has(event.action) ? event : undefined;
     default:

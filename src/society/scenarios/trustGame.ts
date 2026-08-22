@@ -194,10 +194,10 @@ export class TrustGameWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const commitment = tool({
       name: "make_commitment",
-      description: `During negotiation, propose a public promise to return or invest at least N. It becomes settlement-eligible only after the recipient explicitly accepts it; then the world checks the sealed action and records fulfillment or violation.`,
+      description: `During negotiation, propose a public promise the world will check. Two forms: "return-at-least" fixes an absolute amount, "return-ratio" promises a percentage of whatever the investor actually transfers (e.g. amount 150 = return at least 1.5x their investment), so you can commit before knowing their stake. It becomes settlement-eligible only after the recipient explicitly accepts it; then the world checks the sealed action and records fulfillment or violation.`,
       parameters: z.object({
         proposition: z.string().min(1).max(400),
-        actionType: z.enum(["return-at-least", "invest-at-least"]),
+        actionType: z.enum(["return-at-least", "invest-at-least", "return-ratio"]),
         amount: z.number().int().min(0).max(this.endowment * this.multiplier),
         condition: z.string().min(1).max(400).nullable().default(null)
       }).strict(),
@@ -362,14 +362,17 @@ export class TrustGameWorld extends SocialWorldBase {
     if (action === "make_commitment") {
       if (this.phase !== "discussion") throw new Error("COMMITMENT_NOT_OPEN: Commitments can only be declared during the negotiation.");
       const actionType = value.actionType;
-      if (actionType !== "return-at-least" && actionType !== "invest-at-least") {
-        throw new Error("COMMITMENT_ACTION_INVALID: actionType must be return-at-least or invest-at-least.");
+      if (actionType !== "return-at-least" && actionType !== "invest-at-least" && actionType !== "return-ratio") {
+        throw new Error("COMMITMENT_ACTION_INVALID: actionType must be return-at-least, invest-at-least, or return-ratio.");
       }
-      const expectedActor = actionType === "return-at-least" ? trusteeId : investorId;
+      const expectedActor = actionType === "invest-at-least" ? investorId : trusteeId;
       if (actorId !== expectedActor) {
-        throw new Error(`ROLE_MISMATCH: Only the ${actionType === "return-at-least" ? "trustee" : "investor"} can promise that action.`);
+        throw new Error(`ROLE_MISMATCH: Only the ${actionType === "invest-at-least" ? "investor" : "trustee"} can promise that action.`);
       }
-      const cap = actionType === "return-at-least" ? this.endowment * this.multiplier : this.endowment;
+      if (actionType === "return-ratio" && (amount <= 0 || amount > 100 * this.multiplier)) {
+        throw new Error(`COMMITMENT_RATIO_INVALID: A return-ratio promise is a percent from 1 to ${100 * this.multiplier}.`);
+      }
+      const cap = actionType === "return-ratio" ? 100 * this.multiplier : actionType === "return-at-least" ? this.endowment * this.multiplier : this.endowment;
       if (amount < 0 || amount > cap) throw new Error(`COMMITMENT_AMOUNT_INVALID: A ${actionType} promise must be 0 to ${cap}.`);
       const proposition = typeof value.proposition === "string" ? value.proposition.trim() : "";
       if (!proposition) throw new Error("COMMITMENT_PROPOSITION_REQUIRED: Say in words what you promise.");
@@ -510,7 +513,7 @@ export class TrustGameWorld extends SocialWorldBase {
           instructionFor: (actorId) => wave === 1
             ? actorId === investorId
               ? "You are the investor. State or conceal what level of reciprocity would justify a larger investment. Speak once before acting."
-              : "You are the trustee. You may publicly declare a binding promise with make_commitment (the world will check it against your return), challenge the investor's assumptions, or preserve ambiguity. Speak once."
+              : "You are the trustee. You may publicly declare a binding promise with make_commitment — an absolute amount (return-at-least) or a percent of whatever the investor transfers (return-ratio, e.g. amount 150 = return 1.5x their stake) — and the world will check it against your sealed return. Challenge the investor's assumptions, or preserve ambiguity. Speak once."
             : "The negotiation is live. React to what was actually said: answer questions, test promises, or hold your ground. You may stay silent."
         };
       }
@@ -668,23 +671,29 @@ export class TrustGameWorld extends SocialWorldBase {
     // promise-kept / promise-broken labels (§8.3).
     const roundCommitments = this.commitments.filter((entry) => entry.round === this.round && entry.state === "accepted");
     for (const commitment of roundCommitments) {
-      if (commitment.promisedAction.actionType !== "return-at-least" && commitment.promisedAction.actionType !== "invest-at-least") continue;
-      const promisedAmount = commitment.promisedAction.amount;
-      const actual = commitment.promisedAction.actionType === "return-at-least" ? returnedAmount : investment;
-      const fulfilled = actual >= promisedAmount;
+      const actionType = commitment.promisedAction.actionType;
+      if (actionType !== "return-at-least" && actionType !== "invest-at-least" && actionType !== "return-ratio") continue;
+      const promised = commitment.promisedAction.amount;
+      // A ratio promise (percent of whatever was actually transferred) stays
+      // checkable even when the investor's stake was unknown at proposal time.
+      const actual = actionType === "return-ratio"
+        ? returnedAmount
+        : actionType === "return-at-least" ? returnedAmount : investment;
+      const threshold = actionType === "return-ratio" ? (investment * promised) / 100 : promised;
+      const fulfilled = actual >= threshold;
       commitment.state = fulfilled ? "fulfilled" : "violated";
       commitment.settledAtTurn = this.round;
-      commitment.settledByCommandId = commitment.promisedAction.actionType === "return-at-least" ? this.returnCommandId : this.investmentCommandId;
+      commitment.settledByCommandId = actionType === "invest-at-least" ? this.investmentCommandId : this.returnCommandId;
       this.settleSocialCommitment(commitment);
       for (const id of this.profiles.keys()) {
         this.pushEvent(id, {
           type: fulfilled ? "commitment-fulfilled" : "commitment-violated",
           actorId: commitment.promisorActorId,
           targetId: id,
-          facts: { commitmentId: commitment.commitmentId, promised: promisedAmount, actual },
+          facts: { commitmentId: commitment.commitmentId, promised: threshold, actual },
           detail: fulfilled
             ? `承诺兑现：${commitment.promisorActorId} 承诺「${commitment.proposition}」，实际 ${actual}。`
-            : `承诺破裂：${commitment.promisorActorId} 承诺「${commitment.proposition}」，实际只有 ${actual}。`
+            : `承诺破裂：${commitment.promisorActorId} 承诺「${commitment.proposition}」，实际只有 ${actual}（要求 ${threshold}）。`
         });
       }
     }
@@ -839,7 +848,7 @@ function phaseLabel(phase: Phase): string {
 }
 
 function situationFor(phase: Phase, role: "investor" | "trustee", investment: number | undefined, multiplier: number): string {
-  if (phase === "discussion") return `You are the ${role}. Promises declared through make_commitment are checked against actions by the world; roles will reverse next round.`;
+  if (phase === "discussion") return `You are the ${role}. A promise declared through make_commitment is checked against the sealed action by the world — a return-ratio promise (percent of whatever is actually transferred) can be made before the stake is known; roles will reverse next round.`;
   if (phase === "investment") return role === "investor" ? "Choose how much control to transfer to the trustee." : "The investor is deciding how much to trust you.";
   return role === "trustee" ? `The investment was ${investment ?? 0}, giving you ${(investment ?? 0) * multiplier} to allocate.` : "The trustee is deciding how much of the multiplied investment to return.";
 }

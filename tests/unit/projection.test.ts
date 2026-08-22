@@ -89,12 +89,24 @@ check("omniscient passes everything through unchanged", () => {
   assert.equal(projectEventFor(reasoning, omniscient), undefined, "raw reasoning never projects");
 });
 
-check("public seat never receives private cognition or private tools", () => {
+check("public seat never receives private cognition; tool pulses arrive redacted", () => {
   assert.equal(projectEventFor(reasoning, publicView), undefined);
   assert.equal(projectEventFor(thought, publicView), undefined);
   assert.equal(projectEventFor(pressure, publicView), undefined);
-  assert.equal(projectEventFor(tool, publicView), undefined, "hidden tools stay hidden");
-  assert.equal(projectEventFor(publicTool, publicView), undefined, "tool traces stay private in public");
+  // Open phases keep the "a binding action is running" pulse public, but the
+  // tool identity and summaries are privileged (they hint at strategies).
+  const pulse = projectEventFor(tool, publicView);
+  assert.ok(pulse && pulse.type === "agent.tool", "unsealed tool becomes an activity pulse");
+  assert.equal((pulse as { toolName: string }).toolName, "", "tool names stay private in public");
+  assert.equal((pulse as { label?: string }).label, undefined);
+  assert.equal((pulse as { safeInputSummary?: string }).safeInputSummary, undefined);
+  assert.equal((pulse as { safeOutputSummary?: string }).safeOutputSummary, undefined);
+  assert.equal(projectEventFor(publicTool, publicView)?.type, "agent.tool");
+  assert.equal(
+    projectEventFor({ ...tool, sealed: true }, publicView),
+    undefined,
+    "sealed-phase tools stay hidden entirely"
+  );
   assert.equal(projectEventFor(worldAction, publicView), undefined, "hidden world actions stay hidden");
   assert.equal(projectEventFor(publicAction, publicView), publicAction, "public actions flow");
   assert.equal(projectEventFor(cue, publicView), cue, "cues stay visible");

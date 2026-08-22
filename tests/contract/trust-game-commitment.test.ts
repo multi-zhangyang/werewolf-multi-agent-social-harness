@@ -238,3 +238,43 @@ it("after the role swap, round two observes round one's settlement", async () =>
   const ledger = commitments(world);
   assert.equal(ledger[0].state, "violated", "the violation stays on the record after the swap");
 });
+// --- return-ratio promises (§8.1): commit before the stake is known ---
+it("a return-ratio promise settles against the actual transfer, not a fixed amount", async () => {
+  const world = makeWorld();
+  const ratio = await world.performDomainAction(TRUSTEE_R1, "make_commitment", {
+    proposition: "你投多少，我至少返 150%。",
+    actionType: "return-ratio",
+    amount: 150
+  });
+  const commitmentId = (ratio.result as { commitmentId: string }).commitmentId;
+  assert.ok(commitmentId, "the ratio declaration mints a commitment");
+  await playRound(world, 6, 9, [commitmentId]);
+  const ledger = commitments(world);
+  assert.equal(ledger[0].promisedAction.actionType, "return-ratio");
+  assert.equal(ledger[0].state, "fulfilled", "9 returned on a 6 stake clears the 150% line");
+  assert.equal(lastBeat(world), "promise-kept");
+});
+
+it("a return-ratio promise is violated when the actual return misses the percent line", async () => {
+  const world = makeWorld();
+  await world.performDomainAction(TRUSTEE_R1, "make_commitment", {
+    proposition: "至少返两倍。",
+    actionType: "return-ratio",
+    amount: 200
+  });
+  await playRound(world, 8, 12);
+  assert.equal(commitments(world)[0].state, "violated", "12 < 16 required by 200% of 8");
+  assert.equal(lastBeat(world), "promise-broken");
+});
+
+it("return-ratio amounts are validated as percents, not absolute pools", async () => {
+  const world = makeWorld();
+  await assert.rejects(
+    world.performDomainAction(TRUSTEE_R1, "make_commitment", { proposition: "p", actionType: "return-ratio", amount: 0 }),
+    /COMMITMENT_RATIO_INVALID/
+  );
+  await assert.rejects(
+    world.performDomainAction(TRUSTEE_R1, "make_commitment", { proposition: "p", actionType: "return-ratio", amount: 100 * 3 + 1 }),
+    /COMMITMENT_RATIO_INVALID/
+  );
+});

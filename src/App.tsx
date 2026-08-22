@@ -161,11 +161,6 @@ export function App(): ReactNode {
         roomId={route.id}
         token={token}
         onBack={() => { location.hash = "#/"; }}
-        onReplay={() => {
-          const room = rooms.find((entry) => entry.id === route.id);
-          if (room) setCreateScenarioId(room.scenarioId);
-          location.hash = "#/";
-        }}
       />
     );
   }

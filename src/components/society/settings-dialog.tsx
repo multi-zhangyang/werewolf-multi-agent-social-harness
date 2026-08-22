@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Activity, Check, CircleAlert, Loader2, Plus, Settings2, Trash2 } from "lucide-react";
+import { Activity, Check, CircleAlert, Loader2, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -66,6 +66,13 @@ interface TestResult {
   }>;
 }
 
+/** Live catalog fetched from the provider's own GET /models endpoint. */
+interface RemoteModelsResult {
+  ok: boolean;
+  message: string;
+  modelIds: string[];
+}
+
 type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 type ReasoningEffortSelection = ReasoningEffort | "provider-default";
 
@@ -111,6 +118,12 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
   const [savingEffort, setSavingEffort] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  /** When set, the bottom form edits this profile in place (PUT upserts). */
+  const [editingProfile, setEditingProfile] = useState<ModelProfileView | null>(null);
+  /** Per-provider remote catalog state for the "fetch model list" flow. */
+  const [remote, setRemote] = useState<Record<string, { loading: boolean; result?: RemoteModelsResult }>>({});
+  /** Model ids picked from the remote catalog for batch registration. */
+  const [pickedRemoteIds, setPickedRemoteIds] = useState<string[]>([]);
 
   const load = async (): Promise<void> => {
     try {
@@ -196,7 +209,10 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
       setError("上下文窗口必须是正整数（token）。");
       return;
     }
-    const id = `model-${slug(modelDraft.modelId)}`;
+    // Editing in place keeps the profile id (and every room binding to it);
+    // a fresh draft mints a new id from the model id.
+    const id = editingProfile ? editingProfile.id : `model-${slug(modelDraft.modelId)}`;
+    const enabled = editingProfile ? editingProfile.enabled : true;
     setSaving(true);
     setError(undefined);
     try {
@@ -210,7 +226,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
             providerProfileId: modelDraft.providerProfileId,
             modelId: modelDraft.modelId.trim(),
             contextWindow,
-            enabled: true,
+            enabled,
             defaults: { reasoningEffort: modelDraft.reasoningEffort },
             capabilities: {
               streaming: modelDraft.streaming ? "yes" : "unknown",
@@ -242,6 +258,113 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
         streaming: true,
         tools: true
       });
+      setEditingProfile(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Fetch the provider's live model catalog (GET {baseURL}/models server-side). */
+  const loadRemoteModels = async (): Promise<void> => {
+    const providerId = modelDraft.providerProfileId;
+    if (!providerId) {
+      setError("先选择所属提供商，再获取模型列表。");
+      return;
+    }
+    setRemote((current) => ({ ...current, [providerId]: { loading: true } }));
+    setError(undefined);
+    try {
+      const response = await apiFetch(`/api/model-config/providers/${encodeURIComponent(providerId)}/remote-models`);
+      const payload = await response.json().catch(() => undefined) as RemoteModelsResult | { message?: string };
+      if (!response.ok) throw new Error((payload as { message?: string })?.message ?? `HTTP ${response.status}`);
+      setRemote((current) => ({ ...current, [providerId]: { loading: false, result: payload as RemoteModelsResult } }));
+    } catch (cause) {
+      setRemote((current) => ({
+        ...current,
+        [providerId]: { loading: false, result: { ok: false, modelIds: [], message: cause instanceof Error ? cause.message : String(cause) } }
+      }));
+    }
+  };
+
+  /** Register every picked remote model in one PUT; context window applies to all. */
+  const addSelectedRemoteModels = async (): Promise<void> => {
+    const providerId = modelDraft.providerProfileId;
+    if (!providerId || pickedRemoteIds.length === 0) return;
+    const contextWindow = Number(modelDraft.contextWindow);
+    if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
+      setError("上下文窗口必须是正整数（token），批量添加时对所有所选模型生效，之后可逐个修改。");
+      return;
+    }
+    setSaving(true);
+    setError(undefined);
+    try {
+      const response = await fetch("/api/model-config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          modelProfiles: pickedRemoteIds.map((modelId) => ({
+            id: `model-${slug(modelId)}`,
+            name: modelId,
+            providerProfileId: providerId,
+            modelId,
+            contextWindow,
+            enabled: true,
+            defaults: { reasoningEffort: modelDraft.reasoningEffort },
+            capabilities: {
+              streaming: modelDraft.streaming ? "yes" : "unknown",
+              tools: modelDraft.tools ? "yes" : "unknown",
+              parallelToolCalls: "unknown",
+              reasoning: modelDraft.reasoning ? "yes" : "unknown",
+              reasoningSummary: "unknown",
+              structuredOutput: "unknown",
+              promptCaching: "unknown",
+              nativeCompaction: "unknown",
+              seed: "unknown",
+              stopSequences: "unknown",
+              imageInput: "unknown",
+              maxOutputTokens: "unknown"
+            }
+          }))
+        })
+      });
+      const payload = await response.json().catch(() => undefined) as ModelConfigView | { message?: string };
+      if (!response.ok) throw new Error((payload as { message?: string })?.message ?? `HTTP ${response.status}`);
+      setConfig(payload as ModelConfigView);
+      onSaved();
+      setPickedRemoteIds([]);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Flip a profile's enabled flag without touching anything else. */
+  const toggleModel = async (profile: ModelProfileView): Promise<void> => {
+    setSaving(true);
+    setError(undefined);
+    try {
+      const response = await apiFetch("/api/model-config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          modelProfiles: [{
+            id: profile.id,
+            name: profile.name,
+            providerProfileId: profile.providerProfileId,
+            modelId: profile.modelId,
+            contextWindow: profile.contextWindow,
+            enabled: !profile.enabled,
+            capabilities: profile.capabilities
+          }]
+        })
+      });
+      const payload = await response.json().catch(() => undefined) as ModelConfigView | { message?: string };
+      if (!response.ok) throw new Error((payload as { message?: string })?.message ?? `HTTP ${response.status}`);
+      setConfig(payload as ModelConfigView);
+      onSaved();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -336,7 +459,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) { setLoaded(false); setError(undefined); } onOpenChange(next); }}>
       <DialogContent className="max-w-2xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl">
-        <div className="flex max-h-[84vh] flex-col">
+        <div className="flex min-w-0 max-h-[84vh] flex-col">
           <div className="shrink-0 border-b border-border/60 p-6">
             <DialogHeader className="gap-2 text-left">
               <div className="flex items-center gap-3">
@@ -353,22 +476,22 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
             </DialogHeader>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
           <div className="space-y-7 p-6">
             <section>
               <p className="mb-2.5 text-[13px] font-medium text-foreground/80">提供商</p>
               <div className="space-y-2">
                 {config.providers.map((provider) => (
-                  <div key={provider.id} className="flex items-center justify-between rounded-lg border border-border bg-muted/60 px-3 py-2">
-                    <div className="min-w-0">
-                      <p className="text-[13px] font-medium text-foreground/90">
-                        {provider.name}
-                        <span className="ml-2 rounded border border-border bg-card px-1 font-mono text-[9px] text-muted-foreground">{provider.kind}</span>
-                        {provider.hasKey ? <span className="ml-1.5 text-[10px] text-emerald-400">密钥已配置</span> : <span className="ml-1.5 text-[10px] text-amber-400">未配置密钥</span>}
+                  <div key={provider.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 rounded-lg border border-border bg-muted/60 px-3 py-2">
+                    <div className="min-w-0 flex-1 basis-56">
+                      <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px] font-medium leading-5 text-foreground/90">
+                        <span className="break-all">{provider.name}</span>
+                        <span className="rounded border border-border bg-card px-1 font-mono text-[9px] font-normal text-muted-foreground">{provider.kind}</span>
+                        {provider.hasKey ? <span className="text-[10px] font-normal text-emerald-400">密钥已配置</span> : <span className="text-[10px] font-normal text-amber-400">未配置密钥</span>}
                       </p>
-                      <p className="truncate font-mono text-[10px] text-muted-foreground/80">{provider.baseURL} · {provider.apiMode}</p>
+                      <p className="truncate font-mono text-[10px] leading-4 text-muted-foreground/80">{provider.baseURL} · {provider.apiMode}</p>
                     </div>
-                    <Badge variant="outline" className={cn("rounded-full border-border font-normal", provider.enabled ? "text-emerald-400" : "text-muted-foreground")}>
+                    <Badge variant="outline" className={cn("shrink-0 rounded-full border-border font-normal", provider.enabled ? "text-emerald-400" : "text-muted-foreground")}>
                       {provider.enabled ? "启用" : "停用"}
                     </Badge>
                   </div>
@@ -405,7 +528,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                   </label>
                 </div>
                 <p className="mt-2 text-[11px] leading-5 text-muted-foreground/80">
-                  Base URL 示例：https://api.example.com/v1；API 密钥只写入本机 .env.local，不回显、不进入模型档案与房间快照。
+                  Base URL 必须以 <span className="font-mono">/v1</span> 结尾（如 https://api.example.com/v1）；API 密钥只写入本机 .env.local，不回显、不进入模型档案与房间快照。
                 </p>
                 <Button variant="outline" size="sm" className="mt-2 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={() => void addProvider()}>
                   <Plus className="size-3.5" /> 添加提供商
@@ -420,17 +543,17 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
               </div>
               <div className="space-y-2">
                 {config.modelProfiles.map((profile) => (
-                  <div key={profile.id} className="rounded-lg border border-border bg-muted/60 px-3 py-2">
-                    <div className="flex items-center justify-between">
-                      <div className="min-w-0">
-                        <p className="text-[13px] font-medium text-foreground/90">
+                  <div key={profile.id} className="min-w-0 rounded-lg border border-border bg-muted/60 px-3 py-2">
+                    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+                      <div className="min-w-0 flex-1 basis-56">
+                        <p className="break-all text-[13px] font-medium leading-5 text-foreground/90">
                           {profile.name}
-                          <span className="ml-2 rounded border border-border bg-card px-1 font-mono text-[9px] text-muted-foreground">{profile.contextLabel}</span>
-                          <span className={cn("ml-1.5 font-mono text-[9px]", profile.contextWindowSource === "manual" ? "text-muted-foreground" : "text-amber-400/90")}>
+                          <span className="ml-2 rounded border border-border bg-card px-1 font-mono text-[9px] font-normal text-muted-foreground">{profile.contextLabel}</span>
+                          <span className={cn("ml-1.5 font-mono text-[9px] font-normal", profile.contextWindowSource === "manual" ? "text-muted-foreground" : "text-amber-400/90")}>
                             {profile.contextWindowSource === "manual" ? "手动登记" : "已知档案"}
                           </span>
                         </p>
-                        <p className="truncate font-mono text-[10px] text-muted-foreground/80">{profile.modelId} · {config.providers.find((provider) => provider.id === profile.providerProfileId)?.name ?? profile.providerProfileId}</p>
+                        <p className="break-all font-mono text-[10px] leading-4 text-muted-foreground/80">{profile.modelId} · {config.providers.find((provider) => provider.id === profile.providerProfileId)?.name ?? profile.providerProfileId}</p>
                         {Object.entries(profile.capabilities).some(([key, state]) => state !== "unknown" && key !== "maxOutputTokens") ? (
                           <p className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground/70">
                             {Object.entries(profile.capabilities).filter(([key, state]) => state !== "unknown" && key !== "maxOutputTokens").map(([key, state]) => (
@@ -441,7 +564,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                           <p className="mt-0.5 text-[10px] text-muted-foreground/50">能力未验证；点击「测试模型」后发起真实请求。</p>
                         )}
                       </div>
-                      <div className="flex shrink-0 items-center gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         <Select
                           value={profile.defaults?.reasoningEffort ?? "provider-default"}
                           disabled={savingEffort === profile.id || probing === profile.id}
@@ -469,6 +592,35 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                         >
                           {probing === profile.id ? <Loader2 className="animate-spin" /> : <Activity />}
                           测试模型
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 rounded-lg px-2 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                          onClick={() => {
+                            setEditingProfile(profile);
+                            setModelDraft({
+                              name: profile.name,
+                              modelId: profile.modelId,
+                              contextWindow: String(profile.contextWindow),
+                              providerProfileId: profile.providerProfileId,
+                              reasoningEffort: profile.defaults?.reasoningEffort ?? "high",
+                              reasoning: profile.capabilities.reasoning !== "no",
+                              streaming: profile.capabilities.streaming !== "no",
+                              tools: profile.capabilities.tools !== "no"
+                            });
+                          }}
+                        >
+                          编辑
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className={cn("h-7 rounded-lg px-2 text-[11px]", profile.enabled ? "text-emerald-400 hover:text-emerald-300" : "text-muted-foreground hover:text-foreground")}
+                          disabled={saving}
+                          onClick={() => void toggleModel(profile)}
+                        >
+                          {profile.enabled ? "已启用" : "已停用"}
                         </Button>
                         <Button
                           variant="ghost"
@@ -500,9 +652,26 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                 ))}
               </div>
               <div className="mt-3 rounded-lg border border-dashed border-border p-3">
-                <p className="mb-2 text-xs font-medium text-muted-foreground">添加模型档案</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <Select value={modelDraft.providerProfileId} onValueChange={(value) => setModelDraft({ ...modelDraft, providerProfileId: value })}>
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    {editingProfile ? `编辑模型档案：${editingProfile.name}` : "添加模型档案"}
+                  </p>
+                  {editingProfile ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-[11px] text-muted-foreground"
+                      onClick={() => {
+                        setEditingProfile(null);
+                        setModelDraft({ name: "", modelId: "", contextWindow: "", providerProfileId: "", reasoningEffort: "high", reasoning: true, streaming: true, tools: true });
+                      }}
+                    >
+                      取消编辑
+                    </Button>
+                  ) : null}
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <Select value={modelDraft.providerProfileId} onValueChange={(value) => { setPickedRemoteIds([]); setModelDraft({ ...modelDraft, providerProfileId: value }); }}>
                     <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue placeholder="所属提供商" /></SelectTrigger>
                     <SelectContent>
                       <SelectGroup>
@@ -529,6 +698,76 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                     </SelectContent>
                   </Select>
                 </div>
+                <div className="mt-2 rounded-lg border border-border bg-muted/40 p-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-medium text-muted-foreground">从提供商拉取模型列表（推荐）</p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 rounded-lg border-border bg-card px-2 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                      disabled={saving || Boolean(modelDraft.providerProfileId && remote[modelDraft.providerProfileId]?.loading)}
+                      onClick={() => void loadRemoteModels()}
+                    >
+                      {modelDraft.providerProfileId && remote[modelDraft.providerProfileId]?.loading
+                        ? <Loader2 className="size-3 animate-spin" />
+                        : <RefreshCw className="size-3" />}
+                      {modelDraft.providerProfileId && remote[modelDraft.providerProfileId]?.result?.ok ? "重新拉取" : "获取模型列表"}
+                    </Button>
+                  </div>
+                  <p className="mt-1 text-[10px] leading-4 text-muted-foreground/70">
+                    Base URL 需以 /v1 结尾（如 https://api.example.com/v1）。勾选后批量注册，上下文窗口用上方输入值，添加后可随时逐个编辑。
+                  </p>
+                  {modelDraft.providerProfileId && remote[modelDraft.providerProfileId]?.result && !remote[modelDraft.providerProfileId]!.result!.ok ? (
+                    <p className="mt-1.5 text-[11px] leading-4 text-red-400">{remote[modelDraft.providerProfileId]!.result!.message}</p>
+                  ) : null}
+                  {modelDraft.providerProfileId && remote[modelDraft.providerProfileId]?.result?.ok ? (
+                    <>
+                      <div className="mt-1.5 max-h-40 space-y-0.5 overflow-y-auto rounded-md border border-border bg-card p-1">
+                        {remote[modelDraft.providerProfileId]!.result!.modelIds.map((modelId) => {
+                          const registered = config.modelProfiles.some((profile) => profile.providerProfileId === modelDraft.providerProfileId && profile.modelId === modelId);
+                          const picked = pickedRemoteIds.includes(modelId);
+                          return (
+                            <label
+                              key={modelId}
+                              className={cn(
+                                "flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 font-mono text-[11px]",
+                                registered ? "cursor-not-allowed text-muted-foreground/40" : picked ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/60"
+                              )}
+                            >
+                              <input
+                                type="checkbox"
+                                className="size-3 accent-foreground"
+                                disabled={registered}
+                                checked={picked}
+                                onChange={(event) => setPickedRemoteIds((current) => event.target.checked ? [...current, modelId] : current.filter((id) => id !== modelId))}
+                              />
+                              <span className="min-w-0 flex-1 truncate">{modelId}</span>
+                              {registered ? <span className="rounded border border-border bg-muted px-1 text-[9px]">已添加</span> : null}
+                            </label>
+                          );
+                        })}
+                      </div>
+                      {pickedRemoteIds.length ? (
+                        <div className="mt-2 flex items-center gap-2">
+                          <span className="nums text-[11px] text-muted-foreground">已选 {pickedRemoteIds.length} 个</span>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 rounded-lg border-border bg-card px-2 text-[11px] text-foreground hover:bg-muted"
+                            disabled={saving}
+                            onClick={() => void addSelectedRemoteModels()}
+                          >
+                            <Plus className="size-3" />
+                            添加所选模型
+                          </Button>
+                          <button type="button" className="text-[11px] text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground" onClick={() => setPickedRemoteIds([])}>
+                            清空选择
+                          </button>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : null}
+                </div>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {QUICK_CAPABILITIES.map(({ key, label }) => (
                     <label key={key} className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-muted-foreground has-checked:border-foreground/60 has-checked:text-foreground">
@@ -544,7 +783,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                   <span className="self-center text-[10px] text-muted-foreground/60">未勾选 = 能力未验证，参数不会盲目发送</span>
                 </div>
                 <Button variant="outline" size="sm" className="mt-2 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={() => void addModel()}>
-                  <Plus className="size-3.5" /> 添加模型档案
+                  {editingProfile ? "保存修改" : <><Plus className="size-3.5" /> 添加模型档案</>}
                 </Button>
               </div>
             </section>
@@ -553,7 +792,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
               <p className="mb-2.5 text-[13px] font-medium text-foreground/80">全局默认</p>
               <div className="flex items-center gap-3">
                 <Select value={globalModel || "__automatic__"} onValueChange={(value) => setGlobalModel(value === "__automatic__" ? "" : value)}>
-                  <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue placeholder="新房间默认模型" /></SelectTrigger>
+                  <SelectTrigger className="min-w-0 flex-1 rounded-lg border-border bg-card text-foreground/90"><SelectValue placeholder="新房间默认模型" /></SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
                       <SelectItem value="__automatic__">（不指定：使用第一个启用的模型）</SelectItem>

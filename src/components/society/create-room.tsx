@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { apiFetch } from "@/lib/api";
-import { History, Loader2, Play, Trash2 } from "lucide-react";
+import { History, Loader2, Play, Shuffle, Trash2 } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,18 @@ import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
 import { ScenarioIcon } from "./shared";
 import type { CharacterOption, CreateRoomInput, ModelOption } from "./types";
+
+/** How models are assigned to seats (§ 建房模型分配). */
+type ModelAssignMode = "unified" | "per-seat" | "random";
+
+/** Lightweight create-form preferences remembered across visits. */
+interface ModelAssignPrefs {
+  mode?: ModelAssignMode;
+  unifiedProfileId?: string;
+  randomPoolIds?: string[];
+}
+
+const MODEL_PREFS_KEY = "society:model-assign-prefs";
 
 interface CreateRoomProps {
   open: boolean;
@@ -51,10 +63,17 @@ interface RosterTemplateOption {
 }
 
 export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
-  const [selectedModels, setSelectedModels] = useState<string[]>([]);
-  const [seatOverrides, setSeatOverrides] = useState<Record<string, string>>({});
-  const [seatTuning, setSeatTuning] = useState<Record<string, { temperature?: number; reasoningEffort?: "low" | "medium" | "high" | "xhigh" }>>({});
-  const [advanced, setAdvanced] = useState(false);
+  /** Only registry-backed models can be assigned per seat. */
+  const eligibleModels = useMemo(() => models.filter((model) => Boolean(model.profileId)), [models]);
+  const profileById = useMemo(() => new Map(eligibleModels.map((model) => [model.profileId as string, model])), [eligibleModels]);
+
+  const [assignMode, setAssignMode] = useState<ModelAssignMode>("unified");
+  const [unifiedProfileId, setUnifiedProfileId] = useState<string>("");
+  /** Per-seat picks for 逐席配置 (absent = inherit the unified pick). */
+  const [seatPicks, setSeatPicks] = useState<Record<string, string>>({});
+  const [randomPoolIds, setRandomPoolIds] = useState<string[]>([]);
+  /** The dealt seat→profile table shown as the preview; what you see is what is submitted. */
+  const [randomRoster, setRandomRoster] = useState<string[]>([]);
   const [rounds, setRounds] = useState<number>(5);
   const [players, setPlayers] = useState<number>(6);
   const [mode, setMode] = useState<"ai" | "human">("ai");
@@ -74,20 +93,33 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
 
   const minRounds = scenario?.minRounds ?? 2;
   const maxRounds = scenario?.maxRounds ?? 10;
-  const visibleModels = useMemo(() => models.slice(0, 16), [models]);
-  /** Every selected model has a registry profile id → the server can resolve per-seat bindings. */
-  const profilesResolvable = useMemo(
-    () => selectedModels.length > 0 && selectedModels.every((id) => visibleModels.some((model) => model.id === id && model.profileId)),
-    [selectedModels, visibleModels]
-  );
+
+  // Restore lightweight preferences once (they survive across dialogs).
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(MODEL_PREFS_KEY);
+      if (!raw) return;
+      const prefs = JSON.parse(raw) as ModelAssignPrefs;
+      if (prefs.mode === "unified" || prefs.mode === "per-seat" || prefs.mode === "random") setAssignMode(prefs.mode);
+      if (typeof prefs.unifiedProfileId === "string") setUnifiedProfileId(prefs.unifiedProfileId);
+      if (Array.isArray(prefs.randomPoolIds)) setRandomPoolIds(prefs.randomPoolIds.filter((id) => typeof id === "string"));
+    } catch {
+      // Corrupt preferences are ignored, never blocking room creation.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(MODEL_PREFS_KEY, JSON.stringify({ mode: assignMode, unifiedProfileId, randomPoolIds } satisfies ModelAssignPrefs));
+    } catch {
+      // Storage may be unavailable (private mode); assignment still works this session.
+    }
+  }, [assignMode, unifiedProfileId, randomPoolIds]);
 
   useEffect(() => {
     if (!open) return;
-    setSelectedModels(visibleModels.map((model) => model.id));
-    setSeatOverrides({});
-    setSeatTuning({});
+    setSeatPicks({});
     setSeatCharacters({});
-    setAdvanced(false);
     setRounds(scenario?.defaultRounds ?? Math.min(5, maxRounds));
     setPlayers(scenario?.players ?? 2);
     setMode("ai");
@@ -95,7 +127,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     setReasoningEffort("high");
     setSeasonMode("season");
     setError(undefined);
-  }, [open, scenario, maxRounds, visibleModels]);
+  }, [open, scenario, maxRounds]);
 
   // The character library is small; refresh it whenever the dialog opens.
   useEffect(() => {
@@ -124,11 +156,77 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     };
   }, [open, scenario]);
 
+  /** Unified pick falls back to the first registered model until the user chooses. */
+  const unifiedId = profileById.has(unifiedProfileId) ? unifiedProfileId : eligibleModels[0]?.profileId ?? "";
+  const poolIds = useMemo(() => {
+    const known = randomPoolIds.filter((id) => profileById.has(id));
+    return known.length ? known : eligibleModels.map((model) => model.profileId as string);
+  }, [randomPoolIds, profileById, eligibleModels]);
+
+  /** Balanced shuffle: cycle the shuffled pool so every model gets an even share. */
+  const dealBalancedRoster = useCallback((pool: string[], seats: number): string[] => {
+    const deck: string[] = [];
+    while (deck.length < seats) {
+      const round = [...pool];
+      for (let i = round.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [round[i], round[j]] = [round[j], round[i]];
+      }
+      deck.push(...round);
+    }
+    return deck.slice(0, seats);
+  }, []);
+
+  const reshuffleRandom = useCallback(() => {
+    if (!poolIds.length) return;
+    setRandomRoster(dealBalancedRoster(poolIds, players));
+  }, [poolIds, players, dealBalancedRoster]);
+
+  // Keep the dealt roster consistent with the pool and the seat count: a stale
+  // deal (players changed, pool member removed) is silently re-dealt.
+  useEffect(() => {
+    if (assignMode !== "random") return;
+    const poolSet = new Set(poolIds);
+    const valid = randomRoster.length === players && randomRoster.every((id) => poolSet.has(id));
+    if (!valid) reshuffleRandom();
+  }, [assignMode, players, poolIds, randomRoster, reshuffleRandom]);
+
+  /** The full seat→profile table submitted to the server (length = seat count). */
+  const rosterProfileIds = useMemo((): string[] => {
+    if (!players) return [];
+    if (assignMode === "per-seat") {
+      return Array.from({ length: players }, (_, index) => seatPicks[String(index)] ?? unifiedId);
+    }
+    if (assignMode === "random" && randomRoster.length === players) return randomRoster;
+    return Array.from({ length: players }, () => unifiedId);
+  }, [assignMode, players, seatPicks, unifiedId, randomRoster]);
+
+  /** Resolved display name for a seat's character (mirrors submit's characterIds). */
+  const seatCharacterFor = (index: number): CharacterOption | undefined => {
+    const pickedId = seatCharacters[String(index)] ?? characters[index]?.id;
+    return characters.find((character) => character.id === pickedId);
+  };
+
   const applyTemplate = (template: RosterTemplateOption): void => {
     setLoadedTemplateId(template.id);
-    setSelectedModels(template.models.filter((id) => visibleModels.some((model) => model.id === id)));
-    setSeatOverrides(template.agentModelOverrides ?? {});
-    setSeatTuning(template.agentTuning ?? {});
+    // Rebuild the assignment state from whatever the template recorded.
+    const overrideEntries = Object.entries(template.agentModelOverrides ?? {}).filter(([, profileId]) => profileById.has(profileId));
+    const templateProfiles = Array.from(new Set([
+      ...(template.modelProfileIds ?? []).filter((id) => profileById.has(id)),
+      ...overrideEntries.map(([, profileId]) => profileId)
+    ]));
+    if (overrideEntries.length) {
+      setAssignMode("per-seat");
+      setSeatPicks(Object.fromEntries(overrideEntries));
+      setUnifiedProfileId(templateProfiles[0] ?? unifiedId);
+    } else if (templateProfiles.length > 1) {
+      setAssignMode("random");
+      setRandomPoolIds(templateProfiles);
+      setRandomRoster(dealBalancedRoster(templateProfiles, template.players ?? players));
+    } else if (templateProfiles.length === 1) {
+      setAssignMode("unified");
+      setUnifiedProfileId(templateProfiles[0]);
+    }
     if (template.players !== undefined) setPlayers(template.players);
     if (template.rounds !== undefined) setRounds(template.rounds);
     setReasoningEffort(template.reasoningEffort ?? "high");
@@ -152,19 +250,30 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
       return;
     }
     if (!scenario) return;
+    if (!rosterProfileIds.length) {
+      setError("还没有可用模型，无法保存模板。");
+      return;
+    }
     setSubmitting(true);
     setError(undefined);
     try {
+      // Legacy `models` keeps working for old clients; profile ids carry the real roster.
+      const legacyModels = Array.from(new Set(rosterProfileIds.map((profileId) => profileById.get(profileId)?.id).filter((id): id is string => Boolean(id))));
       const response = await apiFetch("/api/room-templates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
           scenarioId: scenario.id,
-          models: selectedModels,
-          ...(profilesResolvable ? { modelProfileIds: selectedModels.map((id) => visibleModels.find((model) => model.id === id)?.profileId).filter((id): id is string => Boolean(id)) } : {}),
-          ...(Object.keys(seatOverrides).length ? { agentModelOverrides: seatOverrides } : {}),
-          ...(Object.keys(seatTuning).length ? { agentTuning: seatTuning } : {}),
+          models: legacyModels,
+          modelProfileIds: Array.from(new Set(rosterProfileIds)),
+          ...(assignMode === "per-seat"
+            ? {
+                agentModelOverrides: Object.fromEntries(
+                  Object.entries(seatPicks).filter(([, profileId]) => profileById.has(profileId))
+                )
+              }
+            : {}),
           ...(scenario.playerRange ? { players } : {}),
           ...(characters.length ? { characterIds: Array.from({ length: players }, (_, index) => seatCharacters[String(index)] ?? characters[index]?.id).filter((id): id is string => Boolean(id)) } : {}),
           rounds,
@@ -199,21 +308,10 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     }
   };
 
-  const toggleModel = (id: string): void => {
-    setSelectedModels((current) => current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]);
-  };
-
-  const seatModelFor = (index: number): ModelOption | undefined => {
-    const override = seatOverrides[String(index)];
-    if (override) return visibleModels.find((model) => model.profileId === override);
-    const modelId = selectedModels[index % selectedModels.length];
-    return visibleModels.find((model) => model.id === modelId);
-  };
-
   const submit = async (): Promise<void> => {
     if (!scenario) return;
-    if (selectedModels.length === 0) {
-      setError("至少选择一个模型。");
+    if (!rosterProfileIds.length) {
+      setError("还没有可用的模型档案：请先在「设置」中注册模型。");
       return;
     }
     if (mode === "human" && !playerName.trim()) {
@@ -225,12 +323,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     try {
       await onCreated({
         scenarioId: scenario.id,
-        models: selectedModels,
-        ...(profilesResolvable
-          ? { modelProfileIds: selectedModels.map((id) => visibleModels.find((model) => model.id === id)?.profileId).filter((id): id is string => Boolean(id)) }
-          : {}),
-        ...(Object.keys(seatOverrides).length ? { agentModelOverrides: seatOverrides } : {}),
-        ...(Object.keys(seatTuning).length ? { agentTuning: seatTuning } : {}),
+        modelProfileIds: rosterProfileIds,
         rounds,
         ...(scenario.playerRange ? { players } : {}),
         ...(characters.length
@@ -254,7 +347,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     <Dialog open={open} onOpenChange={(next) => { if (!next && !submitting) onOpenChange(false); }}>
       <DialogContent className="max-w-xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl" showCloseButton={!submitting}>
         {scenario ? (
-          <div className="flex max-h-[82vh] flex-col">
+          <div className="flex min-w-0 max-h-[82vh] flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="border-b border-border/60 p-6">
               <DialogHeader className="gap-2 text-left">
@@ -281,39 +374,115 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
 
             <div className="space-y-6 p-6">
               <section>
-                <p className="mb-2.5 text-[13px] font-medium text-foreground/80">模型</p>
-                <p className="mb-3 text-xs text-muted-foreground">多选时按席位轮转；高级阵容可单独覆盖。</p>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" data-model>
-                  {visibleModels.map((model) => {
-                    const active = selectedModels.includes(model.id);
-                    return (
-                      <button
-                        key={model.id}
-                        data-model
-                        onClick={() => toggleModel(model.id)}
-                        className={cn(
-                          "flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors",
-                          active
-                            ? "border-foreground/70 bg-muted"
-                            : "border-border bg-card hover:border-foreground/30"
-                        )}
-                      >
-                        <span className={cn("flex size-3.5 shrink-0 items-center justify-center rounded-full border", active ? "border-foreground bg-foreground" : "border-border")}>
-                          {active ? <span className="size-1.5 rounded-full bg-card" /> : null}
-                        </span>
-                        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                          <span className="break-all text-[13px] font-medium leading-5 text-foreground/90">{model.name}</span>
-                          <span className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground/80">
-                            <span className="truncate">{model.provider}</span>
-                            {model.contextLabel ? (
-                              <span className="shrink-0 rounded border border-border bg-muted px-1 text-[9px]">{model.contextLabel}</span>
-                            ) : null}
-                          </span>
-                        </span>
-                      </button>
-                    );
-                  })}
+                <div className="mb-2.5 flex items-center justify-between">
+                  <p className="text-[13px] font-medium text-foreground/80">模型分配</p>
+                  <span className="nums font-mono text-xs text-muted-foreground/80">{eligibleModels.length} 个可用档案</span>
                 </div>
+                {eligibleModels.length ? (
+                  <>
+                    <div className="mb-3 grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted p-1">
+                      <ModeButton active={assignMode === "unified"} onClick={() => setAssignMode("unified")}>统一模型</ModeButton>
+                      <ModeButton active={assignMode === "per-seat"} onClick={() => setAssignMode("per-seat")}>逐席配置</ModeButton>
+                      <ModeButton active={assignMode === "random"} onClick={() => setAssignMode("random")}>随机混合</ModeButton>
+                    </div>
+
+                    {assignMode === "unified" ? (
+                      <div data-model>
+                        <Select value={unifiedId} onValueChange={(value) => setUnifiedProfileId(value)}>
+                          <SelectTrigger className="h-9 w-full rounded-lg border-border bg-card text-foreground/90">
+                            <SelectValue placeholder="选择模型" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              {eligibleModels.map((model) => (
+                                <SelectItem key={model.profileId} value={model.profileId!}>
+                                  {model.name}{model.contextLabel ? ` · ${model.contextLabel}` : ""}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        <p className="mt-1.5 text-[11px] leading-4 text-muted-foreground/70">全部 {players} 个 AI 席位使用同一模型。</p>
+                      </div>
+                    ) : null}
+
+                    {assignMode === "per-seat" ? (
+                      <p className="text-xs leading-5 text-muted-foreground">在下方参与者列表中为每个席位单独挑选模型；未单独挑选的席位使用统一模型（当前 {profileById.get(unifiedId)?.name ?? "—"}）。可在下方预览改回。</p>
+                    ) : null}
+
+                    {assignMode === "random" ? (
+                      <div data-model>
+                        <p className="mb-1.5 text-xs text-muted-foreground">勾选参与随机的模型池（至少一个），按席位平衡洗牌；每个模型的出场次数最多相差一。</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {eligibleModels.map((model) => {
+                            const active = poolIds.includes(model.profileId!);
+                            return (
+                              <button
+                                key={model.profileId}
+                                onClick={() => setRandomPoolIds((current) => {
+                                  const known = current.filter((id) => profileById.has(id));
+                                  const base = known.length ? known : eligibleModels.map((entry) => entry.profileId as string);
+                                  return base.includes(model.profileId!) ? base.filter((id) => id !== model.profileId!) : [...base, model.profileId!];
+                                })}
+                                className={cn(
+                                  "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                                  active ? "border-foreground/60 bg-muted text-foreground" : "border-border bg-card text-muted-foreground hover:border-foreground/30"
+                                )}
+                              >
+                                <span className={cn("size-1.5 rounded-full", active ? "bg-emerald-400" : "bg-border")} />
+                                <span className="max-w-52 truncate font-mono">{model.name}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="mt-2.5 flex items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+                            disabled={!poolIds.length}
+                            onClick={reshuffleRandom}
+                          >
+                            <Shuffle className="size-3.5" />
+                            重新随机
+                          </Button>
+                          <span className="text-[11px] text-muted-foreground/70">提交的就是下方预览的分配，不做服务端暗箱随机。</span>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="mt-3 rounded-lg border border-border bg-muted/60 px-3 py-2.5" data-roster-preview>
+                      <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">最终阵容预览</p>
+                      <div className="space-y-1">
+                        {Array.from({ length: players }).map((_, index) => {
+                          const option = profileById.get(rosterProfileIds[index] ?? "");
+                          const character = seatCharacterFor(index);
+                          return (
+                            <div key={index} className="flex items-center justify-between gap-2 text-[11px]">
+                              <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+                                <span className="flex size-4 shrink-0 items-center justify-center rounded bg-card font-mono text-[9px] ring-1 ring-border">
+                                  {index + 1}
+                                </span>
+                                <span className="truncate">
+                                  {mode === "human" && index === 0 ? (playerName.trim() || "你（人类玩家）") : character?.displayName ?? `第 ${index + 1} 位`}
+                                </span>
+                              </span>
+                              <span className="shrink-0 font-mono text-muted-foreground/90">
+                                {mode === "human" && index === 0 ? "真人玩家" : option?.name ?? "—"}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="rounded-lg border border-dashed border-border p-3.5">
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      还没有已注册的模型档案。请先打开右上角「设置」，在模型配置中心添加模型（支持从提供商一键拉取列表），再回来创建房间。
+                    </p>
+                  </div>
+                )}
               </section>
 
               {scenario.playerRange ? (
@@ -388,41 +557,36 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                 </div>
               </section>
 
-              {scenario && selectedModels.length > 0 ? (
+              {eligibleModels.length ? (
                 <section>
                   <div className="mb-2.5 flex items-center justify-between">
                     <p className="text-[13px] font-medium text-foreground/80">参与者阵容</p>
-                    {profilesResolvable ? (
-                      <button
-                        type="button"
-                        onClick={() => setAdvanced((current) => !current)}
-                        className="text-xs text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground"
-                      >
-                        {advanced ? "收起单 Agent 配置" : "单 Agent 覆盖（高级）"}
-                      </button>
-                    ) : (
-                      <span className="text-[11px] text-muted-foreground/70">在设置中注册模型档案后可单独指定</span>
-                    )}
+                    <span className="text-[11px] text-muted-foreground/70">{assignMode === "per-seat" ? "逐席模式：每行可单独选模型" : "人物可选；模型按上方分配"}</span>
                   </div>
                   {characters.length ? (
                     <p className="mb-2 text-xs leading-5 text-muted-foreground/80">
-                      为每个席位挑选人物（内置或自建），模型按上方选择轮转；「单 Agent 覆盖」可再为单个席位单独指定模型与参数。
+                      为每个席位挑选人物（内置或自建）；{assignMode === "per-seat" ? "同时在每行右侧指定该席位的模型。" : "模型分配见上方「模型分配」与最终阵容预览。"}
                     </p>
                   ) : null}
                   <div className="rounded-lg border border-border bg-muted/60 p-3" data-model>
                     <div className="space-y-1.5">
                       {Array.from({ length: players }).map((_, index) => {
-                        const option = seatModelFor(index);
-                        const overridden = Boolean(seatOverrides[String(index)]);
-                        const tuning = seatTuning[String(index)];
+                        const isHuman = mode === "human" && index === 0;
+                        const option = profileById.get(rosterProfileIds[index] ?? "");
+                        const picked = seatPicks[String(index)];
                         return (
                           <div key={index} className="rounded-md px-1 py-0.5">
-                            <div className="flex items-center justify-between gap-2 text-xs">
+                            <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs">
                               <span className="flex items-center gap-2 text-muted-foreground">
                                 <span className="flex size-5 items-center justify-center rounded bg-card font-mono text-[9px] text-muted-foreground/80 ring-1 ring-border">
                                   {String(index + 1).padStart(2, "0")}
                                 </span>
-                                {characters.length ? (
+                                {isHuman ? (
+                                  <span className="flex items-center gap-1.5">
+                                    {playerName.trim() || "你"}
+                                    <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1 text-[9px] text-amber-300">人类玩家</span>
+                                  </span>
+                                ) : characters.length ? (
                                   <Select
                                     value={seatCharacters[String(index)] ?? "__default"}
                                     onValueChange={(value) => {
@@ -452,25 +616,26 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                                   <span>第 {index + 1} 位参与者</span>
                                 )}
                               </span>
-                              {advanced && profilesResolvable ? (
+                              {isHuman ? (
+                                <span className="font-mono text-[11px] text-muted-foreground/60">本人操控</span>
+                              ) : assignMode === "per-seat" ? (
                                 <Select
-                                  value={seatOverrides[String(index)] ?? ""}
+                                  value={picked ?? unifiedId}
                                   onValueChange={(value) => {
-                                    setSeatOverrides((current) => {
+                                    setSeatPicks((current) => {
                                       const next = { ...current };
-                                      if (value === "" || value === "__inherit") delete next[String(index)];
+                                      if (value === unifiedId) delete next[String(index)];
                                       else next[String(index)] = value;
                                       return next;
                                     });
                                   }}
                                 >
-                                  <SelectTrigger className="h-7 w-56 justify-end rounded-md border-border bg-card font-mono text-[11px] text-muted-foreground">
+                                  <SelectTrigger aria-label={`第 ${index + 1} 席位的模型`} className="h-7 w-56 justify-end rounded-md border-border bg-card font-mono text-[11px] text-muted-foreground">
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
                                     <SelectGroup>
-                                      <SelectItem value="__inherit">轮转继承（{selectedModels[index % selectedModels.length]}）</SelectItem>
-                                      {visibleModels.filter((model) => model.profileId).map((model) => (
+                                      {eligibleModels.map((model) => (
                                         <SelectItem key={model.profileId} value={model.profileId!}>
                                           {model.name}
                                         </SelectItem>
@@ -480,9 +645,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                                 </Select>
                               ) : (
                                 <span className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-                                  {overridden ? (
-                                    <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1 text-[9px] text-amber-300">指定</span>
-                                  ) : null}
+                                  {picked ? <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1 text-[9px] text-amber-300">指定</span> : null}
                                   {option?.contextLabel ? (
                                     <span className="rounded border border-border bg-card px-1 text-[9px] text-muted-foreground/80">{option.contextLabel}</span>
                                   ) : null}
@@ -490,62 +653,13 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                                 </span>
                               )}
                             </div>
-                            {advanced ? (
-                              <div className="mt-1.5 flex items-center gap-2 pl-7 text-[11px] text-muted-foreground">
-                                <span>温度</span>
-                                <input
-                                  type="range"
-                                  min={0}
-                                  max={2}
-                                  step={0.1}
-                                  value={tuning?.temperature ?? 1}
-                                  onChange={(event) => setSeatTuning((current) => {
-                                    const next = { ...current };
-                                    const value = Number(event.target.value);
-                                    next[String(index)] = { ...(next[String(index)] ?? {}), ...(value === 1 ? {} : { temperature: value }) };
-                                    if (Object.keys(next[String(index)] ?? {}).length === 0) delete next[String(index)];
-                                    return next;
-                                  })}
-                                  className="h-1 w-20 accent-foreground"
-                                  aria-label={`第 ${index + 1} 位温度`}
-                                />
-                                <span className="nums w-7 font-mono">{tuning?.temperature ?? 1}</span>
-                                <span className="ml-2">推理</span>
-                                <Select
-                                  value={tuning?.reasoningEffort ?? "__inherit"}
-                                  onValueChange={(value) => setSeatTuning((current) => {
-                                    const next = { ...current };
-                                    if (value === "__inherit") {
-                                      const entry = { ...(next[String(index)] ?? {}) };
-                                      delete entry.reasoningEffort;
-                                      if (Object.keys(entry).length) next[String(index)] = entry;
-                                      else delete next[String(index)];
-                                    } else {
-                                      next[String(index)] = { ...(next[String(index)] ?? {}), reasoningEffort: value as "low" | "medium" | "high" | "xhigh" };
-                                    }
-                                    return next;
-                                  })}
-                                >
-                                  <SelectTrigger className="h-7 w-24 rounded-md border-border bg-card text-[11px]"><SelectValue /></SelectTrigger>
-                                  <SelectContent>
-                                    <SelectGroup>
-                                      <SelectItem value="__inherit">继承</SelectItem>
-                                      <SelectItem value="low">轻量</SelectItem>
-                                      <SelectItem value="medium">标准</SelectItem>
-                                      <SelectItem value="high">深度</SelectItem>
-                                      <SelectItem value="xhigh">极限</SelectItem>
-                                    </SelectGroup>
-                                  </SelectContent>
-                                </Select>
-                              </div>
-                            ) : null}
                           </div>
                         );
                       })}
                     </div>
-                    {advanced ? (
+                    {assignMode === "per-seat" ? (
                       <p className="mt-2 border-t border-border/60 pt-2 text-[11px] leading-4 text-muted-foreground/80">
-                        每个参与者仍是一个独立 Agent：指定的模型档案只替换该席位的模型；温度、最大输出与推理强度只覆盖该席位的参数；人格、记忆与关系不变。继承的字段按「系统 → 模型档案 → 全局 → 房间 → 席位」解析。
+                        每个参与者仍是一个独立 Agent：这里只决定每个席位的模型档案；人格、记忆与关系不变。想恢复某席位的统一模型，把它重新选成与上方一致即可。
                       </p>
                     ) : null}
                   </div>
@@ -614,7 +728,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                   ) : null}
                 </div>
                 <p className="mb-2.5 text-xs leading-5 text-muted-foreground/80">
-                  把当前配置（模型、席位覆盖、人物、回合数、社会季模式）存为模板，一键复用。模板按世界保存，只存本机，不含任何密钥。
+                  把当前配置（模型分配、人物、回合数、社会季模式）存为模板，一键复用。模板按世界保存，只存本机，不含任何密钥。
                 </p>
                 <div className="space-y-2">
                   {templates.length ? (
@@ -663,7 +777,7 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
               </Button>
               <Button
                 onClick={submit}
-                disabled={submitting}
+                disabled={submitting || !eligibleModels.length}
                 className="rounded-lg bg-foreground px-6 text-background hover:bg-foreground/85"
               >
                 {submitting ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
@@ -681,6 +795,7 @@ function ModeButton({ active, onClick, children }: { active: boolean; onClick: (
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       className={cn(
         "h-8 rounded-md text-[13px] font-medium transition-colors",
         active ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground/80"

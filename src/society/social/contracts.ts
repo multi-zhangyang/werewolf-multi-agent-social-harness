@@ -311,6 +311,10 @@ export interface DeceptionPlanInput {
   targetActorIds: string[];
   truePropositions?: string[];
   intendedBelief: string;
+  /** Who the intended belief is about; keeps the plan's proposition on the
+   *  same semantic identity as the audience's later belief updates so the
+   *  believed/detected reconciliation can match them (§7.3). */
+  subjectId?: string;
   motive?: string;
   expectedGain?: string;
   perceivedDetectionRisk?: number;

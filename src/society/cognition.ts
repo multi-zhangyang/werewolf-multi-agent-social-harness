@@ -127,6 +127,7 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
       "- type: lying (a false claim), bluff (threat or bid you may not honor), paltering (true words meant to mislead), omission (letting a false belief stand), or false-promise (a commitment you already plan to break).",
       "- targetIds: which participants the deception is aimed at.",
       "- intendedBelief: exactly what you want them to believe afterwards.",
+      "- intendedBeliefSubjectId: whose belief it is (usually the target's actor ID) — this lets the system later verify whether they actually came to believe it.",
       "- coverStory: the public claims that must stay consistent with the deception.",
       "- fallback: what you will say or do if challenged.",
       "Weigh the cost before lying: exposure damages your credibility with every listener. Honest moves need no ledger entry."
@@ -136,6 +137,7 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
       targetIds: z.array(z.string().min(1)).max(8),
       truePropositions: z.array(z.string().min(1).max(1_000)).max(6).default([]),
       intendedBelief: z.string().min(1).max(1_000),
+      intendedBeliefSubjectId: z.string().min(1).max(160).nullable().default(null),
       coverStory: z.string().min(1).max(1_000),
       fallback: z.string().min(1).max(1_000),
       motive: z.string().min(1).max(500).nullable().default(null),
@@ -153,6 +155,7 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
         targetActorIds: input.targetIds,
         truePropositions: input.truePropositions,
         intendedBelief: input.intendedBelief,
+        ...(input.intendedBeliefSubjectId ? { subjectId: input.intendedBeliefSubjectId } : {}),
         ...(input.motive ? { motive: input.motive } : {}),
         ...(input.expectedGain ? { expectedGain: input.expectedGain } : {}),
         ...(input.perceivedDetectionRisk === null ? {} : { perceivedDetectionRisk: input.perceivedDetectionRisk })

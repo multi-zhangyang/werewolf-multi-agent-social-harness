@@ -1264,6 +1264,7 @@ export class SocialCausalityLedger {
     const logicalTime = this.sequence + 1;
     const intended = this.upsertProposition({
       kind: "evaluation",
+      ...(input.subjectId ? { subjectId: characterIdFor(input.subjectId) } : {}),
       predicate: input.intendedBelief.trim(),
       truthStatus: "subjective",
       groundTruthVisibility: "hidden-until-resolution",

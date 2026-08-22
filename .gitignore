@@ -28,6 +28,10 @@ data/
 # Environment-provided skill instructions
 .agents/
 
+# Local skill caches (machine-local tooling, mirrored from skills-lock.json)
+.claude/
+/agent/
+
 # Logs and process files
 *.log
 npm-debug.log*

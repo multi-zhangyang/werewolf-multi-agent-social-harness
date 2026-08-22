@@ -18,6 +18,11 @@
  *    exit so a clean shutdown never drops pending writes.
  */
 import { createHash } from "node:crypto";
+
+/** Synchronous pause for the rename retry loop (no builtin sleepSync). */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentInputItem, Session } from "@openai/agents";
@@ -186,7 +191,21 @@ export class JsonSessionStore implements Session {
     try {
       mkdirSync(path.dirname(this.file), { recursive: true });
       writeFileSync(temporary, JSON.stringify(payloadWithChecksum), { mode: 0o600 });
-      renameSync(temporary, this.file);
+      // Windows briefly holds renamed targets (antivirus/indexing), making
+      // rename-over-existing fail with EPERM; a few quick retries absorb the
+      // blip before it escalates to a visible persistence failure.
+      let lastRenameError: unknown;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          renameSync(temporary, this.file);
+          lastRenameError = undefined;
+          break;
+        } catch (renameError) {
+          lastRenameError = renameError;
+          sleepSync(25);
+        }
+      }
+      if (lastRenameError !== undefined) throw lastRenameError;
       this.dirty = false;
       if (this.writeFailed) {
         this.writeFailed = false;

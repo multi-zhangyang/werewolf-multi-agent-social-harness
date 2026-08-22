@@ -465,6 +465,14 @@ export abstract class SocialWorldBase implements SocialWorld {
     return [];
   }
 
+  /**
+   * Public token streaming is allowed by default; scenarios with hidden-choice
+   * phases (night actions, sealed votes) override this to seal the stream.
+   */
+  publicStreamingAllowed(): boolean {
+    return true;
+  }
+
   socialCausalityFor(actorId?: string, omniscient = false): SocialCausalityProjection {
     const characterId = actorId ? this.requireProfile(actorId).characterId : undefined;
     return this.socialCausality.project({

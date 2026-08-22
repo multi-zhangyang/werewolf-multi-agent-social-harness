@@ -1247,6 +1247,14 @@ export class SocietyRoom {
       event.type === "agent.compacted" ||
       event.type === "agent.context.pressure"
     ) {
+      // Seal the public token stream and tool names during hidden-choice
+      // phases (§8.3): the projection drops sealed deltas and strips sealed
+      // tool details, while the owner seat and the acting agent's POV still
+      // see everything.
+      if ((event.type === "agent.delta" || event.type === "agent.tool") && !this.world.publicStreamingAllowed()) {
+        this.emit({ ...event, sealed: true });
+        return;
+      }
       this.emit(event);
     }
   }

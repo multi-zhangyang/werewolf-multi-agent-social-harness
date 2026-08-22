@@ -44,6 +44,46 @@ export interface CapabilityProbeResult {
 
 const TIMEOUT = 25_000;
 
+export interface RemoteModelsResult {
+  ok: boolean;
+  message: string;
+  modelIds: string[];
+}
+
+/** List the models a provider exposes on GET {baseURL}/models (OpenAI-compatible). */
+export async function fetchRemoteModels(input: { baseURL: string; apiKey: string }): Promise<RemoteModelsResult> {
+  try {
+    const response = await fetch(`${input.baseURL}/models`, {
+      headers: { Authorization: `Bearer ${input.apiKey}` },
+      signal: AbortSignal.timeout(15_000)
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        modelIds: [],
+        message: `获取模型列表失败（HTTP ${response.status}）：${sanitizeProviderError(text)}。请确认 Base URL 以 /v1 结尾（如 https://api.example.com/v1）且密钥有效。`
+      };
+    }
+    const body = parseJson(text);
+    const rows: unknown[] = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+    const modelIds = rows
+      .map((row) => (row && typeof row === "object" ? (row as { id?: unknown }).id : row))
+      .filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 180)
+      .sort((a, b) => a.localeCompare(b));
+    if (!modelIds.length) {
+      return { ok: false, modelIds: [], message: "提供商返回了空模型列表。请确认 Base URL 以 /v1 结尾。" };
+    }
+    return { ok: true, message: `已获取 ${modelIds.length} 个模型。`, modelIds };
+  } catch (cause) {
+    return {
+      ok: false,
+      modelIds: [],
+      message: `无法连接提供商（${cause instanceof Error ? cause.message : String(cause)}）。请确认 Base URL 以 /v1 结尾且网络可达。`
+    };
+  }
+}
+
 export async function probeCapabilities(input: CapabilityProbeInput): Promise<CapabilityProbeResult> {
   const capabilities: ModelCapabilities = {
     streaming: "unknown",

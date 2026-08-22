@@ -1,6 +1,10 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* streamdown renders markdown with Tailwind classes from its dist bundle;
+ * without this source registration those classes are purged (AI Elements). */
+@source "../node_modules/streamdown/dist/*.js";
+
 @custom-variant dark (&:is(.dark *));
 
 /*

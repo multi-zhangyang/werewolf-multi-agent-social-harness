@@ -291,7 +291,10 @@ check("avalon: a failed quest is a unilateral defection, not a betrayal", async 
   skipDiscussion(world);
   const proposal = world.activation()!;
   const leader = proposal.actorIds[0];
-  const saboteur = byRole("morgana")[0] ?? byRole("assassin")[0];
+  // Roles are dealt randomly: the leader may itself be evil, so the saboteur
+  // must be a different evil member (a team needs two distinct members).
+  const evil = [...byRole("morgana"), ...byRole("assassin")];
+  const saboteur = evil.find((id) => id !== leader) ?? evil[0];
   await world.performDomainAction(leader, "propose_team", { memberIds: [leader, saboteur], reason: "t" });
   world.completeActivation(proposal);
   const vote = world.activation()!;

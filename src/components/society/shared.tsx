@@ -16,30 +16,61 @@ import {
   Waypoints
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { AgentStatus, ScenarioId, SocialChannel } from "@/society/contracts";
 
+/**
+ * Deterministic local avatars (§15.2): the same character renders the same
+ * face everywhere, generated offline from a stable seed — no external image
+ * service, no network dependency, dark-first high-contrast silhouettes.
+ */
+const AVATAR_SKINS = ["#f2c9a4", "#e8b48c", "#d9a273", "#c98f63", "#b57d55", "#a06a45", "#8a5638"] as const;
+const AVATAR_HAIRS = ["#1f2937", "#374151", "#111827", "#4b2e1e", "#5b3a29", "#2d1e12", "#0f172a"] as const;
+const AVATAR_CLOTHES = [
+  "#be123c", "#c2410c", "#a16207", "#3f6212",
+  "#15803d", "#0f766e", "#0369a1", "#1d4ed8",
+  "#4338ca", "#7e22ce", "#a21caf", "#be185d"
+] as const;
 const AVATAR_BACKGROUNDS = [
-  "f43f5e", "f97316", "eab308", "84cc16",
-  "22c55e", "14b8a6", "06b6d4", "0ea5e9",
-  "3b82f6", "6366f1", "8b5cf6", "a855f7",
-  "d946ef", "ec4899", "64748b", "78716c"
+  "#27272a", "#1e293b", "#252528", "#20232a", "#2a2320", "#231f2a"
 ] as const;
 
 export function AgentAvatar({ name, seed, size = "md" }: { name: string; index?: number; seed?: string; size?: "sm" | "md" | "lg" | "xl" }): ReactNode {
   const sizes = { sm: "size-6", md: "size-8", lg: "size-10", xl: "size-14" };
   const stableSeed = seed ?? name;
-  const avatarSeed = encodeURIComponent(stableSeed);
-  const background = AVATAR_BACKGROUNDS[avatarHash(stableSeed) % AVATAR_BACKGROUNDS.length];
-  const source = `https://api.dicebear.com/9.x/lorelei/svg?seed=${avatarSeed}&backgroundColor=${background}&radius=18&scale=92`;
-  const fallback = [...name].slice(0, 1).join("").toUpperCase() || "·";
+  const hash = avatarHash(stableSeed);
+  const initial = [...name].slice(0, 1).join("").toUpperCase() || "·";
   return (
-    <Avatar className={cn("rounded-lg border border-foreground/25 bg-muted shadow-sm ring-1 ring-background", sizes[size])}>
-      <AvatarImage src={source} alt={`${name} 的人物头像`} />
-      <AvatarFallback className="rounded-lg font-mono text-xs font-semibold">{fallback}</AvatarFallback>
-    </Avatar>
+    <span
+      role="img"
+      aria-label={`${name} 的人物头像`}
+      className={cn("relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-lg border border-foreground/20 shadow-sm ring-1 ring-background", sizes[size])}
+      style={{ background: AVATAR_BACKGROUNDS[hash % AVATAR_BACKGROUNDS.length] }}
+    >
+      <svg viewBox="0 0 64 64" className="h-full w-full" aria-hidden>
+        {/* shoulders */}
+        <path d="M10 64 C12 50 22 44 32 44 C42 44 52 50 54 64 Z" fill={AVATAR_CLOTHES[(hash >> 3) % AVATAR_CLOTHES.length]} />
+        {/* neck */}
+        <rect x="27.5" y="36" width="9" height="10" rx="3.5" fill={AVATAR_SKINS[hash % AVATAR_SKINS.length]} />
+        {/* head */}
+        <circle cx="32" cy="26" r="13" fill={AVATAR_SKINS[hash % AVATAR_SKINS.length]} />
+        {/* hair: three deterministic silhouettes */}
+        {hash % 3 === 0 ? (
+          <path d="M19 24 C19 13 25 8 32 8 C39 8 45 13 45 24 C41 18 38 16 32 16 C26 16 23 18 19 24 Z" fill={AVATAR_HAIRS[(hash >> 5) % AVATAR_HAIRS.length]} />
+        ) : hash % 3 === 1 ? (
+          <path d="M18.5 26 C17 14 24 7.5 32 7.5 C40 7.5 47 14 45.5 26 L42 26 C43 18 39 14 32 14 C25 14 21 18 22 26 Z" fill={AVATAR_HAIRS[(hash >> 5) % AVATAR_HAIRS.length]} />
+        ) : (
+          <path d="M20 22 C21 12 26 8 32 8 C38 8 43 12 44 22 C44 24 42 24 41 22 C39 17 36 15 32 15 C28 15 25 17 23 22 C22 24 20 24 20 22 Z M18 30 C17 24 18 20 20 18 L22 26 Z M46 30 C47 24 46 20 44 18 L42 26 Z" fill={AVATAR_HAIRS[(hash >> 5) % AVATAR_HAIRS.length]} />
+        )}
+        {/* eyes */}
+        <circle cx="27" cy="26" r="1.4" fill="#111827" />
+        <circle cx="37" cy="26" r="1.4" fill="#111827" />
+        {/* mouth */}
+        <path d="M29 32 Q32 34.2 35 32" stroke="#111827" strokeWidth="1.2" fill="none" strokeLinecap="round" opacity="0.65" />
+      </svg>
+      <span className="pointer-events-none absolute -bottom-px right-0 font-mono text-[8px] font-bold leading-none text-foreground/80">{initial}</span>
+    </span>
   );
 }
 
@@ -49,7 +80,7 @@ function avatarHash(value: string): number {
     hash ^= byte;
     hash = Math.imul(hash, 16_777_619) >>> 0;
   }
-  return hash;
+  return hash >>> 0;
 }
 
 /** Presence ring: the agent's live state reads off the avatar, no text needed. */
@@ -256,4 +287,17 @@ export function SparkleDivider({ children }: { children?: ReactNode }): ReactNod
       <span className="text-[10px] font-medium uppercase tracking-[0.18em]">{children}</span>
     </div>
   );
+}
+
+/** §15.9: one shared visual language for provenance across every causality card. */
+export function provenanceBadge(source: string): ReactNode {
+  const labels: Record<string, string> = {
+    "world-fact": "世界事实",
+    "authorized-observation": "合法观察",
+    "message-claim": "消息主张",
+    "agent-self-report": "Agent 自述",
+    "system-inference": "系统推断",
+    presentation: "展示标签"
+  };
+  return <Badge variant="outline" className="text-[10px]">{labels[source] ?? source}</Badge>;
 }

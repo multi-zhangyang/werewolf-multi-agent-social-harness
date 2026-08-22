@@ -22,8 +22,7 @@ export interface CharacterOption {
 
 export interface CreateRoomInput {
   scenarioId: string;
-  models: string[];
-  /** Registry model-profile ids, round-robined per seat (server-preferred). */
+  /** Full seat→model-profile table (length = seat count; server round-robins if shorter). */
   modelProfileIds?: string[];
   /** Per-seat overrides: slot index → model-profile id. */
   agentModelOverrides?: Record<string, string>;

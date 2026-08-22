@@ -625,7 +625,8 @@ export interface Commitment {
   proposition: string;
   promisedAction:
     | {
-        actionType: "return-at-least" | "invest-at-least" | "contribute-at-least";
+        actionType: "return-at-least" | "invest-at-least" | "contribute-at-least" | "return-ratio";
+        /** Absolute amount for amount-based promises; percent (0-100] for return-ratio. */
         amount: number;
         condition?: string;
       }
@@ -709,7 +710,17 @@ export interface ActivationCompletion {
 export type AgentRuntimeEvent =
   | { type: "agent.status"; roomId: string; actorId: string; status: AgentStatus; at: string }
   | { type: "agent.updated"; roomId: string; actorId: string; status: AgentStatus; mind: AgentMindState; turnCount: number; totalTokens: number; lastOutput?: string; at: string }
-  | { type: "agent.delta"; roomId: string; actorId: string; delta: string; at: string }
+  | {
+      type: "agent.delta";
+      roomId: string;
+      actorId: string;
+      delta: string;
+      /** True while the current phase is sealed (night actions, simultaneous
+       *  votes): public spectators must not see the token stream, because the
+       *  text would reveal hidden choices before resolution (§8.3). */
+      sealed?: boolean;
+      at: string;
+    }
   | { type: "agent.reasoning-content"; roomId: string; actorId: string; delta: string; elapsedMs: number; done: boolean; at: string }
   | { type: "agent.reasoning-summary"; roomId: string; actorId: string; delta: string; at: string }
   /** @deprecated Read-only compatibility for archives created before schema v3. */
@@ -742,6 +753,8 @@ export type AgentRuntimeEvent =
       safeOutputSummary?: string;
       worldEffect?: string;
       errorCode?: string;
+      /** Sealed while hidden-choice phases run: public sees only the pulse. */
+      sealed?: boolean;
       at: string;
     }
   | { type: "agent.thought-beat"; roomId: string; actorId: string; beat: ThoughtBeat; at: string }
@@ -855,6 +868,13 @@ export interface SocialWorld {
   decisionRecords(): DecisionRecord[];
   /** Viewer-scoped canonical social causality; private cognition stays owner-only. */
   socialCausalityFor(actorId?: string, omniscient?: boolean): import("./social/contracts").SocialCausalityProjection;
+  /**
+   * Whether agent token streams may be shown to public spectators right now
+   * (§8.3). Scenarios seal hidden-choice phases (night actions, simultaneous
+   * votes) so the live text cannot leak unresolved secrets; discussion and
+   * open phases stream freely.
+   */
+  publicStreamingAllowed(): boolean;
   /** Persist the immutable, secret-free runtime policy behind this actor's decisions. */
   recordStrategyProfileSnapshot(input: import("./social/contracts").StrategyProfileSnapshot): import("./social/contracts").StrategyProfileSnapshot;
   /** Persist a sanitized runtime downgrade/failure as AgentTrace, never raw provider content. */
