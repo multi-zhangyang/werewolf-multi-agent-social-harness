@@ -126,9 +126,11 @@ export class FileSeasonStore implements SeasonStore {
         }
       }
       throw new Error("SEASON_FILE_SCHEMA_INVALID");
-    } catch {
+    } catch (cause) {
       // A corrupted season file must never sink the server: quarantine it and
-      // start clean rather than crashing on boot.
+      // start clean rather than crashing on boot — but never silently, since
+      // this discards every character's cross-game dossier.
+      console.warn(`[season] season file at ${this.filePath} is unreadable and was quarantined; cross-game dossiers start empty.`, cause instanceof Error ? cause.message : cause);
       try {
         renameSync(this.filePath, `${this.filePath}.corrupt-${Date.now()}`);
       } catch {

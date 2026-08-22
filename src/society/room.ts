@@ -13,6 +13,7 @@ import type {
   RoomStatus,
   ScenarioId,
   SeasonStore,
+  SocialMessage,
   SocialWorld,
   WorldActionCommit,
   WorldActivation,
@@ -26,11 +27,14 @@ import {
   resolveAgentModelConfig,
   seedRegistryFromEnv,
   type AgentModelBinding,
+  type ModelProfile,
   type ProviderProfile,
   type RegistryGlobalDefaults,
   type ResolvedModelConfig
 } from "./models";
 import { reasoningFallbackFetch, type ReasoningFallbackNotice } from "./models/reasoning-fallback";
+import { buildExtractionRequest, parseExtractedDeclarations, type ExtractionRosterEntry } from "./social/message-extractor";
+import { extractText } from "./context-manager";
 import { RoomArchiveError, RoomArchiveStore, type RoomCheckpoint } from "./persistence";
 import { CinematicDirector } from "./spectator/cinematic-director";
 import { ActivationLimiter } from "./activation-limiter";
@@ -218,6 +222,10 @@ export class SocietyRoom {
   private readonly restoreMinds?: Record<string, AgentMindState>;
   /** Shared stateless provider clients, keyed by provider profile id. */
   private readonly providerClients = new Map<string, OpenAIProvider>();
+  /** Sidecar extraction runs strictly one-at-a-time, off the send path. */
+  private actExtractionChain: Promise<void> = Promise.resolve();
+  private extractionFailures = 0;
+  private readonly extractionProviders = new Map<string, OpenAIProviderType>();
   /** Process-wide activation pool; absent in embedded single-room use. */
   private readonly limiter?: ActivationLimiter;
   private readonly pausedAgents = new Set<string>();
@@ -284,6 +292,17 @@ export class SocietyRoom {
       ...(options.restore?.worldState ? { state: options.restore.worldState } : {})
     });
     this.world.onUpdate((snapshot) => this.onWorldUpdate(snapshot));
+    // Message sidecar (AGENTS.md §6.5): structured social acts are extracted
+    // off-thread from every persisted discussion message so the causality page
+    // reflects what was actually said, not only self-reported cognition.
+    // Skipped for injected (scripted) providers — their finite response queues
+    // exist to drive agent turns, and a sidecar call would consume them.
+    if (!options.provider) {
+      this.world.socialActExtractor = (message) => {
+        this.queueActExtraction(message);
+        return Promise.resolve();
+      };
+    }
     for (const profile of options.profiles) {
       this.cards.set(profile.id, {
         profile: structuredClone({ ...profile, controller: profile.controller ?? "agent" }),
@@ -523,13 +542,6 @@ export class SocietyRoom {
 
   eventsSince(seq = 0): SocietyRoomEventEnvelope[] {
     return this.events.filter((entry) => entry.seq > seq).map((entry) => structuredClone(entry));
-  }
-
-  replayEventsSince(seq = 0): SocietyRoomEventEnvelope[] {
-    return dedupeEnvelopes([...this.replayEvents, ...this.events])
-      .filter((entry) => entry.seq > seq && entry.event.type !== "agent.reasoning-content")
-      .sort((left, right) => left.seq - right.seq)
-      .map((entry) => structuredClone(entry));
   }
 
   subscribe(listener: RoomListener): () => void {
@@ -931,6 +943,78 @@ export class SocietyRoom {
       maxRetries: 1,
       fetch: reasoningFallbackFetch({ onNotice: (notice) => this.emitReasoningNotice(notice) })
     });
+  }
+
+  /** Serialize sidecar extractions: one in flight at a time, never blocking sends. */
+  private queueActExtraction(message: SocialMessage): void {
+    const run = (): Promise<void> => this.performActExtraction(message);
+    this.actExtractionChain = this.actExtractionChain.then(run, run);
+  }
+
+  private async performActExtraction(message: SocialMessage): Promise<void> {
+    try {
+      // A paused or finished room has no live conversation to annotate.
+      if (this.status !== "running") return;
+      const profile = this.extractionModelProfile();
+      if (!profile) return;
+      const roster: ExtractionRosterEntry[] = [...this.cards.values()]
+        .filter((card) => card.profile.controller !== "human")
+        .map((card) => ({ id: card.profile.id, name: card.profile.displayName }));
+      const request = buildExtractionRequest(message, roster);
+      const provider = this.extractionProviderFor(profile.providerProfileId);
+      const model = await provider.getModel(profile.modelId);
+      const response = await model.getResponse({
+        systemInstructions: request.systemInstructions,
+        input: request.input,
+        // Low effort + temperature 0: the sidecar must be fast and stable —
+        // a thinking-model detour here would stall the serialized queue.
+        modelSettings: { temperature: 0, reasoning: { effort: "low" }, parallelToolCalls: false },
+        tools: [],
+        outputType: "text",
+        handoffs: [],
+        tracing: false
+      });
+      const declarations = parseExtractedDeclarations(extractText(response.output), message, roster);
+      if (declarations.length) this.world.recordExtractedSocialActs(message.id, declarations);
+    } catch (cause) {
+      this.extractionFailures += 1;
+      console.warn(
+        `[room ${this.id}] social-act extraction failed (${this.extractionFailures} total) for message ${message.id}:`,
+        cause instanceof Error ? cause.message : cause
+      );
+    }
+  }
+
+  /**
+   * Dedicated provider for the sidecar: shares registry credentials but owns a
+   * short client timeout, so one slow/hung extraction cannot hold the queue for
+   * an activation-length horizon (§17.1: leases cover real lifetimes).
+   */
+  private extractionProviderFor(providerProfileId: string): OpenAIProviderType {
+    const existing = this.extractionProviders.get(providerProfileId);
+    if (existing) return existing;
+    const profile = this.modelRegistry.providerProfile(providerProfileId);
+    const client = new OpenAI({
+      apiKey: profile ? apiKeyForRef(profile) : (this.apiKey ?? apiKeyFromEnv()),
+      baseURL: (profile?.baseURL || undefined) ?? baseUrlFromEnv(),
+      timeout: 120_000,
+      maxRetries: 0,
+      fetch: reasoningFallbackFetch({ onNotice: (notice) => this.emitReasoningNotice(notice) })
+    });
+    const provider = new OpenAIProvider({
+      useResponses: profile?.apiMode === "responses",
+      openAIClient: client
+    });
+    this.extractionProviders.set(providerProfileId, provider);
+    return provider;
+  }
+
+  /** The extraction sidecar uses the global default model, else any enabled profile. */
+  private extractionModelProfile(): ModelProfile | undefined {
+    const defaults = this.modelRegistry.globalDefaults();
+    const preferred = defaults.modelProfileId ? this.modelRegistry.modelProfile(defaults.modelProfileId) : undefined;
+    if (preferred?.enabled) return preferred;
+    return this.modelRegistry.listModelProfiles().find((profile) => profile.enabled);
   }
 
   private async runActivation(activation: WorldActivation, actorIds: string[], overrideInstruction?: string): Promise<void> {

@@ -869,6 +869,15 @@ export interface SocialWorld {
   /** Viewer-scoped canonical social causality; private cognition stays owner-only. */
   socialCausalityFor(actorId?: string, omniscient?: boolean): import("./social/contracts").SocialCausalityProjection;
   /**
+   * Optional message sidecar: when installed, each persisted message is
+   * analyzed off-thread and structured social acts are recorded via
+   * `recordExtractedSocialActs` with `model-extracted` provenance. Failures
+   * must never reach the send path.
+   */
+  socialActExtractor?: (message: SocialMessage) => Promise<void>;
+  /** Record sidecar-extracted social acts for a persisted message; idempotent per message. */
+  recordExtractedSocialActs(messageId: string, declarations: import("./social/contracts").SocialActDeclaration[]): string[];
+  /**
    * Whether agent token streams may be shown to public spectators right now
    * (§8.3). Scenarios seal hidden-choice phases (night actions, simultaneous
    * votes) so the live text cannot leak unresolved secrets; discussion and

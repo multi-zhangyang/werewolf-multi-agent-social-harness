@@ -172,95 +172,153 @@ export class SocialCausalityLedger {
 
     const actIds: string[] = [];
     for (const declaration of declarations) {
-      const targets = [...new Set(declaration.targetActorIds ?? [])];
-      const propositionIds: string[] = [];
-      if (declaration.proposition) {
-        const proposition = this.upsertProposition({
-          kind: declaration.proposition.kind ?? propositionKindFor(declaration.kind),
-          ...(declaration.proposition.subjectId ? {
-            subjectId: allActorIds.includes(declaration.proposition.subjectId)
-              ? characterIdFor(declaration.proposition.subjectId)
-              : declaration.proposition.subjectId
-          } : {}),
-          predicate: declaration.proposition.predicate.trim(),
-          ...(declaration.proposition.object === undefined ? {} : { object: declaration.proposition.object }),
-          truthStatus: declaration.kind === "promise" ? "future-contingent" : "unknown",
-          groundTruthVisibility: declaration.kind === "question" || declaration.kind === "apology"
-            ? "no-objective-ground-truth"
-            : "hidden-until-resolution",
-          sourceEventId: envelope.eventId
-        });
-        propositionIds.push(proposition.propositionId);
-      }
-      const act: SocialActRecord = {
-        socialActId: `social-act-${randomUUID()}`,
-        kind: declaration.kind,
-        messageId: message.id,
-        actorId: message.senderId,
-        actorCharacterId: characterIdFor(message.senderId),
-        audienceActorIds,
-        targetActorIds: targets,
-        propositionIds,
-        confidence: clamp01(declaration.confidence ?? 1),
-        extractionMethod: "explicit-tool",
-        logicalTime: envelope.logicalTime,
-        sourceEventId: envelope.eventId,
-        ...(declaration.deceptionId ? { deceptionId: declaration.deceptionId } : {}),
-        ...(declaration.repairDeceptionId ? { repairDeceptionId: declaration.repairDeceptionId } : {})
-      };
-      this.socialActs.push(act);
-      actIds.push(act.socialActId);
-      const { deceptionId: _privateDeceptionId, ...audienceSafeAct } = act;
-      this.append("social", `social-act.${act.kind}`, audienceSafeAct, {
-        actorId: message.senderId,
-        characterId: characterIdFor(message.senderId),
-        causationId: envelope.eventId,
-        visibility
-      });
-
-      for (const propositionId of propositionIds) {
-        const observerCharacterIds = message.channel === "public"
-          ? ["public"]
-          : audienceActorIds.map((observerActorId) => characterIdFor(observerActorId));
-        for (const observerCharacterId of observerCharacterIds) {
-          this.evidence.push({
-            evidenceId: `evidence-${randomUUID()}`,
-            observerCharacterId,
-            propositionId,
-            sourceType: message.channel === "public" ? "public-message" : message.channel === "private" ? "private-message" : "team-message",
-            sourceActorId: message.senderId,
-            sourceEventId: envelope.eventId,
-            sourceMessageId: message.id,
-            supports: declaration.kind !== "denial",
-            strength: clamp01(declaration.confidence ?? 0.7),
-            sourceReliability: 0.5,
-            visibility: message.channel === "public" ? "public" : "private",
-            logicalTime: envelope.logicalTime
-          });
-        }
-      }
-
-      if (declaration.deceptionId) {
-        this.markDeceptionExecuted(
-          declaration.deceptionId,
-          message,
-          audienceActorIds,
-          propositionIds,
-          characterIdFor
-        );
-      }
-      if (declaration.repairDeceptionId) {
-        this.recordDeceptionRepair(
-          declaration.repairDeceptionId,
-          declaration.kind,
-          message,
-          audienceActorIds,
-          visibility,
-          characterIdFor
-        );
-      }
+      actIds.push(...this.materializeAct(declaration, message, envelope, audienceActorIds, visibility, allActorIds, characterIdFor, "explicit-tool"));
     }
     return actIds;
+  }
+
+  /**
+   * Sidecar path: record model-extracted social acts for a message that was
+   * already persisted. Acts cite the original `message.sent` envelope as their
+   * source (no new domain event is minted) and never carry deception links —
+   * an episode requires the planner's own tool call or detection evidence,
+   * never an extractor's guess (AGENTS.md §7.4).
+   */
+  recordExtractedSocialActs(context: MessageContext): string[] {
+    const { message, declarations, allActorIds, characterIdFor } = context;
+    const envelope = [...this.events].reverse().find((event) =>
+      event.type === "message.sent" && shortText(asRecord(event.payload).messageId, 160) === message.id
+    );
+    if (!envelope) throw new Error(`MESSAGE_NOT_FOUND: No persisted envelope for message '${message.id}'.`);
+    const audienceActorIds = message.channel === "public"
+      ? [...allActorIds]
+      : [...new Set([message.senderId, ...(message.recipientIds ?? [])])];
+    const visibility: VisibilityPolicy = message.channel === "public"
+      ? { kind: "public" }
+      : { kind: "actors", actorIds: audienceActorIds };
+    const actIds: string[] = [];
+    for (const declaration of declarations) {
+      const targets = [...new Set(declaration.targetActorIds ?? [])];
+      for (const target of targets) {
+        if (!allActorIds.includes(target)) throw new Error(`SOCIAL_ACT_TARGET_INVALID: '${target}' is not in this room.`);
+        if (message.channel !== "public" && !audienceActorIds.includes(target)) {
+          throw new Error(`SOCIAL_ACT_VISIBILITY_INVALID: '${target}' cannot receive this ${message.channel} message.`);
+        }
+      }
+      const { deceptionId: _deceptionId, repairDeceptionId: _repairDeceptionId, ...safeDeclaration } = declaration;
+      actIds.push(...this.materializeAct(safeDeclaration, message, envelope, audienceActorIds, visibility, allActorIds, characterIdFor, "model-extracted"));
+    }
+    return actIds;
+  }
+
+  /** Message ids that already carry model-extracted acts (sidecar dedup after restore). */
+  extractedActMessageIds(): string[] {
+    return [...new Set(
+      this.socialActs
+        .filter((act) => act.extractionMethod === "model-extracted")
+        .map((act) => act.messageId)
+        .filter((messageId): messageId is string => Boolean(messageId))
+    )];
+  }
+
+  /** Shared materialization for explicit-tool and model-extracted declarations. */
+  private materializeAct(
+    declaration: SocialActDeclaration,
+    message: SocialMessage,
+    envelope: EventEnvelope,
+    audienceActorIds: string[],
+    visibility: VisibilityPolicy,
+    allActorIds: string[],
+    characterIdFor: (actorId: string) => string,
+    extractionMethod: SocialActRecord["extractionMethod"]
+  ): string[] {
+    const targets = [...new Set(declaration.targetActorIds ?? [])];
+    const propositionIds: string[] = [];
+    if (declaration.proposition) {
+      const proposition = this.upsertProposition({
+        kind: declaration.proposition.kind ?? propositionKindFor(declaration.kind),
+        ...(declaration.proposition.subjectId ? {
+          subjectId: allActorIds.includes(declaration.proposition.subjectId)
+            ? characterIdFor(declaration.proposition.subjectId)
+            : declaration.proposition.subjectId
+        } : {}),
+        predicate: declaration.proposition.predicate.trim(),
+        ...(declaration.proposition.object === undefined ? {} : { object: declaration.proposition.object }),
+        truthStatus: declaration.kind === "promise" ? "future-contingent" : "unknown",
+        groundTruthVisibility: declaration.kind === "question" || declaration.kind === "apology"
+          ? "no-objective-ground-truth"
+          : "hidden-until-resolution",
+        sourceEventId: envelope.eventId
+      });
+      propositionIds.push(proposition.propositionId);
+    }
+    const act: SocialActRecord = {
+      socialActId: `social-act-${randomUUID()}`,
+      kind: declaration.kind,
+      messageId: message.id,
+      actorId: message.senderId,
+      actorCharacterId: characterIdFor(message.senderId),
+      audienceActorIds,
+      targetActorIds: targets,
+      propositionIds,
+      confidence: clamp01(declaration.confidence ?? 1),
+      extractionMethod,
+      logicalTime: envelope.logicalTime,
+      sourceEventId: envelope.eventId,
+      ...(declaration.deceptionId ? { deceptionId: declaration.deceptionId } : {}),
+      ...(declaration.repairDeceptionId ? { repairDeceptionId: declaration.repairDeceptionId } : {})
+    };
+    this.socialActs.push(act);
+    const { deceptionId: _privateDeceptionId, ...audienceSafeAct } = act;
+    this.append("social", `social-act.${act.kind}`, audienceSafeAct, {
+      actorId: message.senderId,
+      characterId: characterIdFor(message.senderId),
+      causationId: envelope.eventId,
+      visibility
+    });
+
+    for (const propositionId of propositionIds) {
+      const observerCharacterIds = message.channel === "public"
+        ? ["public"]
+        : audienceActorIds.map((observerActorId) => characterIdFor(observerActorId));
+      for (const observerCharacterId of observerCharacterIds) {
+        this.evidence.push({
+          evidenceId: `evidence-${randomUUID()}`,
+          observerCharacterId,
+          propositionId,
+          sourceType: message.channel === "public" ? "public-message" : message.channel === "private" ? "private-message" : "team-message",
+          sourceActorId: message.senderId,
+          sourceEventId: envelope.eventId,
+          sourceMessageId: message.id,
+          supports: declaration.kind !== "denial",
+          strength: clamp01(declaration.confidence ?? 0.7),
+          sourceReliability: 0.5,
+          visibility: message.channel === "public" ? "public" : "private",
+          logicalTime: envelope.logicalTime
+        });
+      }
+    }
+
+    if (declaration.deceptionId) {
+      this.markDeceptionExecuted(
+        declaration.deceptionId,
+        message,
+        audienceActorIds,
+        propositionIds,
+        characterIdFor
+      );
+    }
+    if (declaration.repairDeceptionId) {
+      this.recordDeceptionRepair(
+        declaration.repairDeceptionId,
+        declaration.kind,
+        message,
+        audienceActorIds,
+        visibility,
+        characterIdFor
+      );
+    }
+    return [act.socialActId];
   }
 
   recordAction(input: {

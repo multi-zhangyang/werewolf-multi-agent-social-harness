@@ -364,6 +364,8 @@ export interface RoomConnection {
   pause: () => Promise<void>;
   resume: () => Promise<void>;
   toggleAgentPause: (actorId: string, paused: boolean) => Promise<void>;
+  /** Swap one agent's engine (§12.4); identity, session and memory survive. */
+  switchAgentModel: (actorId: string, modelProfileId: string) => Promise<void>;
   submitAction: (action: string, payload: unknown) => Promise<void>;
 }
 
@@ -396,10 +398,14 @@ export function useRoom(
     const viewerQuery = `mode=${encodeURIComponent(viewer.mode)}${viewer.mode === "agent-pov" && viewer.agentId ? `&agent=${encodeURIComponent(viewer.agentId)}` : ""}`;
     let cancelled = false;
     let source: EventSource | undefined;
+    let malformedEvents = 0;
 
     const applySnapshot = (next: SnapshotWithViewer): void => {
       setRoom(next);
       if (next.viewer) setEffectiveViewer(next.viewer);
+      // A fresh snapshot proves the transport works again, so transport-level
+      // error banners clear here rather than lingering forever.
+      setError(undefined);
       // Snapshots anchor truth: live turns whose activations already ended in
       // the snapshot's participant statuses are dropped so a reconnect starts
       // clean instead of resuming stale streams.
@@ -438,6 +444,7 @@ export function useRoom(
       source.addEventListener("event", (event) => {
         try {
           const envelope = JSON.parse((event as MessageEvent).data) as SocietyRoomEventEnvelope;
+          malformedEvents = 0;
           setStream((current) => ingestEnvelope(current, envelope));
           if (envelope.event.type === "world.updated") {
             const snapshot = envelope.event.snapshot;
@@ -458,7 +465,11 @@ export function useRoom(
               : current);
           }
         } catch {
-          // Malformed envelope: the next coalesced snapshot self-heals the view.
+          // Malformed envelope: the next coalesced snapshot self-heals the view,
+          // but a persistent stream of them must become visible instead of
+          // leaving the page silently frozen on stale data.
+          malformedEvents += 1;
+          if (malformedEvents === 5) setError("事件流数据持续异常，画面可能滞后（快照每 5 秒兜底刷新）");
         }
       });
       // Never give up on the stream: EventSource retries natively, and while
@@ -466,6 +477,7 @@ export function useRoom(
       // frozen spectator page is worse than a degraded one).
       source.onerror = () => {
         setConnection("reconnecting");
+        setError("直播连接中断，正在重连…");
       };
     };
     void connect().catch((cause) => {
@@ -518,6 +530,24 @@ export function useRoom(
     await postControl(`/api/rooms/${encodeURIComponent(roomId ?? "")}/agents/${encodeURIComponent(actorId)}/${action}`, token, setError);
   }, [roomId, token]);
 
+  const switchAgentModel = useCallback(async (actorId: string, modelProfileId: string): Promise<void> => {
+    if (!roomId) return;
+    try {
+      const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(actorId)}/model`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { "x-player-token": token } : {}) },
+        body: JSON.stringify({ modelProfileId })
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => undefined);
+        throw new Error(body?.message ?? `HTTP ${response.status}`);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      throw cause;
+    }
+  }, [roomId, token]);
+
   const submitAction = useCallback(async (action: string, payload: unknown): Promise<void> => {
     if (!roomId) return;
     try {
@@ -536,8 +566,8 @@ export function useRoom(
   }, [roomId, token]);
 
   return useMemo(
-    () => ({ room, viewer: effectiveViewer, connection, error, stream, pause, resume, toggleAgentPause, submitAction }),
-    [room, effectiveViewer, connection, error, stream, pause, resume, toggleAgentPause, submitAction]
+    () => ({ room, viewer: effectiveViewer, connection, error, stream, pause, resume, toggleAgentPause, switchAgentModel, submitAction }),
+    [room, effectiveViewer, connection, error, stream, pause, resume, toggleAgentPause, switchAgentModel, submitAction]
   );
 }
 

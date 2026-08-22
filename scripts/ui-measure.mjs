@@ -23,7 +23,7 @@ const report = await page.evaluate(() => {
     if (r.right > worst.right) worst = { right: Math.round(r.right), cls: String(element.className).slice(0, 60) };
   });
   return {
-    viewport: window.innerWidth,
+    viewport: globalThis.window?.innerWidth ?? 0,
     docScrollWidth: document.documentElement.scrollWidth,
     dialog: dr ? { left: Math.round(dr.left), right: Math.round(dr.right), width: Math.round(dr.width) } : undefined,
     wrapper: wr ? { left: Math.round(wr.left), right: Math.round(wr.right), width: Math.round(wr.width) } : undefined,

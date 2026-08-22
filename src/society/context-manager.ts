@@ -588,7 +588,8 @@ function renderItems(items: AgentInputItem[]): string {
   }).filter(Boolean).join("\n");
 }
 
-function extractText(output: Array<{ type?: string; content?: unknown; text?: unknown }>): string {
+/** Join model response output items into plain text (shared with the room's sidecar extractor). */
+export function extractText(output: Array<{ type?: string; content?: unknown; text?: unknown }>): string {
   const parts: string[] = [];
   for (const entry of output ?? []) {
     if (entry.type !== "message") continue;

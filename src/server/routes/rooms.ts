@@ -1,16 +1,14 @@
-import { timingSafeEqual } from "node:crypto";
 import express from "express";
 import { z } from "zod";
 import { characterAgentProfile } from "../../society/profiles";
 import { ALL_SCENARIOS, SCENARIO_METADATA } from "../../society/scenarios";
-import type { AgentProfile, ScenarioId, ScenarioSummary, SpectatorMode, WorldSnapshot } from "../../society/contracts";
+import type { AgentProfile, ScenarioId, ScenarioSummary, SpectatorMode } from "../../society/contracts";
 import { contextLabel } from "../../society/context-manager";
 import type { SocietyRoom, SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "../../society/room";
 import { defaultCapabilities, defaultContextPolicy, persistRegistry, type AgentModelBinding, type ContextPolicy, type ModelProfile } from "../../society/models";
 import { projectEventFor, type SpectatorViewer } from "../../society/spectator/projection";
 import type { ServerContext } from "../context";
 import {
-  isOperatorFor,
   requireGlobalOperator,
   roomAuthorityFor,
   setTokenCookie,
@@ -18,7 +16,7 @@ import {
   type RoomAuthority
 } from "../auth";
 import { RoomArchiveError, type RoomCheckpoint } from "../../society/persistence";
-import { getProviderSettings, publicSettings, saveProviderSettings, testProviderSettings, writeEnvKey } from "../settings";
+import { getProviderSettings, writeEnvKey } from "../settings";
 import { fetchRemoteModels, mergeProbeResult, probeCapabilities } from "../probe";
 
 function sanitizeEnvName(id: string): string {
@@ -94,6 +92,16 @@ function requireRoomControl(
 }
 
 /** Read-only checkpoint projection: public world history, never private minds. */
+function publicArchiveProjection(checkpoint: RoomCheckpoint): Record<string, unknown> {
+  return {
+    roomId: checkpoint.roomId,
+    archivedAt: checkpoint.archivedAt,
+    status: checkpoint.status,
+    seasonMode: checkpoint.seasonMode,
+    snapshot: publicArchivedSnapshot(checkpoint)
+  };
+}
+
 export function publicArchivedSnapshot(checkpoint: RoomCheckpoint): SocietyRoomSnapshot {
   const snapshot = checkpoint.snapshot;
   const world = snapshot.world;
@@ -181,23 +189,7 @@ export function publicArchivedSnapshot(checkpoint: RoomCheckpoint): SocietyRoomS
   };
 }
 
-function publicArchiveProjection(checkpoint: RoomCheckpoint): Record<string, unknown> {
-  return {
-    roomId: checkpoint.roomId,
-    archivedAt: checkpoint.archivedAt,
-    status: checkpoint.status,
-    seasonMode: checkpoint.seasonMode,
-    snapshot: publicArchivedSnapshot(checkpoint)
-  };
-}
-
 const scenarioIds = Object.keys(SCENARIO_METADATA) as [ScenarioId, ...ScenarioId[]];
-
-const settingsSchema = z.object({
-  baseURL: z.string().max(500).optional(),
-  apiKey: z.string().max(400).optional(),
-  models: z.array(z.string().min(1).max(180)).min(1).max(16).optional()
-}).strict();
 
 const createRoomSchema = z.object({
   scenarioId: z.enum(scenarioIds),
@@ -251,27 +243,6 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
         max: context.limiter.maxConcurrent
       }
     });
-  });
-
-  app.get("/api/settings", (_request, response) => {
-    response.json(publicSettings());
-  });
-
-  app.put("/api/settings", (request, response, next) => {
-    if (!requireGlobalOperator(request, response, context.auth)) return;
-    try {
-      const input = settingsSchema.parse(request.body ?? {});
-      response.json(saveProviderSettings(input));
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.post("/api/settings/test", (request, response, next) => {
-    if (!requireGlobalOperator(request, response, context.auth)) return;
-    void testProviderSettings()
-      .then((result) => response.json(result))
-      .catch(next);
   });
 
   app.get("/api/scenarios", (_request, response) => {
@@ -384,7 +355,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     }
     // Public archive: a projected view. Forensic access (operator only)
     // returns the full checkpoint minus session file paths (§16.4).
-    const operator = isOperatorFor(context.auth, request);
+    const operator = context.auth.isOperatorToken(tokenFromRequest(request));
     if (operator) {
       const { sessionFiles: _sessionFiles, ownerToken: _ownerToken, ...rest } = checkpoint;
       response.json({ ...rest, sessionCount: Object.keys(checkpoint.sessionFiles ?? {}).length });
@@ -602,82 +573,6 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     void room.submitHumanAction(token!, action, request.body?.payload).then((commit) => {
       response.status(202).json({ commit, room: room.snapshotFor(actorId) });
     }).catch(next);
-  });
-
-  app.get("/api/rooms/:roomId/replay", (request, response) => {
-    const room = context.rooms.get(request.params.roomId);
-    let checkpoint: RoomCheckpoint | undefined;
-    if (!room) {
-      try {
-        checkpoint = context.archive.load(request.params.roomId);
-      } catch (error) {
-        const code = error instanceof RoomArchiveError ? error.failure.code : "ARCHIVE_READ_FAILED";
-        response.status(503).json({ error: code, message: "The room replay archive is unavailable or corrupt." });
-        return;
-      }
-      if (!checkpoint) {
-        response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist." });
-        return;
-      }
-    }
-
-    const rawMode = request.query.mode;
-    const mode = rawMode === "agent-pov" || rawMode === "omniscient" ? rawMode : "public";
-    const token = tokenFromRequest(request);
-    const operator = context.auth.isOperatorToken(token);
-    const authority = room ? roomAuthorityFor(request, room) : undefined;
-    const archivedOwner = checkpoint ? archivedOwnerTokenMatches(checkpoint, token) : false;
-    const privileged = operator || Boolean(authority?.owner) || archivedOwner;
-    let agentId: string | undefined;
-    if (mode === "agent-pov") {
-      agentId = authority?.participantActorId;
-      if (!agentId && privileged && typeof request.query.agent === "string") agentId = request.query.agent.trim();
-      const actorIds = new Set((room?.snapshotFor().participants ?? checkpoint?.snapshot.participants ?? []).map((entry) => entry.profile.id));
-      if (!agentId || !actorIds.has(agentId)) {
-        response.status(403).json({
-          error: "AGENT_POV_FORBIDDEN",
-          message: "A participant may replay only its own POV; room owners/operators must select a valid agent."
-        });
-        return;
-      }
-    } else if (mode === "omniscient" && !privileged) {
-      response.status(403).json({ error: "OMNISCIENT_FORBIDDEN", message: "Room-owner or operator authorization is required." });
-      return;
-    }
-
-    const fromSequence = nonNegativeSequence(request.query.fromSequence, 0);
-    const toSequence = nonNegativeSequence(request.query.toSequence, Number.MAX_SAFE_INTEGER);
-    if (toSequence < fromSequence) {
-      response.status(400).json({ error: "REPLAY_RANGE_INVALID", message: "toSequence must be at least fromSequence." });
-      return;
-    }
-    const source = room
-      ? room.replayEventsSince(Math.max(0, fromSequence - 1))
-      : archivedReplayEnvelopes(checkpoint!);
-    const viewer: SpectatorViewer = mode === "agent-pov"
-      ? { mode: "agent-pov", agentId, privileged }
-      : mode === "omniscient" ? { mode: "omniscient" } : { mode: "public", privileged: false };
-    const events = source
-      .filter((entry) => entry.seq >= fromSequence && entry.seq <= toSequence)
-      .flatMap((entry) => {
-        const projected = projectReplayEnvelope(entry, viewer);
-        return projected ? [projected] : [];
-      });
-    const hasReplayFrames = source.some((entry) =>
-      mode === "agent-pov"
-        ? entry.event.type === "agent.pov-frame" && entry.event.actorId === agentId
-        : mode === "omniscient" ? entry.event.type === "world.operator-frame" : entry.event.type === "world.updated"
-    );
-    response.json({
-      roomId: request.params.roomId,
-      mode,
-      ...(agentId ? { agentId } : {}),
-      fromSequence,
-      toSequence: toSequence === Number.MAX_SAFE_INTEGER ? null : toSequence,
-      completeness: hasReplayFrames ? "scoped-frames" : "legacy-limited",
-      truncatedBeforeSequence: source.length ? source[0].seq > 1 : false,
-      events
-    });
   });
 
   app.get("/api/rooms/:roomId/events", (request, response) => {
@@ -1068,79 +963,6 @@ function projectEnvelopeForViewer(
   }
   if (projected === event) return envelope;
   return { ...envelope, event: projected };
-}
-
-function projectReplayEnvelope(
-  envelope: SocietyRoomEventEnvelope,
-  viewer: SpectatorViewer
-): SocietyRoomEventEnvelope | undefined {
-  const event = envelope.event;
-  // Replay anchors are persisted in the protected room stream and fetched on
-  // demand; duplicating their full snapshots over live SSE would add noise
-  // and bandwidth without changing the current room view.
-  if (event.type === "agent.pov-frame" || event.type === "world.operator-frame" || event.type === "world.public-frame") return undefined;
-  const projected = projectEventFor(event, viewer);
-  if (!projected) return undefined;
-  if (event.type === "world.updated") {
-    // Historical world.updated envelopes were emitted from the public world
-    // projection, not from a particular participant's AuthorizedObservation.
-    // Agent replay therefore uses explicit agent.pov-frame anchors and never
-    // backfills a past POV from this less-scoped snapshot.
-    if (viewer.mode === "agent-pov") return undefined;
-    if (viewer.mode === "public") {
-      return {
-        id: envelope.id,
-        seq: envelope.seq,
-        event: { ...event, snapshot: publicHistoricalWorldSnapshot(event.snapshot) }
-      };
-    }
-  }
-  if (event.type === "agent.message" && viewer.mode === "public" && event.message.channel !== "public") {
-    return undefined;
-  }
-  if (projected === event) return structuredClone(envelope);
-  return { id: envelope.id, seq: envelope.seq, event: structuredClone(projected) };
-}
-
-function publicHistoricalWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
-  return {
-    roomId: snapshot.roomId,
-    scenarioId: snapshot.scenarioId,
-    title: snapshot.title,
-    status: snapshot.status,
-    turn: snapshot.turn,
-    totalTurns: snapshot.totalTurns,
-    phase: snapshot.phase,
-    summary: snapshot.summary,
-    agents: snapshot.agents.map((agent) => {
-      const { observerRole: _observerRole, ...publicAgent } = agent;
-      return publicAgent;
-    }),
-    messages: snapshot.messages.filter((message) => message.channel === "public").map((message) => structuredClone(message)),
-    log: snapshot.log.map((entry) => structuredClone(entry)),
-    details: {}
-  };
-}
-
-function archivedOwnerTokenMatches(checkpoint: RoomCheckpoint, token: string | undefined): boolean {
-  if (!checkpoint.ownerToken || !token) return false;
-  const expected = Buffer.from(checkpoint.ownerToken);
-  const supplied = Buffer.from(token);
-  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
-}
-
-function archivedReplayEnvelopes(checkpoint: RoomCheckpoint): SocietyRoomEventEnvelope[] {
-  const byId = new Map<string, SocietyRoomEventEnvelope>();
-  for (const envelope of [...(checkpoint.replayEnvelopes ?? []), ...(checkpoint.envelopes ?? [])]) {
-    byId.set(envelope.id, envelope);
-  }
-  return [...byId.values()].sort((left, right) => left.seq - right.seq);
-}
-
-function nonNegativeSequence(value: unknown, fallback: number): number {
-  if (typeof value !== "string" || !value.trim()) return fallback;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function writeEvent(response: express.Response, name: string, data: SocietyRoomSnapshot | unknown, id?: number): void {

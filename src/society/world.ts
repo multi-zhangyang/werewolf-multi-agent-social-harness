@@ -89,6 +89,16 @@ export abstract class SocialWorldBase implements SocialWorld {
   private readonly recentReceipts = new Map<string, WorldActionCommit>();
   private static readonly RECENT_RECEIPT_LIMIT = 64;
 
+  /**
+   * Optional message sidecar (AGENTS.md §6.5): when installed by the room, each
+   * persisted message is analyzed off-thread and any structured social acts are
+   * recorded via `recordExtractedSocialActs` with `model-extracted` provenance.
+   * The hook must never block or throw into the send path; failures are logged
+   * by the owner.
+   */
+  socialActExtractor?: (message: SocialMessage) => Promise<void>;
+  private readonly extractionAttempted = new Set<string>();
+
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[]) {
     this.roomId = roomId;
     this.scenario = scenario;
@@ -140,6 +150,9 @@ export abstract class SocialWorldBase implements SocialWorld {
     this.pendingEvents.clear();
     for (const [id, events] of state.shared.pendingEvents) this.pendingEvents.set(id, structuredClone(events));
     this.socialCausality.restoreState(state.shared.socialCausality);
+    for (const messageId of this.socialCausality.extractedActMessageIds()) {
+      this.extractionAttempted.add(messageId);
+    }
     for (const [actorId, events] of this.pendingEvents) {
       const characterId = this.requireProfile(actorId).characterId;
       for (const event of events) {
@@ -639,7 +652,40 @@ export abstract class SocialWorldBase implements SocialWorld {
     this.queueMessageAppraisals(message, input.socialActs ?? []);
     if (this.messages.length > 500) this.messages.splice(0, this.messages.length - 500);
     this.emitUpdate();
+    void this.runActExtraction(message);
     return structuredClone(message);
+  }
+
+  /**
+   * Record sidecar-extracted social acts for an already-persisted message.
+   * Called by the room's extractor; acts land with `model-extracted` provenance
+   * and never carry deception links. Idempotent per message.
+   */
+  recordExtractedSocialActs(messageId: string, declarations: SocialActDeclaration[]): string[] {
+    const message = this.messages.find((entry) => entry.id === messageId);
+    if (!message) throw new Error(`MESSAGE_NOT_FOUND: '${messageId}' is not part of this world.`);
+    if (!declarations.length) return [];
+    const actIds = this.socialCausality.recordExtractedSocialActs({
+      message,
+      declarations,
+      allActorIds: [...this.profiles.keys()],
+      characterIdFor: (actorId) => this.requireProfile(actorId).characterId
+    });
+    // New causality records must reach spectator projections promptly.
+    if (actIds.length) this.emitUpdate();
+    return actIds;
+  }
+
+  private async runActExtraction(message: SocialMessage): Promise<void> {
+    const extractor = this.socialActExtractor;
+    if (!extractor || this.extractionAttempted.has(message.id)) return;
+    this.extractionAttempted.add(message.id);
+    try {
+      await extractor(structuredClone(message));
+    } catch (cause) {
+      // Extraction is advisory: log and move on, never disturb the send path.
+      console.warn(`[world ${this.roomId}] social-act extraction failed for message ${message.id}:`, cause instanceof Error ? cause.message : cause);
+    }
   }
 
   private queueMessageAppraisals(message: SocialMessage, declarations: SocialActDeclaration[]): void {

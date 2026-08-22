@@ -5,6 +5,7 @@ import type {
   DeceptionEpisode,
   DirectedRelationshipState,
   OutcomeReconciliation,
+  SocialActRecord,
   SocialCausalityProjection
 } from "@/society/social/contracts";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +37,7 @@ export const CausalityPanel = memo(function CausalityPanel({ room, viewerPrivile
       <div className="flex flex-col gap-1.5 p-3">
         <ScoreSection room={room} />
         <SuspicionSection room={room} />
+        <SocialActsSection projection={projection} actorName={actorName} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
         <BeliefSection projection={projection} characterNames={characterNames} />
         <CommitmentSection projection={projection} actorName={actorName} />
         <DeceptionSection projection={projection} actorName={actorName} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
@@ -50,8 +52,68 @@ export const CausalityPanel = memo(function CausalityPanel({ room, viewerPrivile
 });
 
 function totalRecords(projection: SocialCausalityProjection): number {
-  return projection.beliefUpdates.length + projection.commitments.length + projection.deceptions.length
-    + projection.directedRelationships.length + projection.outcomeReconciliations.length;
+  return spectatorActs(projection).length + projection.beliefUpdates.length + projection.commitments.length
+    + projection.deceptions.length + projection.directedRelationships.length + projection.outcomeReconciliations.length;
+}
+
+/** High-signal acts worth a timeline row; assertions/questions stay in the ledger only. */
+const SPECTATOR_ACT_KINDS: ReadonlySet<string> = new Set([
+  "promise", "offer", "acceptance", "rejection", "accusation", "threat",
+  "alliance-proposal", "warning", "denial", "apology"
+]);
+
+const ACT_KIND_LABELS: Record<string, string> = {
+  assertion: "断言", denial: "否认", question: "提问", answer: "回答",
+  promise: "承诺", offer: "报价", acceptance: "接受", rejection: "拒绝",
+  request: "请求", threat: "威胁", accusation: "指控", defense: "辩护",
+  apology: "道歉", "alliance-proposal": "结盟提议", disclosure: "披露",
+  endorsement: "背书", warning: "警告"
+};
+
+function spectatorActs(projection: SocialCausalityProjection | undefined): SocialActRecord[] {
+  return (projection?.socialActs ?? [])
+    .filter((act) => SPECTATOR_ACT_KINDS.has(act.kind))
+    .sort((left, right) => left.logicalTime - right.logicalTime);
+}
+
+function SocialActsSection({ projection, actorName, propositions }: {
+  projection: SocialCausalityProjection | undefined;
+  actorName: (id: string | undefined) => string;
+  propositions: Map<string, SocialCausalityProjection["propositions"][number]>;
+}): ReactNode {
+  const acts = spectatorActs(projection).slice(-12).reverse();
+  if (!acts.length) return null;
+  return (
+    <Section title="社会行为" count={acts.length}>
+      <ul className="space-y-1.5">
+        {acts.map((act) => (
+          <li key={act.socialActId} className="rounded-md border border-border/50 bg-muted/20 px-2 py-1.5">
+            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
+              <span className={cn("font-medium", act.kind === "accusation" || act.kind === "threat" ? "text-rose-300" : act.kind === "promise" || act.kind === "alliance-proposal" ? "text-emerald-300" : undefined)}>
+                {ACT_KIND_LABELS[act.kind] ?? act.kind}
+              </span>
+              <span className="truncate">{actorName(act.actorId)}</span>
+              {act.targetActorIds.length ? (
+                <>
+                  <ArrowRight className="size-3 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="truncate">{act.targetActorIds.map((id) => actorName(id)).join("、")}</span>
+                </>
+              ) : null}
+              {provenanceBadge("message-claim")}
+              {act.extractionMethod === "model-extracted" ? (
+                <Badge variant="outline" className="h-4 rounded-full px-1.5 text-[9px] text-muted-foreground">自动提取{act.confidence < 0.75 ? ` · ${Math.round(act.confidence * 100)}%` : ""}</Badge>
+              ) : null}
+            </div>
+            {act.propositionIds.length ? (
+              <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                {act.propositionIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；")}
+              </p>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </Section>
+  );
 }
 
 /** One flat accordion section; first section defaults open. */

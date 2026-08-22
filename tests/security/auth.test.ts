@@ -197,10 +197,10 @@ describe("global writes fail closed without an operator token", () => {
 
   it("anonymous writes to season, settings and characters are forbidden", async () => {
     assert.equal((await fetch(`${harness.base}/api/season`, { method: "DELETE" })).status, 403);
-    assert.equal((await fetch(`${harness.base}/api/settings`, {
+    assert.equal((await fetch(`${harness.base}/api/model-config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ baseURL: "https://example.invalid" })
+      body: JSON.stringify({ providers: [{ id: "intruder", name: "入侵者", kind: "openai-compatible", baseURL: "https://example.invalid", apiMode: "chat-completions", enabled: true }] })
     })).status, 403);
     assert.equal((await fetch(`${harness.base}/api/characters`, {
       method: "POST",

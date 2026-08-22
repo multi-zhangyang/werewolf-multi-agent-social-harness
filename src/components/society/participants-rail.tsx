@@ -1,14 +1,24 @@
 import { memo, useState, type ReactNode } from "react";
-import { BrainCircuit, ChevronDown, Pause, Play } from "lucide-react";
+import { BrainCircuit, ChevronDown, Cpu, Pause, Play } from "lucide-react";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { RoomConnection } from "./use-room";
-import { AgentAvatar, StatusDot, StatusLabel } from "./shared";
+import { AgentAvatar, StatusDot, StatusLabel, readableModel } from "./shared";
+
+/** One registered model profile as offered by /api/scenarios. */
+export interface ModelOption {
+  id: string;
+  profileId: string;
+  name: string;
+  contextLabel?: string;
+}
 
 /**
  * Left rail: one compact card per participant — avatar, live status, score.
@@ -18,11 +28,15 @@ import { AgentAvatar, StatusDot, StatusLabel } from "./shared";
 export const ParticipantsRail = memo(function ParticipantsRail({
   room,
   viewerPrivileged,
-  onToggleAgentPause
+  onToggleAgentPause,
+  models = [],
+  onSwitchModel
 }: {
   room: SocietyRoomSnapshot;
   viewerPrivileged: boolean;
   onToggleAgentPause?: RoomConnection["toggleAgentPause"];
+  models?: ModelOption[];
+  onSwitchModel?: RoomConnection["switchAgentModel"];
 }): ReactNode {
   const [openId, setOpenId] = useState<string>();
   const selected = room.participants.find((participant) => participant.profile.id === openId);
@@ -65,16 +79,26 @@ export const ParticipantsRail = memo(function ParticipantsRail({
           })}
         </ul>
       </ScrollArea>
-      <MindSheet participant={selected} room={room} privileged={viewerPrivileged} onToggleAgentPause={onToggleAgentPause} onClose={() => setOpenId(undefined)} />
+      <MindSheet
+        participant={selected}
+        room={room}
+        privileged={viewerPrivileged}
+        onToggleAgentPause={onToggleAgentPause}
+        models={models}
+        onSwitchModel={onSwitchModel}
+        onClose={() => setOpenId(undefined)}
+      />
     </>
   );
 });
 
-function MindSheet({ participant, room, privileged, onToggleAgentPause, onClose }: {
+function MindSheet({ participant, room, privileged, onToggleAgentPause, models, onSwitchModel, onClose }: {
   participant: SocietyRoomSnapshot["participants"][number] | undefined;
   room: SocietyRoomSnapshot;
   privileged: boolean;
   onToggleAgentPause?: RoomConnection["toggleAgentPause"];
+  models: ModelOption[];
+  onSwitchModel?: RoomConnection["switchAgentModel"];
   onClose: () => void;
 }): ReactNode {
   if (!participant) return null;
@@ -83,6 +107,11 @@ function MindSheet({ participant, room, privileged, onToggleAgentPause, onClose 
   const beliefs = [...(mind?.beliefs ?? [])].slice(-6).reverse();
   const relationships = [...(mind?.relationships ?? [])].sort((left, right) => right.trust - left.trust);
   const memories = [...(mind?.memories ?? [])].slice(-6).reverse();
+  const canSwitchModel = privileged && Boolean(onSwitchModel) && models.length > 0;
+  // The snapshot carries the live model id; map it back to the registered
+  // profile so the Select shows the current engine. An unregistered id still
+  // displays but cannot be re-selected.
+  const currentOption = models.find((option) => option.id === participant.profile.model);
   return (
     <Sheet open onOpenChange={(open) => { if (!open) onClose(); }}>
       <SheetContent side="left" className="flex w-[380px] flex-col gap-0 border-border bg-background p-0 sm:max-w-[380px]">
@@ -113,6 +142,40 @@ function MindSheet({ participant, room, privileged, onToggleAgentPause, onClose 
                 {participant.paused ? <Play className="size-3.5" aria-hidden /> : <Pause className="size-3.5" aria-hidden />}
                 {participant.paused ? "恢复该参与者" : "暂停该参与者"}
               </Button>
+            ) : null}
+
+            {canSwitchModel ? (
+              <div className="space-y-1.5">
+                <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                  <Cpu className="size-3.5" aria-hidden />
+                  运行模型
+                </p>
+                <Select
+                  value={currentOption?.profileId ?? ""}
+                  onValueChange={(profileId) => {
+                    const option = models.find((entry) => entry.profileId === profileId);
+                    if (!option || !onSwitchModel) return;
+                    void onSwitchModel(participant.profile.id, profileId)
+                      .then(() => toast.success(`已切换到 ${readableModel(option.id)}——身份、记忆与关系保留`))
+                      .catch((cause: unknown) => toast.error(cause instanceof Error ? cause.message : "模型切换失败"));
+                  }}
+                >
+                  <SelectTrigger size="sm" className="w-full text-xs" aria-label="切换该参与者的模型">
+                    <SelectValue placeholder={participant.profile.model ? readableModel(participant.profile.model) : "选择模型"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {models.map((option) => (
+                      <SelectItem key={option.profileId} value={option.profileId} className="text-xs">
+                        {option.name}
+                        {option.contextLabel ? <span className="ml-1.5 text-[10px] text-muted-foreground">{option.contextLabel}</span> : null}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {!currentOption && participant.profile.model ? (
+                  <p className="text-[10px] leading-4 text-muted-foreground">当前引擎 {readableModel(participant.profile.model)} 未在模型中心登记，切换后将无法切回。</p>
+                ) : null}
+              </div>
             ) : null}
 
             {!privileged ? (

@@ -501,17 +501,10 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
     execute: async ({ emotionDelta, padDelta, needsDelta, energyDelta, attention, relationship, belief, goalProgress }, runContext) => {
       const ctx = scopedContext(runContext, context.actorId, context);
       const turn = ctx.world.snapshot().turn;
-      const beliefRecord = belief
-        ? ctx.world.recordBeliefUpdate(ctx.actorId, {
-            subjectId: belief.subjectId,
-            proposition: belief.proposition,
-            probability: belief.probability,
-            confidence: belief.confidence,
-            source: belief.source,
-            sourceMessageIds: belief.sourceMessageIds,
-            supports: belief.supports
-          })
-        : undefined;
+      // One choke point for every inner-state write (§10.3 / §21.7): the ledger
+      // record is canonical and the local mind copy is derived from it, so the
+      // two schemas cannot drift apart silently.
+      const beliefRecord = belief ? applyBeliefChange(ctx, belief, turn) : undefined;
       if (emotionDelta) ctx.mind.mood.emotions = applyEmotionDeltas(ctx.mind.mood.emotions, emotionDelta);
       if (padDelta) ctx.mind.mood.pad = applyPadDeltas(ctx.mind.mood.pad, padDelta);
       if (needsDelta) ctx.mind.mood.needs = applyNeedsDeltas(ctx.mind.mood.needs, needsDelta);
@@ -519,13 +512,6 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
       ctx.mind.mood = refreshMood(ctx.mind.mood, turn);
       if (attention) ctx.mind.attention = [...attention];
       const relationshipRecord = relationship ? updateRelationship(ctx, relationship, turn) : undefined;
-      if (belief) updateBelief(ctx.mind, {
-        subjectId: belief.subjectId,
-        proposition: belief.proposition,
-        probability: belief.probability,
-        confidence: belief.confidence,
-        source: belief.source
-      }, turn);
       if (goalProgress) {
         const goal = ctx.mind.goals.find((candidate) => candidate.id === goalProgress.goalId);
         if (!goal) throw new Error(`GOAL_NOT_FOUND: '${goalProgress.goalId}' is not one of your active goals.`);
@@ -543,6 +529,36 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
       };
     }
   }) as Tool<SocietyAgentContext>;
+}
+
+/**
+ * Single writer for belief changes: record to the social-causality ledger
+ * first, then mirror the canonical `after` values into the agent's working
+ * mind. The mind keeps the actor-facing subject id; probability and confidence
+ * always come from the settled record.
+ */
+function applyBeliefChange(
+  ctx: SocietyAgentContext,
+  belief: { subjectId: string; proposition: string; probability: number; confidence: number; source: string; sourceMessageIds: string[]; supports: boolean },
+  turn: number
+): import("./social/contracts").BeliefUpdateRecord {
+  const record = ctx.world.recordBeliefUpdate(ctx.actorId, {
+    subjectId: belief.subjectId,
+    proposition: belief.proposition,
+    probability: belief.probability,
+    confidence: belief.confidence,
+    source: belief.source,
+    sourceMessageIds: belief.sourceMessageIds,
+    supports: belief.supports
+  });
+  updateBelief(ctx.mind, {
+    subjectId: belief.subjectId,
+    proposition: belief.proposition,
+    probability: record.afterProbability,
+    confidence: record.confidence,
+    source: belief.source
+  }, turn);
+  return record;
 }
 
 function updateRelationship(
@@ -586,7 +602,9 @@ function updateRelationship(
     sourceEvidenceIds: input.sourceEvidenceIds,
     sourceKind: "agent-self-report"
   });
-  Object.assign(relationship, after, { updatedAtTurn: turn, note: input.note });
+  // The settled ledger record is canonical: the working copy mirrors its
+  // after-values rather than recomputing them (§10.3 single-settlement rule).
+  Object.assign(relationship, record.after, { updatedAtTurn: turn, note: input.note });
   return record;
 }
 

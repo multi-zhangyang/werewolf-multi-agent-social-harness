@@ -6,8 +6,6 @@ import { CharacterLibrary } from "./characters";
 import { RosterTemplateStore } from "./templates";
 import { limiterFromEnv, type ActivationLimiter } from "../society/activation-limiter";
 import { createServerAuth, type ServerAuth } from "./auth";
-import { SocialTruthStore } from "../society/evaluation";
-import { CrossPlayCoordinator } from "./cross-play-coordinator";
 
 export interface ServerContext {
   rooms: SocietyRoomRegistry;
@@ -25,10 +23,6 @@ export interface ServerContext {
   limiter: ActivationLimiter;
   /** Operator/owner authorization for the API layer (§18). */
   auth: ServerAuth;
-  /** Operator-only frozen opponent pools and cross-play result ledger. */
-  socialTruth: SocialTruthStore;
-  /** Operator-only real-room cross-play planner and budgeted executor. */
-  crossPlay: CrossPlayCoordinator;
 }
 
 export function createServerContext(): ServerContext {
@@ -40,15 +34,6 @@ export function createServerContext(): ServerContext {
   const rooms = new SocietyRoomRegistry();
   const archive = new RoomArchiveStore();
   const limiter = limiterFromEnv();
-  const socialTruth = new SocialTruthStore();
-  const crossPlay = new CrossPlayCoordinator({
-    store: socialTruth,
-    rooms,
-    archive,
-    models,
-    characters,
-    limiter
-  });
   return {
     rooms,
     season: new FileSeasonStore(defaultSeasonPath(), (displayName) => characters.idsForDisplayName(displayName)),
@@ -57,9 +42,7 @@ export function createServerContext(): ServerContext {
     characters,
     templates: new RosterTemplateStore(),
     limiter,
-    auth: createServerAuth(),
-    socialTruth,
-    crossPlay
+    auth: createServerAuth()
   };
 }
 

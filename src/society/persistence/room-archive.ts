@@ -186,6 +186,9 @@ export class RoomArchiveStore {
     };
     this.failures.push(failure);
     if (this.failures.length > 50) this.failures.splice(0, this.failures.length - 50);
+    // Failures must be operator-visible: a corrupt checkpoint otherwise makes a
+    // room silently disappear from the list and from restart recovery.
+    console.warn(`[room-archive] ${failure.code} during ${failure.operation}${roomId ? ` (room ${roomId})` : ""}:`, cause instanceof Error ? cause.message : cause);
     return new RoomArchiveError(failure, { cause });
   }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowLeft, Eye, Globe, Pause, Play, Radio } from "lucide-react";
+import { ArrowLeft, Eye, Globe, Pause, Play, Radio, TriangleAlert } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
@@ -15,7 +15,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { CausalityPanel } from "./causality-panel";
 import { LiveStream } from "./live-stream";
-import { ParticipantsRail } from "./participants-rail";
+import { ParticipantsRail, type ModelOption } from "./participants-rail";
 import { useRoom, type RoomConnection } from "./use-room";
 import { ScenarioIcon } from "./shared";
 
@@ -31,7 +31,6 @@ export function RoomView({ roomId, token, onBack }: {
   onBack: () => void;
 }): ReactNode {
   const [requestedMode, setRequestedMode] = useState<ViewerChoice>("public");
-  const [scenarioCatalog, setScenarioCatalog] = useState<ScenarioSummary[]>([]);
 
   // The owner seat is privileged: default it to the full live experience once.
   const [autoPromoted, setAutoPromoted] = useState(false);
@@ -40,10 +39,16 @@ export function RoomView({ roomId, token, onBack }: {
   const connection = useRoom(roomId, token, viewerParam);
   const { room, viewer, connection: link, stream } = connection;
 
+  const [scenarioCatalog, setScenarioCatalog] = useState<ScenarioSummary[]>([]);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   useEffect(() => {
     let cancelled = false;
     void apiCatalog()
-      .then((scenarios) => { if (!cancelled) setScenarioCatalog(scenarios); })
+      .then((catalog) => {
+        if (cancelled) return;
+        setScenarioCatalog(catalog.scenarios);
+        setModelOptions(catalog.models);
+      })
       .catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
@@ -129,8 +134,11 @@ export function RoomView({ roomId, token, onBack }: {
         </div>
       </header>
 
-      {link === "reconnecting" ? (
-        <p className="shrink-0 bg-amber-500/10 px-4 py-1 text-center text-[11px] text-amber-300">连接中断，正在重连——快照会自愈。</p>
+      {link === "reconnecting" || (connection.error && link !== "closed") ? (
+        <p className="flex shrink-0 items-center justify-center gap-1.5 bg-amber-500/10 px-4 py-1 text-center text-[11px] text-amber-300">
+          <TriangleAlert className="size-3 shrink-0" aria-hidden />
+          {connection.error ?? "连接中断，正在重连——快照会自愈。"}
+        </p>
       ) : null}
 
       <main className="flex min-h-0 flex-1 flex-col md:hidden">
@@ -142,20 +150,24 @@ export function RoomView({ roomId, token, onBack }: {
           viewerMode={viewer?.mode}
           viewerPrivileged={viewer?.privileged === true}
           onToggleAgentPause={viewer?.privileged ? connection.toggleAgentPause : undefined}
+          models={modelOptions}
+          onSwitchModel={viewer?.privileged ? connection.switchAgentModel : undefined}
         />
       </main>
 
       <main className="hidden min-h-0 flex-1 md:block">
         <ResizablePanelGroup orientation="horizontal" id="society-room-v2">
-          <ResizablePanel defaultSize={17} minSize={11} maxSize={26}>
+          <ResizablePanel defaultSize="17" minSize="11" maxSize="26">
             <ParticipantsRail
               room={room}
               viewerPrivileged={viewer?.privileged === true}
               onToggleAgentPause={viewer?.privileged ? connection.toggleAgentPause : undefined}
+              models={modelOptions}
+              onSwitchModel={viewer?.privileged ? connection.switchAgentModel : undefined}
             />
           </ResizablePanel>
           <ResizableHandle withHandle />
-          <ResizablePanel defaultSize={57} minSize={40}>
+          <ResizablePanel defaultSize="57" minSize="40">
             <div className="flex h-full min-h-0 flex-col">
               <PhaseStrip room={room} sealed={stream.turns.some((turn) => !turn.completedAt && turn.sealed)} />
               <LiveStream
@@ -168,7 +180,7 @@ export function RoomView({ roomId, token, onBack }: {
             </div>
           </ResizablePanel>
           <ResizableHandle withHandle />
-          <ResizablePanel defaultSize={26} minSize={18} maxSize={36}>
+          <ResizablePanel defaultSize="26" minSize="18" maxSize="36">
             <CausalityPanel room={room} viewerMode={viewer?.mode} viewerPrivileged={viewer?.privileged === true} />
           </ResizablePanel>
         </ResizablePanelGroup>
@@ -177,22 +189,24 @@ export function RoomView({ roomId, token, onBack }: {
   );
 }
 
-async function apiCatalog(): Promise<ScenarioSummary[]> {
+async function apiCatalog(): Promise<{ scenarios: ScenarioSummary[]; models: ModelOption[] }> {
   const response = await fetch("/api/scenarios");
-  if (!response.ok) return [];
-  const payload = await response.json() as { scenarios?: ScenarioSummary[] };
-  return payload.scenarios ?? [];
+  if (!response.ok) return { scenarios: [], models: [] };
+  const payload = await response.json() as { scenarios?: ScenarioSummary[]; models?: ModelOption[] };
+  return { scenarios: payload.scenarios ?? [], models: payload.models ?? [] };
 }
 
 /**
  * Narrow screens cannot fit the three-column shell: the rails collapse into
  * two toggleable drawers under the stream instead of being unreachable.
  */
-function MobileRails({ room, viewerMode, viewerPrivileged, onToggleAgentPause }: {
+function MobileRails({ room, viewerMode, viewerPrivileged, onToggleAgentPause, models, onSwitchModel }: {
   room: SocietyRoomSnapshot;
   viewerMode: string | undefined;
   viewerPrivileged: boolean;
   onToggleAgentPause?: RoomConnection["toggleAgentPause"];
+  models: ModelOption[];
+  onSwitchModel?: RoomConnection["switchAgentModel"];
 }): ReactNode {
   const [tab, setTab] = useState<"none" | "people" | "causality">("none");
   return (
@@ -220,7 +234,13 @@ function MobileRails({ room, viewerMode, viewerPrivileged, onToggleAgentPause }:
       {tab !== "none" ? (
         <div className="h-[46vh] border-t border-border">
           {tab === "people" ? (
-            <ParticipantsRail room={room} viewerPrivileged={viewerPrivileged} onToggleAgentPause={onToggleAgentPause} />
+            <ParticipantsRail
+              room={room}
+              viewerPrivileged={viewerPrivileged}
+              onToggleAgentPause={onToggleAgentPause}
+              models={models}
+              onSwitchModel={onSwitchModel}
+            />
           ) : (
             <CausalityPanel room={room} viewerMode={viewerMode} viewerPrivileged={viewerPrivileged} />
           )}

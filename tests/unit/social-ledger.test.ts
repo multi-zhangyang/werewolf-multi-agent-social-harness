@@ -198,3 +198,69 @@ it("commitment settlement records reference world results and reach every audien
     assert.ok(projection.commitments[0].settledByCommandId);
   }
 });
+
+// --- message sidecar extraction (AGENTS.md §6.5) ---
+
+it("recordExtractedSocialActs cites the original message.sent envelope and marks model-extracted provenance", () => {
+  const ledger = ledgerWithTwoActors();
+  const sent = message({ senderId: "agent-01", text: "我保证这轮合作，也劝你别背叛。" });
+  ledger.recordMessage({
+    message: sent,
+    declarations: [],
+    allActorIds: ["agent-01", "agent-02"],
+    characterIdFor
+  });
+  const actIds = ledger.recordExtractedSocialActs({
+    message: sent,
+    declarations: [{
+      kind: "promise" as const,
+      targetActorIds: ["agent-02"],
+      proposition: { kind: "future-action" as const, subjectId: "agent-01", predicate: "这轮我会合作" },
+      confidence: 0.9
+    }],
+    allActorIds: ["agent-01", "agent-02"],
+    characterIdFor
+  });
+  assert.equal(actIds.length, 1);
+  const projection = ledger.project({});
+  const act = projection.socialActs.find((entry) => entry.socialActId === actIds[0]);
+  assert.ok(act, "an extracted act is visible to public viewers");
+  assert.equal(act.extractionMethod, "model-extracted");
+  const sentEnvelope = projection.events.find((event) => event.type === "message.sent");
+  assert.ok(sentEnvelope && act.sourceEventId === sentEnvelope.eventId, "the act cites the original domain envelope");
+  assert.ok(propositionIdsResolve(projection, act), "the proposition is projected alongside the act");
+  assert.deepEqual(ledger.extractedActMessageIds(), [sent.id]);
+});
+
+function propositionIdsResolve(projection: ReturnType<SocialCausalityLedger["project"]>, act: { propositionIds: string[] }): boolean {
+  const ids = new Set(projection.propositions.map((entry) => entry.propositionId));
+  return act.propositionIds.every((id) => ids.has(id));
+}
+
+it("extracted acts can never execute or repair a deception episode", () => {
+  const ledger = ledgerWithTwoActors();
+  const episode = ledger.recordDeceptionPlan("agent-01", "builtin-01", {
+    mode: "direct-lie",
+    targetActorIds: ["agent-02"],
+    intendedBelief: "x"
+  }, characterIdFor);
+  const sent = message({ senderId: "agent-01" });
+  ledger.recordMessage({ message: sent, declarations: [], allActorIds: ["agent-01", "agent-02"], characterIdFor });
+  ledger.recordExtractedSocialActs({
+    message: sent,
+    declarations: [{ kind: "assertion" as const, deceptionId: episode.deceptionId, proposition: { predicate: "x" } }],
+    allActorIds: ["agent-01", "agent-02"],
+    characterIdFor
+  });
+  assert.equal(ledger.project({ omniscient: true }).deceptions[0].status, "planned", "the episode stays planned");
+});
+
+it("extracted acts for an unknown message are rejected", () => {
+  const ledger = ledgerWithTwoActors();
+  assert.throws(() => ledger.recordExtractedSocialActs({
+    message: message({ senderId: "agent-01", id: "msg-missing" }),
+    declarations: [{ kind: "assertion" as const }],
+    allActorIds: ["agent-01", "agent-02"],
+    characterIdFor
+  }), /MESSAGE_NOT_FOUND/);
+});
