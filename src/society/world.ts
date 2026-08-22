@@ -31,7 +31,6 @@ import type {
   DeceptionEpisode,
   DeceptionPlanInput,
   EvidenceRecord,
-  MemoryWritePolicyResult,
   OutcomeReconciliation,
   OutcomeReconciliationInput,
   RelationshipDeltaRecord,
@@ -57,6 +56,8 @@ export interface WorldSerializedState {
     log: WorldLogEntry[];
     pendingEvents: Array<[string, SocialEvent[]]>;
     socialCausality?: SocialCausalityState;
+    /** Smoke-gate counters (AGENTS.md §37): tool-compliance instrumentation. */
+    runtimeStats?: { idempotencyHits: number; staleCommandRejections: number };
   };
   world: unknown;
 }
@@ -88,6 +89,9 @@ export abstract class SocialWorldBase implements SocialWorld {
   private activeActivationId?: string;
   private readonly recentReceipts = new Map<string, WorldActionCommit>();
   private static readonly RECENT_RECEIPT_LIMIT = 64;
+  /** Smoke-gate counters (§37): visible duplicates and late-command rejects. */
+  private idempotencyHits = 0;
+  private staleCommandRejections = 0;
 
   /**
    * Optional message sidecar (AGENTS.md §6.5): when installed by the room, each
@@ -129,7 +133,8 @@ export abstract class SocialWorldBase implements SocialWorld {
         messages: structuredClone(this.messages),
         log: structuredClone(this.log),
         pendingEvents: [...this.pendingEvents.entries()].map(([id, events]) => [id, structuredClone(events)] as [string, SocialEvent[]]),
-        socialCausality: this.socialCausality.exportState()
+        socialCausality: this.socialCausality.exportState(),
+        runtimeStats: { idempotencyHits: this.idempotencyHits, staleCommandRejections: this.staleCommandRejections }
       },
       world: this.exportWorldState()
     };
@@ -222,11 +227,19 @@ export abstract class SocialWorldBase implements SocialWorld {
     // A late tool call must not mutate the world once the room has closed
     // this activation's window (§16.6 / §28.7: 旧请求迟到并尝试调用工具,
     // command gateway 依据 activation epoch 拒绝).
-    this.assertCommandGateOpen();
+    try {
+      this.assertCommandGateOpen();
+    } catch (error) {
+      if ((error as Error & { code?: string }).code === "STALE_ACTIVATION_COMMAND") this.staleCommandRejections += 1;
+      throw error;
+    }
     this.requireProfile(actorId);
     const receiptKey = this.idempotencyKey(actorId, action, payload);
     const existing = this.recentReceipts.get(receiptKey);
-    if (existing) return structuredClone(existing);
+    if (existing) {
+      this.idempotencyHits += 1;
+      return structuredClone(existing);
+    }
     const observationThroughSequence = this.socialCausality.observationCursor();
     let commit: WorldActionCommit;
     if (action === "message" || action === "communicate") {
@@ -580,16 +593,10 @@ export abstract class SocialWorldBase implements SocialWorld {
     return this.socialCausality.recordOutcomeReconciliation(input);
   }
 
-  applyMemoryWritePolicy(actorId: string): MemoryWritePolicyResult {
-    this.requireProfile(actorId);
-    return this.socialCausality.applyMemoryWritePolicy(actorId);
-  }
-
   /**
-   * Outcome memory flows through the social reconciliation ledger
-   * (recordOutcomeReconciliation → applyMemoryWritePolicy), not through
-   * scenario free-text experiences. The room consults this before writing
-   * settlement memories so the two paths never double-write.
+   * Outcome consequences flow through the social reconciliation ledger
+   * (recordOutcomeReconciliation). The room surfaces settlement summaries as
+   * display-only memory notes; the model's own session is the actual memory.
    */
   reconciliationOwnsOutcomeMemory(): boolean {
     return true;

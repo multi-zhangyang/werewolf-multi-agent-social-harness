@@ -33,6 +33,8 @@ export interface RoomCheckpoint {
   agentBindings?: Record<string, { defaultModelProfileId?: string; tuningOverrides?: Record<string, unknown> }>;
   pausedAgents?: string[];
   seasonMode?: "season" | "one-shot";
+  /** Smoke-gate counters (AGENTS.md §37), written at checkpoint time. */
+  runtimeStats?: { extractionFailures: number; settledAbandonedTurns: number };
   /** The room's control token, persisted so recovery keeps the same owner. */
   ownerToken?: string;
   /** False when the room was disposed on purpose — not restarted on boot. */

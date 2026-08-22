@@ -15,7 +15,7 @@ import {
   tokenFromRequest,
   type RoomAuthority
 } from "../auth";
-import { RoomArchiveError, type RoomCheckpoint } from "../../society/persistence";
+import { deleteSeasonSessions, deleteSessionById, RoomArchiveError, type RoomCheckpoint } from "../../society/persistence";
 import { getProviderSettings, writeEnvKey } from "../settings";
 import { fetchRemoteModels, mergeProbeResult, probeCapabilities } from "../probe";
 
@@ -374,7 +374,6 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
           ...(game.role ? { role: game.role } : {}),
           outcome: game.outcome
         })),
-        memoryCount: dossier.memories.length,
         updatedAt: dossier.updatedAt
       })),
       // v1 entries that could not be mapped to a unique character id.
@@ -385,8 +384,17 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   // A fresh season: forget every cross-game memory and start over.
   app.delete("/api/season", (request, response) => {
     if (!requireGlobalOperator(request, response, context.auth)) return;
+    // Season continuity lives in per-character SDK sessions (AGENTS.md §22):
+    // a reset that left those files would "forget" nothing. Refuse while any
+    // active season room still holds its characters' sessions.
+    const busy = context.rooms.list().filter((room) => room.seasonMode === "season" && ["lobby", "running", "paused"].includes(room.status));
+    if (busy.length) {
+      response.status(409).json({ error: "SEASON_RESET_BLOCKED", message: `存在进行中的赛季房间（${busy.map((room) => room.title).join("、")}），请先移除后再重置社会季。` });
+      return;
+    }
     context.season.clear();
-    response.json({ cleared: true, dossiers: [] });
+    const sessionsDeleted = deleteSeasonSessions();
+    response.json({ cleared: true, dossiers: [], sessionsDeleted });
   });
 
   // Forget ONE character's cross-game memory (§7.2): their next game starts
@@ -398,8 +406,17 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(400).json({ error: "CHARACTER_ID_INVALID", message: "Provide a valid character id." });
       return;
     }
+    const holdingRoom = context.rooms.list().find((room) =>
+      room.seasonMode === "season"
+      && ["lobby", "running", "paused"].includes(room.status)
+      && room.world.agents.some((agent) => agent.characterId === characterId));
+    if (holdingRoom) {
+      response.status(409).json({ error: "CHARACTER_SESSION_BUSY", message: `${characterId} 正在赛季房间「${holdingRoom.title}」中，请先移除该房间。` });
+      return;
+    }
     const removed = context.season.remove(characterId);
-    response.json({ removed, characterId, dossiers: context.season.list().length });
+    const sessionDeleted = deleteSessionById(`season:${characterId}`);
+    response.json({ removed, characterId, dossiers: context.season.list().length, sessionDeleted });
   });
 
   app.post("/api/rooms", (request, response, next) => {
@@ -444,6 +461,12 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       setTokenCookie(response, created.ownerToken);
       response.status(202).json(created);
     } catch (error) {
+      // Season sessions are one-per-character: a busy-character conflict is a
+      // client-resolvable state, not a server fault (AGENTS.md §22).
+      if (error instanceof Error && error.message.startsWith("CHARACTER_SESSION_BUSY:")) {
+        response.status(409).json({ error: "CHARACTER_SESSION_BUSY", message: error.message.slice("CHARACTER_SESSION_BUSY:".length).trim() });
+        return;
+      }
       next(error);
     }
   });

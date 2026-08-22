@@ -23,7 +23,7 @@ import { createHash } from "node:crypto";
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentInputItem, Session } from "@openai/agents";
 
@@ -66,6 +66,32 @@ export class SessionStoreCorruptError extends Error {
   }
 }
 
+/** Filename-safe form of a session id (colons and separators collapse to `_`). */
+export function sessionFileId(sessionId: string): string {
+  return sessionId.replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+
+/** Delete one persisted session file (season reset). True when it existed. */
+export function deleteSessionById(sessionId: string, dir = defaultSessionDir()): boolean {
+  const file = path.join(dir, `${sessionFileId(sessionId)}.json`);
+  if (!existsSync(file)) return false;
+  unlinkSync(file);
+  return true;
+}
+
+/** Delete every persisted `season-<characterId>` session file. */
+export function deleteSeasonSessions(dir = defaultSessionDir()): number {
+  if (!existsSync(dir)) return 0;
+  let deleted = 0;
+  for (const entry of readdirSync(dir)) {
+    if (entry.startsWith("season-") && entry.endsWith(".json")) {
+      unlinkSync(path.join(dir, entry));
+      deleted += 1;
+    }
+  }
+  return deleted;
+}
+
 export function defaultSessionDir(cwd: string = process.cwd()): string {
   return path.resolve(cwd, "data", "sessions");
 }
@@ -104,7 +130,7 @@ export class JsonSessionStore implements Session {
   }
 
   static open(sessionId: string, dir = defaultSessionDir(), options: SessionStoreOptions = {}): JsonSessionStore {
-    const safeId = sessionId.replace(/[^A-Za-z0-9_.:-]/g, "_");
+    const safeId = sessionFileId(sessionId);
     mkdirSync(dir, { recursive: true });
     return new JsonSessionStore(sessionId, path.join(dir, `${safeId}.json`), options);
   }

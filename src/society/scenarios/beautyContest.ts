@@ -356,11 +356,6 @@ export class BeautyContestWorld extends SocialWorldBase {
           "target-below-thirty": target < 30
         },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{
-          summary: `In beauty-contest round ${this.round}, I chose ${ownChoice}; group average was ${average.toFixed(2)}, target ${target.toFixed(2)}, and I ${winnerIds.includes(id) ? "won" : "did not win"}.`,
-          importance: winnerIds.includes(id) || distance <= 5 ? 0.74 : 0.62,
-          sourceIds: [commandId, publicResult.eventId]
-        }]
       });
     }
     this.choices.clear();

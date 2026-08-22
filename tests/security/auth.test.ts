@@ -76,7 +76,7 @@ async function startHarness(env: Record<string, string | undefined>): Promise<Ha
     const response = await fetch(`${base}/api/rooms`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scenarioId, mode: "ai", ...extra })
+      body: JSON.stringify({ scenarioId, mode: "ai", season: "one-shot", ...extra })
     });
     assert.equal(response.status, 202);
     const payload = await response.json() as { room: { id: string }; ownerToken: string };

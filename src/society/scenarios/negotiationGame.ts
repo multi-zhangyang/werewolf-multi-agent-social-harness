@@ -653,13 +653,6 @@ export class NegotiationWorld extends SocialWorldBase {
           "cited-commitments-fulfilled": citedCommitments.length > 0 && citedCommitments.every((entry) => entry.state === "fulfilled")
         },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{
-          summary: agreed
-            ? `In negotiation round ${this.round}, I demanded ${result.demands[id]}; the other demand was ${result.demands[ids.find((other) => other !== id)!]}; the deal paid me ${payoffs[id]}.`
-            : `In negotiation round ${this.round}, combined demands exceeded 10; I fell back to my private option and received ${payoffs[id]}.`,
-          importance: citedCommitments.length || !agreed ? 0.84 : 0.68,
-          sourceIds: [commandId, publicResult.eventId, ...citedCommitments.map((entry) => entry.commitmentId)]
-        }]
       });
     }
     // P0-09: a deal is an agreement, not an alliance; a failed deal is a
@@ -790,13 +783,6 @@ export class NegotiationWorld extends SocialWorldBase {
         "deal-reached": input.result.agreed
       },
       resultingEventIds: input.resultingEventIds,
-      memoryWriteSuggestions: [{
-        summary: input.perspective === "proposer"
-          ? `In negotiation round ${this.round}, my offer ${input.offer.offerId} ${responseSummary}; it ${input.offerImplemented ? "was" : "was not"} implemented in the sealed demands.`
-          : `In negotiation round ${this.round}, I ${input.offer.state === "accepted" ? "accepted" : "rejected"} offer ${input.offer.offerId}; it ${input.offerImplemented ? "was" : "was not"} implemented in the sealed demands.`,
-        importance: input.offerAccepted ? (input.offerImplemented ? 0.88 : 0.92) : 0.66,
-        sourceIds: [input.commandId, ...input.resultingEventIds]
-      }]
     });
   }
 

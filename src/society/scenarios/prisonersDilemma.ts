@@ -544,11 +544,6 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
           "actor-payoff-at-least-three": result.payoffs[actorId] >= 3,
           "cited-commitments-fulfilled": citedCommitments.length > 0 && citedCommitments.every((entry) => entry.state === "fulfilled")
         },
-        memoryWriteSuggestions: [{
-          summary: `In PD round ${this.round}, I chose ${result.moves[actorId]}; ${opponentId} chose ${result.moves[opponentId]}; payoff ${result.payoffs[actorId]}.`,
-          importance: result.moves[actorId] !== result.moves[opponentId] || citedCommitments.length ? 0.84 : 0.64,
-          sourceIds: [commandId, ...citedCommitments.map((entry) => entry.commitmentId)]
-        }],
         resultingEventIds: [publicResult.eventId]
       });
     }

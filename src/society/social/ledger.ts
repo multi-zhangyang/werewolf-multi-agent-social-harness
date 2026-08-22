@@ -12,7 +12,6 @@ import type {
   EventEnvelope,
   EvidenceRecord,
   InfluenceLink,
-  MemoryWritePolicyResult,
   OutcomePrediction,
   OutcomeReconciliation,
   OutcomeReconciliationInput,
@@ -1461,13 +1460,6 @@ export class SocialCausalityLedger {
       predictionAssessments,
       propositionSettlements,
       influenceIds,
-      memoryWriteSuggestions: (input.memoryWriteSuggestions ?? []).slice(0, 6).map((suggestion) => ({
-        suggestionId: `memory-suggestion-${randomUUID()}`,
-        summary: suggestion.summary.trim().slice(0, 1_000),
-        importance: clamp01(suggestion.importance),
-        sourceIds: [...new Set([decision.decisionId, decision.actionReceiptId, outcomeEvent.eventId, ...(suggestion.sourceIds ?? [])])],
-        status: "candidate" as const
-      })),
       ...(calibrationError === undefined ? {} : { calibrationError }),
       resultingEventIds: [...new Set([outcomeEvent.eventId, ...(input.resultingEventIds ?? [])])],
       logicalTime: this.sequence + 1,
@@ -1539,44 +1531,6 @@ export class SocialCausalityLedger {
     };
     this.decisions.push(record);
     return record;
-  }
-
-  applyMemoryWritePolicy(actorId: string): MemoryWritePolicyResult {
-    const reconciliations = this.outcomeReconciliations.filter((entry) => entry.actorId === actorId);
-    if (!reconciliations.length) return { evaluated: false, accepted: [] };
-    const accepted: MemoryWritePolicyResult["accepted"] = [];
-    let evaluated = false;
-    for (const reconciliation of reconciliations) {
-      for (const suggestion of reconciliation.memoryWriteSuggestions) {
-        if (suggestion.status !== "candidate") continue;
-        evaluated = true;
-        const hasCanonicalSource = suggestion.sourceIds.includes(reconciliation.decisionId)
-          && suggestion.sourceIds.includes(reconciliation.actionReceiptId)
-          && suggestion.sourceIds.some((id) => reconciliation.resultingEventIds.includes(id));
-        const allow = hasCanonicalSource && suggestion.importance >= 0.6 && suggestion.summary.length > 0;
-        suggestion.status = allow ? "accepted" : "rejected";
-        suggestion.decidedAtLogical = this.sequence + 1;
-        this.append("social", `memory-write.${suggestion.status}`, {
-          suggestionId: suggestion.suggestionId,
-          reconciliationId: reconciliation.reconciliationId,
-          importance: suggestion.importance,
-          sourceIds: suggestion.sourceIds
-        }, {
-          actorId: reconciliation.actorId,
-          characterId: reconciliation.characterId,
-          causationId: reconciliation.reconciliationId,
-          correlationId: reconciliation.actionReceiptId,
-          visibility: { kind: "actors", actorIds: [reconciliation.actorId] }
-        });
-        if (allow) accepted.push({
-          suggestionId: suggestion.suggestionId,
-          summary: suggestion.summary,
-          importance: suggestion.importance,
-          sourceIds: [...suggestion.sourceIds]
-        });
-      }
-    }
-    return { evaluated, accepted: structuredClone(accepted) };
   }
 
   project(viewer: ViewerContext = {}): SocialCausalityProjection {
@@ -1848,10 +1802,6 @@ export class SocialCausalityLedger {
     this.influenceLinks.splice(0, this.influenceLinks.length, ...structuredClone(state.influenceLinks ?? []));
     this.outcomeReconciliations.splice(0, this.outcomeReconciliations.length, ...structuredClone(state.outcomeReconciliations ?? []).map((reconciliation) => ({
       ...reconciliation,
-      memoryWriteSuggestions: reconciliation.memoryWriteSuggestions.map((suggestion) => ({
-        ...suggestion,
-        sourceIds: remapEvidenceIds(suggestion.sourceIds)
-      })),
       provenance: {
         ...reconciliation.provenance,
         sourceIds: remapEvidenceIds(reconciliation.provenance.sourceIds)

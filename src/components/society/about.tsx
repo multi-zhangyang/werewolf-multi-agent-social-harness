@@ -111,7 +111,7 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
             <div className="rounded-lg border border-emerald-400/30 bg-gradient-to-b from-emerald-400/10 to-card p-6">
               <h2 className="text-base font-semibold tracking-tight">社会季模式</h2>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                同一批角色跨局延续：一局结束，每个角色的信任、恩怨与最强记忆被归档；下一局开始时，同一批人带着旧账回到桌前，像一群越玩越熟的老友。每局身份与阵营重新随机，过去的角色不证明本局的忠诚。历史持久化保存在本地，服务器重启也不会丢。随时可以在首页「重置社会季」，让所有人重新互不相识。
+                同一批角色跨局延续：每个角色持有自己的持久会话，一局结束上下文不清空；下一局开始时，同一个 Agent 凭自己的记忆带着旧账回到桌前，像一群越玩越熟的老友。每局身份与阵营重新随机，过去的角色不证明本局的忠诚。历史持久化保存在本地，服务器重启也不会丢。随时可以在首页「重置社会季」，让所有人重新互不相识。
               </p>
             </div>
             <div className="rounded-lg border border-border bg-card p-6">

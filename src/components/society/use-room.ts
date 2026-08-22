@@ -319,15 +319,6 @@ export function reduceRoomEvent(state: RoomStreamState, event: AgentRuntimeEvent
       if (index < 0) return nextState;
       return nextState;
     }
-    case "agent.memory.recalled":
-      return pushTimeline(state, {
-        id: `recalled-${event.at}`,
-        at: event.at,
-        kind: "memory",
-        actorId: event.actorId,
-        label: "记忆检索",
-        detail: `${event.count} 条相关经历被唤起`
-      });
     case "agent.memory.consolidated":
       return pushTimeline(state, {
         id: `consolidated-${event.memoryId}`,

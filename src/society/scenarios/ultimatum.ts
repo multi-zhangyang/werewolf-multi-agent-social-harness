@@ -459,7 +459,6 @@ export class UltimatumWorld extends SocialWorldBase {
           "both-receive-positive": proposerPayoff > 0 && responderPayoff > 0
         },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{ summary: `In ultimatum round ${this.round}, I offered ${offer} of ${this.pot}; the responder ${accepted ? "accepted" : "rejected"}; my payoff was ${proposerPayoff}.`, importance: accepted ? 0.68 : 0.8, sourceIds: [this.offerCommandId, publicResult.eventId] }]
       });
     }
     if (this.responseCommandId) {
@@ -476,7 +475,6 @@ export class UltimatumWorld extends SocialWorldBase {
           "agreement-reached": accepted
         },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{ summary: `In ultimatum round ${this.round}, I ${accepted ? "accepted" : "rejected"} an offer of ${offer}; my payoff was ${responderPayoff}.`, importance: accepted ? 0.68 : 0.8, sourceIds: [this.responseCommandId, publicResult.eventId] }]
       });
     }
     const beat = accepted ? "agreement-reached" as const : "negotiation-failed" as const;

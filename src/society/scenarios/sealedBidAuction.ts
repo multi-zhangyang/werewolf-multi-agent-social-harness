@@ -369,11 +369,6 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
           "actor-bid-at-most-value": ownBid <= ownValue
         },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{
-          summary: `In auction round ${this.round}, my private value was ${ownValue}, I bid ${ownBid}, ${winnerId ?? "nobody"} won at price ${price}, and my payoff was ${payoffs[id]}.`,
-          importance: winnerId === id || ownBid > ownValue ? 0.82 : 0.66,
-          sourceIds: [commandId, publicResult.eventId]
-        }]
       });
     }
     this.bids.clear();

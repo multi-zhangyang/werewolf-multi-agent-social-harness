@@ -23,7 +23,6 @@ function v1Dossier(displayName: string, trust = 0.8): Record<string, unknown> {
     games: [{ scenarioId: "trust-game", role: "investor", outcome: "win", at: "2026-08-01T00:00:00.000Z" }],
     relationships: [{ agentId: "someone", trust, affinity: 0.5, respect: 0.5, tension: 0.2, note: "v1" }],
     beliefs: [],
-    memories: [],
     updatedAt: "2026-08-01T00:00:00.000Z"
   };
 }
@@ -96,7 +95,6 @@ it("v2 dossiers round-trip by character id, including the isolated report", () =
       games: [{ scenarioId: "werewolf", role: "wolf", outcome: "lose", at: "2026-08-02T00:00:00.000Z" }],
       relationships: [],
       beliefs: [],
-      memories: [],
       updatedAt: "2026-08-02T00:00:00.000Z"
     });
     const reopened = new FileSeasonStore(file, () => ["builtin-01"]);
@@ -118,7 +116,6 @@ it("remove and clear are keyed by character id", () => {
       games: [],
       relationships: [],
       beliefs: [],
-      memories: [],
       updatedAt: "2026-08-01T00:00:00.000Z"
     });
     store.save(dossier("builtin-01", "林默"));

@@ -1470,13 +1470,6 @@ export class WerewolfWorld extends SocialWorldBase {
           }
         },
         actualFacts,
-        memoryWriteSuggestions: [{
-          summary: eliminatedId
-            ? `On day ${this.day}, I voted for ${targetId}; ${eliminatedId} was selected and revealed as ${roleLabel(eliminatedRole)}.`
-            : `On day ${this.day}, I voted for ${targetId}; the vote tied and nobody was eliminated.`,
-          importance: targetWasRevealed || eliminatedId === voterId ? 0.86 : 0.64,
-          sourceIds: [commandId]
-        }],
         resultingEventIds: [publicVoteResult.eventId]
       });
     }
@@ -1662,11 +1655,6 @@ export class WerewolfWorld extends SocialWorldBase {
           "actor-survives-night": this.alive.has(actorId)
         },
         resultingEventIds: [input.resultEventId],
-        memoryWriteSuggestions: [{
-          summary: `On night ${this.day}, I nominated ${targetId}; the pack chose ${input.wolfTargetId ?? "no target"}, and ${input.deadByWolf ?? "nobody"} died to the attack.`,
-          importance: selectedByPack || targetKilled ? 0.72 : 0.62,
-          sourceIds: [commandId, input.resultEventId]
-        }]
       });
     }
 
@@ -1685,11 +1673,6 @@ export class WerewolfWorld extends SocialWorldBase {
           "target-appeared-wolf": isWolfRole(perceivedRole as WerewolfRoleId)
         },
         resultingEventIds: [input.resultEventId],
-        memoryWriteSuggestions: [{
-          summary: `On night ${this.day}, my private investigation showed ${targetId} as ${roleLabel(perceivedRole as WerewolfRoleId)}.`,
-          importance: 0.9,
-          sourceIds: [commandId]
-        }]
       });
     }
 
@@ -1708,11 +1691,6 @@ export class WerewolfWorld extends SocialWorldBase {
           "target-was-wolf": isWolfRole(observedRole as WerewolfRoleId)
         },
         resultingEventIds: [input.resultEventId],
-        memoryWriteSuggestions: [{
-          summary: `On night ${this.day}, my private spirit reading showed ${targetId} as ${roleLabel(observedRole as WerewolfRoleId)}.`,
-          importance: 0.9,
-          sourceIds: [commandId]
-        }]
       });
     }
 
@@ -1727,11 +1705,6 @@ export class WerewolfWorld extends SocialWorldBase {
         },
         actualFacts: { "curse-applied": Boolean(targetId) },
         resultingEventIds: [input.resultEventId],
-        memoryWriteSuggestions: targetId ? [{
-          summary: `On night ${this.day}, I cursed ${targetId}, preventing their next daytime vote.`,
-          importance: 0.7,
-          sourceIds: [this.nightmareCurseCommandId]
-        }] : []
       });
     }
 
@@ -1746,11 +1719,6 @@ export class WerewolfWorld extends SocialWorldBase {
         },
         actualFacts: { "charm-active": Boolean(targetId) },
         resultingEventIds: [input.resultEventId],
-        memoryWriteSuggestions: targetId ? [{
-          summary: `On night ${this.day}, I charmed ${targetId}; they will die with me if I am voted out.`,
-          importance: 0.76,
-          sourceIds: [this.charmCommandId]
-        }] : []
       });
     }
 
@@ -1779,13 +1747,6 @@ export class WerewolfWorld extends SocialWorldBase {
           "poison-eliminated-target": Boolean(attemptedPoison && input.poisonId === attemptedPoison)
         },
         resultingEventIds: [input.resultEventId],
-        memoryWriteSuggestions: attemptedSave || attemptedPoison ? [{
-          summary: attemptedSave
-            ? `On night ${this.day}, I used the antidote on ${attemptedSave}; ${input.savedId === attemptedSave ? "the save worked" : "it did not prevent the death"}.`
-            : `On night ${this.day}, I poisoned ${attemptedPoison}; the target was eliminated.`,
-          importance: 0.84,
-          sourceIds: [this.witchCommandId, input.resultEventId]
-        }] : []
       });
     }
 
@@ -1803,11 +1764,6 @@ export class WerewolfWorld extends SocialWorldBase {
         },
         actualFacts: { "guarded-target-survived": targetSurvived },
         resultingEventIds: [input.resultEventId],
-        memoryWriteSuggestions: targetId ? [{
-          summary: `On night ${this.day}, I guarded ${targetId}; they were ${targetSurvived ? "alive" : "dead"} at dawn, but I do not know whether my protection caused that outcome.`,
-          importance: targetSurvived ? 0.68 : 0.76,
-          sourceIds: [this.guardCommandId, input.resultEventId]
-        }] : []
       });
     }
   }
@@ -1869,13 +1825,6 @@ export class WerewolfWorld extends SocialWorldBase {
         "target-eliminated": targetEliminated
       },
       resultingEventIds: [publicResult.eventId],
-      memoryWriteSuggestions: targetId ? [{
-        summary: targetWasWolf
-          ? `On day ${this.day}, I challenged ${targetId}; they were a wolf and were eliminated.`
-          : `On day ${this.day}, I challenged ${targetId}; they were ${targetRole ?? "not a wolf"}, so I died.`,
-        importance: 0.96,
-        sourceIds: [commandId, publicResult.eventId]
-      }] : []
     });
     this.knightCommandId = undefined;
     this.knightTargetId = undefined;
@@ -1934,11 +1883,6 @@ export class WerewolfWorld extends SocialWorldBase {
         "target-was-wolf": targetWasWolf
       },
       resultingEventIds: [publicResult.eventId],
-      memoryWriteSuggestions: targetId ? [{
-        summary: `When I died on day ${this.day}, I used my ${kind} shot on ${targetId}, who was ${targetRole ?? "unknown"}.`,
-        importance: 0.96,
-        sourceIds: [commandId, publicResult.eventId]
-      }] : []
     });
     this.shotCommandIds.delete(shooterId);
     this.shotTargetIds.delete(shooterId);

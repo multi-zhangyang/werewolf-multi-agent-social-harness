@@ -47,7 +47,6 @@ import { JsonSessionStore, defaultSessionDir } from "./persistence";
 import { clampUnit, decayMood, describeEmotions, describeNeeds, describeSocialEmotions, initialMood, refreshMood } from "./affect";
 import { appraiseEvents } from "./appraisal";
 import { SessionContextManager, contextLimitForModel, estimateTokens, type ContextSummaryArtifact } from "./context-manager";
-import { AssociativeMemory } from "./memory";
 import { createCognitionTools, createSocialTools, formatObservation } from "./cognition";
 import { createInjectionShield } from "./guardrails";
 import { createStrategyProfileSnapshot } from "./social/strategy-profile";
@@ -71,8 +70,16 @@ export interface SocietyAgentOptions {
   apiKey?: string;
   baseURL?: string;
   maxTurns?: number;
+  /** Season mode: same-character sessions persist across games (AGENTS.md §22). */
+  seasonMode?: boolean;
   /** Cross-game history for this character, if the season remembers them. */
   dossier?: CharacterDossier;
+  /**
+   * Explicit session identity. Season rooms pass `season:<characterId>` so the
+   * same person's SDK session carries their conversation history across games;
+   * one-shot rooms omit it and default to `<roomId>:<actorId>`.
+   */
+  sessionKey?: string;
   /** Final model config resolved through the registry (model, tuning, budget). */
   resolvedConfig?: ResolvedModelConfig;
   /** Where this agent's durable session file lives (default data/sessions). */
@@ -121,8 +128,11 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       ? restoreMindState(options.restoreMind, options.profile, participants, options.dossier)
       : initialMind(options.profile, participants, options.dossier);
     // Durable per-agent session: history survives restarts in data/sessions/.
+    // Season mode keys by character so the SAME session carries this person's
+    // conversation history across games (AGENTS.md §22); one-shot rooms get a
+    // per-game session and start from zero history.
     this.session = JsonSessionStore.open(
-      `${options.roomId}:${options.profile.id}`,
+      options.sessionKey ?? `${options.roomId}:${options.profile.id}`,
       options.sessionDir ?? defaultSessionDir(),
       {
         onNotice: (notice) => options.emit({
@@ -138,26 +148,15 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         })
       }
     );
-    // Season memories start inside the associative store, not just in the
-    // initial mind view, so they survive the first memory sync and can be
-    // recalled by the agent like any other memory.
-    const seasonMemories = this.mind.memories.filter((entry) => entry.tags.includes("season"));
-    // Autobiographical anchors (§4.2.1) live in the store too: they are the
-    // character's own formative history and must survive memory syncs.
-    const identityMemories = this.mind.memories.filter((entry) => entry.tags.includes("autobiography"));
-    // A checkpoint-restored mind (P3 recovery) also brings its in-game
-    // memories back into the store, so what happened before the restart stays
-    // recallable instead of surviving only as a display snapshot.
-    const restoredGameMemories = options.restoreMind
-      ? this.mind.memories.filter((entry) => !entry.tags.includes("season") && !entry.tags.includes("autobiography"))
-      : [];
+    // Season continuity rides on the persistent session (AGENTS.md §22): no
+    // associative store, no retrieval, no write policy.
     this.context = {
       actorId: options.profile.id,
       roomId: options.roomId,
       profile: this.profile,
       world: options.world,
       mind: this.mind,
-      memory: new AssociativeMemory([...identityMemories, ...seasonMemories, ...restoredGameMemories]),
+      seasonMode: options.seasonMode ?? false,
       emit: options.emit
     };
     this.seedDirectedRelationships();
@@ -397,29 +396,9 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       content: [{ type: "input_text", text: fixedInput }]
     } as unknown as AgentInputItem;
     const history = await this.session.getItems();
-    const pressure = this.contextManager.preflight(history, estimateTokens([fixedItem]));
-    const recallLimit = pressure === "retrieval-tight" || pressure === "soft-compact"
-      ? 4
-      : pressure === "deep-compact" || pressure === "emergency" || pressure === "hard-guard"
-        ? 2
-        : 6;
-    const memoryQuery = buildMemoryRecallQuery(observation, this.mind);
-    const recentMemories = await this.context.memory.recall(
-      memoryQuery,
-      recallLimit,
-      this.mind.mood.pad,
-      this.profile.decisionBiases?.includes("recency-weighting") ? 1.8 : 1
-    );
-    if (recentMemories.length) {
-      this.context.emit({
-        type: "agent.memory.recalled",
-        roomId: this.context.roomId,
-        actorId: this.profile.id,
-        count: recentMemories.length,
-        query: `${observation.phase} ${observation.situation}`,
-        at: new Date().toISOString()
-      });
-    }
+    // Preflight exists purely for compaction planning (AGENTS.md §23): no
+    // retrieval runs here — the model's own session history IS its memory.
+    this.contextManager.preflight(history, estimateTokens([fixedItem]));
     emitStatus(this.context, "thinking");
     this.deltaBuffer = "";
     this.lastDeltaAt = Date.now();
@@ -431,10 +410,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       input,
       modeLine,
       formatObservation(observation),
-      ...socialContext,
-      recentMemories.length
-        ? `Relevant memories:\n${recentMemories.map((memory) => `- ${memory.text}`).join("\n")}`
-        : "Relevant memories: none yet."
+      ...socialContext
     ].join("\n\n");
     const toolCalls: string[] = [];
     let result: StreamedRunResult<SocietyAgentContext, SdkAgent<SocietyAgentContext, any>>;
@@ -512,15 +488,8 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   }
 
   exportDossier(role?: string, outcome?: "win" | "lose"): CharacterDossier {
-    // Season history carries what happened at the table; the character's own
-    // autobiography is definitional and gets re-seeded from the profile, so
-    // it is excluded to avoid duplicates piling up across games.
-    const strongest = this.mind.memories
-      .filter((entry) => !entry.tags.includes("autobiography"))
-      .slice()
-      .sort((left, right) => right.salience - left.salience || right.turn - left.turn)
-      .slice(0, 12)
-      .map((entry) => ({ text: entry.text, salience: entry.salience, valence: entry.valence }));
+    // The dossier keeps relationship/belief/record continuity. What the agent
+    // itself remembers lives in its persistent session, not in the dossier.
     return {
       characterId: this.profile.characterId,
       displayName: this.profile.displayName,
@@ -545,7 +514,6 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         proposition: entry.proposition,
         confidence: entry.confidence
       })),
-      memories: strongest,
       // Personality drift belongs to the person, not to one game: carry the
       // bounded adaptations into the season so the next table sees a character
       // who was changed by what happened (§4.2.8).
@@ -554,23 +522,20 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     };
   }
 
-  async rememberOutcome(text: string, turn: number, source: {
-    suggestionId: string;
-    importance: number;
-    sourceIds: string[];
-  }): Promise<void> {
+  noteOutcome(text: string, turn: number): void {
     if (!text.trim()) return;
-    await this.context.memory.remember({
-      text,
-      tags: ["outcome", "reconciled", `turn:${turn}`],
-      salience: source.importance,
-      valence: 0,
-      pad: { ...this.mind.mood.pad },
-      turn,
-      sourceRefs: [source.suggestionId, ...source.sourceIds],
-      sourceKind: "outcome-reconciliation" as const
-    });
-    await syncMemories(this.context);
+    // Display-only list for the spectator MindSheet (AGENTS.md §22): plain
+    // append, hard cap, no scoring and no retrieval path of any kind.
+    this.mind.memories = [
+      ...this.mind.memories.filter((entry) => !entry.tags.includes("autobiography")),
+      {
+        id: `outcome-${this.profile.id}-${turn}-${randomUUID()}`,
+        text,
+        tags: ["outcome", `turn:${turn}`],
+        turn,
+        createdAt: new Date().toISOString()
+      }
+    ].slice(-20);
   }
 
   /**
@@ -632,20 +597,6 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     const changed = summary.changed || adapted.moved.length > 0;
     if (!changed) return;
     this.mind.mood = refreshMood(this.mind.mood, turn);
-    for (const seed of summary.memories) {
-      if (!seed.sourceRefs.length || seed.salience < 0.6) continue;
-      await this.context.memory.remember({
-        text: seed.text,
-        tags: seed.tags,
-        salience: seed.salience,
-        valence: seed.valence,
-        pad: { ...this.mind.mood.pad },
-        turn,
-        sourceRefs: seed.sourceRefs,
-        sourceKind: "appraisal"
-      });
-    }
-    await syncMemories(this.context);
     this.context.emit({
       type: "agent.updated",
       roomId: this.context.roomId,
@@ -782,24 +733,13 @@ function initialMind(
         note: past.note || "Shared history from previous games"
       };
     });
-  const memories = (dossier?.memories ?? []).slice(0, 10).map<AgentMindState["memories"][number]>((entry, index) => ({
-    id: `season-${profile.id}-${index}`,
-    text: entry.text,
-    tags: ["season", "history"],
-    salience: entry.salience,
-    valence: entry.valence,
-    turn: -1,
-    createdAt: new Date().toISOString()
-  }));
   // Formative experiences seeded before the first turn: why this person
-  // reacts the way they do (§4.2.1). High salience, identity-tagged, never
-  // overwritten by ordinary compaction.
+  // reacts the way they do. Display-only entries; the persona texts also go
+  // into the system instructions directly.
   const anchors = (profile.autobiographicalAnchors ?? []).map<AgentMindState["memories"][number]>((text, index) => ({
     id: `autobiography-${profile.id}-${index}`,
     text,
     tags: ["autobiography", "identity"],
-    salience: 0.82,
-    valence: 0.2,
     turn: -2,
     createdAt: new Date().toISOString()
   }));
@@ -824,7 +764,7 @@ function initialMind(
       source: "previous games"
     })),
     relationships,
-    memories: [...anchors, ...memories],
+    memories: anchors,
     cognitivePasses: [],
     deceptions: [],
     roleHypotheses: [],
@@ -878,24 +818,18 @@ function restoreMindState(
       };
     })
     .filter((entry): entry is AgentRelationship => Boolean(entry));
-  // Identity anchors and season memories always come from the baseline; the
-  // restored in-game memories ride along, deduped by id.
-  const pinned = baseline.memories.filter((entry) => entry.tags.includes("autobiography") || entry.tags.includes("season"));
-  const pinnedIds = new Set(pinned.map((entry) => entry.id));
-  const gameMemories = (restored.memories ?? [])
-    .filter((entry) => typeof entry.text === "string" && entry.text && !entry.tags.includes("autobiography") && !entry.tags.includes("season"))
-    .filter((entry) => {
-      if (pinnedIds.has(entry.id)) return false;
-      pinnedIds.add(entry.id);
-      return true;
-    });
+  // Identity anchors come from the baseline; the checkpoint's display list
+  // rides along, validated and capped (AGENTS.md §22: display-only).
+  const restoredMemories = (restored.memories ?? [])
+    .filter((entry) => typeof entry.text === "string" && entry.text && Array.isArray(entry.tags))
+    .slice(0, 20);
   return {
     mood: validMood(restored.mood) ? restored.mood : baseline.mood,
     attention: Array.isArray(restored.attention) && restored.attention.length > 0 ? restored.attention : baseline.attention,
     goals: validGoals(restored.goals) ? restored.goals : baseline.goals,
     beliefs: Array.isArray(restored.beliefs) ? restored.beliefs.filter(validBelief) : baseline.beliefs,
     relationships,
-    memories: [...pinned, ...gameMemories].slice(0, 320),
+    memories: [...baseline.memories.filter((entry) => entry.tags.includes("autobiography")), ...restoredMemories],
     ...(typeof restored.latestReflection === "string" && restored.latestReflection ? { latestReflection: restored.latestReflection } : {}),
     cognitivePasses: Array.isArray(restored.cognitivePasses) ? restored.cognitivePasses : [],
     deceptions: Array.isArray(restored.deceptions) ? restored.deceptions : [],
@@ -1080,8 +1014,8 @@ function participantInstructions(context: SocietyAgentContext): string {
   const profile = context.world.snapshot().agents.find((agent) => agent.id === context.actorId);
   const effective = effectiveTemperament(context.profile.temperament, context.mind.traitAdaptations);
   const temperamentContextText = temperamentContext({ ...context.profile, temperament: effective });
-  const seasonHistory = (context.mind.memories.find((memory) => memory.tags.includes("season")))
-    ? `This is a continuing community — a Society Season. You have played with some of these people before, and the memories above include what happened in earlier games. Treat them as real shared history: a past betrayal stings, a kept promise earns trust. But roles and rules differ per game, and past roles do not prove this game's loyalties. Refer to past games naturally when it matters — do not lecture others about old scores.`
+  const seasonHistory = context.seasonMode
+    ? "This is a continuing community — a Society Season. Your persistent memory holds every previous game you played: who you met, what was promised, who betrayed whom. Treat that history as real. Roles and rules differ per game, and past roles do not prove this game's loyalties. Refer to past games naturally when it matters — do not lecture others about old scores."
     : "";
   return [
     `You are ${profile?.displayName ?? context.actorId}, an autonomous participant in a continuing social world.`,
@@ -1092,7 +1026,10 @@ function participantInstructions(context: SocietyAgentContext): string {
     ...(adaptationContext(context.mind) ? [adaptationContext(context.mind)] : []),
     ...protocolInstructions(),
     ...(context.profile.autobiographicalAnchors?.length
-      ? ["You carry formative memories (tagged autobiography) from before this table. When a situation echoes one, let it quietly shape your instinct — that is where your gut comes from. Never recite them as an essay."]
+      ? [
+          "You carry formative memories from before this table. When a situation echoes one, let it quietly shape your instinct — that is where your gut comes from. Never recite them as an essay. Formative memories:",
+          ...context.profile.autobiographicalAnchors.map((text) => `- ${text}`)
+        ]
       : []),
     affectContext(context.mind.mood),
     `Attention: ${context.mind.attention.join("; ") || "未定"}.`,
@@ -1335,31 +1272,6 @@ function focusSocialValue(value: unknown, actorId: string, characterId: string):
   return Object.keys(focused).length ? focused : value;
 }
 
-function buildMemoryRecallQuery(
-  observation: ReturnType<SocietyAgentContext["world"]["observe"]>,
-  mind: AgentMindState
-): string {
-  const recentConversation = observation.recentMessages
-    .slice(-5)
-    .map((message) => `${message.senderName}: ${message.text.slice(0, 180)}`);
-  const activeGoals = mind.goals
-    .filter((goal) => goal.status === "active")
-    .slice(0, 4)
-    .map((goal) => `${goal.description} ${goal.progress}`);
-  const sociallyCharged = mind.relationships
-    .slice()
-    .sort((left, right) => (right.tension + (1 - right.trust)) - (left.tension + (1 - left.trust)))
-    .slice(0, 3)
-    .flatMap((relationship) => relationship.note ? [relationship.note] : []);
-  return [
-    observation.phase,
-    observation.situation,
-    ...recentConversation,
-    ...activeGoals,
-    ...sociallyCharged
-  ].join(" \n").slice(0, 2_400);
-}
-
 function emitStatus(context: SocietyAgentContext, status: Extract<AgentRuntimeEvent, { type: "agent.status" }>["status"]): void {
   context.emit({ type: "agent.status", roomId: context.roomId, actorId: context.actorId, status, at: new Date().toISOString() });
 }
@@ -1383,10 +1295,6 @@ function emitTool(
     ...(safeOutputSummary ? { safeOutputSummary } : {}),
     at: new Date().toISOString()
   });
-}
-
-async function syncMemories(context: SocietyAgentContext): Promise<void> {
-  context.mind.memories = await context.memory.list(80);
 }
 
 function toolName(item: Record<string, unknown>): string | undefined {

@@ -339,11 +339,6 @@ export class StagHuntWorld extends SocialWorldBase {
           "actor-chose-stag": choices[id] === "stag"
         },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{
-          summary: `In stag-hunt round ${this.round}, I chose ${choices[id]}; choices were ${Object.entries(choices).map(([actorId, choice]) => `${actorId}=${choice}`).join(", ")}; payoff ${payoffs[id]}.`,
-          importance: allStag || payoffs[id] === 0 ? 0.8 : 0.64,
-          sourceIds: [commandId, publicResult.eventId]
-        }]
       });
     }
     this.choices.clear();

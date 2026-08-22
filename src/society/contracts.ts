@@ -215,36 +215,17 @@ export interface AgentRelationship {
   note: string;
 }
 
+/**
+ * Display-only memory entry (AGENTS.md §22): a plain capped list on the mind
+ * for the spectator MindSheet. It is NOT a retrieval system — the model's own
+ * SDK session carries what the agent actually remembers.
+ */
 export interface AgentMemoryItem {
   id: string;
   text: string;
   tags: string[];
-  salience: number;
-  valence: number;
-  pad?: PadState;
   turn: number;
   createdAt: string;
-  /** Canonical decision/outcome/suggestion ids authorizing this write. */
-  sourceRefs?: string[];
-  sourceKind?: "agent-authored" | "outcome-reconciliation" | "appraisal" | "legacy";
-  /** Links to related memories (AGENTS.md §5.4.7). Built deterministically
-   *  on write; the fact layer stays stable, only interpretation links move. */
-  links?: MemoryLink[];
-}
-
-export interface MemoryLink {
-  toMemoryId: string;
-  kind:
-    | "same-person"
-    | "supports"
-    | "contradicts"
-    | "caused-by"
-    | "resolved-by"
-    | "similar-situation"
-    | "promise-chain"
-    | "deception-chain";
-  weight: number;
-  lastReinforcedAt: string;
 }
 
 /**
@@ -759,7 +740,6 @@ export type AgentRuntimeEvent =
     }
   | { type: "agent.thought-beat"; roomId: string; actorId: string; beat: ThoughtBeat; at: string }
   | { type: "agent.compacted"; roomId: string; actorId: string; estimatedTokens: number; threshold: number; digest: string; level: string; pressureAfter: number; at: string }
-  | { type: "agent.memory.recalled"; roomId: string; actorId: string; count: number; query: string; at: string }
   | { type: "agent.memory.consolidated"; roomId: string; actorId: string; memoryId: string; summary: string; at: string }
   | {
       type: "agent.context.pressure";
@@ -814,22 +794,18 @@ export type AgentRuntimeEvent =
   | { type: "cinematic.cue"; roomId: string; cue: CinematicCue; at: string }
   | { type: "room.status"; roomId: string; status: RoomStatus; detail?: string; at: string };
 
-export interface AgentMemoryStore {
-  remember(input: Omit<AgentMemoryItem, "id" | "createdAt">): Promise<AgentMemoryItem>;
-  /** Link two existing memories by id (AGENTS.md §5.4.7). */
-  link(fromMemoryId: string, toMemoryId: string, kind: MemoryLink["kind"]): Promise<void>;
-  /** `recencyBoost` weights fresh memories higher for recency-weighting characters (§4.2.7). */
-  recall(query: string, limit?: number, moodPad?: PadState, recencyBoost?: number): Promise<AgentMemoryItem[]>;
-  list(limit?: number): Promise<AgentMemoryItem[]>;
-}
-
 export interface SocietyAgentContext {
   actorId: string;
   roomId: string;
   profile: AgentProfile;
   world: SocialWorld;
   mind: AgentMindState;
-  memory: AgentMemoryStore;
+  /**
+   * Season continuity (AGENTS.md §8): in season mode the same character's SDK
+   * session persists across games, so the model's own context carries prior
+   * history. One-shot rooms start from a clean session every game.
+   */
+  seasonMode: boolean;
   emit(event: AgentRuntimeEvent): void;
 }
 
@@ -859,7 +835,6 @@ export interface SocialWorld {
   /** Pending appraisal events for one participant; returns and clears them. */
   eventsFor(actorId: string): SocialEvent[];
   /** Evaluate pending reconciliation-backed memory candidates exactly once. */
-  applyMemoryWritePolicy(actorId: string): import("./social/contracts").MemoryWritePolicyResult;
   /** True once every outcome-memory path in this scenario is reconciliation-backed. */
   reconciliationOwnsOutcomeMemory(): boolean;
   /** Open (proposed, unsettled) commitments this participant is party to. */
@@ -939,7 +914,6 @@ export interface CharacterDossier {
     note: string;
   }>;
   beliefs: Array<{ subjectId: string; proposition: string; confidence: number }>;
-  memories: Array<{ text: string; salience: number; valence: number }>;
   /**
    * Slow personality drift carried across games (§4.2.8): the bounded
    * adaptation each Big Five trait accumulated, with its recorded causes.
@@ -975,11 +949,8 @@ export interface SocietyAgentRuntime {
   readonly session: Session;
   readonly mind: AgentMindState;
   runTurn(input: string, options: { signal: AbortSignal; turn: number }): Promise<AgentTurnResult>;
-  rememberOutcome(text: string, turn: number, source: {
-    suggestionId: string;
-    importance: number;
-    sourceIds: string[];
-  }): Promise<void>;
+  /** Append a settled outcome summary to the display-only memory list (no retrieval). */
+  noteOutcome(text: string, turn: number): void;
   /** Process world-appraisal events into emotion, relationship and memory. */
   appraise(events: SocialEvent[], turn: number): Promise<void>;
   /**

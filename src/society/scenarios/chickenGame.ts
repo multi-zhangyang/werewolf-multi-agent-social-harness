@@ -328,11 +328,6 @@ export class ChickenGameWorld extends SocialWorldBase {
           "actor-payoff-at-least-two": result.payoffs[id] >= 2
         },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{
-          summary: `In chicken round ${this.round}, I chose ${result.choices[id]}, ${opponentId} chose ${result.choices[opponentId]}, and I scored ${result.payoffs[id]}.`,
-          importance: result.payoffs[id] === 0 || result.payoffs[id] === 4 ? 0.8 : 0.64,
-          sourceIds: [commandId, publicResult.eventId]
-        }]
       });
     }
     this.choices.clear();

@@ -24,7 +24,6 @@ function dossier(characterId: string, marker: string): CharacterDossier {
     games: [{ scenarioId: "trust-game", role: "investor", outcome: "win", at: `2026-08-19T00:00:0${Number(marker) % 10}.000Z` }],
     relationships: [{ targetCharacterId: "other", trust: 0.5, affinity: 0.5, respect: 0.5, tension: 0.2, note: marker }],
     beliefs: [{ subjectId: "other", proposition: marker, confidence: 0.5 }],
-    memories: [],
     updatedAt: `2026-08-19T00:00:0${Number(marker) % 10}.000Z`
   };
 }

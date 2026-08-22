@@ -340,13 +340,6 @@ export class CentipedeGameWorld extends SocialWorldBase {
       },
       actualFacts,
       resultingEventIds: [pending.publicResultEventId],
-      memoryWriteSuggestions: [{
-        summary: pending.ended
-          ? `At centipede move ${pending.move}, I chose ${pending.action}; the game ended with pot ${pending.pot} and my payoff ${actorPayoff}.`
-          : `At centipede move ${pending.move}, I passed pot ${pending.pot}, doubling it for the next player.`,
-        importance: pending.ended ? 0.86 : 0.64,
-        sourceIds: [pending.commandId, pending.publicResultEventId]
-      }]
     });
     this.pendingMoveReconciliation = undefined;
   }

@@ -1007,11 +1007,6 @@ export class AvalonWorld extends SocialWorldBase {
         },
         actualFacts: { "team-approved": approved },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{
-          summary: `As leader on quest ${this.quest}, I proposed [${team.join(", ")}]; the table ${approved ? "approved" : "rejected"} it ${approveCount}-${resolvedVotes.size - approveCount}.`,
-          importance: approved ? 0.7 : 0.76,
-          sourceIds: [commandId, publicResult.eventId]
-        }]
       });
       this.proposalCommandId = undefined;
     }
@@ -1029,11 +1024,6 @@ export class AvalonWorld extends SocialWorldBase {
           "vote-matched-majority": accept === approved
         },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{
-          summary: `On quest ${this.quest}, I ${accept ? "approved" : "rejected"} team [${team.join(", ")}]; the table ${approved ? "approved" : "rejected"} it ${approveCount}-${resolvedVotes.size - approveCount}.`,
-          importance: 0.66,
-          sourceIds: [commandId, publicResult.eventId]
-        }]
       });
     }
     const text = approved
@@ -1139,11 +1129,6 @@ export class AvalonWorld extends SocialWorldBase {
           "quest-has-fail-card": failCount > 0
         },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{
-          summary: `I played ${choice} on quest ${this.quest}; the public result was ${outcome} with ${failCount} fail card(s) from team [${team.join(", ")}].`,
-          importance: outcome === "fail" ? 0.82 : 0.68,
-          sourceIds: [commandId, publicResult.eventId]
-        }]
       });
     }
     for (const id of this.profiles.keys()) {
@@ -1280,11 +1265,6 @@ export class AvalonWorld extends SocialWorldBase {
             "target-verdict-evil": verdict === "evil"
           },
           resultingEventIds: [publicResult.eventId, privateResult.sourceEventId ?? privateResult.evidenceId],
-          memoryWriteSuggestions: [{
-            summary: `After quest ${this.quest}, the Lady of the Lake showed me that ${targetId} was ${verdict}.`,
-            importance: 0.9,
-            sourceIds: [commandId, privateResult.sourceEventId ?? privateResult.evidenceId]
-          }]
         });
       }
       this.ladyHolderId = targetId;
@@ -1364,13 +1344,6 @@ export class AvalonWorld extends SocialWorldBase {
         "evil-wins": correct
       },
       resultingEventIds: [publicResult.eventId],
-      memoryWriteSuggestions: [{
-        summary: correct
-          ? `In the final assassination, I identified ${targetId} as Merlin and won for evil.`
-          : `In the final assassination, I targeted ${targetId}, who was ${targetRole}; the loyal faction won.`,
-        importance: 1,
-        sourceIds: [commandId, publicResult.eventId]
-      }]
     });
     for (const id of this.profiles.keys()) {
       this.lastExperiences.set(id, `${this.outcome} 最终身份：${[...this.roles].map(([memberId, memberRole]) => `${memberId}=${memberRole}`).join(", ")}。`);

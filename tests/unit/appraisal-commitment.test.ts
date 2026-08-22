@@ -33,6 +33,7 @@ function mind(): AgentMindState {
     attention: [],
     goals: [],
     beliefs: [],
+    memories: [],
     relationships: [{
       targetCharacterId: "char-b",
       trust: 0.7,
@@ -43,7 +44,6 @@ function mind(): AgentMindState {
       updatedAtTurn: 1,
       note: ""
     }],
-    memories: [],
     cognitivePasses: [],
     deceptions: [],
     roleHypotheses: [],

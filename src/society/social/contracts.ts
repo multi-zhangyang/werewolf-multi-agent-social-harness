@@ -505,14 +505,6 @@ export interface OutcomeReconciliation {
   }>;
   propositionSettlements: Array<{ propositionId: PropositionId; truthStatus: "true" | "false" }>;
   influenceIds: InfluenceId[];
-  memoryWriteSuggestions: Array<{
-    suggestionId: string;
-    summary: string;
-    importance: number;
-    sourceIds: string[];
-    status: "candidate" | "accepted" | "rejected";
-    decidedAtLogical?: number;
-  }>;
   calibrationError?: number;
   resultingEventIds: string[];
   logicalTime: number;
@@ -520,21 +512,10 @@ export interface OutcomeReconciliation {
   schemaVersion: number;
 }
 
-export interface MemoryWritePolicyResult {
-  evaluated: boolean;
-  accepted: Array<{
-    suggestionId: string;
-    summary: string;
-    importance: number;
-    sourceIds: string[];
-  }>;
-}
-
 export interface OutcomeReconciliationInput {
   actionReceiptId: string;
   actualOutcome: { summary: string; metrics: Record<string, number | string | boolean | null> };
   actualFacts: Record<string, boolean>;
-  memoryWriteSuggestions?: Array<{ summary: string; importance: number; sourceIds?: string[] }>;
   resultingEventIds?: string[];
 }
 

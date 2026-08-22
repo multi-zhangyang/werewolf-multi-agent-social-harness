@@ -18,6 +18,7 @@ function mind(): AgentMindState {
     beliefs: [
       { subjectId: "agent-02", proposition: "林默会返还至少 10", confidence: 0.62, updatedAtTurn: 1, source: "他公开承诺过" }
     ],
+    memories: [],
     relationships: [{
       targetCharacterId: "char-b",
       trust: 0.7,
@@ -28,7 +29,6 @@ function mind(): AgentMindState {
       updatedAtTurn: 1,
       note: ""
     }],
-    memories: [],
     cognitivePasses: [],
     deceptions: [],
     roleHypotheses: [],

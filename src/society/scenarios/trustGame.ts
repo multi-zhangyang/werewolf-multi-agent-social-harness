@@ -756,13 +756,6 @@ export class TrustGameWorld extends SocialWorldBase {
           "cited-commitments-fulfilled": citedCommitments.length > 0 && citedCommitments.every((entry) => entry.state === "fulfilled"),
           "actor-payoff-at-least-endowment": actorPayoff >= this.endowment
         },
-        memoryWriteSuggestions: [{
-          summary: role === "investor"
-            ? `As investor in round ${this.round}, I transferred ${investment}; ${trusteeId} returned ${returnedAmount}.`
-            : `As trustee in round ${this.round}, ${investorId} transferred ${investment}; I returned ${returnedAmount}.`,
-          importance: citedCommitments.some((entry) => entry.state === "violated") ? 0.9 : 0.65,
-          sourceIds: [commandId, ...citedCommitmentIds]
-        }],
         resultingEventIds: [publicResult.eventId]
       });
     };

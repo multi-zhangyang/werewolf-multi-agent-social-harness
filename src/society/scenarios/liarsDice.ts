@@ -598,13 +598,6 @@ export class LiarsDiceWorld extends SocialWorldBase {
         },
         actualFacts,
         resultingEventIds: [...new Set([pending.publicResultEventId, ...(bid.publicEventId ? [bid.publicEventId] : [])])],
-        memoryWriteSuggestions: [{
-          summary: outcome.challenged
-            ? `In Liar's Dice round ${outcome.round}, I bid ${bid.quantity}x${bid.face}; after a challenge the bid was ${bidTrue ? "true" : "false"}, and ${outcome.winnerId} won the round.`
-            : `In Liar's Dice round ${outcome.round}, I bid ${bid.quantity}x${bid.face}; the bidding cap ended the round uncontested and ${outcome.winnerId} won.`,
-          importance: outcome.loserId === bid.actorId || outcome.winnerId === bid.actorId ? 0.82 : 0.62,
-          sourceIds: [bid.commandId, pending.publicResultEventId]
-        }]
       });
     }
     if (challenge) {
@@ -633,11 +626,6 @@ export class LiarsDiceWorld extends SocialWorldBase {
           pending.publicResultEventId,
           ...(challenge.challengedBid.publicEventId ? [challenge.challengedBid.publicEventId] : [])
         ])],
-        memoryWriteSuggestions: [{
-          summary: `In Liar's Dice round ${outcome.round}, I challenged ${challenge.challengedBid.quantity}x${challenge.challengedBid.face}; it was ${challenge.challengedBidTrue ? "true" : "false"}, so I ${outcome.winnerId === challenge.actorId ? "won" : "lost"} the round.`,
-          importance: 0.86,
-          sourceIds: [challenge.commandId, pending.publicResultEventId]
-        }]
       });
     }
     this.pendingRoundReconciliation = undefined;

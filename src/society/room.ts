@@ -224,6 +224,8 @@ export class SocietyRoom {
   private readonly providerClients = new Map<string, OpenAIProvider>();
   /** Sidecar extraction runs strictly one-at-a-time, off the send path. */
   private actExtractionChain: Promise<void> = Promise.resolve();
+  /** Last reconciliation logical time surfaced as a display note per actor. */
+  private readonly notedReconciliationSeq = new Map<string, number>();
   private extractionFailures = 0;
   private readonly extractionProviders = new Map<string, OpenAIProviderType>();
   /** Process-wide activation pool; absent in embedded single-room use. */
@@ -888,6 +890,14 @@ export class SocietyRoom {
           world: this.world,
           provider: this.providerClientFor(config.providerProfileId),
           resolvedConfig: config,
+          // Season continuity (AGENTS.md §22): one durable session per
+          // character across every game in the season; one-shot stays per-room.
+          ...(this.seasonMode === "season" && card.profile.characterId
+            ? {
+                seasonMode: true,
+                sessionKey: `season:${card.profile.characterId}`
+              }
+            : {}),
           emit: (event) => this.handleAgentEvent(event),
           ...(dossier ? { dossier } : {}),
           ...(this.restoreMinds?.[card.profile.id] ? { restoreMind: this.restoreMinds[card.profile.id] } : {})
@@ -1280,15 +1290,18 @@ export class SocietyRoom {
     if (!runtime) return;
     const events = this.world.eventsFor(actorId);
     if (events.length) await runtime.appraise(events, this.world.snapshot().turn);
-    const memoryPolicy = this.world.applyMemoryWritePolicy(actorId);
-    if (!memoryPolicy.evaluated) return;
-    for (const write of memoryPolicy.accepted) {
-      await runtime.rememberOutcome(write.summary, this.world.snapshot().turn, {
-        suggestionId: write.suggestionId,
-        importance: write.importance,
-        sourceIds: write.sourceIds
-      });
+    // Surface newly settled outcomes as display notes (AGENTS.md §22): the
+    // model's session carries real memory; this list is spectator-facing.
+    const projection = this.world.socialCausalityFor(actorId);
+    const turn = this.world.snapshot().turn;
+    const notedThrough = this.notedReconciliationSeq.get(actorId) ?? 0;
+    let notedThroughNext = notedThrough;
+    for (const reconciliation of projection.outcomeReconciliations) {
+      if (reconciliation.logicalTime <= notedThrough) continue;
+      runtime.noteOutcome(reconciliation.actualOutcome.summary, turn);
+      notedThroughNext = Math.max(notedThroughNext, reconciliation.logicalTime);
     }
+    if (notedThroughNext !== notedThrough) this.notedReconciliationSeq.set(actorId, notedThroughNext);
   }
 
   private handleAgentEvent(event: AgentRuntimeEvent): void {
@@ -1441,6 +1454,10 @@ export class SocietyRoom {
       sessionFiles,
       profiles: [...this.cards.values()].map((card) => structuredClone(card.profile)),
       worldState: this.world.exportState(),
+      runtimeStats: {
+        extractionFailures: this.extractionFailures,
+        settledAbandonedTurns: this.settledAbandonedTurns
+      },
       agentBindings: structuredClone(this.agentBindings),
       pausedAgents: [...this.pausedAgents],
       seasonMode: this.seasonMode,
@@ -1504,6 +1521,33 @@ export class SocietyRoomRegistry {
   private readonly rooms = new Map<string, SocietyRoom>();
 
   create(options: SocietyRoomCreateOptions): SocietyRoom {
+    // Season sessions are one-per-character (AGENTS.md §22): a character whose
+    // durable session is held by an active season room cannot join another —
+    // two rooms writing the same session file would interleave histories.
+    const seasonMode = options.seasonMode ?? (options.season ? "season" : "one-shot");
+    if (seasonMode === "season") {
+      const wanted = new Set(
+        options.profiles
+          .filter((profile) => profile.controller !== "human")
+          .map((profile) => profile.characterId)
+      );
+      const busy = new Set<string>();
+      for (const room of this.rooms.values()) {
+        if (room.snapshotFor().seasonMode !== "season") continue;
+        const status = room.currentStatus();
+        if (status === "finished" || status === "error") continue;
+        for (const participant of room.snapshotFor().participants) {
+          if (wanted.has(participant.profile.characterId)) {
+              busy.add(`${participant.profile.displayName}（${room.snapshotFor().title}）`);
+          }
+        }
+      }
+      if (busy.size) {
+        throw new Error(
+          `CHARACTER_SESSION_BUSY: 这些角色正在其他赛季房间中，会话不可同时使用：${[...busy].join("、")}。请先结束或移除对应房间。`
+        );
+      }
+    }
     const room = new SocietyRoom(options);
     this.rooms.set(room.id, room);
     return room;
@@ -1552,7 +1596,6 @@ function isReplayEvent(event: AgentRuntimeEvent): boolean {
     case "agent.tool":
     case "agent.thought-beat":
     case "agent.compacted":
-    case "agent.memory.recalled":
     case "agent.memory.consolidated":
     case "agent.guardrail":
     case "agent.status":

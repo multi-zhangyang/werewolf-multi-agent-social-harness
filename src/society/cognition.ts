@@ -28,7 +28,6 @@ import { scopedContext } from "./world";
 
 export interface SocialToolkit {
   all: Tool<SocietyAgentContext>[];
-  recall: Tool<SocietyAgentContext>;
   innerState: Tool<SocietyAgentContext>;
 }
 
@@ -102,20 +101,7 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
     }
   }) as Tool<SocietyAgentContext>;
 
-  const recall = tool({
-    name: "recall_memory",
-    description: "Retrieve personal memories relevant to a person, promise, pattern, or decision. Results are ranked by relevance, recency, salience, and similarity to your current emotional state.",
-    parameters: z.object({
-      query: z.string().min(1).max(600),
-      limit: z.number().int().min(1).max(12).default(6)
-    }).strict(),
-    execute: async ({ query, limit }, runContext) => {
-      const ctx = scopedContext(runContext, context.actorId, context);
-      return ctx.memory.recall(query, limit, ctx.mind.mood.pad);
-    }
-  }) as Tool<SocietyAgentContext>;
-
-  const updateInnerState = createInnerStateTool(context);
+const updateInnerState = createInnerStateTool(context);
 
   // Strategic deception is a typed, audience-aware plan — not an invisible
   // lie. The model records what it wants others to believe and how it will
@@ -176,7 +162,7 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
     }
   }) as Tool<SocietyAgentContext>;
 
-  return { all: [communicate, recall, updateInnerState, logDeception], recall, innerState: updateInnerState };
+  return { all: [communicate, updateInnerState, logDeception], innerState: updateInnerState };
 }
 
 /**

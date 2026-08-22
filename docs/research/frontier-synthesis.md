@@ -1,5 +1,7 @@
 # Frontier Synthesis — LLM Social Agents (2026)
 
+> **版本说明（2026-08-22）：** 本文是研究文献综述，非工程合同。文中引用的 `AGENTS.md §x` 章节号指向 2026-08-18 旧版章程，该章程已被 API-only 务实版替代（章节号已变）。本文中"把心理参数编码为可切换机制"类建议若与新版章程"只测量三类硬数据"的原则冲突，以新版章程为准。
+>
 > Research window: verified 2022–2026 literature. **Verification method:** every arXiv ID below
 > was checked directly against the canonical `arxiv.org/abs/{id}` HTML page (citation_* meta tags),
 > confirming the exact title/date. IDs whose `id_list` search result contradicted their `/abs/` page

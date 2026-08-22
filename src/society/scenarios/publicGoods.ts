@@ -533,11 +533,6 @@ export class PublicGoodsWorld extends SocialWorldBase {
           "cited-commitments-fulfilled": citedCommitments.length > 0 && citedCommitments.every((entry) => entry.state === "fulfilled")
         },
         resultingEventIds: [publicResult.eventId],
-        memoryWriteSuggestions: [{
-          summary: `In public-goods round ${this.round}, I contributed ${ownContribution}; the group contributed ${pool}; my payoff was ${ownReturn}.`,
-          importance: citedCommitments.length || ownContribution === 0 || groupHasZeroContributor ? 0.82 : 0.66,
-          sourceIds: [commandId, publicResult.eventId, ...citedCommitments.map((entry) => entry.commitmentId)]
-        }]
       });
     }
     const highest = Math.max(...this.contributions.values());
