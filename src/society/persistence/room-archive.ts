@@ -72,6 +72,11 @@ export class RoomArchiveStore {
     return path.join(this.dir, safeId, "checkpoint.json");
   }
 
+  summaryFile(roomId: string): string {
+    const safeId = roomId.replace(/[^A-Za-z0-9_.:-]/g, "_");
+    return path.join(this.dir, safeId, "summary.json");
+  }
+
   save(checkpoint: RoomCheckpoint): void {
     const file = this.checkpointFile(checkpoint.roomId);
     const temporary = `${file}.tmp`;
@@ -82,6 +87,14 @@ export class RoomArchiveStore {
     } catch (cause) {
       throw this.recordError("ARCHIVE_WRITE_FAILED", "save", checkpoint.roomId, true, cause);
     }
+    // Keep a tiny summary beside every checkpoint so the landing room list
+    // never parses the full (envelope-heavy) checkpoint. A summary write
+    // failure must not fail the authoritative save; list() rebuilds lazily.
+    try {
+      writeFileSync(this.summaryFile(checkpoint.roomId), JSON.stringify(this.summarize(checkpoint)), { mode: 0o600 });
+    } catch (cause) {
+      console.warn(`[room-archive] summary write failed for ${checkpoint.roomId}:`, cause instanceof Error ? cause.message : cause);
+    }
   }
 
   load(roomId: string): RoomCheckpoint | undefined {
@@ -90,26 +103,56 @@ export class RoomArchiveStore {
     return this.readCheckpoint(file, roomId);
   }
 
-  /** Summaries of all archived rooms, newest first (for the landing room list). */
+/** Summaries of all archived rooms, newest first (for the landing room list). */
   list(): ArchivedRoomSummary[] {
     if (!existsSync(this.dir)) return [];
-    return this.readAll()
-      .filter((checkpoint): checkpoint is RoomCheckpoint => Boolean(checkpoint))
-      .map((checkpoint) => ({
-        roomId: checkpoint.roomId,
-        archivedAt: checkpoint.archivedAt,
-        status: checkpoint.status,
-        title: checkpoint.snapshot.title,
-        scenarioId: checkpoint.snapshot.scenarioId,
-        messages: checkpoint.snapshot.world.messages.length,
-        logEntries: checkpoint.snapshot.world.log.length,
-        participants: checkpoint.snapshot.participants.map((participant) => ({
-          id: participant.profile.id,
-          displayName: participant.profile.displayName,
-          model: participant.profile.model
-        }))
+    const summaries: ArchivedRoomSummary[] = [];
+    for (const entry of readdirSync(this.dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const summaryFile = path.join(this.dir, entry.name, "summary.json");
+      const checkpointFile = path.join(this.dir, entry.name, "checkpoint.json");
+      try {
+        // Fast path: the per-room summary written at save time. Reading the
+        // full checkpoint here would parse every replay envelope on every
+        // landing-page poll and stall the event loop (and SSE frames).
+        if (existsSync(summaryFile)) {
+          const parsed = JSON.parse(readFileSync(summaryFile, "utf8")) as ArchivedRoomSummary;
+          if (typeof parsed.roomId === "string") {
+            summaries.push(parsed);
+            continue;
+          }
+        }
+        // Legacy rooms without a summary: parse once and rebuild the file.
+        if (!existsSync(checkpointFile)) continue;
+        const checkpoint = this.readCheckpoint(checkpointFile, entry.name);
+        const summary = this.summarize(checkpoint);
+        try {
+          writeFileSync(summaryFile, JSON.stringify(summary), { mode: 0o600 });
+        } catch { /* rebuilt lazily on the next call */ }
+        summaries.push(summary);
+      } catch {
+        // readCheckpoint already recorded the corruption as an operator-
+        // visible failure; one bad room must not sink the whole list.
+      }
+    }
+    return summaries.sort((left, right) => right.archivedAt.localeCompare(left.archivedAt));
+  }
+
+  private summarize(checkpoint: RoomCheckpoint): ArchivedRoomSummary {
+    return {
+      roomId: checkpoint.roomId,
+      archivedAt: checkpoint.archivedAt,
+      status: checkpoint.status,
+      title: checkpoint.snapshot.title,
+      scenarioId: checkpoint.snapshot.scenarioId,
+      messages: checkpoint.snapshot.world.messages.length,
+      logEntries: checkpoint.snapshot.world.log.length,
+      participants: checkpoint.snapshot.participants.map((participant) => ({
+        id: participant.profile.id,
+        displayName: participant.profile.displayName,
+        model: participant.profile.model
       }))
-      .sort((left, right) => right.archivedAt.localeCompare(left.archivedAt));
+    };
   }
 
   /**
