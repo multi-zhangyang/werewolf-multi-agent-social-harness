@@ -775,6 +775,65 @@ export class SocialCausalityLedger {
     return { eventId: envelope.eventId, propositionId: proposition.propositionId, evidenceId: evidence.evidenceId };
   }
 
+  /**
+   * Extracted action claims ("I will cooperate") by one character, for
+   * settlement-time reconciliation (§28 主张对账): the scenario compares each
+   * claim against the actual action and records support/contradiction.
+   */
+  extractedActionClaims(subjectCharacterId: string): Array<{ propositionId: string; object: string }> {
+    const claims: Array<{ propositionId: string; object: string }> = [];
+    for (const proposition of this.propositions.values()) {
+      if (
+        proposition.kind === "future-action" &&
+        proposition.predicate === "claimed-action" &&
+        proposition.subjectId === subjectCharacterId &&
+        typeof proposition.object === "string"
+      ) {
+        claims.push({ propositionId: proposition.propositionId, object: proposition.object });
+      }
+    }
+    return claims;
+  }
+
+  /**
+   * Record the settlement outcome for one extracted action claim. Idempotent:
+   * a claim already reconciled against a domain result is never re-judged by
+   * a later round, and unknown proposition ids are ignored.
+   */
+  recordClaimOutcome(input: {
+    propositionId: string;
+    actualValue: string;
+    matches: boolean;
+    sourceEventId: string;
+  }): string | undefined {
+    const proposition = this.propositions.get(input.propositionId);
+    if (!proposition || proposition.predicate !== "claimed-action") return undefined;
+    const existing = this.evidence.find((entry) =>
+      entry.propositionId === input.propositionId && entry.sourceType === "domain-result"
+    );
+    if (existing) return existing.evidenceId;
+    const envelope = this.append("domain", "claim.reconciled", {
+      propositionId: input.propositionId,
+      actualValue: input.actualValue,
+      matches: input.matches,
+      sourceEventId: input.sourceEventId
+    }, { visibility: { kind: "public" } });
+    const evidence: EvidenceRecord = {
+      evidenceId: `evidence-${randomUUID()}`,
+      observerCharacterId: "public",
+      propositionId: input.propositionId,
+      sourceType: "domain-result",
+      sourceEventId: input.sourceEventId,
+      supports: input.matches,
+      strength: 1,
+      sourceReliability: 1,
+      visibility: "public",
+      logicalTime: envelope.logicalTime
+    };
+    this.evidence.push(evidence);
+    return evidence.evidenceId;
+  }
+
   recordIdentityObservation(input: {
     observerActorId: string;
     observerCharacterId: string;
@@ -821,6 +880,8 @@ export class SocialCausalityLedger {
     subjectActorId: string;
     subjectCharacterId: string;
     actualRoleId: string;
+    /** Camp of the revealed role, when the scenario defines teams (werewolf). */
+    revealedTeam?: "wolf" | "good";
     actorIdForCharacter(characterId: string): string | undefined;
   }): { eventId: string; detectedDeceptionIds: string[] } {
     const existing = this.events.find((event) => {
@@ -883,7 +944,7 @@ export class SocialCausalityLedger {
         input.actorIdForCharacter
       );
     }
-    const detectedDeceptionIds = this.detectIdentityDeceptions(input.subjectCharacterId, input.actualRoleId, envelope.eventId);
+    const detectedDeceptionIds = this.detectIdentityDeceptions(input.subjectCharacterId, input.actualRoleId, envelope.eventId, input.revealedTeam, input.actorIdForCharacter);
     return { eventId: envelope.eventId, detectedDeceptionIds };
   }
 
@@ -2113,7 +2174,13 @@ export class SocialCausalityLedger {
     }
   }
 
-  private detectIdentityDeceptions(subjectCharacterId: string, actualRoleId: string, revealEventId: string): string[] {
+  private detectIdentityDeceptions(
+    subjectCharacterId: string,
+    actualRoleId: string,
+    revealEventId: string,
+    revealedTeam?: "wolf" | "good",
+    actorIdForCharacter?: (characterId: string) => string | undefined
+  ): string[] {
     const detected = new Set<string>();
     for (const act of this.socialActs) {
       if (!act.deceptionId || !act.messageId) continue;
@@ -2154,6 +2221,86 @@ export class SocialCausalityLedger {
         visibility
       });
       if (!episode.consequenceEventIds.includes(detection.eventId)) episode.consequenceEventIds.push(detection.eventId);
+    }
+
+    // Planless self-identity lies (AGENTS.md §28): an extracted team claim by
+    // the revealed player themself that the reveal proves false IS the
+    // detection evidence — the episode is born detected, citing the claim's
+    // message and the reveal event. Claims about OTHERS stay neutral (an
+    // honest mistake is indistinguishable from a lie without intent evidence).
+    if (revealedTeam) {
+      for (const act of this.socialActs) {
+        if (!act.messageId || act.actorCharacterId !== subjectCharacterId) continue;
+        if (act.deceptionId) continue; // planned path above owns these
+        if ([...this.deceptions.values()].some((episode) => episode.executionMessageIds.includes(act.messageId!))) continue;
+        const falseTeamPropositionIds = act.propositionIds.filter((propositionId) => {
+          const proposition = this.propositions.get(propositionId);
+          return proposition?.kind === "identity"
+            && proposition.subjectId === subjectCharacterId
+            && proposition.predicate === "has-team"
+            && proposition.object !== revealedTeam;
+        });
+        if (!falseTeamPropositionIds.length) continue;
+
+        const messageEvent = this.events.find((event) => {
+          const payload = asRecord(event.payload);
+          return event.type === "message.sent" && payload.messageId === act.messageId;
+        });
+        const publicExposure = messageEvent?.visibility.kind === "public";
+        const audienceActorIds = act.audienceActorIds.filter((actorId) => actorId !== act.actorId);
+        const episode: DeceptionEpisode = {
+          deceptionId: `deception-${randomUUID()}`,
+          deceiverCharacterId: subjectCharacterId,
+          deceiverActorId: act.actorId,
+          targetAudienceIds: [...audienceActorIds],
+          targetAudienceCharacterIds: audienceActorIds
+            .map((actorId) => actorIdForCharacter?.(actorId))
+            .filter((characterId): characterId is string => Boolean(characterId)),
+          mode: "identity-performance",
+          truePropositionIds: [],
+          intendedFalseBeliefIds: [...falseTeamPropositionIds],
+          motiveGoalIds: [],
+          executionMessageIds: [act.messageId],
+          receivedByCharacterIds: [...new Set(act.audienceActorIds.map((actorId) => actorIdForCharacter?.(actorId)).filter((characterId): characterId is string => Boolean(characterId)))],
+          believedByCharacterIds: [],
+          rejectedByCharacterIds: [],
+          detectedByCharacterIds: [],
+          repairMessageIds: [],
+          repairAcceptedByCharacterIds: [],
+          supportingActionReceiptIds: [],
+          maintenanceMessageIds: [],
+          contradictionEventIds: [revealEventId],
+          audienceBeliefsBefore: [],
+          audienceBeliefsAfter: [],
+          inducedDecisionIds: [],
+          inducedActionReceiptIds: [],
+          status: "detected",
+          detectionEventIds: [revealEventId],
+          consequenceEventIds: [],
+          exposureVisibility: publicExposure ? "public" : "targets",
+          schemaVersion: 1
+        };
+        this.deceptions.set(episode.deceptionId, episode);
+        markDetectedAudience(episode);
+        const visibility: VisibilityPolicy = publicExposure
+          ? { kind: "public" }
+          : { kind: "actors", actorIds: [...new Set([episode.deceiverActorId, ...episode.targetAudienceIds])] };
+        const detection = this.append("social", "deception.detected", {
+          deceptionId: episode.deceptionId,
+          executionMessageId: act.messageId,
+          contradictedPropositionIds: falseTeamPropositionIds,
+          revealEventId,
+          source: "reveal-reconciliation"
+        }, {
+          actorId: episode.deceiverActorId,
+          characterId: episode.deceiverCharacterId,
+          causationId: revealEventId,
+          correlationId: episode.deceptionId,
+          visibility
+        });
+        episode.consequenceEventIds.push(detection.eventId);
+        detected.add(episode.deceptionId);
+      }
     }
     return [...detected];
   }

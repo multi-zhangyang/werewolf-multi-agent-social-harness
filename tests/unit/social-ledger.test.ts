@@ -264,3 +264,60 @@ it("extracted acts for an unknown message are rejected", () => {
     characterIdFor
   }), /MESSAGE_NOT_FOUND/);
 });
+
+// --- planless identity-claim reconciliation (AGENTS.md §28 lie-loop) ---
+
+it("a planless false team claim is born detected when the reveal contradicts it, citing message + reveal", () => {
+  const ledger = ledgerWithTwoActors();
+  const sent = message({ senderId: "agent-01", text: "我是村民，别投我。" });
+  ledger.recordMessage({ message: sent, declarations: [], allActorIds: ["agent-01", "agent-02"], characterIdFor });
+  const actIds = ledger.recordExtractedSocialActs({
+    message: sent,
+    declarations: [{
+      kind: "assertion" as const,
+      proposition: { kind: "identity" as const, subjectId: "builtin-01", predicate: "has-team", object: "good" },
+      confidence: 0.9
+    }],
+    allActorIds: ["agent-01", "agent-02"],
+    characterIdFor
+  });
+  assert.equal(actIds.length, 1);
+
+  const detected = ledger.revealIdentity({
+    subjectActorId: "agent-01",
+    subjectCharacterId: "builtin-01",
+    actualRoleId: "wolf",
+    revealedTeam: "wolf",
+    actorIdForCharacter: characterIdFor
+  });
+
+  assert.equal(detected.detectedDeceptionIds.length, 1, "the reveal births one evidence-born episode");
+  const episode = ledger.project({ omniscient: true }).deceptions[0];
+  assert.equal(episode.status, "detected");
+  assert.equal(episode.executionMessageIds[0], sent.id, "the episode cites the claim's message");
+  assert.ok(episode.detectionEventIds.length >= 1 && episode.contradictionEventIds.includes(detected.eventId));
+});
+
+it("a consistent team claim produces no episode, and a repeat reveal does not duplicate episodes", () => {
+  const ledger = ledgerWithTwoActors();
+  const sent = message({ senderId: "agent-01" });
+  ledger.recordMessage({ message: sent, declarations: [], allActorIds: ["agent-01", "agent-02"], characterIdFor });
+  ledger.recordExtractedSocialActs({
+    message: sent,
+    declarations: [{ kind: "assertion" as const, proposition: { kind: "identity" as const, subjectId: "builtin-01", predicate: "has-team", object: "good" }, confidence: 0.9 }],
+    allActorIds: ["agent-01", "agent-02"],
+    characterIdFor
+  });
+
+  const first = ledger.revealIdentity({ subjectActorId: "agent-01", subjectCharacterId: "builtin-01", actualRoleId: "seer", revealedTeam: "good", actorIdForCharacter: characterIdFor });
+  assert.equal(first.detectedDeceptionIds.length, 0, "a true claim is corroborated, not punished");
+  const _second = ledger.revealIdentity({ subjectActorId: "agent-01", subjectCharacterId: "builtin-01", actualRoleId: "seer", revealedTeam: "good", actorIdForCharacter: characterIdFor });
+  assert.equal(ledger.project({ omniscient: true }).deceptions.length, 0);
+
+  // Now a wolf flip on the SAME claim: exactly one episode despite two reveals.
+  const third = ledger.revealIdentity({ subjectActorId: "agent-01", subjectCharacterId: "builtin-01", actualRoleId: "wolf", revealedTeam: "wolf", actorIdForCharacter: characterIdFor });
+  assert.equal(third.detectedDeceptionIds.length, 1);
+  const fourth = ledger.revealIdentity({ subjectActorId: "agent-01", subjectCharacterId: "builtin-01", actualRoleId: "wolf", revealedTeam: "wolf", actorIdForCharacter: characterIdFor });
+  assert.equal(fourth.detectedDeceptionIds.length, 1);
+  assert.equal(ledger.project({ omniscient: true }).deceptions.length, 1, "no duplicate per message");
+});

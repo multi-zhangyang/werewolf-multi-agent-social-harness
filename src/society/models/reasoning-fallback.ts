@@ -1,5 +1,8 @@
 type JsonObject = Record<string, unknown>;
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { sanitizeChatCompletionsPayload } from "../wire-json";
+
 export type EffectiveReasoningEffort = "xhigh" | "high" | "provider-default";
 
 export interface ReasoningFallbackNotice {
@@ -29,8 +32,43 @@ const capabilityNoticeByScope = new Map<string, Omit<ReasoningFallbackNotice, "m
  * untouched so authentication, quota and transport errors remain visible.
  */
 export function reasoningFallbackFetch(options: ReasoningFallbackOptions = {}): typeof fetch {
-  const fetchImpl = options.fetchImpl ?? fetch;
   const useCapabilityCache = options.useCapabilityCache !== false;
+  // SOCIETY_DEBUG_PROVIDER=1 persists every non-2xx provider exchange
+  // (request + redacted-free response text) under data/debug/ so endpoint
+  // 4xx/5xx storms can be diagnosed offline against the exact payload.
+  const debugDump = process.env.SOCIETY_DEBUG_PROVIDER === "1";
+  const baseFetch = options.fetchImpl ?? fetch;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    let response = await baseFetch(input, init);
+    // SOCIETY_DEBUG_PROVIDER=1 persists the ORIGINAL failed exchange (request
+    // + response text) under data/debug/ before any repair, so 4xx/5xx storms
+    // can be diagnosed offline against the exact payload that was rejected.
+    if (debugDump && !response.ok) {
+      try {
+        mkdirSync("data/debug", { recursive: true });
+        const text = await response.clone().text();
+        writeFileSync(`data/debug/failed-${Date.now()}-${response.status}.json`, JSON.stringify({
+          url: String(input),
+          at: new Date().toISOString(),
+          status: response.status,
+          request: jsonBody(init?.body) ?? null,
+          response: text.slice(0, 4_000)
+        }, null, 2));
+      } catch { /* diagnostics only */ }
+    }
+    // Wire-contract enforcement (§16.2): a request whose replayed
+    // function.arguments is not valid JSON is rejected wholesale by strict
+    // endpoints. Repair the arguments and retry once so one malformed
+    // model emission cannot poison the conversation for any user/model.
+    if ((response.status === 400 || response.status === 422) && init?.body) {
+      const payload = jsonBody(init.body);
+      const fixed = sanitizeChatCompletionsPayload(payload);
+      if (fixed) {
+        response = await baseFetch(input, { ...init, body: JSON.stringify(fixed) });
+      }
+    }
+    return response;
+  };
   return async (input, init) => {
     const payload = jsonBody(init?.body);
     if (!payload) return fetchImpl(input, init);

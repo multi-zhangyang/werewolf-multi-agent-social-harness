@@ -43,7 +43,7 @@ import type {
 } from "./contracts";
 import type { ResolvedModelConfig } from "./models";
 import { reasoningFallbackFetch, type ReasoningFallbackNotice } from "./models/reasoning-fallback";
-import { JsonSessionStore, defaultSessionDir } from "./persistence";
+import { JsonSessionStore, defaultSessionDir, sanitizeFunctionCallArgs } from "./persistence";
 import { clampUnit, decayMood, describeEmotions, describeNeeds, describeSocialEmotions, initialMood, refreshMood } from "./affect";
 import { appraiseEvents } from "./appraisal";
 import { SessionContextManager, contextLimitForModel, estimateTokens, type ContextSummaryArtifact } from "./context-manager";
@@ -171,10 +171,17 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       })
     });
     this.contextManager = this.buildContextManager(provider, options.resolvedConfig);
+    // Within a single run the Runner replays its own just-produced tool calls
+    // on the next model call. A model that emits malformed JSON arguments
+    // (unescaped quotes — a known GLM quirk) would poison every subsequent
+    // call with an endpoint-side 400. Sanitize at the one choke point every
+    // model call passes through (AGENTS.md §16.2 provider-safe history).
+    const budgetedInput = this.contextManager.sessionInputCallback;
     this.runner = new Runner({
       modelProvider: provider,
       tracingDisabled: true,
-      sessionInputCallback: this.contextManager.sessionInputCallback
+      sessionInputCallback: async (historyItems, newItems) =>
+        sanitizeFunctionCallArgs(await budgetedInput(historyItems, newItems))
     });
     // Per-agent runtime backpressure (§6.6): the resolved tuning's
     // maxTurns / requestTimeoutMs / retry fields take precedence over the
@@ -619,13 +626,18 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         emitStatus(this.context, name === "communicate" ? "speaking" : "acting");
         emitTool(this.context, toolCallId(item), name, "started", toolInput(item));
       } else if (event.name === "tool_output") {
+        // The SDK converts a thrown tool execute into a normal output whose
+        // text matches its fixed error template — surface that as a failed
+        // phase instead of pretending every tool call succeeded (§37).
+        const output = toolOutput(item) ?? "";
+        const failed = output.startsWith("An error occurred while running the tool.");
         emitTool(
           this.context,
           toolCallId(item),
           toolName(item) ?? toolCalls.at(-1) ?? "unknown_tool",
-          "succeeded",
+          failed ? "failed" : "succeeded",
           undefined,
-          toolOutput(item)
+          output
         );
       } else if (event.name === "message_output_created") {
         emitStatus(this.context, "thinking");
@@ -1280,7 +1292,7 @@ function emitTool(
   context: SocietyAgentContext,
   toolCallId: string | undefined,
   toolName: string,
-  phase: "started" | "succeeded",
+  phase: "started" | "succeeded" | "failed",
   safeInputSummary?: string,
   safeOutputSummary?: string
 ): void {

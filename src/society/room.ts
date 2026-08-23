@@ -970,21 +970,32 @@ export class SocietyRoom {
       const roster: ExtractionRosterEntry[] = [...this.cards.values()]
         .filter((card) => card.profile.controller !== "human")
         .map((card) => ({ id: card.profile.id, name: card.profile.displayName }));
-      const request = buildExtractionRequest(message, roster);
-      const provider = this.extractionProviderFor(profile.providerProfileId);
-      const model = await provider.getModel(profile.modelId);
-      const response = await model.getResponse({
-        systemInstructions: request.systemInstructions,
-        input: request.input,
-        // Low effort + temperature 0: the sidecar must be fast and stable —
-        // a thinking-model detour here would stall the serialized queue.
-        modelSettings: { temperature: 0, reasoning: { effort: "low" }, parallelToolCalls: false },
-        tools: [],
-        outputType: "text",
-        handoffs: [],
-        tracing: false
-      });
-      const declarations = parseExtractedDeclarations(extractText(response.output), message, roster);
+      const request = buildExtractionRequest(message, roster, this.world.extractionHints?.());
+      const runOnce = async (): Promise<string> => {
+        const provider = this.extractionProviderFor(profile.providerProfileId);
+        const model = await provider.getModel(profile.modelId);
+        const response = await model.getResponse({
+          systemInstructions: request.systemInstructions,
+          input: request.input,
+          // Low effort + temperature 0: the sidecar must be fast and stable —
+          // a thinking-model detour here would stall the serialized queue.
+          modelSettings: { temperature: 0, reasoning: { effort: "low" }, parallelToolCalls: false },
+          tools: [],
+          outputType: "text",
+          handoffs: [],
+          tracing: false
+        });
+        return extractText(response.output);
+      };
+      let raw: string;
+      try {
+        raw = await runOnce();
+      } catch {
+        // Transient timeout/429 under provider load gets exactly one retry;
+        // a second failure is logged by the caller below.
+        raw = await runOnce();
+      }
+      const declarations = parseExtractedDeclarations(raw, message, roster);
       if (declarations.length) this.world.recordExtractedSocialActs(message.id, declarations);
     } catch (cause) {
       this.extractionFailures += 1;

@@ -64,6 +64,20 @@ export class NegotiationWorld extends SocialWorldBase {
     this.addLog("奖池固定为 10 点。双方各有私密保底选项：谈崩了就各自拿走自己的保底。", 1);
   }
 
+  /**
+   * Sidecar extraction hints (§19): claim statements ("我至少要 7")
+   * become `claimed-action` propositions reconciled against the sealed
+   * demand at settlement.
+   */
+  extractionHints?(): string {
+    return [
+      "本局是谈判博弈（纳什要价）。行动主张判定：",
+      '- 当说话者断言自己将要求的数额时输出 claims 条目：aboutSelf=true、assertedAction（格式 "demand-数字"，如 "demand-7"）、confidence。',
+      '- 例：「我至少要 7」→{aboutSelf:true, assertedAction:"demand-7"}；「7 是我底线，一分不少」→{aboutSelf:true, assertedAction:"demand-7"}；「你应该少要点」→ 不算主张。',
+      '- 虚张声势与真实底线在结算前无法区分，都按主张记录；疑问、劝告、要求对方表态不算主张。'
+    ].join("\n");
+  }
+
   protected exportWorldState(): unknown {
     return {
       schemaVersion: NEGOTIATION_STATE_SCHEMA_VERSION,
@@ -109,6 +123,10 @@ export class NegotiationWorld extends SocialWorldBase {
     if (s.discussion) {
       this.discussion = this.createDiscussion();
       this.discussion.restoreState(s.discussion);
+    } else {
+      // Mirror the live lifecycle: the director is nulled when the waves run
+      // out (activation() line ~484) and recreated at the next round.
+      this.discussion = null;
     }
   }
 
@@ -151,7 +169,8 @@ export class NegotiationWorld extends SocialWorldBase {
           : "Open commitments: none.",
         `Current offers: ${this.offers.filter((offer) => offer.round === this.round).map((offer) => `${offer.offerId}: ${offer.proposerActorId} asks ${offer.proposerDemand}, ${offer.recipientActorId} gets ${offer.recipientDemand} (${offer.state})`).join("; ") || "none"}.`,
         ...socialReferenceContext(causality),
-        `Past rounds: ${this.history.map((result) => `R${result.round} claim ${result.demands[actorId] ?? "-"} → ${result.payoffs[actorId]} points${result.agreed ? "" : " (no deal)"}`).join("; ") || "none"}.`
+        `Past rounds: ${this.history.map((result) => `R${result.round} claim ${result.demands[actorId] ?? "-"} → ${result.payoffs[actorId]} points${result.agreed ? "" : " (no deal)"}`).join("; ") || "none"}.`,
+        `Settled commitments: ${this.settledCommitmentsFor(actorId).map((commitment) => `[${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, score: this.scores.get(actorId) ?? 0 },
       others: this.otherProfiles(actorId).map((profile) => ({
@@ -407,6 +426,14 @@ export class NegotiationWorld extends SocialWorldBase {
     );
   }
 
+  private settledCommitmentsFor(actorId: string): Commitment[] {
+    return this.commitments.filter((entry) =>
+      entry.round < this.round &&
+      entry.state !== "proposed" && entry.state !== "accepted" &&
+      (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+    );
+  }
+
   private assertCommitmentReferences(actorId: string, commitmentIds: string[]): void {
     for (const commitmentId of commitmentIds) {
       const commitment = this.commitments.find((entry) => entry.commitmentId === commitmentId);
@@ -608,6 +635,20 @@ export class NegotiationWorld extends SocialWorldBase {
       object: { demands: result.demands, payoffs, agreed },
       payload: { round: this.round, demands: result.demands, payoffs, agreed }
     });
+    // §28 主张对账: reconcile extracted demand claims ("我至少要 7")
+    // against the sealed demand.
+    for (const id of ids) {
+      const actualDemand = result.demands[id];
+      const characterId = this.requireProfile(id).characterId;
+      for (const claim of this.extractedActionClaims(characterId)) {
+        this.recordClaimedActionOutcome({
+          propositionId: claim.propositionId,
+          actualValue: String(actualDemand),
+          matches: claim.object === `demand-${actualDemand}`,
+          sourceEventId: publicResult.eventId
+        });
+      }
+    }
     this.reconcileOfferOutcomes(result, publicResult.eventId);
     for (const id of ids) {
       const own = payoffs[id];

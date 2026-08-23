@@ -19,7 +19,7 @@ import { conversationSignalsFromSocialActs, DiscussionDirector } from "../../con
 import { SuspicionClimate } from "../../suspicion";
 import { boundedRounds, discussionPersonality, emitAction } from "../helpers";
 import { roleHypothesisTool } from "../../cognition";
-import { createStrategyActionShape, socialReferenceContext } from "../../social/strategy-input";
+import { createStrategyActionShape, socialReferenceContext, toolArgumentFeedback } from "../../social/strategy-input";
 import type { SocialActDeclaration } from "../../social/contracts";
 import {
   WEREWOLF_ROLES,
@@ -31,6 +31,19 @@ import {
 } from "./roles";
 
 type Phase = "day-discussion" | "day-knight" | "day-vote" | "night";
+
+/**
+ * SDK `tool()` with Society validation feedback: when the model's arguments
+ * fail schema parsing, the retry hint names the failing fields and their legal
+ * values instead of the SDK's bare "invalid input", so the model can repair
+ * its own call on the next attempt.
+ */
+const societyTool = ((options: Record<string, unknown>) =>
+  tool({
+    ...options,
+    // Society tools standardize on field-level validation feedback.
+    errorFunction: toolArgumentFeedback(typeof options.name === "string" ? options.name : "tool")
+  } as Parameters<typeof tool>[0])) as unknown as typeof tool;
 
 const WEREWOLF_VOTE_OUTCOME_KEYS = [
   "target-eliminated",
@@ -74,6 +87,20 @@ interface PendingShot {
 }
 
 export class WerewolfWorld extends SocialWorldBase {
+  /**
+   * Sidecar extraction hints (§19): teach the extractor the camp vocabulary so
+   * identity claims ("我是村民" / "X 是狼人") become `identity/has-team`
+   * propositions that reveal reconciliation can falsify (§28).
+   */
+  extractionHints?(): string {
+    return [
+      "本局是狼人杀。身份主张判定：",
+      '- 当说话者断言某人属于哪个阵营时，输出 claims 条目：aboutSelf（说自己为 true）、targetName（说别人时报名字）、assertedTeam（"wolf"=属于狼人阵营，"good"=属于好人阵营）、confidence。',
+      '- 例：「我是村民」→ {aboutSelf:true, assertedTeam:"good"}；「我不是狼人」→ {aboutSelf:true, assertedTeam:"good"}；「X 是狼」→ {aboutSelf:false, targetName:"X", assertedTeam:"wolf"}；「我相信你」→ 不算主张。',
+      '- 疑问、反问、要求他人表态、转述他人观点都不算主张。'
+    ].join("\n");
+  }
+
   private readonly maxDays: number;
   private readonly deckName: string;
   private readonly roles = new Map<string, WerewolfRoleId>();
@@ -375,15 +402,20 @@ export class WerewolfWorld extends SocialWorldBase {
   toolsFor(actorId: string): Tool<SocietyAgentContext>[] {
     const role = this.roles.get(actorId);
     if (!role) throw new Error(`ACTOR_NOT_FOUND: '${actorId}' is not in this room.`);
+    // Targets must name a real participant. The enum surfaces the legal IDs in
+    // the tool schema itself, so display names, hallucinated ids and stringified
+    // "null" sentinels are rejected at parse time as retryable validation
+    // feedback instead of wedging the turn inside the equality guard.
+    const targetRef = z.enum([...this.roles.keys()] as [string, ...string[]]);
     const tools: Tool<SocietyAgentContext>[] = [];
 
-    const vote = tool({
+    const vote = societyTool({
       name: "cast_day_vote",
       description: "Compare bounded vote intents, select one, predict only publicly resolvable outcomes, then cast a sealed binding vote. Cite authorized beliefs, evidence and actor models by ID.",
       parameters: z.object({
-        targetId: z.string().min(1),
+        targetId: targetRef,
         reason: z.string().min(1).max(2_000),
-        ...createStrategyActionShape({ targetId: z.string().min(1).max(160) }, WEREWOLF_VOTE_OUTCOME_KEYS)
+        ...createStrategyActionShape({ targetId: targetRef }, WEREWOLF_VOTE_OUTCOME_KEYS)
       }).strict(),
       execute: async (input, runContext) => {
         const selected = input.candidateIntents[input.selectedIntentIndex];
@@ -406,13 +438,13 @@ export class WerewolfWorld extends SocialWorldBase {
     tools.push(vote as Tool<SocietyAgentContext>);
 
     if (isWolfRole(role)) {
-      const chooseNightTarget = tool({
+      const chooseNightTarget = societyTool({
         name: "choose_night_target",
         description: "Compare bounded attack intents using only your authorized knowledge, then nominate one living non-wolf. Each wolf submits independently and the pack majority decides.",
         parameters: z.object({
-          targetId: z.string().min(1).max(160),
+          targetId: targetRef,
           reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: z.string().min(1).max(160) }, WEREWOLF_WOLF_TARGET_OUTCOME_KEYS)
+          ...createStrategyActionShape({ targetId: targetRef }, WEREWOLF_WOLF_TARGET_OUTCOME_KEYS)
         }).strict(),
         execute: async (input, runContext) => {
           const selected = input.candidateIntents[input.selectedIntentIndex];
@@ -435,13 +467,13 @@ export class WerewolfWorld extends SocialWorldBase {
       tools.push(chooseNightTarget as Tool<SocietyAgentContext>);
     }
     if (role === "seer") {
-      const investigate = tool({
+      const investigate = societyTool({
         name: "investigate_identity",
         description: "Compare bounded investigation intents, then privately inspect one other living participant. The result is private evidence and must not be treated as public knowledge.",
         parameters: z.object({
-          targetId: z.string().min(1).max(160),
+          targetId: targetRef,
           reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: z.string().min(1).max(160) }, WEREWOLF_SEER_OUTCOME_KEYS)
+          ...createStrategyActionShape({ targetId: targetRef }, WEREWOLF_SEER_OUTCOME_KEYS)
         }).strict(),
         execute: async (input, runContext) => {
           const selected = input.candidateIntents[input.selectedIntentIndex];
@@ -464,13 +496,13 @@ export class WerewolfWorld extends SocialWorldBase {
       tools.push(investigate as Tool<SocietyAgentContext>);
     }
     if (role === "spirit-seer") {
-      const investigateDead = tool({
+      const investigateDead = societyTool({
         name: "investigate_dead_identity",
         description: "Compare bounded spirit-reading intents, then inspect one dead participant's true role. The result remains private unless you later choose to disclose it.",
         parameters: z.object({
-          targetId: z.string().min(1).max(160),
+          targetId: targetRef,
           reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: z.string().min(1).max(160) }, WEREWOLF_SPIRIT_SEER_OUTCOME_KEYS)
+          ...createStrategyActionShape({ targetId: targetRef }, WEREWOLF_SPIRIT_SEER_OUTCOME_KEYS)
         }).strict(),
         execute: async (input, runContext) => {
           const selected = input.candidateIntents[input.selectedIntentIndex];
@@ -493,13 +525,13 @@ export class WerewolfWorld extends SocialWorldBase {
       tools.push(investigateDead as Tool<SocietyAgentContext>);
     }
     if (role === "nightmare") {
-      const curse = tool({
+      const curse = societyTool({
         name: "dream_curse",
         description: "After the wolf nomination, compare bounded curse intents, then curse one living non-wolf so they cannot vote tomorrow, or pass with targetId=null.",
         parameters: z.object({
-          targetId: z.string().min(1).max(160).nullable().default(null),
+          targetId: targetRef.nullable().default(null),
           reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: z.string().min(1).max(160).nullable() }, WEREWOLF_NIGHTMARE_OUTCOME_KEYS)
+          ...createStrategyActionShape({ targetId: targetRef.nullable() }, WEREWOLF_NIGHTMARE_OUTCOME_KEYS)
         }).strict(),
         execute: async (input, runContext) => {
           const selected = input.candidateIntents[input.selectedIntentIndex];
@@ -522,13 +554,13 @@ export class WerewolfWorld extends SocialWorldBase {
       tools.push(curse as Tool<SocietyAgentContext>);
     }
     if (role === "wolf-beauty") {
-      const charm = tool({
+      const charm = societyTool({
         name: "charm_target",
         description: "After the wolf nomination, compare bounded charm intents, then charm one living non-wolf who will die with you if you are voted out tomorrow, or pass with targetId=null.",
         parameters: z.object({
-          targetId: z.string().min(1).max(160).nullable().default(null),
+          targetId: targetRef.nullable().default(null),
           reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: z.string().min(1).max(160).nullable() }, WEREWOLF_CHARM_OUTCOME_KEYS)
+          ...createStrategyActionShape({ targetId: targetRef.nullable() }, WEREWOLF_CHARM_OUTCOME_KEYS)
         }).strict(),
         execute: async (input, runContext) => {
           const selected = input.candidateIntents[input.selectedIntentIndex];
@@ -551,34 +583,35 @@ export class WerewolfWorld extends SocialWorldBase {
       tools.push(charm as Tool<SocietyAgentContext>);
     }
     if (role === "witch") {
-      const witchChoice = tool({
+      const witchChoice = societyTool({
         name: "witch_night_choice",
-        description: "Compare bounded potion intents using only tonight's authorized witch observation, then save, poison, or pass. You cannot use both potions in one night or save yourself.",
+        description: "Compare bounded potion intents using only tonight's authorized witch observation, then pick exactly one action: save the wolf victim with the antidote (not yourself), poison one living player, or pass. The two potions can never be used in the same night.",
         parameters: z.object({
-          saveTargetId: z.string().min(1).nullable().default(null),
-          poisonTargetId: z.string().min(1).nullable().default(null),
           reason: z.string().min(1).max(2_000),
           ...createStrategyActionShape({
-            saveTargetId: z.string().min(1).max(160).nullable(),
-            poisonTargetId: z.string().min(1).max(160).nullable()
+            action: z.enum(["save", "poison", "pass"]),
+            targetId: targetRef.nullable()
           }, WEREWOLF_WITCH_OUTCOME_KEYS)
         }).strict(),
         execute: async (input, runContext) => {
           const selected = input.candidateIntents[input.selectedIntentIndex];
-          if (!selected || selected.saveTargetId !== input.saveTargetId || selected.poisonTargetId !== input.poisonTargetId) {
-            throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected potion choice must equal the binding choice.");
-          }
+          if (!selected?.action) throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: A potion intent must be selected.");
+          // The selected intent is the single source of truth: the binding is
+          // derived from it, so a model can never submit save and poison at
+          // once or disagree with its own choice (the world still backstops).
+          const saveTargetId = selected.action === "save" ? (selected.targetId ?? null) : null;
+          const poisonTargetId = selected.action === "poison" ? (selected.targetId ?? null) : null;
           const context = scopedContext(runContext, actorId);
           const commit = await this.performAction(actorId, "witch_night_choice", {
             ...input,
+            saveTargetId,
+            poisonTargetId,
             candidateIntents: input.candidateIntents.map((candidate) => ({
               ...candidate,
               action: "witch_night_choice",
-              payloadSummary: candidate.saveTargetId
-                ? `saveTargetId=${candidate.saveTargetId}`
-                : candidate.poisonTargetId
-                  ? `poisonTargetId=${candidate.poisonTargetId}`
-                  : "pass"
+              payloadSummary: candidate.action === "pass"
+                ? "pass"
+                : `${candidate.action}TargetId=${candidate.targetId ?? ""}`
             }))
           });
           emitAction(context, commit.action, commit.detail);
@@ -588,13 +621,13 @@ export class WerewolfWorld extends SocialWorldBase {
       tools.push(witchChoice as Tool<SocietyAgentContext>);
     }
     if (role === "guard") {
-      const guard = tool({
+      const guard = societyTool({
         name: "guard_tonight",
         description: "Compare bounded protection intents, then guard one living participant or pass. You may guard yourself, cannot repeat last night's target, and protection does not stop poison.",
         parameters: z.object({
-          targetId: z.string().min(1).nullable().default(null),
+          targetId: targetRef.nullable().default(null),
           reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: z.string().min(1).max(160).nullable() }, WEREWOLF_GUARD_OUTCOME_KEYS)
+          ...createStrategyActionShape({ targetId: targetRef.nullable() }, WEREWOLF_GUARD_OUTCOME_KEYS)
         }).strict(),
         execute: async (input, runContext) => {
           const selected = input.candidateIntents[input.selectedIntentIndex];
@@ -625,13 +658,13 @@ export class WerewolfWorld extends SocialWorldBase {
     // Hidden-identity worlds get the role-probability ledger: suspicion stays
     // a distribution, not a free-text hunch.
     if (role === "knight" && !this.knightUsed) {
-      const duel = tool({
+      const duel = societyTool({
         name: "knight_challenge",
         description: "Compare bounded duel targets, then use the knight's one challenge or pass. A wolf target dies; a non-wolf target causes your own death.",
         parameters: z.object({
-          targetId: z.string().min(1).max(60).nullable().default(null),
+          targetId: targetRef.nullable().default(null),
           reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: z.string().min(1).max(160).nullable() }, WEREWOLF_KNIGHT_OUTCOME_KEYS)
+          ...createStrategyActionShape({ targetId: targetRef.nullable() }, WEREWOLF_KNIGHT_OUTCOME_KEYS)
         }).strict(),
         execute: async (input, runContext) => {
           const selected = input.candidateIntents[input.selectedIntentIndex];
@@ -662,13 +695,16 @@ export class WerewolfWorld extends SocialWorldBase {
     action: "hunter_shoot" | "wolf_king_shoot",
     description: string
   ): Tool<SocietyAgentContext> {
-    return tool({
+    return societyTool({
       name: action,
       description,
       parameters: z.object({
-        targetId: z.string().min(1).max(160).nullable().default(null),
+        targetId: z.enum([...this.roles.keys()] as [string, ...string[]]).nullable().default(null),
         reason: z.string().min(1).max(2_000),
-        ...createStrategyActionShape({ targetId: z.string().min(1).max(160).nullable() }, WEREWOLF_SHOT_OUTCOME_KEYS)
+        ...createStrategyActionShape(
+          { targetId: z.enum([...this.roles.keys()] as [string, ...string[]]).nullable() },
+          WEREWOLF_SHOT_OUTCOME_KEYS
+        )
       }).strict(),
       execute: async (input, runContext) => {
         const selected = input.candidateIntents[input.selectedIntentIndex];
@@ -1415,7 +1451,7 @@ export class WerewolfWorld extends SocialWorldBase {
       }
     }
     if (idiotSurvives && eliminatedId) {
-      const detectedDeceptions = this.revealIdentity(eliminatedId, "idiot");
+      const detectedDeceptions = this.revealIdentity(eliminatedId, "idiot", "good");
       if (detectedDeceptions.length) {
         this.addLog(`身份揭晓证伪了 ${detectedDeceptions.length} 条带计划、带消息引用的身份欺骗。`, this.day, "deception-exposed");
       }
@@ -1892,7 +1928,7 @@ export class WerewolfWorld extends SocialWorldBase {
   /** Schedule death skills and run the shared win checks after any death. */
   private pushEliminationEvents(targetId: string, by: "vote" | "night" | "poison" | "shot" | "knight" | "boom" | "charm", role: WerewolfRoleId | undefined): void {
     const targetName = this.profiles.get(targetId)?.displayName ?? targetId;
-    const detectedDeceptions = role ? this.revealIdentity(targetId, role) : [];
+    const detectedDeceptions = role ? this.revealIdentity(targetId, role, isWolfRole(role) ? "wolf" : "good") : [];
     if (detectedDeceptions.length) {
       this.addLog(`身份揭晓证伪了 ${detectedDeceptions.length} 条带计划、带消息引用的身份欺骗。`, this.day, "deception-exposed");
     }
@@ -2011,7 +2047,7 @@ export class WerewolfWorld extends SocialWorldBase {
     this.winners = winners;
     this.outcome = outcome;
     this.addLog(outcome, this.day, "win");
-    for (const [actorId, role] of this.roles) this.revealIdentity(actorId, role);
+    for (const [actorId, role] of this.roles) this.revealIdentity(actorId, role, isWolfRole(role) ? "wolf" : "good");
     for (const id of this.profiles.keys()) {
       const won = winners.includes(id);
       this.pushEvent(id, {

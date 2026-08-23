@@ -477,11 +477,12 @@ export abstract class SocialWorldBase implements SocialWorld {
     });
   }
 
-  protected revealIdentity(subjectActorId: string, actualRoleId: string): string[] {
+  protected revealIdentity(subjectActorId: string, actualRoleId: string, revealedTeam?: "wolf" | "good"): string[] {
     return this.socialCausality.revealIdentity({
       subjectActorId,
       subjectCharacterId: this.requireProfile(subjectActorId).characterId,
       actualRoleId,
+      ...(revealedTeam ? { revealedTeam } : {}),
       actorIdForCharacter: (characterId) => [...this.profiles.values()].find((profile) => profile.characterId === characterId)?.id
     }).detectedDeceptionIds;
   }
@@ -591,6 +592,21 @@ export abstract class SocialWorldBase implements SocialWorld {
   /** Connect a committed action to the deterministic result without writing memory directly. */
   protected reconcileSocialOutcome(input: OutcomeReconciliationInput): OutcomeReconciliation {
     return this.socialCausality.recordOutcomeReconciliation(input);
+  }
+
+  /** Model-extracted action claims ("I will cooperate") by one character (§28 主张对账). */
+  protected extractedActionClaims(subjectCharacterId: string): Array<{ propositionId: string; object: string }> {
+    return this.socialCausality.extractedActionClaims(subjectCharacterId);
+  }
+
+  /** Record the settlement verdict for one extracted action claim; idempotent per claim. */
+  protected recordClaimedActionOutcome(input: {
+    propositionId: string;
+    actualValue: string;
+    matches: boolean;
+    sourceEventId: string;
+  }): void {
+    this.socialCausality.recordClaimOutcome(input);
   }
 
   /**

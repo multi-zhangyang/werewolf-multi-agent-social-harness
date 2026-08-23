@@ -620,3 +620,59 @@ check("werewolf rejects out-of-range player counts with a clear error", () => {
   assert.throws(() => createWorld({ roomId: "r", scenarioId: "werewolf", profiles: profiles(13), rounds: 2 }), /PLAYER_COUNT_INVALID/);
 });
 
+
+check("werewolf target fields reject sentinels and names at parse time", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  const toolset = world as unknown as {
+    toolsFor(id: string): Array<{ name: string; invoke(context: unknown, input: string): Promise<unknown> }>;
+  };
+  const base = {
+    reason: "test",
+    candidateIntents: [
+      { action: "save", targetId: "agent-02", goal: "g1", summary: "s1", exposureRisk: 0, relationshipRisk: 0 },
+      { action: "pass", targetId: null, goal: "g2", summary: "s2", exposureRisk: 0, relationshipRisk: 0 }
+    ],
+    selectedIntentIndex: 0,
+    predictedConsequences: [{ outcomeKey: "save-prevented-wolf-kill", proposition: "p", probability: 0.5 }]
+  };
+  const call = async (tool: { invoke(context: unknown, input: string): Promise<unknown> }, input: unknown) =>
+    String(await tool.invoke(undefined, JSON.stringify(input)));
+  // The witch wedge regression: a stringified "null" sentinel must be rejected
+  // at parse time as retryable validation feedback, never silently accepted.
+  const witch = toolset.toolsFor(byRole("witch")[0]).find((t) => t.name === "witch_night_choice");
+  assert.ok(witch, "witch_night_choice is available");
+  assert.match(
+    await call(witch, { ...base, candidateIntents: [{ ...base.candidateIntents[0], targetId: "null" }, base.candidateIntents[1]] }),
+    /rejected by schema validation/,
+    '"null" sentinel rejected'
+  );
+  assert.match(
+    await call(witch, { ...base, candidateIntents: [{ ...base.candidateIntents[0], targetId: "P3" }, base.candidateIntents[1]] }),
+    /rejected by schema validation/,
+    "display names rejected"
+  );
+  assert.match(
+    await call(witch, { ...base, candidateIntents: [{ ...base.candidateIntents[0], action: "heal" }, base.candidateIntents[1]] }),
+    /rejected by schema validation/,
+    "unknown potion actions rejected"
+  );
+  // The selected intent is the single source of truth: save and poison can no
+  // longer be submitted together (inexpressible in the schema), and a valid
+  // selection passes straight through.
+  assert.ok(!await call(witch, base).then((out) => out.includes("rejected by schema validation")), "real ids and explicit pass pass the schema");
+  assert.ok(
+    !await call(witch, { ...base, candidateIntents: [{ action: "poison", targetId: null, goal: "g1", summary: "s1", exposureRisk: 0, relationshipRisk: 0 }, base.candidateIntents[1]] }).then((out) => out.includes("rejected by schema validation")),
+    "explicit null targets pass the schema"
+  );
+  // Required-target tools reject the sentinel too.
+  const voter = Object.keys((world.snapshot().details as { roles: Record<string, string> }).roles)[0];
+  const vote = toolset.toolsFor(voter).find((t) => t.name === "cast_day_vote");
+  assert.ok(vote, "cast_day_vote is available");
+  const voteBase = {
+    ...base,
+    candidateIntents: base.candidateIntents.map(({ action: _action, ...rest }) => ({ ...rest, targetId: "agent-02" })),
+    predictedConsequences: [{ outcomeKey: "vote-matched-plurality", proposition: "p", probability: 0.5 }]
+  };
+  assert.match(await call(vote, { ...voteBase, targetId: "null" }), /rejected by schema validation/, "sentinel vote rejected");
+  assert.ok(!await call(vote, { ...voteBase, targetId: "agent-02" }).then((out) => out.includes("rejected by schema validation")), "valid vote passes the schema");
+});

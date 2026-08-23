@@ -850,6 +850,12 @@ export interface SocialWorld {
    * must never reach the send path.
    */
   socialActExtractor?: (message: SocialMessage) => Promise<void>;
+  /**
+   * Scenario-specific guidance for the message sidecar extractor (§19) — e.g.
+   * identity-claim vocabulary for werewolf. Optional; scenarios without
+   * claim semantics omit it.
+   */
+  extractionHints?(): string;
   /** Record sidecar-extracted social acts for a persisted message; idempotent per message. */
   recordExtractedSocialActs(messageId: string, declarations: import("./social/contracts").SocialActDeclaration[]): string[];
   /**

@@ -26,6 +26,7 @@ function sleepSync(ms: number): void {
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentInputItem, Session } from "@openai/agents";
+import { normalizeInputTextParts, repairJsonText } from "../wire-json";
 
 export const SESSION_STORE_SCHEMA_VERSION = 1;
 
@@ -92,6 +93,39 @@ export function deleteSeasonSessions(dir = defaultSessionDir()): number {
   return deleted;
 }
 
+/**
+ * Enforce the tool-calling wire contract (OpenAI spec: function.arguments is
+ * a JSON string) on persisted history. Repair preserves the model's intent;
+ * "{}" is the last-resort fallback — the paired tool result already reports
+ * the parse failure to the model either way. Shared repair logic lives in
+ * `wire-json.ts` so the provider fetch layer enforces the same contract.
+ */
+export function sanitizeFunctionCallArgs(items: AgentInputItem[]): AgentInputItem[] {
+  let repaired = 0;
+  const out = items.map((item): AgentInputItem => {
+    const record = item as unknown as Record<string, unknown>;
+    if (record.type === "function_call" && typeof record.arguments === "string") {
+      try {
+        JSON.parse(record.arguments);
+      } catch {
+        repaired += 1;
+        const fixed = repairJsonText(record.arguments) ?? "{}";
+        return { ...item, arguments: fixed } as AgentInputItem;
+      }
+    }
+    if (record.type === "message" && record.role === "system" && Array.isArray(record.content)) {
+      // Strict endpoints reject structured content arrays in SYSTEM messages
+      // (the compression digest uses this format); flatten text-only arrays
+      // to a plain string so a compacted history never 400s every follow-up.
+      const content = normalizeInputTextParts(record.content);
+      if (content !== record.content) return { ...item, content } as AgentInputItem;
+    }
+    return item;
+  });
+  if (repaired > 0) console.warn(`[session-store] repaired ${repaired} malformed function_call argument payload(s) into wire-valid history`);
+  return out;
+}
+
 export function defaultSessionDir(cwd: string = process.cwd()): string {
   return path.resolve(cwd, "data", "sessions");
 }
@@ -125,7 +159,11 @@ export class JsonSessionStore implements Session {
     private readonly options: SessionStoreOptions = {}
   ) {
     const loaded = loadFile(file);
-    this.items = loaded?.sessionId === sessionId ? (loaded.items ?? []) : [];
+    // Provider-safe history (§16.2): a malformed function_call payload
+    // (model truncation mid-arguments) gets rejected wholesale by endpoints
+    // that validate replayed tool_calls — poisoning every later request.
+    // The paired tool result already reports the parse error to the model.
+    this.items = sanitizeFunctionCallArgs(loaded?.sessionId === sessionId ? (loaded.items ?? []) : []);
     openStores.add(new WeakRef(this));
   }
 
@@ -155,7 +193,7 @@ export class JsonSessionStore implements Session {
 
   async addItems(items: AgentInputItem[]): Promise<void> {
     if (!items.length) return;
-    this.items.push(...structuredClone(items));
+    this.items.push(...structuredClone(sanitizeFunctionCallArgs(items)));
     this.markDirty();
   }
 

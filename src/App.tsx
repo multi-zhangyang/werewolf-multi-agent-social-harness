@@ -113,9 +113,16 @@ export function App(): ReactNode {
   }, []);
 
   const resetSeason = useCallback(async (): Promise<void> => {
-    const response = await apiFetch("/api/season", { method: "DELETE" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    setSeason([]);
+    try {
+      const response = await apiFetch("/api/season", { method: "DELETE" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => undefined);
+        throw new Error(payload?.message ?? `HTTP ${response.status}`);
+      }
+      setSeason([]);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
   }, []);
 
   const forgetCharacter = useCallback(async (characterId: string, displayName: string): Promise<void> => {

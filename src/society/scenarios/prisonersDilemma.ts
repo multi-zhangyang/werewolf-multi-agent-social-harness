@@ -59,6 +59,20 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     this.addLog("谈判开始：语言不能替代行动；只有被明确接受的承诺才会在结算时对账。", 1);
   }
 
+  /**
+   * Sidecar extraction hints (§19): teach the extractor the move vocabulary so
+   * statements like "我会合作" become future-action `claimed-action`
+   * propositions that round settlement reconciles against the sealed move.
+   */
+  extractionHints?(): string {
+    return [
+      "本局是囚徒困境。行动主张判定：",
+      '- 当说话者断言自己将选择的行为时输出 claims 条目：aboutSelf=true、assertedAction（只能是 "cooperate"=合作 或 "defect"=背叛/不合作）、confidence。',
+      '- 例：「我会合作」→{aboutSelf:true, assertedAction:"cooperate"}；「这轮我绝对不合作」→{aboutSelf:true, assertedAction:"defect"}；「你可以相信我」→ 不算主张。',
+      '- 疑问、质询、要求对方先表态、转述他人想法都不算主张。'
+    ].join("\n");
+  }
+
   protected exportWorldState(): unknown {
     return {
       schemaVersion: PRISONERS_DILEMMA_STATE_SCHEMA_VERSION,
@@ -138,7 +152,8 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
           ? `Open commitments:\n${openCommitments.map((commitment) => `- [${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("\n")}`
           : "Open commitments: none.",
         ...socialReferenceContext(causality),
-        `Past rounds: ${this.history.map((result) => `${result.round} ${result.moves[actorId]} / ${result.payoffs[actorId]} points`).join("; ") || "none"}.`
+        `Past rounds: ${this.history.map((result) => `${result.round} ${result.moves[actorId]} / ${result.payoffs[actorId]} points`).join("; ") || "none"}.`,
+        `Settled commitments: ${this.settledCommitmentsFor(actorId).map((commitment) => `[${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, score: this.scores.get(actorId) ?? 0 },
       others: this.otherProfiles(actorId).map((profile) => ({
@@ -337,6 +352,14 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     );
   }
 
+  private settledCommitmentsFor(actorId: string): Commitment[] {
+    return this.commitments.filter((entry) =>
+      entry.round < this.round &&
+      entry.state !== "proposed" && entry.state !== "accepted" &&
+      (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+    );
+  }
+
   private assertCommitmentReferences(actorId: string, commitmentIds: string[]): void {
     for (const commitmentId of commitmentIds) {
       const commitment = this.commitments.find((entry) => entry.commitmentId === commitmentId);
@@ -498,6 +521,21 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
       payload: { round: this.round, moves: result.moves, payoffs: result.payoffs },
       kind: "past-action"
     });
+    // §28 主张对账: reconcile model-extracted action claims ("我会合作")
+    // against the actual sealed move. A contradicted claim records evidence —
+    // cheap talk stays visible on the causality page instead of vanishing.
+    for (const actorId of ids) {
+      const actualMove = result.moves[actorId];
+      const characterId = this.requireProfile(actorId).characterId;
+      for (const claim of this.extractedActionClaims(characterId)) {
+        this.recordClaimedActionOutcome({
+          propositionId: claim.propositionId,
+          actualValue: actualMove,
+          matches: claim.object === actualMove,
+          sourceEventId: publicResult.eventId
+        });
+      }
+    }
     for (const actorId of ids) {
       const opponentId = ids.find((id) => id !== actorId)!;
       const opponentMove = result.moves[opponentId];

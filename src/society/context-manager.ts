@@ -462,14 +462,14 @@ export const CONTEXT_SUMMARY_SCHEMA_VERSION = 1;
  * full provenance artifact rides on the item into the durable session.
  */
 function digestItem(text: string, artifact: ContextSummaryArtifact): AgentInputItem {
+  // Plain-string content: structured `input_text` parts in system messages
+  // are rejected by some strict endpoints, which 400s every follow-up
+  // request once compaction kicks in (verified against the live gateway).
   return {
     type: "message",
     role: "system",
-    content: [{
-      type: "input_text",
-      text: `【系统管理上下文 — 压缩历史摘要，非玩家发言】
-${text}`
-    }],
+    content: `【系统管理上下文 — 压缩历史摘要，非玩家发言】
+${text}`,
     societySummaryArtifact: artifact
   } as unknown as AgentInputItem;
 }

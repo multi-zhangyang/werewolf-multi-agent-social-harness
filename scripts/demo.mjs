@@ -60,14 +60,31 @@ async function main() {
       rounds: Math.max(meta.minRounds, Math.min(rounds, meta.maxRounds)),
       mode: "ai",
       reasoningEffort: process.env.DEMO_REASONING_EFFORT ?? "high",
+      // Transcripts are independent evidence runs (AGENTS.md §27.6), not
+      // season-continuity games: one-shot avoids cross-game session locks.
+      season: process.env.DEMO_SEASON ?? "one-shot",
       ...(players > 0 ? { players } : {})
     });
     const roomId = created.room.id;
     const started = Date.now();
     let room = created.room;
+    let resumes = 0;
     while (room.status === "lobby" || room.status === "running" || room.status === "paused") {
       await sleep(2_000);
       room = await getJson(`/api/rooms/${roomId}`);
+      // A room pauses rather than substituting an action when a seat's turn
+      // comes back empty or failed (AGENTS.md §35). The demo acts as the
+      // operator: resume it and let the same seat retry its activation.
+      if (room.status === "paused" && resumes < 20) {
+        const token = process.env.DEMO_OPERATOR_TOKEN;
+        if (token) {
+          await postJson(`/api/rooms/${roomId}/resume`, {}, token);
+          resumes += 1;
+        } else {
+          console.error(`[demo] ${scenarioId} paused; set DEMO_OPERATOR_TOKEN to resume it automatically`);
+          break;
+        }
+      }
       if (Date.now() - started > 20 * 60_000) {
         console.error(`[demo] ${scenarioId} timed out after 20 minutes`);
         failures += 1;
@@ -105,10 +122,13 @@ async function getJson(path) {
   return response.json();
 }
 
-async function postJson(path, body) {
+async function postJson(path, body, token) {
   const response = await fetch(`${API}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
     body: JSON.stringify(body)
   });
   const payload = await response.json().catch(() => undefined);

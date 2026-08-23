@@ -1,11 +1,40 @@
 import { z } from "zod";
+import { setSensitiveDataLoggingEnabled } from "@openai/agents";
 import type { SocialCausalityProjection } from "./contracts";
+
+// The SDK redacts tool data from validation errors by default, which leaves
+// parse-failure feedback with no field details for the model to repair. Our
+// own safe summaries (safeInputSummary/safeOutputSummary) are the privacy
+// boundary for logs and UI; enabling SDK error details only enriches the
+// retry hint the model receives.
+setSensitiveDataLoggingEnabled(true);
 
 const predictedResponseSchema = z.object({
   targetActorId: z.string().min(1).max(160),
   response: z.string().min(1).max(500),
   probability: z.number().min(0).max(1)
 }).strict();
+
+/**
+ * Parse-time validation feedback for Society tools. The SDK default reports a
+ * bare "invalid input" with no specifics, which leaves the model guessing and
+ * burning retries on the same malformed arguments. This surfaces the failing
+ * fields and their legal values so any model can repair its own call.
+ */
+export function toolArgumentFeedback(toolName: string): (context: unknown, error: unknown) => string {
+  return (_context, error) => {
+    const original = (error as { originalError?: { message?: unknown } } | null | undefined)?.originalError;
+    if (typeof original === "object" && original !== null && typeof original.message === "string") {
+      return [
+        `The arguments for ${toolName} were rejected by schema validation.`,
+        "Fix the listed fields and call the tool again.",
+        `Validation details: ${original.message.slice(0, 600)}`
+      ].join(" ");
+    }
+    const details = error instanceof Error ? error.toString() : String(error);
+    return `An error occurred while running the tool. Please try again. Error: ${details.slice(0, 600)}`;
+  };
+}
 
 export function createStrategyActionShape<T extends z.ZodRawShape>(
   actionShape: T,

@@ -74,9 +74,63 @@ describe("parseExtractedDeclarations", () => {
 describe("buildExtractionRequest", () => {
   it("includes roster ids, channel and verbatim text; instructions demand JSON-only output", () => {
     const request = buildExtractionRequest(message(), ROSTER);
-    assert.match(request.systemInstructions, /JSON 数组/);
+    assert.match(request.systemInstructions, /JSON 对象/);
     assert.match(request.input, /id: agent-02/);
     assert.match(request.input, /这轮我一定投你/);
     assert.doesNotMatch(request.systemInstructions, /silence/);
+  });
+});
+
+describe("identity claims (AGENTS.md §28)", () => {
+  it("parses the object protocol and synthesizes identity/has-team declarations", () => {
+    const raw = JSON.stringify({
+      acts: [],
+      claims: [
+        { aboutSelf: true, assertedTeam: "good", confidence: 0.9 },
+        { aboutSelf: false, targetName: "苏遥", assertedTeam: "wolf", confidence: 0.8 }
+      ]
+    });
+    const declarations = parseExtractedDeclarations(raw, message(), ROSTER);
+    assert.equal(declarations.length, 2);
+    assert.equal(declarations[0].proposition?.kind, "identity");
+    assert.equal(declarations[0].proposition?.subjectId, "agent-01");
+    assert.equal(declarations[0].proposition?.predicate, "has-team");
+    assert.equal(declarations[0].proposition?.object, "good");
+    assert.deepEqual(declarations[1].targetActorIds, ["agent-02"]);
+    assert.equal(declarations[1].proposition?.object, "wolf");
+  });
+
+  it("drops unknown teams, sub-floor confidence and unresolvable targets; keeps legacy bare-array output working", () => {
+    const bad = JSON.stringify({
+      acts: [],
+      claims: [
+        { aboutSelf: true, assertedTeam: "villager-team", confidence: 0.9 },
+        { aboutSelf: true, assertedTeam: "wolf", confidence: 0.3 },
+        { aboutSelf: false, targetName: "路人甲", assertedTeam: "wolf", confidence: 0.9 }
+      ]
+    });
+    assert.equal(parseExtractedDeclarations(bad, message(), ROSTER).length, 0);
+    const legacy = JSON.stringify([{ kind: "accusation", proposition: "苏遥是狼", confidence: 0.9 }]);
+    const legacyParsed = parseExtractedDeclarations(legacy, message(), ROSTER);
+    assert.equal(legacyParsed.length, 1);
+    assert.equal(legacyParsed[0].kind, "accusation");
+  });
+
+  it("parses self action claims into future-action claimed-action propositions", () => {
+    const raw = JSON.stringify({
+      acts: [],
+      claims: [
+        { aboutSelf: true, assertedAction: "cooperate", confidence: 0.9 },
+        { aboutSelf: true, assertedAction: "defect", confidence: 0.4 },
+        { aboutSelf: false, assertedAction: "cooperate", confidence: 0.9 }
+      ]
+    });
+    const declarations = parseExtractedDeclarations(raw, message(), ROSTER);
+    assert.equal(declarations.length, 1, "only the confident self claim survives");
+    assert.equal(declarations[0].kind, "assertion");
+    assert.equal(declarations[0].proposition?.kind, "future-action");
+    assert.equal(declarations[0].proposition?.subjectId, "agent-01");
+    assert.equal(declarations[0].proposition?.predicate, "claimed-action");
+    assert.equal(declarations[0].proposition?.object, "cooperate");
   });
 });

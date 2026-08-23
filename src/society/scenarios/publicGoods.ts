@@ -65,6 +65,20 @@ export class PublicGoodsWorld extends SocialWorldBase {
     this.addLog(`${profiles.length} 名参与者每人每轮获得 ${this.endowment} 点资源，公共池按 ${this.multiplier} 倍增长后均分。`, 1);
   }
 
+  /**
+   * Sidecar extraction hints (§19): contribution statements ("我会投 5 点")
+   * become `claimed-action` propositions reconciled against the actual
+   * contribution at settlement.
+   */
+  extractionHints?(): string {
+    return [
+      "本局是公共品博弈。行动主张判定：",
+      '- 当说话者断言自己将投入的数额时输出 claims 条目：aboutSelf=true、assertedAction（格式 "contribute-数字"，如 "contribute-5"）、confidence。',
+      '- 例：「我会投 5 点」→{aboutSelf:true, assertedAction:"contribute-5"}；「我一分都不会投」→{aboutSelf:true, assertedAction:"contribute-0"}；「大家都该多投」→ 不算主张。',
+      '- 疑问、呼吁、要求他人表态都不算主张。'
+    ].join("\n");
+  }
+
   protected exportWorldState(): unknown {
     return {
       schemaVersion: PUBLIC_GOODS_STATE_SCHEMA_VERSION,
@@ -144,7 +158,8 @@ export class PublicGoodsWorld extends SocialWorldBase {
           ? `Open commitments:\n${openCommitments.map((commitment) => `- [${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("\n")}`
           : "Open commitments: none.",
         ...socialReferenceContext(causality),
-        `Previous contributions: ${this.history.map((entry) => `R${entry.round}=${entry.contributions[actorId]}`).join(", ") || "none"}.`
+        `Previous contributions: ${this.history.map((entry) => `R${entry.round}=${entry.contributions[actorId]}`).join(", ") || "none"}.`,
+        `Settled commitments: ${this.settledCommitmentsFor(actorId).map((commitment) => `[${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, score: this.scores.get(actorId) ?? 0 },
       others: this.otherProfiles(actorId).map((profile) => ({
@@ -349,6 +364,14 @@ export class PublicGoodsWorld extends SocialWorldBase {
     );
   }
 
+  private settledCommitmentsFor(actorId: string): Commitment[] {
+    return this.commitments.filter((entry) =>
+      entry.round < this.round &&
+      entry.state !== "proposed" && entry.state !== "accepted" &&
+      (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+    );
+  }
+
   private assertCommitmentReferences(actorId: string, commitmentIds: string[]): void {
     for (const commitmentId of commitmentIds) {
       const commitment = this.commitments.find((entry) => entry.commitmentId === commitmentId);
@@ -503,6 +526,20 @@ export class PublicGoodsWorld extends SocialWorldBase {
       object: { pool, share: roundNumber(share), contributions },
       payload: { round: this.round, pool, share: roundNumber(share), contributions, returns }
     });
+    // §28 主张对账: reconcile extracted contribution claims against the
+    // actual sealed contribution.
+    for (const actorId of this.profiles.keys()) {
+      const actualAmount = contributions[actorId] ?? 0;
+      const characterId = this.requireProfile(actorId).characterId;
+      for (const claim of this.extractedActionClaims(characterId)) {
+        this.recordClaimedActionOutcome({
+          propositionId: claim.propositionId,
+          actualValue: String(actualAmount),
+          matches: claim.object === `contribute-${actualAmount}`,
+          sourceEventId: publicResult.eventId
+        });
+      }
+    }
     const groupAverage = pool / this.profiles.size;
     const groupHasZeroContributor = Object.values(contributions).some((amount) => amount === 0);
     for (const actorId of this.profiles.keys()) {

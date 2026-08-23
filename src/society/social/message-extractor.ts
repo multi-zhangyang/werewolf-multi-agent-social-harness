@@ -2,11 +2,16 @@ import type { SocialMessage } from "../contracts";
 import type { SocialActDeclaration, SocialActKind } from "./contracts";
 
 /**
- * Message sidecar extraction (AGENTS.md §6.5 / P1-02): derive structured
- * social acts from a discussion message AFTER it is persisted. The original
- * text stays immutable; extraction results carry confidence and are recorded
- * with `extractionMethod: "model-extracted"` so observers can tell them apart
- * from the speaker's own typed declarations.
+ * Message sidecar extraction (AGENTS.md §19): derive structured social acts
+ * from a discussion message AFTER it is persisted. The original text stays
+ * immutable; extraction results carry confidence and are recorded with
+ * `extractionMethod: "model-extracted"` so observers can tell them apart from
+ * the speaker's own typed declarations.
+ *
+ * Scenarios with identity mechanics (werewolf) may also pass `hints` so the
+ * extractor recognizes **identity claims** ("我是村民" / "X 是狼人"). A claim
+ * becomes an `assertion` act whose proposition is `identity/has-team` — the
+ * ledger reconciles those against role reveals (§28) without any plan tool.
  *
  * This module is pure: no provider, no ledger access. The room owns the model
  * call and the recording path, so tests can drive parsing deterministically.
@@ -32,7 +37,7 @@ export interface ExtractionRequest {
   input: string;
 }
 
-export function buildExtractionRequest(message: SocialMessage, roster: ExtractionRosterEntry[]): ExtractionRequest {
+export function buildExtractionRequest(message: SocialMessage, roster: ExtractionRosterEntry[], hints?: string): ExtractionRequest {
   const participants = roster
     .map((entry) => `- ${entry.name} (id: ${entry.id})`)
     .join("\n");
@@ -42,12 +47,18 @@ export function buildExtractionRequest(message: SocialMessage, roster: Extractio
   const systemInstructions = [
     "你是对话的社会语义标注器。给定一条多智能体社交对局中的消息，提取说话者在这条消息里实际做出的社会行为。",
     "只根据消息文本本身判断，不要猜测未说出的意图。宁可漏报，不可编造。",
-    "每条行为输出：kind（必须是这些之一：" + EXTRACTABLE_KINDS.join("/") + "）、targets（行为指向的参与者 id 数组，没有则省略）、proposition（该行为主张/承诺/指控的具体内容，一句话，带主语）、confidence（0 到 1 的小数）。",
+    '输出一个 JSON 对象：{"acts": [...], "claims": [...]}。',
+    "acts 每条：kind（必须是这些之一：" + EXTRACTABLE_KINDS.join("/") + "）、targets（行为指向的参与者 id 数组，没有则省略）、proposition（该行为主张/承诺/指控的具体内容，一句话，带主语）、confidence（0 到 1 的小数）。",
+    "claims 是说话者对自己的断言，二选一：",
+    "- 阵营主张：断言某人属于哪个阵营。每条：aboutSelf（true=说自己，false=说别人）、targetName（说别人时填名册里的名字）、assertedTeam（只能是 \"wolf\" 或 \"good\"）、confidence。",
+    "- 行动主张：断言自己将采取的行为。每条：aboutSelf=true、assertedAction（场景词汇表里的行为名，如 \"cooperate\"；带数值时如 \"contribute-3\"）、confidence。",
     "规则：",
-    "- 一条消息可以产生 0 到 3 条行为；寒暄、推进剧情、无明确社会行为的输出空数组 []。",
+    "- acts 一条消息最多 3 条；寒暄、推进剧情、无明确社会行为时 acts 为空数组。",
     "- proposition 必须是消息中可引用的原义，不得扩写或演绎。",
     "- promise/offer 只在说话者明确说出将要做某事时输出。",
-    "- 只输出 JSON 数组，不要解释、不要 markdown 代码块以外的任何文字。"
+    "- claims 只在文本明确断言时输出；猜测、质询、要求他人表态都不算主张。",
+    "- 只输出 JSON 对象，不要解释、不要 markdown 代码块以外的任何文字。",
+    ...(hints ? [hints] : [])
   ].join("\n");
   const input = [
     `参与者名册：`,
@@ -67,8 +78,8 @@ export function buildExtractionRequest(message: SocialMessage, roster: Extractio
  * chatty extractor cannot flood the ledger. Returns at most three acts.
  */
 export function parseExtractedDeclarations(raw: string, message: SocialMessage, roster: ExtractionRosterEntry[]): SocialActDeclaration[] {
-  const payload = extractJsonArray(raw);
-  if (!Array.isArray(payload)) return [];
+  const payload = extractJsonPayload(raw);
+  if (!payload) return [];
   const byName = new Map(roster.map((entry) => [entry.name.toLowerCase(), entry.id]));
   const knownIds = new Set(roster.map((entry) => entry.id));
   const senderId = message.senderId;
@@ -76,7 +87,7 @@ export function parseExtractedDeclarations(raw: string, message: SocialMessage, 
     ? [...knownIds].filter((id) => id !== senderId)
     : (message.recipientIds ?? []).filter((id) => knownIds.has(id));
   const declarations: SocialActDeclaration[] = [];
-  for (const entry of payload.slice(0, 3)) {
+  for (const entry of payload.acts.slice(0, 3)) {
     if (!entry || typeof entry !== "object") continue;
     const record = entry as Record<string, unknown>;
     const kind = record.kind;
@@ -94,7 +105,64 @@ export function parseExtractedDeclarations(raw: string, message: SocialMessage, 
     };
     declarations.push(declaration);
   }
-  return declarations;
+  for (const claim of payload.claims.slice(0, 2)) {
+    const declaration = identityClaimDeclaration(claim, { byName, knownIds, senderId });
+    if (declaration) declarations.push(declaration);
+  }
+  return declarations.slice(0, 4);
+}
+
+function identityClaimDeclaration(
+  claim: unknown,
+  scope: { byName: Map<string, string>; knownIds: Set<string>; senderId: string }
+): SocialActDeclaration | undefined {
+  if (!claim || typeof claim !== "object") return undefined;
+  const record = claim as Record<string, unknown>;
+  const confidence = clamp01(record.confidence);
+  if (confidence < EXTRACTION_CONFIDENCE_FLOOR) return undefined;
+  const assertedTeam = record.assertedTeam;
+  if (assertedTeam === "wolf" || assertedTeam === "good") {
+    let subjectId: string | undefined;
+    if (record.aboutSelf === true) {
+      subjectId = scope.senderId;
+    } else if (typeof record.targetName === "string") {
+      subjectId = scope.knownIds.has(record.targetName.trim())
+        ? record.targetName.trim()
+        : scope.byName.get(record.targetName.trim().toLowerCase());
+    }
+    if (!subjectId) return undefined;
+    return {
+      kind: "assertion",
+      targetActorIds: subjectId === scope.senderId ? [] : [subjectId],
+      ...(confidence < 1 ? { confidence } : {}),
+      proposition: {
+        kind: "identity",
+        subjectId,
+        // Team-level predicate: reveal reconciliation compares camps, not exact
+        // roles — claiming "预言家" while being 女巫 must not read as a lie.
+        predicate: "has-team",
+        object: assertedTeam
+      }
+    };
+  }
+  // Action claim: the speaker asserts their OWN upcoming behavior. The
+  // scenario defines the vocabulary (cooperate / defect / contribute-N …);
+  // settlement reconciles the claim against the actual action (§28 主张对账).
+  if (record.aboutSelf === true && typeof record.assertedAction === "string") {
+    const action = record.assertedAction.trim().slice(0, 40);
+    if (!action) return undefined;
+    return {
+      kind: "assertion",
+      ...(confidence < 1 ? { confidence } : {}),
+      proposition: {
+        kind: "future-action",
+        subjectId: scope.senderId,
+        predicate: "claimed-action",
+        object: action
+      }
+    };
+  }
+  return undefined;
 }
 
 function resolveTargets(value: unknown, scope: {
@@ -161,17 +229,39 @@ function clamp01(value: unknown): number {
   return Math.min(1, Math.max(0, parsed));
 }
 
-/** Tolerate fenced or prose-wrapped responses: take the outermost JSON array. */
-function extractJsonArray(raw: string): unknown {
+/**
+ * Tolerate fenced or prose-wrapped responses. Accepts both the current object
+ * form `{"acts":[...],"claims":[...]}` and the legacy bare array (acts only).
+ */
+function extractJsonPayload(raw: string): { acts: unknown[]; claims: unknown[] } | undefined {
   const text = raw.trim();
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
   const candidate = fenced ? fenced[1] : text;
-  const start = candidate.indexOf("[");
-  const end = candidate.lastIndexOf("]");
-  if (start === -1 || end <= start) return undefined;
   try {
-    return JSON.parse(candidate.slice(start, end + 1)) as unknown;
+    const objectStart = candidate.indexOf("{");
+    const arrayStart = candidate.indexOf("[");
+    if (objectStart !== -1 && (arrayStart === -1 || objectStart < arrayStart)) {
+      const objectEnd = candidate.lastIndexOf("}");
+      if (objectEnd > objectStart) {
+        const parsed = JSON.parse(candidate.slice(objectStart, objectEnd + 1)) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          const record = parsed as Record<string, unknown>;
+          return {
+            acts: Array.isArray(record.acts) ? record.acts : [],
+            claims: Array.isArray(record.claims) ? record.claims : []
+          };
+        }
+      }
+    }
+    if (arrayStart !== -1) {
+      const arrayEnd = candidate.lastIndexOf("]");
+      if (arrayEnd > arrayStart) {
+        const parsed = JSON.parse(candidate.slice(arrayStart, arrayEnd + 1)) as unknown;
+        if (Array.isArray(parsed)) return { acts: parsed, claims: [] };
+      }
+    }
   } catch {
     return undefined;
   }
+  return undefined;
 }

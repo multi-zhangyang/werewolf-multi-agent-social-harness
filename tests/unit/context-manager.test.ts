@@ -108,7 +108,7 @@ check("crossing soft-compact threshold compacts and keeps pinned facts", async (
   const result = await manager.sessionInputCallback(history, []);
   assert.ok(calls.digest >= 1, "expected at least one digest call");
   const first = result[0] as unknown as Record<string, unknown>;
-  const content = (first.content as Array<Record<string, unknown>>)[0]?.text as string;
+  const content = first.content as unknown as string;
   assert.ok(content.includes("固定事实"), "digest must carry the pinned-facts block");
   assert.ok(content.includes("我是 T，角色：狼人"), "identity fact survives");
   assert.ok(content.includes("胜利条件"), "win-condition fact survives");
@@ -211,7 +211,7 @@ check("compactHistory compacts an over-budget history down to digest + recent", 
   assert.ok(calls.digest >= 1, "a digest call is expected");
   assert.ok(replacement.length < history.length, "replacement is much shorter");
   const first = replacement[0] as unknown as Record<string, unknown>;
-  const content = (first.content as Array<Record<string, unknown>>)[0]?.text as string;
+  const content = first.content as unknown as string;
   assert.ok(content.includes("固定事实"), "digest carries the pinned-facts block");
   assert.ok(content.includes("预言家"), "the role fact survives the pre-switch compaction");
   assert.equal(replacement.at(-1), history.at(-1), "the most recent item stays verbatim at the tail");
@@ -232,7 +232,7 @@ check("the new turn's input is measured in the same budget as the history", asyn
   const result = await manager.sessionInputCallback(history, newItems);
   assert.ok(calls.digest >= 1, "the full candidate (history + new input) must trigger compaction");
   assert.equal((result[0] as unknown as Record<string, unknown>).role, "system", "the view opens with the trusted digest");
-  const firstText = ((result[0] as unknown as Record<string, unknown>).content as Array<Record<string, unknown>>)[0]?.text as string;
+  const firstText = (result[0] as unknown as Record<string, unknown>).content as string;
   assert.ok(firstText.includes("【历史摘要】"), "the compacted view replaced the raw head of history");
 });
 
@@ -287,7 +287,7 @@ check("the digest is a trusted system block with a full provenance artifact", as
   assert.ok(artifact.compressedNarrative.length > 0);
   const first = result[0] as unknown as Record<string, unknown>;
   assert.equal(first.role, "system", "the digest is never disguised as a user message");
-  const text = (first.content as Array<Record<string, unknown>>)[0]?.text as string;
+  const text = first.content as unknown as string;
   assert.ok(text.includes("【系统管理上下文"), "the trusted framing is explicit");
   assert.ok((first as { societySummaryArtifact?: unknown }).societySummaryArtifact, "the artifact rides on the item");
 });
