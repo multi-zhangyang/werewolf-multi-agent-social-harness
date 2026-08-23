@@ -47,6 +47,33 @@ check("no binding resolves to first enabled profile (system fallback)", () => {
   assert.equal(resolved.tuning.reasoningEffort?.value, "medium");
 });
 
+check("a binding to a disabled profile is refused loudly, never resolved", () => {
+  registry.upsertModelProfile({ ...mkProfile("mp-disabled", "model-x", 256_000), enabled: false });
+  assert.throws(
+    () => resolveAgentModelConfig({
+      agentId: "a3", lookup,
+      binding: { defaultModelProfileId: "mp-disabled" }
+    }),
+    /MODEL_PROFILE_DISABLED/
+  );
+  assert.throws(
+    () => resolveAgentModelConfig({
+      agentId: "a4", lookup,
+      globalDefaults: { modelProfileId: "mp-disabled" }
+    }),
+    /MODEL_PROFILE_DISABLED/,
+    "a disabled global default is refused too"
+  );
+});
+
+check("a binding to an enabled profile resolves it", () => {
+  const resolved = resolveAgentModelConfig({
+    agentId: "a5", lookup,
+    binding: { defaultModelProfileId: "mp-b" }
+  });
+  assert.equal(resolved.modelId, "model-b");
+});
+
 check("global defaults override model profile defaults", () => {
   const resolved = resolveAgentModelConfig({
     agentId: "a2", lookup,

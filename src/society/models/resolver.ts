@@ -54,12 +54,21 @@ export function resolveAgentModelConfig(input: ModelResolutionInput): ResolvedMo
   const safety = input.safety ?? defaultSafetyLimits();
 
   // 1. Model profile: agent phase override > agent binding > room > global > first enabled profile.
+  //    A profile the operator disabled must never be resolved: a seat bound to
+  //    it fails with a clear error so the operator rebinds, instead of
+  //    silently calling the disabled model (or silently switching seats).
   const profileId =
     input.binding?.phaseOverrides?.[input.phase ?? "act"]?.modelProfileId ??
     input.binding?.defaultModelProfileId ??
     input.roomDefaults?.modelProfileId ??
     input.globalDefaults?.modelProfileId;
-  const modelProfile = input.lookup.modelProfile(profileId ?? "") ?? input.lookup.firstModelProfile();
+  const requestedProfile = profileId ? input.lookup.modelProfile(profileId) : undefined;
+  if (requestedProfile?.enabled === false) {
+    throw new Error(
+      `MODEL_PROFILE_DISABLED: '${requestedProfile.id}' (${requestedProfile.modelId}) \u5df2\u88ab\u7981\u7528\u3002\u8bf7\u4e3a\u8be5\u5ea7\u4f4d\u91cd\u65b0\u7ed1\u5b9a\u53ef\u7528\u6a21\u578b\u3002`
+    );
+  }
+  const modelProfile = requestedProfile ?? input.lookup.firstModelProfile();
   if (!modelProfile) {
     throw new Error(`MODEL_PROFILE_MISSING: No model profile is resolvable for '${input.agentId}'. Configure at least one enabled model profile.`);
   }
