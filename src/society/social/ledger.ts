@@ -881,7 +881,7 @@ export class SocialCausalityLedger {
     subjectCharacterId: string;
     actualRoleId: string;
     /** Camp of the revealed role, when the scenario defines teams (werewolf). */
-    revealedTeam?: "wolf" | "good";
+    revealedTeam?: "wolf" | "good" | "evil" | "loyal";
     actorIdForCharacter(characterId: string): string | undefined;
   }): { eventId: string; detectedDeceptionIds: string[] } {
     const existing = this.events.find((event) => {
@@ -2178,7 +2178,7 @@ export class SocialCausalityLedger {
     subjectCharacterId: string,
     actualRoleId: string,
     revealEventId: string,
-    revealedTeam?: "wolf" | "good",
+    revealedTeam?: "wolf" | "good" | "evil" | "loyal",
     actorIdForCharacter?: (characterId: string) => string | undefined
   ): string[] {
     const detected = new Set<string>();

@@ -477,7 +477,7 @@ export abstract class SocialWorldBase implements SocialWorld {
     });
   }
 
-  protected revealIdentity(subjectActorId: string, actualRoleId: string, revealedTeam?: "wolf" | "good"): string[] {
+  protected revealIdentity(subjectActorId: string, actualRoleId: string, revealedTeam?: "wolf" | "good" | "evil" | "loyal"): string[] {
     return this.socialCausality.revealIdentity({
       subjectActorId,
       subjectCharacterId: this.requireProfile(subjectActorId).characterId,

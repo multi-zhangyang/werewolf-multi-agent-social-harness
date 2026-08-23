@@ -5,6 +5,7 @@ import type {
   ActivationCompletion,
   AgentObservation,
   AgentProfile,
+  Commitment,
   PlayerActionSpec,
   ScenarioSummary,
   SocialChannel,
@@ -132,6 +133,7 @@ export class AvalonWorld extends SocialWorldBase {
   private readonly teamSizes: number[];
   private readonly roles = new Map<string, Role>();
   private readonly questHistory: QuestRecord[] = [];
+  private readonly commitments: Commitment[] = [];
   private readonly teamVotes = new Map<string, boolean>();
   private readonly teamVoteCommandIds = new Map<string, string>();
   private readonly questVotes = new Map<string, "succeed" | "fail">();
@@ -200,6 +202,7 @@ export class AvalonWorld extends SocialWorldBase {
       ladyReveals: [...this.ladyReveals.entries()].map(([observerId, reveals]) => [observerId, structuredClone(reveals)] as [string, LadyReveal[]]),
       roles: this.mapEntries(this.roles),
       questHistory: structuredClone(this.questHistory),
+      commitments: structuredClone(this.commitments),
       teamVotes: this.mapEntries(this.teamVotes),
       teamVoteCommandIds: this.mapEntries(this.teamVoteCommandIds),
       questVotes: this.mapEntries(this.questVotes),
@@ -221,7 +224,8 @@ export class AvalonWorld extends SocialWorldBase {
       ladyHolderId: string; ladyInspectId: string | null; ladyInspectCommandId: string | null;
       ladyHolderHistory: string[];
       ladyReveals: Array<[string, LadyReveal[]]>;
-      roles: Array<[string, Role]>; questHistory: QuestRecord[]; teamVotes: Array<[string, boolean]>;
+      roles: Array<[string, Role]>; questHistory: QuestRecord[]; commitments: Commitment[];
+      teamVotes: Array<[string, boolean]>;
       teamVoteCommandIds: Array<[string, string]>; questVotes: Array<[string, "succeed" | "fail"]>;
       questVoteCommandIds: Array<[string, string]>; approvedTeamVotes: Array<[string, boolean]>;
       proposalCommandId: string | null; lastExperiences: Array<[string, string]>;
@@ -271,6 +275,8 @@ export class AvalonWorld extends SocialWorldBase {
     this.registerFactionKnowledge();
     this.questHistory.length = 0;
     this.questHistory.push(...structuredClone(s.questHistory ?? []));
+    this.commitments.length = 0;
+    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
     this.fillMap(this.teamVotes, s.teamVotes);
     this.fillMap(this.teamVoteCommandIds, s.teamVoteCommandIds);
     this.fillMap(this.questVotes, s.questVotes);
@@ -281,6 +287,10 @@ export class AvalonWorld extends SocialWorldBase {
     if (s.discussion) {
       this.discussion = this.createDiscussion();
       this.discussion.restoreState(s.discussion);
+    } else {
+      // Mirror the live lifecycle: the director is nulled when the waves run
+      // out (activation()) and recreated at the next quest's discussion.
+      this.discussion = null;
     }
     this.suspicion.restoreState(s.suspicion);
   }
@@ -304,6 +314,7 @@ export class AvalonWorld extends SocialWorldBase {
         successes: this.successes,
         failures: this.failures,
         history: this.questHistory,
+        commitments: this.commitments,
         winners: this.winners,
         outcome: this.outcome,
         ...(this.discussion ? { discussion: this.discussion.state() } : {}),
@@ -325,6 +336,7 @@ export class AvalonWorld extends SocialWorldBase {
     const morganaSeat = [...this.roles].find(([, candidate]) => candidate === "morgana")?.[0];
     const percivalSights = role === "percival" ? [merlinSeat, morganaSeat].filter((id): id is string => Boolean(id)) : [];
     const causality = this.socialCausalityFor(actorId);
+    const openCommitments = this.openCommitmentsThisQuest(actorId);
     const privateLadyReveals = this.ladyReveals.get(actorId) ?? [];
     return {
       roomId: this.roomId,
@@ -352,6 +364,10 @@ export class AvalonWorld extends SocialWorldBase {
         `你的队伍表决：${this.teamVotes.has(actorId) ? String(this.teamVotes.get(actorId)) : "未投"}。`,
         `你的任务表决：${this.questVotes.get(actorId) ?? "未投"}。`,
         `任务历史：${this.questHistory.map((record) => `第 ${record.quest} 次任务 队伍=[${record.team.join(",")}] ${record.outcome === "success" ? "成功" : "失败"}（黑票 ${record.failCount}）`).join("；") || "暂无"}。`,
+        openCommitments.length
+          ? `未结算承诺：\n${openCommitments.map((commitment) => `- [${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("\n")}`
+          : "未结算承诺：无。",
+        `已结算承诺：${this.settledCommitmentsFor(actorId).map((commitment) => `[${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("; ") || "无"}。`,
         ...socialReferenceContext(causality)
       ].filter(Boolean).join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, role },
@@ -370,6 +386,35 @@ export class AvalonWorld extends SocialWorldBase {
     const role = this.roles.get(actorId);
     if (!role) throw new Error(`ACTOR_NOT_FOUND: '${actorId}' is not in this room.`);
     const tools: Tool<SocietyAgentContext>[] = [];
+    const makeCommitment = tool({
+      name: "make_commitment",
+      description: "Propose a public typed promise: approve/reject the current quest's team vote, or succeed/fail your own quest vote. It is recorded, but settles as kept or broken only if another participant explicitly accepts it. Loyal participants cannot promise to fail a quest.",
+      parameters: z.object({
+        commitmentType: z.enum(["team-vote", "quest-outcome"]),
+        choice: z.enum(["approve", "reject", "succeed", "fail"]),
+        proposition: z.string().min(1).max(400),
+        condition: z.string().min(1).max(400).nullable().default(null)
+      }).strict(),
+      execute: async (input, runContext) => {
+        const context = scopedContext(runContext, actorId);
+        const commit = await this.performAction(actorId, "make_commitment", input);
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
+      }
+    });
+    tools.push(makeCommitment as Tool<SocietyAgentContext>);
+    const acceptCommitment = tool({
+      name: "accept_commitment",
+      description: "Explicitly accept one proposed commitment addressed to you. Acceptance makes it eligible for deterministic settlement against the sealed vote.",
+      parameters: z.object({ commitmentId: z.string().min(1).max(200) }).strict(),
+      execute: async (input, runContext) => {
+        const context = scopedContext(runContext, actorId);
+        const commit = await this.performAction(actorId, "accept_commitment", input);
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
+      }
+    });
+    tools.push(acceptCommitment as Tool<SocietyAgentContext>);
     const propose = tool({
       name: "propose_team",
       description: `Compare bounded team intents, predict whether the table will approve them, then nominate exactly ${this.teamSize(this.quest)} members including yourself. The team is announced publicly before the vote.`,
@@ -591,6 +636,89 @@ export class AvalonWorld extends SocialWorldBase {
     const value = recordPayload(payload);
     const reason = typeof value.reason === "string" ? value.reason.trim() : "";
 
+    if (action === "make_commitment") {
+      if (this.phase !== "discussion") throw new Error("COMMITMENT_NOT_OPEN: Commitments are proposed during the round-table discussion.");
+      const commitmentType = value.commitmentType;
+      if (commitmentType !== "team-vote" && commitmentType !== "quest-outcome") {
+        throw new Error("COMMITMENT_TYPE_INVALID: Promise a team-vote or quest-outcome.");
+      }
+      const choice = value.choice;
+      const legal = commitmentType === "team-vote"
+        ? (choice === "approve" || choice === "reject")
+        : (choice === "succeed" || choice === "fail");
+      if (!legal) throw new Error("COMMITMENT_CHOICE_INVALID: The choice does not match the commitment type.");
+      if (commitmentType === "quest-outcome" && choice === "fail" && isLoyalRole(role)) {
+        throw new Error("LOYAL_CANNOT_PROMISE_FAIL: Loyal participants can only succeed a quest.");
+      }
+      const proposition = typeof value.proposition === "string" ? value.proposition.trim() : "";
+      if (!proposition) throw new Error("COMMITMENT_PROPOSITION_REQUIRED: State the promise explicitly.");
+      const ownCount = this.commitments.filter((entry) => entry.quest === this.quest && entry.promisorActorId === actorId).length;
+      if (ownCount >= 2) throw new Error("COMMITMENT_LIMIT_EXCEEDED: At most two proposals per participant per quest.");
+      const commandId = `cmd-${randomUUID()}`;
+      const commitment: Commitment = {
+        commitmentId: `commit:av:${this.quest}:${actorId}:${ownCount + 1}`,
+        round: this.quest,
+        quest: this.quest,
+        promisorActorId: actorId,
+        promisorCharacterId: this.requireProfile(actorId).characterId,
+        audienceActorIds: [...this.profiles.keys()].filter((id) => id !== actorId),
+        proposition,
+        promisedAction: commitmentType === "team-vote"
+          ? { actionType: "team-vote", choice: choice as "approve" | "reject", ...(typeof value.condition === "string" && value.condition.trim() ? { condition: value.condition.trim() } : {}) }
+          : { actionType: "quest-outcome", choice: choice as "succeed" | "fail", ...(typeof value.condition === "string" && value.condition.trim() ? { condition: value.condition.trim() } : {}) },
+        state: "proposed",
+        acceptedByActorIds: [],
+        acceptedByCommandIds: [],
+        createdByCommandId: commandId,
+        createdAtTurn: this.quest,
+        schemaVersion: 1
+      };
+      this.commitments.push(commitment);
+      this.recordSocialCommitment(commitment);
+      for (const id of this.profiles.keys()) {
+        this.pushEvent(id, {
+          type: "commitment-proposed",
+          actorId,
+          targetId: id,
+          facts: { commitmentId: commitment.commitmentId, commitmentType, choice },
+          detail: `${actorId === id ? "你" : this.profiles.get(actorId)?.displayName ?? actorId} 提议承诺：${proposition}。`
+        });
+      }
+      this.emitUpdate();
+      return { action, commandId, detail: proposition, result: { accepted: true, commitmentId: commitment.commitmentId } };
+    }
+    if (action === "accept_commitment") {
+      if (this.phase !== "discussion") throw new Error("COMMITMENT_ACCEPTANCE_NOT_OPEN: Accept commitments during the round-table discussion.");
+      const commitmentId = typeof value.commitmentId === "string" ? value.commitmentId : "";
+      const commitment = this.commitments.find((entry) => entry.commitmentId === commitmentId && entry.quest === this.quest);
+      if (!commitment) throw new Error(`COMMITMENT_NOT_FOUND: '${commitmentId}'.`);
+      if (commitment.promisorActorId === actorId || !commitment.audienceActorIds.includes(actorId)) {
+        throw new Error("COMMITMENT_ACCEPTOR_INVALID: Only another participant may accept this proposal.");
+      }
+      if (commitment.state !== "proposed" && commitment.state !== "accepted") {
+        throw new Error(`COMMITMENT_NOT_OPEN: '${commitmentId}' is already ${commitment.state}.`);
+      }
+      const acceptedByActorIds = commitment.acceptedByActorIds ?? (commitment.acceptedByActorIds = []);
+      const acceptedByCommandIds = commitment.acceptedByCommandIds ?? (commitment.acceptedByCommandIds = []);
+      if (acceptedByActorIds.includes(actorId)) throw new Error(`COMMITMENT_ALREADY_ACCEPTED: '${commitmentId}'.`);
+      const commandId = `cmd-${randomUUID()}`;
+      acceptedByActorIds.push(actorId);
+      acceptedByCommandIds.push(commandId);
+      commitment.acceptedAtTurn = this.quest;
+      commitment.state = "accepted";
+      this.acceptSocialCommitment(commitment, actorId, commandId);
+      for (const id of this.profiles.keys()) {
+        this.pushEvent(id, {
+          type: "commitment-accepted",
+          actorId,
+          targetId: commitment.promisorActorId,
+          facts: { commitmentId },
+          detail: `${actorId === id ? "你" : this.profiles.get(actorId)?.displayName ?? actorId} 接受了承诺「${commitment.proposition}」。`
+        });
+      }
+      this.emitUpdate();
+      return { action, commandId, detail: commitmentId, result: { accepted: true, commitmentId, state: commitment.state } };
+    }
     if (action === "propose_team") {
       if (this.phase !== "proposal") throw new Error("PROPOSAL_NOT_OPEN: Wait for the proposal phase.");
       if (this.leaderId !== actorId) throw new Error("NOT_THE_LEADER: Only the current leader can propose a team.");
@@ -938,6 +1066,70 @@ export class AvalonWorld extends SocialWorldBase {
     }
   }
 
+  private openCommitmentsThisQuest(actorId: string): Commitment[] {
+    return this.commitments.filter((entry) =>
+      (entry.quest ?? entry.round) === this.quest &&
+      (entry.state === "proposed" || entry.state === "accepted") &&
+      (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+    );
+  }
+
+  private settledCommitmentsFor(actorId: string): Commitment[] {
+    return this.commitments.filter((entry) =>
+      (entry.quest ?? entry.round) < this.quest &&
+      entry.state !== "proposed" && entry.state !== "accepted" &&
+      (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+    );
+  }
+
+  /** Settle this quest's accepted commitments of one action type against actual behavior. */
+  private settleAvalonCommitments(
+    actionType: "team-vote" | "quest-outcome",
+    actualByActor: Map<string, string>,
+    sourceEventId: string,
+    beatFallback: "agreement-reached" | "cooperative-outcome" | "unilateral-defection" | undefined
+  ): { beat: "promise-kept" | "promise-broken" | "agreement-reached" | "cooperative-outcome" | "unilateral-defection" | undefined } {
+    const accepted = this.commitments.filter((entry) => (entry.quest ?? entry.round) === this.quest && entry.state === "accepted" && entry.promisedAction.actionType === actionType);
+    let anyViolated = false;
+    const allFulfilled = accepted.length > 0;
+    for (const commitment of accepted) {
+      const actual = actualByActor.get(commitment.promisorActorId);
+      if (actual === undefined) {
+        // The actor never had the chance to act (e.g. not on the quest team):
+        // the promise is voided, not violated — no opportunity, no verdict.
+        commitment.state = "void";
+        commitment.settledAtTurn = this.quest;
+        this.settleSocialCommitment(commitment);
+        continue;
+      }
+      const promisedChoice = (commitment.promisedAction as { choice?: string }).choice;
+      if (promisedChoice === undefined) continue;
+      const fulfilled = actual === promisedChoice;
+      commitment.state = fulfilled ? "fulfilled" : "violated";
+      commitment.settledAtTurn = this.quest;
+      commitment.settledByCommandId = this.teamVoteCommandIds.get(commitment.promisorActorId) ?? this.questVoteCommandIds.get(commitment.promisorActorId);
+      this.settleSocialCommitment(commitment);
+      if (!fulfilled) anyViolated = true;
+      for (const id of this.profiles.keys()) {
+        this.pushEvent(id, {
+          type: fulfilled ? "commitment-fulfilled" : "commitment-violated",
+          actorId: commitment.promisorActorId,
+          targetId: id,
+          facts: { commitmentId: commitment.commitmentId, promisedChoice, actualChoice: actual },
+          detail: fulfilled
+            ? `承诺兑现：${this.profiles.get(commitment.promisorActorId)?.displayName ?? commitment.promisorActorId} 承诺${promisedChoice}，实际也${actual}。`
+            : `承诺违约：${this.profiles.get(commitment.promisorActorId)?.displayName ?? commitment.promisorActorId} 承诺${promisedChoice}，实际${actual}。`
+        });
+      }
+    }
+    for (const commitment of this.commitments.filter((entry) => (entry.quest ?? entry.round) === this.quest && entry.state === "proposed" && entry.promisedAction.actionType === actionType)) {
+      commitment.state = "void";
+      commitment.settledAtTurn = this.quest;
+      this.settleSocialCommitment(commitment);
+    }
+    return anyViolated ? { beat: "promise-broken" } : allFulfilled && accepted.length > 0 ? { beat: "promise-kept" } : { beat: beatFallback as "agreement-reached" | "cooperative-outcome" | "unilateral-defection" | undefined };
+  }
+
   private availableActions(actorId: string, role: Role): string[] {
     if (this.phase === "discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "read_the_room", "log_deception_plan", "update_inner_state"];
     if (this.phase === "proposal") return this.leaderId === actorId ? ["propose_team", "communicate"] : [];
@@ -1029,7 +1221,13 @@ export class AvalonWorld extends SocialWorldBase {
     const text = approved
       ? `第 ${this.quest} 次任务：圆桌以 ${approveCount} 票通过了队伍 [${team.map((member) => this.profiles.get(member)?.displayName ?? member).join("、")}]。`
       : `第 ${this.quest} 次任务：圆桌以 ${approveCount} 票赞成否决了队伍 [${team.map((member) => this.profiles.get(member)?.displayName ?? member).join("、")}]。`;
-    this.addLog(text, this.quest, approved ? "agreement-reached" : undefined);
+    const commitmentBeat = this.settleAvalonCommitments(
+      "team-vote",
+      new Map([...resolvedVotes].map(([actorId, accept]) => [actorId, accept ? "approve" : "reject"])),
+      publicResult.eventId,
+      approved ? "agreement-reached" : undefined
+    );
+    this.addLog(text, this.quest, commitmentBeat.beat ?? (approved ? "agreement-reached" : undefined));
     if (approved) {
       this.approvedTeamVotes.clear();
       for (const [actorId, vote] of resolvedVotes) this.approvedTeamVotes.set(actorId, vote);
@@ -1164,8 +1362,16 @@ export class AvalonWorld extends SocialWorldBase {
       }
     }
     // P0-09: a fail vote is a unilateral defection inside the quest, not a
-    // broken promise; a pass is a cooperative outcome.
-    this.addLog(text, this.quest, outcome === "fail" ? "unilateral-defection" : "cooperative-outcome");
+    // broken promise; a pass is a cooperative outcome. Accepted quest-outcome
+    // promises settle here: a minion who promised to fail and did is a kept
+    // promise; one who promised loyalty-cover and failed is exposed.
+    const questCommitmentBeat = this.settleAvalonCommitments(
+      "quest-outcome",
+      new Map(resolvedQuestVotes),
+      publicResult.eventId,
+      outcome === "fail" ? "unilateral-defection" : "cooperative-outcome"
+    );
+    this.addLog(text, this.quest, questCommitmentBeat.beat ?? (outcome === "fail" ? "unilateral-defection" : "cooperative-outcome"));
     if (this.failures >= 3) {
       this.winners = this.factionMembers(["morgana", "assassin", "mordred", "oberon", "minion"]);
       this.outcome = "三次任务失败，内奸得逞，圆桌陷落。";
@@ -1353,7 +1559,10 @@ export class AvalonWorld extends SocialWorldBase {
 
   private endGame(): void {
     this.addLog(this.outcome, this.quest);
-    for (const [actorId, role] of this.roles) this.revealIdentity(actorId, role);
+    // §28: identity reveals carry the faction so extracted camp claims
+    // (忠诚/内奸) can be reconciled — a minion who claimed loyalty is
+    // exposed by the very reveal that ends the game.
+    for (const [actorId, role] of this.roles) this.revealIdentity(actorId, role, isEvilRole(role) ? "evil" : "loyal");
     for (const id of this.profiles.keys()) {
       const won = this.winners.includes(id);
       this.pushEvent(id, {
@@ -1441,6 +1650,14 @@ function sameMembers(left: string[], right: string[]): boolean {
   if (left.length !== right.length) return false;
   const leftSet = new Set(left);
   return leftSet.size === right.length && right.every((value) => leftSet.has(value));
+}
+
+function normalizeCommitment(value: Commitment): Commitment {
+  return {
+    ...value,
+    acceptedByActorIds: [...(value.acceptedByActorIds ?? [])],
+    acceptedByCommandIds: [...(value.acceptedByCommandIds ?? [])]
+  };
 }
 
 function recordPayload(payload: unknown): Record<string, unknown> {

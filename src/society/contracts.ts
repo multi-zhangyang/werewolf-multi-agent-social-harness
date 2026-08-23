@@ -597,6 +597,8 @@ export interface PlayerActionSpec {
 export interface Commitment {
   commitmentId: string;
   round: number;
+  /** Round counter for quest-scoped games (avalon); mirrors `round` elsewhere. */
+  quest?: number;
   /** The promisor's seat and permanent character (§15.2). */
   promisorActorId: string;
   promisorCharacterId: string;
@@ -611,16 +613,36 @@ export interface Commitment {
         amount: number;
         condition?: string;
       }
-      | {
-          actionType: "choose-move";
-          choice: "cooperate" | "defect";
-          condition?: string;
-        }
-      | {
-          actionType: "demand-exactly";
-          amount: number;
-          condition?: string;
-        };
+    | {
+        actionType: "choose-move";
+        choice: "cooperate" | "defect";
+        condition?: string;
+      }
+    | {
+        actionType: "demand-exactly";
+        amount: number;
+        condition?: string;
+      }
+    | {
+        actionType: "team-vote";
+        choice: "approve" | "reject";
+        condition?: string;
+      }
+    | {
+        actionType: "quest-outcome";
+        choice: "succeed" | "fail";
+        condition?: string;
+      }
+    | {
+        actionType: "offer-at-least";
+        amount: number;
+        condition?: string;
+      }
+    | {
+        actionType: "accept-at-least";
+        amount: number;
+        condition?: string;
+      };
   state: "proposed" | "accepted" | "fulfilled" | "violated" | "void";
   /** Present on current records; optional only while reading legacy checkpoints. */
   acceptedByActorIds?: string[];

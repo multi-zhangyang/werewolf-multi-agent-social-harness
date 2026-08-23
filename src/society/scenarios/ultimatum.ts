@@ -5,6 +5,7 @@ import type {
   ActivationCompletion,
   AgentObservation,
   AgentProfile,
+  Commitment,
   PlayerActionSpec,
   ScenarioSummary,
   SocialMessage,
@@ -38,6 +39,7 @@ export class UltimatumWorld extends SocialWorldBase {
   private readonly totalRounds: number;
   private readonly pot = 10;
   private readonly scores = new Map<string, number>();
+  private readonly commitments: Commitment[] = [];
   private readonly history: UltimatumRound[] = [];
   private readonly lastExperiences = new Map<string, string>();
   private phase: Phase = "discussion";
@@ -56,12 +58,27 @@ export class UltimatumWorld extends SocialWorldBase {
     this.addLog("第一轮开始：提议者提出 10 点资源的分配方案，回应者可以接受，也可以用拒绝惩罚不公平。", 1);
   }
 
+  /**
+   * Sidecar extraction hints (§19): split statements ("我会给你 4")
+   * become `claimed-action` propositions reconciled against the sealed
+   * offer at settlement.
+   */
+  extractionHints?(): string {
+    return [
+      "本局是最后通牒博弈。行动主张判定：",
+      '- 当说话者（提议者）断言自己将提出的份额时输出 claims 条目：aboutSelf=true、assertedAction（格式 "offer-数字"，如 "offer-4"）、confidence。',
+      '- 例：「我会给你 4」→{aboutSelf:true, assertedAction:"offer-4"}；「我一分都不会让」→{aboutSelf:true, assertedAction:"offer-0"}；「你应该多要一点」→ 不算主张。',
+      '- 疑问、劝告、回应者的意图表态都不算主张。'
+    ].join("\n");
+  }
+
   protected exportWorldState(): unknown {
     return {
       schemaVersion: ULTIMATUM_STATE_SCHEMA_VERSION,
       round: this.round,
       phase: this.phase,
       scores: this.mapEntries(this.scores),
+      commitments: structuredClone(this.commitments),
       offer: this.offer ?? null,
       response: this.response ?? null,
       offerCommandId: this.offerCommandId ?? null,
@@ -75,7 +92,7 @@ export class UltimatumWorld extends SocialWorldBase {
   protected restoreWorldState(state: unknown): void {
     const s = state as Partial<{
       schemaVersion: number;
-      round: number; phase: string; scores: Array<[string, number]>; history: UltimatumRound[];
+      round: number; phase: string; scores: Array<[string, number]>; commitments: Commitment[]; history: UltimatumRound[];
       offer: number | null; response: boolean | null; offerCommandId: string | null; responseCommandId: string | null;
       lastExperiences: Array<[string, string]>; discussion: unknown;
     }> | undefined;
@@ -86,6 +103,8 @@ export class UltimatumWorld extends SocialWorldBase {
     this.round = Number(s.round ?? 1);
     this.phase = (s.phase ?? "discussion") as Phase;
     this.fillMap(this.scores, s.scores);
+    this.commitments.length = 0;
+    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
     this.offer = s.offer ?? undefined;
     this.response = s.response ?? undefined;
     this.offerCommandId = s.offerCommandId ?? undefined;
@@ -96,6 +115,9 @@ export class UltimatumWorld extends SocialWorldBase {
     if (s.discussion) {
       this.discussion = this.createDiscussion();
       this.discussion.restoreState(s.discussion);
+    } else {
+      // Mirror the live lifecycle: the director is nulled when waves end.
+      this.discussion = null;
     }
   }
 
@@ -114,6 +136,7 @@ export class UltimatumWorld extends SocialWorldBase {
         offer: this.offer,
         response: this.response,
         scores: Object.fromEntries(this.scores),
+        commitments: this.commitments,
         history: this.history,
         ...(this.discussion ? { discussion: this.discussion.state() } : {})
       }
@@ -136,7 +159,8 @@ export class UltimatumWorld extends SocialWorldBase {
         `Your cumulative score: ${this.scores.get(actorId) ?? 0}.`,
         `Current offer: ${this.offer ?? "not proposed"}. Your response: ${this.response ?? "not decided"}.`,
         ...socialReferenceContext(causality),
-        `Round history: ${this.history.map((entry) => `R${entry.round} ${entry.proposerId === actorId ? "proposed" : "responded"} ${entry.offer}/${this.pot}, payoff ${entry.payoffs[actorId]}`).join("; ") || "none"}.`
+        `Round history: ${this.history.map((entry) => `R${entry.round} ${entry.proposerId === actorId ? "proposed" : "responded"} ${entry.offer}/${this.pot}, payoff ${entry.payoffs[actorId]}`).join("; ") || "none"}.`,
+        `Settled commitments: ${this.settledCommitmentsFor(actorId).map((commitment) => `[${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, role, score: this.scores.get(actorId) ?? 0 },
       others: this.otherProfiles(actorId).map((profile) => ({
@@ -193,7 +217,34 @@ export class UltimatumWorld extends SocialWorldBase {
         return commit.result;
       }
     });
-    return [propose, respond];
+    const makeCommitment = tool({
+      name: "make_commitment",
+      description: `Propose a typed promise: as the proposer, offer at least N to the responder; as the responder, accept any offer at least N. It settles as kept or broken only if the other participant explicitly accepts it.`,
+      parameters: z.object({
+        commitmentType: z.enum(["offer-at-least", "accept-at-least"]),
+        amount: z.number().int().min(0).max(this.pot),
+        proposition: z.string().min(1).max(400),
+        condition: z.string().min(1).max(400).nullable().default(null)
+      }).strict(),
+      execute: async (input, runContext) => {
+        const context = scopedContext(runContext, actorId);
+        const commit = await this.performAction(actorId, "make_commitment", input);
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
+      }
+    });
+    const acceptCommitment = tool({
+      name: "accept_commitment",
+      description: "Explicitly accept one proposed commitment addressed to you. Acceptance makes it eligible for deterministic settlement against the sealed offer and response.",
+      parameters: z.object({ commitmentId: z.string().min(1).max(200) }).strict(),
+      execute: async (input, runContext) => {
+        const context = scopedContext(runContext, actorId);
+        const commit = await this.performAction(actorId, "accept_commitment", input);
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
+      }
+    });
+    return [propose, respond, makeCommitment, acceptCommitment];
   }
 
   domainActionsFor(actorId: string): PlayerActionSpec[] {
@@ -230,6 +281,96 @@ export class UltimatumWorld extends SocialWorldBase {
   performDomainAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
     this.requireProfile(actorId);
     const [proposerId, responderId] = this.rolesForRound();
+    if (action === "make_commitment") {
+      if (this.phase !== "discussion") throw new Error("COMMITMENT_NOT_OPEN: Commitments are proposed during the negotiation.");
+      const type = payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>).commitmentType : undefined;
+      if (type !== "offer-at-least" && type !== "accept-at-least") {
+        throw new Error("COMMITMENT_TYPE_INVALID: Promise offer-at-least or accept-at-least.");
+      }
+      const amount = Number((payload as Record<string, unknown>).amount);
+      if (!Number.isInteger(amount) || amount < 0 || amount > this.pot) {
+        throw new Error(`COMMITMENT_AMOUNT_INVALID: Promise an integer from 0 to ${this.pot}.`);
+      }
+      const proposition = typeof (payload as Record<string, unknown>).proposition === "string"
+        ? ((payload as Record<string, unknown>).proposition as string).trim() : "";
+      if (!proposition) throw new Error("COMMITMENT_PROPOSITION_REQUIRED: State the promise explicitly.");
+      if (type === "offer-at-least" && actorId !== proposerId) {
+        throw new Error("ROLE_MISMATCH: Only this round's proposer can promise an offer.");
+      }
+      if (type === "accept-at-least" && actorId !== responderId) {
+        throw new Error("ROLE_MISMATCH: Only this round's responder can promise acceptance.");
+      }
+      const ownCount = this.commitments.filter((entry) => entry.round === this.round && entry.promisorActorId === actorId).length;
+      if (ownCount >= 2) throw new Error("COMMITMENT_LIMIT_EXCEEDED: At most two proposals per participant per round.");
+      const commandId = `cmd-${randomUUID()}`;
+      const condition = typeof (payload as Record<string, unknown>).condition === "string"
+        && ((payload as Record<string, unknown>).condition as string).trim()
+        ? ((payload as Record<string, unknown>).condition as string).trim() : undefined;
+      const commitment: Commitment = {
+        commitmentId: `commit:ug:${this.round}:${actorId}:${ownCount + 1}`,
+        round: this.round,
+        promisorActorId: actorId,
+        promisorCharacterId: this.requireProfile(actorId).characterId,
+        audienceActorIds: [actorId === proposerId ? responderId : proposerId],
+        proposition,
+        promisedAction: type === "offer-at-least"
+          ? { actionType: "offer-at-least", amount, ...(condition ? { condition } : {}) }
+          : { actionType: "accept-at-least", amount, ...(condition ? { condition } : {}) },
+        state: "proposed",
+        acceptedByActorIds: [],
+        acceptedByCommandIds: [],
+        createdByCommandId: commandId,
+        createdAtTurn: this.round,
+        schemaVersion: 1
+      };
+      this.commitments.push(commitment);
+      this.recordSocialCommitment(commitment);
+      for (const id of this.profiles.keys()) {
+        this.pushEvent(id, {
+          type: "commitment-proposed",
+          actorId,
+          targetId: id,
+          facts: { commitmentId: commitment.commitmentId, commitmentType: type, amount },
+          detail: `${actorId === id ? "你" : this.profiles.get(actorId)?.displayName ?? actorId} 提议承诺：${proposition}。`
+        });
+      }
+      this.emitUpdate();
+      return Promise.resolve({ action, commandId, detail: proposition, result: { accepted: true, commitmentId: commitment.commitmentId } });
+    }
+    if (action === "accept_commitment") {
+      if (this.phase !== "discussion") throw new Error("COMMITMENT_ACCEPTANCE_NOT_OPEN: Accept commitments during the negotiation.");
+      const commitmentId = typeof (payload as Record<string, unknown>).commitmentId === "string"
+        ? ((payload as Record<string, unknown>).commitmentId as string) : "";
+      const commitment = this.commitments.find((entry) => entry.commitmentId === commitmentId && entry.round === this.round);
+      if (!commitment) throw new Error(`COMMITMENT_NOT_FOUND: '${commitmentId}'.`);
+      if (commitment.promisorActorId === actorId || !commitment.audienceActorIds.includes(actorId)) {
+        throw new Error("COMMITMENT_ACCEPTOR_INVALID: Only the other participant may accept this proposal.");
+      }
+      if (commitment.state !== "proposed" && commitment.state !== "accepted") {
+        throw new Error(`COMMITMENT_NOT_OPEN: '${commitmentId}' is already ${commitment.state}.`);
+      }
+      const acceptedByActorIds = commitment.acceptedByActorIds ?? (commitment.acceptedByActorIds = []);
+      const acceptedByCommandIds = commitment.acceptedByCommandIds ?? (commitment.acceptedByCommandIds = []);
+      if (acceptedByActorIds.includes(actorId)) throw new Error(`COMMITMENT_ALREADY_ACCEPTED: '${commitmentId}'.`);
+      const commandId = `cmd-${randomUUID()}`;
+      acceptedByActorIds.push(actorId);
+      acceptedByCommandIds.push(commandId);
+      commitment.acceptedAtTurn = this.round;
+      commitment.state = "accepted";
+      this.acceptSocialCommitment(commitment, actorId, commandId);
+      for (const id of this.profiles.keys()) {
+        this.pushEvent(id, {
+          type: "commitment-accepted",
+          actorId,
+          targetId: commitment.promisorActorId,
+          facts: { commitmentId },
+          detail: `${actorId === id ? "你" : this.profiles.get(actorId)?.displayName ?? actorId} 接受了承诺「${commitment.proposition}」。`
+        });
+      }
+      this.emitUpdate();
+      return Promise.resolve({ action, commandId, detail: commitmentId, result: { accepted: true, commitmentId, state: commitment.state } });
+    }
     if (action === "propose_split") {
       const { offer } = parseProposePayload(payload);
       if (this.phase !== "propose" || actorId !== proposerId) {
@@ -406,6 +547,22 @@ export class UltimatumWorld extends SocialWorldBase {
     return ["communicate", "reflect_on_social_situation", "read_the_room", "update_inner_state"];
   }
 
+  private openCommitmentsThisRound(actorId: string): Commitment[] {
+    return this.commitments.filter((entry) =>
+      entry.round === this.round &&
+      (entry.state === "proposed" || entry.state === "accepted") &&
+      (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+    );
+  }
+
+  private settledCommitmentsFor(actorId: string): Commitment[] {
+    return this.commitments.filter((entry) =>
+      entry.round < this.round &&
+      entry.state !== "proposed" && entry.state !== "accepted" &&
+      (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+    );
+  }
+
   private rolesForRound(): [string, string] {
     const ids = [...this.profiles.keys()];
     return this.round % 2 === 1 ? [ids[0], ids[1]] : [ids[1], ids[0]];
@@ -428,6 +585,65 @@ export class UltimatumWorld extends SocialWorldBase {
       object: { proposerId, responderId, offer, accepted, payoffs },
       payload: { round: this.round, proposerId, responderId, offer, accepted, payoffs }
     });
+    // §28 主张对账: reconcile extracted offer claims ("我会给你 4")
+    // against the actual sealed offer.
+    for (const id of this.profiles.keys()) {
+      const characterId = this.requireProfile(id).characterId;
+      for (const claim of this.extractedActionClaims(characterId)) {
+        this.recordClaimedActionOutcome({
+          propositionId: claim.propositionId,
+          actualValue: String(offer),
+          matches: claim.object === `offer-${offer}`,
+          sourceEventId: publicResult.eventId
+        });
+      }
+    }
+    // §28: settle this round's accepted commitments against the sealed offer
+    // and response. An accept-at-least promise whose threshold the offer never
+    // reached is voided — the condition never materialized.
+    const roundCommitments = this.commitments.filter((entry) => entry.round === this.round && entry.state === "accepted");
+    let anyViolated = false;
+    let anyFulfilled = false;
+    for (const commitment of roundCommitments) {
+      if (commitment.promisedAction.actionType === "offer-at-least") {
+        const fulfilled = offer >= commitment.promisedAction.amount;
+        if (fulfilled) anyFulfilled = true;
+        commitment.state = fulfilled ? "fulfilled" : "violated";
+        if (!fulfilled) anyViolated = true;
+      } else if (commitment.promisedAction.actionType === "accept-at-least") {
+        if (offer < commitment.promisedAction.amount) {
+          commitment.state = "void";
+        } else {
+          const fulfilled = accepted;
+          if (fulfilled) anyFulfilled = true;
+          commitment.state = fulfilled ? "fulfilled" : "violated";
+          if (!fulfilled) anyViolated = true;
+        }
+      } else {
+        continue;
+      }
+      commitment.settledAtTurn = this.round;
+      commitment.settledByCommandId = commitment.promisedAction.actionType === "offer-at-least" ? this.offerCommandId : this.responseCommandId;
+      this.settleSocialCommitment(commitment);
+      if (commitment.state !== "void") {
+        for (const id of this.profiles.keys()) {
+          this.pushEvent(id, {
+            type: commitment.state === "fulfilled" ? "commitment-fulfilled" : "commitment-violated",
+            actorId: commitment.promisorActorId,
+            targetId: id,
+            facts: { commitmentId: commitment.commitmentId, promisedAmount: commitment.promisedAction.amount, offer },
+            detail: commitment.state === "fulfilled"
+              ? `承诺兑现：${this.profiles.get(commitment.promisorActorId)?.displayName ?? commitment.promisorActorId} 的「${commitment.proposition}」得到兑现。`
+              : `承诺违约：${this.profiles.get(commitment.promisorActorId)?.displayName ?? commitment.promisorActorId} 的「${commitment.proposition}」被实际行为违背。`
+          });
+        }
+      }
+    }
+    for (const commitment of this.commitments.filter((entry) => entry.round === this.round && entry.state === "proposed")) {
+      commitment.state = "void";
+      commitment.settledAtTurn = this.round;
+      this.settleSocialCommitment(commitment);
+    }
     for (const id of this.profiles.keys()) {
       this.lastExperiences.set(
         id,
@@ -477,7 +693,13 @@ export class UltimatumWorld extends SocialWorldBase {
         resultingEventIds: [publicResult.eventId],
       });
     }
-    const beat = accepted ? "agreement-reached" as const : "negotiation-failed" as const;
+    const beat = anyViolated
+      ? "promise-broken" as const
+      : anyFulfilled
+        ? "promise-kept" as const
+        : accepted
+          ? "agreement-reached" as const
+          : "negotiation-failed" as const;
     this.addLog(`第 ${this.round} 轮结算：提议 ${offer}/${this.pot}，回应者${accepted ? "接受" : "拒绝"}。`, this.round, beat);
     this.offer = undefined;
     this.response = undefined;
@@ -532,4 +754,13 @@ function situationFor(phase: Phase, role: "proposer" | "responder", offer: numbe
   if (phase === "discussion") return `You are the ${role} this round. Promises are not binding, and roles reverse next round.`;
   if (phase === "propose") return role === "proposer" ? "Choose how to split the pot. Too greedy a split may be rejected." : "The proposer is deciding the split.";
   return role === "responder" ? `The proposer offered you ${offer ?? 0} of ${pot}. Rejection punishes unfairness but costs you both.` : "The responder is deciding whether to accept your split.";
+}
+
+
+function normalizeCommitment(value: Commitment): Commitment {
+  return {
+    ...value,
+    acceptedByActorIds: [...(value.acceptedByActorIds ?? [])],
+    acceptedByCommandIds: [...(value.acceptedByCommandIds ?? [])]
+  };
 }

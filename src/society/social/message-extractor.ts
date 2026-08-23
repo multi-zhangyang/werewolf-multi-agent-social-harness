@@ -50,7 +50,7 @@ export function buildExtractionRequest(message: SocialMessage, roster: Extractio
     '输出一个 JSON 对象：{"acts": [...], "claims": [...]}。',
     "acts 每条：kind（必须是这些之一：" + EXTRACTABLE_KINDS.join("/") + "）、targets（行为指向的参与者 id 数组，没有则省略）、proposition（该行为主张/承诺/指控的具体内容，一句话，带主语）、confidence（0 到 1 的小数）。",
     "claims 是说话者对自己的断言，二选一：",
-    "- 阵营主张：断言某人属于哪个阵营。每条：aboutSelf（true=说自己，false=说别人）、targetName（说别人时填名册里的名字）、assertedTeam（只能是 \"wolf\" 或 \"good\"）、confidence。",
+    "- 阵营主张：断言某人属于哪个阵营。每条：aboutSelf（true=说自己，false=说别人）、targetName（说别人时填名册里的名字）、assertedTeam（只能是 \"wolf\"、\"good\"、\"evil\" 或 \"loyal\"）、confidence。",
     "- 行动主张：断言自己将采取的行为。每条：aboutSelf=true、assertedAction（场景词汇表里的行为名，如 \"cooperate\"；带数值时如 \"contribute-3\"）、confidence。",
     "规则：",
     "- acts 一条消息最多 3 条；寒暄、推进剧情、无明确社会行为时 acts 为空数组。",
@@ -121,7 +121,7 @@ function identityClaimDeclaration(
   const confidence = clamp01(record.confidence);
   if (confidence < EXTRACTION_CONFIDENCE_FLOOR) return undefined;
   const assertedTeam = record.assertedTeam;
-  if (assertedTeam === "wolf" || assertedTeam === "good") {
+  if (assertedTeam === "wolf" || assertedTeam === "good" || assertedTeam === "evil" || assertedTeam === "loyal") {
     let subjectId: string | undefined;
     if (record.aboutSelf === true) {
       subjectId = scope.senderId;
