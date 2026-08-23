@@ -116,10 +116,19 @@ async function main() {
   }
 }
 
-async function getJson(path) {
-  const response = await fetch(`${API}${path}`);
-  if (!response.ok) throw new Error(`GET ${path} -> ${response.status}`);
-  return response.json();
+async function getJson(path, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(`${API}${path}`);
+      if (!response.ok) throw new Error(`GET ${path} -> ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await sleep(2_000 * attempt);
+    }
+  }
+  throw lastError;
 }
 
 async function postJson(path, body, token) {

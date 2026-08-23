@@ -77,6 +77,20 @@ export class TrustGameWorld extends SocialWorldBase {
     this.addLog("第一轮开始：投资者先决定交出多少资源，受托者随后决定返还多少。", 1);
   }
 
+  /**
+   * Sidecar extraction hints (§19): stake/return statements ("我会投 8" /
+   * "我会返还 10") become `claimed-action` propositions reconciled
+   * against the sealed amounts at settlement.
+   */
+  extractionHints?(): string {
+    return [
+      "本局是信任博弈。行动主张判定：",
+      '- 当说话者断言自己将投入或返还的数额时输出 claims 条目：aboutSelf=true、assertedAction（格式 "invest-数字" 或 "return-数字"，如 "invest-8"、"return-10"）、confidence。',
+      '- 例：「我会投 8」→{aboutSelf:true, assertedAction:"invest-8"}；「我至少返还 10」→{aboutSelf:true, assertedAction:"return-10"}；「你应该多投点」→ 不算主张。',
+      '- 疑问、呼吁、要求他人表态都不算主张。'
+    ].join("\n");
+  }
+
   protected exportWorldState(): unknown {
     return {
       schemaVersion: TRUST_GAME_STATE_SCHEMA_VERSION,
@@ -711,6 +725,18 @@ export class TrustGameWorld extends SocialWorldBase {
       payload: { round: this.round, investorId, trusteeId, investment, multipliedAmount, returnedAmount, payoffs },
       kind: "past-action"
     });
+    for (const id of this.profiles.keys()) {
+      const actualAmount = id === investorId ? investment : returnedAmount;
+      const characterId = this.requireProfile(id).characterId;
+      for (const claim of this.extractedActionClaims(characterId)) {
+        this.recordClaimedActionOutcome({
+          propositionId: claim.propositionId,
+          actualValue: String(actualAmount),
+          matches: claim.object === `${id === investorId ? "invest" : "return"}-${actualAmount}`,
+          sourceEventId: publicResult.eventId
+        });
+      }
+    }
     for (const id of this.profiles.keys()) {
       this.pushEvent(id, { type: "investment-made", actorId: investorId, targetId: id, facts: { amount: investment, resultEventId: publicResult.eventId }, detail: `第 ${this.round} 轮投资 ${investment} 已结算。` });
       this.pushEvent(id, { type: "return-made", actorId: trusteeId, targetId: id, facts: { amount: returnedAmount, resultEventId: publicResult.eventId }, detail: `第 ${this.round} 轮返还 ${returnedAmount} 已结算。` });

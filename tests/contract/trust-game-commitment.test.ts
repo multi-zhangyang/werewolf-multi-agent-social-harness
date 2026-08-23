@@ -267,6 +267,27 @@ it("a return-ratio promise is violated when the actual return misses the percent
   assert.equal(lastBeat(world), "promise-broken");
 });
 
+it("an extracted invest claim reconciles against the sealed stake", async () => {
+  const world = makeWorld();
+  driveDiscussion(world);
+  const message = await world.sendMessage({ senderId: INVESTOR_R1, channel: "public", text: "我会投 8。" });
+  world.recordExtractedSocialActs(message.id, [{
+    kind: "assertion",
+    proposition: { kind: "future-action", subjectId: INVESTOR_R1, predicate: "claimed-action", object: "invest-8" }
+  }]);
+  const invest = world.activation()!;
+  await world.performDomainAction(invest.actorIds[0], "make_investment", { amount: 3, reason: "t" });
+  world.completeActivation(invest);
+  const back = world.activation()!;
+  await world.performDomainAction(back.actorIds[0], "return_from_trust", { amount: 0, reason: "t" });
+  world.completeActivation(back);
+  const projection = (world as unknown as { socialCausalityFor(actorId?: string, omniscient?: boolean): { evidence: Array<{ propositionId: string; supports: boolean; sourceType: string }> } }).socialCausalityFor(undefined, true);
+  assert.ok(
+    projection.evidence.some((entry) => entry.sourceType === "domain-result" && entry.supports === false),
+    "investing 3 contradicts the claimed invest-8"
+  );
+});
+
 it("return-ratio amounts are validated as percents, not absolute pools", async () => {
   const world = makeWorld();
   await assert.rejects(
