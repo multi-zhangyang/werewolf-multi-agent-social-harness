@@ -82,6 +82,19 @@ export class LiarsDiceWorld extends SocialWorldBase {
     this.expectedActorId = this.starterId;
     this.addLog("骰盅已摇。每个人只看得见自己的点数，看不见别人的。", 1);
   }
+  /**
+   * Sidecar extraction hints (§19): bid statements ("我这里至少 5 个 6") become
+   * `claimed-action` propositions reconciled when a challenge reveals the dice.
+   */
+  extractionHints?(): string {
+    return [
+      "本局是吹牛骰。行动主张判定：",
+      '- 当说话者断言自己的骰子能支撑某个叫价时输出 claims 条目：aboutSelf=true、assertedAction（格式 "bid-数量-面值"，如 "bid-5-6"）、confidence。',
+      '- 例：「我这里至少 5 个 6」→{aboutSelf:true, assertedAction:"bid-5-6"}；「你在吹牛」→ 不算主张。',
+      '- 疑问、挑战意图、要求他人加码都不算主张。'
+    ].join("\n");
+  }
+
 
   protected exportWorldState(): unknown {
     return {
@@ -518,6 +531,25 @@ export class LiarsDiceWorld extends SocialWorldBase {
         } : {})
       }
     });
+    // §28 主张对账: when a challenge reveals the dice, reconcile the
+    // bidder's extracted bid claims ("我这里至少 5 个 6") against the truth.
+    if (input.challenge) {
+      const challenged = input.challenge.challengedBid;
+      const actualCount = [...this.dice.values()].filter((die) => die === challenged.face).length;
+      const bidderCharacterId = this.requireProfile(challenged.actorId).characterId;
+      for (const claim of this.extractedActionClaims(bidderCharacterId)) {
+        const parsed = /^bid-(\d+)-(\d+)$/.exec(claim.object);
+        if (!parsed) continue;
+        const [claimedQuantity, claimedFace] = [Number(parsed[1]), Number(parsed[2])];
+        if (claimedFace !== challenged.face) continue;
+        this.recordClaimedActionOutcome({
+          propositionId: claim.propositionId,
+          actualValue: `${actualCount}×${challenged.face}`,
+          matches: actualCount >= claimedQuantity,
+          sourceEventId: publicResult.eventId
+        });
+      }
+    }
     this.pendingRoundReconciliation = {
       outcome: structuredClone(outcome),
       publicResultEventId: publicResult.eventId,

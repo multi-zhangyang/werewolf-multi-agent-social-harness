@@ -66,6 +66,19 @@ export class BeautyContestWorld extends SocialWorldBase {
     this.addLog("选美博弈开始：每人私下选择 0–100 的整数，最接近所有人平均值 2/3 的人获胜。", 1);
   }
 
+  /**
+   * Sidecar extraction hints (§19): number statements ("我会选 50") become
+   * `claimed-action` propositions reconciled against the sealed choice.
+   */
+  extractionHints?(): string {
+    return [
+      "本局是选美博弈。行动主张判定：",
+      '- 当说话者断言自己将选择的数字时输出 claims 条目：aboutSelf=true、assertedAction（格式 "number-数字"，如 "number-50"）、confidence。',
+      '- 例：「我会选 50」→{aboutSelf:true, assertedAction:"number-50"}；「大家都该选 0」→ 不算主张。',
+      '- 疑问、呼吁、要求他人表态都不算主张。'
+    ].join("\n");
+  }
+
   protected exportWorldState(): unknown {
     return {
       schemaVersion: BEAUTY_CONTEST_STATE_SCHEMA_VERSION,
@@ -331,6 +344,20 @@ export class BeautyContestWorld extends SocialWorldBase {
       object: { choices, average, target, winnerIds },
       payload: { round: this.round, choices, average, target, winnerIds }
     });
+    // §28 主张对账: reconcile extracted number claims against the
+    // actual sealed choice.
+    for (const id of ids) {
+      const actualNumber = choices[id];
+      const characterId = this.requireProfile(id).characterId;
+      for (const claim of this.extractedActionClaims(characterId)) {
+        this.recordClaimedActionOutcome({
+          propositionId: claim.propositionId,
+          actualValue: String(actualNumber),
+          matches: claim.object === `number-${actualNumber}`,
+          sourceEventId: publicResult.eventId
+        });
+      }
+    }
     for (const id of ids) {
       this.lastExperiences.set(
         id,

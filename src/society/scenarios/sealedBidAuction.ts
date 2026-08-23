@@ -346,6 +346,21 @@ export class SealedBidAuctionWorld extends SocialWorldBase {
       object: { bids, winnerId, price, payoffs },
       payload: { round: this.round, bids, winnerId: winnerId ?? null, price, payoffs }
     });
+    // §28 主张对账: reconcile extracted bid claims against the
+    // actual sealed bid.
+    for (const id of ids) {
+      const actualBid = bids[id];
+      const characterId = this.requireProfile(id).characterId;
+      for (const claim of this.extractedActionClaims(characterId)) {
+        this.recordClaimedActionOutcome({
+          propositionId: claim.propositionId,
+          actualValue: String(actualBid),
+          matches: claim.object === `bid-${actualBid}`,
+          sourceEventId: publicResult.eventId
+        });
+      }
+    }
+
     const winnerName = winnerId ? this.profiles.get(winnerId)?.displayName ?? winnerId : "nobody";
     const beat = winnerId && price > (values[winnerId] ?? 0) ? "adverse-outcome" as const : "win" as const;
     this.addLog(`第 ${this.round} 轮结算：${winnerName} 以 ${price} 点拍得，支付次高价。`, this.round, beat);
