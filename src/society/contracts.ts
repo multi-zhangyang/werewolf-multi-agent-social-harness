@@ -634,6 +634,21 @@ export interface Commitment {
         condition?: string;
       }
     | {
+        actionType: "centipede-move";
+        choice: "take" | "pass";
+        condition?: string;
+      }
+    | {
+        actionType: "hunt-choice";
+        choice: "stag" | "rabbit";
+        condition?: string;
+      }
+    | {
+        actionType: "chicken-choice";
+        choice: "swerve" | "straight";
+        condition?: string;
+      }
+    | {
         actionType: "offer-at-least";
         amount: number;
         condition?: string;

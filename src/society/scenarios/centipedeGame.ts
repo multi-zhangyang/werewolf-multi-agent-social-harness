@@ -5,6 +5,7 @@ import type {
   ActivationCompletion,
   AgentObservation,
   AgentProfile,
+  Commitment,
   PlayerActionSpec,
   ScenarioSummary,
   SocialMessage,
@@ -40,6 +41,7 @@ interface MoveRecord {
 export class CentipedeGameWorld extends SocialWorldBase {
   private readonly totalMoves: number;
   private readonly scores = new Map<string, number>();
+  private readonly commitments: Commitment[] = [];
   private readonly history: MoveRecord[] = [];
   private readonly lastExperiences = new Map<string, string>();
   private discussion: DiscussionDirector;
@@ -56,6 +58,19 @@ export class CentipedeGameWorld extends SocialWorldBase {
     this.addLog(`蜈蚣博弈开始：奖池从 4 点起，每传递一次翻倍。共有 ${this.totalMoves} 次机会。`, 1);
   }
 
+  /**
+   * Sidecar extraction hints (§19): move statements ("我会拿走"/"我会传递")
+   * become `claimed-action` propositions reconciled against the actual move.
+   */
+  extractionHints?(): string {
+    return [
+      "本局是蜈蚣博弈。行动主张判定：",
+      '- 当持球者断言自己将选择的行为时输出 claims 条目：aboutSelf=true、assertedAction（只能是 "take"=拿走 或 "pass"=传递）、confidence。',
+      '- 例：「我会拿走」→{aboutSelf:true, assertedAction:"take"}；「我保证继续传递」→{aboutSelf:true, assertedAction:"pass"}；「你应该传递」→ 不算主张。',
+      '- 疑问、劝告、要求对方表态都不算主张。'
+    ].join("\n");
+  }
+
   protected exportWorldState(): unknown {
     return {
       schemaVersion: CENTIPEDE_STATE_SCHEMA_VERSION,
@@ -63,6 +78,7 @@ export class CentipedeGameWorld extends SocialWorldBase {
       ended: this.ended,
       phase: this.phase,
       scores: this.mapEntries(this.scores),
+      commitments: structuredClone(this.commitments),
       pendingMoveReconciliation: this.pendingMoveReconciliation ? structuredClone(this.pendingMoveReconciliation) : null,
       discussion: this.discussion.exportState(),
       history: structuredClone(this.history),
@@ -74,7 +90,7 @@ export class CentipedeGameWorld extends SocialWorldBase {
     const s = state as Partial<{
       schemaVersion: number;
       move: number; ended: boolean; phase: string; scores: Array<[string, number]>;
-      pendingMoveReconciliation: PendingMoveReconciliation | null;
+      pendingMoveReconciliation: PendingMoveReconciliation | null; commitments: Commitment[];
       discussion: ReturnType<DiscussionDirector["exportState"]>;
       history: MoveRecord[]; lastExperiences: Array<[string, string]>;
     }> | undefined;
@@ -86,9 +102,11 @@ export class CentipedeGameWorld extends SocialWorldBase {
     this.ended = Boolean(s.ended);
     this.phase = (s.phase ?? "discussion") as Phase;
     this.fillMap(this.scores, s.scores);
+    this.commitments.length = 0;
+    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
     this.pendingMoveReconciliation = s.pendingMoveReconciliation ? structuredClone(s.pendingMoveReconciliation) : undefined;
     this.discussion = this.createDiscussion();
-    this.discussion.restoreState(s.discussion);
+    if (s.discussion) this.discussion.restoreState(s.discussion);
     this.history.length = 0;
     this.history.push(...structuredClone(s.history ?? []));
     this.fillMap(this.lastExperiences, s.lastExperiences);
@@ -103,6 +121,7 @@ export class CentipedeGameWorld extends SocialWorldBase {
       summary: this.summary(),
       details: {
         scores: Object.fromEntries(this.scores),
+        commitments: this.commitments,
         pot: this.pot(),
         moverId: this.moverId(),
         ended: this.ended,
@@ -128,6 +147,10 @@ export class CentipedeGameWorld extends SocialWorldBase {
         `Payoff if you take now: ${Math.floor(this.pot() * 0.7)} points; the other player gets ${Math.floor(this.pot() * 0.2)}.`,
         `If both players pass to the end, the pot splits evenly at ${Math.floor(this.pot() / 2)} each.`,
         ...socialReferenceContext(causality),
+        this.openCommitmentsFor(actorId).length
+          ? `Open commitments:\n${this.openCommitmentsFor(actorId).map((commitment) => `- [${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("\n")}`
+          : "Open commitments: none.",
+        `Settled commitments: ${this.settledCommitmentsFor(actorId).map((commitment) => `[${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("; ") || "none"}.`,
         `Moves so far: ${this.history.map((record) => `M${record.move} ${record.moverId} ${record.action}`).join("; ") || "none"}.`
       ].join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: true, score: this.scores.get(actorId) ?? 0 },
@@ -166,7 +189,33 @@ export class CentipedeGameWorld extends SocialWorldBase {
         return commit.result;
       }
     });
-    return [choose] as Tool<SocietyAgentContext>[];
+    const makeCommitment = tool({
+      name: "make_commitment",
+      description: "Propose a public typed promise to take or pass on your next move. It is recorded, but settles as kept or broken only if the other participant explicitly accepts it.",
+      parameters: z.object({
+        moveAction: z.enum(["take", "pass"]),
+        proposition: z.string().min(1).max(400),
+        condition: z.string().min(1).max(400).nullable().default(null)
+      }).strict(),
+      execute: async (input, runContext) => {
+        const context = scopedContext(runContext, actorId);
+        const commit = await this.performAction(actorId, "make_commitment", input);
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
+      }
+    });
+    const acceptCommitment = tool({
+      name: "accept_commitment",
+      description: "Explicitly accept one proposed commitment addressed to you. Acceptance makes it eligible for deterministic settlement against the sealed move.",
+      parameters: z.object({ commitmentId: z.string().min(1).max(200) }).strict(),
+      execute: async (input, runContext) => {
+        const context = scopedContext(runContext, actorId);
+        const commit = await this.performAction(actorId, "accept_commitment", input);
+        emitAction(context, commit.action, commit.detail);
+        return commit.result;
+      }
+    });
+    return [choose, makeCommitment, acceptCommitment] as Tool<SocietyAgentContext>[];
   }
 
   domainActionsFor(actorId: string): PlayerActionSpec[] {
@@ -187,6 +236,82 @@ export class CentipedeGameWorld extends SocialWorldBase {
 
   async performDomainAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
     this.requireProfile(actorId);
+    if (action === "make_commitment") {
+      if (this.phase !== "discussion") throw new Error("COMMITMENT_NOT_OPEN: Commitments are proposed during the negotiation.");
+      const value = recordPayload(payload);
+      const moveAction = value.moveAction;
+      if (moveAction !== "take" && moveAction !== "pass") throw new Error("COMMITMENT_MOVE_INVALID: Promise take or pass.");
+      const proposition = typeof value.proposition === "string" ? value.proposition.trim() : "";
+      if (!proposition) throw new Error("COMMITMENT_PROPOSITION_REQUIRED: State the promise explicitly.");
+      const ownCount = this.commitments.filter((entry) => entry.round === this.move && entry.promisorActorId === actorId).length;
+      if (ownCount >= 2) throw new Error("COMMITMENT_LIMIT_EXCEEDED: At most two proposals per participant per move.");
+      const commandId = `cmd-${randomUUID()}`;
+      const commitment: Commitment = {
+        commitmentId: `commit:cg:${this.move}:${actorId}:${ownCount + 1}`,
+        round: this.move,
+        promisorActorId: actorId,
+        promisorCharacterId: this.requireProfile(actorId).characterId,
+        audienceActorIds: [...this.profiles.keys()].filter((id) => id !== actorId),
+        proposition,
+        promisedAction: {
+          actionType: "centipede-move",
+          choice: moveAction,
+          ...(typeof value.condition === "string" && value.condition.trim() ? { condition: value.condition.trim() } : {})
+        },
+        state: "proposed",
+        acceptedByActorIds: [],
+        acceptedByCommandIds: [],
+        createdByCommandId: commandId,
+        createdAtTurn: this.move,
+        schemaVersion: 1
+      };
+      this.commitments.push(commitment);
+      this.recordSocialCommitment(commitment);
+      for (const id of this.profiles.keys()) {
+        this.pushEvent(id, {
+          type: "commitment-proposed",
+          actorId,
+          targetId: id,
+          facts: { commitmentId: commitment.commitmentId, promisedMove: moveAction },
+          detail: `${actorId === id ? "你" : this.profiles.get(actorId)?.displayName ?? actorId} 提议承诺：${proposition}。`
+        });
+      }
+      this.emitUpdate();
+      return { action, commandId, detail: proposition, result: { accepted: true, commitmentId: commitment.commitmentId } };
+    }
+    if (action === "accept_commitment") {
+      if (this.phase !== "discussion") throw new Error("COMMITMENT_ACCEPTANCE_NOT_OPEN: Accept commitments during the negotiation.");
+      const value = recordPayload(payload);
+      const commitmentId = typeof value.commitmentId === "string" ? value.commitmentId : "";
+      const commitment = this.commitments.find((entry) => entry.commitmentId === commitmentId && entry.round === this.move);
+      if (!commitment) throw new Error(`COMMITMENT_NOT_FOUND: '${commitmentId}'.`);
+      if (commitment.promisorActorId === actorId || !commitment.audienceActorIds.includes(actorId)) {
+        throw new Error("COMMITMENT_ACCEPTOR_INVALID: Only the other participant may accept this proposal.");
+      }
+      if (commitment.state !== "proposed" && commitment.state !== "accepted") {
+        throw new Error(`COMMITMENT_NOT_OPEN: '${commitmentId}' is already ${commitment.state}.`);
+      }
+      const acceptedByActorIds = commitment.acceptedByActorIds ?? (commitment.acceptedByActorIds = []);
+      const acceptedByCommandIds = commitment.acceptedByCommandIds ?? (commitment.acceptedByCommandIds = []);
+      if (acceptedByActorIds.includes(actorId)) throw new Error(`COMMITMENT_ALREADY_ACCEPTED: '${commitmentId}'.`);
+      const commandId = `cmd-${randomUUID()}`;
+      acceptedByActorIds.push(actorId);
+      acceptedByCommandIds.push(commandId);
+      commitment.acceptedAtTurn = this.move;
+      commitment.state = "accepted";
+      this.acceptSocialCommitment(commitment, actorId, commandId);
+      for (const id of this.profiles.keys()) {
+        this.pushEvent(id, {
+          type: "commitment-accepted",
+          actorId,
+          targetId: commitment.promisorActorId,
+          facts: { commitmentId },
+          detail: `${actorId === id ? "你" : this.profiles.get(actorId)?.displayName ?? actorId} 接受了承诺「${commitment.proposition}」。`
+        });
+      }
+      this.emitUpdate();
+      return { action, commandId, detail: commitmentId, result: { accepted: true, commitmentId, state: commitment.state } };
+    }
     if (action !== "centipede_move") throw new Error(`ACTION_NOT_AVAILABLE: '${action}' is not valid in this world.`);
     if (this.phase !== "move" || this.ended) throw new Error("MOVE_NOT_OPEN: Wait until it is your move.");
     if (this.moverId() !== actorId) throw new Error("NOT_YOUR_MOVE: The other player holds the current move.");
@@ -218,8 +343,9 @@ export class CentipedeGameWorld extends SocialWorldBase {
         object: { moverId: actorId, action: chosen, pot, payoffs, ended: true },
         payload: { move: this.move, moverId: actorId, action: chosen, pot, payoffs, ended: true }
       });
+      const beat = this.settleMoveCommitments(actorId, chosen, publicResult.eventId);
       this.pendingMoveReconciliation = { commandId, actorId, move: this.move, action: chosen, pot, payoffs, ended: true, publicResultEventId: publicResult.eventId };
-      this.addLog(text, this.move);
+      this.addLog(text, this.move, beat);
       this.finish();
       return { action, commandId, detail: reason ? `${chosen}; ${reason}` : chosen, result: { accepted: true, action: chosen, payoffs } };
     }
@@ -232,8 +358,9 @@ export class CentipedeGameWorld extends SocialWorldBase {
       object: { moverId: actorId, action: chosen, pot, nextPot: pot * 2, ended: false },
       payload: { move: this.move, moverId: actorId, action: chosen, pot, nextPot: pot * 2, ended: false }
     });
+    const beat = this.settleMoveCommitments(actorId, chosen, publicResult.eventId);
     this.pendingMoveReconciliation = { commandId, actorId, move: this.move, action: chosen, pot, payoffs: {}, ended: false, publicResultEventId: publicResult.eventId };
-    this.addLog(record.text, this.move);
+    this.addLog(record.text, this.move, beat);
     this.move += 1;
     this.phase = "discussion";
     this.discussion = this.createDiscussion();
@@ -318,6 +445,68 @@ export class CentipedeGameWorld extends SocialWorldBase {
     return this.phase === "discussion" ? this.discussion.waveNumber : undefined;
   }
 
+  private settleMoveCommitments(moverId: string, actualAction: Move, sourceEventId: string): "promise-kept" | "promise-broken" | undefined {
+    // §28 主张对账: reconcile extracted move claims ("我会拿走") against the
+    // actual sealed move.
+    const moverCharacterId = this.requireProfile(moverId).characterId;
+    for (const claim of this.extractedActionClaims(moverCharacterId)) {
+      this.recordClaimedActionOutcome({
+        propositionId: claim.propositionId,
+        actualValue: actualAction,
+        matches: claim.object === actualAction,
+        sourceEventId
+      });
+    }
+    const accepted = this.commitments.filter((entry) => entry.round === this.move && entry.state === "accepted");
+    let anyViolated = false;
+    let anyFulfilled = false;
+    for (const commitment of accepted) {
+      if (commitment.promisedAction.actionType !== "centipede-move") continue;
+      if (commitment.promisorActorId !== moverId) continue;
+      const promised = commitment.promisedAction.choice;
+      if (promised !== "take" && promised !== "pass") continue;
+      const fulfilled = promised === actualAction;
+      commitment.state = fulfilled ? "fulfilled" : "violated";
+      commitment.settledAtTurn = this.move;
+      commitment.settledByCommandId = commitment.createdByCommandId;
+      this.settleSocialCommitment(commitment);
+      if (fulfilled) anyFulfilled = true; else anyViolated = true;
+      for (const id of this.profiles.keys()) {
+        this.pushEvent(id, {
+          type: fulfilled ? "commitment-fulfilled" : "commitment-violated",
+          actorId: commitment.promisorActorId,
+          targetId: id,
+          facts: { commitmentId: commitment.commitmentId, promisedMove: promised, actualMove: actualAction },
+          detail: fulfilled
+            ? `承诺兑现：${this.profiles.get(commitment.promisorActorId)?.displayName ?? commitment.promisorActorId} 承诺${promised}，实际也${actualAction}。`
+            : `承诺违约：${this.profiles.get(commitment.promisorActorId)?.displayName ?? commitment.promisorActorId} 承诺${promised}，实际${actualAction}。`
+        });
+      }
+    }
+    for (const commitment of this.commitments.filter((entry) => entry.round === this.move && entry.state === "proposed")) {
+      commitment.state = "void";
+      commitment.settledAtTurn = this.move;
+      this.settleSocialCommitment(commitment);
+    }
+    return anyViolated ? "promise-broken" as const : anyFulfilled ? "promise-kept" as const : undefined;
+  }
+
+  private openCommitmentsThisMove(actorId: string): Commitment[] {
+    return this.commitments.filter((entry) =>
+      entry.round === this.move &&
+      (entry.state === "proposed" || entry.state === "accepted") &&
+      (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+    );
+  }
+
+  private settledCommitmentsFor(actorId: string): Commitment[] {
+    return this.commitments.filter((entry) =>
+      entry.round < this.move &&
+      entry.state !== "proposed" && entry.state !== "accepted" &&
+      (entry.promisorActorId === actorId || entry.audienceActorIds.includes(actorId))
+    );
+  }
+
   private reconcilePendingMove(): void {
     const pending = this.pendingMoveReconciliation;
     if (!pending) return;
@@ -400,3 +589,12 @@ interface PendingMoveReconciliation {
 
 const CENTIPEDE_STATE_SCHEMA_VERSION = 3;
 const CENTIPEDE_OUTCOME_KEYS = ["game-ends-this-move", "pot-passes", "actor-payoff-at-least-half-pot", "both-receive-positive"] as const;
+
+
+function normalizeCommitment(value: Commitment): Commitment {
+  return {
+    ...value,
+    acceptedByActorIds: [...(value.acceptedByActorIds ?? [])],
+    acceptedByCommandIds: [...(value.acceptedByCommandIds ?? [])]
+  };
+}
