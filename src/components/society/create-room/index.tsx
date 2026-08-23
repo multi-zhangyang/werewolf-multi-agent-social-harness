@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { apiFetch } from "@/lib/api";
-import { History, Loader2, Play, Shuffle, Trash2 } from "lucide-react";
+import { Loader2, Play, Trash2 } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,21 +20,13 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { cn } from "@/lib/utils";
-import { ScenarioIcon } from "./shared";
-import type { CharacterOption, CreateRoomInput, ModelOption } from "./types";
-
-/** How models are assigned to seats (§ 建房模型分配). */
-type ModelAssignMode = "unified" | "per-seat" | "random";
-
-/** Lightweight create-form preferences remembered across visits. */
-interface ModelAssignPrefs {
-  mode?: ModelAssignMode;
-  unifiedProfileId?: string;
-  randomPoolIds?: string[];
-}
-
-const MODEL_PREFS_KEY = "society:model-assign-prefs";
+import { ScenarioIcon } from "../shared";
+import type { CharacterOption, CreateRoomInput, ModelOption } from "../types";
+import { ModelAssignSection } from "./model-assign-section";
+import { ModeButton } from "./model-assign-section";
+import { RosterSection } from "./roster-section";
+import { SeasonModeSection } from "./season-mode-section";
+import { MODEL_PREFS_KEY, type ModelAssignMode, type ModelAssignPrefs, type RosterPreviewRow, type RosterTemplateOption } from "./types";
 
 interface CreateRoomProps {
   open: boolean;
@@ -44,22 +36,6 @@ interface CreateRoomProps {
   seasonCount?: number;
   onOpenChange: (open: boolean) => void;
   onCreated: (input: CreateRoomInput) => Promise<{ roomId: string }>;
-}
-
-/** A saved create-room configuration (§6.4 阵容模板). */
-interface RosterTemplateOption {
-  id: string;
-  name: string;
-  scenarioId: string;
-  models: string[];
-  modelProfileIds?: string[];
-  agentModelOverrides?: Record<string, string>;
-  agentTuning?: Record<string, { temperature?: number; reasoningEffort?: "low" | "medium" | "high" | "xhigh" }>;
-  players?: number;
-  characterIds?: string[];
-  rounds?: number;
-  reasoningEffort?: "low" | "medium" | "high" | "xhigh";
-  season?: "season" | "one-shot";
 }
 
 export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
@@ -343,6 +319,24 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     }
   };
 
+  /** The seat table shown under 模型分配 — what you see is what is submitted. */
+  const previewRows: RosterPreviewRow[] = Array.from({ length: players }, (_, index) => {
+    const option = profileById.get(rosterProfileIds[index] ?? "");
+    const character = seatCharacterFor(index);
+    return {
+      index,
+      characterLabel: mode === "human" && index === 0
+        ? (playerName.trim() || "你（人类玩家）")
+        : character?.displayName ?? `第 ${index + 1} 位`,
+      modelLabel: mode === "human" && index === 0 ? "真人玩家" : option?.name ?? "—"
+    };
+  });
+
+  const rosterModelFor = (index: number): { name?: string; contextLabel?: string; picked: boolean } => {
+    const option = profileById.get(rosterProfileIds[index] ?? "");
+    return { name: option?.name, contextLabel: option?.contextLabel, picked: Boolean(seatPicks[String(index)]) };
+  };
+
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next && !submitting) onOpenChange(false); }}>
       <DialogContent className="max-w-xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl" showCloseButton={!submitting}>
@@ -373,117 +367,37 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
             </div>
 
             <div className="space-y-6 p-6">
-              <section>
-                <div className="mb-2.5 flex items-center justify-between">
-                  <p className="text-[13px] font-medium text-foreground/80">模型分配</p>
-                  <span className="nums font-mono text-xs text-muted-foreground/80">{eligibleModels.length} 个可用档案</span>
-                </div>
-                {eligibleModels.length ? (
-                  <>
-                    <div className="mb-3 grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted p-1">
-                      <ModeButton active={assignMode === "unified"} onClick={() => setAssignMode("unified")}>统一模型</ModeButton>
-                      <ModeButton active={assignMode === "per-seat"} onClick={() => setAssignMode("per-seat")}>逐席配置</ModeButton>
-                      <ModeButton active={assignMode === "random"} onClick={() => setAssignMode("random")}>随机混合</ModeButton>
-                    </div>
-
-                    {assignMode === "unified" ? (
-                      <div data-model>
-                        <Select value={unifiedId} onValueChange={(value) => setUnifiedProfileId(value)}>
-                          <SelectTrigger className="h-9 w-full rounded-lg border-border bg-card text-foreground/90">
-                            <SelectValue placeholder="选择模型" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectGroup>
-                              {eligibleModels.map((model) => (
-                                <SelectItem key={model.profileId} value={model.profileId!}>
-                                  {model.name}{model.contextLabel ? ` · ${model.contextLabel}` : ""}
-                                </SelectItem>
-                              ))}
-                            </SelectGroup>
-                          </SelectContent>
-                        </Select>
-                        <p className="mt-1.5 text-[11px] leading-4 text-muted-foreground/70">全部 {players} 个 AI 席位使用同一模型。</p>
-                      </div>
-                    ) : null}
-
-                    {assignMode === "per-seat" ? (
-                      <p className="text-xs leading-5 text-muted-foreground">在下方参与者列表中为每个席位单独挑选模型；未单独挑选的席位使用统一模型（当前 {profileById.get(unifiedId)?.name ?? "—"}）。可在下方预览改回。</p>
-                    ) : null}
-
-                    {assignMode === "random" ? (
-                      <div data-model>
-                        <p className="mb-1.5 text-xs text-muted-foreground">勾选参与随机的模型池（至少一个），按席位平衡洗牌；每个模型的出场次数最多相差一。</p>
-                        <div className="flex flex-wrap gap-1.5">
-                          {eligibleModels.map((model) => {
-                            const active = poolIds.includes(model.profileId!);
-                            return (
-                              <button
-                                key={model.profileId}
-                                onClick={() => setRandomPoolIds((current) => {
-                                  const known = current.filter((id) => profileById.has(id));
-                                  const base = known.length ? known : eligibleModels.map((entry) => entry.profileId as string);
-                                  return base.includes(model.profileId!) ? base.filter((id) => id !== model.profileId!) : [...base, model.profileId!];
-                                })}
-                                className={cn(
-                                  "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors",
-                                  active ? "border-foreground/60 bg-muted text-foreground" : "border-border bg-card text-muted-foreground hover:border-foreground/30"
-                                )}
-                              >
-                                <span className={cn("size-1.5 rounded-full", active ? "bg-emerald-400" : "bg-border")} />
-                                <span className="max-w-52 truncate font-mono">{model.name}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                        <div className="mt-2.5 flex items-center gap-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-8 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
-                            disabled={!poolIds.length}
-                            onClick={reshuffleRandom}
-                          >
-                            <Shuffle className="size-3.5" />
-                            重新随机
-                          </Button>
-                          <span className="text-[11px] text-muted-foreground/70">提交的就是下方预览的分配，不做服务端暗箱随机。</span>
-                        </div>
-                      </div>
-                    ) : null}
-
-                    <div className="mt-3 rounded-lg border border-border bg-muted/60 px-3 py-2.5" data-roster-preview>
-                      <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">最终阵容预览</p>
-                      <div className="space-y-1">
-                        {Array.from({ length: players }).map((_, index) => {
-                          const option = profileById.get(rosterProfileIds[index] ?? "");
-                          const character = seatCharacterFor(index);
-                          return (
-                            <div key={index} className="flex items-center justify-between gap-2 text-[11px]">
-                              <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
-                                <span className="flex size-4 shrink-0 items-center justify-center rounded bg-card font-mono text-[9px] ring-1 ring-border">
-                                  {index + 1}
-                                </span>
-                                <span className="truncate">
-                                  {mode === "human" && index === 0 ? (playerName.trim() || "你（人类玩家）") : character?.displayName ?? `第 ${index + 1} 位`}
-                                </span>
-                              </span>
-                              <span className="shrink-0 font-mono text-muted-foreground/90">
-                                {mode === "human" && index === 0 ? "真人玩家" : option?.name ?? "—"}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </>
-                ) : (
+              {eligibleModels.length ? (
+                <ModelAssignSection
+                  assignMode={assignMode}
+                  onAssignModeChange={setAssignMode}
+                  eligibleModels={eligibleModels}
+                  unifiedId={unifiedId}
+                  onUnifiedIdChange={setUnifiedProfileId}
+                  unifiedName={profileById.get(unifiedId)?.name ?? "—"}
+                  players={players}
+                  poolIds={poolIds}
+                  onTogglePoolModel={(profileId) => setRandomPoolIds((current) => {
+                    const known = current.filter((id) => profileById.has(id));
+                    const base = known.length ? known : eligibleModels.map((entry) => entry.profileId as string);
+                    return base.includes(profileId) ? base.filter((id) => id !== profileId) : [...base, profileId];
+                  })}
+                  onReshuffle={reshuffleRandom}
+                  previewRows={previewRows}
+                />
+              ) : (
+                <section>
+                  <div className="mb-2.5 flex items-center justify-between">
+                    <p className="text-[13px] font-medium text-foreground/80">模型分配</p>
+                    <span className="nums font-mono text-xs text-muted-foreground/80">0 个可用档案</span>
+                  </div>
                   <div className="rounded-lg border border-dashed border-border p-3.5">
                     <p className="text-xs leading-5 text-muted-foreground">
                       还没有已注册的模型档案。请先打开右上角「设置」，在模型配置中心添加模型（支持从提供商一键拉取列表），再回来创建房间。
                     </p>
                   </div>
-                )}
-              </section>
+                </section>
+              )}
 
               {scenario.playerRange ? (
                 <section>
@@ -558,144 +472,33 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
               </section>
 
               {eligibleModels.length ? (
-                <section>
-                  <div className="mb-2.5 flex items-center justify-between">
-                    <p className="text-[13px] font-medium text-foreground/80">参与者阵容</p>
-                    <span className="text-[11px] text-muted-foreground/70">{assignMode === "per-seat" ? "逐席模式：每行可单独选模型" : "人物可选；模型按上方分配"}</span>
-                  </div>
-                  {characters.length ? (
-                    <p className="mb-2 text-xs leading-5 text-muted-foreground/80">
-                      为每个席位挑选人物（内置或自建）；{assignMode === "per-seat" ? "同时在每行右侧指定该席位的模型。" : "模型分配见上方「模型分配」与最终阵容预览。"}
-                    </p>
-                  ) : null}
-                  <div className="rounded-lg border border-border bg-muted/60 p-3" data-model>
-                    <div className="space-y-1.5">
-                      {Array.from({ length: players }).map((_, index) => {
-                        const isHuman = mode === "human" && index === 0;
-                        const option = profileById.get(rosterProfileIds[index] ?? "");
-                        const picked = seatPicks[String(index)];
-                        return (
-                          <div key={index} className="rounded-md px-1 py-0.5">
-                            <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs">
-                              <span className="flex items-center gap-2 text-muted-foreground">
-                                <span className="flex size-5 items-center justify-center rounded bg-card font-mono text-[9px] text-muted-foreground/80 ring-1 ring-border">
-                                  {String(index + 1).padStart(2, "0")}
-                                </span>
-                                {isHuman ? (
-                                  <span className="flex items-center gap-1.5">
-                                    {playerName.trim() || "你"}
-                                    <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1 text-[9px] text-amber-300">人类玩家</span>
-                                  </span>
-                                ) : characters.length ? (
-                                  <Select
-                                    value={seatCharacters[String(index)] ?? "__default"}
-                                    onValueChange={(value) => {
-                                      setSeatCharacters((current) => {
-                                        const next = { ...current };
-                                        if (value === "__default") delete next[String(index)];
-                                        else next[String(index)] = value;
-                                        return next;
-                                      });
-                                    }}
-                                  >
-                                    <SelectTrigger aria-label={`第 ${index + 1} 位参与者的人物`} className="h-7 w-44 justify-start rounded-md border-border bg-card text-[11px] text-foreground/80">
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectGroup>
-                                        <SelectItem value="__default">按顺序内置人物</SelectItem>
-                                        {characters.map((character) => (
-                                          <SelectItem key={character.id} value={character.id}>
-                                            {character.displayName}{character.builtIn ? "" : " · 自建"}
-                                          </SelectItem>
-                                        ))}
-                                      </SelectGroup>
-                                    </SelectContent>
-                                  </Select>
-                                ) : (
-                                  <span>第 {index + 1} 位参与者</span>
-                                )}
-                              </span>
-                              {isHuman ? (
-                                <span className="font-mono text-[11px] text-muted-foreground/60">本人操控</span>
-                              ) : assignMode === "per-seat" ? (
-                                <Select
-                                  value={picked ?? unifiedId}
-                                  onValueChange={(value) => {
-                                    setSeatPicks((current) => {
-                                      const next = { ...current };
-                                      if (value === unifiedId) delete next[String(index)];
-                                      else next[String(index)] = value;
-                                      return next;
-                                    });
-                                  }}
-                                >
-                                  <SelectTrigger aria-label={`第 ${index + 1} 席位的模型`} className="h-7 w-56 justify-end rounded-md border-border bg-card font-mono text-[11px] text-muted-foreground">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    <SelectGroup>
-                                      {eligibleModels.map((model) => (
-                                        <SelectItem key={model.profileId} value={model.profileId!}>
-                                          {model.name}
-                                        </SelectItem>
-                                      ))}
-                                    </SelectGroup>
-                                  </SelectContent>
-                                </Select>
-                              ) : (
-                                <span className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-                                  {picked ? <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1 text-[9px] text-amber-300">指定</span> : null}
-                                  {option?.contextLabel ? (
-                                    <span className="rounded border border-border bg-card px-1 text-[9px] text-muted-foreground/80">{option.contextLabel}</span>
-                                  ) : null}
-                                  {option?.name ?? "—"}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {assignMode === "per-seat" ? (
-                      <p className="mt-2 border-t border-border/60 pt-2 text-[11px] leading-4 text-muted-foreground/80">
-                        每个参与者仍是一个独立 Agent：这里只决定每个席位的模型档案；人格、记忆与关系不变。想恢复某席位的统一模型，把它重新选成与上方一致即可。
-                      </p>
-                    ) : null}
-                  </div>
-                </section>
+                <RosterSection
+                  players={players}
+                  mode={mode}
+                  playerName={playerName}
+                  characters={characters}
+                  seatCharacters={seatCharacters}
+                  onSeatCharacterChange={(seat, characterId) => setSeatCharacters((current) => {
+                    const next = { ...current };
+                    if (characterId) next[String(seat)] = characterId;
+                    else delete next[String(seat)];
+                    return next;
+                  })}
+                  assignMode={assignMode}
+                  seatPicks={seatPicks}
+                  onSeatPicksChange={(seat, profileId) => setSeatPicks((current) => {
+                    const next = { ...current };
+                    if (profileId) next[String(seat)] = profileId;
+                    else delete next[String(seat)];
+                    return next;
+                  })}
+                  unifiedId={unifiedId}
+                  eligibleModels={eligibleModels}
+                  rosterModelFor={rosterModelFor}
+                />
               ) : null}
 
-              <section>
-                <p className="mb-2.5 text-[13px] font-medium text-foreground/80">记忆模式</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <SeasonModeCard
-                    active={seasonMode === "season"}
-                    onClick={() => setSeasonMode("season")}
-                    title="社会季模式"
-                    description="角色带着过往对局的记忆、关系与恩怨入场，一局结束后继续积累。像一群越玩越熟的老友。"
-                    hint={seasonCount > 0 ? `${seasonCount} 位角色已有历史` : "从零开始积累"}
-                  />
-                  <SeasonModeCard
-                    active={seasonMode === "one-shot"}
-                    onClick={() => setSeasonMode("one-shot")}
-                    title="单局模式"
-                    description="本局完全隔离，不读取任何历史，结束后也不留下任何记忆。适合一局定胜负、零干扰对决。"
-                    hint="无历史、无残留"
-                  />
-                </div>
-                {seasonMode === "season" && seasonCount > 0 ? (
-                  <p className="mt-2 flex items-start gap-1.5 text-xs leading-5 text-muted-foreground">
-                    <History className="mt-0.5 size-3.5 shrink-0" />
-                    社会季进行中：{seasonCount} 位角色会带着历史入场。想让他们互不相识，请先在首页「重置社会季」，或改用单局模式。
-                  </p>
-                ) : null}
-                {seasonMode === "one-shot" ? (
-                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                    不读取、也不写入社会季：身份随机、记忆归零，连角色关系都从陌生人开始。
-                  </p>
-                ) : null}
-              </section>
+              <SeasonModeSection seasonMode={seasonMode} onSeasonModeChange={setSeasonMode} seasonCount={seasonCount} />
 
               {mode === "human" ? (
                 <section>
@@ -788,47 +591,5 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
         ) : null}
       </DialogContent>
     </Dialog>
-  );
-}
-
-function ModeButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }): ReactNode {
-  return (
-    <button
-      onClick={onClick}
-      aria-pressed={active}
-      className={cn(
-        "h-8 rounded-md text-[13px] font-medium transition-colors",
-        active ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground/80"
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function SeasonModeCard({ active, onClick, title, description, hint }: {
-  active: boolean;
-  onClick: () => void;
-  title: string;
-  description: string;
-  hint?: string;
-}): ReactNode {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "flex flex-col rounded-lg border p-3.5 text-left transition-colors",
-        active ? "border-emerald-400/50 bg-emerald-400/10" : "border-border bg-card hover:border-border"
-      )}
-    >
-      <span className={cn("flex items-center gap-2 text-[13px] font-semibold", active ? "text-emerald-300" : "text-foreground/90")}>
-        <span className={cn("flex size-3.5 items-center justify-center rounded-full border", active ? "border-emerald-400 bg-emerald-400" : "border-border")}>
-          {active ? <span className="size-1.5 rounded-full bg-background" /> : null}
-        </span>
-        {title}
-        {hint ? <span className={cn("ml-auto rounded-full border px-2 py-px text-[10px] font-normal", active ? "border-emerald-400/40 text-emerald-300/90" : "border-border text-muted-foreground")}>{hint}</span> : null}
-      </span>
-      <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">{description}</span>
-    </button>
   );
 }
