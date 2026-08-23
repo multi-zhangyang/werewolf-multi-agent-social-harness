@@ -120,7 +120,9 @@ describe("room event envelopes", () => {
     try {
       void room.start();
       await waitFor(() => room.currentStatus() === "finished", 8_000);
-      const events = (room as unknown as { events: Array<{ id: string; seq: number }> }).events;
+      // The retained window (SSE backlog) via its public reader: seq strictly
+      // increases and ids stay unique so clients can dedupe and re-apply.
+      const events = room.eventsSince(0);
       expect(events.length).toBeGreaterThan(10);
       for (let index = 1; index < events.length; index += 1) {
         expect(events[index].seq).toBeGreaterThan(events[index - 1].seq);

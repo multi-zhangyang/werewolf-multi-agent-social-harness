@@ -10,15 +10,17 @@ import type { AgentModelBinding } from "../society/models";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
+/** Shared server context; created once at module scope so post-listen boot
+ *  work (recovery, retention) runs against the same stores as the routes. */
+const context = createServerContext();
+
 export function createServerApp(): express.Express {
   const app = express();
-  const context = createServerContext();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "512kb" }));
   registerCharacterRoutes(app, context);
   registerTemplateRoutes(app, context);
   registerRoomRoutes(app, context);
-  recoverInterruptedRooms(context);
   app.use(express.static(path.resolve(directory, "../../dist")));
   app.get("*path", (_request, response) => {
     response.sendFile(path.resolve(directory, "../../dist/index.html"));
@@ -54,6 +56,12 @@ if (isMainModule()) {
   });
   app.listen(port, host, () => {
     console.log(`Society listening on http://${host}:${port}`);
+    // Restart recovery runs only after the listener is up: parsing archived
+    // checkpoints must never delay serving, and recovered rooms come back
+    // paused anyway (they run when an observer resumes them).
+    recoverInterruptedRooms(context);
+    // Retention (§31): reap terminal archived rooms beyond the cap.
+    context.archive.reap();
   });
 }
 

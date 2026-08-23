@@ -36,9 +36,26 @@ import { reasoningFallbackFetch, type ReasoningFallbackNotice } from "./models/r
 import { buildExtractionRequest, parseExtractedDeclarations, type ExtractionRosterEntry } from "./social/message-extractor";
 import { extractText } from "./context-manager";
 import { RoomArchiveError, RoomArchiveStore, type RoomCheckpoint } from "./persistence";
+import { EnvelopeWindow, type EnvelopeWindowBudget } from "./envelope-window";
 import { CinematicDirector } from "./spectator/cinematic-director";
 import { ActivationLimiter } from "./activation-limiter";
 import type { WorldSerializedState } from "./world";
+
+/**
+ * Rolling event windows (§31): both buffers are capped by count AND bytes —
+ * `world.*-frame` envelopes embed full snapshots, so a count-only cap let a
+ * single room's checkpoint grow past 300MB. Budgets are env-overridable.
+ */
+const EVENT_WINDOW_BUDGET: EnvelopeWindowBudget = {
+  maxCount: 500,
+  maxBytes: positiveIntegerFromEnv("SOCIETY_EVENT_BUDGET_BYTES", 4 * 1024 * 1024),
+  minKeep: 20
+};
+const REPLAY_WINDOW_BUDGET: EnvelopeWindowBudget = {
+  maxCount: 5_000,
+  maxBytes: positiveIntegerFromEnv("SOCIETY_REPLAY_BUDGET_BYTES", 8 * 1024 * 1024),
+  minKeep: 100
+};
 
 export interface SocietyRoomCreateOptions {
   id?: string;
@@ -206,8 +223,8 @@ export class SocietyRoom {
   private readonly world: SocialWorld;
   private readonly cards = new Map<string, RuntimeCard>();
   private readonly agents = new Map<string, AutonomousSocietyAgent>();
-  private readonly events: SocietyRoomEventEnvelope[] = [];
-  private readonly replayEvents: SocietyRoomEventEnvelope[] = [];
+  private readonly events = new EnvelopeWindow<SocietyRoomEventEnvelope>(EVENT_WINDOW_BUDGET, envelopeByteSize);
+  private readonly replayEvents = new EnvelopeWindow<SocietyRoomEventEnvelope>(REPLAY_WINDOW_BUDGET, envelopeByteSize);
   private readonly listeners = new Set<RoomListener>();
   private abortController = new AbortController();
   private readonly provider?: OpenAIProviderType;
@@ -319,11 +336,11 @@ export class SocietyRoom {
       this.status = "paused";
       for (const actorId of options.restore.pausedAgents ?? []) this.pausedAgents.add(actorId);
       if (options.restore.events?.length) {
-        this.events.push(...options.restore.events.map((envelope) => structuredClone(envelope)));
+        this.events.pushAll(options.restore.events.map((envelope) => structuredClone(envelope)));
       }
       const replaySource = options.restore.replayEvents ?? options.restore.events?.filter((entry) => isReplayEvent(entry.event));
       if (replaySource?.length) {
-        this.replayEvents.push(...dedupeEnvelopes(replaySource).map((envelope) => structuredClone(envelope)));
+        this.replayEvents.pushAll(dedupeEnvelopes(replaySource).map((envelope) => structuredClone(envelope)));
       }
     }
     this.onWorldUpdate(this.world.snapshotFor());
@@ -543,7 +560,7 @@ export class SocietyRoom {
   }
 
   eventsSince(seq = 0): SocietyRoomEventEnvelope[] {
-    return this.events.filter((entry) => entry.seq > seq).map((entry) => structuredClone(entry));
+    return this.events.toArray().filter((entry) => entry.seq > seq).map((entry) => structuredClone(entry));
   }
 
   subscribe(listener: RoomListener): () => void {
@@ -633,6 +650,15 @@ export class SocietyRoom {
     this.director.dispose();
     this.saveCheckpoint(false);
     this.emit({ type: "room.status", roomId: this.id, status: this.status, detail: reason, at: now() });
+  }
+
+  /**
+   * Retention pass over the shared archive directory (§31): terminal rooms
+   * beyond the archive cap are deleted, oldest first. Called at natural
+   * finish and on removal; recovery candidates are never touched.
+   */
+  reapArchive(): Array<{ roomId: string; reason: "retention-cap" }> {
+    return this.archive.reap();
   }
 
   /**
@@ -811,6 +837,7 @@ export class SocietyRoom {
           this.status = "finished";
           this.saveSeasonDossiers();
           this.saveCheckpoint();
+          this.reapArchive();
           this.director.dispose();
           this.emit({ type: "room.status", roomId: this.id, status: "finished", at: now() });
         }
@@ -1403,13 +1430,11 @@ export class SocietyRoom {
 
   private emit(event: AgentRuntimeEvent, checkpoint = true): void {
     if (event.type === "runtime.notice") this.world.recordRuntimeNotice(event);
-    const envelope: SocietyRoomEventEnvelope = { id: randomUUID(), seq: (this.events.at(-1)?.seq ?? 0) + 1, event };
+    const envelope: SocietyRoomEventEnvelope = { id: randomUUID(), seq: (this.events.last()?.seq ?? 0) + 1, event };
     this.events.push(envelope);
     if (isReplayEvent(event)) {
       this.replayEvents.push(structuredClone(envelope));
-      if (this.replayEvents.length > 5_000) this.replayEvents.splice(0, this.replayEvents.length - 5_000);
     }
-    if (this.events.length > 500) this.events.splice(0, this.events.length - 500);
     this.updatedAt = "at" in event && typeof event.at === "string" ? event.at : now();
     for (const listener of this.listeners) listener(structuredClone(envelope));
     // High-priority cinematic cues become endgame highlights (derived facts).
@@ -1457,10 +1482,10 @@ export class SocietyRoom {
       status: this.status,
       snapshot: this.snapshotFor(),
       envelopes: this.events
+        .toArray()
         .filter((entry) => entry.event.type !== "agent.reasoning-content")
-        .slice(-500)
         .map((entry) => structuredClone(entry)),
-      replayEnvelopes: this.replayEvents.map((entry) => structuredClone(entry)),
+      replayEnvelopes: this.replayEvents.toArray().map((entry) => structuredClone(entry)),
       agentMinds: Object.fromEntries([...this.agents].map(([actorId, runtime]) => [actorId, structuredClone(runtime.mind)])),
       sessionFiles,
       profiles: [...this.cards.values()].map((card) => structuredClone(card.profile)),
@@ -1573,6 +1598,7 @@ export class SocietyRoomRegistry {
     const room = this.rooms.get(roomId);
     if (!room) return undefined;
     room.dispose();
+    room.reapArchive();
     this.rooms.delete(roomId);
     return room;
   }
@@ -1624,6 +1650,11 @@ function dedupeEnvelopes(envelopes: SocietyRoomEventEnvelope[]): SocietyRoomEven
   const byId = new Map<string, SocietyRoomEventEnvelope>();
   for (const envelope of envelopes) byId.set(envelope.id, envelope);
   return [...byId.values()];
+}
+
+/** Serialized size of an envelope, for the byte-budgeted event windows. */
+function envelopeByteSize(envelope: SocietyRoomEventEnvelope): number {
+  return JSON.stringify(envelope).length;
 }
 
 /** Resolve a provider profile's apiKeyRef into the actual secret from env. */

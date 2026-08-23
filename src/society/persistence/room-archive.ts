@@ -9,7 +9,7 @@
  * secrets ever reach the archive: it only holds what the SSE stream already
  * exposes to an observer.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentMindState, AgentProfile, ScenarioId } from "../contracts";
 import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "../room";
@@ -50,6 +50,10 @@ export interface ArchivedRoomSummary {
   messages: number;
   logEntries: number;
   participants: Array<{ id: string; displayName: string; model: string }>;
+  /** Recovery pre-filters, so boot never parses a checkpoint just to skip it. */
+  mode?: string;
+  recoverable?: boolean;
+  profileCount?: number;
 }
 
 export function defaultRoomArchiveDir(cwd: string = process.cwd()): string {
@@ -151,7 +155,10 @@ export class RoomArchiveStore {
         id: participant.profile.id,
         displayName: participant.profile.displayName,
         model: participant.profile.model
-      }))
+      })),
+      mode: checkpoint.snapshot.mode,
+      recoverable: checkpoint.recoverable,
+      profileCount: checkpoint.snapshot.participants.length
     };
   }
 
@@ -159,11 +166,23 @@ export class RoomArchiveStore {
    * Checkpoints whose rooms were interrupted (status running/paused, not
    * disposed, with enough state to rebuild). These are candidates for
    * restart recovery at boot.
+   *
+   * Boot must never parse every archived checkpoint: summaries answer
+   * "is this a candidate?" for free, so only genuinely interrupted rooms
+   * are read in full. A room without the recovery summary fields (legacy
+   * archive) stays a candidate and is decided by its checkpoint.
    */
   interrupted(): RoomCheckpoint[] {
     if (!existsSync(this.dir)) return [];
-    return this.readAll()
-      .filter((checkpoint): checkpoint is RoomCheckpoint => Boolean(checkpoint))
+    const checkpoints: RoomCheckpoint[] = [];
+    for (const candidate of this.recoveryCandidates()) {
+      try {
+        checkpoints.push(this.readCheckpoint(candidate.file, candidate.roomId));
+      } catch {
+        // readCheckpoint already recorded the failure; skip this room.
+      }
+    }
+    return checkpoints
       .filter((checkpoint) => checkpoint.status === "running" || checkpoint.status === "paused")
       .filter((checkpoint) => checkpoint.recoverable !== false)
       .filter((checkpoint) => Array.isArray(checkpoint.profiles) && checkpoint.profiles.length >= 2)
@@ -172,29 +191,93 @@ export class RoomArchiveStore {
       .sort((left, right) => right.archivedAt.localeCompare(left.archivedAt));
   }
 
-  diagnostics(): RoomArchiveFailure[] {
-    return this.failures.map((failure) => ({ ...failure }));
-  }
-
-  private readAll(): Array<RoomCheckpoint | undefined> {
-    let names: string[];
+  /** Directories that may hold a recoverable checkpoint, cheapest read first. */
+  private recoveryCandidates(): Array<{ file: string; roomId: string }> {
+    let entries;
     try {
-      names = readdirSync(this.dir, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name);
+      entries = readdirSync(this.dir, { withFileTypes: true }).filter((entry) => entry.isDirectory());
     } catch (cause) {
       this.recordError("ARCHIVE_LIST_FAILED", "list", undefined, true, cause);
       return [];
     }
-    return names.map((name) => {
-      const file = path.join(this.dir, name, "checkpoint.json");
-      if (!existsSync(file)) return undefined;
+    const candidates: Array<{ file: string; roomId: string }> = [];
+    for (const entry of entries) {
+      const file = path.join(this.dir, entry.name, "checkpoint.json");
+      if (!existsSync(file)) continue;
+      let summary: Partial<ArchivedRoomSummary> | undefined;
       try {
-        return this.readCheckpoint(file, name);
+        const parsed = JSON.parse(readFileSync(path.join(this.dir, entry.name, "summary.json"), "utf8")) as Partial<ArchivedRoomSummary>;
+        if (typeof parsed.roomId === "string") summary = parsed;
       } catch {
-        return undefined;
+        summary = undefined;
       }
-    });
+      if (summary) {
+        if (summary.status !== "running" && summary.status !== "paused") continue;
+        if (summary.recoverable === false) continue;
+        if (summary.mode === "human") continue;
+        if (typeof summary.profileCount === "number" && summary.profileCount < 2) continue;
+      }
+      candidates.push({ file, roomId: entry.name });
+    }
+    return candidates;
+  }
+
+  diagnostics(): RoomArchiveFailure[] {
+    return this.failures.map((failure) => ({ ...failure }));
+  }
+
+  /**
+   * Retention (§31): terminal archived rooms would otherwise accumulate
+   * forever (multi-GB archives made boot a full-disk scan). The reap keeps
+   * the newest `maxRooms` terminal rooms and deletes the rest, oldest
+   * first. Rooms that could still be recovered (status running/paused with
+   * recoverable !== false, or a legacy summary that cannot prove
+   * terminality) are never deleted. Every removal is logged and returned.
+   */
+  reap(options?: { maxRooms?: number }): Array<{ roomId: string; reason: "retention-cap" }> {
+    const maxRooms = options?.maxRooms ?? positiveIntegerFromEnv("SOCIETY_ARCHIVE_MAX_ROOMS", 24);
+    if (!existsSync(this.dir)) return [];
+    let entries;
+    try {
+      entries = readdirSync(this.dir, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+    } catch {
+      return [];
+    }
+    const terminal: Array<{ roomId: string; dir: string; archivedAt: string }> = [];
+    for (const entry of entries) {
+      const dir = path.join(this.dir, entry.name);
+      const summary = this.readSummaryEntry(dir);
+      if (!summary) continue;
+      const recoverable = summary.recoverable !== false
+        && (summary.status === "running" || summary.status === "paused" || summary.status === "lobby");
+      const explicitlyDisposed = summary.recoverable === false;
+      if (recoverable || (!explicitlyDisposed && summary.status !== "finished" && summary.status !== "error")) continue;
+      terminal.push({ roomId: summary.roomId, dir, archivedAt: summary.archivedAt });
+    }
+    terminal.sort((left, right) => right.archivedAt.localeCompare(left.archivedAt));
+    const removed: Array<{ roomId: string; reason: "retention-cap" }> = [];
+    for (const room of terminal.slice(maxRooms)) {
+      try {
+        removeDirectorySync(room.dir);
+        if (existsSync(room.dir)) throw new Error("directory still present after removal");
+        removed.push({ roomId: room.roomId, reason: "retention-cap" });
+        console.warn(`[room-archive] reaped terminal room ${room.roomId} (archive capped at ${maxRooms})`);
+      } catch (cause) {
+        console.warn(`[room-archive] reap failed for ${room.roomId}:`, cause instanceof Error ? cause.message : cause);
+      }
+    }
+    return removed;
+  }
+
+  /** Best-effort summary read; missing/corrupt summaries are not reapable. */
+  private readSummaryEntry(dir: string): ArchivedRoomSummary | undefined {
+    try {
+      const parsed = JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8")) as Partial<ArchivedRoomSummary>;
+      if (typeof parsed.roomId !== "string" || typeof parsed.archivedAt !== "string" || typeof parsed.status !== "string") return undefined;
+      return parsed as ArchivedRoomSummary;
+    } catch {
+      return undefined;
+    }
   }
 
   private readCheckpoint(file: string, expectedRoomId?: string): RoomCheckpoint {
@@ -252,5 +335,38 @@ export class RoomArchiveError extends Error {
   constructor(readonly failure: RoomArchiveFailure, options?: ErrorOptions) {
     super(failure.code, options);
     this.name = "RoomArchiveError";
+  }
+}
+
+function positiveIntegerFromEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+/**
+ * Windows-safe recursive directory removal. On some filter-driver setups
+ * (antivirus/indexer) Node's `rmSync(recursive)` silently leaves freshly
+ * written entries behind, so removal is stepwise: unlink children, then the
+ * directory, falling back to rmSync for states stepwise deletion cannot
+ * express. A removal that did not actually remove throws.
+ */
+function removeDirectorySync(dir: string): void {
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) removeDirectorySync(child);
+      else unlinkSync(child);
+    }
+    rmdirSync(dir);
+  } catch {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
+  if (existsSync(dir)) {
+    // One short retry round: a filter driver can hold a handle for a moment.
+    try {
+      removeDirectorySync(dir);
+    } catch {
+      throw new Error(`could not remove ${dir}`);
+    }
   }
 }

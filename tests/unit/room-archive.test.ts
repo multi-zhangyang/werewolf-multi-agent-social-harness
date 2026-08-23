@@ -26,9 +26,10 @@ function checkpoint(roomId: string, overrides: Partial<RoomCheckpoint> = {}): Ro
       createdAt: "2026-08-23T00:00:00.000Z",
       updatedAt: "2026-08-23T00:00:00.000Z",
       world: { messages: [{ id: "m1" }], log: [{ id: "l1" }] },
-      participants: [{
-        profile: { id: "agent-01", displayName: "林默", model: "model-a", characterId: "c-1", controller: "agent" }
-      }]
+      participants: [
+        { profile: { id: "agent-01", displayName: "林默", model: "model-a", characterId: "c-1", controller: "agent" } },
+        { profile: { id: "agent-02", displayName: "苏遥", model: "model-a", characterId: "c-2", controller: "agent" } }
+      ]
     } as unknown as RoomCheckpoint["snapshot"],
     envelopes: [],
     agentMinds: {},
@@ -96,6 +97,163 @@ describe("room archive summaries", () => {
       assert.equal(listed[0].status, "finished", "the latest save's summary wins");
       const onDisk = JSON.parse(readFileSync(join(dir, "room-a", "summary.json"), "utf8"));
       assert.equal(onDisk.status, "finished");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("restart recovery candidates (interrupted)", () => {
+  it("summaries carry the recovery pre-filter fields", () => {
+    const dir = mkdtempSync(join(tmpdir(), "society-archive-"));
+    try {
+      const archive = new RoomArchive(dir);
+      archive.save(checkpoint("room-a", {
+        status: "paused",
+        recoverable: true,
+        profiles: [{ id: "a1" }, { id: "a2" }] as RoomCheckpoint["profiles"],
+        worldState: { phase: "mid" } as unknown as RoomCheckpoint["worldState"]
+      }));
+      const onDisk = JSON.parse(readFileSync(join(dir, "room-a", "summary.json"), "utf8"));
+      assert.equal(onDisk.mode, "ai");
+      assert.equal(onDisk.recoverable, true);
+      assert.equal(onDisk.profileCount, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("terminal rooms are never parsed — only real candidates are read", () => {
+    const dir = mkdtempSync(join(tmpdir(), "society-archive-"));
+    try {
+      const archive = new RoomArchive(dir);
+      // A genuinely interrupted, recoverable room.
+      archive.save(checkpoint("room-live", {
+        status: "paused",
+        recoverable: true,
+        profiles: [{ id: "a1" }, { id: "a2" }] as RoomCheckpoint["profiles"],
+        worldState: { phase: "mid" } as unknown as RoomCheckpoint["worldState"]
+      }));
+      // A finished room whose checkpoint is deleted afterwards: if
+      // interrupted() tried to parse it, it would just be skipped — but the
+      // contract is that it is filtered out by its summary alone.
+      archive.save(checkpoint("room-done", { status: "finished" }));
+      rmSync(join(dir, "room-done", "checkpoint.json"));
+      const candidates = archive.interrupted();
+      assert.equal(candidates.length, 1);
+      assert.equal(candidates[0].roomId, "room-live");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("disposed and human-mode rooms are excluded by their summaries", () => {
+    const dir = mkdtempSync(join(tmpdir(), "society-archive-"));
+    try {
+      const archive = new RoomArchive(dir);
+      archive.save(checkpoint("room-disposed", {
+        status: "paused",
+        recoverable: false,
+        profiles: [{ id: "a1" }, { id: "a2" }] as RoomCheckpoint["profiles"],
+        worldState: { phase: "mid" } as unknown as RoomCheckpoint["worldState"]
+      }));
+      archive.save(checkpoint("room-human", {
+        status: "running",
+        recoverable: true,
+        profiles: [{ id: "a1" }, { id: "a2" }] as RoomCheckpoint["profiles"],
+        worldState: { phase: "mid" } as unknown as RoomCheckpoint["worldState"],
+        snapshot: { ...checkpoint("room-human").snapshot, mode: "human" } as RoomCheckpoint["snapshot"]
+      }));
+      assert.equal(archive.interrupted().length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a legacy summary without recovery fields falls back to the checkpoint", () => {
+    const dir = mkdtempSync(join(tmpdir(), "society-archive-"));
+    try {
+      const archive = new RoomArchive(dir);
+      archive.save(checkpoint("room-legacy", {
+        status: "paused",
+        recoverable: true,
+        profiles: [{ id: "a1" }, { id: "a2" }] as RoomCheckpoint["profiles"],
+        worldState: { phase: "mid" } as unknown as RoomCheckpoint["worldState"]
+      }));
+      // Strip the newer summary fields, as an old archive would look.
+      const summaryPath = join(dir, "room-legacy", "summary.json");
+      const legacy = JSON.parse(readFileSync(summaryPath, "utf8"));
+      delete legacy.recoverable;
+      delete legacy.mode;
+      delete legacy.profileCount;
+      writeFileSync(summaryPath, JSON.stringify(legacy));
+      const candidates = archive.interrupted();
+      assert.equal(candidates.length, 1);
+      assert.equal(candidates[0].roomId, "room-legacy");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("archive retention (reap)", () => {
+  it("keeps the newest terminal rooms and deletes the oldest beyond the cap", () => {
+    const dir = mkdtempSync(join(tmpdir(), "society-archive-"));
+    try {
+      const archive = new RoomArchive(dir);
+      for (let index = 0; index < 5; index += 1) {
+        archive.save(checkpoint(`room-${index}`, {
+          status: "finished",
+          archivedAt: `2026-08-2${index}T00:00:00.000Z`
+        }));
+      }
+      const removed = archive.reap({ maxRooms: 2 });
+      assert.deepEqual(removed.map((entry) => entry.roomId), ["room-2", "room-1", "room-0"]);
+      assert.ok(!existsSync(join(dir, "room-0")), "the oldest room directory is deleted");
+      assert.ok(!existsSync(join(dir, "room-2")), "only the newest two survive the cap");
+      assert.ok(existsSync(join(dir, "room-4")), "the newest rooms survive");
+      assert.equal(archive.list().length, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never reaps recoverable rooms, even beyond the cap", () => {
+    const dir = mkdtempSync(join(tmpdir(), "society-archive-"));
+    try {
+      const archive = new RoomArchive(dir);
+      archive.save(checkpoint("room-interrupted", {
+        status: "paused",
+        recoverable: true,
+        profiles: [{ id: "a1" }, { id: "a2" }] as RoomCheckpoint["profiles"],
+        worldState: { phase: "mid" } as unknown as RoomCheckpoint["worldState"]
+      }));
+      // Legacy paused room without a recoverable flag: presumed recoverable.
+      archive.save(checkpoint("room-legacy", { status: "paused" }));
+      archive.save(checkpoint("room-done", { status: "finished" }));
+      const removed = archive.reap({ maxRooms: 0 });
+      // Only the finished room may be reaped at cap 0.
+      assert.deepEqual(removed.map((entry) => entry.roomId), ["room-done"]);
+      assert.ok(existsSync(join(dir, "room-interrupted")));
+      assert.ok(existsSync(join(dir, "room-legacy")));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reaps explicitly disposed rooms (recoverable=false), including paused ones", () => {
+    const dir = mkdtempSync(join(tmpdir(), "society-archive-"));
+    try {
+      const archive = new RoomArchive(dir);
+      archive.save(checkpoint("room-disposed-running", {
+        status: "paused",
+        recoverable: false,
+        profiles: [{ id: "a1" }, { id: "a2" }] as RoomCheckpoint["profiles"],
+        worldState: { phase: "mid" } as unknown as RoomCheckpoint["worldState"]
+      }));
+      const removed = archive.reap({ maxRooms: 0 });
+      assert.deepEqual(removed.map((entry) => entry.roomId), ["room-disposed-running"]);
+      assert.ok(!existsSync(join(dir, "room-disposed-running")));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -100,7 +100,7 @@ export function waitFor(predicate: () => boolean, timeoutMs: number): Promise<vo
 }
 
 export function lastEvents(room: SocietyRoom, count: number): string[] {
-  const events: Array<{ seq: number; event: { type: string } }> = (room as unknown as { events: Array<{ seq: number; event: { type: string } }> }).events;
+  const events = room.eventsSince(0);
   return events.slice(-count).map((entry) => `#${entry.seq} ${entry.event.type}`);
 }
 
