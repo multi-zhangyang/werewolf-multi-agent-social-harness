@@ -116,8 +116,8 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
       </header>
 
       {scenarios.length ? (
-        <div className="scroll-fade-x overflow-x-auto border-b border-border/80 bg-muted/40">
-          <div className="mx-auto flex w-full max-w-6xl gap-1.5 px-6 py-2.5">
+        <div className="overflow-x-auto border-b border-border/80 bg-muted/40 sm:overflow-x-visible">
+          <div className="mx-auto flex w-full max-w-6xl flex-nowrap gap-1.5 px-6 py-2.5 sm:flex-wrap sm:justify-center">
             {scenarios.map((scenario) => {
               const tone = CATEGORY[CATEGORY_OF[scenario.id] ?? "confrontation"];
               return (
@@ -145,7 +145,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
           <Badge variant="outline" className="mb-8 rounded-full border-border bg-card px-3.5 py-1.5 text-xs font-medium tracking-wide text-foreground/85">
             Powered by OpenAI Agents SDK
           </Badge>
-          <h1 className="hero-ink text-5xl font-semibold tracking-normal sm:text-7xl">
+          <h1 className="hero-ink text-balance text-5xl font-semibold tracking-normal sm:text-7xl">
             多智能体社会博弈竞技场
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-balance text-lg leading-8 text-muted-foreground sm:text-xl">
@@ -191,7 +191,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
                 return (
                   <div key={entry.characterId} className="group relative rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/25">
                     <p className="flex items-center gap-2 text-sm font-semibold tracking-tight">
-                      <AgentAvatar name={entry.displayName} index={hashIndex(entry.characterId)} seed={entry.characterId} size="sm" />
+                      <AgentAvatar name={entry.displayName} seed={entry.characterId} size="sm" />
                       {entry.displayName}
                     </p>
                     <p className="nums mt-2 font-mono text-[11px] text-muted-foreground/80">
@@ -336,22 +336,25 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {archived.slice(0, 6).map((room) => (
-                <div
+                <button
                   key={room.roomId}
-                  className="flex items-center gap-4 rounded-lg border border-border/60 bg-card/60 p-4 text-left opacity-95"
+                  type="button"
+                  onClick={() => onOpenRoom(room.roomId)}
+                  className="group flex items-center gap-4 rounded-lg border border-border/60 bg-card/60 p-4 text-left transition-all hover:-translate-y-0.5 hover:border-foreground/25 hover:bg-card"
                 >
-                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/50 text-muted-foreground/70">
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/50 text-muted-foreground/70 transition-colors group-hover:text-muted-foreground">
                     <ScenarioIcon id={room.scenarioId} className="size-4.5" />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-semibold tracking-tight text-foreground/70">{room.title}</span>
+                    <span className="block truncate text-sm font-semibold tracking-tight text-foreground/70 group-hover:text-foreground/90">{room.title}</span>
                     <span className="nums mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/70">
                       <span>已归档</span>
                       <span className="text-muted-foreground/40">·</span>
                       <span>{room.messages} 条消息 · {room.participants.length} 名参与者</span>
                     </span>
                   </span>
-                </div>
+                  <ArrowUpRight className="size-4 shrink-0 text-muted-foreground/40 transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-foreground/70" />
+                </button>
               ))}
             </div>
             <p className="mt-3 text-xs leading-5 text-muted-foreground/60">
@@ -397,7 +400,7 @@ function HeroStage(): ReactNode {
         {cast.map((character, index) => (
           <span key={character.characterId} className={cn("relative flex flex-col items-center gap-2 rounded-lg", index % 2 === 1 && "translate-y-3")}>
             <span className="relative">
-              <AgentAvatar name={character.name} index={index} seed={character.characterId} size="lg" />
+              <AgentAvatar name={character.name} seed={character.characterId} size="lg" />
               <span
                 className="live-pulse absolute -right-1 -top-1 size-2 rounded-full bg-emerald-400"
                 style={{ animationDelay: `${index * 420}ms` }}
@@ -446,12 +449,6 @@ function StatCard({ value, label, live }: { value: string; label: string; live?:
       </span>
     </div>
   );
-}
-
-function hashIndex(seed: string): number {
-  let hash = 0;
-  for (const char of seed) hash = (hash * 31 + char.charCodeAt(0)) | 0;
-  return Math.abs(hash);
 }
 
 function ScenarioCard({ scenario, onStart, wide }: { scenario: ScenarioSummary; onStart: () => void; wide?: boolean }): ReactNode {

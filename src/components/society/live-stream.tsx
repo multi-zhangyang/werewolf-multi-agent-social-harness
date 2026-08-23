@@ -1,14 +1,13 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CircleUser, Hourglass } from "lucide-react";
+import { Hourglass, Wrench } from "lucide-react";
 import type { SocialMessage } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { EffectiveViewer, LiveTurn, RoomConnection } from "./use-room";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { eventLabel, ScenarioIcon } from "./shared";
+import { AgentAvatar, ChannelBadge, channelSurface, eventLabel, ScenarioIcon } from "./shared";
 import { TurnCard } from "./turn-card";
 
 /**
@@ -129,6 +128,7 @@ function buildStreamItems(
           key={message.id}
           message={message}
           name={names.get(message.senderId) ?? message.senderId}
+          seed={avatarSeedFor(message.senderId)}
           turn={turn}
           canSeeCognition={canSeeCognition}
         />
@@ -151,7 +151,7 @@ function buildStreamItems(
           turn={turn}
           name={names.get(turn.actorId) ?? turn.actorId}
           seed={avatarSeedFor(turn.actorId)}
-          canSeeCognition={canSeeCognition || !live && false}
+          canSeeCognition={canSeeCognition}
         />
       )
     });
@@ -162,23 +162,22 @@ function buildStreamItems(
 const MessageBubble = memo(function MessageBubble({
   message,
   name,
+  seed,
   turn,
   canSeeCognition
 }: {
   message: SocialMessage;
   name: string;
+  seed?: string;
   turn?: LiveTurn;
   canSeeCognition: boolean;
 }): ReactNode {
-  const channelBadge = message.channel !== "public"
-    ? <Badge variant="outline" className="text-[10px]">{message.channel === "private" ? "私聊" : "阵营"}</Badge>
-    : null;
   return (
-    <article className="rounded-xl border bg-card/40 p-3">
+    <article className={cn("rounded-xl border p-3", channelSurface[message.channel])}>
       <header className="mb-1.5 flex items-center gap-2">
-        <CircleUser className="size-3.5 text-muted-foreground" aria-hidden />
+        <AgentAvatar name={name} seed={seed} size="sm" />
         <span className="text-sm font-medium">{name}</span>
-        {channelBadge}
+        {message.channel !== "public" ? <ChannelBadge channel={message.channel} /> : null}
         <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatClock(message.createdAt)}</time>
       </header>
       <div className="text-sm leading-relaxed [&_p]:my-0">{message.text}</div>
@@ -188,7 +187,7 @@ const MessageBubble = memo(function MessageBubble({
           <div className="mt-1.5 space-y-1.5">
             {turn.reasoning?.text ? <pre className="whitespace-pre-wrap rounded-md bg-muted/40 p-2 font-sans leading-relaxed">{turn.reasoning.text}</pre> : null}
             {turn.tools.map((tool) => (
-              <p key={tool.toolCallId}>🛠 {tool.label ?? eventLabel(tool.toolName)}{tool.safeOutputSummary ? ` · ${tool.safeOutputSummary}` : ""}</p>
+              <p key={tool.toolCallId} className="flex items-center gap-1.5"><Wrench className="size-3 shrink-0" aria-hidden />{tool.label ?? eventLabel(tool.toolName)}{tool.safeOutputSummary ? ` · ${tool.safeOutputSummary}` : ""}</p>
             ))}
           </div>
         </details>

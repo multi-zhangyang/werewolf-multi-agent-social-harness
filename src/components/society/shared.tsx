@@ -36,7 +36,7 @@ const AVATAR_BACKGROUNDS = [
   "#27272a", "#1e293b", "#252528", "#20232a", "#2a2320", "#231f2a"
 ] as const;
 
-export function AgentAvatar({ name, seed, size = "md" }: { name: string; index?: number; seed?: string; size?: "sm" | "md" | "lg" | "xl" }): ReactNode {
+export function AgentAvatar({ name, seed, size = "md" }: { name: string; seed?: string; size?: "sm" | "md" | "lg" | "xl" }): ReactNode {
   const sizes = { sm: "size-6", md: "size-8", lg: "size-10", xl: "size-14" };
   const stableSeed = seed ?? name;
   const hash = avatarHash(stableSeed);
@@ -81,30 +81,6 @@ function avatarHash(value: string): number {
     hash = Math.imul(hash, 16_777_619) >>> 0;
   }
   return hash >>> 0;
-}
-
-/** Presence ring: the agent's live state reads off the avatar, no text needed. */
-export function AgentPresence({ name, index = 0, seed, size = "md", status, className }: {
-  name: string;
-  index?: number;
-  seed?: string;
-  size?: "sm" | "md" | "lg" | "xl";
-  status: AgentStatus;
-  className?: string;
-}): ReactNode {
-  const tone = status === "speaking"
-    ? "ring-foreground/80"
-    : status === "thinking" || status === "acting"
-      ? "ring-muted-foreground/70"
-      : "ring-transparent";
-  const live = status === "speaking" || status === "thinking" || status === "acting";
-  return (
-    <span className={cn("relative inline-flex rounded-lg", live && "on-air", className)}>
-      <span className={cn("inline-flex rounded-lg p-px ring-2 ring-offset-2 ring-offset-background transition-all", tone)}>
-        <AgentAvatar name={name} index={index} seed={seed} size={size} />
-      </span>
-    </span>
-  );
 }
 
 export function StatusDot({ status, className }: { status: AgentStatus | "running" | "paused" | "finished" | "error"; className?: string }): ReactNode {
@@ -223,13 +199,6 @@ export function roleLabelZh(role: string | undefined): string {
     minion: "爪牙"
   };
   return role ? labels[role] ?? role : "未知";
-}
-
-/** Faction tint for a role badge: red for deceivers, green for loyal, gold for seers. */
-export function roleTintClass(role: string | undefined): string {
-  return role
-    ? "border-foreground/20 bg-foreground/5 text-foreground"
-    : "border-border bg-card text-muted-foreground";
 }
 
 export function formatTime(value: string): string {

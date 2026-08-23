@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 import { apiFetch, storeOwnerToken } from "@/lib/api";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
@@ -43,7 +44,6 @@ export function App(): ReactNode {
   const [createScenarioId, setCreateScenarioId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [charactersOpen, setCharactersOpen] = useState(false);
-  const [error, setError] = useState<string>();
   const [booting, setBooting] = useState(true);
 
   useEffect(() => {
@@ -78,7 +78,7 @@ export function App(): ReactNode {
   useEffect(() => {
     let active = true;
     void loadCatalog()
-      .catch((cause) => { if (active) setError(errorMessage(cause)); })
+      .catch((cause) => { if (active) toast.error(errorMessage(cause)); })
       .finally(() => { if (active) setBooting(false); });
     return () => { active = false; };
   }, [loadCatalog]);
@@ -121,7 +121,7 @@ export function App(): ReactNode {
       }
       setSeason([]);
     } catch (cause) {
-      setError(errorMessage(cause));
+      toast.error(errorMessage(cause));
     }
   }, []);
 
@@ -135,7 +135,7 @@ export function App(): ReactNode {
       }
       setSeason((current) => current.filter((entry) => entry.characterId !== characterId));
     } catch (cause) {
-      setError(errorMessage(cause));
+      toast.error(errorMessage(cause));
     }
   }, []);
 
@@ -148,7 +148,7 @@ export function App(): ReactNode {
       setRooms((current) => current.filter((room) => room.id !== roomId));
       setArchived(payload?.archived ?? []);
     } catch (cause) {
-      setError(errorMessage(cause));
+      toast.error(errorMessage(cause));
     }
   }, []);
 
@@ -180,7 +180,7 @@ export function App(): ReactNode {
     <>
       {booting ? (
         <div className="flex min-h-screen items-center justify-center">
-          <span className="size-8 animate-spin rounded-full border-2 border-zinc-200 border-t-zinc-700" />
+          <span className="size-8 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-foreground" />
         </div>
       ) : (
         <Landing
@@ -194,7 +194,7 @@ export function App(): ReactNode {
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenCharacters={() => setCharactersOpen(true)}
           onOpenAbout={() => { location.hash = "#/about"; }}
-          onResetSeason={() => { void resetSeason().catch((cause) => setError(errorMessage(cause))); }}
+          onResetSeason={() => { void resetSeason().catch((cause) => toast.error(errorMessage(cause))); }}
           onForgetCharacter={(characterId, displayName) => { void forgetCharacter(characterId, displayName); }}
           onRemoveRoom={(roomId) => { void removeRoom(roomId); }}
         />
@@ -210,18 +210,13 @@ export function App(): ReactNode {
       <SettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
-        onSaved={() => { void loadCatalog().catch((cause) => setError(errorMessage(cause))); }}
+        onSaved={() => { void loadCatalog().catch((cause) => toast.error(errorMessage(cause))); }}
       />
       <CharactersDialog
         open={charactersOpen}
         onOpenChange={setCharactersOpen}
         onChanged={() => undefined}
       />
-      {error ? (
-        <div className="fixed inset-x-0 bottom-4 z-30 mx-auto w-fit rounded-lg border border-red-200 bg-white px-4 py-2 text-xs text-red-600 shadow-lg">
-          {error}
-        </div>
-      ) : null}
     </>
   );
 }

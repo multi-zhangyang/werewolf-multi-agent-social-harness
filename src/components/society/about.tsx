@@ -51,7 +51,7 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
           <ArrowLeft className="size-4" />
         </Button>
         <span className="flex items-center gap-2.5">
-          <span className="flex size-8 items-center justify-center rounded-lg border border-white/10 bg-foreground font-mono text-sm text-background">◆</span>
+          <span className="flex size-8 items-center justify-center rounded-lg border border-border bg-foreground font-mono text-sm text-background">◆</span>
           <span className="text-sm font-semibold tracking-tight">Society</span>
         </span>
         <a href="https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness" target="_blank" rel="noreferrer">

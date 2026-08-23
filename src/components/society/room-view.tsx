@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowLeft, Eye, Globe, Pause, Play, Radio, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Eye, Globe, Lock, Pause, Play, Radio, TriangleAlert } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
@@ -134,7 +134,8 @@ export function RoomView({ roomId, token, onBack }: {
         </div>
       </header>
 
-      {link === "reconnecting" || (connection.error && link !== "closed") ? (
+      {/* Terminal rooms (finished/archived) have no live stream by design — a reconnect banner there is noise. */}
+      {link !== "closed" && world.status !== "finished" && (link === "reconnecting" || connection.error) ? (
         <p className="flex shrink-0 items-center justify-center gap-1.5 bg-amber-500/10 px-4 py-1 text-center text-[11px] text-amber-300">
           <TriangleAlert className="size-3 shrink-0" aria-hidden />
           {connection.error ?? "连接中断，正在重连——快照会自愈。"}
@@ -275,7 +276,7 @@ function PhaseStrip({ room, sealed }: { room: SocietyRoomSnapshot; sealed: boole
       <span className="nums shrink-0 font-mono text-[11px] text-muted-foreground">R{world.turn}/{world.totalTurns}</span>
       <Badge variant="outline" className="shrink-0 text-[10px]">{world.phase}</Badge>
       {sealed ? (
-        <span className="shrink-0 text-[10px] text-violet-300">🔒 密封阶段 · 发言流暂停公开</span>
+        <span className="flex shrink-0 items-center gap-1 text-[10px] text-violet-300"><Lock className="size-3" aria-hidden />密封阶段 · 发言流暂停公开</span>
       ) : speakingAgents.length ? (
         <span className="flex min-w-0 items-center gap-1 text-[10px] text-emerald-300">
           <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400" aria-hidden />
