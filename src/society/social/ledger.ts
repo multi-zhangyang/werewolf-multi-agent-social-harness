@@ -2228,19 +2228,21 @@ export class SocialCausalityLedger {
     // detection evidence — the episode is born detected, citing the claim's
     // message and the reveal event. Claims about OTHERS stay neutral (an
     // honest mistake is indistinguishable from a lie without intent evidence).
+    // `has-team` claims compare against the revealed team; `has-role` claims
+    // (e.g. "我是村民") compare against the actual role.
     if (revealedTeam) {
       for (const act of this.socialActs) {
         if (!act.messageId || act.actorCharacterId !== subjectCharacterId) continue;
         if (act.deceptionId) continue; // planned path above owns these
         if ([...this.deceptions.values()].some((episode) => episode.executionMessageIds.includes(act.messageId!))) continue;
-        const falseTeamPropositionIds = act.propositionIds.filter((propositionId) => {
+        const falseIdentityPropositionIds = act.propositionIds.filter((propositionId) => {
           const proposition = this.propositions.get(propositionId);
-          return proposition?.kind === "identity"
-            && proposition.subjectId === subjectCharacterId
-            && proposition.predicate === "has-team"
-            && proposition.object !== revealedTeam;
+          if (proposition?.kind !== "identity" || proposition.subjectId !== subjectCharacterId) return false;
+          if (proposition.predicate === "has-team") return proposition.object !== revealedTeam;
+          if (proposition.predicate === "has-role") return proposition.object !== actualRoleId;
+          return false;
         });
-        if (!falseTeamPropositionIds.length) continue;
+        if (!falseIdentityPropositionIds.length) continue;
 
         const messageEvent = this.events.find((event) => {
           const payload = asRecord(event.payload);
@@ -2258,7 +2260,7 @@ export class SocialCausalityLedger {
             .filter((characterId): characterId is string => Boolean(characterId)),
           mode: "identity-performance",
           truePropositionIds: [],
-          intendedFalseBeliefIds: [...falseTeamPropositionIds],
+          intendedFalseBeliefIds: [...falseIdentityPropositionIds],
           motiveGoalIds: [],
           executionMessageIds: [act.messageId],
           receivedByCharacterIds: [...new Set(act.audienceActorIds.map((actorId) => actorIdForCharacter?.(actorId)).filter((characterId): characterId is string => Boolean(characterId)))],
@@ -2288,7 +2290,7 @@ export class SocialCausalityLedger {
         const detection = this.append("social", "deception.detected", {
           deceptionId: episode.deceptionId,
           executionMessageId: act.messageId,
-          contradictedPropositionIds: falseTeamPropositionIds,
+          contradictedPropositionIds: falseIdentityPropositionIds,
           revealEventId,
           source: "reveal-reconciliation"
         }, {

@@ -263,6 +263,11 @@ export class WerewolfWorld extends SocialWorldBase {
     if (s.discussion) {
       this.discussion = this.createDiscussion();
       this.discussion.restoreState(s.discussion);
+    } else {
+      // The constructor always creates a fresh director; a checkpoint where
+      // the discussion has ended (vote/night/finished) must restore to null
+      // so the round-trip matches and no stale wave can reopen.
+      this.discussion = null;
     }
     this.suspicion.restoreState(s.suspicion);
     this.winners = [...(s.winners ?? [])];
@@ -374,7 +379,7 @@ export class WerewolfWorld extends SocialWorldBase {
       ...(role === "hunter" ? ["Rules: 你被投票放逐或被狼人夜袭时可以开枪带走一名玩家；被女巫毒杀不能开枪。"] : []),
       ...(role === "wolf-king" ? ["Rules: 你被投票放逐或被猎人击杀时可以开枪带走一名玩家；被女巫毒杀不能开枪。"] : []),
       ...(role === "jester" ? ["Rules: 只有被白天投票出局你才获胜；被毒杀、被夜袭或被开枪带走都不算。"] : []),
-      "For an explicit identity claim in communicate.socialActs, use kind=identity, predicate=has-role, subjectId=the claimed actor id, and object=the role id. Link deceptionId only when executing your own recorded deception plan.",
+      "For an explicit identity claim in communicate.socialActs, use kind=assertion (or denial when claiming you are NOT something), proposition.kind=identity, predicate=has-role, subjectId=the claimed actor id, object=the role id. Link deceptionId only when executing your own recorded deception plan.",
       ...socialReferenceContext(causality),
       `Your vote: ${this.votes.get(actorId) ?? "not cast"}.`,
       `You are ${this.alive.has(actorId) ? "alive" : "eliminated"}.`

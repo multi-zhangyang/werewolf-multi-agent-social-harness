@@ -57,7 +57,7 @@
 
 | 场景 | 规则与结算 | 密封/信息边界 | typed 承诺 | 主张对账 | 结果对账 | checkpoint | 真实对局 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 狼人杀 | ✅ 30 项规则 | ✅ 投票密封 | ❌ 无 | ❌ 见缺口① | ✅ ×10 | ❌ | ✅ 3 |
+| 狼人杀 | ✅ 32 项（含 §28 两项） | ✅ 投票密封 | ❌ 无 | ✅ 提取/显式主张均对账 | ✅ ×10 | ✅ 3 项 | ✅ 3 |
 | 囚徒困境 | ✅ 11 项 | ✅ 不越权断言 | ✅ `choose-move` | ✅ | ✅ | ✅ 3 项 | ✅ 5 |
 | 谈判博弈 | ✅ 9 项 | ✅ 不越权断言 | ✅ 成交自动 typed | ✅ | ✅ | ✅ 3 项 | ✅ 4 |
 | 公共品 | ✅ 10 项 | ✅ 不越权断言 | ✅ `contribute-at-least` | ✅ | ✅ | ✅ 3 项 | ✅ 8 |
@@ -73,7 +73,8 @@
 
 ## 证据索引
 
-- **狼人杀规则**：`tests/contract/werewolf-rules.test.ts`（牌堆表、白天投票、骑士决斗、女巫、守卫、猎人、小丑、白狼王、梦魇、狼美人、通灵师、狼人平衡、Avalon 官方人数表与湖中仙女、输入校验）。
+- **狼人杀规则与 §28 谎言闭环**：`tests/contract/werewolf-rules.test.ts`（牌堆表、白天投票、骑士决斗、女巫、守卫、猎人、小丑、白狼王、梦魇、狼美人、通灵师、狼人平衡、Avalon 官方人数表与湖中仙女、输入校验；`a wolf's extracted good-camp claim is detected at the vote-out reveal` 与 `a wolf's explicit villager claim is detected at the vote-out reveal` 钉住"主张→淘汰→揭晓→对账→detected"全链）。
+- **狼人杀 checkpoint 恢复**：`tests/recovery/werewolf-checkpoint.test.ts`（密封投票部分提交后恢复结算、夜晚部分提交后恢复、终局稳定重导出）。
 - **密封**：`tests/contract/sealed-actions.test.ts`（阿瓦隆组队票/任务票、狼人杀白天投票在全员提交前保持密封）；各场景契约测试内含"sealed … never cross an observation boundary"断言（囚徒困境/公共品/谈判/选美/密封拍卖）。
 - **中性标签门禁**：`tests/contract/story-beat-labels.test.ts`（22 项：无证据时 betrayal / promise-kept / alliance / deception-exposed / misplay 一律降级为中性结局标签）。
 - **泛化 round-trip**：`tests/recovery/world-serialization.test.ts` 覆盖全部 13 场景导出恢复一致、恢复后暂停续跑、跨场景状态不匹配拒绝。
@@ -81,9 +82,9 @@
 
 ## 缺口清单（Phase C 工作清单，按 §27 推进顺序）
 
-1. **① 狼人杀主张对账缺失**：身份主张经 `identity/has-team` socialActs 与 `revealIdentity` 记录，但无 `extractedActionClaims` / `recordClaimedActionOutcome` 接入，§28"主张→揭晓→对账为假→detected→关系后果"的行为链没有端到端专属测试。补：行为链测试 + 与提取提示的打通（旗舰，最高优先级）。
+1. **~~① 狼人杀主张对账缺失~~**：已补齐（§28 两项契约测试 + observe 显式主张词表修正 + ledger 无计划路径支持 `has-role` 自述假主张），2026-08-24。
 2. **② 阿瓦隆**：无 `extractionHints`（旁路提取缺位）；阵营主张对账缺失（现有"minion claimed loyalty is exposed by the reveal"走 identity 路径，需扩展提取后的阵营主张对账）。
-3. **③ checkpoint 专属套件缺失**：狼人杀、选美博弈、密封拍卖——补阶段级恢复测试（讨论中恢复、密封行动已提交后恢复、终局稳定）。
+3. **③ checkpoint 专属套件缺失**：选美博弈、密封拍卖——补阶段级恢复测试（讨论中恢复、密封行动已提交后恢复、终局稳定）。狼人杀部分已补齐（2026-08-24）。
 4. **④ 密封拍卖无 `extractionHints`**：讨论阶段的出价意图无法旁路提取，补与选美同模式的主张提取提示。
 5. **⑤ 密封边界断言缺失**：吹牛骰（`hiddenDice` 已在投影白名单 redact，但无"私有骰面不越观察边界"的专属测试）；胆小鬼、猎鹿（同时选择有密封状态且可恢复，但无专属不越权断言）。各补一个边界测试。
 

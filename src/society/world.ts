@@ -113,6 +113,9 @@ export abstract class SocialWorldBase implements SocialWorld {
   }
 
   start(): void {
+    // Finished is terminal: a world restored from a finished checkpoint must
+    // never be re-run by a later start()/resume (restart recovery, §26).
+    if (this.status === "finished") return;
     this.status = "running";
     for (const id of this.profiles.keys()) this.statuses.set(id, "idle");
     this.emitUpdate();

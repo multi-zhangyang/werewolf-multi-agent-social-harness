@@ -99,6 +99,72 @@ check("day vote eliminates the plurality target and reveals the role", () => {
   assert.equal(after.phase, "夜晚行动", "phase advances to night");
 });
 
+// --- §28 lie loop: an identity claim contradicted by a reveal becomes a
+// born-detected deception episode (claim -> vote-out -> reveal -> reconcile).
+function deceptionProjection(world: SocialWorldBase): Array<{
+  deceiverActorId: string;
+  status: string;
+  mode: string;
+  executionMessageIds: string[];
+  contradictionEventIds: string[];
+}> {
+  const projection = (world as unknown as {
+    socialCausalityFor(actorId?: string, omniscient?: boolean): { deceptions: Array<{
+      deceiverActorId: string;
+      status: string;
+      mode: string;
+      executionMessageIds: string[];
+      contradictionEventIds: string[];
+    }> };
+  }).socialCausalityFor(undefined, true);
+  return projection.deceptions;
+}
+
+function voteOut(world: SocialWorldBase, target: string, byRole: (role: string) => string[]): void {
+  skipDiscussion(world);
+  const vote = world.activation()!;
+  assert.ok(vote && vote.id.endsWith(":vote"));
+  for (const actor of vote.actorIds) {
+    void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === target ? byRole("villager")[0] : target, reason: "t" });
+  }
+  world.completeActivation(vote);
+}
+
+check("a wolf's extracted good-camp claim is detected at the vote-out reveal", async () => {
+  const { world, byRole } = makeWerewolf(8);
+  const wolf = byRole("wolf")[0];
+  const message = await world.sendMessage({ senderId: wolf, channel: "public", text: "我是好人阵营的，别投我。" });
+  world.recordExtractedSocialActs(message.id, [{
+    kind: "assertion",
+    proposition: { kind: "identity", subjectId: wolf, predicate: "has-team", object: "good" }
+  }]);
+  voteOut(world, wolf, byRole);
+  const episode = deceptionProjection(world).find((entry) => entry.deceiverActorId === wolf);
+  assert.ok(episode, "the false camp claim becomes a deception episode");
+  assert.equal(episode.status, "detected");
+  assert.equal(episode.mode, "identity-performance");
+  assert.ok(episode.executionMessageIds.includes(message.id), "the episode cites the claim's message");
+  assert.ok(episode.contradictionEventIds.length >= 1, "the reveal event contradicts the claim");
+});
+
+check("a wolf's explicit villager claim is detected at the vote-out reveal", async () => {
+  const { world, byRole } = makeWerewolf(8);
+  const wolf = byRole("wolf")[0];
+  await world.sendMessage({
+    senderId: wolf,
+    channel: "public",
+    text: "我是村民，相信我。",
+    socialActs: [{ kind: "assertion", proposition: { kind: "identity", subjectId: wolf, predicate: "has-role", object: "villager" } }]
+  });
+  voteOut(world, wolf, byRole);
+  const episode = deceptionProjection(world).find((entry) => entry.deceiverActorId === wolf);
+  assert.ok(episode, "the explicit false-role claim becomes a deception episode");
+  assert.equal(episode.status, "detected");
+  assert.equal(episode.mode, "identity-performance");
+  assert.ok(episode.executionMessageIds.length >= 1, "the episode cites the claim's message");
+  assert.ok(episode.contradictionEventIds.length >= 1, "the reveal event contradicts the claim");
+});
+
 // --- idiot rules ---
 check("idiot voted out flips, survives and loses the vote", async () => {
   const { world, byRole } = makeWerewolf(10);
