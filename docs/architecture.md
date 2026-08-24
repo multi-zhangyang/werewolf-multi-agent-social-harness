@@ -12,10 +12,9 @@ SocietyRoom ── schedules activations, settles social accounts
   │
   ├─ AutonomousSocietyAgent × participants
   │    ├─ @openai/agents Agent
-  │    ├─ MemorySession
-  │    ├─ associative memory
-  │    ├─ appraisal engine (event → emotion/relationship/memory)
-  │    ├─ internal cognition passes (reflection / mind-read / plan)
+  │    ├─ durable SDK session (JsonSessionStore)
+  │    ├─ appraisal engine (event → emotion/relationship/mind)
+  │    ├─ internal cognition passes (read_the_room / update_inner_state)
   │    ├─ social tools
   │    └─ scene tools
   │
@@ -28,13 +27,15 @@ SocietyRoom ── schedules activations, settles social accounts
 ## Agent boundary
 
 `src/society/participant.ts` creates one SDK `Agent` per participant — and only
-one. The participant has a stable session, a private mind state and an
-associative memory store. `communicate`, `remember_experience`, `recall_memory`
-and `update_inner_state` are SDK function tools. Reflection, theory-of-mind and
-planning are internal cognitive passes of this same identity: the agent performs
-them inside its own session through private tools (`reflect_on_social_situation`,
-`read_the_room`, `plan_social_strategy`), writes the results into its own mind
-and emits a structured `ThoughtBeat` for observers. There are no specialist
+one. The participant has a durable SDK session (a `JsonSessionStore` under
+`data/sessions/`, gitignored) and a private mind state whose memory list is
+display-only — the model's own session history is what the character actually
+remembers (AGENTS.md §22: no retrieval, no scoring, no write policy).
+`communicate`, `log_deception_plan`, `update_role_hypotheses`, `read_the_room`
+and `update_inner_state` are SDK function tools. Reflection and theory-of-mind
+are internal cognitive passes of this same identity: the agent performs them
+inside its own session through `read_the_room`, writes the results into its own
+mind and emits a structured `ThoughtBeat` for observers. There are no specialist
 sub-agents and no `Agent.asTool()` delegation — the participant stays one peer
 agent from start to finish.
 
@@ -44,8 +45,8 @@ only happen inside a successful domain tool call.
 
 Model switching (§12.4) keeps this boundary: while the room (or that one seat)
 is paused, `AutonomousSocietyAgent.switchModel` rebuilds the engine on a new
-provider/model binding and recomputes the context budget, but the session, mind,
-memory and world role are carried over verbatim — and when the new window is
+provider/model binding and recomputes the context budget, but the session history,
+mind and world role are carried over verbatim — and when the new window is
 smaller, the session history is compacted first so the first post-switch turn
 starts below its pressure thresholds. The switch is broadcast as
 `agent.model.switched`.
@@ -58,32 +59,37 @@ stood up for you"*, *"you were eliminated"* — and the appraisal engine maps th
 to PAD / core emotion / social emotion / need / relationship deltas, modulated
 by the character's Big Five profile and its stable judgment biases (§4.2.7):
 betrayal-hypervigilance deepens trust drops, loss-aversion amplifies negative
-affect and recency-weighting raises the salience of fresh memories. Salient
-events become memories with valence and salience, so a betrayal surfaces again
-later. Emotions are event-driven, never self-reported.
+affect and recency-weighting raises the salience of fresh events. Settled
+outcomes become display-only memory notes for the spectator MindSheet
+(`noteOutcome`); the model's session history carries what the character actually
+remembers (AGENTS.md §22). Emotions are event-driven, never self-reported.
 
 ## Context boundary (one character = one agent)
 
 Each participant is a fully isolated SDK agent: its own `Agent` instance, its
-own `MemorySession` (id = room + actor), its own mind, its own associative
-memory store and its own context object. The isolation is structural rather
-than asserted: sessions, minds and memory stores are constructed per actor in
-`participant.ts`, and every tool is bound to one actor — `scopedContext` raises
+own durable session (keyed `season:<characterId>` in season mode so one
+character's history spans games, `<roomId>:<actorId>` in one-shot), its own
+mind and its own context object. The isolation is structural rather than
+asserted: sessions and minds are constructed per actor in `participant.ts`, and
+every tool is bound to one actor — `scopedContext` raises
 `CROSS_AGENT_CONTEXT_DETECTED` if the SDK ever hands it another agent's run
 context, so a tool can never act as someone else.
 
 Context is also budgeted per agent (`src/society/context-manager.ts`): the
 model's context window is resolved by model id (`SOCIETY_MODEL_CONTEXTS`,
 default 256k), and once a turn's estimated input crosses
-`SOCIETY_CONTEXT_COMPACT_RATIO` (default 0.75) of that window, the SDK's
-`sessionInputCallback` compresses the older history into a structured digest
-via the agent's own model, keeping recent exchanges verbatim. The digest is
-persisted by the SDK, so history stays bounded across a long game — and
-different models (1M vs 256k) compact at their own limits.
+`SOCIETY_CONTEXT_COMPACT_RATIO` (default 0.75) of that window, the manager
+rewrites session history through the SDK's `sessionInputCallback`, compressing
+the older turns into a pinned-facts + digest block via the agent's own model
+and keeping recent exchanges verbatim. The compacted view is written back into
+the durable session (`replaceHistoryWithCompaction`), so history stays bounded
+across a long game — and different models (1M vs 256k) compact at their own
+limits.
 
 An SDK input guardrail (`injection-shield`) scans every turn's input for
 manipulation attempts hidden in other players' speech; it never halts a turn,
-but flags the attempt for observers and stores it in the character's memory.
+but flags the attempt for observers as an `agent.guardrail` event — a guardrail
+trace never becomes long-term memory without social/outcome provenance.
 
 ## Character boundary
 
@@ -94,9 +100,10 @@ Four concepts stay decoupled (§7.1): the **character** is a persistent person
 built-in characters; the local library (`src/server/characters.ts`,
 `data/characters.json`, gitignored, no secrets) adds user-defined ones with
 create / edit / copy / delete / import / export, and the room creator can cast
-any character to any seat. Autobiographical anchors are seeded as high-salience
-identity memories so echoing situations can surface why this person reacts this
-way, and season dossiers carry table history without duplicating them.
+any character to any seat. Autobiographical anchors are seeded into the mind's
+display-only memory list (tagged `autobiography`) so the spectator can see what
+shapes this person's reactions; season dossiers carry table history across
+games without duplicating them (AGENTS.md §22 — no retrieval system).
 
 ## Suspicion boundary
 
@@ -142,8 +149,8 @@ eliminations, vote tallies, role actions and emotional spikes. The director
 never reads hidden identity counts, never advises agents and never modifies
 world state; its outputs (`tension.changed`, `cinematic.cue`) are
 presentational events on the same stream. The room UI renders them as a
-tension meter, a cue banner and a unified timeline tab (thought / tool /
-message / action / cue / memory).
+tension meter, a cue banner and the three-pane workbench (participants / live
+stream / causality page).
 
 ## Room and event stream
 
@@ -158,7 +165,8 @@ of substituting a decision. While paused, a seat's model can be switched through
 `/api/rooms/:roomId/agents/:actorId/model` (§12.4 — see Agent boundary). The
 Express route `/api/rooms/:roomId/events` sends an initial snapshot followed by
 SSE envelopes. The browser reduces those envelopes into the current room view
-while retaining the event sequence for the activity panels and Agent inspector.
+while retaining the event sequence for the participant cards, live stream and
+causality page.
 
 Events deliberately describe observable execution:
 
@@ -189,7 +197,7 @@ keys and raw provider diagnostics never enter a snapshot or event.
 6. Use `DiscussionDirector` for any phase that should feel like a conversation.
 7. Register the world in `src/society/scenarios/index.ts`.
 
-The UI and room API then discover the scene through the catalog. This makes it
-possible to add negotiation, bluffing, coalition and trust games beyond
-Werewolf — Avalon, Centipede, Chicken and Stag Hunt ship today — without
-creating another runtime.
+The UI and room API then discover the scene through the catalog. All thirteen
+scenarios — Werewolf, Avalon, Prisoner's Dilemma, Trust Game, Public Goods,
+Ultimatum, Beauty Contest, Sealed-Bid Auction, Centipede, Chicken, Stag Hunt,
+Negotiation and Liar's Dice — ship this way without creating another runtime.

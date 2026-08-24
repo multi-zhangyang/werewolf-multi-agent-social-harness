@@ -196,7 +196,8 @@ npm run build
 ## 文档与贡献
 
 - 工程不变量与完成标准：[AGENTS.md](AGENTS.md)
-- 欺骗与信念建模路线：[game_agent_deception_strategy_frontier.md](game_agent_deception_strategy_frontier.md)
+- 场景成熟度验收矩阵：[docs/scenarios.md](docs/scenarios.md)
+- smoke 门禁运行手册：[docs/smoke-gate.md](docs/smoke-gate.md)
 - 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
 - 安全策略：[SECURITY.md](SECURITY.md)
 
