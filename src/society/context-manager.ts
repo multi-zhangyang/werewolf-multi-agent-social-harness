@@ -160,7 +160,9 @@ export class SessionContextManager {
   private compactCount = 0;
   private lastDigest?: string;
   private lastEstimated = 0;
-  private lastLevel: ContextPressureLevel = "normal";
+  /** Undefined until the first preflight, so every room emits at least one
+   *  pressure sample for the §37 smoke metric even when it never rises. */
+  private lastLevel?: ContextPressureLevel;
   private lastCompactedAt?: string;
   private activationsSinceCompaction = 0;
 
@@ -191,7 +193,7 @@ export class SessionContextManager {
 
   /** Current pressure level (drives retrieval tightening etc.). */
   pressure(): ContextPressureLevel {
-    return this.lastLevel;
+    return this.lastLevel ?? "normal";
   }
 
   /**
