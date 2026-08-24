@@ -37,14 +37,41 @@ describe("sanitizeFunctionCallArgs", () => {
     assert.equal(parsed.attention[0], "盯着他的发言");
   });
 
-  it("leaves valid arguments untouched and falls back to {} when unrepairable", () => {
+  it("leaves valid arguments untouched", () => {
     const valid = '{"text": "正常参数"}';
     const [untouched] = sanitizeFunctionCallArgs([functionCallItem(valid)]);
     assert.equal(JSON.stringify(parsedArgumentsOf(untouched)), JSON.stringify({ text: "正常参数" }));
+  });
 
+  it("drops an unrepairable function_call instead of replaying {}", () => {
+    // Strict endpoints validate replayed tool_calls; "{}" is wire-valid but
+    // schema-invalid, so an unrepairable call must never survive in history.
     const hopeless = '{"a": "b",,,}';
-    const [fallback] = sanitizeFunctionCallArgs([functionCallItem(hopeless)]);
-    assert.deepEqual(parsedArgumentsOf(fallback), {});
+    const before = { type: "message", role: "assistant", content: "前置" } as unknown as AgentInputItem;
+    const after = { type: "message", role: "assistant", content: "后续" } as unknown as AgentInputItem;
+    const out = sanitizeFunctionCallArgs([before, functionCallItem(hopeless), after]);
+    assert.equal(out.length, 2, "the poisoned call is removed");
+    assert.deepEqual(out[0], before);
+    assert.deepEqual(out[1], after);
+  });
+
+  it("drops the paired function_call_output together with its poisoned call", () => {
+    const hopeless = '{"a": "b",,,}';
+    const call = functionCallItem(hopeless);
+    const paired = { type: "function_call_output", callId: "call-1", output: "An error occurred" } as unknown as AgentInputItem;
+    const unrelated = { type: "function_call_output", callId: "call-other", output: "ok" } as unknown as AgentInputItem;
+    const out = sanitizeFunctionCallArgs([call, paired, unrelated]);
+    assert.equal(out.length, 1, "call + its output are removed, other outputs survive");
+    assert.deepEqual(out[0], unrelated);
+  });
+
+  it("keeps the function_call_output of a successfully repaired call", () => {
+    const malformed = '{"attention": ["盯着他的发言';
+    const call = functionCallItem(malformed);
+    const paired = { type: "function_call_output", callId: "call-1", output: "ok" } as unknown as AgentInputItem;
+    const [repaired, output] = sanitizeFunctionCallArgs([call, paired]);
+    assert.deepEqual(JSON.parse((repaired as unknown as Record<string, unknown>).arguments as string), { attention: ["盯着他的发言"] });
+    assert.deepEqual(output, paired, "the paired output stays with the repaired call");
   });
 
   it("passes through non-function_call items unchanged", () => {

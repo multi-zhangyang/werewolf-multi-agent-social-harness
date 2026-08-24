@@ -1560,7 +1560,10 @@ export class SocietyRoom {
 
   private fail(error: unknown): void {
     this.status = "error";
-    this.error = errorMessage(error);
+    // Operator console keeps the full diagnostic (key-redacted); viewers and
+    // checkpoints only ever see the friendly text (AGENTS.md §32).
+    console.error(`[room ${this.id}] ${errorMessage(error)}`);
+    this.error = friendlyFailure(error);
     if (!this.abortController.signal.aborted) {
       this.abortController.abort(error instanceof Error ? error : new Error(this.error));
     }
@@ -1727,7 +1730,7 @@ export function isTransientProviderFailure(error: unknown): boolean {
   return /429|rate limit|502|503|504|500|Internal server error|ECONN|ETIMEDOUT|socket|network|fetch failed|TURN_TIMEOUT/i.test(errorMessage(error));
 }
 
-function friendlyFailure(error: unknown): string {
+export function friendlyFailure(error: unknown): string {
   const message = errorMessage(error);
   const maxTurns = /Max turns \((\d+)\) exceeded/i.exec(message);
   if (maxTurns) return `本轮行动次数已达上限（${maxTurns[1]} 次）`;
@@ -1737,9 +1740,12 @@ function friendlyFailure(error: unknown): string {
   if (/CONTEXT_HARD_GUARD/i.test(message)) return "上下文压力达到硬上限，正在压缩";
   if (/reused for a different invocation/i.test(message)) return "工具调用标识冲突，本轮重试";
   if (/400\s|openai_error/i.test(message) && /400/i.test(message)) return "提供商拒绝了本次请求（400），稍后重试";
+  if (/422/i.test(message)) return "提供商拒绝了本次请求（422），稍后重试";
   if (/429|rate limit/i.test(message)) return "提供商限流，稍后重试";
   if (/502|503|504/i.test(message)) return "提供商暂时不可用";
-  return message.replace(/^[A-Za-z_]+:\s*/, "").slice(0, 160);
+  // Never echo raw provider error text (bodies can carry internal details,
+  // AGENTS.md §32); the operator console keeps the full diagnostic.
+  return "提供商请求失败，请稍后重试";
 }
 
 function explicitlyRequestedCapabilities(

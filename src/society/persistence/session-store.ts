@@ -95,34 +95,69 @@ export function deleteSeasonSessions(dir = defaultSessionDir()): number {
 
 /**
  * Enforce the tool-calling wire contract (OpenAI spec: function.arguments is
- * a JSON string) on persisted history. Repair preserves the model's intent;
- * "{}" is the last-resort fallback — the paired tool result already reports
- * the parse failure to the model either way. Shared repair logic lives in
- * `wire-json.ts` so the provider fetch layer enforces the same contract.
+ * a JSON string) on persisted history. Repair preserves the model's intent
+ * when the syntax is recoverable (unescaped quotes, truncation). A call whose
+ * arguments cannot be repaired is DROPPED together with its paired
+ * `function_call_output` — replaying "{}" would be wire-valid but
+ * schema-invalid, so endpoints that validate replayed tool_calls would 400
+ * every follow-up request and permanently poison the conversation. The parse
+ * failure was already reported to the model in the same turn; future turns
+ * never need the poisoned call. Shared repair logic lives in `wire-json.ts`
+ * so the provider fetch layer enforces the same contract.
  */
 export function sanitizeFunctionCallArgs(items: AgentInputItem[]): AgentInputItem[] {
   let repaired = 0;
-  const out = items.map((item): AgentInputItem => {
+  let dropped = 0;
+  // First pass: collect the call ids that cannot be made wire-valid.
+  const poisonedCallIds = new Set<string>();
+  for (const item of items) {
     const record = item as unknown as Record<string, unknown>;
     if (record.type === "function_call" && typeof record.arguments === "string") {
       try {
         JSON.parse(record.arguments);
       } catch {
-        repaired += 1;
-        const fixed = repairJsonText(record.arguments) ?? "{}";
-        return { ...item, arguments: fixed } as AgentInputItem;
+        if (repairJsonText(record.arguments) === undefined && typeof record.callId === "string") {
+          poisonedCallIds.add(record.callId);
+        }
       }
+    }
+  }
+  const out: AgentInputItem[] = [];
+  for (const item of items) {
+    const record = item as unknown as Record<string, unknown>;
+    if (record.type === "function_call" && typeof record.arguments === "string") {
+      try {
+        JSON.parse(record.arguments);
+        out.push(item);
+        continue;
+      } catch {
+        const fixed = repairJsonText(record.arguments);
+        if (fixed === undefined) {
+          dropped += 1;
+          continue;
+        }
+        repaired += 1;
+        out.push({ ...item, arguments: fixed } as AgentInputItem);
+        continue;
+      }
+    }
+    if (record.type === "function_call_output" && typeof record.callId === "string" && poisonedCallIds.has(record.callId)) {
+      dropped += 1;
+      continue;
     }
     if (record.type === "message" && record.role === "system" && Array.isArray(record.content)) {
       // Strict endpoints reject structured content arrays in SYSTEM messages
       // (the compression digest uses this format); flatten text-only arrays
       // to a plain string so a compacted history never 400s every follow-up.
       const content = normalizeInputTextParts(record.content);
-      if (content !== record.content) return { ...item, content } as AgentInputItem;
+      if (content !== record.content) out.push({ ...item, content } as AgentInputItem);
+      else out.push(item);
+      continue;
     }
-    return item;
-  });
+    out.push(item);
+  }
   if (repaired > 0) console.warn(`[session-store] repaired ${repaired} malformed function_call argument payload(s) into wire-valid history`);
+  if (dropped > 0) console.warn(`[session-store] dropped ${dropped} poisoned function_call item(s) so replayed history cannot 400 again`);
   return out;
 }
 
