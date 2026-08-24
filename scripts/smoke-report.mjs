@@ -7,8 +7,11 @@
  *
  * Data sources per checkpoint (data/rooms/<id>/checkpoint.json):
  *   - worldState.shared.socialCausality  (full omniscient ledger projection)
- *   - worldState.shared.runtimeStats     (idempotency hits, stale rejects)
- *   - replayEnvelopes                    (runtime.notice / agent.tool / world.action)
+ *   - worldState.shared.runtimeStats     (idempotency hits, stale/invalid rejects)
+ *   - runtimeStats                       (extraction failures, abandoned turns,
+ *                                          provider turn durations, activation counts)
+ *   - replayEnvelopes                    (runtime.notice / agent.tool / world.action
+ *                                          / agent.context.pressure)
  *   - snapshot.world.log                 (story beats for the strong-label audit)
  * The visibility-filtered snapshot.world.details is deliberately NOT used.
  *
@@ -51,6 +54,12 @@ function countBy(items, keyOf) {
   return counts;
 }
 
+function percentile(sorted, ratio) {
+  if (!sorted.length) return undefined;
+  const index = Math.min(sorted.length - 1, Math.floor(sorted.length * ratio));
+  return sorted[index];
+}
+
 function analyze(roomId, checkpoint) {
   if (!checkpoint || checkpoint.corrupt) {
     return { roomId, corrupt: checkpoint?.corrupt ?? "missing" };
@@ -67,6 +76,34 @@ function analyze(roomId, checkpoint) {
   const toolsStarted = envelopes.filter((entry) => entry.event?.type === "agent.tool" && entry.event.phase === "started").length;
   const toolsSucceeded = envelopes.filter((entry) => entry.event?.type === "agent.tool" && entry.event.phase === "succeeded").length;
   const worldActions = envelopes.filter((entry) => entry.event?.type === "world.action").length;
+
+  // Context pressure (§37 infrastructure): agent.context.pressure is retained
+  // in replayEnvelopes so the distribution survives the SSE window.
+  const pressureEvents = envelopes
+    .filter((entry) => entry.event?.type === "agent.context.pressure")
+    .map((entry) => entry.event);
+  const pressureByLevel = countBy(pressureEvents, (event) => event.level ?? "unknown");
+  const pressurePeak = pressureEvents.reduce((max, event) => Math.max(max, event.pressureRatio ?? 0), 0);
+
+  // Provider latency (§37): successful turn wall-clock durations persisted by
+  // the room, labeled as wall time in the report (not provider-server time).
+  const roomRuntime = checkpoint.runtimeStats ?? {};
+  const durations = (roomRuntime.providerTurnDurationsMs ?? []).filter((value) => Number.isFinite(value)).slice().sort((a, b) => a - b);
+  const providerLatency = durations.length
+    ? { samples: durations.length, p50Ms: percentile(durations, 0.5), p95Ms: percentile(durations, 0.95) }
+    : undefined;
+
+  // Valid action rate (§37): successful world actions over every command the
+  // gateway saw (successes + stale rejects + invalid rejects).
+  const invalidActionRejections = stats.invalidActionRejections ?? 0;
+  const staleCommandRejections = stats.staleCommandRejections ?? 0;
+  const commandsSeen = worldActions + invalidActionRejections + staleCommandRejections;
+  const validActionRate = commandsSeen > 0 ? worldActions / commandsSeen : undefined;
+
+  // Required action completion (§37): activations that settled on the first
+  // pass versus those that needed the room's retry loop.
+  const completedActivations = roomRuntime.completedActivations ?? 0;
+  const retriedActivations = roomRuntime.retriedActivations ?? 0;
 
   const commitments = ledger.commitments ?? [];
   const commitmentStates = countBy(commitments, (entry) => entry.state);
@@ -99,10 +136,15 @@ function analyze(roomId, checkpoint) {
       toolsSucceeded,
       worldActions,
       idempotencyHits: stats.idempotencyHits ?? 0,
-      staleCommandRejections: stats.staleCommandRejections ?? 0,
+      staleCommandRejections,
+      invalidActionRejections,
+      validActionRate,
       degradations,
       noticeCodes
     },
+    pressure: { byLevel: pressureByLevel, peak: pressurePeak },
+    providerLatency,
+    completion: { completedActivations, retriedActivations },
     commitments: { total: commitments.length, states: commitmentStates },
     extraction: {
       byMethod: actsByMethod,
@@ -135,11 +177,22 @@ for (const report of reports) {
     "**工具合规**", "",
     `- agent.tool started/succeeded: ${report.compliance.toolsStarted}/${report.compliance.toolsSucceeded}`,
     `- world.action: ${report.compliance.worldActions}`,
-    `- 幂等命中: ${report.compliance.idempotencyHits} · 迟到拒绝: ${report.compliance.staleCommandRejections}`,
+    `- 幂等命中: ${report.compliance.idempotencyHits} · 迟到拒绝: ${report.compliance.staleCommandRejections} · 无效拒绝: ${report.compliance.invalidActionRejections}`,
+    report.compliance.validActionRate === undefined
+      ? "- 有效行动率: 无命令样本"
+      : `- 有效行动率: ${(report.compliance.validActionRate * 100).toFixed(1)}%（world.action / 命令总数）`,
+    `- 行动完成率: ${report.completion.completedActivations} 次激活直接完成 · ${report.completion.retriedActivations} 次经重试轮`,
     `- 推理降级通知: ${report.compliance.degradations}`,
     `- runtime.notice: ${JSON.stringify(report.compliance.noticeCodes)}`, "",
+    "**上下文压力**", "",
+    `- 分布（level → 次数）: ${JSON.stringify(report.pressure.byLevel)}`,
+    `- 峰值 pressureRatio: ${report.pressure.peak.toFixed(3)}`, "",
+    "**Provider 延迟（turn 墙钟耗时）**", "",
+    report.providerLatency
+      ? `- 样本 ${report.providerLatency.samples} · p50 ${report.providerLatency.p50Ms}ms · p95 ${report.providerLatency.p95Ms}ms`
+      : "- 无样本", "",
     "**承诺对账**", "",
-    `- 承朽数: ${report.commitments.total} · 状态分布: ${JSON.stringify(report.commitments.states)}`, "",
+    `- 承诺数: ${report.commitments.total} · 状态分布: ${JSON.stringify(report.commitments.states)}`, "",
     "**社会行为（提取）**", "",
     `- 按来源: ${JSON.stringify(report.extraction.byMethod)}`,
     `- 提取失败计数: ${report.runtime.extractionFailures} · 弃置回合: ${report.runtime.settledAbandonedTurns}`, "",

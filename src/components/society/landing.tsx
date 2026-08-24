@@ -13,7 +13,6 @@ interface SeasonSummary {
   characterId: string;
   displayName: string;
   games: Array<{ scenarioId: string; role?: string; outcome: "win" | "lose" }>;
-  memoryCount: number;
   updatedAt: string;
 }
 
@@ -195,7 +194,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
                       {entry.displayName}
                     </p>
                     <p className="nums mt-2 font-mono text-[11px] text-muted-foreground/80">
-                      {entry.games.length} 局 · 胜 {wins} · 记忆 {entry.memoryCount}
+                      {entry.games.length} 局 · 胜 {wins}
                     </p>
                     <p className="mt-1 truncate text-[11px] text-muted-foreground">
                       最近：{entry.games.at(-1)?.scenarioId ?? "—"}

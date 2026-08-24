@@ -1,4 +1,4 @@
-# 场景扩展
+# 场景与成熟度验收
 
 一个场景只需要实现 `SocialWorld` 契约，不需要复制 Agent、SSE 或 UI 代码。
 
@@ -30,3 +30,65 @@
 新增场景时，让每一个可观察行为都通过事件流进入 UI；不要只返回一个最终分数。
 适合继续加入的方向包括联盟谈判、谣言与信息级联、身份交换、不对称承诺或
 多轮声誉博弈。
+
+---
+
+# 成熟度验收矩阵
+
+> 审计基线：`main @ 9a7317e`（2026-08-24）。本表只陈述"已实现且有测试证据"
+> / "已实现但未充分验证" / "缺失"，不把目标写成现状（AGENTS.md §0.5）。
+> 证据 = 离线测试文件名；真实对局 = `artifacts/transcripts/` 下的真实模型记录数。
+
+**三态图例**
+
+- ✅ **已验证**：该机制存在，且有专属离线测试或真实对局证据；
+- 🟡 **存在未验证**：代码路径存在，但审计未找到专属测试断言（仅泛化覆盖）；
+- ❌ **缺失**：该机制未实现，或实现与 §27 标准不符。
+
+**六列说明**（对照 AGENTS.md §27 五条标准）
+
+- **规则与结算**：typed command + 确定性 reducer 的契约测试；
+- **密封/信息边界**：同时行动不泄密、observe 正向投影的边界测试（顺序行动场景标 `—`）；
+- **typed 承诺**：场景提供可结算的 typed 承诺工具（无承诺语义的场景靠主张对账 + 中性标签）；
+- **主张对账**：旁路提取的行动/身份主张在结算时确定性对账（§28 行为链的核心环节）；
+- **结果对账**：行动结算写入 OutcomeReconciliation 并派生关系后果；
+- **checkpoint**：专属阶段级恢复测试（`world-serialization.test.ts` 的泛化 round-trip 不算）；
+- **真实对局**：真实模型 transcript 数量。
+
+| 场景 | 规则与结算 | 密封/信息边界 | typed 承诺 | 主张对账 | 结果对账 | checkpoint | 真实对局 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 狼人杀 | ✅ 30 项规则 | ✅ 投票密封 | ❌ 无 | ❌ 见缺口① | ✅ ×10 | ❌ | ✅ 3 |
+| 囚徒困境 | ✅ 11 项 | ✅ 不越权断言 | ✅ `choose-move` | ✅ | ✅ | ✅ 3 项 | ✅ 5 |
+| 谈判博弈 | ✅ 9 项 | ✅ 不越权断言 | ✅ 成交自动 typed | ✅ | ✅ | ✅ 3 项 | ✅ 4 |
+| 公共品 | ✅ 10 项 | ✅ 不越权断言 | ✅ `contribute-at-least` | ✅ | ✅ | ✅ 3 项 | ✅ 8 |
+| 阿瓦隆 | ✅ 7 项+官方表 | ✅ 组队/任务票密封 | ✅ `team-vote`/`quest-outcome` | ❌ 见缺口② | ✅ ×6 | ✅ 3 项 | ✅ 2 |
+| 最后通牒 | ✅ 9 项 | —（顺序行动） | ✅ `offer/accept-at-least` | ✅ | ✅ | ✅ 3 项 | ✅ 3 |
+| 蜈蚣博弈 | ✅ 5 项 | —（顺序行动） | ✅ `centipede-move` | ✅ | ✅ | ✅ 2 项 | ✅ 2 |
+| 胆小鬼 | ✅ 5 项 | 🟡 见缺口⑤ | ✅ `chicken-choice` | ✅ | ✅ | ✅ 1 项 | ✅ 2 |
+| 猎鹿 | ✅ 5 项 | 🟡 见缺口⑤ | ✅ `hunt-choice` | ✅ | ✅ | ✅ 1 项 | ✅ 2 |
+| 选美博弈 | ✅ 4 项 | ✅ 不越权断言 | ❌（无承诺语义） | ✅ | ✅ | ❌ | ✅ 2 |
+| 密封拍卖 | ✅ 4 项 | ✅ 不越权断言 | ❌（无承诺语义） | ✅ | ✅ | ❌ | ✅ 2 |
+| 吹牛骰 | ✅ 2 项 | 🟡 见缺口⑤ | ❌（无承诺语义） | ✅ 开盅对账 | ✅ | ✅ 2 项 | ✅ 1 |
+| 信任博弈 | ✅ 16 项 | —（顺序行动） | ✅ `return-at-least`/`invest-at-least`/`return-ratio` | ✅ | ✅ | ✅ 6 项 | ✅ 2 |
+
+## 证据索引
+
+- **狼人杀规则**：`tests/contract/werewolf-rules.test.ts`（牌堆表、白天投票、骑士决斗、女巫、守卫、猎人、小丑、白狼王、梦魇、狼美人、通灵师、狼人平衡、Avalon 官方人数表与湖中仙女、输入校验）。
+- **密封**：`tests/contract/sealed-actions.test.ts`（阿瓦隆组队票/任务票、狼人杀白天投票在全员提交前保持密封）；各场景契约测试内含"sealed … never cross an observation boundary"断言（囚徒困境/公共品/谈判/选美/密封拍卖）。
+- **中性标签门禁**：`tests/contract/story-beat-labels.test.ts`（22 项：无证据时 betrayal / promise-kept / alliance / deception-exposed / misplay 一律降级为中性结局标签）。
+- **泛化 round-trip**：`tests/recovery/world-serialization.test.ts` 覆盖全部 13 场景导出恢复一致、恢复后暂停续跑、跨场景状态不匹配拒绝。
+- **恢复基线**：`tests/recovery/session-store.test.ts`、`season-concurrency.test.ts`、`season-migration.test.ts`。
+
+## 缺口清单（Phase C 工作清单，按 §27 推进顺序）
+
+1. **① 狼人杀主张对账缺失**：身份主张经 `identity/has-team` socialActs 与 `revealIdentity` 记录，但无 `extractedActionClaims` / `recordClaimedActionOutcome` 接入，§28"主张→揭晓→对账为假→detected→关系后果"的行为链没有端到端专属测试。补：行为链测试 + 与提取提示的打通（旗舰，最高优先级）。
+2. **② 阿瓦隆**：无 `extractionHints`（旁路提取缺位）；阵营主张对账缺失（现有"minion claimed loyalty is exposed by the reveal"走 identity 路径，需扩展提取后的阵营主张对账）。
+3. **③ checkpoint 专属套件缺失**：狼人杀、选美博弈、密封拍卖——补阶段级恢复测试（讨论中恢复、密封行动已提交后恢复、终局稳定）。
+4. **④ 密封拍卖无 `extractionHints`**：讨论阶段的出价意图无法旁路提取，补与选美同模式的主张提取提示。
+5. **⑤ 密封边界断言缺失**：吹牛骰（`hiddenDice` 已在投影白名单 redact，但无"私有骰面不越观察边界"的专属测试）；胆小鬼、猎鹿（同时选择有密封状态且可恢复，但无专属不越权断言）。各补一个边界测试。
+
+## 本表维护约定
+
+- 每完成一个 Phase C 缺口，更新对应格子的标记并附上新测试文件名；
+- 每局真实模型 smoke（§38）后更新"真实对局"计数；
+- 标记只能由审计证据升级，不能凭代码阅读"应该如此"升级。

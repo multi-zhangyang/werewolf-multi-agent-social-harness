@@ -57,7 +57,7 @@ export interface WorldSerializedState {
     pendingEvents: Array<[string, SocialEvent[]]>;
     socialCausality?: SocialCausalityState;
     /** Smoke-gate counters (AGENTS.md §37): tool-compliance instrumentation. */
-    runtimeStats?: { idempotencyHits: number; staleCommandRejections: number };
+    runtimeStats?: { idempotencyHits: number; staleCommandRejections: number; invalidActionRejections: number };
   };
   world: unknown;
 }
@@ -89,9 +89,10 @@ export abstract class SocialWorldBase implements SocialWorld {
   private activeActivationId?: string;
   private readonly recentReceipts = new Map<string, WorldActionCommit>();
   private static readonly RECENT_RECEIPT_LIMIT = 64;
-  /** Smoke-gate counters (§37): visible duplicates and late-command rejects. */
+  /** Smoke-gate counters (§37): visible duplicates, late-command rejects and invalid action rejects. */
   private idempotencyHits = 0;
   private staleCommandRejections = 0;
+  private invalidActionRejections = 0;
 
   /**
    * Optional message sidecar (AGENTS.md §6.5): when installed by the room, each
@@ -134,7 +135,7 @@ export abstract class SocialWorldBase implements SocialWorld {
         log: structuredClone(this.log),
         pendingEvents: [...this.pendingEvents.entries()].map(([id, events]) => [id, structuredClone(events)] as [string, SocialEvent[]]),
         socialCausality: this.socialCausality.exportState(),
-        runtimeStats: { idempotencyHits: this.idempotencyHits, staleCommandRejections: this.staleCommandRejections }
+        runtimeStats: { idempotencyHits: this.idempotencyHits, staleCommandRejections: this.staleCommandRejections, invalidActionRejections: this.invalidActionRejections }
       },
       world: this.exportWorldState()
     };
@@ -155,6 +156,11 @@ export abstract class SocialWorldBase implements SocialWorld {
     this.pendingEvents.clear();
     for (const [id, events] of state.shared.pendingEvents) this.pendingEvents.set(id, structuredClone(events));
     this.socialCausality.restoreState(state.shared.socialCausality);
+    if (state.shared.runtimeStats) {
+      this.idempotencyHits = state.shared.runtimeStats.idempotencyHits ?? 0;
+      this.staleCommandRejections = state.shared.runtimeStats.staleCommandRejections ?? 0;
+      this.invalidActionRejections = state.shared.runtimeStats.invalidActionRejections ?? 0;
+    }
     for (const messageId of this.socialCausality.extractedActMessageIds()) {
       this.extractionAttempted.add(messageId);
     }
@@ -233,41 +239,49 @@ export abstract class SocialWorldBase implements SocialWorld {
       if ((error as Error & { code?: string }).code === "STALE_ACTIVATION_COMMAND") this.staleCommandRejections += 1;
       throw error;
     }
-    this.requireProfile(actorId);
-    const receiptKey = this.idempotencyKey(actorId, action, payload);
-    const existing = this.recentReceipts.get(receiptKey);
-    if (existing) {
-      this.idempotencyHits += 1;
-      return structuredClone(existing);
+    try {
+      this.requireProfile(actorId);
+      const receiptKey = this.idempotencyKey(actorId, action, payload);
+      const existing = this.recentReceipts.get(receiptKey);
+      if (existing) {
+        this.idempotencyHits += 1;
+        return structuredClone(existing);
+      }
+      const observationThroughSequence = this.socialCausality.observationCursor();
+      let commit: WorldActionCommit;
+      if (action === "message" || action === "communicate") {
+        const input = parseMessagePayload(payload);
+        const message = await this.sendMessage({ senderId: actorId, ...input });
+        commit = { action, detail: input.text, result: { messageId: message.id }, commandId: `msg:${message.id}` };
+      } else {
+        const raw = await this.performDomainAction(actorId, action, payload);
+        // A scenario may mint its own stable receipt (e.g. for a DecisionRecord);
+        // otherwise the gate assigns one.
+        commit = { ...raw, commandId: raw.commandId ?? randomUUID() };
+      }
+      this.socialCausality.recordAction({
+        actorId,
+        characterId: this.requireProfile(actorId).characterId,
+        action,
+        payload,
+        commit,
+        observationThroughSequence,
+        characterIdFor: (targetActorId) => this.requireProfile(targetActorId).characterId,
+        ...(this.activeActivationId ? { activationId: this.activeActivationId } : {})
+      });
+      this.recentReceipts.set(receiptKey, structuredClone(commit));
+      if (this.recentReceipts.size > SocialWorldBase.RECENT_RECEIPT_LIMIT) {
+        const oldest = this.recentReceipts.keys().next().value;
+        if (oldest !== undefined) this.recentReceipts.delete(oldest);
+      }
+      return structuredClone(commit);
+    } catch (error) {
+      // §37: any command the gateway rejects — bad payload, illegal action,
+      // validation failure — counts once; STALE_ACTIVATION_COMMAND is counted
+      // separately at the gate above.
+      this.invalidActionRejections += 1;
+      throw error;
     }
-    const observationThroughSequence = this.socialCausality.observationCursor();
-    let commit: WorldActionCommit;
-    if (action === "message" || action === "communicate") {
-      const input = parseMessagePayload(payload);
-      const message = await this.sendMessage({ senderId: actorId, ...input });
-      commit = { action, detail: input.text, result: { messageId: message.id }, commandId: `msg:${message.id}` };
-    } else {
-      const raw = await this.performDomainAction(actorId, action, payload);
-      // A scenario may mint its own stable receipt (e.g. for a DecisionRecord);
-      // otherwise the gate assigns one.
-      commit = { ...raw, commandId: raw.commandId ?? randomUUID() };
-    }
-    this.socialCausality.recordAction({
-      actorId,
-      characterId: this.requireProfile(actorId).characterId,
-      action,
-      payload,
-      commit,
-      observationThroughSequence,
-      characterIdFor: (targetActorId) => this.requireProfile(targetActorId).characterId,
-      ...(this.activeActivationId ? { activationId: this.activeActivationId } : {})
-    });
-    this.recentReceipts.set(receiptKey, structuredClone(commit));
-    if (this.recentReceipts.size > SocialWorldBase.RECENT_RECEIPT_LIMIT) {
-      const oldest = this.recentReceipts.keys().next().value;
-      if (oldest !== undefined) this.recentReceipts.delete(oldest);
-    }
-    return structuredClone(commit);
   }
 
   beginActivation(activation: WorldActivation): void {

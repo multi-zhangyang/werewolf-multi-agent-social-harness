@@ -261,6 +261,11 @@ export class SocietyRoom {
   private abandonedRunningTurns = 0;
   /** Of those, how many have since truly settled (or were terminated). */
   private settledAbandonedTurns = 0;
+  /** §37 smoke-gate counters, persisted with the checkpoint. */
+  private completedActivations = 0;
+  private retriedActivations = 0;
+  /** Successful turn wall-clock durations in ms (provider p50/p95 source, capped). */
+  private readonly providerTurnDurationsMs: number[] = [];
   private runningPromise?: Promise<void>;
   private waitingHuman?: HumanWaiter;
   private humanActionInFlight = false;
@@ -851,6 +856,7 @@ export class SocietyRoom {
       // already gave up on are then rejected by the world.
       let completion = this.world.completeActivation(activation);
       if (!completion.completed && completion.missingActorIds.length) {
+        this.retriedActivations += 1;
         await this.runActivation(
           activation,
           completion.missingActorIds,
@@ -863,6 +869,7 @@ export class SocietyRoom {
         this.pause(`行动未完成：${completion.missingActorIds.join(", ")}。房间没有自动代打。`);
         return;
       }
+      this.completedActivations += 1;
       await this.settleAfterActivation();
     }
   }
@@ -1145,6 +1152,9 @@ export class SocietyRoom {
         // Releasing happens in `lease` so aborted and timed-out turns free
         // their slot only when the underlying request truly settles.
         const release = this.limiter ? await this.limiter.acquire(signal) : undefined;
+        // §37: turn wall-clock duration for provider latency percentiles;
+        // only locally successful turns are counted (failures/abandoned skip).
+        const startedAt = Date.now();
         // Lease-until-settle (§17.1 / §26.15): the permit is bound to the
         // real lifetime of the provider request, not to the local race. A
         // local timeout or abort only stops waiting for THIS turn; the
@@ -1186,7 +1196,12 @@ export class SocietyRoom {
           }, { once: true });
         });
         try {
-          return await Promise.race([runPromise, timeoutPromise]);
+          const result = await Promise.race([runPromise, timeoutPromise]);
+          this.providerTurnDurationsMs.push(Date.now() - startedAt);
+          if (this.providerTurnDurationsMs.length > 500) {
+            this.providerTurnDurationsMs.splice(0, this.providerTurnDurationsMs.length - 500);
+          }
+          return result;
         } catch (error) {
           // The race was lost locally while the request may still be
           // streaming; the lease stays held until the request settles.
@@ -1492,7 +1507,10 @@ export class SocietyRoom {
       worldState: this.world.exportState(),
       runtimeStats: {
         extractionFailures: this.extractionFailures,
-        settledAbandonedTurns: this.settledAbandonedTurns
+        settledAbandonedTurns: this.settledAbandonedTurns,
+        completedActivations: this.completedActivations,
+        retriedActivations: this.retriedActivations,
+        providerTurnDurationsMs: [...this.providerTurnDurationsMs]
       },
       agentBindings: structuredClone(this.agentBindings),
       pausedAgents: [...this.pausedAgents],
@@ -1633,6 +1651,7 @@ function isReplayEvent(event: AgentRuntimeEvent): boolean {
     case "agent.tool":
     case "agent.thought-beat":
     case "agent.compacted":
+    case "agent.context.pressure":
     case "agent.memory.consolidated":
     case "agent.guardrail":
     case "agent.status":

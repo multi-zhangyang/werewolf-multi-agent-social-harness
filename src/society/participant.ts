@@ -548,8 +548,10 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   /**
    * The world's appraisal events are translated into state changes here: the
    * deterministic engine updates PAD / core and social emotions / needs /
-   * relationships (personality-modulated), and the salient ones become
-   * memories that shape future turns.
+   * relationships (personality-modulated) plus slow trait adaptation. It never
+   * writes memories — the model's own SDK session history carries what the
+   * character actually remembers (AGENTS.md §22); settlement outcomes reach
+   * the spectator MindSheet as display-only notes via `noteOutcome`.
    */
   async appraise(events: SocialEvent[], turn: number): Promise<void> {
     if (!events.length) return;

@@ -34,7 +34,14 @@ export interface RoomCheckpoint {
   pausedAgents?: string[];
   seasonMode?: "season" | "one-shot";
   /** Smoke-gate counters (AGENTS.md §37), written at checkpoint time. */
-  runtimeStats?: { extractionFailures: number; settledAbandonedTurns: number };
+  runtimeStats?: {
+    extractionFailures: number;
+    settledAbandonedTurns: number;
+    completedActivations: number;
+    retriedActivations: number;
+    /** Successful turn wall-clock durations in ms; smoke-report computes p50/p95. */
+    providerTurnDurationsMs: number[];
+  };
   /** The room's control token, persisted so recovery keeps the same owner. */
   ownerToken?: string;
   /** False when the room was disposed on purpose — not restarted on boot. */

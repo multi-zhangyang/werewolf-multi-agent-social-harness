@@ -10,25 +10,17 @@
  * express the resulting state, but the underlying update is event-driven and
  * consistent — the same event moves different characters differently.
  *
- * Every update has a causal chain: event -> appraisal -> state + memory ->
- * future behavior (state is injected into every participant's context, and
- * salient events become retrievable memories).
+ * Every update has a causal chain: event -> appraisal -> state (the updated
+ * state is injected into every participant's context). Long-term memory is the
+ * model's own SDK session history (AGENTS.md §22); settlement outcomes reach
+ * the spectator MindSheet as display-only notes via `noteOutcome`.
  */
 
 import type { AgentMindState, AgentProfile, AgentTemperament, DecisionBias, SocialEvent } from "./contracts";
-import { applyEmotionDeltas, applyNeedsDeltas, applyPadDeltas, clampSigned, clampUnit } from "./affect";
-
-export interface AppraisalMemorySeed {
-  text: string;
-  tags: string[];
-  salience: number;
-  valence: number;
-  sourceRefs: string[];
-}
+import { applyEmotionDeltas, applyNeedsDeltas, applyPadDeltas, clampUnit } from "./affect";
 
 export interface AppraisalSummary {
   changed: boolean;
-  memories: AppraisalMemorySeed[];
 }
 
 interface Deltas {
@@ -76,7 +68,6 @@ export function appraiseEvents(
   // same event lands; the stored profile baseline stays untouched (§4.2.8).
   const temperament = effectiveTemperament ?? profile.temperament;
   const biases = new Set(profile.decisionBiases ?? []);
-  const memories: AppraisalMemorySeed[] = [];
   let changed = false;
 
   for (const event of events) {
@@ -86,14 +77,6 @@ export function appraiseEvents(
     const deltas = modulateByRegulation(biased, profile.regulation);
     changed = true;
     apply(mind, event, deltas, turn, resolveCharacterId);
-    const valence = estimateValence(deltas);
-    memories.push({
-      text: event.detail,
-      tags: [event.type, `turn:${turn}`, ...(event.actorId ? [event.actorId] : []), ...(event.targetId ? [event.targetId] : [])],
-      salience: deltas.salience,
-      valence,
-      sourceRefs: [...(event.sourceEventIds ?? []), event.id]
-    });
     mind.lastAppraisals.push({
       text: `${eventTypeLabel(event.type)}：${event.detail}`,
       turn,
@@ -102,7 +85,7 @@ export function appraiseEvents(
     if (mind.lastAppraisals.length > 8) mind.lastAppraisals.splice(0, mind.lastAppraisals.length - 8);
   }
 
-  return { changed, memories };
+  return { changed };
 }
 
 const NEGATIVE_EMOTIONS = ["anger", "fear", "sadness", "disgust"] as const;
@@ -681,13 +664,4 @@ function apply(
       relationship.note = event.detail;
     }
   }
-}
-
-function estimateValence(deltas: Deltas): number {
-  const pad = deltas.pad;
-  const pleasure = pad?.pleasure ?? 0;
-  const emotionJoy = deltas.emotions?.joy ?? 0;
-  const emotionSadness = deltas.emotions?.sadness ?? 0;
-  const emotionAnger = deltas.emotions?.anger ?? 0;
-  return clampSigned(pleasure * 0.7 + emotionJoy * 0.5 - emotionSadness * 0.5 - emotionAnger * 0.3);
 }

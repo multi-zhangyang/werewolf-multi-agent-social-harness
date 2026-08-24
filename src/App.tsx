@@ -27,7 +27,6 @@ interface SeasonResponse {
     characterId: string;
     displayName: string;
     games: Array<{ scenarioId: string; role?: string; outcome: "win" | "lose" }>;
-    memoryCount: number;
     updatedAt: string;
   }>;
 }
