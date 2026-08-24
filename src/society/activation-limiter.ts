@@ -1,6 +1,5 @@
 /**
- * Cross-room provider backpressure (AGENTS.md P3: 多房间并发 / 提供商限流 /
- * Agent 级背压).
+ * Cross-room provider backpressure (多房间并发 / 提供商限流 / Agent 级背压).
  *
  * Every agent turn in every room competes for a process-wide bounded pool of
  * concurrent provider activations. A turn acquires a permit before calling

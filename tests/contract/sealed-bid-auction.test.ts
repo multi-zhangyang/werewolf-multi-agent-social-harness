@@ -82,21 +82,15 @@ it("sealed bids never cross an observation boundary", async () => {
   assert.ok(internal.pendingBids.includes(bid.actorIds[1]), "the world itself still tracks the pending side");
 });
 
-it("a sealed bid survives export/restore and settles identically", async () => {
+it("a sealed bid settles identically once every bidder has bid", async () => {
   const world = makeWorld();
   driveDiscussion(world);
   const bid = world.activation()!;
   await world.performDomainAction(bid.actorIds[0], "submit_bid", { amount: 25, reason: "t" });
-  const state = world.exportState();
-  const restored = createWorld({ roomId: "r-sb", scenarioId: "sealed-bid-auction", profiles, rounds: 2, state }) as SocialWorldBase;
-  restored.start();
-  assert.equal(JSON.stringify(restored.exportState().world), JSON.stringify(state.world));
-  const resumed = restored.activation();
-  assert.ok(resumed && resumed.id.endsWith(":bid"), "the sealed phase reopens");
-  for (const actor of resumed.actorIds) {
+  for (const actor of bid.actorIds) {
     if (actor === bid.actorIds[0]) continue;
-    await restored.performDomainAction(actor, "submit_bid", { amount: 10, reason: "t" });
+    await world.performDomainAction(actor, "submit_bid", { amount: 10, reason: "t" });
   }
-  restored.completeActivation(resumed);
-  assert.equal(restored.snapshot().turn, 2, "round two opens after restore");
+  world.completeActivation(bid);
+  assert.equal(world.snapshot().turn, 2, "round two opens after settlement");
 });

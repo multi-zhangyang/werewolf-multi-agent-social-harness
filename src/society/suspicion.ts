@@ -78,7 +78,7 @@ export class SuspicionClimate {
     return { scores: this.normalized(), entries: this.entryList() };
   }
 
-  /** Checkpoint serialization (restart recovery, P3). */
+  /** In-memory state handoff: the climate's full working state as plain data. */
   exportState(): { scores: Array<[string, number]>; entries: SuspicionEntry[]; maxScore: number } {
     return {
       scores: [...this.scores.entries()],

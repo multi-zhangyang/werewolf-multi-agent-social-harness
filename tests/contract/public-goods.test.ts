@@ -154,27 +154,21 @@ it("a matched contribution claim records supporting evidence", async () => {
   );
 });
 
-// --- checkpoint: mid-state round-trip ---
-it("an accepted promise and a sealed contribution survive export/restore and settle identically", async () => {
+// --- sealed contributions: the barrier holds until every contribution is in ---
+it("an accepted promise and a sealed contribution settle identically on the live path", async () => {
   const world = makeWorld();
   const commitmentId = await declare(world, P1, 5, "我会投 5 点。");
   await world.performDomainAction(P2, "accept_commitment", { commitmentId });
   driveDiscussion(world);
   const contribution = world.activation()!;
   await world.performDomainAction(contribution.actorIds[0], "contribute_to_pool", { amount: 5, reason: "t" });
-  const state = world.exportState();
-  const restored = createWorld({ roomId: "r-pg", scenarioId: "public-goods", profiles, rounds: 2, state }) as SocialWorldBase;
-  restored.start();
-  assert.equal(commitments(restored)[0].state, "accepted", "the accepted promise survives");
-  const resumed = restored.activation();
-  assert.ok(resumed && resumed.id.endsWith(":contribution"), "the sealed phase reopens");
-  for (const actor of resumed.actorIds) {
+  for (const actor of contribution.actorIds) {
     if (actor === contribution.actorIds[0]) continue;
-    await restored.performDomainAction(actor, "contribute_to_pool", { amount: 0, reason: "t" });
+    await world.performDomainAction(actor, "contribute_to_pool", { amount: 0, reason: "t" });
   }
-  restored.completeActivation(resumed);
-  assert.equal(commitments(restored)[0].state, "fulfilled", "settlement after restore matches the live path");
-  assert.equal(lastBeat(restored), "promise-kept");
+  world.completeActivation(contribution);
+  assert.equal(commitments(world)[0].state, "fulfilled");
+  assert.equal(lastBeat(world), "promise-kept");
 });
 
 // --- repeated interaction: the next round observes the settled history ---

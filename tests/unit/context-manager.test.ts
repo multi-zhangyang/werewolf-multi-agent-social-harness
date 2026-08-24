@@ -292,32 +292,3 @@ check("the digest is a trusted system block with a full provenance artifact", as
   assert.ok((first as { societySummaryArtifact?: unknown }).societySummaryArtifact, "the artifact rides on the item");
 });
 
-check("the digest artifact survives the durable session (compaction → reopen)", async () => {
-  const { mkdtempSync, rmSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const pathModule = await import("node:path");
-  const { JsonSessionStore } = await import("../../src/society/persistence");
-  const dir = mkdtempSync(pathModule.join(tmpdir(), "society-ctx-"));
-  try {
-    const store = JsonSessionStore.open("ctx-test", dir);
-    await store.addItems(bigHistory(9_000));
-    store.close();
-    const calls = { digest: 0 };
-    const manager = new SessionContextManager({
-      provider: fakeProvider(calls), model: "fake-model", actorLabel: "T",
-      resolvedConfig: resolved,
-      onSessionCompacted: (items) => store.replaceHistoryWithCompaction(items)
-    });
-    await manager.sessionInputCallback(await store.getItems(), bigHistory(2_000));
-    store.close();
-    const reopened = JsonSessionStore.open("ctx-test", dir);
-    const items = await reopened.getItems();
-    const first = items[0] as unknown as { role: string; societySummaryArtifact?: { summaryId: string } };
-    assert.equal(first.role, "system");
-    assert.ok(first.societySummaryArtifact?.summaryId, "the artifact survives the reopen");
-    rmSync(dir, { recursive: true, force: true });
-  } catch (cause) {
-    rmSync(dir, { recursive: true, force: true });
-    throw cause;
-  }
-});

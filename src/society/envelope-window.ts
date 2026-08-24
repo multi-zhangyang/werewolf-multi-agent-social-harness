@@ -4,7 +4,7 @@
  * The room keeps two event buffers — the short SSE backlog and the longer
  * replay-anchor list. Both are capped by entry count AND by serialized
  * bytes: `world.*-frame` envelopes embed full snapshots, so a count-only cap
- * lets a handful of rooms grow multi-hundred-MB checkpoints (§31). Trimming
+ * lets a handful of rooms grow multi-hundred-MB buffers. Trimming
  * is O(1) amortized via a head index with occasional compaction; callers
  * read through `toArray()`/`last()` and never mutate the retained window.
  */

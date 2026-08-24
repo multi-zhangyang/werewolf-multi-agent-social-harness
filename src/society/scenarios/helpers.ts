@@ -13,7 +13,7 @@ export function emitAction(context: SocietyAgentContext, action: string, detail:
 
 /**
  * Personality signals for the DiscussionDirector, derived from the character
- * profile. Betrayal-hypervigilance (§4.2.7) is applied measurably: a vigilant
+ * profile. Betrayal-hypervigilance is applied measurably: a vigilant
  * character feels more response pressure when targeted, so accusations and
  * challenges land harder and draw a response sooner.
  */

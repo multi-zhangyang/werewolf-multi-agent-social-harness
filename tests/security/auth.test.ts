@@ -1,16 +1,16 @@
 /**
- * API security checks (AGENTS.md §18 / P0-05), rewritten against the strict
- * operator model that actually ships in src/server/auth.ts:
+ * API security checks (AGENTS.md §18 / P0-05), against the strict operator
+ * model that actually ships in src/server/auth.ts:
  *
  *  - anonymous viewers stay PUBLIC, always;
  *  - the room owner token unlocks omniscient viewing + control of THAT room
  *    only (cross-room tokens are refused);
- *  - global operations (season reset, settings, characters, templates) and
- *    the forensic archive require SOCIETY_OPERATOR_TOKEN — ownership never
- *    escalates into operator authority, and with no token configured every
- *    global write is refused (fail closed);
- *  - archives split public from forensic: minds never leave via the public
- *    projection; session file paths never cross either wire.
+ *  - global operations (model config, characters, templates) require
+ *    SOCIETY_OPERATOR_TOKEN — ownership never escalates into operator
+ *    authority, and with no token configured every global write is refused
+ *    (fail closed);
+ *  - private state never leaks: roles stay hidden from public seats, and the
+ *    public room view strips world internals.
  *
  * HTTP-level tests against the real route stack — no model calls, no network.
  */
@@ -43,7 +43,6 @@ async function startHarness(env: Record<string, string | undefined>): Promise<Ha
   const dir = mkdtempSync(path.join(tmpdir(), "society-auth-"));
   const previous: Record<string, string | undefined> = {};
   const overrides: Record<string, string | undefined> = {
-    SOCIETY_SEASON_FILE: path.join(dir, "season.json"),
     SOCIETY_CHARACTERS_FILE: path.join(dir, "characters.json"),
     SOCIETY_TEMPLATES_FILE: path.join(dir, "templates.json"),
     OPENAI_API_KEY: undefined,
@@ -72,11 +71,11 @@ async function startHarness(env: Record<string, string | undefined>): Promise<Ha
   const port = (server.address() as AddressInfo).port;
   const base = `http://127.0.0.1:${port}`;
 
-  const create = async (scenarioId: string, extra: Record<string, unknown> = {}): Promise<{ id: string; ownerToken: string }> => {
+  const create = async (scenarioId: string): Promise<{ id: string; ownerToken: string }> => {
     const response = await fetch(`${base}/api/rooms`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scenarioId, mode: "ai", season: "one-shot", ...extra })
+      body: JSON.stringify({ scenarioId, mode: "ai" })
     });
     assert.equal(response.status, 202);
     const payload = await response.json() as { room: { id: string }; ownerToken: string };
@@ -96,8 +95,6 @@ async function stopHarness(harness: Harness): Promise<void> {
   await new Promise<void>((resolve) => harness.server.close(() => resolve()));
   harness.context.rooms.remove(harness.roomA);
   harness.context.rooms.remove(harness.roomB);
-  rmSync(path.resolve("data", "rooms", harness.roomA), { recursive: true, force: true });
-  rmSync(path.resolve("data", "rooms", harness.roomB), { recursive: true, force: true });
   rmSync(harness.dir, { recursive: true, force: true });
 }
 
@@ -164,29 +161,28 @@ describe("room control authority", () => {
   });
 });
 
-describe("archive layering", () => {
+describe("public projection strips world internals", () => {
   let harness: Harness;
   beforeAll(async () => { harness = await startHarness({}); });
   afterAll(async () => { await stopHarness(harness); });
 
-  it("the public archive carries no minds, session files or world internals", async () => {
-    const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}/archive`);
+  it("the public room view carries no roles, hidden dice or sealed-move bookkeeping", async () => {
+    const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}?mode=public`);
     assert.equal(response.status, 200);
-    const archive = await response.json() as Record<string, unknown>;
-    assert.equal(archive.agentMinds, undefined, "minds never leave via the public archive");
-    assert.equal(archive.sessionFiles, undefined);
-    const snapshot = archive.snapshot as { world: { details: Record<string, unknown> } };
-    assert.deepEqual(snapshot.world.details, {}, "world internals (roles etc.) are stripped");
+    const view = await response.json() as { world: { details: Record<string, unknown> } };
+    const details = view.world.details;
+    assert.equal(details.roles, undefined, "roles never reach the public projection");
+    assert.equal(details.hiddenDice, undefined);
+    assert.equal(details.pendingVotes, undefined);
   });
 
-  it("an owner token does not unlock the forensic archive (§18.1)", async () => {
-    const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}/archive`, {
+  it("an owner token does not leak private bookkeeping into the public view either", async () => {
+    const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}?mode=public`, {
       headers: withBearer(harness.roomAToken)
     });
     assert.equal(response.status, 200);
-    const archive = await response.json() as Record<string, unknown>;
-    assert.equal(archive.agentMinds, undefined, "ownership never escalates into forensic authority");
-    assert.equal(archive.sessionFiles, undefined);
+    const view = await response.json() as { world: { details: Record<string, unknown> } };
+    assert.equal(view.world.details.roles, undefined, "ownership never upgrades the public projection");
   });
 });
 
@@ -195,8 +191,7 @@ describe("global writes fail closed without an operator token", () => {
   beforeAll(async () => { harness = await startHarness({}); });
   afterAll(async () => { await stopHarness(harness); });
 
-  it("anonymous writes to season, settings and characters are forbidden", async () => {
-    assert.equal((await fetch(`${harness.base}/api/season`, { method: "DELETE" })).status, 403);
+  it("anonymous writes to model config, characters and templates are forbidden", async () => {
     assert.equal((await fetch(`${harness.base}/api/model-config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -207,21 +202,27 @@ describe("global writes fail closed without an operator token", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ displayName: "入侵者", persona: "一位试图越权创建人物的测试。", traits: ["测试"], values: ["验证"], goals: ["破坏"] })
     })).status, 403);
+    assert.equal((await fetch(`${harness.base}/api/room-templates`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "入侵模板", scenarioId: "trust-game" })
+    })).status, 403);
   });
 
   it("an owner token cannot perform global operations either", async () => {
-    const season = await fetch(`${harness.base}/api/season`, {
-      method: "DELETE",
-      headers: withBearer(harness.roomAToken)
-    });
-    assert.equal(season.status, 403, "ownership never escalates into operator authority");
-
     const characters = await fetch(`${harness.base}/api/characters`, {
       method: "POST",
       headers: { ...withBearer(harness.roomAToken), "Content-Type": "application/json" },
       body: JSON.stringify({ displayName: "房主自建", persona: "一位试图通过房主令牌越权的人物。", traits: ["测试"], values: ["验证"], goals: ["越权"] })
     });
     assert.equal(characters.status, 403, "character creation is operator-gated");
+
+    const templates = await fetch(`${harness.base}/api/room-templates`, {
+      method: "POST",
+      headers: { ...withBearer(harness.roomAToken), "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "房主模板", scenarioId: "trust-game" })
+    });
+    assert.equal(templates.status, 403, "template creation is operator-gated");
   });
 });
 
@@ -232,29 +233,28 @@ describe("strict operator mode (SOCIETY_OPERATOR_TOKEN configured)", () => {
   afterAll(async () => { await stopHarness(harness); });
 
   it("an owner token alone no longer grants global operations", async () => {
-    const response = await fetch(`${harness.base}/api/season`, {
-      method: "DELETE",
-      headers: withBearer(harness.roomAToken)
+    const response = await fetch(`${harness.base}/api/characters`, {
+      method: "POST",
+      headers: { ...withBearer(harness.roomAToken), "Content-Type": "application/json" },
+      body: JSON.stringify({ displayName: "房主自建", persona: "测试。", traits: ["测试"], values: ["验证"], goals: ["越权"] })
     });
     assert.equal(response.status, 403, "owner ≠ operator when an operator token exists");
   });
 
   it("the configured operator token grants global operations", async () => {
-    const response = await fetch(`${harness.base}/api/season`, {
-      method: "DELETE",
-      headers: withBearer(OPERATOR)
+    const response = await fetch(`${harness.base}/api/characters`, {
+      method: "POST",
+      headers: { ...withBearer(OPERATOR), "Content-Type": "application/json" },
+      body: JSON.stringify({ displayName: "运营者创建", persona: "一位由运营者创建的人物。", traits: ["尽责"], values: ["秩序"], goals: ["测试"] })
     });
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 201);
   });
 
-  it("the operator token also unlocks the forensic archive", async () => {
-    const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}/archive`, {
+  it("the operator token unlocks room control beyond ownership", async () => {
+    const response = await fetch(`${harness.base}/api/rooms/${harness.roomB}/pause`, {
+      method: "POST",
       headers: withBearer(OPERATOR)
     });
-    assert.equal(response.status, 200);
-    const archive = await response.json() as Record<string, unknown>;
-    assert.ok(archive.agentMinds, "operator archive includes minds");
-    assert.equal(archive.sessionFiles, undefined, "session file paths never cross the wire");
-    assert.ok(typeof archive.sessionCount === "number");
+    assert.equal(response.status, 200, "operator authority covers any room");
   });
 });

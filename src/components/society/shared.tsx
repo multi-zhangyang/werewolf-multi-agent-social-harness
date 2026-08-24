@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils";
 import type { AgentStatus, ScenarioId, SocialChannel } from "@/society/contracts";
 
 /**
- * Deterministic local avatars (§15.2): the same character renders the same
+ * Deterministic local avatars: the same character renders the same
  * face everywhere, generated offline from a stable seed — no external image
  * service, no network dependency, dark-first high-contrast silhouettes.
  */
@@ -258,7 +258,7 @@ export function SparkleDivider({ children }: { children?: ReactNode }): ReactNod
   );
 }
 
-/** §15.9: one shared visual language for provenance across every causality card. */
+/** One shared visual language for provenance across every causality card. */
 export function provenanceBadge(source: string): ReactNode {
   const labels: Record<string, string> = {
     "world-fact": "世界事实",

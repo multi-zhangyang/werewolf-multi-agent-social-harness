@@ -17,7 +17,7 @@ import type {
 import { scopedContext, SocialWorldBase } from "../world";
 import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
-import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import { socialReferenceContext } from "../social/context-refs";
 import type { SocialActDeclaration } from "../social/contracts";
 
 type Choice = "stag" | "rabbit";
@@ -29,9 +29,6 @@ interface RoundResult {
   payoffs: Record<string, number>;
   text: string;
 }
-
-const STAG_HUNT_STATE_SCHEMA_VERSION = 3;
-const STAG_HUNT_OUTCOME_KEYS = ["all-hunt-stag", "actor-payoff-at-least-three", "any-rabbit", "actor-chose-stag"] as const;
 
 /**
  * Stag hunt. The shared hunt pays the most but fails completely unless both
@@ -59,7 +56,7 @@ export class StagHuntWorld extends SocialWorldBase {
   }
 
   /**
-   * Sidecar extraction hints (§19): choice statements become `claimed-action`
+   * Sidecar extraction hints: choice statements become `claimed-action`
    * propositions reconciled against the sealed choice at settlement.
    */
   extractionHints?(): string {
@@ -70,46 +67,7 @@ export class StagHuntWorld extends SocialWorldBase {
     ].join("\n");
   }
 
-  protected exportWorldState(): unknown {
-    return {
-      schemaVersion: STAG_HUNT_STATE_SCHEMA_VERSION,
-      round: this.round,
-      phase: this.phase,
-      scores: this.mapEntries(this.scores),
-      commitments: structuredClone(this.commitments),
-      choices: this.mapEntries(this.choices),
-      choiceCommandIds: this.mapEntries(this.choiceCommandIds),
-      discussion: this.discussion.exportState(),
-      history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences)
-    };
-  }
 
-  protected restoreWorldState(state: unknown): void {
-    const s = state as Partial<{
-      schemaVersion: number;
-      round: number; phase: string; scores: Array<[string, number]>; commitments: Commitment[]; choices: Array<[string, Choice]>;
-      choiceCommandIds: Array<[string, string]>;
-      discussion: ReturnType<DiscussionDirector["exportState"]>;
-      history: RoundResult[]; lastExperiences: Array<[string, string]>;
-    }> | undefined;
-    if (!s) return;
-    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== 2 && s.schemaVersion !== STAG_HUNT_STATE_SCHEMA_VERSION) {
-      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: stag-hunt ${s.schemaVersion}`);
-    }
-    this.round = Number(s.round ?? 1);
-    this.phase = (s.phase ?? "discussion") as Phase;
-    this.fillMap(this.scores, s.scores);
-    this.commitments.length = 0;
-    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
-    this.fillMap(this.choices, s.choices);
-    this.fillMap(this.choiceCommandIds, s.choiceCommandIds);
-    this.discussion = this.createDiscussion();
-    this.discussion.restoreState(s.discussion);
-    this.history.length = 0;
-    this.history.push(...structuredClone(s.history ?? []));
-    this.fillMap(this.lastExperiences, s.lastExperiences);
-  }
 
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
@@ -162,19 +120,16 @@ export class StagHuntWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const choose = tool({
       name: "hunt_choice",
-      description: "Compare bounded hunt intents and predict the public result, then commit privately to stag or rabbit. Binding for this round.",
+      description: "Commit privately to stag or rabbit. The typed choice is the binding action for this round and cannot be changed.",
       parameters: z.object({
         choice: z.enum(["stag", "rabbit"]),
-        reason: z.string().min(1).max(2_000),
-        ...createStrategyActionShape({ choice: z.enum(["stag", "rabbit"]) }, STAG_HUNT_OUTCOME_KEYS)
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.choice !== input.choice) throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: Selected hunt choice must equal the binding choice.");
         const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "hunt_choice", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({ ...candidate, action: "hunt_choice", payloadSummary: `choice=${candidate.choice}` }))
+          choice: input.choice,
+          reason: input.reason
         });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -350,7 +305,7 @@ export class StagHuntWorld extends SocialWorldBase {
       label: `第 ${this.round} 轮出发`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => "Review authorized messages, beliefs and actor models. Call hunt_choice exactly once with bounded candidates and public-result predictions; text cannot substitute for the tool call."
+      instructionFor: () => "Review authorized messages, beliefs and actor models. Call hunt_choice exactly once; text cannot substitute for the tool call."
     };
   }
 
@@ -440,7 +395,7 @@ export class StagHuntWorld extends SocialWorldBase {
       payload: { round: this.round, choices, payoffs, allStag }
     });
     for (const id of ids) this.lastExperiences.set(id, `${text} 你的选择是 ${choices[id] === "stag" ? "猎鹿" : "猎兔"}。你当前得分 ${this.scores.get(id)}。`);
-    // §28 主张对账: reconcile extracted choice claims against the
+    // 主张对账: reconcile extracted choice claims against the
     // actual sealed choice; settle accepted choice promises.
     for (const id of ids) {
       const actualChoice = choices[id];
@@ -561,14 +516,4 @@ function recordPayload(payload: unknown): Record<string, unknown> {
     throw new Error("ACTION_PAYLOAD_INVALID: Provide an object payload.");
   }
   return payload as Record<string, unknown>;
-}
-
-
-
-function normalizeCommitment(value: Commitment): Commitment {
-  return {
-    ...value,
-    acceptedByActorIds: [...(value.acceptedByActorIds ?? [])],
-    acceptedByCommandIds: [...(value.acceptedByCommandIds ?? [])]
-  };
 }

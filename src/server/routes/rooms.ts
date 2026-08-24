@@ -15,7 +15,6 @@ import {
   tokenFromRequest,
   type RoomAuthority
 } from "../auth";
-import { deleteSeasonSessions, deleteSessionById, RoomArchiveError, type RoomCheckpoint } from "../../society/persistence";
 import { getProviderSettings, writeEnvKey } from "../settings";
 import { fetchRemoteModels, mergeProbeResult, probeCapabilities } from "../probe";
 
@@ -24,7 +23,7 @@ function sanitizeEnvName(id: string): string {
 }
 
 /**
- * Resolve the spectator seat for a request (AGENTS.md §8.3 / §15.10).
+ * Resolve the spectator seat for a request.
  * The anonymous default is PUBLIC — omniscient and agent-pov seats require a
  * participant, owner or operator token. Postgame reveals the world after the
  * game ends, but private minds stay gated behind owner/operator.
@@ -91,104 +90,6 @@ function requireRoomControl(
   return undefined;
 }
 
-/** Read-only checkpoint projection: public world history, never private minds. */
-function publicArchiveProjection(checkpoint: RoomCheckpoint): Record<string, unknown> {
-  return {
-    roomId: checkpoint.roomId,
-    archivedAt: checkpoint.archivedAt,
-    status: checkpoint.status,
-    seasonMode: checkpoint.seasonMode,
-    snapshot: publicArchivedSnapshot(checkpoint)
-  };
-}
-
-export function publicArchivedSnapshot(checkpoint: RoomCheckpoint): SocietyRoomSnapshot {
-  const snapshot = checkpoint.snapshot;
-  const world = snapshot.world;
-  return {
-    id: snapshot.id,
-    scenarioId: snapshot.scenarioId,
-    title: snapshot.title,
-    mode: snapshot.mode,
-    seasonMode: snapshot.seasonMode,
-    status: snapshot.status,
-    createdAt: snapshot.createdAt,
-    updatedAt: snapshot.updatedAt,
-    world: {
-      roomId: world.roomId,
-      scenarioId: world.scenarioId,
-      title: world.title,
-      status: world.status,
-      turn: world.turn,
-      totalTurns: world.totalTurns,
-      phase: world.phase,
-      summary: world.summary,
-      agents: world.agents.map((agent) => ({
-        id: agent.id,
-        displayName: agent.displayName,
-        characterId: agent.characterId,
-        status: agent.status,
-        alive: agent.alive,
-        ...(agent.score === undefined ? {} : { score: agent.score })
-      })),
-      messages: (world.messages ?? [])
-        .filter((message) => message.channel === "public")
-        .map((message) => ({
-          id: message.id,
-          roomId: message.roomId,
-          senderId: message.senderId,
-          senderName: message.senderName,
-          channel: "public" as const,
-          text: message.text,
-          turn: message.turn,
-          phase: message.phase,
-          createdAt: message.createdAt,
-          ...(message.replyTo ? { replyTo: message.replyTo } : {}),
-          ...(message.wave === undefined ? {} : { wave: message.wave })
-        })),
-      log: world.log.map((entry) => ({
-        id: entry.id,
-        text: entry.text,
-        turn: entry.turn,
-        phase: entry.phase,
-        at: entry.at,
-        ...(entry.beat ? { beat: entry.beat } : {})
-      })),
-      details: {}
-    },
-    participants: (snapshot.participants ?? []).map((participant) => ({
-      profile: {
-        id: participant.profile.id,
-        displayName: participant.profile.displayName,
-        characterId: participant.profile.characterId,
-        model: participant.profile.model,
-        controller: participant.profile.controller,
-        persona: participant.profile.persona,
-        decisionBiases: participant.profile.decisionBiases,
-        voice: participant.profile.voice,
-        autobiographicalAnchors: participant.profile.autobiographicalAnchors
-      },
-      status: participant.status,
-      alive: participant.alive,
-      ...(participant.score === undefined ? {} : { score: participant.score }),
-      ...(participant.paused === undefined ? {} : { paused: participant.paused })
-    })),
-    ...(snapshot.highlights
-      ? {
-          highlights: snapshot.highlights.map((highlight) => ({
-            id: highlight.id,
-            at: highlight.at,
-            title: highlight.title,
-            ...(highlight.subtitle ? { subtitle: highlight.subtitle } : {}),
-            camera: highlight.camera,
-            priority: highlight.priority,
-            focusAgentIds: [...highlight.focusAgentIds]
-          }))
-        }
-      : {})
-  };
-}
-
 const scenarioIds = Object.keys(SCENARIO_METADATA) as [ScenarioId, ...ScenarioId[]];
 
 const createRoomSchema = z.object({
@@ -212,8 +113,7 @@ const createRoomSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   mode: z.enum(["ai", "human"]).default("ai"),
   playerName: z.string().trim().min(1).max(40).optional(),
-  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
-  season: z.enum(["season", "one-shot"]).default("season")
+  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("high")
 }).strict().superRefine((input, issueContext) => {
   if (input.mode === "human" && !input.playerName) {
     issueContext.addIssue({ code: z.ZodIssueCode.custom, path: ["playerName"], message: "Human mode requires a playerName." });
@@ -324,10 +224,10 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.get("/api/rooms", (_request, response) => {
-    response.json({ rooms: context.rooms.list(), archived: context.archive.list() });
+    response.json({ rooms: context.rooms.list(), archived: [] });
   });
 
-  // Remove a room: stops it, finalizes its archive checkpoint, frees memory.
+  // Remove a room: stops it and frees memory.
   // Human rooms require the player's own token; AI rooms are observer-owned.
   app.delete("/api/rooms/:roomId", (request, response) => {
     const room = context.rooms.get(request.params.roomId);
@@ -337,86 +237,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     }
     if (!requireRoomControl(request, response, room, context.auth)) return;
     const removed = context.rooms.remove(request.params.roomId);
-    response.json({ removed: Boolean(removed), roomId: request.params.roomId, archived: context.archive.list() });
-  });
-
-  app.get("/api/rooms/:roomId/archive", (request, response) => {
-    let checkpoint: RoomCheckpoint | undefined;
-    try {
-      checkpoint = context.archive.load(request.params.roomId);
-    } catch (error) {
-      const code = error instanceof RoomArchiveError ? error.failure.code : "ARCHIVE_READ_FAILED";
-      response.status(503).json({ error: code, message: "The room archive is unavailable or corrupt." });
-      return;
-    }
-    if (!checkpoint) {
-      response.status(404).json({ error: "ARCHIVE_NOT_FOUND", message: "No checkpoint exists for this room." });
-      return;
-    }
-    // Public archive: a projected view. Forensic access (operator only)
-    // returns the full checkpoint minus session file paths (§16.4).
-    const operator = context.auth.isOperatorToken(tokenFromRequest(request));
-    if (operator) {
-      const { sessionFiles: _sessionFiles, ownerToken: _ownerToken, ...rest } = checkpoint;
-      response.json({ ...rest, sessionCount: Object.keys(checkpoint.sessionFiles ?? {}).length });
-      return;
-    }
-    response.json(publicArchiveProjection(checkpoint));
-  });
-
-  app.get("/api/season", (_request, response) => {
-    response.json({
-      dossiers: context.season.list().map((dossier) => ({
-        characterId: dossier.characterId,
-        displayName: dossier.displayName,
-        games: dossier.games.slice(-6).map((game) => ({
-          scenarioId: game.scenarioId,
-          ...(game.role ? { role: game.role } : {}),
-          outcome: game.outcome
-        })),
-        updatedAt: dossier.updatedAt
-      })),
-      // v1 entries that could not be mapped to a unique character id.
-      isolated: context.season.listIsolated()
-    });
-  });
-
-  // A fresh season: forget every cross-game memory and start over.
-  app.delete("/api/season", (request, response) => {
-    if (!requireGlobalOperator(request, response, context.auth)) return;
-    // Season continuity lives in per-character SDK sessions (AGENTS.md §22):
-    // a reset that left those files would "forget" nothing. Refuse while any
-    // active season room still holds its characters' sessions.
-    const busy = context.rooms.list().filter((room) => room.seasonMode === "season" && ["lobby", "running", "paused"].includes(room.status));
-    if (busy.length) {
-      response.status(409).json({ error: "SEASON_RESET_BLOCKED", message: `存在进行中的赛季房间（${busy.map((room) => room.title).join("、")}），请先移除后再重置社会季。` });
-      return;
-    }
-    context.season.clear();
-    const sessionsDeleted = deleteSeasonSessions();
-    response.json({ cleared: true, dossiers: [], sessionsDeleted });
-  });
-
-  // Forget ONE character's cross-game memory (§7.2): their next game starts
-  // from a clean slate while everyone else keeps their history.
-  app.delete("/api/season/:characterId", (request, response) => {
-    if (!requireGlobalOperator(request, response, context.auth)) return;
-    const characterId = decodeURIComponent(request.params.characterId);
-    if (!characterId.trim() || characterId.length > 120) {
-      response.status(400).json({ error: "CHARACTER_ID_INVALID", message: "Provide a valid character id." });
-      return;
-    }
-    const holdingRoom = context.rooms.list().find((room) =>
-      room.seasonMode === "season"
-      && ["lobby", "running", "paused"].includes(room.status)
-      && room.world.agents.some((agent) => agent.characterId === characterId));
-    if (holdingRoom) {
-      response.status(409).json({ error: "CHARACTER_SESSION_BUSY", message: `${characterId} 正在赛季房间「${holdingRoom.title}」中，请先移除该房间。` });
-      return;
-    }
-    const removed = context.season.remove(characterId);
-    const sessionDeleted = deleteSessionById(`season:${characterId}`);
-    response.json({ removed, characterId, dossiers: context.season.list().length, sessionDeleted });
+    response.json({ removed: Boolean(removed), roomId: request.params.roomId, archived: [] });
   });
 
   app.post("/api/rooms", (request, response, next) => {
@@ -449,45 +270,32 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
         rounds: input.rounds,
         apiKey: getProviderSettings().apiKey || undefined,
         baseURL: getProviderSettings().baseURL || undefined,
-        seasonMode: input.season,
         modelRegistry: context.models,
         limiter: context.limiter,
         ...(roomDefaults ? { roomDefaults } : {}),
-        ...(agentBindings ? { agentBindings } : {}),
-        ...(input.season === "season" ? { season: context.season } : {})
+        ...(agentBindings ? { agentBindings } : {})
       });
       void room.start();
       const created = room.creationResult();
       setTokenCookie(response, created.ownerToken);
       response.status(202).json(created);
     } catch (error) {
-      // Season sessions are one-per-character: a busy-character conflict is a
-      // client-resolvable state, not a server fault (AGENTS.md §22).
-      if (error instanceof Error && error.message.startsWith("CHARACTER_SESSION_BUSY:")) {
-        response.status(409).json({ error: "CHARACTER_SESSION_BUSY", message: error.message.slice("CHARACTER_SESSION_BUSY:".length).trim() });
-        return;
-      }
       next(error);
     }
+  });
+
+  app.get("/api/rooms/:roomId/metrics", (request, response) => {
+    const room = context.rooms.get(request.params.roomId);
+    if (!room) {
+      response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
+      return;
+    }
+    response.json(room.metrics());
   });
 
   app.get("/api/rooms/:roomId", (request, response) => {
     const room = context.rooms.get(request.params.roomId);
     if (!room) {
-      // Archive fallback (§5.9): a finished or interrupted room that left the
-      // process memory can still be viewed read-only from its checkpoint.
-      let checkpoint: RoomCheckpoint | undefined;
-      try {
-        checkpoint = context.archive.load(request.params.roomId);
-      } catch (error) {
-        const code = error instanceof RoomArchiveError ? error.failure.code : "ARCHIVE_READ_FAILED";
-        response.status(503).json({ error: code, message: "The room archive is unavailable or corrupt." });
-        return;
-      }
-      if (checkpoint?.snapshot) {
-        response.json(publicArchivedSnapshot(checkpoint));
-        return;
-      }
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
@@ -502,7 +310,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     const viewer = resolveViewer(request, room, authority, isOperator);
     // The effective viewer rides along with every snapshot so the UI shows
     // the boundary actually granted — never the one requested and silently
-    // downgraded (§18.2).
+    // downgraded.
     response.json({ ...room.snapshotForViewer(viewer), viewer: viewerDescription(viewer) });
   });
 
@@ -561,7 +369,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     response.json(room.snapshotFor());
   });
 
-  // Model switch (§12.4): swap one agent's model while paused; identity,
+  // Model switch: swap one agent's model while paused; identity,
   // session and memory survive. The room must be paused (or just that agent).
   app.post("/api/rooms/:roomId/agents/:actorId/model", (request, response, next) => {
     const room = context.rooms.get(request.params.roomId);
@@ -619,7 +427,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     response.setHeader("X-Accel-Buffering", "no");
     response.flushHeaders?.();
 
-    // SSE cursor recovery (AGENTS.md §9.4): a (re)connecting client resumes
+    // SSE cursor recovery: a (re)connecting client resumes
     // from its last sequence via ?afterSequence= or the Last-Event-ID header
     // EventSource sends automatically. Backlog events are replayed first, then
     // only increments flow — snapshots anchor the stream, they don't replace it.
@@ -965,7 +773,7 @@ function afterSequence(request: express.Request): number {
  * `projectEventFor`, the world snapshot carried by a `world.updated` envelope
  * is the room's internal view: it must be re-scoped to the viewer's seat
  * before it crosses the wire, otherwise a public seat would receive private
- * and team-channel messages (AGENTS.md §8.3).
+ * and team-channel messages.
  */
 function projectEnvelopeForViewer(
   envelope: SocietyRoomEventEnvelope,

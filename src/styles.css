@@ -255,7 +255,7 @@ body {
   animation-play-state: paused;
 }
 
-/* Flash highlight when jumping to a conversation position (§8.3) */
+/* Flash highlight when jumping to a conversation position */
 @keyframes msg-jump {
   0%, 100% { background: transparent; }
   20%, 60% { background: oklch(0.7 0.15 240 / 0.18); }

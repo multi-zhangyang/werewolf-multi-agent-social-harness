@@ -3,10 +3,8 @@
  *
  * These records never replace the raw message or the deterministic world
  * result. They connect what an actor observed or claimed to later beliefs,
- * decisions and social consequences with explicit provenance.
+ * relationships, commitments and social consequences with explicit provenance.
  */
-
-import type { ContextPolicy, ModelCapabilities } from "../models/contracts";
 
 export type EventId = string;
 export type PropositionId = string;
@@ -14,12 +12,7 @@ export type EvidenceId = string;
 export type SocialActId = string;
 export type BeliefUpdateId = string;
 export type DeceptionId = string;
-export type SocialDecisionId = string;
 export type ActorModelId = string;
-export type CandidateIntentId = string;
-export type StrategySelectionId = string;
-export type StrategyProfileSnapshotId = string;
-export type InfluenceId = string;
 export type OutcomeReconciliationId = string;
 export type RelationshipDeltaId = string;
 
@@ -313,7 +306,7 @@ export interface DeceptionPlanInput {
   intendedBelief: string;
   /** Who the intended belief is about; keeps the plan's proposition on the
    *  same semantic identity as the audience's later belief updates so the
-   *  believed/detected reconciliation can match them (§7.3). */
+   *  believed/detected reconciliation can match them. */
   subjectId?: string;
   motive?: string;
   expectedGain?: string;
@@ -355,157 +348,13 @@ export interface DeceptionEpisode {
   schemaVersion: number;
 }
 
-export interface OutcomePrediction {
-  outcomeKey: string;
-  proposition: string;
-  probability: number;
-  horizon: "immediate" | "round" | "game" | "future-game";
-}
-
-/** A bounded option considered by the same participant that will act. */
-export interface CandidateIntent {
-  intentId: CandidateIntentId;
-  actorId: string;
-  characterId: string;
-  activationId?: string;
-  goal: string;
-  summary: string;
-  publicStrategy?: string;
-  possibleActions: Array<{ action: string; payloadSummary?: string }>;
-  expectedUtility?: number;
-  exposureRisk?: number;
-  relationshipRisk?: number;
-  predictedResponses: Array<{ targetCharacterId: string; response: string; probability: number }>;
-  evidenceRefs: EvidenceId[];
-  beliefRefs: string[];
-  actorModelRefs: ActorModelId[];
-  source: "agent-self-report" | "bounded-rule";
-  logicalTime: number;
-  schemaVersion: number;
-}
-
-export interface StrategySelection {
-  selectionId: StrategySelectionId;
-  actorId: string;
-  characterId: string;
-  activationId?: string;
-  strategyProfileSnapshotId?: StrategyProfileSnapshotId;
-  candidateIntentIds: CandidateIntentId[];
-  selectedIntentId: CandidateIntentId;
-  selector: "agent" | "bounded-rule" | "shadow";
-  selectorVersion: string;
-  evidenceRefs: EvidenceId[];
-  budget: { maxCandidates: number; consideredCandidates: number };
-  /**
-   * Non-binding deterministic audit over the Agent's own declared estimates.
-   * It never changes the typed command and is not a claim about true utility.
-   */
-  shadowRecommendation?: {
-    recommendedIntentId: CandidateIntentId;
-    agentSelectedIntentId: CandidateIntentId;
-    agreedWithAgent: boolean;
-    score: number;
-    scoreBreakdown: {
-      normalizedExpectedUtility: number;
-      exposurePenalty: number;
-      relationshipPenalty: number;
-      evidenceBonus: number;
-    };
-    weights: {
-      utility: number;
-      exposureRisk: number;
-      relationshipRisk: number;
-      evidence: number;
-    };
-    estimateSource: "agent-self-report";
-    selectorVersion: string;
-  };
-  logicalTime: number;
-  schemaVersion: number;
-}
-
-/** Immutable, secret-free runtime configuration behind one actor's decisions. */
-export interface StrategyProfileSnapshot {
-  strategyProfileSnapshotId: StrategyProfileSnapshotId;
-  actorId: string;
-  characterId: string;
-  modelConfig: {
-    modelProfileId: string;
-    modelId: string;
-    providerProfileId: string;
-    contextWindow: number;
-    usableInputTokens: number;
-    tuning: Record<string, { value: unknown; source: string }>;
-    capabilities: ModelCapabilities;
-    negotiationNotes: string[];
-  };
-  persona: {
-    text: string;
-    decisionBiases: string[];
-    voice?: string;
-    autobiographicalAnchors: string[];
-  };
-  promptPolicy: {
-    id: string;
-    version: string;
-    instructions: string[];
-    instructionsHash: string;
-  };
-  contextPolicy: ContextPolicy;
-  toolSchemas: Array<{
-    name: string;
-    description: string;
-    parameters: Record<string, unknown>;
-    strict: boolean;
-  }>;
-  strategyVersion: string;
-  reasoningFallback: {
-    requestedEffort: string;
-    order: Array<"xhigh" | "high" | "provider-default">;
-    downgradeOnlyOnCapabilityError: true;
-    notifyOnDowngradeOrFailure: true;
-  };
-  configurationHash: string;
-  createdAtLogical: number;
-  createdAt: string;
-  schemaVersion: number;
-}
-
-export interface InfluenceLink {
-  influenceId: InfluenceId;
-  sourceEventId: string;
-  targetCharacterId: string;
-  beliefUpdateIds: BeliefUpdateId[];
-  decisionId?: SocialDecisionId;
-  resultingActionReceiptId?: string;
-  confidence: number;
-  basis:
-    | "agent-cited"
-    | "direct-commitment-reference"
-    | "temporal-association"
-    | "counterfactual-replay"
-    | "observer-inferred";
-  logicalTime: number;
-  schemaVersion: number;
-}
-
 export interface OutcomeReconciliation {
   reconciliationId: OutcomeReconciliationId;
-  decisionId: SocialDecisionId;
   actorId: string;
   characterId: string;
   actionReceiptId: string;
-  predictedConsequences: OutcomePrediction[];
   actualOutcome: { summary: string; metrics: Record<string, number | string | boolean | null> };
-  predictionAssessments: Array<{
-    outcomeKey: string;
-    predictedProbability: number;
-    actual: boolean;
-    squaredError: number;
-  }>;
   propositionSettlements: Array<{ propositionId: PropositionId; truthStatus: "true" | "false" }>;
-  influenceIds: InfluenceId[];
-  calibrationError?: number;
   resultingEventIds: string[];
   logicalTime: number;
   provenance: Provenance;
@@ -517,31 +366,6 @@ export interface OutcomeReconciliationInput {
   actualOutcome: { summary: string; metrics: Record<string, number | string | boolean | null> };
   actualFacts: Record<string, boolean>;
   resultingEventIds?: string[];
-}
-
-export interface SocialDecisionRecord {
-  decisionId: SocialDecisionId;
-  actorId: string;
-  characterId: string;
-  activationId?: string;
-  strategyProfileSnapshotId?: StrategyProfileSnapshotId;
-  logicalTime: number;
-  observationRefs: string[];
-  evidenceRefs: string[];
-  relevantBeliefIds: string[];
-  relevantActorModelIds: string[];
-  relevantRelationshipIds: string[];
-  openCommitmentIds: string[];
-  activeDeceptionIds: string[];
-  candidateIntentIds: CandidateIntentId[];
-  strategySelectionId: StrategySelectionId;
-  selectedIntent: { intentId: CandidateIntentId; summary: string; publicStrategy?: string };
-  predictedConsequences: OutcomePrediction[];
-  action: string;
-  actionReceiptId: string;
-  resultingEventIds: string[];
-  outcomeReconciliationId?: OutcomeReconciliationId;
-  provenance: Provenance;
 }
 
 export interface SocialCausalityProjection {
@@ -556,16 +380,6 @@ export interface SocialCausalityProjection {
   directedRelationships: DirectedRelationshipState[];
   relationshipDeltas: RelationshipDeltaRecord[];
   commitments: CommitmentRecord[];
-  candidateIntents: CandidateIntent[];
-  strategyProfileSnapshots: StrategyProfileSnapshot[];
-  activeStrategyProfileSnapshotIds: Record<string, StrategyProfileSnapshotId>;
-  strategySelections: StrategySelection[];
-  decisions: SocialDecisionRecord[];
-  influenceLinks: InfluenceLink[];
   outcomeReconciliations: OutcomeReconciliation[];
   deceptions: DeceptionEpisode[];
-}
-
-export interface SocialCausalityState extends SocialCausalityProjection {
-  roomId: string;
 }

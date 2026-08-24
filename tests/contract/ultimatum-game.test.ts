@@ -139,26 +139,19 @@ it("a contradicted offer claim records contradiction evidence", async () => {
   );
 });
 
-// --- checkpoint: mid-state round-trip ---
-it("an accepted promise and a sealed offer survive export/restore and settle identically", async () => {
+// --- sealed offer: the barrier holds until the response is in ---
+it("an accepted promise and a sealed offer settle identically on the live path", async () => {
   const world = makeWorld();
   const commitmentId = await declare(world, P1, "offer-at-least", 4, "我至少给你 4。");
   await world.performDomainAction(P2, "accept_commitment", { commitmentId });
   driveDiscussion(world);
   const propose = world.activation()!;
   await world.performDomainAction(propose.actorIds[0], "propose_split", { offer: 5, reason: "t" });
-  const state = world.exportState();
-  const restored = createWorld({ roomId: "r-ug", scenarioId: "ultimatum-game", profiles, rounds: 2, state }) as SocialWorldBase;
-  restored.start();
-  assert.equal(JSON.stringify(restored.exportState().world), JSON.stringify(state.world));
-  assert.equal(commitments(restored).find((entry) => entry.commitmentId === commitmentId)?.state, "accepted");
-  const resumed = restored.activation();
-  assert.ok(resumed && resumed.id.endsWith(":propose"), "the proposal phase reopens");
-  restored.completeActivation(resumed);
-  const respond = restored.activation();
-  assert.ok(respond && respond.id.endsWith(":respond"), "the response phase reopens");
-  await restored.performDomainAction(respond.actorIds[0], "respond_to_offer", { accept: true, reason: "t" });
-  restored.completeActivation(respond);
-  assert.equal(commitments(restored).find((entry) => entry.commitmentId === commitmentId)?.state, "fulfilled");
-  assert.equal(lastBeat(restored), "promise-kept");
+  world.completeActivation(propose);
+  const respond = world.activation();
+  assert.ok(respond && respond.id.endsWith(":respond"), "the response phase opens");
+  await world.performDomainAction(respond.actorIds[0], "respond_to_offer", { accept: true, reason: "t" });
+  world.completeActivation(respond);
+  assert.equal(commitments(world).find((entry) => entry.commitmentId === commitmentId)?.state, "fulfilled");
+  assert.equal(lastBeat(world), "promise-kept");
 });

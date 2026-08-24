@@ -156,23 +156,17 @@ it("a matched demand claim records supporting evidence", async () => {
   );
 });
 
-// --- checkpoint: mid-state round-trip ---
-it("an accepted offer and a sealed demand survive export/restore and settle identically", async () => {
+// --- sealed demands: the barrier holds until both are in ---
+it("an accepted offer settles against the sealed demands on the live path", async () => {
   const world = makeWorld();
   await offerAndAccept(world, 5, 5);
   driveDiscussion(world);
   const demand = world.activation()!;
   await world.performDomainAction(demand.actorIds[0], "submit_demand", { demand: 5, reason: "t" });
-  const state = world.exportState();
-  const restored = createWorld({ roomId: "r-ng", scenarioId: "negotiation-game", profiles, rounds: 2, state }) as SocialWorldBase;
-  restored.start();
-  assert.equal(commitments(restored).length, 2, "the mutual commitments survive");
-  const resumed = restored.activation();
-  assert.ok(resumed && resumed.id.endsWith(":demand"), "the sealed phase reopens");
-  await restored.performDomainAction(resumed.actorIds[1], "submit_demand", { demand: 5, reason: "t" });
-  restored.completeActivation(resumed);
-  assert.ok(commitments(restored).every((entry) => entry.state === "fulfilled"), "settlement after restore matches the live path");
-  assert.equal(lastBeat(restored), "promise-kept");
+  await world.performDomainAction(demand.actorIds[1], "submit_demand", { demand: 5, reason: "t" });
+  world.completeActivation(demand);
+  assert.ok(commitments(world).every((entry) => entry.state === "fulfilled"), "the mutual commitments settle fulfilled");
+  assert.equal(lastBeat(world), "promise-kept");
 });
 
 // --- repeated interaction: the next round observes the settled history ---

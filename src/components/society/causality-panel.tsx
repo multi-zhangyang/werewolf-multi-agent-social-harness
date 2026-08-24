@@ -339,17 +339,11 @@ function OutcomeSection({ projection, actorName }: {
   actorName: (id: string | undefined) => string;
 }): ReactNode {
   const reconciliations = [...(projection?.outcomeReconciliations ?? [])].reverse().slice(0, 6);
-  const links = (projection?.influenceLinks ?? []).slice(-6).reverse();
-  if (!reconciliations.length && !links.length) return null;
+  if (!reconciliations.length) return null;
   return (
-    <Section title="结果对账（全知）" count={reconciliations.length + links.length}>
+    <Section title="结果对账（全知）" count={reconciliations.length}>
       {reconciliations.map((reconciliation) => (
         <OutcomeRow key={reconciliation.reconciliationId} reconciliation={reconciliation} actorName={actorName} />
-      ))}
-      {links.map((link) => (
-        <p key={link.influenceId} className="text-[11px] leading-4 text-muted-foreground">
-          可能影响 {actorName(link.targetCharacterId)} · {influenceBasisLabel(link.basis)} · 置信 {Math.round(link.confidence * 100)}%
-        </p>
       ))}
     </Section>
   );
@@ -360,24 +354,8 @@ function OutcomeRow({ reconciliation, actorName }: { reconciliation: OutcomeReco
     <div className="rounded-md border border-border/50 p-2 text-[11px] leading-4">
       <p className="font-medium">{actorName(reconciliation.actorId)}</p>
       <p className="text-muted-foreground">{reconciliation.actualOutcome.summary}</p>
-      {reconciliation.predictionAssessments.length ? (
-        <p className="mt-0.5 text-[10px] text-muted-foreground/70">
-          预测结算 {reconciliation.predictionAssessments.length} 项 · 命中 {reconciliation.predictionAssessments.filter((assessment) => assessment.actual).length}
-        </p>
-      ) : null}
     </div>
   );
-}
-
-function influenceBasisLabel(basis: string): string {
-  const labels: Record<string, string> = {
-    "agent-cited": "Agent 明确引用",
-    "direct-commitment-reference": "直接引用承诺",
-    "temporal-association": "时间关联",
-    "counterfactual-replay": "反事实重放",
-    "observer-inferred": "系统推断"
-  };
-  return labels[basis] ?? basis;
 }
 
 function deceptionStatusLabel(status: string): string {

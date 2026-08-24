@@ -207,8 +207,8 @@ it("a minion who claimed loyalty is exposed by the reveal", async () => {
   assert.ok(episode.contradictionEventIds.length >= 1, "the reveal event contradicts the claim");
 });
 
-// --- checkpoint: mid-state round-trip ---
-it("commitments and a sealed team vote survive export/restore", async () => {
+// --- sealed team vote: the barrier holds until every vote is in ---
+it("a sealed team vote settles the accepted promise once every vote is in", async () => {
   const world = makeWorld();
   const commitmentId = await declareAndAccept(world, P1, "team-vote", "approve", "我会赞成队伍。");
   driveDiscussion(world);
@@ -219,17 +219,10 @@ it("commitments and a sealed team vote survive export/restore", async () => {
   world.completeActivation(proposal);
   const vote = world.activation()!;
   await world.performDomainAction(vote.actorIds[0], "cast_team_vote", { accept: true, reason: "t" });
-  const state = world.exportState();
-  const restored = createWorld({ roomId: "r-av", scenarioId: "avalon", profiles, rounds: 5, state }) as SocialWorldBase;
-  restored.start();
-  assert.equal(JSON.stringify(restored.exportState().world), JSON.stringify(state.world));
-  assert.equal(commitments(restored).find((entry) => entry.commitmentId === commitmentId)?.state, "accepted");
-  const resumed = restored.activation();
-  assert.ok(resumed && resumed.id.endsWith(":vote"), "the sealed vote reopens");
-  for (const actor of resumed.actorIds) {
+  for (const actor of vote.actorIds) {
     if (actor === vote.actorIds[0]) continue;
-    await restored.performDomainAction(actor, "cast_team_vote", { accept: true, reason: "t" });
+    await world.performDomainAction(actor, "cast_team_vote", { accept: true, reason: "t" });
   }
-  restored.completeActivation(resumed);
-  assert.equal(commitments(restored).find((entry) => entry.commitmentId === commitmentId)?.state, "fulfilled");
+  world.completeActivation(vote);
+  assert.equal(commitments(world).find((entry) => entry.commitmentId === commitmentId)?.state, "fulfilled");
 });

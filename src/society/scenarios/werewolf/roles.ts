@@ -1,5 +1,5 @@
 /**
- * Werewolf role system (AGENTS.md §7.4) — grounded in the standard Chinese
+ * Werewolf role system — grounded in the standard Chinese
  * werewolf boards researched for this project:
  *
  *  - 12-player classic 预女猎守 board: 3 small wolves + wolf king, seer, witch,
@@ -147,7 +147,7 @@ export interface WerewolfDeck {
 }
 
 /**
- * Built-in deck templates (AGENTS.md §7.4). Wolf counts follow the standard
+ * Built-in deck templates. Wolf counts follow the standard
  * tables: 6-8P → 2 wolves, 9-10P → 3 wolves, 11-12P → 4 wolves (incl. wolf
  * king at the deeper boards). The 7P "生还者" style board (researched on
  * zh.wikiversity / werewolv.es) puts 4 specials against 2 wolves; the 11P

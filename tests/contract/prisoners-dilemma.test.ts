@@ -191,25 +191,18 @@ it("a matched action claim records supporting evidence", async () => {
   );
 });
 
-// --- checkpoint: mid-state round-trip ---
-it("commitments and a sealed choice survive export/restore and settle identically", async () => {
+// --- sealed choice: the barrier holds until both moves are in ---
+it("commitments and a sealed choice settle identically on the live path", async () => {
   const world = makeWorld();
   const commitmentId = await declare(world, P1, "cooperate", "我会合作。");
   await world.performDomainAction(P2, "accept_commitment", { commitmentId });
   driveDiscussion(world);
   const choice = world.activation()!;
   await world.performDomainAction(choice.actorIds[0], "choose_move", { move: "cooperate", reason: "t" });
-  const state = world.exportState();
-  const restored = createWorld({ roomId: "r-pd", scenarioId: "prisoners-dilemma", profiles, rounds: 2, state }) as SocialWorldBase;
-  restored.start();
-  assert.equal(commitments(restored)[0].state, "accepted", "the accepted promise survives");
-  const restoredChoice = restored.activation();
-  assert.ok(restoredChoice && restoredChoice.id.endsWith(":choice"), "the sealed phase reopens");
-  assert.equal(JSON.stringify(restored.exportState().world), JSON.stringify(state.world), "re-export right after restore is stable");
-  await restored.performDomainAction(restoredChoice.actorIds[1], "choose_move", { move: "cooperate", reason: "t" });
-  restored.completeActivation(restoredChoice);
-  assert.equal(commitments(restored)[0].state, "fulfilled", "settlement after restore matches the live path");
-  assert.equal(lastBeat(restored), "promise-kept");
+  await world.performDomainAction(choice.actorIds[1], "choose_move", { move: "cooperate", reason: "t" });
+  world.completeActivation(choice);
+  assert.equal(commitments(world)[0].state, "fulfilled");
+  assert.equal(lastBeat(world), "promise-kept");
 });
 
 // --- repeated interaction: the next round observes the settled history ---

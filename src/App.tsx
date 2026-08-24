@@ -3,7 +3,6 @@ import { toast } from "sonner";
 import { apiFetch, storeOwnerToken } from "@/lib/api";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
-import type { ArchivedRoomSummary } from "@/society/persistence";
 import { About } from "@/components/society/about";
 import { CharactersDialog } from "@/components/society/characters-dialog";
 import { CreateRoomDialog } from "@/components/society/create-room";
@@ -19,16 +18,6 @@ interface CatalogResponse {
 
 interface RoomListResponse {
   rooms: SocietyRoomSnapshot[];
-  archived?: ArchivedRoomSummary[];
-}
-
-interface SeasonResponse {
-  dossiers: Array<{
-    characterId: string;
-    displayName: string;
-    games: Array<{ scenarioId: string; role?: string; outcome: "win" | "lose" }>;
-    updatedAt: string;
-  }>;
 }
 
 type Route = { name: "landing" } | { name: "room"; id: string } | { name: "about" };
@@ -37,8 +26,6 @@ export function App(): ReactNode {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [rooms, setRooms] = useState<SocietyRoomSnapshot[]>([]);
-  const [archived, setArchived] = useState<ArchivedRoomSummary[]>([]);
-  const [season, setSeason] = useState<SeasonResponse["dossiers"]>([]);
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
   const [createScenarioId, setCreateScenarioId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -62,16 +49,13 @@ export function App(): ReactNode {
   }, [route]);
 
   const loadCatalog = useCallback(async (): Promise<void> => {
-    const [catalog, list, seasonResponse] = await Promise.all([
+    const [catalog, list] = await Promise.all([
       getJson<CatalogResponse>("/api/scenarios"),
-      getJson<RoomListResponse>("/api/rooms"),
-      getJson<SeasonResponse>("/api/season").catch(() => ({ dossiers: [] }))
+      getJson<RoomListResponse>("/api/rooms")
     ]);
     setScenarios(catalog.scenarios);
     setModels(catalog.models);
     setRooms(list.rooms);
-    setArchived(list.archived ?? []);
-    setSeason(seasonResponse.dossiers);
   }, []);
 
   useEffect(() => {
@@ -86,7 +70,6 @@ export function App(): ReactNode {
     const poll = window.setInterval(() => {
       void getJson<RoomListResponse>("/api/rooms").then((list) => {
         setRooms(list.rooms);
-        setArchived(list.archived ?? []);
       }).catch(() => undefined);
     }, 15_000);
     return () => window.clearInterval(poll);
@@ -111,41 +94,13 @@ export function App(): ReactNode {
     return { roomId: result.room.id, playerToken: result.playerToken };
   }, []);
 
-  const resetSeason = useCallback(async (): Promise<void> => {
-    try {
-      const response = await apiFetch("/api/season", { method: "DELETE" });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => undefined);
-        throw new Error(payload?.message ?? `HTTP ${response.status}`);
-      }
-      setSeason([]);
-    } catch (cause) {
-      toast.error(errorMessage(cause));
-    }
-  }, []);
-
-  const forgetCharacter = useCallback(async (characterId: string, displayName: string): Promise<void> => {
-    if (!window.confirm(`让「${displayName}」忘掉全部跨局历史？下一局它会像陌生人一样入场。`)) return;
-    try {
-      const response = await apiFetch(`/api/season/${encodeURIComponent(characterId)}`, { method: "DELETE" });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => undefined);
-        throw new Error(payload?.message ?? `HTTP ${response.status}`);
-      }
-      setSeason((current) => current.filter((entry) => entry.characterId !== characterId));
-    } catch (cause) {
-      toast.error(errorMessage(cause));
-    }
-  }, []);
-
   const removeRoom = useCallback(async (roomId: string): Promise<void> => {
-    if (!window.confirm("停止并移除这个房间？对局历史会保留在归档中。")) return;
+    if (!window.confirm("停止并移除这个房间？对局将立即结束且不可恢复。")) return;
     try {
       const response = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}`, { method: "DELETE" });
       const payload = await response.json().catch(() => undefined);
       if (!response.ok) throw new Error(payload?.message ?? `HTTP ${response.status}`);
       setRooms((current) => current.filter((room) => room.id !== roomId));
-      setArchived(payload?.archived ?? []);
     } catch (cause) {
       toast.error(errorMessage(cause));
     }
@@ -186,15 +141,11 @@ export function App(): ReactNode {
           scenarios={scenarios}
           models={models}
           rooms={rooms}
-          archived={archived}
-          season={season}
           onStart={(scenarioId) => setCreateScenarioId(scenarioId)}
           onOpenRoom={(roomId) => { location.hash = `#/rooms/${encodeURIComponent(roomId)}`; }}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenCharacters={() => setCharactersOpen(true)}
           onOpenAbout={() => { location.hash = "#/about"; }}
-          onResetSeason={() => { void resetSeason().catch((cause) => toast.error(errorMessage(cause))); }}
-          onForgetCharacter={(characterId, displayName) => { void forgetCharacter(characterId, displayName); }}
           onRemoveRoom={(roomId) => { void removeRoom(roomId); }}
         />
       )}
@@ -202,7 +153,6 @@ export function App(): ReactNode {
         open={createScenarioId !== undefined}
         scenario={scenario}
         models={models}
-        seasonCount={season.length}
         onOpenChange={(open) => { if (!open) setCreateScenarioId(undefined); }}
         onCreated={createRoom}
       />

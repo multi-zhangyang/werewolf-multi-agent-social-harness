@@ -147,9 +147,14 @@ check("chicken: a head-on collision is an adverse outcome, not a misplay", async
 // --- sealed bid auction (winner's curse needs a deterministic setup) ---
 check("sealed bid auction: paying above your private value is an adverse outcome, not a misplay", async () => {
   const world = makeWorld("sealed-bid-auction", 3);
-  const state = world.exportState().world as { values?: Array<[string, number]> };
-  const values = Object.fromEntries(state.values ?? []);
-  const winner = Object.entries(values).sort((a, b) => a[1] - b[1])[0];
+  // Each actor's private value is readable only through their own POV.
+  const values = new Map<string, number>();
+  for (const agent of world.snapshot().agents) {
+    const match = /Your private value this round: (\d+)/.exec(world.observe(agent.id).privateContext);
+    assert.ok(match, `each actor's private value is readable through their own POV (${agent.id})`);
+    values.set(agent.id, Number(match[1]));
+  }
+  const winner = [...values.entries()].sort((a, b) => a[1] - b[1])[0];
   if (winner[1] >= 100) {
     // Degenerate draw: every value is maxed, the curse is unreachable — the
     // normal win label must stand instead.

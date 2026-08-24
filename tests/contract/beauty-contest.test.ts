@@ -82,21 +82,15 @@ it("sealed numbers never cross an observation boundary", async () => {
   assert.ok(internal.pendingChoices.includes(choice.actorIds[1]), "the world itself still tracks the pending side");
 });
 
-it("a sealed choice survives export/restore and settles identically", async () => {
+it("a sealed choice settles identically once every player has chosen", async () => {
   const world = makeWorld();
   driveDiscussion(world);
   const choice = world.activation()!;
   await world.performDomainAction(choice.actorIds[0], "choose_number", { number: 22, reason: "t" });
-  const state = world.exportState();
-  const restored = createWorld({ roomId: "r-bc", scenarioId: "beauty-contest", profiles, rounds: 2, state }) as SocialWorldBase;
-  restored.start();
-  assert.equal(JSON.stringify(restored.exportState().world), JSON.stringify(state.world));
-  const resumed = restored.activation();
-  assert.ok(resumed && resumed.id.endsWith(":choice"), "the sealed phase reopens");
-  for (const actor of resumed.actorIds) {
+  for (const actor of choice.actorIds) {
     if (actor === choice.actorIds[0]) continue;
-    await restored.performDomainAction(actor, "choose_number", { number: 22, reason: "t" });
+    await world.performDomainAction(actor, "choose_number", { number: 22, reason: "t" });
   }
-  restored.completeActivation(resumed);
-  assert.equal(restored.snapshot().turn, 2, "round two opens after restore");
+  world.completeActivation(choice);
+  assert.equal(world.snapshot().turn, 2, "round two opens after settlement");
 });

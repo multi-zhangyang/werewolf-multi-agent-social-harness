@@ -6,12 +6,10 @@ import { createServerContext, host, port } from "./context";
 import { registerRoomRoutes } from "./routes/rooms";
 import { registerCharacterRoutes } from "./characters";
 import { registerTemplateRoutes } from "./templates";
-import type { AgentModelBinding } from "../society/models";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
-/** Shared server context; created once at module scope so post-listen boot
- *  work (recovery, retention) runs against the same stores as the routes. */
+/** Shared server context, created once at module scope. */
 const context = createServerContext();
 
 export function createServerApp(): express.Express {
@@ -42,9 +40,8 @@ export function createServerApp(): express.Express {
 const app = createServerApp();
 
 if (isMainModule()) {
-  // Fail loudly instead of dying silently: a long-running room server must
-  // surface process-level failures with a scrubbed, grep-able reason so an
-  // external supervisor can restart it.
+  // Fail loudly instead of dying silently: surface process-level failures
+  // with a scrubbed, grep-able reason so an external supervisor can restart.
   process.on("unhandledRejection", (reason) => {
     console.error("[society] unhandled rejection:", errorMessage(reason));
     process.exit(1);
@@ -56,12 +53,6 @@ if (isMainModule()) {
   });
   app.listen(port, host, () => {
     console.log(`Society listening on http://${host}:${port}`);
-    // Restart recovery runs only after the listener is up: parsing archived
-    // checkpoints must never delay serving, and recovered rooms come back
-    // paused anyway (they run when an observer resumes them).
-    recoverInterruptedRooms(context);
-    // Retention (§31): reap terminal archived rooms beyond the cap.
-    context.archive.reap();
   });
 }
 
@@ -79,62 +70,4 @@ function errorMessage(error: unknown): string {
     .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
     .replace(/\brp_[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
     .slice(0, 800);
-}
-
-/**
- * Restart recovery (P3): rooms whose last checkpoint was interrupted are
- * rehydrated from it — world state, profiles, model bindings, the paused
- * seats and the event stream — and held paused for an explicit resume.
- * Sessions and memories come back from disk per agent. Human rooms are left
- * archived (player tokens are not persisted).
- */
-function recoverInterruptedRooms(context: ReturnType<typeof createServerContext>): void {
-  for (const checkpoint of context.archive.interrupted()) {
-    try {
-      const room = context.rooms.create({
-        id: checkpoint.roomId,
-        scenarioId: checkpoint.snapshot.scenarioId,
-        profiles: (checkpoint.profiles ?? []).map((profile) => ({
-          ...profile,
-          // Pre-CharacterId checkpoints: resolve the stable id from the
-          // character library, or pin a clearly-legacy id instead of guessing.
-          characterId: profile.characterId ?? resolveLegacyCharacterId(context, checkpoint.roomId, profile)
-        })),
-        rounds: checkpoint.snapshot.world.totalTurns,
-        seasonMode: checkpoint.seasonMode ?? "season",
-        modelRegistry: context.models,
-        limiter: context.limiter,
-        ...(checkpoint.seasonMode === "season" ? { season: context.season } : {}),
-        restore: {
-          worldState: checkpoint.worldState!,
-          rounds: checkpoint.snapshot.world.totalTurns,
-          ...(checkpoint.ownerToken ? { ownerToken: checkpoint.ownerToken } : {}),
-          ...(checkpoint.agentBindings ? { agentBindings: checkpoint.agentBindings as Record<string, AgentModelBinding> } : {}),
-          ...(checkpoint.agentMinds ? { agentMinds: checkpoint.agentMinds } : {}),
-          ...(checkpoint.pausedAgents ? { pausedAgents: checkpoint.pausedAgents } : {}),
-          ...(checkpoint.envelopes?.length ? { events: checkpoint.envelopes } : {}),
-          ...(checkpoint.replayEnvelopes?.length ? { replayEvents: checkpoint.replayEnvelopes } : {})
-        }
-      });
-      room.recoverFromCheckpoint();
-      console.log(`[society] recovered ${checkpoint.snapshot.scenarioId} room ${checkpoint.roomId} from checkpoint (paused, awaiting resume)`);
-    } catch (error) {
-      console.warn(`[society] could not recover room ${checkpoint.roomId}:`, errorMessage(error));
-    }
-  }
-}
-
-/** Stable id for a profile restored from a pre-CharacterId checkpoint. */
-function resolveLegacyCharacterId(
-  context: ReturnType<typeof createServerContext>,
-  roomId: string,
-  profile: { id: string; displayName: string }
-): string {
-  const matches = context.characters.idsForDisplayName(profile.displayName);
-  if (matches.length === 1) return matches[0];
-  console.warn(
-    `[society] checkpoint ${roomId}: no unique character id for '${profile.displayName}' ` +
-    `(matches: ${matches.join(", ") || "none"}); using a legacy id.`
-  );
-  return `legacy:${roomId}:${profile.id}`;
 }

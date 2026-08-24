@@ -1,5 +1,5 @@
 /**
- * Character library (AGENTS.md §7.2): built-in characters and user-defined
+ * Character library: built-in characters and user-defined
  * ones — create, edit, copy, delete, import/export. A character here is a
  * person (persona, values, biases, voice, formative memories); roles, models
  * and controllers stay separate. Secrets never enter this store.

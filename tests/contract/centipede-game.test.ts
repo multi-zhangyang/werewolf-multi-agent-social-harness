@@ -90,16 +90,11 @@ it("an extracted move claim reconciles against the actual move", async () => {
   );
 });
 
-it("commitments and a pending move survive export/restore", async () => {
+it("a pass promise the mover honors on the live path earns promise-kept", async () => {
   const world = makeWorld();
   const commitmentId = await declare(world, P1, "pass", "我会传递。");
   await world.performDomainAction(P2, "accept_commitment", { commitmentId });
-  const state = world.exportState();
-  const restored = createWorld({ roomId: "r-cg", scenarioId: "centipede-game", profiles, rounds: 4, state }) as SocialWorldBase;
-  restored.start();
-  assert.equal(JSON.stringify(restored.exportState().world), JSON.stringify(state.world));
-  assert.equal(commitments(restored).find((entry) => entry.commitmentId === commitmentId)?.state, "accepted");
-  await playMove(restored, "pass");
-  assert.equal(commitments(restored).find((entry) => entry.commitmentId === commitmentId)?.state, "fulfilled");
-  assert.equal(lastBeat(restored), "promise-kept");
+  await playMove(world, "pass");
+  assert.equal(commitments(world).find((entry) => entry.commitmentId === commitmentId)?.state, "fulfilled");
+  assert.equal(lastBeat(world), "promise-kept");
 });

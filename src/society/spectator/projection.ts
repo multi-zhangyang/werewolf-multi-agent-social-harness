@@ -1,5 +1,5 @@
 /**
- * Server-side spectator event projection (AGENTS.md §8.3).
+ * Server-side spectator event projection.
  *
  * Each spectator mode has a hard information boundary enforced here, before
  * any envelope reaches the wire:
@@ -40,7 +40,7 @@ function projectPublic(event: AgentRuntimeEvent, privileged: boolean): AgentRunt
   switch (event.type) {
     // Private cognition and state never leaves the public seat. Token streams
     // are public during open phases (watching the speech being written is the
-    // product) but sealed while a hidden choice is being made (§8.3).
+    // product) but sealed while a hidden choice is being made.
     case "agent.delta":
       return event.sealed ? undefined : event;
     case "agent.reasoning-content":
@@ -105,7 +105,7 @@ function projectPov(event: AgentRuntimeEvent, selfId: string | undefined, privil
 }
 
 /**
- * Timeline window around a highlight moment (§8.7): a few entries before it
+ * Timeline window around a highlight moment: a few entries before it
  * (the cause) and a couple after (what followed), from an ascending-sorted,
  * time-parseable timeline. Used by the highlights card to expand 前因后果.
  */

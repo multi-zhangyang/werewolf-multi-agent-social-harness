@@ -40,11 +40,11 @@ it("a bid claim is reconciled against the revealed dice on challenge", async () 
   assert.ok(challengerActivation && challengerActivation.actorIds.length === 1);
   const challenger = challengerActivation.actorIds[0];
   assert.notEqual(challenger, opener, "the next actor holds the move");
-  await world.performDomainAction(challenger, "liars_move", { move: "challenge", reason: "t" });
+  const challenge = await world.performDomainAction(challenger, "liars_move", { move: "challenge", reason: "t" });
   world.completeActivation(challengerActivation);
   // Compute the verdict from the world's own dice: a challenge reveals them.
-  const exported = (world.exportState().world as unknown as { dice: Array<[string, number]> }).dice;
-  const actualCount = exported.filter(([, die]) => die === 5).length;
+  const revealed = (challenge.result as { revealed?: Record<string, number> }).revealed ?? {};
+  const actualCount = Object.values(revealed).filter((die) => die === 5).length;
   const reconciled = evidence(world).filter((entry) => entry.sourceType === "domain-result");
   assert.ok(reconciled.length >= 1, "the challenge reconciles the bidder's claim");
   assert.equal(

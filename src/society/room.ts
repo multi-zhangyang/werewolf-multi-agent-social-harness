@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { OpenAIProvider, type OpenAIProvider as OpenAIProviderType, type Session } from "@openai/agents";
+import { OpenAIProvider, type OpenAIProvider as OpenAIProviderType } from "@openai/agents";
 import OpenAI from "openai";
 import type {
   AgentMindState,
@@ -12,7 +12,6 @@ import type {
   PlayerActionSpec,
   RoomStatus,
   ScenarioId,
-  SeasonStore,
   SocialMessage,
   SocialWorld,
   WorldActionCommit,
@@ -35,16 +34,14 @@ import {
 import { reasoningFallbackFetch, type ReasoningFallbackNotice } from "./models/reasoning-fallback";
 import { buildExtractionRequest, parseExtractedDeclarations, type ExtractionRosterEntry } from "./social/message-extractor";
 import { extractText } from "./context-manager";
-import { RoomArchiveError, RoomArchiveStore, type RoomCheckpoint } from "./persistence";
 import { EnvelopeWindow, type EnvelopeWindowBudget } from "./envelope-window";
 import { CinematicDirector } from "./spectator/cinematic-director";
 import { ActivationLimiter } from "./activation-limiter";
-import type { WorldSerializedState } from "./world";
 
 /**
- * Rolling event windows (§31): both buffers are capped by count AND bytes —
- * `world.*-frame` envelopes embed full snapshots, so a count-only cap let a
- * single room's checkpoint grow past 300MB. Budgets are env-overridable.
+ * Rolling event windows: both buffers are capped by count AND bytes —
+ * `world.*-frame` envelopes embed full snapshots, so a count-only cap lets a
+ * single room's buffers grow unbounded. Budgets are env-overridable.
  */
 const EVENT_WINDOW_BUDGET: EnvelopeWindowBudget = {
   maxCount: 500,
@@ -65,11 +62,6 @@ export interface SocietyRoomCreateOptions {
   provider?: OpenAIProviderType;
   apiKey?: string;
   baseURL?: string;
-  /** Cross-game memory: dossiers are loaded for returning characters and
-   *  saved when the room finishes. */
-  season?: SeasonStore;
-  /** season = characters carry history; one-shot = no memory in, none out. */
-  seasonMode?: "season" | "one-shot";
   /** Provider/model/context-policy registry used to resolve each agent's model. */
   modelRegistry?: ModelRegistry;
   /** Room-wide model defaults (统一模型 / 推理强度), below agent overrides. */
@@ -77,31 +69,11 @@ export interface SocietyRoomCreateOptions {
   /** Per-agent model bindings, keyed by profile id. */
   agentBindings?: Record<string, AgentModelBinding>;
   /**
-   * Process-wide provider backpressure (P3): every agent turn acquires a
-   * permit from this shared pool before calling the model, so multiple rooms
-   * never fan out more concurrent activations than the deployment can bear.
+   * Process-wide provider backpressure: every agent turn acquires a permit
+   * from this shared pool before calling the model, so multiple rooms never
+   * fan out more concurrent activations than the deployment can bear.
    */
   limiter?: ActivationLimiter;
-  /** Checkpoint archive directory (default data/rooms); tests inject a temp dir. */
-  archiveDir?: string;
-  /**
-   * Restart recovery (P3): rebuild this room from a saved checkpoint instead
-   * of starting fresh. The world state, profiles, model bindings, paused
-   * seats and the event stream come from the checkpoint; sessions, memories
-   * and season dossiers rehydrate from disk.
-   */
-  restore?: {
-    worldState: WorldSerializedState;
-    rounds?: number;
-    agentBindings?: Record<string, AgentModelBinding>;
-    /** Checkpointed private minds, keyed by actor id (P3 recovery). */
-    agentMinds?: Record<string, AgentMindState>;
-    pausedAgents?: string[];
-    events?: SocietyRoomEventEnvelope[];
-    replayEvents?: SocietyRoomEventEnvelope[];
-    /** The room's control token survives a restart with the checkpoint. */
-    ownerToken?: string;
-  };
 }
 
 export interface SocietyRoomEventEnvelope {
@@ -115,15 +87,15 @@ export interface SocietyRoomEventEnvelope {
 export interface SocietyParticipantProfile {
   id: string;
   displayName: string;
-  /** The stable character behind this seat (§10.2). */
+  /** The stable character behind this seat. */
   characterId: string;
   model: string;
   controller: ParticipantController;
   /**
    * Character-definition data (the person, not the in-game role): persona,
-   * stable judgment biases (§4.2.7), speech voice and formative memories
-   * (§4.2.1). Public by design — this is who the character is, never what
-   * they privately know or believe inside this game.
+   * stable judgment biases, speech voice and formative memories. Public by
+   * design — this is who the character is, never what they privately know or
+   * believe inside this game.
    */
   persona?: string;
   decisionBiases?: DecisionBias[];
@@ -169,8 +141,6 @@ export interface SocietyRoomSnapshot {
   scenarioId: ScenarioId;
   title: string;
   mode: "human" | "ai";
-  /** season = characters carry cross-game history; one-shot = no memory. */
-  seasonMode: "season" | "one-shot";
   status: RoomStatus;
   createdAt: string;
   updatedAt: string;
@@ -184,7 +154,7 @@ export interface SocietyRoomSnapshot {
 
 export interface SocietyRoomCreateResult {
   room: SocietyRoomSnapshot;
-  /** Control token for this room: pause/resume/remove/model switches (§18.2). */
+  /** Control token for this room: pause/resume/remove/model switches. */
   ownerToken: string;
   playerActorId?: string;
   playerToken?: string;
@@ -230,13 +200,9 @@ export class SocietyRoom {
   private readonly provider?: OpenAIProviderType;
   private readonly apiKey?: string;
   private readonly baseURL?: string;
-  private readonly season?: SeasonStore;
-  private readonly seasonMode: "season" | "one-shot";
   private readonly modelRegistry: ModelRegistry;
   private readonly roomDefaults?: SocietyRoomCreateOptions["roomDefaults"];
   private readonly agentBindings: Record<string, AgentModelBinding>;
-  /** Checkpoint-restored private minds, keyed by actor id (P3 recovery). */
-  private readonly restoreMinds?: Record<string, AgentMindState>;
   /** Shared stateless provider clients, keyed by provider profile id. */
   private readonly providerClients = new Map<string, OpenAIProvider>();
   /** Sidecar extraction runs strictly one-at-a-time, off the send path. */
@@ -255,13 +221,13 @@ export class SocietyRoom {
   private readonly turnGraceMs: number;
   private readonly humanTurnTimeoutMs: number;
   private readonly humanToken?: string;
-  /** Control token for this room (owner). Persisted with the checkpoint. */
+  /** Control token for this room (owner); returned once at creation. */
   private readonly ownerToken: string;
-  /** §17.2: turns the room gave up on locally while the request kept running. */
+  /** Turns the room gave up on locally while the request kept running. */
   private abandonedRunningTurns = 0;
   /** Of those, how many have since truly settled (or were terminated). */
   private settledAbandonedTurns = 0;
-  /** §37 smoke-gate counters, persisted with the checkpoint. */
+  /** In-memory counters, exposed via /api/rooms/:id/metrics. */
   private completedActivations = 0;
   private retriedActivations = 0;
   /** Successful turn wall-clock durations in ms (provider p50/p95 source, capped). */
@@ -272,9 +238,6 @@ export class SocietyRoom {
   private status: RoomStatus = "lobby";
   private updatedAt: string;
   private error?: string;
-  private readonly archive: RoomArchiveStore;
-  private archiveTimer?: ReturnType<typeof setTimeout>;
-  private archiveFailureCode?: string;
   /** Presentation-only spectator director: reads events, emits cues/tension. */
   private readonly director: CinematicDirector;
   /** Endgame highlights derived from high-priority cues (presentation-only). */
@@ -288,14 +251,10 @@ export class SocietyRoom {
     this.provider = options.provider;
     this.apiKey = options.apiKey;
     this.baseURL = options.baseURL;
-    this.season = options.season;
-    this.seasonMode = options.restore?.worldState ? (options.seasonMode ?? "season") : (options.seasonMode ?? (options.season ? "season" : "one-shot"));
     this.modelRegistry = options.modelRegistry ?? fallbackRegistryFromEnv();
     this.roomDefaults = options.roomDefaults;
-    this.agentBindings = options.restore?.agentBindings ?? options.agentBindings ?? {};
-    this.restoreMinds = options.restore?.agentMinds;
+    this.agentBindings = options.agentBindings ?? {};
     this.limiter = options.limiter;
-    this.archive = new RoomArchiveStore(options.archiveDir);
     this.director = new CinematicDirector({
       roomId: this.id,
       emit: (event) => this.emit(event)
@@ -307,20 +266,19 @@ export class SocietyRoom {
     if (humans.length > 1) throw new Error("HUMAN_LIMIT_EXCEEDED: A room supports at most one human participant.");
     this.humanActorId = humans[0]?.id;
     this.humanToken = this.humanActorId ? randomBytes(32).toString("base64url") : undefined;
-    this.ownerToken = options.restore?.ownerToken ?? randomBytes(32).toString("base64url");
+    this.ownerToken = randomBytes(32).toString("base64url");
     this.world = createWorld({
       roomId: this.id,
       scenarioId: options.scenarioId,
       profiles: options.profiles,
-      rounds: options.restore?.rounds ?? options.rounds,
-      ...(options.restore?.worldState ? { state: options.restore.worldState } : {})
+      rounds: options.rounds
     });
     this.world.onUpdate((snapshot) => this.onWorldUpdate(snapshot));
-    // Message sidecar (AGENTS.md §6.5): structured social acts are extracted
-    // off-thread from every persisted discussion message so the causality page
-    // reflects what was actually said, not only self-reported cognition.
-    // Skipped for injected (scripted) providers — their finite response queues
-    // exist to drive agent turns, and a sidecar call would consume them.
+    // Message sidecar: structured social acts are extracted off-thread from
+    // every discussion message so the causality page reflects what was
+    // actually said, not only self-reported cognition. Skipped for injected
+    // (scripted) providers — their finite response queues exist to drive
+    // agent turns, and a sidecar call would consume them.
     if (!options.provider) {
       this.world.socialActExtractor = (message) => {
         this.queueActExtraction(message);
@@ -334,19 +292,6 @@ export class SocietyRoom {
         turnCount: 0,
         totalTokens: 0
       });
-    }
-    if (options.restore) {
-      // Recovered rooms come back held: nothing runs until an observer
-      // resumes them. The event stream continues from the checkpoint seq.
-      this.status = "paused";
-      for (const actorId of options.restore.pausedAgents ?? []) this.pausedAgents.add(actorId);
-      if (options.restore.events?.length) {
-        this.events.pushAll(options.restore.events.map((envelope) => structuredClone(envelope)));
-      }
-      const replaySource = options.restore.replayEvents ?? options.restore.events?.filter((entry) => isReplayEvent(entry.event));
-      if (replaySource?.length) {
-        this.replayEvents.pushAll(dedupeEnvelopes(replaySource).map((envelope) => structuredClone(envelope)));
-      }
     }
     this.onWorldUpdate(this.world.snapshotFor());
   }
@@ -380,7 +325,6 @@ export class SocietyRoom {
       scenarioId: this.scenarioId,
       title: world.title,
       mode: this.humanActorId ? "human" : "ai",
-      seasonMode: this.seasonMode,
       status: this.status,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
@@ -403,14 +347,14 @@ export class SocietyRoom {
   }
 
   /**
-   * Spectator-mode projection (AGENTS.md §8.3). The server enforces each
-   * mode's information boundary before anything crosses the wire:
+   * Spectator-mode projection. The server enforces each mode's information
+   * boundary before anything crosses the wire:
    *
    *  - public: no minds, public-channel messages only, living roles hidden;
    *  - omniscient: the full observer seat (private minds included);
    *  - agent-pov: the watched agent's scoped world view, no minds;
    *  - postgame: the world is fully revealed after the game ends, but
-   *    private minds stay behind owner/operator permission (§15.10).
+   *    private minds stay behind owner/operator permission.
    */
   snapshotForViewer(viewer: SpectatorViewer): SocietyRoomSnapshot {
     const mode = viewer.mode;
@@ -424,7 +368,6 @@ export class SocietyRoom {
         scenarioId: this.scenarioId,
         title: publicWorld.title,
         mode: this.humanActorId ? "human" : "ai",
-        seasonMode: this.seasonMode,
         status: this.status,
         createdAt: this.createdAt,
         updatedAt: this.updatedAt,
@@ -449,7 +392,6 @@ export class SocietyRoom {
         scenarioId: this.scenarioId,
         title: reveal.title,
         mode: this.humanActorId ? "human" : "ai",
-        seasonMode: this.seasonMode,
         status: this.status,
         createdAt: this.createdAt,
         updatedAt: this.updatedAt,
@@ -469,7 +411,6 @@ export class SocietyRoom {
         scenarioId: this.scenarioId,
         title: povWorld.title,
         mode: this.humanActorId ? "human" : "ai",
-        seasonMode: this.seasonMode,
         status: this.status,
         createdAt: this.createdAt,
         updatedAt: this.updatedAt,
@@ -491,7 +432,7 @@ export class SocietyRoom {
     }
 
     // omniscient: the full observer seat. Living hidden roles ARE revealed
-    // (§8.3 全知第三视角: 显示角色), unlike the public seat — so the observer
+    // (全知第三视角: 显示角色), unlike the public seat — so the observer
     // gets the same role map the internal world holds, overlaid onto the
     // scoped (channel-filtered) world view.
     if (mode === "omniscient") {
@@ -502,10 +443,6 @@ export class SocietyRoom {
         ...agent,
         ...(roles.get(agent.id) ? { observerRole: roles.get(agent.id) } : {})
       }));
-      // Decision records are stripped from scoped views (§5.4); the full
-      // observer seat gets the real ledger back for the action triangle.
-      const records = this.world.decisionRecords();
-      if (records.length) reveal.details = { ...reveal.details, decisionRecords: records };
       reveal.details = {
         ...reveal.details,
         socialCausality: this.world.socialCausalityFor(undefined, true)
@@ -515,7 +452,6 @@ export class SocietyRoom {
         scenarioId: this.scenarioId,
         title: reveal.title,
         mode: this.humanActorId ? "human" : "ai",
-        seasonMode: this.seasonMode,
         status: this.status,
         createdAt: this.createdAt,
         updatedAt: this.updatedAt,
@@ -594,9 +530,8 @@ export class SocietyRoom {
     }
     this.world.pause();
     // Close the command gate so requests the room gave up on cannot mutate
-    // a later phase after a pause (§16.6).
+    // a later phase after a pause.
     this.world.endActivation();
-    this.saveCheckpoint();
     this.emit({ type: "room.status", roomId: this.id, status: "paused", detail: reason, at: now() });
   }
 
@@ -610,7 +545,6 @@ export class SocietyRoom {
     if (!this.abortController.signal.aborted) this.abortController.abort(new Error(reason));
     this.world.pause();
     this.world.endActivation();
-    this.saveCheckpoint();
     this.emit({ type: "room.status", roomId: this.id, status: "paused", detail: reason, at: now() });
   }
 
@@ -625,7 +559,6 @@ export class SocietyRoom {
     this.abortController = new AbortController();
     this.status = "running";
     this.world.start();
-    this.saveCheckpoint();
     this.emit({ type: "room.status", roomId: this.id, status: "running", detail: "房间已恢复", at: now() });
     this.runningPromise = this.run().catch((error) => {
       if (this.status !== "paused") this.fail(error);
@@ -633,10 +566,8 @@ export class SocietyRoom {
   }
 
   /**
-   * Stop and release a room: abort all in-flight work, finalize the rolling
-   * checkpoint (the archive keeps the history) and detach the director. Used
-   * when an observer removes the room; sessions and season dossiers stay on
-   * disk for the characters.
+   * Stop and release a room: abort all in-flight work and detach the
+   * director. Nothing is persisted — the room dies with the process.
    */
   dispose(reason = "房间已被移除"): void {
     if (this.status === "running") {
@@ -653,35 +584,7 @@ export class SocietyRoom {
     // Late in-flight requests must not mutate the world after removal.
     this.world.endActivation();
     this.director.dispose();
-    this.saveCheckpoint(false);
     this.emit({ type: "room.status", roomId: this.id, status: this.status, detail: reason, at: now() });
-  }
-
-  /**
-   * Retention pass over the shared archive directory (§31): terminal rooms
-   * beyond the archive cap are deleted, oldest first. Called at natural
-   * finish and on removal; recovery candidates are never touched.
-   */
-  reapArchive(): Array<{ roomId: string; reason: "retention-cap" }> {
-    return this.archive.reap();
-  }
-
-  /**
-   * Restart recovery (P3): after the constructor rehydrated the world from a
-   * checkpoint, build the peer agents from their durable sessions and hold
-   * the room paused. An observer resumes it explicitly; nothing runs on its
-   * own and nothing is decided for anyone.
-   */
-  recoverFromCheckpoint(): void {
-    if (this.status !== "paused") this.status = "paused";
-    for (const card of this.cards.values()) {
-      if (card.profile.controller === "human") card.status = "idle";
-      else card.status = "paused";
-      this.world.setAgentStatus(card.profile.id, card.status);
-    }
-    this.createAgents();
-    this.saveCheckpoint(true);
-    this.emit({ type: "room.status", roomId: this.id, status: "paused", detail: "已从检查点恢复，等待继续", at: now() });
   }
 
   /** Pause one agent without sinking the room: its running turn is interrupted
@@ -695,7 +598,6 @@ export class SocietyRoom {
     this.world.setAgentStatus(actorId, "paused");
     // Interrupt a turn that is already streaming so the pause takes effect now.
     this.activeSignals.get(actorId)?.abort(new Error("AGENT_PAUSED"));
-    this.saveCheckpoint();
     this.emit({ type: "agent.paused", roomId: this.id, actorId, reason, at: now() });
   }
 
@@ -708,7 +610,6 @@ export class SocietyRoom {
       card.status = "idle";
       this.world.setAgentStatus(actorId, "idle");
     }
-    this.saveCheckpoint();
     this.emit({ type: "agent.resumed", roomId: this.id, actorId, at: now() });
   }
 
@@ -717,7 +618,7 @@ export class SocietyRoom {
   }
 
   /**
-   * Model switch (§12.4): swaps one agent's model binding while the room (or
+   * Model switch: swaps one agent's model binding while the room (or
    * that agent) is paused. Identity, session, memory and world role are kept;
    * the new binding is resolved through the registry, the context budget is
    * recomputed, and a history compaction runs first when the new window is
@@ -756,7 +657,6 @@ export class SocietyRoom {
     await runtime.switchModel({ provider, resolvedConfig: config });
     this.agentBindings[actorId] = binding;
     card.profile.model = config.modelId;
-    this.saveCheckpoint();
     return { previousModel, model: config.modelId };
   }
 
@@ -764,9 +664,65 @@ export class SocietyRoom {
     return this.status;
   }
 
+  /** In-memory metrics for the smoke gate (zero-disk, docs/agent-design.md). */
+  metrics(): Record<string, unknown> {
+    const projection = this.world.socialCausalityFor(undefined, true);
+    const counts = <K extends string>(keys: K[]): Record<string, number> => {
+      const result: Record<string, number> = {};
+      for (const key of keys) result[key] = (result[key] ?? 0) + 1;
+      return result;
+    };
+    const notices = this.replayEvents.toArray()
+      .filter((entry) => entry.event.type === "runtime.notice")
+      .map((entry) => (entry.event as Extract<AgentRuntimeEvent, { type: "runtime.notice" }>).code);
+    const pressures = this.replayEvents.toArray()
+      .filter((entry) => entry.event.type === "agent.context.pressure")
+      .map((entry) => entry.event as Extract<AgentRuntimeEvent, { type: "agent.context.pressure" }>);
+    const tools = this.replayEvents.toArray()
+      .filter((entry) => entry.event.type === "agent.tool")
+      .map((entry) => entry.event as Extract<AgentRuntimeEvent, { type: "agent.tool" }>);
+    const durations = [...this.providerTurnDurationsMs].sort((a, b) => a - b);
+    const pct = (ratio: number): number | undefined =>
+      durations.length ? durations[Math.min(durations.length - 1, Math.floor(durations.length * ratio))] : undefined;
+    const worldStats = this.world.runtimeStats();
+    return {
+      roomId: this.id,
+      scenarioId: this.scenarioId,
+      status: this.status,
+      turns: `${this.world.snapshot().turn}/${this.world.snapshot().totalTurns}`,
+      compliance: {
+        toolStarted: tools.filter((tool) => tool.phase === "started").length,
+        toolSucceeded: tools.filter((tool) => tool.phase === "succeeded").length,
+        toolFailed: tools.filter((tool) => tool.phase === "failed").length,
+        worldActions: this.replayEvents.toArray().filter((entry) => entry.event.type === "world.action").length,
+        idempotencyHits: worldStats.idempotencyHits,
+        staleCommandRejections: worldStats.staleCommandRejections,
+        invalidActionRejections: worldStats.invalidActionRejections,
+        completedActivations: this.completedActivations,
+        retriedActivations: this.retriedActivations,
+        abandonedTurns: this.abandonedRunningTurns,
+        settledAbandonedTurns: this.settledAbandonedTurns,
+        noticeCodes: counts(notices)
+      },
+      pressure: {
+        byLevel: counts(pressures.map((event) => event.level)),
+        peak: pressures.reduce((max, event) => Math.max(max, event.pressureRatio), 0)
+      },
+      providerLatencyMs: { samples: durations.length, p50: pct(0.5), p95: pct(0.95) },
+      commitments: {
+        total: projection.commitments.length,
+        states: counts(projection.commitments.map((entry) => entry.state))
+      },
+      extraction: {
+        byMethod: counts(projection.socialActs.map((act) => act.extractionMethod)),
+        extractionFailures: this.extractionFailures
+      }
+    };
+  }
+
   /**
-   * §17.2 abandoned-but-running: turns the room gave up on locally (timeout
-   * or abort) whose provider request is still in flight. Each such request
+   * Abandoned-but-running: turns the room gave up on locally (timeout or
+   * abort) whose provider request is still in flight. Each such request
    * keeps its permit until it truly settles, so the real concurrency never
    * exceeded the pool even when providers ignore aborts.
    */
@@ -803,28 +759,6 @@ export class SocietyRoom {
     }
   }
 
-  /** Distill every character's mind into the season when the room ends. */
-  private saveSeasonDossiers(): void {
-    if (!this.season) return;
-    const details = this.world.snapshot().details ?? {};
-    const winners = Array.isArray(details.winners) ? (details.winners as string[]) : [];
-    const roles = (details.roles ?? {}) as Record<string, string | undefined>;
-    for (const [actorId, runtime] of this.agents) {
-      const card = this.cards.get(actorId);
-      if (!card) continue;
-      const role = roles[actorId] ? String(roles[actorId]) : undefined;
-      // Some worlds (negotiation games) do not declare winners; only record an
-      // outcome when the world actually settled one.
-      const outcome = winners.length > 0 ? (winners.includes(actorId) ? "win" : "lose") : undefined;
-      const previous = this.season.get(card.profile.characterId);
-      const current = runtime.exportDossier(role, outcome);
-      this.season.save({
-        ...current,
-        games: [...(previous?.games ?? []), ...current.games].slice(-20)
-      });
-    }
-  }
-
   private async run(): Promise<void> {
     this.createAgents();
     // Agent construction may have paused the room (configuration errors);
@@ -840,9 +774,6 @@ export class SocietyRoom {
       if (!activation) {
         if (this.world.snapshot().status === "finished") {
           this.status = "finished";
-          this.saveSeasonDossiers();
-          this.saveCheckpoint();
-          this.reapArchive();
           this.director.dispose();
           this.emit({ type: "room.status", roomId: this.id, status: "finished", at: now() });
         }
@@ -850,10 +781,10 @@ export class SocietyRoom {
       }
       this.world.beginActivation(activation);
       await this.runActivation(activation, activation.actorIds);
-      // Command epoch gate (§16.6): the window stays open for the whole
-      // activation — retries and human waits included — and closes before
-      // the next one. Tool calls that arrive late from a request the room
-      // already gave up on are then rejected by the world.
+      // Command epoch gate: the window stays open for the whole activation —
+      // retries and human waits included — and closes before the next one.
+      // Tool calls that arrive late from a request the room already gave up
+      // on are then rejected by the world.
       let completion = this.world.completeActivation(activation);
       if (!completion.completed && completion.missingActorIds.length) {
         this.retriedActivations += 1;
@@ -917,24 +848,13 @@ export class SocietyRoom {
       const config = resolved.get(card.profile.id);
       if (!config) continue;
       try {
-        const dossier = this.season?.get(card.profile.characterId);
         const runtime = createSocietyAgent({
           profile: { ...card.profile, model: config.modelId },
           roomId: this.id,
           world: this.world,
           provider: this.providerClientFor(config.providerProfileId),
           resolvedConfig: config,
-          // Season continuity (AGENTS.md §22): one durable session per
-          // character across every game in the season; one-shot stays per-room.
-          ...(this.seasonMode === "season" && card.profile.characterId
-            ? {
-                seasonMode: true,
-                sessionKey: `season:${card.profile.characterId}`
-              }
-            : {}),
-          emit: (event) => this.handleAgentEvent(event),
-          ...(dossier ? { dossier } : {}),
-          ...(this.restoreMinds?.[card.profile.id] ? { restoreMind: this.restoreMinds[card.profile.id] } : {})
+          emit: (event) => this.handleAgentEvent(event)
         });
         this.agents.set(card.profile.id, runtime);
         card.profile.model = config.modelId;
@@ -957,7 +877,7 @@ export class SocietyRoom {
     // The bundled OpenAI client defaults to a 600s request timeout; slow
     // thinking models exceed it on long turns. Align the client timeout
     // with the room's own wall-clock horizon so the room (not the client)
-    // decides when a turn is abandoned (§17.1). The provider must not carry
+    // decides when a turn is abandoned. The provider must not carry
     // apiKey/baseURL when a client is injected — the client owns them.
     const fallbackKey = this.apiKey ?? apiKeyFromEnv();
     const fallbackBaseURL = this.baseURL ?? baseUrlFromEnv();
@@ -1042,8 +962,8 @@ export class SocietyRoom {
 
   /**
    * Dedicated provider for the sidecar: shares registry credentials but owns a
-   * short client timeout, so one slow/hung extraction cannot hold the queue for
-   * an activation-length horizon (§17.1: leases cover real lifetimes).
+   * short client timeout, so one slow/hung extraction cannot hold the queue
+   * for an activation-length horizon.
    */
   private extractionProviderFor(providerProfileId: string): OpenAIProviderType {
     const existing = this.extractionProviders.get(providerProfileId);
@@ -1152,10 +1072,10 @@ export class SocietyRoom {
         // Releasing happens in `lease` so aborted and timed-out turns free
         // their slot only when the underlying request truly settles.
         const release = this.limiter ? await this.limiter.acquire(signal) : undefined;
-        // §37: turn wall-clock duration for provider latency percentiles;
+        // Turn wall-clock duration for provider latency percentiles;
         // only locally successful turns are counted (failures/abandoned skip).
         const startedAt = Date.now();
-        // Lease-until-settle (§17.1 / §26.15): the permit is bound to the
+        // Lease-until-settle: the permit is bound to the
         // real lifetime of the provider request, not to the local race. A
         // local timeout or abort only stops waiting for THIS turn; the
         // request keeps its slot until it truly settles (or a worker
@@ -1209,7 +1129,7 @@ export class SocietyRoom {
           if (abandoned) this.abandonedRunningTurns += 1;
           throw error;
         } finally {
-          // §17.3: the guard timer dies on every path — success, failure,
+          // The guard timer dies on every path — success, failure,
           // abort, retry — not just in the abort listener.
           if (graceTimer) clearTimeout(graceTimer);
         }
@@ -1343,8 +1263,8 @@ export class SocietyRoom {
     if (!runtime) return;
     const events = this.world.eventsFor(actorId);
     if (events.length) await runtime.appraise(events, this.world.snapshot().turn);
-    // Surface newly settled outcomes as display notes (AGENTS.md §22): the
-    // model's session carries real memory; this list is spectator-facing.
+    // Surface newly settled outcomes as display notes: the model's session
+    // carries real memory; this list is spectator-facing.
     const projection = this.world.socialCausalityFor(actorId);
     const turn = this.world.snapshot().turn;
     const notedThrough = this.notedReconciliationSeq.get(actorId) ?? 0;
@@ -1398,7 +1318,7 @@ export class SocietyRoom {
       event.type === "agent.context.pressure"
     ) {
       // Seal the public token stream and tool names during hidden-choice
-      // phases (§8.3): the projection drops sealed deltas and strips sealed
+      // phases: the projection drops sealed deltas and strips sealed
       // tool details, while the owner seat and the acting agent's POV still
       // see everything.
       if ((event.type === "agent.delta" || event.type === "agent.tool") && !this.world.publicStreamingAllowed()) {
@@ -1443,7 +1363,7 @@ export class SocietyRoom {
     });
   }
 
-  private emit(event: AgentRuntimeEvent, checkpoint = true): void {
+  private emit(event: AgentRuntimeEvent): void {
     if (event.type === "runtime.notice") this.world.recordRuntimeNotice(event);
     const envelope: SocietyRoomEventEnvelope = { id: randomUUID(), seq: (this.events.last()?.seq ?? 0) + 1, event };
     this.events.push(envelope);
@@ -1468,100 +1388,12 @@ export class SocietyRoom {
     // The director sees the same public event stream plus the world snapshot;
     // its own outputs are presentation events and never loop back into rules.
     this.director.ingest(event, this.world.snapshot());
-    if (checkpoint) this.scheduleCheckpoint();
-  }
-
-  /** Rolling checkpoint, coalesced so high-frequency streaming stays cheap. */
-  private scheduleCheckpoint(): void {
-    if (this.archiveTimer) return;
-    this.archiveTimer = setTimeout(() => {
-      this.archiveTimer = undefined;
-      this.saveCheckpoint();
-    }, 800);
-    this.archiveTimer.unref?.();
-  }
-
-  private saveCheckpoint(recoverable = true): void {
-    if (this.archiveTimer) {
-      clearTimeout(this.archiveTimer);
-      this.archiveTimer = undefined;
-    }
-    const sessionFiles: Record<string, string> = {};
-    for (const [actorId, runtime] of this.agents) {
-      const session = runtime.session as Session & { sessionFilePath?: string };
-      if (session.sessionFilePath) sessionFiles[actorId] = session.sessionFilePath;
-    }
-    const checkpoint: RoomCheckpoint = {
-      roomId: this.id,
-      archivedAt: now(),
-      status: this.status,
-      snapshot: this.snapshotFor(),
-      envelopes: this.events
-        .toArray()
-        .filter((entry) => entry.event.type !== "agent.reasoning-content")
-        .map((entry) => structuredClone(entry)),
-      replayEnvelopes: this.replayEvents.toArray().map((entry) => structuredClone(entry)),
-      agentMinds: Object.fromEntries([...this.agents].map(([actorId, runtime]) => [actorId, structuredClone(runtime.mind)])),
-      sessionFiles,
-      profiles: [...this.cards.values()].map((card) => structuredClone(card.profile)),
-      worldState: this.world.exportState(),
-      runtimeStats: {
-        extractionFailures: this.extractionFailures,
-        settledAbandonedTurns: this.settledAbandonedTurns,
-        completedActivations: this.completedActivations,
-        retriedActivations: this.retriedActivations,
-        providerTurnDurationsMs: [...this.providerTurnDurationsMs]
-      },
-      agentBindings: structuredClone(this.agentBindings),
-      pausedAgents: [...this.pausedAgents],
-      seasonMode: this.seasonMode,
-      ownerToken: this.ownerToken,
-      recoverable
-    };
-    try {
-      this.archive.save(checkpoint);
-      if (this.archiveFailureCode) {
-        this.archiveFailureCode = undefined;
-        this.emit({
-          type: "runtime.notice",
-          roomId: this.id,
-          category: "persistence",
-          severity: "info",
-          code: "ARCHIVE_WRITE_RECOVERED",
-          message: "房间检查点已恢复写入。",
-          retrying: false,
-          at: now()
-        }, false);
-      }
-    } catch (error) {
-      const code = error instanceof RoomArchiveError ? error.failure.code : "ARCHIVE_WRITE_FAILED";
-      if (this.archiveFailureCode !== code) {
-        this.archiveFailureCode = code;
-        this.emit({
-          type: "runtime.notice",
-          roomId: this.id,
-          category: "persistence",
-          severity: "error",
-          code,
-          message: "房间检查点写入失败，世界仍在运行；系统将在后台重试。",
-          retrying: true,
-          at: now()
-        }, false);
-      }
-      if (!this.archiveTimer) {
-        this.archiveTimer = setTimeout(() => {
-          this.archiveTimer = undefined;
-          this.saveCheckpoint(recoverable);
-        }, 5_000);
-        this.archiveTimer.unref?.();
-      }
-    }
   }
 
   private fail(error: unknown): void {
     this.status = "error";
     // Operator console keeps the full diagnostic (key-redacted); viewers and
-    // checkpoints only ever see the friendly text (AGENTS.md §32).
+    // snapshots only ever see the friendly text.
     console.error(`[room ${this.id}] ${errorMessage(error)}`);
     this.error = friendlyFailure(error);
     if (!this.abortController.signal.aborted) {
@@ -1569,7 +1401,6 @@ export class SocietyRoom {
     }
     this.world.pause();
     this.director.dispose();
-    this.saveCheckpoint();
     this.emit({ type: "room.status", roomId: this.id, status: "error", detail: this.error, at: now() });
   }
 }
@@ -1578,33 +1409,6 @@ export class SocietyRoomRegistry {
   private readonly rooms = new Map<string, SocietyRoom>();
 
   create(options: SocietyRoomCreateOptions): SocietyRoom {
-    // Season sessions are one-per-character (AGENTS.md §22): a character whose
-    // durable session is held by an active season room cannot join another —
-    // two rooms writing the same session file would interleave histories.
-    const seasonMode = options.seasonMode ?? (options.season ? "season" : "one-shot");
-    if (seasonMode === "season") {
-      const wanted = new Set(
-        options.profiles
-          .filter((profile) => profile.controller !== "human")
-          .map((profile) => profile.characterId)
-      );
-      const busy = new Set<string>();
-      for (const room of this.rooms.values()) {
-        if (room.snapshotFor().seasonMode !== "season") continue;
-        const status = room.currentStatus();
-        if (status === "finished" || status === "error") continue;
-        for (const participant of room.snapshotFor().participants) {
-          if (wanted.has(participant.profile.characterId)) {
-              busy.add(`${participant.profile.displayName}（${room.snapshotFor().title}）`);
-          }
-        }
-      }
-      if (busy.size) {
-        throw new Error(
-          `CHARACTER_SESSION_BUSY: 这些角色正在其他赛季房间中，会话不可同时使用：${[...busy].join("、")}。请先结束或移除对应房间。`
-        );
-      }
-    }
     const room = new SocietyRoom(options);
     this.rooms.set(room.id, room);
     return room;
@@ -1614,12 +1418,11 @@ export class SocietyRoomRegistry {
     return this.rooms.get(roomId);
   }
 
-  /** Stop the room, finalize its checkpoint and release it from memory. */
+  /** Stop the room and release it from memory. */
   remove(roomId: string): SocietyRoom | undefined {
     const room = this.rooms.get(roomId);
     if (!room) return undefined;
     room.dispose();
-    room.reapArchive();
     this.rooms.delete(roomId);
     return room;
   }
@@ -1666,12 +1469,6 @@ function isReplayEvent(event: AgentRuntimeEvent): boolean {
     default:
       return false;
   }
-}
-
-function dedupeEnvelopes(envelopes: SocietyRoomEventEnvelope[]): SocietyRoomEventEnvelope[] {
-  const byId = new Map<string, SocietyRoomEventEnvelope>();
-  for (const envelope of envelopes) byId.set(envelope.id, envelope);
-  return [...byId.values()];
 }
 
 /** Serialized size of an envelope, for the byte-budgeted event windows. */
@@ -1743,8 +1540,8 @@ export function friendlyFailure(error: unknown): string {
   if (/422/i.test(message)) return "提供商拒绝了本次请求（422），稍后重试";
   if (/429|rate limit/i.test(message)) return "提供商限流，稍后重试";
   if (/502|503|504/i.test(message)) return "提供商暂时不可用";
-  // Never echo raw provider error text (bodies can carry internal details,
-  // AGENTS.md §32); the operator console keeps the full diagnostic.
+  // Never echo raw provider error text (bodies can carry internal details);
+  // the operator console keeps the full diagnostic.
   return "提供商请求失败，请稍后重试";
 }
 

@@ -3,7 +3,7 @@
  * peer agents.
  *
  * A society participant accumulates every turn's observations, tool calls and
- * outputs. This manager enforces the ContextPolicy of §5.3:
+ * outputs. This manager enforces the resolved ContextPolicy:
  *
  *   normal          < watchRatio            run normally
  *   watch           watch…retrievalTight    report pressure, dedupe
@@ -72,19 +72,19 @@ export interface ContextBudgetOptions {
   /** Called when the pressure level changes (for observer UI). */
   onPressure?: (budget: ContextBudget, level: ContextPressureLevel) => void;
   /**
-   * Rewrite the durable session to the compacted items (§5.9). Without this,
-   * the request view shrinks but the stored history keeps growing, so the
-   * next activation re-estimates the full history and re-trips the hard
-   * guard forever — the exact deadlock a long game must never hit.
+   * Rewrite the session to the compacted items. Without this, the request view
+   * shrinks but the stored history keeps growing, so the next activation
+   * re-estimates the full history and re-trips the hard guard forever — the
+   * exact deadlock a long game must never hit.
    */
   onSessionCompacted?: (items: AgentInputItem[]) => Promise<void> | void;
 }
 
 /**
- * Provenance of one compaction (AGENTS.md §12.4): the digest is a trusted
- * system-administrative context block, never player speech. The artifact
- * travels with the digest item into the durable session, so a restart can
- * still show what was summarized, from which range, by which model.
+ * Provenance of one compaction: the digest is a trusted system-administrative
+ * context block, never player speech. The artifact travels with the digest
+ * item into the session, so the spectator can still see what was summarized,
+ * from which range, by which model.
  */
 export interface ContextSummaryArtifact {
   summaryId: string;
@@ -161,7 +161,7 @@ export class SessionContextManager {
   private lastDigest?: string;
   private lastEstimated = 0;
   /** Undefined until the first preflight, so every room emits at least one
-   *  pressure sample for the §37 smoke metric even when it never rises. */
+   *  pressure sample for the smoke metric even when it never rises. */
   private lastLevel?: ContextPressureLevel;
   private lastCompactedAt?: string;
   private activationsSinceCompaction = 0;
@@ -197,8 +197,8 @@ export class SessionContextManager {
   }
 
   /**
-   * One-shot compaction against this manager's window, used by model switches
-   * (§12.4): before the agent continues on a smaller window, its history is
+   * One-shot compaction against this manager's window, used by model switches:
+   * before the agent continues on a smaller window, its history is
    * compacted so the first turn after the switch starts below the pressure
    * thresholds instead of tripping the hard guard. Returns the replacement
    * history (compaction marker + retained suffix).
@@ -216,10 +216,9 @@ export class SessionContextManager {
   }
 
   /**
-   * This-round pressure BEFORE memory retrieval (AGENTS.md §12.3): estimate
-   * the session history plus the fixed part of the incoming input, so the
-   * caller sizes retrieval by THIS activation's budget instead of the
-   * previous one's.
+   * This-round pressure BEFORE memory retrieval: estimate the session history
+   * plus the fixed part of the incoming input, so the caller sizes retrieval
+   * by THIS activation's budget instead of the previous one's.
    */
   preflight(historyItems: AgentInputItem[], extraTokens: number): ContextPressureLevel {
     const estimated = estimateTokens(historyItems, this.policy.heuristicSafetyMultiplier) + Math.max(0, extraTokens);
@@ -237,8 +236,8 @@ export class SessionContextManager {
     // placeholder in the request view only — the stored session is untouched
     // and the agent keeps its own failure history.
     historyItems = sanitizeFunctionCalls(historyItems);
-    // Full-candidate measurement (§12.2): the new turn's input belongs to the
-    // SAME budget calculation as the history — never appended afterwards.
+    // Full-candidate measurement: the new turn's input belongs to the SAME
+    // budget calculation as the history — never appended afterwards.
     const fullEstimate = estimateTokens([...historyItems, ...newItems], this.policy.heuristicSafetyMultiplier);
     this.lastEstimated = fullEstimate;
     this.activationsSinceCompaction += 1;
@@ -250,7 +249,7 @@ export class SessionContextManager {
 
     // Hard guard: never send a request that would overrun the window. One
     // last-resort emergency compaction runs first — without it, pressure can
-    // never drop and the agent deadlocks (§5.3 emergency / §5.8 fallback).
+    // never drop and the agent deadlocks.
     // The relief check includes the new input: compaction must free enough
     // room for the whole request, not just the history.
     if (budget.pressureRatio >= this.policy.hardLimitRatio) {
@@ -280,7 +279,7 @@ export class SessionContextManager {
     }
 
     const { kept, compacted } = await this.compact(historyItems, level);
-    // Persist the compacted history so the next activation estimates the
+    // Write the compacted history back so the next activation estimates the
     // shrunk session instead of the pre-compaction one.
     if (compacted) await this.options.onSessionCompacted?.([digestItem(kept.digest, kept.artifact), ...kept.recent]);
     return [digestItem(kept.digest, kept.artifact), ...kept.recent, ...newItems];
@@ -459,9 +458,9 @@ const SUMMARY_PROMPT_VERSION = "context-digest-v1";
 export const CONTEXT_SUMMARY_SCHEMA_VERSION = 1;
 
 /**
- * The compaction digest is a TRUSTED system context block (§12.4), not a
- * user message: it renders with an explicit administrative framing and the
- * full provenance artifact rides on the item into the durable session.
+ * The compaction digest is a TRUSTED system context block, not a user
+ * message: it renders with an explicit administrative framing and the full
+ * provenance artifact rides on the item into the session.
  */
 function digestItem(text: string, artifact: ContextSummaryArtifact): AgentInputItem {
   // Plain-string content: structured `input_text` parts in system messages
@@ -508,7 +507,7 @@ function artifactFor(
 
 /**
  * Replace malformed tool-call argument JSON in the request view of history.
- * Non-destructive: the durable session keeps the original items.
+ * Non-destructive: the session keeps the original items.
  */
 export function sanitizeFunctionCalls(items: AgentInputItem[]): AgentInputItem[] {
   let changed = false;

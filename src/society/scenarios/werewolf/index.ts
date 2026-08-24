@@ -19,7 +19,7 @@ import { conversationSignalsFromSocialActs, DiscussionDirector } from "../../con
 import { SuspicionClimate } from "../../suspicion";
 import { boundedRounds, discussionPersonality, emitAction } from "../helpers";
 import { roleHypothesisTool } from "../../cognition";
-import { createStrategyActionShape, socialReferenceContext, toolArgumentFeedback } from "../../social/strategy-input";
+import { socialReferenceContext, toolArgumentFeedback } from "../../social/context-refs";
 import type { SocialActDeclaration } from "../../social/contracts";
 import {
   WEREWOLF_ROLES,
@@ -44,22 +44,6 @@ const societyTool = ((options: Record<string, unknown>) =>
     // Society tools standardize on field-level validation feedback.
     errorFunction: toolArgumentFeedback(typeof options.name === "string" ? options.name : "tool")
   } as Parameters<typeof tool>[0])) as unknown as typeof tool;
-
-const WEREWOLF_VOTE_OUTCOME_KEYS = [
-  "target-eliminated",
-  "vote-matched-plurality",
-  "actor-survives-day",
-  "target-revealed-wolf"
-] as const;
-const WEREWOLF_KNIGHT_OUTCOME_KEYS = ["challenge-used", "target-was-wolf", "knight-survived", "target-eliminated"] as const;
-const WEREWOLF_SHOT_OUTCOME_KEYS = ["shot-fired", "target-eliminated", "target-was-wolf"] as const;
-const WEREWOLF_WOLF_TARGET_OUTCOME_KEYS = ["pack-selected-target", "target-killed-by-wolves", "actor-survives-night"] as const;
-const WEREWOLF_SEER_OUTCOME_KEYS = ["investigation-completed", "target-appeared-wolf"] as const;
-const WEREWOLF_SPIRIT_SEER_OUTCOME_KEYS = ["investigation-completed", "target-was-wolf"] as const;
-const WEREWOLF_NIGHTMARE_OUTCOME_KEYS = ["curse-applied"] as const;
-const WEREWOLF_CHARM_OUTCOME_KEYS = ["charm-active"] as const;
-const WEREWOLF_WITCH_OUTCOME_KEYS = ["save-prevented-wolf-kill", "poison-eliminated-target"] as const;
-const WEREWOLF_GUARD_OUTCOME_KEYS = ["guarded-target-survived"] as const;
 
 interface DayRecord {
   day: number;
@@ -88,9 +72,9 @@ interface PendingShot {
 
 export class WerewolfWorld extends SocialWorldBase {
   /**
-   * Sidecar extraction hints (§19): teach the extractor the camp vocabulary so
+   * Sidecar extraction hints: teach the extractor the camp vocabulary so
    * identity claims ("我是村民" / "X 是狼人") become `identity/has-team`
-   * propositions that reveal reconciliation can falsify (§28).
+   * propositions that reveal reconciliation can falsify.
    */
   extractionHints?(): string {
     return [
@@ -175,137 +159,7 @@ export class WerewolfWorld extends SocialWorldBase {
     this.addLog(`身份已经分配（${deck.name}）。公开讨论开始，所有承诺都可能是策略。`, 1);
   }
 
-  protected exportWorldState(): unknown {
-    return {
-      day: this.day,
-      phase: this.phase,
-      roles: this.mapEntries(this.roles),
-      alive: [...this.alive],
-      votes: this.mapEntries(this.votes),
-      voteCommandIds: this.mapEntries(this.voteCommandIds),
-      wolfTargets: this.mapEntries(this.wolfTargets),
-      wolfTargetCommandIds: this.mapEntries(this.wolfTargetCommandIds),
-      seerKnowledge: [...this.seerKnowledge.entries()].map(([seerId, knowledge]) => [seerId, [...knowledge.entries()]] as [string, Array<[string, WerewolfRoleId]>]),
-      seerTargets: this.mapEntries(this.seerTargets),
-      seerTargetCommandIds: this.mapEntries(this.seerTargetCommandIds),
-      history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences),
-      discussion: this.discussion ? this.discussion.exportState() : null,
-      suspicion: this.suspicion.exportState(),
-      winners: [...this.winners],
-      outcome: this.outcome,
-      antidoteAvailable: this.antidoteAvailable,
-      poisonAvailable: this.poisonAvailable,
-      witchSaveId: this.witchSaveId ?? null,
-      witchPoisonId: this.witchPoisonId ?? null,
-      witchActed: this.witchActed,
-      witchCommandId: this.witchCommandId ?? null,
-      guardTargetId: this.guardTargetId ?? null,
-      guardCommandId: this.guardCommandId ?? null,
-      lastGuardTargetId: this.lastGuardTargetId ?? null,
-      pendingShots: structuredClone(this.pendingShots),
-      jesterWon: this.jesterWon,
-      idiotRevealed: [...this.idiotRevealed],
-      knightUsed: this.knightUsed,
-      knightCommandId: this.knightCommandId ?? null,
-      knightTargetId: this.knightTargetId ?? null,
-      knightTargetWasWolf: this.knightTargetWasWolf ?? null,
-      nightmareCurse: this.nightmareCurse ?? null,
-      nightmareCurseDecided: this.nightmareCurse !== undefined,
-      nightmareCurseCommandId: this.nightmareCurseCommandId ?? null,
-      charmTarget: this.charmTarget ?? null,
-      charmDecided: this.charmTarget !== undefined,
-      charmCommandId: this.charmCommandId ?? null,
-      spiritKnowledge: [...this.spiritKnowledge.entries()].map(([seerId, knowledge]) => [seerId, [...knowledge.entries()]] as [string, Array<[string, WerewolfRoleId]>]),
-      spiritTargets: this.mapEntries(this.spiritTargets),
-      spiritTargetCommandIds: this.mapEntries(this.spiritTargetCommandIds),
-      shotCommandIds: this.mapEntries(this.shotCommandIds),
-      shotTargetIds: this.mapEntries(this.shotTargetIds),
-      shotKinds: this.mapEntries(this.shotKinds)
-    };
-  }
 
-  protected restoreWorldState(state: unknown): void {
-    const s = state as Partial<{
-      day: number; phase: string; roles: Array<[string, WerewolfRoleId]>; alive: string[];
-      votes: Array<[string, string]>; voteCommandIds: Array<[string, string]>; wolfTargets: Array<[string, string]>; wolfTargetCommandIds: Array<[string, string]>;
-      seerKnowledge: Array<[string, Array<[string, WerewolfRoleId]>]>; seerTargets: Array<[string, string]>; seerTargetCommandIds: Array<[string, string]>;
-      history: DayRecord[]; lastExperiences: Array<[string, string]>; discussion: unknown; suspicion: unknown;
-      winners: string[]; outcome: string; antidoteAvailable: boolean; poisonAvailable: boolean;
-      witchSaveId: string | null; witchPoisonId: string | null; witchActed: boolean; witchCommandId: string | null;
-      guardTargetId: string | null; guardCommandId: string | null; lastGuardTargetId: string | null; pendingShots: PendingShot[]; jesterWon: boolean; idiotRevealed: string[]; knightUsed: boolean;
-      knightCommandId: string | null; knightTargetId: string | null; knightTargetWasWolf: boolean | null;
-      nightmareCurse: string | null; nightmareCurseDecided: boolean; nightmareCurseCommandId: string | null;
-      charmTarget: string | null; charmDecided: boolean; charmCommandId: string | null;
-      spiritKnowledge: Array<[string, Array<[string, WerewolfRoleId]>]>; spiritTargets: Array<[string, string]>; spiritTargetCommandIds: Array<[string, string]>;
-      shotCommandIds: Array<[string, string]>; shotTargetIds: Array<[string, string | null]>; shotKinds: Array<[string, "hunter" | "wolf-king"]>;
-    }> | undefined;
-    if (!s) return;
-    this.day = Number(s.day ?? 1);
-    this.phase = (s.phase ?? "day-discussion") as Phase;
-    this.fillMap(this.roles, s.roles);
-    this.registerIdentityAssignments();
-    this.alive.clear();
-    for (const id of s.alive ?? []) this.alive.add(id);
-    this.fillMap(this.votes, s.votes);
-    this.fillMap(this.voteCommandIds, s.voteCommandIds);
-    this.fillMap(this.wolfTargets, s.wolfTargets);
-    this.fillMap(this.wolfTargetCommandIds, s.wolfTargetCommandIds);
-    this.seerKnowledge.clear();
-    for (const [seerId, knowledge] of s.seerKnowledge ?? []) {
-      this.seerKnowledge.set(seerId, new Map(knowledge ?? []));
-    }
-    this.fillMap(this.seerTargets, s.seerTargets);
-    this.fillMap(this.seerTargetCommandIds, s.seerTargetCommandIds);
-    this.history.length = 0;
-    this.history.push(...structuredClone(s.history ?? []));
-    this.fillMap(this.lastExperiences, s.lastExperiences);
-    if (s.discussion) {
-      this.discussion = this.createDiscussion();
-      this.discussion.restoreState(s.discussion);
-    } else {
-      // The constructor always creates a fresh director; a checkpoint where
-      // the discussion has ended (vote/night/finished) must restore to null
-      // so the round-trip matches and no stale wave can reopen.
-      this.discussion = null;
-    }
-    this.suspicion.restoreState(s.suspicion);
-    this.winners = [...(s.winners ?? [])];
-    this.outcome = String(s.outcome ?? "");
-    this.antidoteAvailable = Boolean(s.antidoteAvailable);
-    this.poisonAvailable = Boolean(s.poisonAvailable);
-    this.witchSaveId = s.witchSaveId ?? undefined;
-    this.witchPoisonId = s.witchPoisonId ?? undefined;
-    this.witchActed = Boolean(s.witchActed);
-    this.witchCommandId = s.witchCommandId ?? undefined;
-    const nightmareCurseDecided = s.nightmareCurseDecided ?? typeof s.nightmareCurse === "string";
-    this.nightmareCurse = nightmareCurseDecided ? (s.nightmareCurse ?? null) : undefined;
-    this.nightmareCurseCommandId = s.nightmareCurseCommandId ?? undefined;
-    const charmDecided = s.charmDecided ?? typeof s.charmTarget === "string";
-    this.charmTarget = charmDecided ? (s.charmTarget ?? null) : undefined;
-    this.charmCommandId = s.charmCommandId ?? undefined;
-    this.spiritKnowledge.clear();
-    for (const [seerId, knowledge] of s.spiritKnowledge ?? []) {
-      this.spiritKnowledge.set(seerId, new Map(knowledge ?? []));
-    }
-    this.fillMap(this.spiritTargets, s.spiritTargets);
-    this.fillMap(this.spiritTargetCommandIds, s.spiritTargetCommandIds);
-    this.guardTargetId = s.guardTargetId ?? undefined;
-    this.guardCommandId = s.guardCommandId ?? undefined;
-    this.lastGuardTargetId = s.lastGuardTargetId ?? undefined;
-    this.pendingShots.length = 0;
-    this.pendingShots.push(...structuredClone(s.pendingShots ?? []));
-    this.jesterWon = Boolean(s.jesterWon);
-    this.idiotRevealed.clear();
-    for (const id of s.idiotRevealed ?? []) this.idiotRevealed.add(id);
-    this.knightUsed = Boolean(s.knightUsed);
-    this.knightCommandId = s.knightCommandId ?? undefined;
-    this.knightTargetId = s.knightTargetId ?? undefined;
-    this.knightTargetWasWolf = s.knightTargetWasWolf ?? undefined;
-    this.fillMap(this.shotCommandIds, s.shotCommandIds);
-    this.fillMap(this.shotTargetIds, s.shotTargetIds);
-    this.fillMap(this.shotKinds, s.shotKinds);
-  }
 
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
@@ -331,7 +185,7 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   /**
-   * Hidden-choice phases seal the public token stream (§8.3): a wolf's night
+   * Hidden-choice phases seal the public token stream: a wolf's night
    * deliberation or a voter's reasoning would reveal the unresolved choice to
    * spectators. Only the open day discussion streams publicly.
    */
@@ -416,26 +270,14 @@ export class WerewolfWorld extends SocialWorldBase {
 
     const vote = societyTool({
       name: "cast_day_vote",
-      description: "Compare bounded vote intents, select one, predict only publicly resolvable outcomes, then cast a sealed binding vote. Cite authorized beliefs, evidence and actor models by ID.",
+      description: "Cast a sealed binding vote against one living participant. The vote is revealed only after everyone has voted.",
       parameters: z.object({
         targetId: targetRef,
-        reason: z.string().min(1).max(2_000),
-        ...createStrategyActionShape({ targetId: targetRef }, WEREWOLF_VOTE_OUTCOME_KEYS)
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.targetId !== input.targetId) {
-          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected vote target must equal the binding target.");
-        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "cast_day_vote", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({
-            ...candidate,
-            action: "cast_day_vote",
-            payloadSummary: `targetId=${candidate.targetId}`
-          }))
-        });
+        const commit = await this.performAction(actorId, "cast_day_vote", input);
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -445,26 +287,14 @@ export class WerewolfWorld extends SocialWorldBase {
     if (isWolfRole(role)) {
       const chooseNightTarget = societyTool({
         name: "choose_night_target",
-        description: "Compare bounded attack intents using only your authorized knowledge, then nominate one living non-wolf. Each wolf submits independently and the pack majority decides.",
+        description: "Nominate one living non-wolf as the pack's night attack target. Each wolf submits independently and the pack majority decides.",
         parameters: z.object({
           targetId: targetRef,
-          reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: targetRef }, WEREWOLF_WOLF_TARGET_OUTCOME_KEYS)
+          reason: z.string().min(1).max(2_000)
         }).strict(),
         execute: async (input, runContext) => {
-          const selected = input.candidateIntents[input.selectedIntentIndex];
-          if (!selected || selected.targetId !== input.targetId) {
-            throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected wolf target must equal the binding target.");
-          }
           const context = scopedContext(runContext, actorId);
-          const commit = await this.performAction(actorId, "choose_night_target", {
-            ...input,
-            candidateIntents: input.candidateIntents.map((candidate) => ({
-              ...candidate,
-              action: "choose_night_target",
-              payloadSummary: `targetId=${candidate.targetId}`
-            }))
-          });
+          const commit = await this.performAction(actorId, "choose_night_target", input);
           emitAction(context, commit.action, commit.detail);
           return commit.result;
         }
@@ -474,26 +304,14 @@ export class WerewolfWorld extends SocialWorldBase {
     if (role === "seer") {
       const investigate = societyTool({
         name: "investigate_identity",
-        description: "Compare bounded investigation intents, then privately inspect one other living participant. The result is private evidence and must not be treated as public knowledge.",
+        description: "Privately inspect one other living participant. The result is private evidence and must not be treated as public knowledge.",
         parameters: z.object({
           targetId: targetRef,
-          reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: targetRef }, WEREWOLF_SEER_OUTCOME_KEYS)
+          reason: z.string().min(1).max(2_000)
         }).strict(),
         execute: async (input, runContext) => {
-          const selected = input.candidateIntents[input.selectedIntentIndex];
-          if (!selected || selected.targetId !== input.targetId) {
-            throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected investigation target must equal the binding target.");
-          }
           const context = scopedContext(runContext, actorId);
-          const commit = await this.performAction(actorId, "investigate_identity", {
-            ...input,
-            candidateIntents: input.candidateIntents.map((candidate) => ({
-              ...candidate,
-              action: "investigate_identity",
-              payloadSummary: `targetId=${candidate.targetId}`
-            }))
-          });
+          const commit = await this.performAction(actorId, "investigate_identity", input);
           emitAction(context, commit.action, commit.detail);
           return commit.result;
         }
@@ -503,26 +321,14 @@ export class WerewolfWorld extends SocialWorldBase {
     if (role === "spirit-seer") {
       const investigateDead = societyTool({
         name: "investigate_dead_identity",
-        description: "Compare bounded spirit-reading intents, then inspect one dead participant's true role. The result remains private unless you later choose to disclose it.",
+        description: "Inspect one dead participant's true role. The result remains private unless you later choose to disclose it.",
         parameters: z.object({
           targetId: targetRef,
-          reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: targetRef }, WEREWOLF_SPIRIT_SEER_OUTCOME_KEYS)
+          reason: z.string().min(1).max(2_000)
         }).strict(),
         execute: async (input, runContext) => {
-          const selected = input.candidateIntents[input.selectedIntentIndex];
-          if (!selected || selected.targetId !== input.targetId) {
-            throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected spirit-reading target must equal the binding target.");
-          }
           const context = scopedContext(runContext, actorId);
-          const commit = await this.performAction(actorId, "investigate_dead_identity", {
-            ...input,
-            candidateIntents: input.candidateIntents.map((candidate) => ({
-              ...candidate,
-              action: "investigate_dead_identity",
-              payloadSummary: `targetId=${candidate.targetId}`
-            }))
-          });
+          const commit = await this.performAction(actorId, "investigate_dead_identity", input);
           emitAction(context, commit.action, commit.detail);
           return commit.result;
         }
@@ -532,26 +338,14 @@ export class WerewolfWorld extends SocialWorldBase {
     if (role === "nightmare") {
       const curse = societyTool({
         name: "dream_curse",
-        description: "After the wolf nomination, compare bounded curse intents, then curse one living non-wolf so they cannot vote tomorrow, or pass with targetId=null.",
+        description: "Curse one living non-wolf so they cannot vote tomorrow, or pass with targetId=null.",
         parameters: z.object({
           targetId: targetRef.nullable().default(null),
-          reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: targetRef.nullable() }, WEREWOLF_NIGHTMARE_OUTCOME_KEYS)
+          reason: z.string().min(1).max(2_000)
         }).strict(),
         execute: async (input, runContext) => {
-          const selected = input.candidateIntents[input.selectedIntentIndex];
-          if (!selected || selected.targetId !== input.targetId) {
-            throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected curse target must equal the binding target.");
-          }
           const context = scopedContext(runContext, actorId);
-          const commit = await this.performAction(actorId, "dream_curse", {
-            ...input,
-            candidateIntents: input.candidateIntents.map((candidate) => ({
-              ...candidate,
-              action: "dream_curse",
-              payloadSummary: `targetId=${candidate.targetId ?? "pass"}`
-            }))
-          });
+          const commit = await this.performAction(actorId, "dream_curse", input);
           emitAction(context, commit.action, commit.detail);
           return commit.result;
         }
@@ -561,26 +355,14 @@ export class WerewolfWorld extends SocialWorldBase {
     if (role === "wolf-beauty") {
       const charm = societyTool({
         name: "charm_target",
-        description: "After the wolf nomination, compare bounded charm intents, then charm one living non-wolf who will die with you if you are voted out tomorrow, or pass with targetId=null.",
+        description: "Charm one living non-wolf who will die with you if you are voted out tomorrow, or pass with targetId=null.",
         parameters: z.object({
           targetId: targetRef.nullable().default(null),
-          reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: targetRef.nullable() }, WEREWOLF_CHARM_OUTCOME_KEYS)
+          reason: z.string().min(1).max(2_000)
         }).strict(),
         execute: async (input, runContext) => {
-          const selected = input.candidateIntents[input.selectedIntentIndex];
-          if (!selected || selected.targetId !== input.targetId) {
-            throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected charm target must equal the binding target.");
-          }
           const context = scopedContext(runContext, actorId);
-          const commit = await this.performAction(actorId, "charm_target", {
-            ...input,
-            candidateIntents: input.candidateIntents.map((candidate) => ({
-              ...candidate,
-              action: "charm_target",
-              payloadSummary: `targetId=${candidate.targetId ?? "pass"}`
-            }))
-          });
+          const commit = await this.performAction(actorId, "charm_target", input);
           emitAction(context, commit.action, commit.detail);
           return commit.result;
         }
@@ -590,34 +372,25 @@ export class WerewolfWorld extends SocialWorldBase {
     if (role === "witch") {
       const witchChoice = societyTool({
         name: "witch_night_choice",
-        description: "Compare bounded potion intents using only tonight's authorized witch observation, then pick exactly one action: save the wolf victim with the antidote (not yourself), poison one living player, or pass. The two potions can never be used in the same night.",
+        description: "Use one potion tonight: save the wolf victim with the antidote (not yourself), poison one living player, or pass with targetId=null. The two potions can never be used in the same night.",
         parameters: z.object({
-          reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({
-            action: z.enum(["save", "poison", "pass"]),
-            targetId: targetRef.nullable()
-          }, WEREWOLF_WITCH_OUTCOME_KEYS)
+          action: z.enum(["save", "poison", "pass"]),
+          targetId: targetRef.nullable(),
+          reason: z.string().min(1).max(2_000)
         }).strict(),
         execute: async (input, runContext) => {
-          const selected = input.candidateIntents[input.selectedIntentIndex];
-          if (!selected?.action) throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: A potion intent must be selected.");
-          // The selected intent is the single source of truth: the binding is
-          // derived from it, so a model can never submit save and poison at
-          // once or disagree with its own choice (the world still backstops).
-          const saveTargetId = selected.action === "save" ? (selected.targetId ?? null) : null;
-          const poisonTargetId = selected.action === "poison" ? (selected.targetId ?? null) : null;
+          // The flat action field is the single source of truth: the domain
+          // payload derives saveTargetId/poisonTargetId from it, so a model can
+          // never submit save and poison at once (the world still backstops).
+          const saveTargetId = input.action === "save" ? input.targetId : null;
+          const poisonTargetId = input.action === "poison" ? input.targetId : null;
           const context = scopedContext(runContext, actorId);
           const commit = await this.performAction(actorId, "witch_night_choice", {
-            ...input,
+            action: input.action,
+            targetId: input.targetId,
             saveTargetId,
             poisonTargetId,
-            candidateIntents: input.candidateIntents.map((candidate) => ({
-              ...candidate,
-              action: "witch_night_choice",
-              payloadSummary: candidate.action === "pass"
-                ? "pass"
-                : `${candidate.action}TargetId=${candidate.targetId ?? ""}`
-            }))
+            reason: input.reason
           });
           emitAction(context, commit.action, commit.detail);
           return commit.result;
@@ -628,26 +401,14 @@ export class WerewolfWorld extends SocialWorldBase {
     if (role === "guard") {
       const guard = societyTool({
         name: "guard_tonight",
-        description: "Compare bounded protection intents, then guard one living participant or pass. You may guard yourself, cannot repeat last night's target, and protection does not stop poison.",
+        description: "Guard one living participant or pass with targetId=null. You may guard yourself, cannot repeat last night's target, and protection does not stop poison.",
         parameters: z.object({
           targetId: targetRef.nullable().default(null),
-          reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: targetRef.nullable() }, WEREWOLF_GUARD_OUTCOME_KEYS)
+          reason: z.string().min(1).max(2_000)
         }).strict(),
         execute: async (input, runContext) => {
-          const selected = input.candidateIntents[input.selectedIntentIndex];
-          if (!selected || selected.targetId !== input.targetId) {
-            throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected guard target must equal the binding target.");
-          }
           const context = scopedContext(runContext, actorId);
-          const commit = await this.performAction(actorId, "guard_tonight", {
-            ...input,
-            candidateIntents: input.candidateIntents.map((candidate) => ({
-              ...candidate,
-              action: "guard_tonight",
-              payloadSummary: `targetId=${candidate.targetId ?? "pass"}`
-            }))
-          });
+          const commit = await this.performAction(actorId, "guard_tonight", input);
           emitAction(context, commit.action, commit.detail);
           return commit.result;
         }
@@ -655,36 +416,24 @@ export class WerewolfWorld extends SocialWorldBase {
       tools.push(guard as Tool<SocietyAgentContext>);
     }
     if (role === "hunter") {
-      tools.push(this.deathShotTool(actorId, "hunter_shoot", "You are dying. Compare bounded shot targets, then shoot one living participant or hold. A hunter who is poisoned cannot shoot."));
+      tools.push(this.deathShotTool(actorId, "hunter_shoot", "You are dying. Shoot one living participant or hold. A hunter who is poisoned cannot shoot."));
     }
     if (role === "wolf-king") {
-      tools.push(this.deathShotTool(actorId, "wolf_king_shoot", "You are dying. Compare bounded shot targets, then take one living participant with you or hold."));
+      tools.push(this.deathShotTool(actorId, "wolf_king_shoot", "You are dying. Take one living participant with you or hold."));
     }
     // Hidden-identity worlds get the role-probability ledger: suspicion stays
     // a distribution, not a free-text hunch.
     if (role === "knight" && !this.knightUsed) {
       const duel = societyTool({
         name: "knight_challenge",
-        description: "Compare bounded duel targets, then use the knight's one challenge or pass. A wolf target dies; a non-wolf target causes your own death.",
+        description: "Use the knight's one challenge or pass with targetId=null. A wolf target dies; a non-wolf target causes your own death.",
         parameters: z.object({
           targetId: targetRef.nullable().default(null),
-          reason: z.string().min(1).max(2_000),
-          ...createStrategyActionShape({ targetId: targetRef.nullable() }, WEREWOLF_KNIGHT_OUTCOME_KEYS)
+          reason: z.string().min(1).max(2_000)
         }).strict(),
         execute: async (input, runContext) => {
-          const selected = input.candidateIntents[input.selectedIntentIndex];
-          if (!selected || selected.targetId !== input.targetId) {
-            throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected duel target must equal the binding target.");
-          }
           const context = scopedContext(runContext, actorId);
-          const commit = await this.performAction(actorId, "knight_challenge", {
-            ...input,
-            candidateIntents: input.candidateIntents.map((candidate) => ({
-              ...candidate,
-              action: "knight_challenge",
-              payloadSummary: `targetId=${candidate.targetId ?? "pass"}`
-            }))
-          });
+          const commit = await this.performAction(actorId, "knight_challenge", input);
           emitAction(context, commit.action, commit.detail);
           return commit.result;
         }
@@ -705,26 +454,11 @@ export class WerewolfWorld extends SocialWorldBase {
       description,
       parameters: z.object({
         targetId: z.enum([...this.roles.keys()] as [string, ...string[]]).nullable().default(null),
-        reason: z.string().min(1).max(2_000),
-        ...createStrategyActionShape(
-          { targetId: z.enum([...this.roles.keys()] as [string, ...string[]]).nullable() },
-          WEREWOLF_SHOT_OUTCOME_KEYS
-        )
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.targetId !== input.targetId) {
-          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected death-shot target must equal the binding target.");
-        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, action, {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({
-            ...candidate,
-            action,
-            payloadSummary: `targetId=${candidate.targetId ?? "hold"}`
-          }))
-        });
+        const commit = await this.performAction(actorId, action, input);
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -916,7 +650,7 @@ export class WerewolfWorld extends SocialWorldBase {
       if (targetId === actorId) throw new Error("INVALID_INVESTIGATION_TARGET: Choose another living participant.");
       if (this.seerTargets.has(actorId)) throw new Error("INVESTIGATION_ALREADY_USED: Your investigation is fixed for tonight.");
       const targetRole = this.roles.get(targetId)!;
-      // The hidden wolf reads as a villager through the seer's eyes (§7.4).
+      // The hidden wolf reads as a villager through the seer's eyes.
       const perceivedRole = targetRole === "hidden-wolf" ? "villager" : targetRole;
       const commandId = `cmd-${randomUUID()}`;
       this.seerTargets.set(actorId, targetId);
@@ -1390,7 +1124,7 @@ export class WerewolfWorld extends SocialWorldBase {
             : `${this.profiles.get(eliminatedId)?.displayName} 被投票放逐，身份揭晓：${roleLabel(eliminatedRole)}。`
         : "本轮平票，无人被放逐。";
     for (const id of this.profiles.keys()) this.lastExperiences.set(id, `第 ${this.day} 天投票：${voteText} 投票：${[...this.votes].map(([voter, target]) => `${voter}->${target}`).join(", ")}。`);
-    // P0-09: eliminating a wolf reveals a hidden role, it does not prove a
+    // Eliminating a wolf reveals a hidden role, it does not prove a
     // specific lie was caught; eliminating an innocent is an adverse outcome.
     const voteBeat = idiotSurvives
       ? undefined

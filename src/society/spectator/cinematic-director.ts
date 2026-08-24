@@ -1,5 +1,5 @@
 /**
- * CinematicDirector — the automatic spectator director (AGENTS.md §8.6).
+ * CinematicDirector — the automatic spectator director.
  *
  * It derives tension and camera cues from REAL events only: world beats,
  * eliminations, vote swings, role actions, emotional spikes and speaking
@@ -153,9 +153,9 @@ export class CinematicDirector {
     if (tally.size) this.lastVoteTally = tally;
 
     // Win condition approaching (public signal only: the round counter). Hidden
-    // identity counts are never read by the director — §2.6.
+    // identity counts are never read by the director.
     // Direct accusations: hidden-identity worlds publish a public suspicion
-    // ledger (speech/vote/outcome entries — all heard by the table, §2.6).
+    // ledger (speech/vote/outcome entries — all heard by the table).
     // New speech entries become duel cues between accuser and target.
     const suspicion = (world.details as { suspicion?: { entries?: Array<{ kind?: string; accuser: string; target: string }> } } | undefined)?.suspicion;
     if (suspicion && Array.isArray(suspicion.entries)) {
@@ -209,7 +209,7 @@ export class CinematicDirector {
       comeback: { reason: "save", camera: "wide-table", title: "逆转", priority: 8 },
       misplay: { reason: "contradiction", camera: "agent-mind", title: "失手", priority: 5 },
       win: { reason: "win-condition-near", camera: "endgame", title: "终局", priority: 11 },
-      // P0-09 neutral beats keep light, low-weight presentation (role-action
+      // Neutral beats keep light, low-weight presentation (role-action
       // 0.16 instead of the betrayal/deception weights). Reveal and return
       // beats stay unmapped: ingestWorld already covers eliminations and
       // role flips with their own cameras.

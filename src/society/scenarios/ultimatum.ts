@@ -17,7 +17,7 @@ import type {
 import { scopedContext, SocialWorldBase } from "../world";
 import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
-import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import { socialReferenceContext } from "../social/context-refs";
 import type { SocialActDeclaration } from "../social/contracts";
 
 type Phase = "discussion" | "propose" | "respond";
@@ -30,10 +30,6 @@ interface UltimatumRound {
   accepted: boolean;
   payoffs: Record<string, number>;
 }
-
-const ULTIMATUM_STATE_SCHEMA_VERSION = 2;
-const ULTIMATUM_PROPOSAL_OUTCOME_KEYS = ["offer-accepted", "proposer-payoff-at-least-five", "responder-payoff-at-least-three", "both-receive-positive"] as const;
-const ULTIMATUM_RESPONSE_OUTCOME_KEYS = ["offer-accepted", "actor-payoff-positive", "proposer-payoff-positive", "agreement-reached"] as const;
 
 export class UltimatumWorld extends SocialWorldBase {
   private readonly totalRounds: number;
@@ -59,7 +55,7 @@ export class UltimatumWorld extends SocialWorldBase {
   }
 
   /**
-   * Sidecar extraction hints (§19): split statements ("我会给你 4")
+   * Sidecar extraction hints: split statements ("我会给你 4")
    * become `claimed-action` propositions reconciled against the sealed
    * offer at settlement.
    */
@@ -72,54 +68,7 @@ export class UltimatumWorld extends SocialWorldBase {
     ].join("\n");
   }
 
-  protected exportWorldState(): unknown {
-    return {
-      schemaVersion: ULTIMATUM_STATE_SCHEMA_VERSION,
-      round: this.round,
-      phase: this.phase,
-      scores: this.mapEntries(this.scores),
-      commitments: structuredClone(this.commitments),
-      offer: this.offer ?? null,
-      response: this.response ?? null,
-      offerCommandId: this.offerCommandId ?? null,
-      responseCommandId: this.responseCommandId ?? null,
-      history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences),
-      discussion: this.discussion ? this.discussion.exportState() : null
-    };
-  }
 
-  protected restoreWorldState(state: unknown): void {
-    const s = state as Partial<{
-      schemaVersion: number;
-      round: number; phase: string; scores: Array<[string, number]>; commitments: Commitment[]; history: UltimatumRound[];
-      offer: number | null; response: boolean | null; offerCommandId: string | null; responseCommandId: string | null;
-      lastExperiences: Array<[string, string]>; discussion: unknown;
-    }> | undefined;
-    if (!s) return;
-    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== ULTIMATUM_STATE_SCHEMA_VERSION) {
-      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: ultimatum ${s.schemaVersion}`);
-    }
-    this.round = Number(s.round ?? 1);
-    this.phase = (s.phase ?? "discussion") as Phase;
-    this.fillMap(this.scores, s.scores);
-    this.commitments.length = 0;
-    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
-    this.offer = s.offer ?? undefined;
-    this.response = s.response ?? undefined;
-    this.offerCommandId = s.offerCommandId ?? undefined;
-    this.responseCommandId = s.responseCommandId ?? undefined;
-    this.history.length = 0;
-    this.history.push(...structuredClone(s.history ?? []));
-    this.fillMap(this.lastExperiences, s.lastExperiences);
-    if (s.discussion) {
-      this.discussion = this.createDiscussion();
-      this.discussion.restoreState(s.discussion);
-    } else {
-      // Mirror the live lifecycle: the director is nulled when waves end.
-      this.discussion = null;
-    }
-  }
 
   snapshot(): WorldSnapshot {
     const [proposerId, responderId] = this.rolesForRound();
@@ -179,40 +128,28 @@ export class UltimatumWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const propose = tool({
       name: "propose_split",
-      description: `Compare bounded split intents and response predictions, then offer the responder an integer share from 0 to ${this.pot}. This typed offer is binding for the response phase.`,
+      description: `Offer the responder an integer share from 0 to ${this.pot}. This typed offer is binding for the response phase.`,
       parameters: z.object({
         offer: z.number().int().min(0).max(this.pot),
-        reason: z.string().min(1).max(2_000),
-        ...createStrategyActionShape({ offer: z.number().int().min(0).max(this.pot) }, ULTIMATUM_PROPOSAL_OUTCOME_KEYS)
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.offer !== input.offer) throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: Selected split must equal the binding offer.");
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "propose_split", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({ ...candidate, action: "propose_split", payloadSummary: `offer=${candidate.offer}` }))
-        });
+        const commit = await this.performAction(actorId, "propose_split", input);
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
     });
     const respond = tool({
       name: "respond_to_offer",
-      description: "Compare bounded response intents and outcome predictions, then accept or reject the typed split. Accepting locks in both payoffs; rejecting gives both zero.",
+      description: "Accept or reject the typed split. Accepting locks in both payoffs; rejecting gives both zero.",
       parameters: z.object({
         accept: z.boolean(),
-        reason: z.string().min(1).max(2_000),
-        ...createStrategyActionShape({ accept: z.boolean() }, ULTIMATUM_RESPONSE_OUTCOME_KEYS)
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.accept !== input.accept) throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: Selected response must equal the binding response.");
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "respond_to_offer", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({ ...candidate, action: "respond_to_offer", payloadSummary: `accept=${candidate.accept}` }))
-        });
+        const commit = await this.performAction(actorId, "respond_to_offer", input);
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -428,7 +365,7 @@ export class UltimatumWorld extends SocialWorldBase {
         label: `${proposerName} 提出分配`,
         actorIds: [proposerId],
         mode: "sequential",
-        instructionFor: () => `Call propose_split now with bounded candidates, response predictions, and an integer offer from 0 to ${this.pot}.`
+        instructionFor: () => `Call propose_split now with an integer offer from 0 to ${this.pot}.`
       };
     }
     if (this.phase === "respond") {
@@ -438,7 +375,7 @@ export class UltimatumWorld extends SocialWorldBase {
         label: `${responderName} 回应`,
         actorIds: [responderId],
         mode: "sequential",
-        instructionFor: () => "Call respond_to_offer now with bounded candidates and outcome predictions, accepting or rejecting the proposed split."
+        instructionFor: () => "Call respond_to_offer now, accepting or rejecting the proposed split."
       };
     }
     return null;
@@ -585,7 +522,7 @@ export class UltimatumWorld extends SocialWorldBase {
       object: { proposerId, responderId, offer, accepted, payoffs },
       payload: { round: this.round, proposerId, responderId, offer, accepted, payoffs }
     });
-    // §28 主张对账: reconcile extracted offer claims ("我会给你 4")
+    // 主张对账: reconcile extracted offer claims ("我会给你 4")
     // against the actual sealed offer.
     for (const id of this.profiles.keys()) {
       const characterId = this.requireProfile(id).characterId;
@@ -598,7 +535,7 @@ export class UltimatumWorld extends SocialWorldBase {
         });
       }
     }
-    // §28: settle this round's accepted commitments against the sealed offer
+    // Settle this round's accepted commitments against the sealed offer
     // and response. An accept-at-least promise whose threshold the offer never
     // reached is voided — the condition never materialized.
     const roundCommitments = this.commitments.filter((entry) => entry.round === this.round && entry.state === "accepted");
@@ -754,13 +691,4 @@ function situationFor(phase: Phase, role: "proposer" | "responder", offer: numbe
   if (phase === "discussion") return `You are the ${role} this round. Promises are not binding, and roles reverse next round.`;
   if (phase === "propose") return role === "proposer" ? "Choose how to split the pot. Too greedy a split may be rejected." : "The proposer is deciding the split.";
   return role === "responder" ? `The proposer offered you ${offer ?? 0} of ${pot}. Rejection punishes unfairness but costs you both.` : "The responder is deciding whether to accept your split.";
-}
-
-
-function normalizeCommitment(value: Commitment): Commitment {
-  return {
-    ...value,
-    acceptedByActorIds: [...(value.acceptedByActorIds ?? [])],
-    acceptedByCommandIds: [...(value.acceptedByCommandIds ?? [])]
-  };
 }

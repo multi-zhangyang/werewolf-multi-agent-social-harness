@@ -1,5 +1,5 @@
 /**
- * Request authentication for the Society API (AGENTS.md §18 / P0-05).
+ * Request authentication for the Society API.
  *
  * Role model:
  *  - anonymous spectator: public projection only, always;
@@ -7,8 +7,8 @@
  *    own actions only;
  *  - room owner: the per-room control token returned at creation — pause,
  *    resume, remove, model switches, omniscient viewing of that room;
- *  - operator: `SOCIETY_OPERATOR_TOKEN` — global operations (season reset,
- *    model config / settings writes, forensic archive). Room ownership never
+ *  - operator: `SOCIETY_OPERATOR_TOKEN` — global writes (model config,
+ *    settings, character library, roster templates). Room ownership never
  *    escalates into global operator authority.
  *
  * Tokens are read from `Authorization: Bearer`, the `x-player-token` header,
@@ -82,8 +82,9 @@ function safeEqual(left: string, right: string): boolean {
 }
 
 /**
- * Guard for global (operator) writes — season reset, model config, settings.
- * Sends the 403 itself and returns false when the request is not authorized.
+ * Guard for global (operator) writes — model config, settings, character
+ * library, roster templates. Sends the 403 itself and returns false when the
+ * request is not authorized.
  */
 export function requireGlobalOperator(
   request: Request,

@@ -1,36 +1,23 @@
-import { useState, type ReactNode } from "react";
-import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, Eraser, MessagesSquare, Play, Radio, RotateCcw, Settings2, Trash2, Users, Waypoints } from "lucide-react";
+import { type ReactNode } from "react";
+import { ArrowDown, ArrowRight, ArrowUpRight, BrainCircuit, MessagesSquare, Play, Radio, Settings2, Trash2, Users, Waypoints } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
-import type { ArchivedRoomSummary } from "@/society/persistence";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AgentAvatar, ScenarioIcon, StatusDot, StatusLabel } from "./shared";
 import type { ModelOption } from "./types";
 import { cn } from "@/lib/utils";
 
-interface SeasonSummary {
-  characterId: string;
-  displayName: string;
-  games: Array<{ scenarioId: string; role?: string; outcome: "win" | "lose" }>;
-  updatedAt: string;
-}
-
 interface LandingProps {
   scenarios: ScenarioSummary[];
   models: ModelOption[];
   rooms: SocietyRoomSnapshot[];
-  archived: ArchivedRoomSummary[];
-  season: SeasonSummary[];
   onStart: (scenarioId: string) => void;
   onOpenRoom: (roomId: string) => void;
   onOpenSettings: () => void;
   onOpenCharacters: () => void;
   onOpenAbout: () => void;
-  onResetSeason: () => void;
-  /** Forget one character's cross-game memory (§7.2). */
-  onForgetCharacter: (characterId: string, displayName: string) => void;
-  /** Stop and release a room; its history stays in the archive. */
+  /** Stop and release a room; nothing is persisted. */
   onRemoveRoom: (roomId: string) => void;
 }
 
@@ -80,7 +67,7 @@ const CATEGORY_OF: Record<string, keyof typeof CATEGORY> = {
   "liars-dice": "deception"
 };
 
-export function Landing({ scenarios, models, rooms, archived, season, onStart, onOpenRoom, onOpenSettings, onOpenCharacters, onOpenAbout, onResetSeason, onForgetCharacter, onRemoveRoom }: LandingProps): ReactNode {
+export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenSettings, onOpenCharacters, onOpenAbout, onRemoveRoom }: LandingProps): ReactNode {
   return (
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-20 border-b border-border/80 bg-background/70 backdrop-blur-xl">
@@ -172,50 +159,6 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
           </div>
         </section>
 
-        {season.length ? (
-          <section className="mb-20">
-            <div className="mb-4 flex items-end justify-between">
-              <div>
-                <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground/80">Season</p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight">延续的社群</h2>
-              </div>
-              <SeasonResetButton onReset={onResetSeason} />
-            </div>
-            <p className="mb-4 max-w-3xl text-[13px] leading-6 text-muted-foreground">
-              社会季：同一批角色会跨局延续——上一局的背叛、恩怨与信任会进入下一局，像一群真正熟悉的旧友。每局的身份与阵营重新分配，过去的角色不决定今天的忠诚，但过去的经历会改变今天的判断。随时可以清空，开启一个所有人都互不相识的全新社会季。
-            </p>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-              {season.slice(0, 8).map((entry) => {
-                const wins = entry.games.filter((game) => game.outcome === "win").length;
-                return (
-                  <div key={entry.characterId} className="group relative rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/25">
-                    <p className="flex items-center gap-2 text-sm font-semibold tracking-tight">
-                      <AgentAvatar name={entry.displayName} seed={entry.characterId} size="sm" />
-                      {entry.displayName}
-                    </p>
-                    <p className="nums mt-2 font-mono text-[11px] text-muted-foreground/80">
-                      {entry.games.length} 局 · 胜 {wins}
-                    </p>
-                    <p className="mt-1 truncate text-[11px] text-muted-foreground">
-                      最近：{entry.games.at(-1)?.scenarioId ?? "—"}
-                      {entry.games.at(-1)?.role ? ` · ${entry.games.at(-1)?.role}` : ""}
-                    </p>
-                    <button
-                      type="button"
-                      aria-label={`忘记 ${entry.displayName} 的跨局历史`}
-                      title={`让 ${entry.displayName} 忘掉全部跨局历史，下一局从陌生人开始`}
-                      onClick={() => onForgetCharacter(entry.characterId, entry.displayName)}
-                      className="absolute right-2 top-2 flex size-6 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-border hover:text-red-400 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-foreground"
-                    >
-                      <Eraser className="size-3.5" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        ) : null}
-
         <section className="mb-20 grid grid-cols-1 gap-px overflow-hidden rounded-xl border border-border bg-border sm:grid-cols-2">
           {FEATURES.map((feature) => {
             const Icon = feature.icon;
@@ -229,27 +172,6 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
               </div>
             );
           })}
-        </section>
-
-        <section className="mb-20 grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div className="rounded-xl border border-emerald-400/30 bg-gradient-to-b from-emerald-400/10 to-card p-7">
-            <div className="flex items-center gap-2">
-              <span className="live-pulse size-1.5 rounded-full bg-emerald-400" />
-              <h3 className="text-lg font-semibold tracking-tight">社会季模式</h3>
-            </div>
-            <p className="mt-2.5 text-sm leading-6 text-muted-foreground">
-              同一批角色跨局延续：上一局的背叛、恩怨与信任进入下一局，像一群越玩越熟的老友。每局身份重新分配，过去的角色不决定今天的忠诚，但过去的经历会改变今天的判断。可以在首页一键「重置社会季」，让所有人重新互不相识。
-            </p>
-          </div>
-          <div className="rounded-xl border border-border bg-card p-7">
-            <div className="flex items-center gap-2">
-              <span className="size-1.5 rounded-full bg-amber-400" />
-              <h3 className="text-lg font-semibold tracking-tight">单局模式</h3>
-            </div>
-            <p className="mt-2.5 text-sm leading-6 text-muted-foreground">
-              一局定胜负、零历史干扰：角色互不相识，不读取任何过往记忆，结束后也不留下任何记忆。适合想观察纯粹博弈、或者不被上一局恩怨影响的公平对决——创建房间时选择「单局模式」即可。
-            </p>
-          </div>
         </section>
 
         <section id="scenarios" className="scroll-mt-20">
@@ -310,7 +232,7 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
                     <button
                       type="button"
                       aria-label={`移除 ${room.title}`}
-                      title="停止并移除：对局历史会保留在归档中"
+                      title="停止并移除：对局立即结束且不可恢复"
                       onClick={() => onRemoveRoom(room.id)}
                       className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/50 transition-colors hover:bg-border hover:text-red-400"
                     >
@@ -321,44 +243,6 @@ export function Landing({ scenarios, models, rooms, archived, season, onStart, o
                 </div>
               ))}
             </div>
-          </section>
-        ) : null}
-
-        {archived.length ? (
-          <section className="mt-12">
-            <div className="mb-6 flex items-end justify-between">
-              <div>
-                <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground/80">Archive</p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground/80">已归档的对局</h2>
-              </div>
-              <span className="nums font-mono text-xs text-muted-foreground/80">{archived.length} archives</span>
-            </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {archived.slice(0, 6).map((room) => (
-                <button
-                  key={room.roomId}
-                  type="button"
-                  onClick={() => onOpenRoom(room.roomId)}
-                  className="group flex items-center gap-4 rounded-lg border border-border/60 bg-card/60 p-4 text-left transition-all hover:-translate-y-0.5 hover:border-foreground/25 hover:bg-card"
-                >
-                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/50 text-muted-foreground/70 transition-colors group-hover:text-muted-foreground">
-                    <ScenarioIcon id={room.scenarioId} className="size-4.5" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-semibold tracking-tight text-foreground/70 group-hover:text-foreground/90">{room.title}</span>
-                    <span className="nums mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/70">
-                      <span>已归档</span>
-                      <span className="text-muted-foreground/40">·</span>
-                      <span>{room.messages} 条消息 · {room.participants.length} 名参与者</span>
-                    </span>
-                  </span>
-                  <ArrowUpRight className="size-4 shrink-0 text-muted-foreground/40 transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-foreground/70" />
-                </button>
-              ))}
-            </div>
-            <p className="mt-3 text-xs leading-5 text-muted-foreground/60">
-              归档是服务器在运行中持续写入的滚动检查点（data/rooms/）；重启后房间历史与每个 Agent 的会话文件仍然保留，可从检查点恢复查看。
-            </p>
           </section>
         ) : null}
       </main>
@@ -410,31 +294,6 @@ function HeroStage(): ReactNode {
         ))}
       </div>
     </div>
-  );
-}
-
-/** Two-step season reset: forget every cross-game memory and start fresh. */
-function SeasonResetButton({ onReset }: { onReset: () => void }): ReactNode {
-  const [armed, setArmed] = useState(false);
-  return armed ? (
-    <span className="flex items-center gap-2">
-      <span className="text-xs text-muted-foreground">清空全部角色记忆,开启全新社会季?</span>
-      <Button
-        size="sm"
-        className="rounded-lg border border-rose-400/40 bg-rose-400/10 px-3 text-rose-300 hover:bg-rose-400/20"
-        onClick={() => { onReset(); setArmed(false); }}
-      >
-        确认清空
-      </Button>
-      <Button size="sm" variant="ghost" className="px-3 text-muted-foreground" onClick={() => setArmed(false)}>
-        取消
-      </Button>
-    </span>
-  ) : (
-    <Button size="sm" variant="outline" className="gap-1.5 rounded-lg border-border bg-card px-3 text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => setArmed(true)}>
-      <RotateCcw className="size-3.5" />
-      重置社会季
-    </Button>
   );
 }
 

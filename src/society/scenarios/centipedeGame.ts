@@ -17,7 +17,7 @@ import type {
 import { scopedContext, SocialWorldBase } from "../world";
 import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
-import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import { socialReferenceContext } from "../social/context-refs";
 import type { SocialActDeclaration } from "../social/contracts";
 
 type Move = "take" | "pass";
@@ -59,7 +59,7 @@ export class CentipedeGameWorld extends SocialWorldBase {
   }
 
   /**
-   * Sidecar extraction hints (§19): move statements ("我会拿走"/"我会传递")
+   * Sidecar extraction hints: move statements ("我会拿走"/"我会传递")
    * become `claimed-action` propositions reconciled against the actual move.
    */
   extractionHints?(): string {
@@ -71,46 +71,7 @@ export class CentipedeGameWorld extends SocialWorldBase {
     ].join("\n");
   }
 
-  protected exportWorldState(): unknown {
-    return {
-      schemaVersion: CENTIPEDE_STATE_SCHEMA_VERSION,
-      move: this.move,
-      ended: this.ended,
-      phase: this.phase,
-      scores: this.mapEntries(this.scores),
-      commitments: structuredClone(this.commitments),
-      pendingMoveReconciliation: this.pendingMoveReconciliation ? structuredClone(this.pendingMoveReconciliation) : null,
-      discussion: this.discussion.exportState(),
-      history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences)
-    };
-  }
 
-  protected restoreWorldState(state: unknown): void {
-    const s = state as Partial<{
-      schemaVersion: number;
-      move: number; ended: boolean; phase: string; scores: Array<[string, number]>;
-      pendingMoveReconciliation: PendingMoveReconciliation | null; commitments: Commitment[];
-      discussion: ReturnType<DiscussionDirector["exportState"]>;
-      history: MoveRecord[]; lastExperiences: Array<[string, string]>;
-    }> | undefined;
-    if (!s) return;
-    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== 2 && s.schemaVersion !== CENTIPEDE_STATE_SCHEMA_VERSION) {
-      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: centipede-game ${s.schemaVersion}`);
-    }
-    this.move = Number(s.move ?? 1);
-    this.ended = Boolean(s.ended);
-    this.phase = (s.phase ?? "discussion") as Phase;
-    this.fillMap(this.scores, s.scores);
-    this.commitments.length = 0;
-    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
-    this.pendingMoveReconciliation = s.pendingMoveReconciliation ? structuredClone(s.pendingMoveReconciliation) : undefined;
-    this.discussion = this.createDiscussion();
-    if (s.discussion) this.discussion.restoreState(s.discussion);
-    this.history.length = 0;
-    this.history.push(...structuredClone(s.history ?? []));
-    this.fillMap(this.lastExperiences, s.lastExperiences);
-  }
 
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
@@ -171,19 +132,16 @@ export class CentipedeGameWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const choose = tool({
       name: "centipede_move",
-      description: "As the player on move, compare bounded take/pass intents and predict the public transition, then commit one irreversible typed move.",
+      description: "As the player on move, commit one irreversible typed move: take now or pass the pot on.",
       parameters: z.object({
         action: z.enum(["take", "pass"]),
-        reason: z.string().min(1).max(2_000),
-        ...createStrategyActionShape({ moveAction: z.enum(["take", "pass"]) }, CENTIPEDE_OUTCOME_KEYS)
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.moveAction !== input.action) throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: Selected centipede move must equal the binding action.");
         const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "centipede_move", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({ ...candidate, action: "centipede_move", payloadSummary: `action=${candidate.moveAction}` }))
+          action: input.action,
+          reason: input.reason
         });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -393,7 +351,7 @@ export class CentipedeGameWorld extends SocialWorldBase {
       actorIds: [this.moverId()],
       mode: "sequential",
       instructionFor: (actorId) => actorId === this.moverId()
-        ? `The pot is ${this.pot()}. Call centipede_move exactly once with bounded candidates and public-transition predictions: take now or pass.`
+        ? `The pot is ${this.pot()}. Call centipede_move exactly once: take now or pass.`
         : "The other player holds the move. You will observe the outcome."
     };
   }
@@ -446,7 +404,7 @@ export class CentipedeGameWorld extends SocialWorldBase {
   }
 
   private settleMoveCommitments(moverId: string, actualAction: Move, sourceEventId: string): "promise-kept" | "promise-broken" | undefined {
-    // §28 主张对账: reconcile extracted move claims ("我会拿走") against the
+    // 主张对账: reconcile extracted move claims ("我会拿走") against the
     // actual sealed move.
     const moverCharacterId = this.requireProfile(moverId).characterId;
     for (const claim of this.extractedActionClaims(moverCharacterId)) {
@@ -585,16 +543,4 @@ interface PendingMoveReconciliation {
   payoffs: Record<string, number>;
   ended: boolean;
   publicResultEventId: string;
-}
-
-const CENTIPEDE_STATE_SCHEMA_VERSION = 3;
-const CENTIPEDE_OUTCOME_KEYS = ["game-ends-this-move", "pot-passes", "actor-payoff-at-least-half-pot", "both-receive-positive"] as const;
-
-
-function normalizeCommitment(value: Commitment): Commitment {
-  return {
-    ...value,
-    acceptedByActorIds: [...(value.acceptedByActorIds ?? [])],
-    acceptedByCommandIds: [...(value.acceptedByCommandIds ?? [])]
-  };
 }

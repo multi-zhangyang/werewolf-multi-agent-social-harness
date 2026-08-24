@@ -2,7 +2,7 @@ import type { SocialMessage } from "../contracts";
 import type { SocialActDeclaration, SocialActKind } from "./contracts";
 
 /**
- * Message sidecar extraction (AGENTS.md §19): derive structured social acts
+ * Message sidecar extraction: derive structured social acts
  * from a discussion message AFTER it is persisted. The original text stays
  * immutable; extraction results carry confidence and are recorded with
  * `extractionMethod: "model-extracted"` so observers can tell them apart from
@@ -11,7 +11,7 @@ import type { SocialActDeclaration, SocialActKind } from "./contracts";
  * Scenarios with identity mechanics (werewolf) may also pass `hints` so the
  * extractor recognizes **identity claims** ("我是村民" / "X 是狼人"). A claim
  * becomes an `assertion` act whose proposition is `identity/has-team` — the
- * ledger reconciles those against role reveals (§28) without any plan tool.
+ * ledger reconciles those against role reveals without any plan tool.
  *
  * This module is pure: no provider, no ledger access. The room owns the model
  * call and the recording path, so tests can drive parsing deterministically.
@@ -147,7 +147,7 @@ function identityClaimDeclaration(
   }
   // Action claim: the speaker asserts their OWN upcoming behavior. The
   // scenario defines the vocabulary (cooperate / defect / contribute-N …);
-  // settlement reconciles the claim against the actual action (§28 主张对账).
+  // settlement reconciles the claim against the actual action.
   if (record.aboutSelf === true && typeof record.assertedAction === "string") {
     const action = record.assertedAction.trim().slice(0, 40);
     if (!action) return undefined;

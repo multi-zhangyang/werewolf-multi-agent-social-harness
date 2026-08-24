@@ -5,14 +5,11 @@
  *
  *  - the shared permit pool is never exceeded, even mid-hang;
  *  - a local timeout never releases a permit before the request settles;
- *  - the room always lands in finished or paused, never silently wedged;
- *  - the checkpoint archive is always valid, parseable JSON.
+ *  - the room always lands in finished or paused, never silently wedged.
  *
  * Fully deterministic (fixed seeds), offline, no real provider.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
-import path from "node:path";
 import { ScriptedModel, modelResponse } from "@openai/agents/testing";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
 import { ActivationLimiter } from "../../src/society/activation-limiter";
@@ -72,7 +69,7 @@ async function runSeed(seed: number): Promise<void> {
   const model = new ChaosModel(twoRoundScript(), rng);
   const limiter = new ActivationLimiter(1);
   installFastTurns();
-  const { room, archiveDir, cleanup } = testRoom(model, limiter);
+  const { room, cleanup } = testRoom(model, limiter);
   let maxConcurrency = 0;
   try {
     void room.start();
@@ -101,14 +98,6 @@ async function runSeed(seed: number): Promise<void> {
       const history = snapshot.world.details.history as Array<unknown> | undefined;
       expect(history && history.length >= 1, `a finished room settled at least one round: ${context}`).toBe(true);
     }
-
-    // The checkpoint archive is always valid, parseable JSON.
-    const checkpoint = path.join(archiveDir, room.id, "checkpoint.json");
-    expect(existsSync(checkpoint), `checkpoint must exist: ${context}`).toBe(true);
-    const parsed = JSON.parse(readFileSync(checkpoint, "utf8")) as { roomId?: string; worldState?: unknown; snapshot?: unknown };
-    expect(parsed.roomId).toBe(room.id);
-    expect(parsed.worldState, `checkpoint carries world rules state: ${context}`).toBeTruthy();
-    expect(parsed.snapshot, `checkpoint carries the observer snapshot: ${context}`).toBeTruthy();
   } finally {
     model.releaseAll();
     clearFastTurns();
@@ -117,7 +106,7 @@ async function runSeed(seed: number): Promise<void> {
 }
 
 describe("provider chaos (§19.8)", () => {
-  it("seeded fuzz: permits, lease, status and checkpoints survive random provider chaos", async () => {
+  it("seeded fuzz: permits, lease and status survive random provider chaos", async () => {
     for (const seed of [1, 7, 13, 21, 42, 99, 137, 202]) {
       await runSeed(seed);
     }

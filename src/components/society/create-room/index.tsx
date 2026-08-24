@@ -25,7 +25,6 @@ import type { CharacterOption, CreateRoomInput, ModelOption } from "../types";
 import { ModelAssignSection } from "./model-assign-section";
 import { ModeButton } from "./model-assign-section";
 import { RosterSection } from "./roster-section";
-import { SeasonModeSection } from "./season-mode-section";
 import { MODEL_PREFS_KEY, type ModelAssignMode, type ModelAssignPrefs, type RosterPreviewRow, type RosterTemplateOption } from "./types";
 
 interface CreateRoomProps {
@@ -33,12 +32,11 @@ interface CreateRoomProps {
   scenario: ScenarioSummary | undefined;
   models: ModelOption[];
   /** How many characters carry cross-game history into this room. */
-  seasonCount?: number;
   onOpenChange: (open: boolean) => void;
   onCreated: (input: CreateRoomInput) => Promise<{ roomId: string }>;
 }
 
-export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
+export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
   /** Only registry-backed models can be assigned per seat. */
   const eligibleModels = useMemo(() => models.filter((model) => Boolean(model.profileId)), [models]);
   const profileById = useMemo(() => new Map(eligibleModels.map((model) => [model.profileId as string, model])), [eligibleModels]);
@@ -55,14 +53,13 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
   const [mode, setMode] = useState<"ai" | "human">("ai");
   const [playerName, setPlayerName] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState<"low" | "medium" | "high" | "xhigh">("high");
-  const [seasonMode, setSeasonMode] = useState<"season" | "one-shot">("season");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
   /** Character library: built-ins + user-defined characters. */
   const [characters, setCharacters] = useState<CharacterOption[]>([]);
   /** Per-seat character picks (absent = the seat's default built-in). */
   const [seatCharacters, setSeatCharacters] = useState<Record<string, string>>({});
-  /** Saved roster templates for this world (§6.4). */
+  /** Saved roster templates for this world. */
   const [templates, setTemplates] = useState<RosterTemplateOption[]>([]);
   const [templateName, setTemplateName] = useState("");
   const [loadedTemplateId, setLoadedTemplateId] = useState<string>();
@@ -101,7 +98,6 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     setMode("ai");
     setPlayerName("");
     setReasoningEffort("high");
-    setSeasonMode("season");
     setError(undefined);
   }, [open, scenario, maxRounds]);
 
@@ -206,7 +202,6 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
     if (template.players !== undefined) setPlayers(template.players);
     if (template.rounds !== undefined) setRounds(template.rounds);
     setReasoningEffort(template.reasoningEffort ?? "high");
-    setSeasonMode(template.season ?? "season");
     if (characters.length && template.characterIds?.length) {
       const picks: Record<string, string> = {};
       template.characterIds.forEach((id, index) => {
@@ -254,7 +249,6 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
           ...(characters.length ? { characterIds: Array.from({ length: players }, (_, index) => seatCharacters[String(index)] ?? characters[index]?.id).filter((id): id is string => Boolean(id)) } : {}),
           rounds,
           reasoningEffort,
-          season: seasonMode
         })
       });
       const payload = await response.json().catch(() => undefined);
@@ -310,7 +304,6 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
         mode,
         ...(mode === "human" ? { playerName: playerName.trim() } : {}),
         reasoningEffort,
-        season: seasonMode
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -498,7 +491,6 @@ export function CreateRoomDialog({ open, scenario, models, seasonCount = 0, onOp
                 />
               ) : null}
 
-              <SeasonModeSection seasonMode={seasonMode} onSeasonModeChange={setSeasonMode} seasonCount={seasonCount} />
 
               {mode === "human" ? (
                 <section>

@@ -12,8 +12,8 @@
  *
  * Every update has a causal chain: event -> appraisal -> state (the updated
  * state is injected into every participant's context). Long-term memory is the
- * model's own SDK session history (AGENTS.md §22); settlement outcomes reach
- * the spectator MindSheet as display-only notes via `noteOutcome`.
+ * model's own SDK session history; settlement outcomes reach the spectator
+ * MindSheet as display-only notes via `noteOutcome`.
  */
 
 import type { AgentMindState, AgentProfile, AgentTemperament, DecisionBias, SocialEvent } from "./contracts";
@@ -61,11 +61,11 @@ export function appraiseEvents(
   events: SocialEvent[],
   turn: number,
   effectiveTemperament?: AgentTemperament,
-  /** Resolves a world actor id to the character's stable id (AGENTS.md §10.2). */
+  /** Resolves a world actor id to the character's stable id. */
   resolveCharacterId?: (actorId: string) => string | undefined
 ): AppraisalSummary {
   // The effective Big Five (baseline + bounded adaptation) modulates how the
-  // same event lands; the stored profile baseline stays untouched (§4.2.8).
+  // same event lands; the stored profile baseline stays untouched.
   const temperament = effectiveTemperament ?? profile.temperament;
   const biases = new Set(profile.decisionBiases ?? []);
   let changed = false;
@@ -91,7 +91,7 @@ export function appraiseEvents(
 const NEGATIVE_EMOTIONS = ["anger", "fear", "sadness", "disgust"] as const;
 
 /**
- * Stable judgment biases, measurably applied (§4.2.7): a bias is part of the
+ * Stable judgment biases, measurably applied: a bias is part of the
  * character, fixed for life, and modulates how the same event lands — it is
  * never a per-round random error. Three biases are measurable here:
  *

@@ -16,7 +16,7 @@ import type {
 import { scopedContext, SocialWorldBase } from "../world";
 import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
-import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import { socialReferenceContext } from "../social/context-refs";
 import type { SocialActDeclaration } from "../social/contracts";
 
 type Phase = "discussion" | "choice";
@@ -29,9 +29,6 @@ interface BeautyRound {
   winnerIds: string[];
   text: string;
 }
-
-const BEAUTY_CONTEST_STATE_SCHEMA_VERSION = 3;
-const BEAUTY_CONTEST_OUTCOME_KEYS = ["actor-wins", "choice-below-average", "choice-within-five-of-target", "target-below-thirty"] as const;
 
 /**
  * Keynesian Beauty Contest.
@@ -67,7 +64,7 @@ export class BeautyContestWorld extends SocialWorldBase {
   }
 
   /**
-   * Sidecar extraction hints (§19): number statements ("我会选 50") become
+   * Sidecar extraction hints: number statements ("我会选 50") become
    * `claimed-action` propositions reconciled against the sealed choice.
    */
   extractionHints?(): string {
@@ -79,43 +76,7 @@ export class BeautyContestWorld extends SocialWorldBase {
     ].join("\n");
   }
 
-  protected exportWorldState(): unknown {
-    return {
-      schemaVersion: BEAUTY_CONTEST_STATE_SCHEMA_VERSION,
-      round: this.round,
-      phase: this.phase,
-      scores: this.mapEntries(this.scores),
-      choices: this.mapEntries(this.choices),
-      choiceCommandIds: this.mapEntries(this.choiceCommandIds),
-      discussion: this.discussion.exportState(),
-      history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences)
-    };
-  }
 
-  protected restoreWorldState(state: unknown): void {
-    const s = state as Partial<{
-      schemaVersion: number;
-      round: number; phase: string; scores: Array<[string, number]>; choices: Array<[string, number]>;
-      choiceCommandIds: Array<[string, string]>;
-      discussion: ReturnType<DiscussionDirector["exportState"]>;
-      history: BeautyRound[]; lastExperiences: Array<[string, string]>;
-    }> | undefined;
-    if (!s) return;
-    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== 2 && s.schemaVersion !== BEAUTY_CONTEST_STATE_SCHEMA_VERSION) {
-      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: beauty-contest ${s.schemaVersion}`);
-    }
-    this.round = Number(s.round ?? 1);
-    this.phase = (s.phase ?? "discussion") as Phase;
-    this.fillMap(this.scores, s.scores);
-    this.fillMap(this.choices, s.choices);
-    this.fillMap(this.choiceCommandIds, s.choiceCommandIds);
-    this.discussion = this.createDiscussion();
-    this.discussion.restoreState(s.discussion);
-    this.history.length = 0;
-    this.history.push(...structuredClone(s.history ?? []));
-    this.fillMap(this.lastExperiences, s.lastExperiences);
-  }
 
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
@@ -170,19 +131,16 @@ export class BeautyContestWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const choose = tool({
       name: "choose_number",
-      description: `Compare bounded higher-order intents and predict the public aggregate, then privately choose an integer from ${this.minChoice} to ${this.maxChoice}.`,
+      description: `Privately choose an integer from ${this.minChoice} to ${this.maxChoice}. The typed number is the binding action and cannot be changed.`,
       parameters: z.object({
         number: z.number().int().min(this.minChoice).max(this.maxChoice),
-        reason: z.string().min(1).max(2_000),
-        ...createStrategyActionShape({ number: z.number().int().min(this.minChoice).max(this.maxChoice) }, BEAUTY_CONTEST_OUTCOME_KEYS)
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.number !== input.number) throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: Selected number must equal the binding choice.");
         const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "choose_number", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({ ...candidate, action: "choose_number", payloadSummary: `number=${candidate.number}` }))
+          number: input.number,
+          reason: input.reason
         });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -253,7 +211,7 @@ export class BeautyContestWorld extends SocialWorldBase {
       label: `第 ${this.round} 轮选择`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => `Call choose_number exactly once with bounded candidates and aggregate-result predictions. Use your authorized actor models to reason about what others believe.`
+      instructionFor: () => `Call choose_number exactly once. Use your authorized actor models to reason about what others believe.`
     };
   }
 
@@ -344,7 +302,7 @@ export class BeautyContestWorld extends SocialWorldBase {
       object: { choices, average, target, winnerIds },
       payload: { round: this.round, choices, average, target, winnerIds }
     });
-    // §28 主张对账: reconcile extracted number claims against the
+    // 主张对账: reconcile extracted number claims against the
     // actual sealed choice.
     for (const id of ids) {
       const actualNumber = choices[id];

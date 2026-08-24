@@ -28,7 +28,7 @@ it("drops the must-log-your-lies framing (§14.10)", () => {
 });
 
 it("keeps the §5.5 protocol floor", () => {
-  assert.ok(/Maintain your own goals, memory, beliefs about others, emotion, and relationships across turns/.test(text), "identity continuity stays");
+  assert.ok(/Maintain your own goals, beliefs about others, emotion, and relationships across turns/.test(text), "identity continuity stays");
   assert.ok(/All speech and all actions that change the world must use tools/.test(text), "the tool protocol stays");
   assert.ok(/Never claim an action happened unless its tool completed/.test(text), "no fabricated observations");
   assert.ok(/Do not reveal private role information unless doing so serves your strategy/.test(text), "the information boundary stays");

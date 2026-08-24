@@ -1,5 +1,4 @@
 import type { AgentProfile, ScenarioId, SocialWorld } from "../contracts";
-import { SocialWorldBase, type WorldSerializedState } from "../world";
 import { PrisonersDilemmaWorld } from "./prisonersDilemma";
 import { PublicGoodsWorld } from "./publicGoods";
 import { TrustGameWorld } from "./trustGame";
@@ -22,8 +21,6 @@ export function createWorld(input: {
   scenarioId: ScenarioId;
   profiles: AgentProfile[];
   rounds?: number;
-  /** Checkpoint state for restart recovery (P3). */
-  state?: WorldSerializedState;
 }): SocialWorld {
   const metadata = SCENARIO_METADATA[input.scenarioId];
   if (!metadata) throw new Error(`SCENARIO_NOT_FOUND: '${input.scenarioId}' is not available.`);
@@ -50,10 +47,6 @@ export function createWorld(input: {
   else if (input.scenarioId === "negotiation-game") world = new NegotiationWorld(input.roomId, metadata, input.profiles, input.rounds);
   else if (input.scenarioId === "liars-dice") world = new LiarsDiceWorld(input.roomId, metadata, input.profiles, input.rounds);
   else world = new WerewolfWorld(input.roomId, metadata, input.profiles, input.rounds);
-  if (input.state) {
-    (world as SocialWorldBase).restoreState(input.state);
-    world.pause();
-  }
   return world;
 }
 

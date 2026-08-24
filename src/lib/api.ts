@@ -1,5 +1,5 @@
 /**
- * API client helpers for the Society web app (§18.3): the room owner token is
+ * API client helpers for the Society web app: the room owner token is
  * kept in localStorage and sent as `Authorization: Bearer` — never in URLs,
  * never in logs. The server also sets an HttpOnly `society_token` cookie on
  * authenticated requests, which EventSource-based SSE reconnects send back

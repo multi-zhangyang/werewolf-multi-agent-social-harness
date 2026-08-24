@@ -11,6 +11,7 @@
  */
 import {
   Agent,
+  MemorySession,
   OpenAIProvider,
   Runner,
   type AgentInputItem,
@@ -27,15 +28,12 @@ import {
 import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import type {
-  AgentBelief,
-  AgentGoal,
   AgentMindState,
   AgentMoodState,
   AgentProfile,
   AgentRelationship,
   AgentRuntimeEvent,
   AgentTurnResult,
-  CharacterDossier,
   DecisionBias,
   SocialEvent,
   SocietyAgentContext,
@@ -43,15 +41,14 @@ import type {
 } from "./contracts";
 import type { ResolvedModelConfig } from "./models";
 import { reasoningFallbackFetch, type ReasoningFallbackNotice } from "./models/reasoning-fallback";
-import { JsonSessionStore, defaultSessionDir, sanitizeFunctionCallArgs } from "./persistence";
+import { sanitizeFunctionCallArgs } from "./wire-json";
 import { clampUnit, decayMood, describeEmotions, describeNeeds, describeSocialEmotions, initialMood, refreshMood } from "./affect";
 import { appraiseEvents } from "./appraisal";
 import { SessionContextManager, contextLimitForModel, estimateTokens, type ContextSummaryArtifact } from "./context-manager";
 import { createCognitionTools, createSocialTools, formatObservation } from "./cognition";
 import { createInjectionShield } from "./guardrails";
-import { createStrategyProfileSnapshot } from "./social/strategy-profile";
 import type { SocialCausalityProjection } from "./social/contracts";
-import { adaptTraits, decayAcrossSeason, effectiveTemperament, traitStatesFromTemperament } from "./traits";
+import { adaptTraits, effectiveTemperament, traitStatesFromTemperament } from "./traits";
 
 const providerRetrySettings = {
   retry: {
@@ -70,27 +67,8 @@ export interface SocietyAgentOptions {
   apiKey?: string;
   baseURL?: string;
   maxTurns?: number;
-  /** Season mode: same-character sessions persist across games (AGENTS.md §22). */
-  seasonMode?: boolean;
-  /** Cross-game history for this character, if the season remembers them. */
-  dossier?: CharacterDossier;
-  /**
-   * Explicit session identity. Season rooms pass `season:<characterId>` so the
-   * same person's SDK session carries their conversation history across games;
-   * one-shot rooms omit it and default to `<roomId>:<actorId>`.
-   */
-  sessionKey?: string;
   /** Final model config resolved through the registry (model, tuning, budget). */
   resolvedConfig?: ResolvedModelConfig;
-  /** Where this agent's durable session file lives (default data/sessions). */
-  sessionDir?: string;
-  /**
-   * Checkpoint-restored mind (P3 recovery): the participant's structured
-   * inner state from the last checkpoint — relationships, beliefs,
-   * deceptions, emotion, trait adaptations and in-game memories — so a
-   * recovered room keeps the same people instead of resetting their minds.
-   */
-  restoreMind?: AgentMindState;
 }
 
 export class AutonomousSocietyAgent implements SocietyAgentRuntime {
@@ -114,49 +92,23 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   private reasoningStartedAt = 0;
   private lastReasoningAt = 0;
   private reasoningActive = false;
-  /** Provenance of the latest compaction (AGENTS.md §12.4). */
+  /** Provenance of the latest compaction. */
   private lastSummaryArtifact?: ContextSummaryArtifact;
 
   constructor(options: SocietyAgentOptions) {
     this.profile = structuredClone(options.profile);
-    // Restart recovery (P3): a restored mind carries the participant's
-    // structured inner state (relationships, beliefs, deceptions, emotion,
-    // goals, trait adaptations) and in-game memories across the restart.
-    // Fresh rooms still start from the character profile + season dossier.
+    // Every game starts the person fresh: no cross-game session, no dossier.
     const participants = options.world.snapshot().agents.map((agent) => ({ id: agent.id, characterId: agent.characterId }));
-    this.mind = options.restoreMind
-      ? restoreMindState(options.restoreMind, options.profile, participants, options.dossier)
-      : initialMind(options.profile, participants, options.dossier);
-    // Durable per-agent session: history survives restarts in data/sessions/.
-    // Season mode keys by character so the SAME session carries this person's
-    // conversation history across games (AGENTS.md §22); one-shot rooms get a
-    // per-game session and start from zero history.
-    this.session = JsonSessionStore.open(
-      options.sessionKey ?? `${options.roomId}:${options.profile.id}`,
-      options.sessionDir ?? defaultSessionDir(),
-      {
-        onNotice: (notice) => options.emit({
-          type: "runtime.notice",
-          roomId: options.roomId,
-          actorId: options.profile.id,
-          category: "persistence",
-          severity: notice.severity,
-          code: notice.code,
-          message: notice.message,
-          retrying: notice.retrying,
-          at: new Date().toISOString()
-        })
-      }
-    );
-    // Season continuity rides on the persistent session (AGENTS.md §22): no
-    // associative store, no retrieval, no write policy.
+    this.mind = initialMind(options.profile, participants);
+    // In-memory session only: the conversation lives inside this process and
+    // is never written to disk (zero-disk invariant, docs/agent-design.md).
+    this.session = new MemorySession({ sessionId: `${options.roomId}:${options.profile.id}` });
     this.context = {
       actorId: options.profile.id,
       roomId: options.roomId,
       profile: this.profile,
       world: options.world,
       mind: this.mind,
-      seasonMode: options.seasonMode ?? false,
       emit: options.emit
     };
     this.seedDirectedRelationships();
@@ -175,7 +127,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     // on the next model call. A model that emits malformed JSON arguments
     // (unescaped quotes — a known GLM quirk) would poison every subsequent
     // call with an endpoint-side 400. Sanitize at the one choke point every
-    // model call passes through (AGENTS.md §16.2 provider-safe history).
+    // model call passes through.
     const budgetedInput = this.contextManager.sessionInputCallback;
     this.runner = new Runner({
       modelProvider: provider,
@@ -183,7 +135,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       sessionInputCallback: async (historyItems, newItems) =>
         sanitizeFunctionCallArgs(await budgetedInput(historyItems, newItems))
     });
-    // Per-agent runtime backpressure (§6.6): the resolved tuning's
+    // Per-agent runtime backpressure: the resolved tuning's
     // maxTurns / requestTimeoutMs / retry fields take precedence over the
     // process-wide env defaults, so a seat can carry its own limits.
     const tuning = options.resolvedConfig?.tuning;
@@ -217,15 +169,6 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     const cognition = createCognitionTools(this.context);
     const worldTools = options.world.toolsFor(this.profile.id);
     this.tools = [...social.all, ...cognition, ...worldTools];
-
-    if (options.resolvedConfig) {
-      options.world.recordStrategyProfileSnapshot(createStrategyProfileSnapshot({
-        profile: this.profile,
-        resolvedConfig: options.resolvedConfig,
-        tools: this.tools as Tool<unknown>[],
-        promptInstructions: protocolInstructions()
-      }));
-    }
 
     // One identity, one session, one agent. Discussion phases and binding
     // action phases differ only in the turn guidance passed to the same agent;
@@ -262,40 +205,22 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   }
 
   /**
-   * Model switch (§12.4): the person stays, the engine changes. The session,
-   * mind and memory are preserved verbatim; history is compacted first if the
-   * new window is smaller, the context budget is recomputed for the new
-   * model, and the switch is announced as a real event for the observer seat.
+   * Model switch: the person stays, the engine changes. The session and mind
+   * are preserved verbatim; the context budget is recomputed for the new
+   * model (the request-view compaction handles a smaller window on the next
+   * preflight), and the switch is announced as a real event for observers.
    */
   async switchModel(next: { provider: OpenAIProvider; resolvedConfig: ResolvedModelConfig }): Promise<{ previousModel: string; model: string }> {
     const previousModel = this.profile.model;
     const nextModel = next.resolvedConfig.modelId;
     this.profile.model = nextModel;
-    // Build the new engine first so the pre-switch compaction targets the new
-    // window — a smaller window starts below its pressure thresholds.
-    const nextManager = this.buildContextManager(next.provider, next.resolvedConfig);
-    const history = await this.session.getItems();
-    const replacement = await nextManager.compactHistory(history);
-    if (replacement !== history) {
-      if (this.session.replaceHistoryWithCompaction) await this.session.replaceHistoryWithCompaction(replacement);
-      else {
-        await this.session.clearSession();
-        await this.session.addItems(replacement);
-      }
-    }
-    this.contextManager = nextManager;
+    this.contextManager = this.buildContextManager(next.provider, next.resolvedConfig);
     this.runner = new Runner({
       modelProvider: next.provider,
       tracingDisabled: true,
-      sessionInputCallback: nextManager.sessionInputCallback
+      sessionInputCallback: this.contextManager.sessionInputCallback
     });
     this.agent = this.buildAgent(next.resolvedConfig);
-    this.context.world.recordStrategyProfileSnapshot(createStrategyProfileSnapshot({
-      profile: this.profile,
-      resolvedConfig: next.resolvedConfig,
-      tools: this.tools as Tool<unknown>[],
-      promptInstructions: protocolInstructions()
-    }));
     this.context.emit({
       type: "agent.model.switched",
       roomId: this.context.roomId,
@@ -330,9 +255,9 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         this.lastSummaryArtifact = artifact;
       },
       onCompacted: (digest, estimatedTokens, threshold, level, pressureAfter) => {
-        // Compaction is a context artifact, not an experience. It remains in
-        // the durable session artifact and trace but cannot write long-term
-        // episodic memory without an OutcomeReconciliation/MemoryWritePolicy.
+        // Compaction is a context artifact, not an experience. It stays in the
+        // session artifact and trace but cannot write long-term episodic
+        // memory without an OutcomeReconciliation.
         this.context.emit({
           type: "agent.compacted",
           roomId: this.context.roomId,
@@ -357,14 +282,6 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
           contextWindow: budget.contextWindow,
           at: new Date().toISOString()
         });
-      },
-      // Persist every compaction into the durable session (§5.9): the request
-      // view shrinking alone leaves the store growing, and the next
-      // activation would re-estimate the full history and re-trip the hard
-      // guard. The store must follow the compacted view.
-      onSessionCompacted: (items) => {
-        const store = this.session as Session & { replaceHistoryWithCompaction?: (replacement: typeof items) => Promise<void> };
-        return store.replaceHistoryWithCompaction?.(items);
       }
     });
   }
@@ -389,7 +306,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     this.mind.mood = decayMood(this.mind.mood, options.turn);
     const observation = this.context.world.observe(this.profile.id);
     const socialContext = formatSocialContext(this.mind, this.context.world, this.profile.id);
-    // Pressure-first ordering (AGENTS.md §12.3): build the FIXED part of this
+    // Pressure-first ordering: build the FIXED part of this
     // turn's input, measure THIS activation's budget against it, and only
     // then size memory retrieval by that pressure — never by the previous
     // round's. The SDK callback re-measures the final assembled input.
@@ -403,8 +320,8 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       content: [{ type: "input_text", text: fixedInput }]
     } as unknown as AgentInputItem;
     const history = await this.session.getItems();
-    // Preflight exists purely for compaction planning (AGENTS.md §23): no
-    // retrieval runs here — the model's own session history IS its memory.
+    // Preflight exists purely for compaction planning: no retrieval runs here —
+    // the model's own session history IS its memory.
     this.contextManager.preflight(history, estimateTokens([fixedItem]));
     emitStatus(this.context, "thinking");
     this.deltaBuffer = "";
@@ -422,7 +339,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     const toolCalls: string[] = [];
     let result: StreamedRunResult<SocietyAgentContext, SdkAgent<SocietyAgentContext, any>>;
     try {
-      // Per-agent request budget (§6.6): the resolved `requestTimeoutMs` is
+      // Per-agent request budget: the resolved `requestTimeoutMs` is
       // combined with the room's own signal so a stalled provider can't hang
       // one seat past its configured limit.
       const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
@@ -446,7 +363,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     }
     const finalOutput = String(result.finalOutput ?? "").trim();
     if (finalOutput) {
-      // The final model text is transient working state, not durable social
+      // The final model text is transient working state, not canonical social
       // memory. Long-term writes happen only after appraisal/reconciliation.
       this.mind.latestReflection = finalOutput;
     }
@@ -494,45 +411,10 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     return facts;
   }
 
-  exportDossier(role?: string, outcome?: "win" | "lose"): CharacterDossier {
-    // The dossier keeps relationship/belief/record continuity. What the agent
-    // itself remembers lives in its persistent session, not in the dossier.
-    return {
-      characterId: this.profile.characterId,
-      displayName: this.profile.displayName,
-      // Every game is recorded, with or without a declared winner: the season
-      // cares about history, not just victories.
-      games: [{
-        scenarioId: this.context.world.scenario.id,
-        ...(role ? { role } : {}),
-        ...(outcome ? { outcome } : {}),
-        at: new Date().toISOString()
-      }],
-      relationships: this.mind.relationships.map((entry) => ({
-        targetCharacterId: entry.targetCharacterId,
-        trust: entry.trust,
-        affinity: entry.affinity,
-        respect: entry.respect,
-        tension: entry.tension,
-        note: entry.note
-      })),
-      beliefs: this.mind.beliefs.slice(0, 8).map((entry) => ({
-        subjectId: entry.subjectId,
-        proposition: entry.proposition,
-        confidence: entry.confidence
-      })),
-      // Personality drift belongs to the person, not to one game: carry the
-      // bounded adaptations into the season so the next table sees a character
-      // who was changed by what happened (§4.2.8).
-      ...(this.mind.traitAdaptations ? { traitAdaptations: structuredClone(this.mind.traitAdaptations) } : {}),
-      updatedAt: new Date().toISOString()
-    };
-  }
-
   noteOutcome(text: string, turn: number): void {
     if (!text.trim()) return;
-    // Display-only list for the spectator MindSheet (AGENTS.md §22): plain
-    // append, hard cap, no scoring and no retrieval path of any kind.
+    // Display-only list for the spectator MindSheet: plain append, hard cap,
+    // no scoring and no retrieval path of any kind.
     this.mind.memories = [
       ...this.mind.memories.filter((entry) => !entry.tags.includes("autobiography")),
       {
@@ -550,8 +432,8 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
    * deterministic engine updates PAD / core and social emotions / needs /
    * relationships (personality-modulated) plus slow trait adaptation. It never
    * writes memories — the model's own SDK session history carries what the
-   * character actually remembers (AGENTS.md §22); settlement outcomes reach
-   * the spectator MindSheet as display-only notes via `noteOutcome`.
+   * character actually remembers; settlement outcomes reach the spectator
+   * MindSheet as display-only notes via `noteOutcome`.
    */
   async appraise(events: SocialEvent[], turn: number): Promise<void> {
     if (!events.length) return;
@@ -630,7 +512,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       } else if (event.name === "tool_output") {
         // The SDK converts a thrown tool execute into a normal output whose
         // text matches its fixed error template — surface that as a failed
-        // phase instead of pretending every tool call succeeded (§37).
+        // phase instead of pretending every tool call succeeded.
         const output = toolOutput(item) ?? "";
         const failed = output.startsWith("An error occurred while running the tool.");
         emitTool(
@@ -712,41 +594,22 @@ export function baseUrlFromEnv(env: NodeJS.ProcessEnv = process.env): string | u
 
 function initialMind(
   profile: AgentProfile,
-  participants: Array<{ id: string; characterId: string }>,
-  dossier?: CharacterDossier
+  participants: Array<{ id: string; characterId: string }>
 ): AgentMindState {
   // Relationships are keyed by the OTHER character's stable id, never by the
-  // current seat: a seat swap or a rename must not move history (§10.2).
+  // current seat. Every game starts neutral — there is no cross-game carry-over.
   const relationships = participants
     .filter((participant) => participant.id !== profile.id)
-    .map<AgentRelationship>((participant) => {
-      // The season remembers this character's history with the others: trust,
-      // affinity, respect and tension carry over instead of resetting to
-      // neutral. A betrayal last game starts this game as distrust.
-      const past = dossier?.relationships.find((entry) => entry.targetCharacterId === participant.characterId);
-      if (!past) {
-        return {
-          targetCharacterId: participant.characterId,
-          trust: 0.5,
-          affinity: 0.5,
-          respect: 0.5,
-          tension: 0.15,
-          familiarity: 0.05,
-          updatedAtTurn: 0,
-          note: "No shared history"
-        };
-      }
-      return {
-        targetCharacterId: participant.characterId,
-        trust: clamp(past.trust),
-        affinity: clamp(past.affinity),
-        respect: clamp(past.respect),
-        tension: clamp(past.tension),
-        familiarity: Math.max(0.35, Math.min(1, past.familiarity ?? 0.5)),
-        updatedAtTurn: 0,
-        note: past.note || "Shared history from previous games"
-      };
-    });
+    .map<AgentRelationship>((participant) => ({
+      targetCharacterId: participant.characterId,
+      trust: 0.5,
+      affinity: 0.5,
+      respect: 0.5,
+      tension: 0.15,
+      familiarity: 0.05,
+      updatedAtTurn: 0,
+      note: "No shared history"
+    }));
   // Formative experiences seeded before the first turn: why this person
   // reacts the way they do. Display-only entries; the persona texts also go
   // into the system instructions directly.
@@ -767,16 +630,8 @@ function initialMind(
       progress: "not started",
       status: "active"
     })),
-    // Drift persists across games but decays while away from the table.
-    traitAdaptations: decayAcrossSeason(dossier?.traitAdaptations) ?? traitStatesFromTemperament(profile.temperament, 0),
-    beliefs: (dossier?.beliefs ?? []).slice(0, 6).map((belief) => ({
-      subjectId: belief.subjectId,
-      proposition: belief.proposition,
-      probability: clamp(belief.confidence),
-      confidence: clamp(belief.confidence),
-      updatedAtTurn: 0,
-      source: "previous games"
-    })),
+    traitAdaptations: traitStatesFromTemperament(profile.temperament, 0),
+    beliefs: [],
     relationships,
     memories: anchors,
     cognitivePasses: [],
@@ -784,101 +639,6 @@ function initialMind(
     roleHypotheses: [],
     lastAppraisals: []
   };
-}
-
-/**
- * Rehydrate a checkpointed mind (P3 recovery) without resetting the person.
- *
- * The restored state wins for every field it actually contains; identity
- * anchors and season memories are rebuilt from a fresh baseline so they can
- * never be lost to checkpoint age; relationships are re-keyed to the current
- * seat list (departed players dropped, new seats neutral); and every field is
- * validated so a truncated checkpoint degrades to defaults instead of
- * throwing. The person stays the person — only the world around them may have
- * changed.
- */
-function restoreMindState(
-  restored: AgentMindState,
-  profile: AgentProfile,
-  participants: Array<{ id: string; characterId: string }>,
-  dossier?: CharacterDossier
-): AgentMindState {
-  const baseline = initialMind(profile, participants, dossier);
-  // Pre-CharacterId checkpoints keyed relationships by ACTOR id; resolve each
-  // legacy entry to the actor's stable character id during restore.
-  const restoredRelationships = new Map<string, AgentRelationship>();
-  for (const entry of restored.relationships ?? []) {
-    const legacy = entry as unknown as { agentId?: string };
-    const key = entry.targetCharacterId
-      ?? participants.find((participant) => participant.id === legacy.agentId)?.characterId;
-    if (key) restoredRelationships.set(key, entry);
-  }
-  const relationships = participants
-    .filter((participant) => participant.id !== profile.id)
-    .map((participant) => {
-      const fallback = baseline.relationships.find((entry) => entry.targetCharacterId === participant.characterId);
-      if (!fallback) return undefined;
-      const entry = restoredRelationships.get(participant.characterId);
-      if (!entry) return fallback;
-      return {
-        targetCharacterId: participant.characterId,
-        trust: finiteUnit(entry.trust, fallback.trust),
-        affinity: finiteUnit(entry.affinity, fallback.affinity),
-        respect: finiteUnit(entry.respect, fallback.respect),
-        tension: finiteUnit(entry.tension, fallback.tension),
-        familiarity: finiteUnit(entry.familiarity, fallback.familiarity),
-        updatedAtTurn: Number.isFinite(entry.updatedAtTurn) ? entry.updatedAtTurn : fallback.updatedAtTurn,
-        note: typeof entry.note === "string" && entry.note ? entry.note : fallback.note
-      };
-    })
-    .filter((entry): entry is AgentRelationship => Boolean(entry));
-  // Identity anchors come from the baseline; the checkpoint's display list
-  // rides along, validated and capped (AGENTS.md §22: display-only).
-  const restoredMemories = (restored.memories ?? [])
-    .filter((entry) => typeof entry.text === "string" && entry.text && Array.isArray(entry.tags))
-    .slice(0, 20);
-  return {
-    mood: validMood(restored.mood) ? restored.mood : baseline.mood,
-    attention: Array.isArray(restored.attention) && restored.attention.length > 0 ? restored.attention : baseline.attention,
-    goals: validGoals(restored.goals) ? restored.goals : baseline.goals,
-    beliefs: Array.isArray(restored.beliefs) ? restored.beliefs.filter(validBelief) : baseline.beliefs,
-    relationships,
-    memories: [...baseline.memories.filter((entry) => entry.tags.includes("autobiography")), ...restoredMemories],
-    ...(typeof restored.latestReflection === "string" && restored.latestReflection ? { latestReflection: restored.latestReflection } : {}),
-    cognitivePasses: Array.isArray(restored.cognitivePasses) ? restored.cognitivePasses : [],
-    deceptions: Array.isArray(restored.deceptions) ? restored.deceptions : [],
-    roleHypotheses: Array.isArray(restored.roleHypotheses) ? restored.roleHypotheses : [],
-    lastAppraisals: Array.isArray(restored.lastAppraisals) ? restored.lastAppraisals : [],
-    traitAdaptations:
-      restored.traitAdaptations && Object.keys(restored.traitAdaptations).length > 0
-        ? restored.traitAdaptations
-        : baseline.traitAdaptations
-  };
-}
-
-function finiteUnit(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? clamp(value) : fallback;
-}
-
-function validMood(mood: AgentMoodState | undefined): mood is AgentMoodState {
-  if (!mood || typeof mood !== "object") return false;
-  return typeof mood.label === "string" && typeof mood.energy === "number" && Boolean(mood.emotions && typeof mood.emotions === "object") && Boolean(mood.needs && typeof mood.needs === "object");
-}
-
-function validGoals(goals: AgentGoal[] | undefined): goals is AgentGoal[] {
-  return (
-    Array.isArray(goals) &&
-    goals.length > 0 &&
-    goals.every((goal) => typeof goal?.id === "string" && typeof goal.description === "string" && ["active", "satisfied", "abandoned"].includes(goal.status))
-  );
-}
-
-function validBelief(belief: AgentBelief): boolean {
-  return typeof belief?.subjectId === "string"
-    && typeof belief.proposition === "string"
-    && typeof belief.confidence === "number"
-    && Number.isFinite(belief.confidence)
-    && (belief.probability === undefined || (typeof belief.probability === "number" && Number.isFinite(belief.probability)));
 }
 
 function affectContext(mood: AgentMoodState): string {
@@ -942,8 +702,8 @@ function sdkSettingsFromNegotiated(allowed: Record<string, unknown>): Record<str
 /**
  * Surface slow personality drift to the model without announcing stats:
  * only the directional change and its recorded cause, only when a trait has
- * actually moved off its baseline (§4.2.8 — change is written into the self
- * narrative, not into the original persona).
+ * actually moved off its baseline — change is written into the self
+ * narrative, not into the original persona.
  */
 function adaptationContext(mind: AgentMindState): string | undefined {
   const states = mind.traitAdaptations;
@@ -1000,7 +760,7 @@ function regulationContext(regulation: NonNullable<AgentProfile["regulation"]>):
 }
 
 /**
- * Stable judgment biases (§4.2.7). Only the few biases this character actually
+ * Stable judgment biases. Only the few biases this character actually
  * lives with are announced — in plain behavioral terms, never as a checklist of
  * labels. They bias how evidence is weighed; they do not dictate any action.
  */
@@ -1028,9 +788,6 @@ function participantInstructions(context: SocietyAgentContext): string {
   const profile = context.world.snapshot().agents.find((agent) => agent.id === context.actorId);
   const effective = effectiveTemperament(context.profile.temperament, context.mind.traitAdaptations);
   const temperamentContextText = temperamentContext({ ...context.profile, temperament: effective });
-  const seasonHistory = context.seasonMode
-    ? "This is a continuing community — a Society Season. Your persistent memory holds every previous game you played: who you met, what was promised, who betrayed whom. Treat that history as real. Roles and rules differ per game, and past roles do not prove this game's loyalties. Refer to past games naturally when it matters — do not lecture others about old scores."
-    : "";
   return [
     `You are ${profile?.displayName ?? context.actorId}, an autonomous participant in a continuing social world.`,
     `Identity: ${context.actorId}. Persona: ${context.profile.persona}`,
@@ -1047,43 +804,38 @@ function participantInstructions(context: SocietyAgentContext): string {
       : []),
     affectContext(context.mind.mood),
     `Attention: ${context.mind.attention.join("; ") || "未定"}.`,
-    `Values: ${context.profile.values.join("; ")}`,
-    ...(seasonHistory ? [seasonHistory] : [])
+    `Values: ${context.profile.values.join("; ")}`
   ].filter(Boolean).join("\n");
 }
 
 /**
- * Context-free protocol instructions (§5.5). Every character receives these
- * verbatim: identity continuity, information boundaries, the tool protocol,
- * and the right to silence. Strategy leanings — how suspicious to be, whether
- * to defect, when to deceive — are deliberately absent: those must come from
- * persona, temperament, relationships and history, never from a global
- * prompt (§14.10 / §26.4).
+ * Context-free protocol instructions. Every character receives these verbatim:
+ * identity continuity, information boundaries, the tool protocol, and the
+ * freedom to be silent, distrust or deceive as the situation justifies.
  */
 export function protocolInstructions(): string[] {
   return [
     "You are a real person in this world: you feel, appraise, and carry emotional state across turns. Your current emotional state colors—but does not dictate—your judgment.",
-    "Maintain your own goals, memory, beliefs about others, emotion, and relationships across turns.",
-    "Promises in this world are social commitments people make with words and actions. Judge each one by the person, your relationship, and the evidence you have — never by a blanket rule. Record the promises that matter to you and revisit them when their conditions come due.",
-    "You may cooperate, persuade, withhold information, challenge, repair trust, or deceive when your character and the situation justify it. How much you trust, concede, or hold back is yours to decide from your personality, relationships, and history.",
-    "When you choose to keep a structured record of a strategic deception, use log_deception_plan before acting and cite the returned deceptionId on the exact communicate socialAct that executes it; logging is optional, but a logged plan must stay tied to the real message without revealing it to its audience.",
-    "When a message clearly asserts, questions, accuses, offers, accepts, rejects, promises or apologizes, declare that meaning in communicate.socialActs. The original message remains authoritative; socialActs only record its structured social meaning.",
-    "When evidence changes a belief, update probability and confidence separately and cite visible source message IDs when available.",
-    "In hidden-identity worlds, keep your role inferences as probabilities with update_role_hypotheses instead of bare hunches; renormalize when new evidence arrives.",
-    "Your cognition is your own — one mind, one session. In high-stakes moments, perform brief internal passes and record each with its tool: reflect_on_social_situation for appraising incentives and options, read_the_room for what others want, believe and hide, plan_social_strategy for a concrete next step. These notes stay private and shape your later choices.",
+    "Maintain your own goals, beliefs about others, emotion, and relationships across turns.",
+    "Promises are social commitments people make with words and actions. Judge each one by the person, your relationship, and the evidence you have — never by a blanket rule.",
+    "You may cooperate, persuade, withhold information, challenge, repair trust, or deceive when your character and the situation justify it.",
+    "When you choose to keep a structured record of a strategic deception, use log_deception_plan before acting and cite the returned deceptionId on the exact communicate socialAct that executes it; logging is optional.",
+    "When a message clearly asserts, questions, accuses, offers, accepts, rejects, promises or apologizes, declare that meaning in communicate.socialActs. The original message remains authoritative.",
+    "In hidden-identity worlds, keep your role inferences as probabilities with update_role_hypotheses; renormalize when new evidence arrives.",
+    "Your cognition is your own. In high-stakes moments you may call read_the_room or update_inner_state to record what you see and feel; these notes stay private.",
     "Use at most one cognition pass per turn unless the situation is urgent; prefer acting once you have enough clarity.",
     "All speech and all actions that change the world must use tools. Never claim an action happened unless its tool completed.",
     "You may stay silent when there is nothing worth saying: silence, watching and withholding are real choices, not failures.",
     "Do not reveal private role information unless doing so serves your strategy. Do not output hidden chain-of-thought.",
-    "After the required tool succeeds, stop with a brief confirmation. Never expose hidden reasoning or narrate an action that did not happen."
+    "After the required tool succeeds, stop with a brief confirmation."
   ];
 }
 
 /**
- * The structured social-state block compiled into every turn (§12.1 /
- * §14.6 step 13): directed relationships, relevant beliefs, and the open
- * commitments this participant is party to. State that lived only in the
- * mind now actually reaches the model — where it can change behavior.
+ * The structured social-state block compiled into every turn: directed
+ * relationships, relevant beliefs, and the open commitments this participant
+ * is party to. State that lived only in the mind now actually reaches the
+ * model — where it can change behavior.
  */
 export function formatSocialContext(mind: AgentMindState, world: SocietyAgentContext["world"], actorId: string): string[] {
   const blocks: string[] = [];
@@ -1186,20 +938,12 @@ export function formatSocialContext(mind: AgentMindState, world: SocietyAgentCon
       }).join("\n")}`
     );
   }
-  const decisionsById = new Map(privateSocialState.decisions.map((decision) => [decision.decisionId, decision]));
   const recentOutcomes = privateSocialState.outcomeReconciliations.slice(-4);
   if (recentOutcomes.length) {
     blocks.push(
-      `[RECENT RESULTS] Compare what you expected with what actually happened and adapt your next move:\n${recentOutcomes.map((outcome) => {
-        const decision = decisionsById.get(outcome.decisionId);
-        const misses = outcome.predictionAssessments
-          .slice()
-          .sort((left, right) => right.squaredError - left.squaredError)
-          .slice(0, 3)
-          .map((assessment) => `${assessment.outcomeKey}: expected ${assessment.predictedProbability.toFixed(2)}, actual ${assessment.actual ? "yes" : "no"}`)
-          .join("; ");
-        return `- Chose ${decision?.selectedIntent.summary ?? decision?.action ?? "an action"}. Result: ${outcome.actualOutcome.summary}${misses ? ` · prediction check: ${misses}` : ""}`;
-      }).join("\n")}`
+      `[RECENT RESULTS] What the world settled for your recent actions — compare it with what you expected and adapt your next move:\n${recentOutcomes.map((outcome) =>
+        `- Result: ${outcome.actualOutcome.summary}`
+      ).join("\n")}`
     );
   }
   const commitments = world.openCommitmentsFor(actorId);

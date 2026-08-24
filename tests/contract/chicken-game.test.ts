@@ -91,21 +91,15 @@ it("a contradicted extracted claim records contradiction evidence", async () => 
   );
 });
 
-it("commitments and a sealed choice survive export/restore and settle identically", async () => {
+it("a sealed choice settles identically once both players have chosen", async () => {
   const world = makeWorld();
   const commitmentId = await declare(world, P1, "swerve", "我会打方向盘。");
   await world.performDomainAction(P2, "accept_commitment", { commitmentId });
   driveDiscussion(world);
   const choice = world.activation()!;
   await world.performDomainAction(choice.actorIds[0], "chicken_choice", { choice: "swerve", reason: "t" });
-  const state = world.exportState();
-  const restored = createWorld({ roomId: "r-ck", scenarioId: "chicken-game", profiles, rounds: 2, state }) as SocialWorldBase;
-  restored.start();
-  assert.equal(commitments(restored).find((entry) => entry.commitmentId === commitmentId)?.state, "accepted");
-  const resumed = restored.activation();
-  assert.ok(resumed && resumed.id.endsWith(":choice"));
-  await restored.performDomainAction(resumed.actorIds[1], "chicken_choice", { choice: "swerve", reason: "t" });
-  restored.completeActivation(resumed);
-  assert.equal(commitments(restored).find((entry) => entry.commitmentId === commitmentId)?.state, "fulfilled");
-  assert.equal(lastBeat(restored), "promise-kept");
+  await world.performDomainAction(choice.actorIds[1], "chicken_choice", { choice: "swerve", reason: "t" });
+  world.completeActivation(choice);
+  assert.equal(commitments(world).find((entry) => entry.commitmentId === commitmentId)?.state, "fulfilled");
+  assert.equal(lastBeat(world), "promise-kept");
 });

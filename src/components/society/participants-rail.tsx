@@ -180,7 +180,7 @@ function MindSheet({ participant, room, privileged, onToggleAgentPause, models, 
 
             {!privileged ? (
               <p className="rounded-lg border border-border/60 bg-muted/30 p-3 text-xs leading-5 text-muted-foreground">
-                私有心智仅对房主/operator 开放（§15.10）。当前公开视角只展示情绪外观与分数。
+                私有心智仅对房主/operator 开放。当前公开视角只展示情绪外观与分数。
               </p>
             ) : null}
 

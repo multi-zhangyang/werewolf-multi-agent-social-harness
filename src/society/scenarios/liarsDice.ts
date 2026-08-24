@@ -14,7 +14,7 @@ import type {
 } from "../contracts";
 import { scopedContext, SocialWorldBase } from "../world";
 import { boundedRounds, emitAction } from "./helpers";
-import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import { socialReferenceContext } from "../social/context-refs";
 
 interface Bid {
   actorId: string;
@@ -36,8 +36,6 @@ interface RoundOutcome {
 
 const LIVES = 3;
 const MAX_BIDS_PER_ROUND = 8;
-const LIARS_DICE_STATE_SCHEMA_VERSION = 3;
-const LIARS_DICE_OUTCOME_KEYS = ["current-bid-true", "actor-wins-round", "actor-loses-life", "round-ends-this-move", "next-actor-challenges"] as const;
 
 /**
  * Liar's Dice — the table game of pure bluffing (Borg 1963; formalized as a
@@ -83,7 +81,7 @@ export class LiarsDiceWorld extends SocialWorldBase {
     this.addLog("骰盅已摇。每个人只看得见自己的点数，看不见别人的。", 1);
   }
   /**
-   * Sidecar extraction hints (§19): bid statements ("我这里至少 5 个 6") become
+   * Sidecar extraction hints: bid statements ("我这里至少 5 个 6") become
    * `claimed-action` propositions reconciled when a challenge reveals the dice.
    */
   extractionHints?(): string {
@@ -96,55 +94,7 @@ export class LiarsDiceWorld extends SocialWorldBase {
   }
 
 
-  protected exportWorldState(): unknown {
-    return {
-      schemaVersion: LIARS_DICE_STATE_SCHEMA_VERSION,
-      round: this.round,
-      bidCount: this.bidCount,
-      starterId: this.starterId,
-      expectedActorId: this.expectedActorId,
-      awaitingMove: this.awaitingMove,
-      pendingHumanQuantity: this.pendingHumanQuantity ?? null,
-      pendingRoundReconciliation: this.pendingRoundReconciliation ? structuredClone(this.pendingRoundReconciliation) : null,
-      lives: this.mapEntries(this.lives),
-      scores: this.mapEntries(this.scores),
-      dice: this.mapEntries(this.dice),
-      bids: structuredClone(this.bids),
-      history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences)
-    };
-  }
 
-  protected restoreWorldState(state: unknown): void {
-    const s = state as Partial<{
-      schemaVersion: number;
-      round: number; bidCount: number; starterId: string; expectedActorId: string; awaitingMove: boolean;
-      pendingHumanQuantity: number | null; lives: Array<[string, number]>; scores: Array<[string, number]>;
-      pendingRoundReconciliation: PendingRoundReconciliation | null;
-      dice: Array<[string, number]>; bids: Bid[]; history: RoundOutcome[]; lastExperiences: Array<[string, string]>;
-    }> | undefined;
-    if (!s) return;
-    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== 2 && s.schemaVersion !== LIARS_DICE_STATE_SCHEMA_VERSION) {
-      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: liars-dice ${s.schemaVersion}`);
-    }
-    this.round = Number(s.round ?? 1);
-    this.bidCount = Number(s.bidCount ?? 0);
-    this.starterId = String(s.starterId ?? "");
-    this.expectedActorId = String(s.expectedActorId ?? "");
-    this.awaitingMove = Boolean(s.awaitingMove);
-    this.pendingHumanQuantity = s.pendingHumanQuantity == null ? undefined : Number(s.pendingHumanQuantity);
-    this.pendingRoundReconciliation = s.pendingRoundReconciliation ? structuredClone(s.pendingRoundReconciliation) : undefined;
-    this.fillMap(this.lives, s.lives);
-    this.fillMap(this.scores, s.scores);
-    this.fillMap(this.dice, s.dice);
-    for (const actorId of [...this.dice.keys()]) {
-      if (!this.isAlive(actorId)) this.dice.delete(actorId);
-    }
-    this.bids = structuredClone(s.bids ?? []);
-    this.history.length = 0;
-    this.history.push(...structuredClone(s.history ?? []));
-    this.fillMap(this.lastExperiences, s.lastExperiences);
-  }
 
   snapshot(): WorldSnapshot {
     const currentBid = this.currentBid();
@@ -217,12 +167,7 @@ export class LiarsDiceWorld extends SocialWorldBase {
       parameters: z.object({
         move: z.enum(["bid", "challenge"]),
         quantity: z.number().int().min(1).max(quantityCap).nullable().default(null),
-        face: z.number().int().min(1).max(6).nullable().default(null),
-        ...createStrategyActionShape({
-          moveChoice: z.enum(["bid", "challenge"]),
-          quantity: z.number().int().min(1).max(quantityCap).nullable().default(null),
-          face: z.number().int().min(1).max(6).nullable().default(null)
-        }, LIARS_DICE_OUTCOME_KEYS)
+        face: z.number().int().min(1).max(6).nullable().default(null)
       }).strict().superRefine((input, issueContext) => {
         if (input.move === "bid" && (input.quantity == null || input.face == null)) {
           issueContext.addIssue({ code: z.ZodIssueCode.custom, path: ["quantity"], message: "A bid needs both quantity and face." });
@@ -230,50 +175,13 @@ export class LiarsDiceWorld extends SocialWorldBase {
         if (input.move === "challenge" && (input.quantity != null || input.face != null)) {
           issueContext.addIssue({ code: z.ZodIssueCode.custom, path: ["quantity"], message: "A challenge takes no quantity or face." });
         }
-        input.candidateIntents.forEach((candidate, index) => {
-          if (candidate.moveChoice === "bid" && (candidate.quantity == null || candidate.face == null)) {
-            issueContext.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ["candidateIntents", index, "quantity"],
-              message: "A bid candidate needs both quantity and face."
-            });
-          }
-          if (candidate.moveChoice === "challenge" && (candidate.quantity != null || candidate.face != null)) {
-            issueContext.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ["candidateIntents", index, "quantity"],
-              message: "A challenge candidate takes no quantity or face."
-            });
-          }
-        });
       }),
       execute: async (input, runContext) => {
-        const currentBid = this.currentBid();
-        for (const candidate of input.candidateIntents) {
-          if (candidate.moveChoice === "challenge" && !currentBid) {
-            throw new Error("STRATEGY_CANDIDATE_ILLEGAL: A challenge candidate requires a current bid.");
-          }
-          if (candidate.moveChoice === "bid" && !this.isLegalRaise(candidate.quantity!, candidate.face!)) {
-            throw new Error("STRATEGY_CANDIDATE_ILLEGAL: Every bid candidate must be a legal raise from the current bid.");
-          }
-        }
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.moveChoice !== input.move) {
-          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: Selected Liar's Dice intent must equal the binding move.");
-        }
-        if (input.move === "bid" && (selected.quantity !== input.quantity || selected.face !== input.face)) {
-          throw new Error("STRATEGY_SELECTION_BID_MISMATCH: Selected bid quantity and face must equal the binding bid.");
-        }
         const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "liars_move", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({
-            ...candidate,
-            action: "liars_move",
-            payloadSummary: candidate.moveChoice === "challenge"
-              ? "move=challenge"
-              : `move=bid; quantity=${candidate.quantity}; face=${candidate.face}`
-          }))
+          move: input.move,
+          quantity: input.quantity,
+          face: input.face
         });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -531,7 +439,7 @@ export class LiarsDiceWorld extends SocialWorldBase {
         } : {})
       }
     });
-    // §28 主张对账: when a challenge reveals the dice, reconcile the
+    // 主张对账: when a challenge reveals the dice, reconcile the
     // bidder's extracted bid claims ("我这里至少 5 个 6") against the truth.
     if (input.challenge) {
       const challenged = input.challenge.challengedBid;

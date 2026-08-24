@@ -17,7 +17,7 @@ import type {
 import { scopedContext, SocialWorldBase } from "../world";
 import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
-import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import { socialReferenceContext } from "../social/context-refs";
 import type { SocialActDeclaration } from "../social/contracts";
 
 type Choice = "swerve" | "straight";
@@ -29,9 +29,6 @@ interface RoundResult {
   payoffs: Record<string, number>;
   text: string;
 }
-
-const CHICKEN_STATE_SCHEMA_VERSION = 3;
-const CHICKEN_OUTCOME_KEYS = ["mutual-crash", "opponent-swerves", "actor-outscores-opponent", "actor-payoff-at-least-two"] as const;
 
 /**
  * Chicken (hawk-dove) game. Both drivers choose simultaneously: swerving is
@@ -59,7 +56,7 @@ export class ChickenGameWorld extends SocialWorldBase {
   }
 
   /**
-   * Sidecar extraction hints (§19): choice statements become `claimed-action`
+   * Sidecar extraction hints: choice statements become `claimed-action`
    * propositions reconciled against the sealed choice at settlement.
    */
   extractionHints?(): string {
@@ -70,46 +67,7 @@ export class ChickenGameWorld extends SocialWorldBase {
     ].join("\n");
   }
 
-  protected exportWorldState(): unknown {
-    return {
-      schemaVersion: CHICKEN_STATE_SCHEMA_VERSION,
-      round: this.round,
-      phase: this.phase,
-      scores: this.mapEntries(this.scores),
-      commitments: structuredClone(this.commitments),
-      choices: this.mapEntries(this.choices),
-      choiceCommandIds: this.mapEntries(this.choiceCommandIds),
-      discussion: this.discussion.exportState(),
-      history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences)
-    };
-  }
 
-  protected restoreWorldState(state: unknown): void {
-    const s = state as Partial<{
-      schemaVersion: number;
-      round: number; phase: string; scores: Array<[string, number]>; commitments: Commitment[]; choices: Array<[string, Choice]>;
-      choiceCommandIds: Array<[string, string]>;
-      discussion: ReturnType<DiscussionDirector["exportState"]>;
-      history: RoundResult[]; lastExperiences: Array<[string, string]>;
-    }> | undefined;
-    if (!s) return;
-    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== 2 && s.schemaVersion !== CHICKEN_STATE_SCHEMA_VERSION) {
-      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: chicken-game ${s.schemaVersion}`);
-    }
-    this.round = Number(s.round ?? 1);
-    this.phase = (s.phase ?? "discussion") as Phase;
-    this.fillMap(this.scores, s.scores);
-    this.commitments.length = 0;
-    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
-    this.fillMap(this.choices, s.choices);
-    this.fillMap(this.choiceCommandIds, s.choiceCommandIds);
-    this.discussion = this.createDiscussion();
-    this.discussion.restoreState(s.discussion);
-    this.history.length = 0;
-    this.history.push(...structuredClone(s.history ?? []));
-    this.fillMap(this.lastExperiences, s.lastExperiences);
-  }
 
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
@@ -161,19 +119,16 @@ export class ChickenGameWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const choose = tool({
       name: "chicken_choice",
-      description: "Compare bounded confrontation intents and predict the public result, then commit privately to swerve or straight. Binding for this round.",
+      description: "Commit privately to swerve or straight. The typed choice is the binding action for this round and cannot be changed.",
       parameters: z.object({
         choice: z.enum(["swerve", "straight"]),
-        reason: z.string().min(1).max(2_000),
-        ...createStrategyActionShape({ choice: z.enum(["swerve", "straight"]) }, CHICKEN_OUTCOME_KEYS)
+        reason: z.string().min(1).max(2_000)
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.choice !== input.choice) throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: Selected chicken choice must equal the binding choice.");
         const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "chicken_choice", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({ ...candidate, action: "chicken_choice", payloadSummary: `choice=${candidate.choice}` }))
+          choice: input.choice,
+          reason: input.reason
         });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -349,7 +304,7 @@ export class ChickenGameWorld extends SocialWorldBase {
       label: `第 ${this.round} 轮抉择`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => "Review authorized threats, beliefs and actor models. Call chicken_choice exactly once with bounded candidates and public-result predictions; text cannot substitute for the tool call."
+      instructionFor: () => "Review authorized threats, beliefs and actor models. Call chicken_choice exactly once; text cannot substitute for the tool call."
     };
   }
 
@@ -432,7 +387,7 @@ export class ChickenGameWorld extends SocialWorldBase {
       payload: { round: this.round, choices: result.choices, payoffs: result.payoffs }
     });
     for (const id of ids) this.lastExperiences.set(id, `${text} 你本轮选择了${choiceLabel(result.choices[id])}。你的累计得分：${this.scores.get(id)}。`);
-    // §28 主张对账: reconcile extracted choice claims against the
+    // 主张对账: reconcile extracted choice claims against the
     // actual sealed choice; settle accepted choice promises.
     const actualChoiceOf = (id: string): Choice => (id === ids[0] ? left : right);
     for (const id of ids) {
@@ -557,13 +512,4 @@ function payoff(left: Choice, right: Choice): [number, number] {
   if (left === "swerve" && right === "swerve") return [2, 2];
   if (left === "straight" && right === "straight") return [0, 0];
   return left === "straight" ? [4, 1] : [1, 4];
-}
-
-
-function normalizeCommitment(value: Commitment): Commitment {
-  return {
-    ...value,
-    acceptedByActorIds: [...(value.acceptedByActorIds ?? [])],
-    acceptedByCommandIds: [...(value.acceptedByCommandIds ?? [])]
-  };
 }

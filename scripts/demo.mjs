@@ -60,9 +60,6 @@ async function main() {
       rounds: Math.max(meta.minRounds, Math.min(rounds, meta.maxRounds)),
       mode: "ai",
       reasoningEffort: process.env.DEMO_REASONING_EFFORT ?? "high",
-      // Transcripts are independent evidence runs (AGENTS.md §27.6), not
-      // season-continuity games: one-shot avoids cross-game session locks.
-      season: process.env.DEMO_SEASON ?? "one-shot",
       ...(players > 0 ? { players } : {})
     });
     const roomId = created.room.id;

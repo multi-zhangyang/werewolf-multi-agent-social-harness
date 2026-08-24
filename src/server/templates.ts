@@ -1,7 +1,7 @@
 /**
- * Room roster templates (AGENTS.md §6.4): saved create-room configurations —
+ * Room roster templates: saved create-room configurations —
  * world, model picks, per-seat model/tuning overrides, character casting,
- * rounds and season mode. Persisted to data/room-templates.json (gitignored).
+ * rounds and roster settings. Persisted to data/room-templates.json (gitignored).
  * Templates hold configuration only: no secrets, no runtime state.
  */
 import { randomUUID } from "node:crypto";
@@ -32,8 +32,7 @@ const templateSchema = z.object({
   characterIds: z.array(z.string().min(1).max(120)).max(12).optional(),
   rounds: z.number().int().positive().max(20).optional(),
   mode: z.enum(["ai", "human"]).default("ai"),
-  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
-  season: z.enum(["season", "one-shot"]).default("season")
+  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("high")
 }).strict();
 
 export type RosterTemplateInput = z.infer<typeof templateSchema>;

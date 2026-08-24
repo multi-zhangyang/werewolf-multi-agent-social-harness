@@ -487,7 +487,7 @@ function createInnerStateTool(context: SocietyAgentContext): Tool<SocietyAgentCo
     execute: async ({ emotionDelta, padDelta, needsDelta, energyDelta, attention, relationship, belief, goalProgress }, runContext) => {
       const ctx = scopedContext(runContext, context.actorId, context);
       const turn = ctx.world.snapshot().turn;
-      // One choke point for every inner-state write (§10.3 / §21.7): the ledger
+      // One choke point for every inner-state write: the ledger
       // record is canonical and the local mind copy is derived from it, so the
       // two schemas cannot drift apart silently.
       const beliefRecord = belief ? applyBeliefChange(ctx, belief, turn) : undefined;
@@ -589,7 +589,7 @@ function updateRelationship(
     sourceKind: "agent-self-report"
   });
   // The settled ledger record is canonical: the working copy mirrors its
-  // after-values rather than recomputing them (§10.3 single-settlement rule).
+  // after-values rather than recomputing them.
   Object.assign(relationship, record.after, { updatedAtTurn: turn, note: input.note });
   return record;
 }

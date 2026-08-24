@@ -7,7 +7,7 @@
  */
 import { strict as assert } from "node:assert";
 import { describe, it } from "vitest";
-import { sanitizeFunctionCallArgs } from "../../src/society/persistence/session-store";
+import { sanitizeFunctionCallArgs } from "../../src/society/wire-json";
 import type { AgentInputItem } from "@openai/agents";
 
 function functionCallItem(argumentsText: string): AgentInputItem {

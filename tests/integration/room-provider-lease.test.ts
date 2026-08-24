@@ -19,9 +19,6 @@
  * entirely (its generator's suspension point never resolves on abort).
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { ScriptedModel, assistantMessage, functionCall, modelResponse } from "@openai/agents/testing";
 import type { Model, ModelProvider, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
@@ -153,7 +150,6 @@ function testRoom(model: Model, limiter: ActivationLimiter): { room: SocietyRoom
     contextPolicyId: DEFAULT_CONTEXT_POLICY_ID,
     enabled: true
   });
-  const archiveDir = mkdtempSync(path.join(tmpdir(), "society-lease-"));
   const room = new SocietyRoom({
     id: roomId,
     scenarioId: "trust-game",
@@ -161,15 +157,10 @@ function testRoom(model: Model, limiter: ActivationLimiter): { room: SocietyRoom
     rounds: 1,
     provider: fakeProvider(model) as unknown as OpenAIProviderType,
     modelRegistry: registry,
-    limiter,
-    archiveDir
+    limiter
   });
   const cleanup = (): void => {
     room.dispose("test cleanup");
-    rmSync(archiveDir, { recursive: true, force: true });
-    for (const profile of profiles) {
-      rmSync(path.join("data", "sessions", `${roomId}:${profile.id}.json`), { force: true });
-    }
   };
   return { room, cleanup };
 }
@@ -305,15 +296,7 @@ describe("normal scripted flow", () => {
     process.env.SOCIETY_AGENT_TURN_GRACE_MS = FAST_TURNS.SOCIETY_AGENT_TURN_GRACE_MS;
     // Discussion wave 1 (investor, then trustee) plus its decay turn,
     // investment with its tool-result round, return with its tool-result
-    // round. Binding tools carry the full strategy shape the SDK validates.
-    const investIntents = (amount: number) => [
-      { goal: "g", summary: `invest ${amount}`, publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount },
-      { goal: "g2", summary: "invest 0", publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount: 0 }
-    ];
-    const returnIntents = (amount: number) => [
-      { goal: "g", summary: `return ${amount}`, publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount },
-      { goal: "g2", summary: "return 0", publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount: 0 }
-    ];
+    // round. Binding tools carry the flat payloads the SDK validates.
     const script = new ScriptedModel([
       // Round 1: discussion wave (苏遥, 林默) + decay turn, investment, return.
       modelResponse([assistantMessage("我会先观察这轮的投资结构。")]),
@@ -321,18 +304,12 @@ describe("normal scripted flow", () => {
       modelResponse([assistantMessage("好。")]),
       modelResponse([functionCall("make_investment", {
         amount: 8,
-        reason: "相信对方会公平返还",
-        candidateIntents: investIntents(8),
-        selectedIntentIndex: 0,
-        predictedConsequences: [{ outcomeKey: "investment-positive", proposition: "对方会公平返还", probability: 0.8, horizon: "round" }]
+        reason: "相信对方会公平返还"
       }, { callId: "call-inv-1" })]),
       modelResponse([assistantMessage("已完成投资。")]),
       modelResponse([functionCall("return_from_trust", {
         amount: 8,
-        reason: "按约返还",
-        candidateIntents: returnIntents(8),
-        selectedIntentIndex: 0,
-        predictedConsequences: [{ outcomeKey: "return-at-least-investment", proposition: "全额返还", probability: 0.9, horizon: "round" }]
+        reason: "按约返还"
       }, { callId: "call-ret-1" })]),
       modelResponse([assistantMessage("已完成返还。")]),
       // Round 2 (roles swap): discussion wave + decay turn, investment, return.
@@ -341,18 +318,12 @@ describe("normal scripted flow", () => {
       modelResponse([assistantMessage("好。")]),
       modelResponse([functionCall("make_investment", {
         amount: 6,
-        reason: "对方上轮返还合理",
-        candidateIntents: investIntents(6),
-        selectedIntentIndex: 0,
-        predictedConsequences: [{ outcomeKey: "investment-positive", proposition: "对方会公平返还", probability: 0.8, horizon: "round" }]
+        reason: "对方上轮返还合理"
       }, { callId: "call-inv-2" })]),
       modelResponse([assistantMessage("已完成投资。")]),
       modelResponse([functionCall("return_from_trust", {
         amount: 10,
-        reason: "继续维持公平",
-        candidateIntents: returnIntents(10),
-        selectedIntentIndex: 0,
-        predictedConsequences: [{ outcomeKey: "return-at-least-investment", proposition: "全额返还", probability: 0.9, horizon: "round" }]
+        reason: "继续维持公平"
       }, { callId: "call-ret-2" })]),
       modelResponse([assistantMessage("已完成返还。")])
     ]);

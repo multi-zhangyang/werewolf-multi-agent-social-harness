@@ -1,5 +1,5 @@
 /**
- * Slow personality adaptation (AGENTS.md §4.2.8).
+ * Slow personality adaptation.
  *
  * A character's Big Five baseline must not flip after a single game. Repeated,
  * high-intensity experiences only shift a small bounded "adaptation" that
@@ -153,8 +153,8 @@ export function traitStatesFromTemperament(temperament: AgentTemperament | undef
 }
 
 /**
- * Season-boundary decay: while a character is away from the table, unreinforced
- * drift erodes partway back toward the baseline (§4.2.8 — slow change, with
+ * Away-from-table decay: while a character is not playing, unreinforced
+ * drift erodes partway back toward the baseline (slow change, with
  * regression). Long-term changes survive; a single game's nudge fades.
  */
 export const SEASON_BOUNDARY_DECAY = 0.6;

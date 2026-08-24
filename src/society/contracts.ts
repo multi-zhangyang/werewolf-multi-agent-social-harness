@@ -2,8 +2,8 @@ import type { Agent, ModelProvider, Session, Tool } from "@openai/agents";
 import type { ResolvedModelConfig } from "./models";
 
 /**
- * A character's permanent identity (AGENTS.md §10.2/§15): stable across
- * rooms, seats, models and game roles. Never derived from a display name.
+ * A character's permanent identity: stable across rooms, seats, models and
+ * game roles. Never derived from a display name.
  */
 export type CharacterId = string;
 
@@ -29,8 +29,8 @@ export type PlayerActionKind = "message" | "choice" | "number" | "target" | "tea
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
 /**
- * Spectator information modes (AGENTS.md §8.3). Visibility projection happens
- * server-side: a mode never lets data leak across its boundary.
+ * Spectator information modes. Visibility projection happens server-side: a
+ * mode never lets data leak across its boundary.
  */
 export type SpectatorMode = "public" | "omniscient" | "agent-pov" | "postgame";
 
@@ -62,7 +62,7 @@ export interface AgentTemperament {
 }
 
 /**
- * Stable judgment biases (AGENTS.md §4.2.7): bounded rationality comes from
+ * Stable judgment biases: bounded rationality comes from
  * the character, not from random error. Each character owns only a few of
  * these, fixed for its lifetime — never the whole list, never shuffled per
  * round. Some biases are measurable in the appraisal engine (hypervigilance
@@ -94,10 +94,10 @@ export interface AgentProfile {
   goals: string[];
   /** Big Five (OCEAN) profile, grounded in personality-anchoring research. */
   temperament?: AgentTemperament;
-  /** A few stable judgment biases this character lives with (§4.2.7). */
+  /** A few stable judgment biases this character lives with. */
   decisionBiases?: DecisionBias[];
   /**
-   * Autobiographical anchors (§4.2.1): short formative memories — childhood,
+   * Autobiographical anchors: short formative memories — childhood,
    * key wins, betrayals, the source of this character's values. Seeded into
    * the agent's associative memory as high-salience identity memories so a
    * situation that echoes them can surface why this person reacts this way.
@@ -112,7 +112,7 @@ export interface AgentProfile {
 }
 
 /**
- * A character is the person (§7.1/§7.2): identity, values, voice, biases and
+ * A character is the person: identity, values, voice, biases and
  * formative memories — never a game role, never a model. Built-ins ship with
  * the product; user-defined characters live in the local library and can be
  * imported/exported without secrets.
@@ -196,7 +196,7 @@ export interface AgentMoodState {
 export interface AgentBelief {
   subjectId: string;
   proposition: string;
-  /** Subjective probability and confidence are distinct (§6.3). */
+  /** Subjective probability and confidence are distinct. */
   probability?: number;
   confidence: number;
   updatedAtTurn: number;
@@ -216,9 +216,9 @@ export interface AgentRelationship {
 }
 
 /**
- * Display-only memory entry (AGENTS.md §22): a plain capped list on the mind
- * for the spectator MindSheet. It is NOT a retrieval system — the model's own
- * SDK session carries what the agent actually remembers.
+ * Display-only memory entry: a plain capped list on the mind for the spectator
+ * MindSheet. It is NOT a retrieval system — the model's own SDK session carries
+ * what the agent actually remembers.
  */
 export interface AgentMemoryItem {
   id: string;
@@ -242,7 +242,7 @@ export interface AgentCognitivePass {
 }
 
 /**
- * Slow personality adaptation (AGENTS.md §4.2.8). A character's Big Five
+ * Slow personality adaptation. A character's Big Five
  * baseline does not flip after one game; repeated, high-intensity experiences
  * only shift a small bounded adaptation that decays back toward the baseline
  * unless reinforced. `effective = baseline + bounded(adaptation)`, and every
@@ -296,8 +296,8 @@ export interface ThoughtBeat {
 /**
  * A strategic deception this agent has planned. Recorded through the private
  * `log_deception_plan` tool, so deception is a typed, audience-aware goal —
- * never an invisible lie (AGENTS.md §10: goal, audience, intended belief,
- * cover story, cost review).
+ * never an invisible lie: it carries an intended belief, a cover story and a
+ * fallback.
  */
 export interface AgentDeceptionPlan {
   /** Canonical private episode id; cite it when a later message executes the plan. */
@@ -328,7 +328,7 @@ export interface AgentAppraisalNote {
 
 /**
  * Deterministic tension signal derived from real events. Presentation-only:
- * it drives camera and pacing, never the game (AGENTS.md §8.6).
+ * it drives camera and pacing, never the game.
  */
 export type TensionReason =
   | "direct-accusation"
@@ -363,7 +363,7 @@ export type CameraMode =
 
 /**
  * A presentational camera cue derived from real events; re-derivable and
- * never part of the world truth (AGENTS.md §10.6).
+ * never part of the world truth.
  */
 export interface CinematicCue {
   id: string;
@@ -399,9 +399,9 @@ export interface AgentMindState {
   /** The causal notes behind recent appraisal-driven mood changes. */
   lastAppraisals: AgentAppraisalNote[];
   /**
-   * Slow, bounded personality adaptation (AGENTS.md §4.2.8). Effective Big
-   * Five values = baseline + bounded adaptation; adaptation decays back toward
-   * baseline unless reinforced by repeated high-intensity experiences.
+   * Slow, bounded personality adaptation. Effective Big Five values = baseline
+   * + bounded adaptation; adaptation decays back toward baseline unless
+   * reinforced by repeated high-intensity experiences.
    */
   traitAdaptations?: Record<AdaptableTrait, TraitState>;
 }
@@ -467,7 +467,7 @@ export type StoryBeatKind =
   | "comeback"          // someone behind the curve turned the game
   | "misplay"           // a self-inflicted, costly error
   | "win"               // decisive, game-changing strike
-  // P0-09: neutral outcome labels. The strong labels above require social
+  // Neutral outcome labels. The strong labels above require social
   // evidence (a Commitment or DeceptionEpisode); until the spine records it,
   // scenarios report only what the world results prove.
   | "cooperative-outcome"   // coordinated success, no promise implied
@@ -521,7 +521,7 @@ export interface WorldActivation {
  */
 export interface SocialEvent {
   id: string;
-  /** Private canonical social-event ids that persist this observation across restart. */
+  /** Private canonical social-event ids this observation cites. */
   sourceEventIds?: string[];
   type:
     | "accused"          // someone publicly accused this agent
@@ -588,8 +588,8 @@ export interface PlayerActionSpec {
 }
 
 /**
- * A first-class promise inside a scenario (§8.1, Phase 1 minimal slice).
- * Created only through an explicit typed tool (`make_commitment`), then
+ * A first-class promise inside a scenario. Created only through an explicit
+ * typed tool (`make_commitment`), then
  * settled by the world rules when the promised action's condition comes due.
  * A commitment is the only evidence that may upgrade a neutral outcome label
  * into promise-kept / promise-broken.
@@ -599,7 +599,7 @@ export interface Commitment {
   round: number;
   /** Round counter for quest-scoped games (avalon); mirrors `round` elsewhere. */
   quest?: number;
-  /** The promisor's seat and permanent character (§15.2). */
+  /** The promisor's seat and permanent character. */
   promisorActorId: string;
   promisorCharacterId: string;
   /** Who the declaration was made to. */
@@ -659,7 +659,7 @@ export interface Commitment {
         condition?: string;
       };
   state: "proposed" | "accepted" | "fulfilled" | "violated" | "void";
-  /** Present on current records; optional only while reading legacy checkpoints. */
+  /** Present on current records; optional on records written earlier. */
   acceptedByActorIds?: string[];
   acceptedByCommandIds?: string[];
   /** The idempotent command that created this commitment. */
@@ -689,10 +689,9 @@ export interface OpenCommitmentView {
 }
 
 /**
- * A structured, auditable decision record for one binding action (§5.4,
- * Phase 1 minimal slice). Written by the world at command-commit time; it
- * cites the commitments and beliefs the actor explicitly referenced, never
- * raw chain-of-thought.
+ * Legacy decision-record shape from the removed audit pipeline. Kept for type
+ * compatibility; no longer written by the world — decision rationale lives in
+ * the conversation, not in structured form.
  */
 export interface DecisionRecord {
   decisionId: string;
@@ -712,7 +711,7 @@ export interface WorldActionCommit {
   detail: string;
   result?: unknown;
   /**
-   * Stable command receipt (§16.6): a retry of the same command inside the
+   * Stable command receipt: a retry of the same command inside the
    * same activation epoch returns the original receipt instead of applying
    * the world action twice.
    */
@@ -735,13 +734,13 @@ export type AgentRuntimeEvent =
       delta: string;
       /** True while the current phase is sealed (night actions, simultaneous
        *  votes): public spectators must not see the token stream, because the
-       *  text would reveal hidden choices before resolution (§8.3). */
+       *  text would reveal hidden choices before resolution. */
       sealed?: boolean;
       at: string;
     }
   | { type: "agent.reasoning-content"; roomId: string; actorId: string; delta: string; elapsedMs: number; done: boolean; at: string }
   | { type: "agent.reasoning-summary"; roomId: string; actorId: string; delta: string; at: string }
-  /** @deprecated Read-only compatibility for archives created before schema v3. */
+  /** @deprecated Read-only compatibility with records created before schema v3. */
   | { type: "agent.reasoning"; roomId: string; actorId: string; delta: string; at: string }
   | {
       type: "runtime.notice";
@@ -837,12 +836,6 @@ export interface SocietyAgentContext {
   profile: AgentProfile;
   world: SocialWorld;
   mind: AgentMindState;
-  /**
-   * Season continuity (AGENTS.md §8): in season mode the same character's SDK
-   * session persists across games, so the model's own context carries prior
-   * history. One-shot rooms start from a clean session every game.
-   */
-  seasonMode: boolean;
   emit(event: AgentRuntimeEvent): void;
 }
 
@@ -858,7 +851,7 @@ export interface SocialWorld {
   playerActions(actorId: string): PlayerActionSpec[];
   performAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit>;
   /**
-   * Command epoch gate (§16.6 / §17.1): the room opens a window for each
+   * Command epoch gate: the room opens a window for each
    * activation (including retries and human waits). Tool calls that arrive
    * after the window closed — e.g. from a request the room already gave up
    * on — are rejected instead of mutating a later phase.
@@ -876,8 +869,6 @@ export interface SocialWorld {
   reconciliationOwnsOutcomeMemory(): boolean;
   /** Open (proposed, unsettled) commitments this participant is party to. */
   openCommitmentsFor(actorId: string): OpenCommitmentView[];
-  /** Auditable decision records for binding actions; [] where none exist. */
-  decisionRecords(): DecisionRecord[];
   /** Viewer-scoped canonical social causality; private cognition stays owner-only. */
   socialCausalityFor(actorId?: string, omniscient?: boolean): import("./social/contracts").SocialCausalityProjection;
   /**
@@ -888,7 +879,7 @@ export interface SocialWorld {
    */
   socialActExtractor?: (message: SocialMessage) => Promise<void>;
   /**
-   * Scenario-specific guidance for the message sidecar extractor (§19) — e.g.
+   * Scenario-specific guidance for the message sidecar extractor — e.g.
    * identity-claim vocabulary for werewolf. Optional; scenarios without
    * claim semantics omit it.
    */
@@ -896,14 +887,12 @@ export interface SocialWorld {
   /** Record sidecar-extracted social acts for a persisted message; idempotent per message. */
   recordExtractedSocialActs(messageId: string, declarations: import("./social/contracts").SocialActDeclaration[]): string[];
   /**
-   * Whether agent token streams may be shown to public spectators right now
-   * (§8.3). Scenarios seal hidden-choice phases (night actions, simultaneous
+   * Whether agent token streams may be shown to public spectators right now.
+   * Scenarios seal hidden-choice phases (night actions, simultaneous
    * votes) so the live text cannot leak unresolved secrets; discussion and
    * open phases stream freely.
    */
   publicStreamingAllowed(): boolean;
-  /** Persist the immutable, secret-free runtime policy behind this actor's decisions. */
-  recordStrategyProfileSnapshot(input: import("./social/contracts").StrategyProfileSnapshot): import("./social/contracts").StrategyProfileSnapshot;
   /** Persist a sanitized runtime downgrade/failure as AgentTrace, never raw provider content. */
   recordRuntimeNotice(input: Extract<AgentRuntimeEvent, { type: "runtime.notice" }>): void;
   /** Record one actor's structured belief update with visible source checks. */
@@ -926,56 +915,8 @@ export interface SocialWorld {
   /** Append a public world-log entry (shown in the observer timeline). */
   addWorldLog(text: string): void;
   onUpdate(listener: (snapshot: WorldSnapshot) => void): () => void;
-  /** Restart recovery (P3): serialize / rehydrate the full rules state. */
-  exportState(): import("./world").WorldSerializedState;
-  restoreState(state: import("./world").WorldSerializedState): void;
-}
-
-/**
- * A character's cross-game dossier: what the season remembers about them
- * after a game ends — the roles they played, who they trusted or resented,
- * their strongest memories, and the reputation they earned.
- */
-export interface CharacterDossier {
-  /** The permanent character id this history belongs to (AGENTS.md §10.2). */
-  characterId: CharacterId;
-  /** Display name at the time of the latest game — for the UI, not the key. */
-  displayName: string;
-  games: Array<{
-    scenarioId: string;
-    role?: string;
-    outcome?: "win" | "lose";
-    at: string;
-  }>;
-  relationships: Array<{
-    targetCharacterId: CharacterId;
-    trust: number;
-    affinity: number;
-    respect: number;
-    tension: number;
-    familiarity?: number;
-    note: string;
-  }>;
-  beliefs: Array<{ subjectId: string; proposition: string; confidence: number }>;
-  /**
-   * Slow personality drift carried across games (§4.2.8): the bounded
-   * adaptation each Big Five trait accumulated, with its recorded causes.
-   * Loaded back with a season-boundary decay so drift survives a game but
-   * erodes while the character is away from the table.
-   */
-  traitAdaptations?: Record<AdaptableTrait, TraitState>;
-  updatedAt: string;
-}
-
-/** Cross-game memory: dossiers keyed by character, shared by a season. */
-export interface SeasonStore {
-  get(characterId: CharacterId): CharacterDossier | undefined;
-  save(dossier: CharacterDossier): void;
-  list(): CharacterDossier[];
-  /** Forget all dossiers — the operator starts a brand-new season. */
-  clear(): void;
-  /** Forget one character's cross-game memory (§7.2 重置长期记忆). */
-  remove(characterId: CharacterId): boolean;
+  /** In-memory command-gateway counters for the /metrics endpoint. */
+  runtimeStats(): { idempotencyHits: number; staleCommandRejections: number; invalidActionRejections: number };
 }
 
 export interface AgentTurnResult {
@@ -997,10 +938,8 @@ export interface SocietyAgentRuntime {
   /** Process world-appraisal events into emotion, relationship and memory. */
   appraise(events: SocialEvent[], turn: number): Promise<void>;
   /**
-   * Model switch (§12.4): keeps this agent's identity, session, mind and
-   * memory; swaps the model binding and recomputes the context budget.
+   * Model switch: keeps this agent's identity, session, mind and memory; swaps
+   * the model binding and recomputes the context budget.
    */
   switchModel(next: { provider: ModelProvider; resolvedConfig: ResolvedModelConfig }): Promise<{ previousModel: string; model: string }>;
-  /** Distill this character's private mind into a season dossier. */
-  exportDossier(role?: string, outcome?: "win" | "lose"): CharacterDossier;
 }

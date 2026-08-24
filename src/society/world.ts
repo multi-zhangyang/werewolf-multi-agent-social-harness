@@ -5,10 +5,8 @@ import type {
   AgentProfile,
   AgentStatus,
   Commitment,
-  DecisionRecord,
   OpenCommitmentView,
   PlayerActionSpec,
-  ScenarioId,
   ScenarioSummary,
   SocialChannel,
   SocialEvent,
@@ -36,31 +34,8 @@ import type {
   RelationshipDeltaRecord,
   RelationshipUpdateInput,
   SocialActDeclaration,
-  SocialCausalityProjection,
-  SocialCausalityState,
-  StrategyProfileSnapshot
+  SocialCausalityProjection
 } from "./social/contracts";
-
-/**
- * Serializable world state for restart recovery (P3). The base class owns the
- * shared stream (messages, log, statuses, queued appraisal events); each
- * scenario owns its private rules state under `world`. Everything here must
- * survive a JSON round-trip — maps travel as entry tuples, never as Maps.
- */
-export interface WorldSerializedState {
-  scenarioId: ScenarioId;
-  shared: {
-    status: WorldSnapshot["status"];
-    statuses: Array<[string, AgentStatus]>;
-    messages: SocialMessage[];
-    log: WorldLogEntry[];
-    pendingEvents: Array<[string, SocialEvent[]]>;
-    socialCausality?: SocialCausalityState;
-    /** Smoke-gate counters (AGENTS.md §37): tool-compliance instrumentation. */
-    runtimeStats?: { idempotencyHits: number; staleCommandRejections: number; invalidActionRejections: number };
-  };
-  world: unknown;
-}
 
 export abstract class SocialWorldBase implements SocialWorld {
   readonly roomId: string;
@@ -76,7 +51,7 @@ export abstract class SocialWorldBase implements SocialWorld {
   protected listeners = new Set<(snapshot: WorldSnapshot) => void>();
 
   /**
-   * Command epoch gate (§16.6 / §17.1). The room opens one window per
+   * Command epoch gate. The room opens one window per
    * activation and closes it when the activation fully settles; every
    * command entry point checks the gate first, so a tool call that arrives
    * late from a request the room already gave up on is rejected instead of
@@ -89,13 +64,13 @@ export abstract class SocialWorldBase implements SocialWorld {
   private activeActivationId?: string;
   private readonly recentReceipts = new Map<string, WorldActionCommit>();
   private static readonly RECENT_RECEIPT_LIMIT = 64;
-  /** Smoke-gate counters (§37): visible duplicates, late-command rejects and invalid action rejects. */
+  /** Smoke-gate counters: visible duplicates, late-command rejects and invalid action rejects. */
   private idempotencyHits = 0;
   private staleCommandRejections = 0;
   private invalidActionRejections = 0;
 
   /**
-   * Optional message sidecar (AGENTS.md §6.5): when installed by the room, each
+   * Optional message sidecar: when installed by the room, each
    * persisted message is analyzed off-thread and any structured social acts are
    * recorded via `recordExtractedSocialActs` with `model-extracted` provenance.
    * The hook must never block or throw into the send path; failures are logged
@@ -113,8 +88,8 @@ export abstract class SocialWorldBase implements SocialWorld {
   }
 
   start(): void {
-    // Finished is terminal: a world restored from a finished checkpoint must
-    // never be re-run by a later start()/resume (restart recovery, §26).
+    // Finished is terminal: a finished world must never be re-run by a later
+    // start()/resume.
     if (this.status === "finished") return;
     this.status = "running";
     for (const id of this.profiles.keys()) this.statuses.set(id, "idle");
@@ -126,59 +101,6 @@ export abstract class SocialWorldBase implements SocialWorld {
     this.status = "paused";
     this.emitUpdate();
   }
-
-  /** Serialize the whole world for a room checkpoint (restart recovery, P3). */
-  exportState(): WorldSerializedState {
-    return {
-      scenarioId: this.scenario.id,
-      shared: {
-        status: this.status,
-        statuses: [...this.statuses.entries()],
-        messages: structuredClone(this.messages),
-        log: structuredClone(this.log),
-        pendingEvents: [...this.pendingEvents.entries()].map(([id, events]) => [id, structuredClone(events)] as [string, SocialEvent[]]),
-        socialCausality: this.socialCausality.exportState(),
-        runtimeStats: { idempotencyHits: this.idempotencyHits, staleCommandRejections: this.staleCommandRejections, invalidActionRejections: this.invalidActionRejections }
-      },
-      world: this.exportWorldState()
-    };
-  }
-
-  /** Rehydrate this world from a checkpoint; the scenario must be the same. */
-  restoreState(state: WorldSerializedState): void {
-    if (state.scenarioId !== this.scenario.id) {
-      throw new Error(`SCENARIO_STATE_MISMATCH: checkpoint is ${state.scenarioId}, world is ${this.scenario.id}.`);
-    }
-    this.status = state.shared.status;
-    this.statuses.clear();
-    for (const [id, status] of state.shared.statuses) this.statuses.set(id, status);
-    this.messages.length = 0;
-    this.messages.push(...structuredClone(state.shared.messages));
-    this.log.length = 0;
-    this.log.push(...structuredClone(state.shared.log));
-    this.pendingEvents.clear();
-    for (const [id, events] of state.shared.pendingEvents) this.pendingEvents.set(id, structuredClone(events));
-    this.socialCausality.restoreState(state.shared.socialCausality);
-    if (state.shared.runtimeStats) {
-      this.idempotencyHits = state.shared.runtimeStats.idempotencyHits ?? 0;
-      this.staleCommandRejections = state.shared.runtimeStats.staleCommandRejections ?? 0;
-      this.invalidActionRejections = state.shared.runtimeStats.invalidActionRejections ?? 0;
-    }
-    for (const messageId of this.socialCausality.extractedActMessageIds()) {
-      this.extractionAttempted.add(messageId);
-    }
-    for (const [actorId, events] of this.pendingEvents) {
-      const characterId = this.requireProfile(actorId).characterId;
-      for (const event of events) {
-        if (event.sourceEventIds?.length) continue;
-        event.sourceEventIds = [this.socialCausality.recordAppraisalObservation(actorId, characterId, event)];
-      }
-    }
-    this.restoreWorldState(state.world);
-  }
-
-  protected abstract exportWorldState(): unknown;
-  protected abstract restoreWorldState(state: unknown): void;
 
   abstract snapshot(): WorldSnapshot;
   /**
@@ -234,8 +156,8 @@ export abstract class SocialWorldBase implements SocialWorld {
 
   async performAction(actorId: string, action: string, payload: unknown): Promise<WorldActionCommit> {
     // A late tool call must not mutate the world once the room has closed
-    // this activation's window (§16.6 / §28.7: 旧请求迟到并尝试调用工具,
-    // command gateway 依据 activation epoch 拒绝).
+    // this activation's window: 旧请求迟到并尝试调用工具, command gateway
+    // 依据 activation epoch 拒绝.
     try {
       this.assertCommandGateOpen();
     } catch (error) {
@@ -250,7 +172,6 @@ export abstract class SocialWorldBase implements SocialWorld {
         this.idempotencyHits += 1;
         return structuredClone(existing);
       }
-      const observationThroughSequence = this.socialCausality.observationCursor();
       let commit: WorldActionCommit;
       if (action === "message" || action === "communicate") {
         const input = parseMessagePayload(payload);
@@ -258,7 +179,7 @@ export abstract class SocialWorldBase implements SocialWorld {
         commit = { action, detail: input.text, result: { messageId: message.id }, commandId: `msg:${message.id}` };
       } else {
         const raw = await this.performDomainAction(actorId, action, payload);
-        // A scenario may mint its own stable receipt (e.g. for a DecisionRecord);
+        // A scenario may mint its own stable receipt for a binding action;
         // otherwise the gate assigns one.
         commit = { ...raw, commandId: raw.commandId ?? randomUUID() };
       }
@@ -266,10 +187,7 @@ export abstract class SocialWorldBase implements SocialWorld {
         actorId,
         characterId: this.requireProfile(actorId).characterId,
         action,
-        payload,
         commit,
-        observationThroughSequence,
-        characterIdFor: (targetActorId) => this.requireProfile(targetActorId).characterId,
         ...(this.activeActivationId ? { activationId: this.activeActivationId } : {})
       });
       this.recentReceipts.set(receiptKey, structuredClone(commit));
@@ -279,7 +197,7 @@ export abstract class SocialWorldBase implements SocialWorld {
       }
       return structuredClone(commit);
     } catch (error) {
-      // §37: any command the gateway rejects — bad payload, illegal action,
+      // Any command the gateway rejects — bad payload, illegal action,
       // validation failure — counts once; STALE_ACTIVATION_COMMAND is counted
       // separately at the gate above.
       this.invalidActionRejections += 1;
@@ -306,6 +224,15 @@ export abstract class SocialWorldBase implements SocialWorld {
       open: this.activationWindowOpen,
       epoch: this.commandEpoch,
       ...(this.activeActivationId ? { activationId: this.activeActivationId } : {})
+    };
+  }
+
+  /** In-memory command-gateway counters for the /metrics endpoint. */
+  runtimeStats(): { idempotencyHits: number; staleCommandRejections: number; invalidActionRejections: number } {
+    return {
+      idempotencyHits: this.idempotencyHits,
+      staleCommandRejections: this.staleCommandRejections,
+      invalidActionRejections: this.invalidActionRejections
     };
   }
 
@@ -377,14 +304,6 @@ export abstract class SocialWorldBase implements SocialWorld {
       observerActorIds,
       characterIdFor: (actorId) => this.requireProfile(actorId).characterId
     });
-  }
-
-  recordStrategyProfileSnapshot(input: StrategyProfileSnapshot): StrategyProfileSnapshot {
-    const profile = this.requireProfile(input.actorId);
-    if (profile.characterId !== input.characterId) {
-      throw new Error("STRATEGY_PROFILE_IDENTITY_MISMATCH: Snapshot character does not own this actor.");
-    }
-    return this.socialCausality.recordStrategyProfileSnapshot(input);
   }
 
   recordRuntimeNotice(input: Extract<import("./contracts").AgentRuntimeEvent, { type: "runtime.notice" }>): void {
@@ -504,11 +423,6 @@ export abstract class SocialWorldBase implements SocialWorld {
     }).detectedDeceptionIds;
   }
 
-  /** Scenarios with decision records override this (§5.4 / Phase 1). */
-  decisionRecords(): DecisionRecord[] {
-    return [];
-  }
-
   /**
    * Public token streaming is allowed by default; scenarios with hidden-choice
    * phases (night actions, sealed votes) override this to seal the stream.
@@ -611,7 +525,7 @@ export abstract class SocialWorldBase implements SocialWorld {
     return this.socialCausality.recordOutcomeReconciliation(input);
   }
 
-  /** Model-extracted action claims ("I will cooperate") by one character (§28 主张对账). */
+  /** Model-extracted action claims ("I will cooperate") by one character, reconciled at settlement. */
   protected extractedActionClaims(subjectCharacterId: string): Array<{ propositionId: string; object: string }> {
     return this.socialCausality.extractedActionClaims(subjectCharacterId);
   }
@@ -940,19 +854,6 @@ export abstract class SocialWorldBase implements SocialWorld {
 
   protected otherProfiles(actorId: string): AgentProfile[] {
     return [...this.profiles.values()].filter((profile) => profile.id !== actorId);
-  }
-
-  /** JSON-safe serialization helpers for scenario state maps. */
-  protected mapEntries<K, V>(map: Map<K, V>): Array<[K, V]> {
-    return [...map.entries()];
-  }
-
-  protected fillMap<K, V>(target: Map<K, V>, entries: unknown): void {
-    target.clear();
-    if (!Array.isArray(entries)) return;
-    for (const entry of entries) {
-      if (Array.isArray(entry) && entry.length >= 2) target.set(entry[0] as K, entry[1] as V);
-    }
   }
 }
 

@@ -14,7 +14,7 @@ interface PersonalitySeed {
   goals: string[];
   temperament: AgentTemperament;
   decisionBiases: DecisionBias[];
-  /** Formative experiences seeded as identity memory (§4.2.1). */
+  /** Formative experiences seeded as identity memory. */
   autobiographicalAnchors: string[];
   voice: string;
   regulation: NonNullable<AgentProfile["regulation"]>;
@@ -541,7 +541,7 @@ export function builtinCharacter(id: string): CharacterDefinition | undefined {
  * Turn a CharacterDefinition into one seat's AgentProfile. The seat gets an
  * actor id (`agent-NN`), a model from the round-robin, and everything that
  * makes this person who they are — the character travels with its identity,
- * memory and relationships across models (§6.7).
+ * memory and relationships across models.
  */
 export function characterAgentProfile(
   character: CharacterDefinition,

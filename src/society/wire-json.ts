@@ -7,6 +7,7 @@
  * poison the conversation. These helpers make outgoing payloads valid
  * without special-casing any provider or model.
  */
+import type { AgentInputItem } from "@openai/agents";
 
 /** Deterministic repair: escape inner quotes, close truncated strings/brackets. */
 export function repairJsonText(text: string): string | undefined {
@@ -125,4 +126,70 @@ export function sanitizeChatCompletionsPayload<T>(body: T): T | undefined {
     }
   }
   return changed ? body : undefined;
+}
+
+/**
+ * Enforce the tool-calling wire contract on session history items. Repair
+ * preserves the model's intent when the syntax is recoverable (unescaped
+ * quotes, truncation). A call whose arguments cannot be repaired is DROPPED
+ * together with its paired `function_call_output` — replaying "{}" would be
+ * wire-valid but schema-invalid, so endpoints that validate replayed
+ * tool_calls would 400 every follow-up request and permanently poison the
+ * conversation. The parse failure was already reported to the model in the
+ * same turn; future turns never need the poisoned call.
+ */
+export function sanitizeFunctionCallArgs(items: AgentInputItem[]): AgentInputItem[] {
+  let repaired = 0;
+  let dropped = 0;
+  // First pass: collect the call ids that cannot be made wire-valid.
+  const poisonedCallIds = new Set<string>();
+  for (const item of items) {
+    const record = item as unknown as Record<string, unknown>;
+    if (record.type === "function_call" && typeof record.arguments === "string") {
+      try {
+        JSON.parse(record.arguments);
+      } catch {
+        if (repairJsonText(record.arguments) === undefined && typeof record.callId === "string") {
+          poisonedCallIds.add(record.callId);
+        }
+      }
+    }
+  }
+  const out: AgentInputItem[] = [];
+  for (const item of items) {
+    const record = item as unknown as Record<string, unknown>;
+    if (record.type === "function_call" && typeof record.arguments === "string") {
+      try {
+        JSON.parse(record.arguments);
+        out.push(item);
+        continue;
+      } catch {
+        const fixed = repairJsonText(record.arguments);
+        if (fixed === undefined) {
+          dropped += 1;
+          continue;
+        }
+        repaired += 1;
+        out.push({ ...item, arguments: fixed } as AgentInputItem);
+        continue;
+      }
+    }
+    if (record.type === "function_call_output" && typeof record.callId === "string" && poisonedCallIds.has(record.callId)) {
+      dropped += 1;
+      continue;
+    }
+    if (record.type === "message" && record.role === "system" && Array.isArray(record.content)) {
+      // Strict endpoints reject structured content arrays in SYSTEM messages
+      // (the compression digest uses this format); flatten text-only arrays
+      // to a plain string so a compacted history never 400s every follow-up.
+      const content = normalizeInputTextParts(record.content);
+      if (content !== record.content) out.push({ ...item, content } as AgentInputItem);
+      else out.push(item);
+      continue;
+    }
+    out.push(item);
+  }
+  if (repaired > 0) console.warn(`[wire-json] repaired ${repaired} malformed function_call argument payload(s) into wire-valid history`);
+  if (dropped > 0) console.warn(`[wire-json] dropped ${dropped} poisoned function_call item(s) so replayed history cannot 400 again`);
+  return out;
 }

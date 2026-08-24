@@ -5,14 +5,11 @@ import type {
   ActorModelInput,
   BeliefSelfReportInput,
   BeliefUpdateRecord,
-  CandidateIntent,
   CommitmentRecord,
   DeceptionEpisode,
   DeceptionPlanInput,
   EventEnvelope,
   EvidenceRecord,
-  InfluenceLink,
-  OutcomePrediction,
   OutcomeReconciliation,
   OutcomeReconciliationInput,
   Proposition,
@@ -23,13 +20,8 @@ import type {
   SocialActDeclaration,
   SocialActRecord,
   SocialCausalityProjection,
-  SocialCausalityState,
-  SocialDecisionRecord,
-  StrategyProfileSnapshot,
-  StrategySelection,
   VisibilityPolicy
 } from "./contracts";
-import { createShadowStrategyRecommendation } from "./strategy-selector";
 
 export const SOCIAL_CAUSALITY_SCHEMA_VERSION = 6;
 
@@ -58,44 +50,10 @@ export class SocialCausalityLedger {
   private readonly directedRelationships = new Map<string, DirectedRelationshipState>();
   private readonly relationshipDeltas: RelationshipDeltaRecord[] = [];
   private readonly commitments = new Map<string, CommitmentRecord>();
-  private readonly candidateIntents: CandidateIntent[] = [];
-  private readonly strategyProfileSnapshots = new Map<string, StrategyProfileSnapshot>();
-  private readonly activeStrategyProfileSnapshotIds = new Map<string, string>();
-  private readonly strategySelections: StrategySelection[] = [];
-  private readonly decisions: SocialDecisionRecord[] = [];
-  private readonly influenceLinks: InfluenceLink[] = [];
   private readonly outcomeReconciliations: OutcomeReconciliation[] = [];
   private readonly deceptions = new Map<string, DeceptionEpisode>();
 
   constructor(private readonly roomId: string) {}
-
-  recordStrategyProfileSnapshot(input: StrategyProfileSnapshot): StrategyProfileSnapshot {
-    if (!input.actorId || !input.characterId) throw new Error("STRATEGY_PROFILE_IDENTITY_REQUIRED: actorId and characterId are required.");
-    const existing = this.strategyProfileSnapshots.get(input.strategyProfileSnapshotId);
-    if (existing) {
-      if (existing.configurationHash !== input.configurationHash) {
-        throw new Error(`STRATEGY_PROFILE_HASH_COLLISION: '${input.strategyProfileSnapshotId}'.`);
-      }
-      this.activeStrategyProfileSnapshotIds.set(input.actorId, existing.strategyProfileSnapshotId);
-      return structuredClone(existing);
-    }
-    const envelope = this.append("agent-trace", "strategy-profile.snapshot-created", {
-      strategyProfileSnapshotId: input.strategyProfileSnapshotId,
-      configurationHash: input.configurationHash,
-      modelProfileId: input.modelConfig.modelProfileId,
-      strategyVersion: input.strategyVersion
-    }, {
-      actorId: input.actorId,
-      characterId: input.characterId,
-      visibility: { kind: "actors", actorIds: [input.actorId] }
-    });
-    const snapshot = structuredClone(input);
-    snapshot.createdAtLogical = envelope.logicalTime;
-    snapshot.createdAt = envelope.wallTime;
-    this.strategyProfileSnapshots.set(snapshot.strategyProfileSnapshotId, snapshot);
-    this.activeStrategyProfileSnapshotIds.set(snapshot.actorId, snapshot.strategyProfileSnapshotId);
-    return structuredClone(snapshot);
-  }
 
   recordRuntimeNotice(input: {
     actorId?: string;
@@ -181,7 +139,7 @@ export class SocialCausalityLedger {
    * already persisted. Acts cite the original `message.sent` envelope as their
    * source (no new domain event is minted) and never carry deception links —
    * an episode requires the planner's own tool call or detection evidence,
-   * never an extractor's guess (AGENTS.md §7.4).
+   * never an extractor's guess.
    */
   recordExtractedSocialActs(context: MessageContext): string[] {
     const { message, declarations, allActorIds, characterIdFor } = context;
@@ -320,138 +278,32 @@ export class SocialCausalityLedger {
     return [act.socialActId];
   }
 
+  /**
+   * Record a committed binding action as the `command.committed` domain event.
+   * The receipt is the stable commandId; the same receipt is later reconciled
+   * against the deterministic result via recordOutcomeReconciliation. The
+   * ledger deliberately records no candidate intents, strategy selections or
+   * decision records for an action: strategy auditing is not part of the
+   * social causality ledger.
+   */
   recordAction(input: {
     actorId: string;
     characterId: string;
     action: string;
-    payload: unknown;
     commit: WorldActionCommit;
-    observationThroughSequence: number;
     activationId?: string;
-    characterIdFor(actorId: string): string;
-  }): SocialDecisionRecord {
-    const committedMessageId = shortText(asRecord(input.commit.result).messageId, 160);
-    const observationRefs = this.recentVisibleEventIds(input.actorId, 12, (event) =>
-      event.sequence <= input.observationThroughSequence
-      && (!committedMessageId || shortText(asRecord(event.payload).messageId, 160) !== committedMessageId)
-    );
+  }): void {
     const receiptId = input.commit.commandId ?? `receipt-${randomUUID()}`;
-    const envelope = this.append("domain", "command.committed", {
+    this.append("domain", "command.committed", {
       action: input.action,
       receiptId,
       detail: input.commit.detail
     }, {
       actorId: input.actorId,
       characterId: input.characterId,
-      correlationId: input.activationId,
+      ...(input.activationId ? { correlationId: input.activationId } : {}),
       visibility: { kind: "actors", actorIds: [input.actorId] }
     });
-    const payload = asRecord(input.payload);
-    const evidenceRefs = this.visibleEvidenceRefs(input.characterId, stringArray(payload.referencedEvidenceIds));
-    const relevantBeliefIds = this.ownedBeliefRefs(input.characterId, stringArray(payload.referencedBeliefIds));
-    const relevantActorModelIds = this.ownedActorModelRefs(input.characterId, stringArray(payload.referencedActorModelIds));
-    const relevantRelationshipIds = this.ownedRelationshipRefs(input.characterId, stringArray(payload.referencedRelationshipIds));
-    const committedCommitmentId = shortText(asRecord(input.commit.result).commitmentId, 200);
-    const openCommitmentIds = this.visibleCommitmentRefs(input.actorId, [
-      ...stringArray(payload.referencedCommitmentIds),
-      ...(committedCommitmentId ? [committedCommitmentId] : [])
-    ]);
-    const activeDeceptionIds = this.ownedDeceptionRefs(input.actorId, stringArray(payload.referencedDeceptionIds));
-    const predictedConsequences = parseOutcomePredictions(payload.predictedConsequences);
-    const candidates = this.buildCandidateIntents({
-      actorId: input.actorId,
-      characterId: input.characterId,
-      action: input.action,
-      payload,
-      evidenceRefs,
-      relevantBeliefIds,
-      relevantActorModelIds,
-      logicalTime: envelope.logicalTime,
-      ...(input.activationId ? { activationId: input.activationId } : {}),
-      characterIdFor: input.characterIdFor
-    });
-    this.candidateIntents.push(...candidates);
-    const requestedIndex = integerInRange(payload.selectedIntentIndex, 0, candidates.length - 1);
-    const requested = candidates[requestedIndex ?? 0];
-    const selected = requested.possibleActions.some((possible) => possible.action === input.action)
-      ? requested
-      : candidates.find((candidate) => candidate.possibleActions.some((possible) => possible.action === input.action)) ?? requested;
-    const activeStrategyProfileSnapshotId = this.activeStrategyProfileSnapshotIds.get(input.actorId);
-    const shadowRecommendation = createShadowStrategyRecommendation({
-      candidates,
-      agentSelectedIntentId: selected.intentId,
-      ...(activeStrategyProfileSnapshotId
-        ? { strategyProfileSnapshot: this.strategyProfileSnapshots.get(activeStrategyProfileSnapshotId) }
-        : {})
-    });
-    const selection: StrategySelection = {
-      selectionId: `strategy-selection-${randomUUID()}`,
-      actorId: input.actorId,
-      characterId: input.characterId,
-      ...(input.activationId ? { activationId: input.activationId } : {}),
-      ...(activeStrategyProfileSnapshotId
-        ? { strategyProfileSnapshotId: activeStrategyProfileSnapshotId }
-        : {}),
-      candidateIntentIds: candidates.map((candidate) => candidate.intentId),
-      selectedIntentId: selected.intentId,
-      selector: Array.isArray(payload.candidateIntents) ? "agent" : "bounded-rule",
-      selectorVersion: "bounded-intent-v1",
-      evidenceRefs,
-      budget: { maxCandidates: 4, consideredCandidates: candidates.length },
-      ...(shadowRecommendation ? { shadowRecommendation } : {}),
-      logicalTime: envelope.logicalTime,
-      schemaVersion: 1
-    };
-    this.strategySelections.push(selection);
-    this.append("social", "strategy.selected", { selection, candidates }, {
-      actorId: input.actorId,
-      characterId: input.characterId,
-      causationId: envelope.eventId,
-      visibility: { kind: "actors", actorIds: [input.actorId] }
-    });
-    const record: SocialDecisionRecord = {
-      decisionId: `social-decision-${randomUUID()}`,
-      actorId: input.actorId,
-      characterId: input.characterId,
-      ...(input.activationId ? { activationId: input.activationId } : {}),
-      ...(selection.strategyProfileSnapshotId ? { strategyProfileSnapshotId: selection.strategyProfileSnapshotId } : {}),
-      logicalTime: envelope.logicalTime,
-      observationRefs,
-      evidenceRefs,
-      relevantBeliefIds,
-      relevantActorModelIds,
-      relevantRelationshipIds,
-      openCommitmentIds,
-      activeDeceptionIds,
-      candidateIntentIds: candidates.map((candidate) => candidate.intentId),
-      strategySelectionId: selection.selectionId,
-      selectedIntent: {
-        intentId: selected.intentId,
-        summary: selected.summary,
-        ...(selected.publicStrategy ? { publicStrategy: selected.publicStrategy } : {})
-      },
-      predictedConsequences,
-      action: input.action,
-      actionReceiptId: receiptId,
-      resultingEventIds: [envelope.eventId],
-      provenance: {
-        sourceKind: "agent-self-report",
-        sourceIds: [envelope.eventId, receiptId],
-        confidence: typeof payload.reason === "string" ? 0.9 : 0.5,
-        createdAtLogical: envelope.logicalTime,
-        schemaVersion: 1
-      }
-    };
-    this.decisions.push(record);
-    this.append("social", "decision.recorded", structuredClone(record), {
-      actorId: input.actorId,
-      characterId: input.characterId,
-      causationId: envelope.eventId,
-      visibility: { kind: "actors", actorIds: [input.actorId] }
-    });
-    this.linkCitedSources(record, input.action !== "make_commitment");
-    this.reconcileDeceptionDecision(record);
-    return structuredClone(record);
   }
 
   recordWorldLog(log: WorldLogEntry): void {
@@ -462,10 +314,6 @@ export class SocialCausalityLedger {
       turn: log.turn,
       phase: log.phase
     }, { visibility: { kind: "public" } });
-  }
-
-  observationCursor(): number {
-    return this.sequence;
   }
 
   recordAppraisalObservation(
@@ -777,8 +625,8 @@ export class SocialCausalityLedger {
 
   /**
    * Extracted action claims ("I will cooperate") by one character, for
-   * settlement-time reconciliation (§28 主张对账): the scenario compares each
-   * claim against the actual action and records support/contradiction.
+   * settlement-time reconciliation: the scenario compares each claim against
+   * the actual action and records support/contradiction.
    */
   extractedActionClaims(subjectCharacterId: string): Array<{ propositionId: string; object: string }> {
     const claims: Array<{ propositionId: string; object: string }> = [];
@@ -1466,67 +1314,38 @@ export class SocialCausalityLedger {
   recordOutcomeReconciliation(input: OutcomeReconciliationInput): OutcomeReconciliation {
     const existing = this.outcomeReconciliations.find((entry) => entry.actionReceiptId === input.actionReceiptId);
     if (existing) return structuredClone(existing);
-    // Preferred path: the command gateway recorded a DecisionRecord for this
-    // receipt (room-driven actions). Deterministic scenario settlements that
-    // bypass the gateway (tests, scripted rooms) still own their receipts, so
-    // a bounded world-fact decision is synthesized instead of failing the
-    // whole settlement — the reconciliation stays auditable either way.
-    let decision = this.decisions.find((entry) => entry.actionReceiptId === input.actionReceiptId);
-    if (!decision) decision = this.recordWorldFactDecision(input);
+    // The receipt comes straight from the caller (the stable commandId of the
+    // committed command). No decision record is consulted or synthesized —
+    // the ledger no longer keeps one. The actor identity is recovered from
+    // the original `command.committed` envelope when the command went through
+    // the gateway; deterministic settlements that bypass it fall back to a
+    // world-fact owner (same as the retired world-fact decision path).
+    const committed = [...this.events].reverse().find((event) =>
+      event.type === "command.committed" && asRecord(event.payload).receiptId === input.actionReceiptId
+    );
+    const actorId = committed?.actorId ?? "world";
+    const characterId = committed?.characterId ?? "world";
     const outcomeEvent = this.append("domain", "outcome.observed", structuredClone(input.actualOutcome), {
-      actorId: decision.actorId,
-      characterId: decision.characterId,
-      causationId: decision.resultingEventIds[0],
+      actorId,
+      characterId,
+      ...(committed ? { causationId: committed.eventId } : {}),
       correlationId: input.actionReceiptId,
-      visibility: { kind: "actors", actorIds: [decision.actorId] }
+      visibility: { kind: "actors", actorIds: [actorId] }
     });
-    const predictionAssessments = decision.predictedConsequences.flatMap((prediction) => {
-      const actual = input.actualFacts[prediction.outcomeKey];
-      if (actual === undefined) return [];
-      return [{
-        outcomeKey: prediction.outcomeKey,
-        predictedProbability: prediction.probability,
-        actual,
-        squaredError: (prediction.probability - (actual ? 1 : 0)) ** 2
-      }];
-    });
-    const propositionSettlements = decision.predictedConsequences.flatMap((prediction) => {
-      const actual = input.actualFacts[prediction.outcomeKey];
-      if (actual === undefined) return [];
-      const proposition = this.upsertProposition({
-        kind: "world-state",
-        subjectId: decision.characterId,
-        predicate: prediction.proposition,
-        truthStatus: actual ? "true" : "false",
-        groundTruthVisibility: "hidden-until-resolution",
-        sourceEventId: outcomeEvent.eventId
-      });
-      proposition.truthStatus = actual ? "true" : "false";
-      return [{ propositionId: proposition.propositionId, truthStatus: actual ? "true" as const : "false" as const }];
-    });
-    const influenceIds = this.influenceLinks
-      .filter((entry) => entry.decisionId === decision.decisionId)
-      .map((entry) => entry.influenceId);
-    const calibrationError = predictionAssessments.length
-      ? predictionAssessments.reduce((sum, entry) => sum + entry.squaredError, 0) / predictionAssessments.length
-      : undefined;
     const reconciliation: OutcomeReconciliation = {
       reconciliationId: `outcome-reconciliation-${randomUUID()}`,
-      decisionId: decision.decisionId,
-      actorId: decision.actorId,
-      characterId: decision.characterId,
-      actionReceiptId: decision.actionReceiptId,
-      predictedConsequences: structuredClone(decision.predictedConsequences),
+      actorId,
+      characterId,
+      actionReceiptId: input.actionReceiptId,
       actualOutcome: structuredClone(input.actualOutcome),
-      predictionAssessments,
-      propositionSettlements,
-      influenceIds,
-      ...(calibrationError === undefined ? {} : { calibrationError }),
+      // Predictions are gone with the decision records; settlements stay an
+      // (empty) schema-stable array until a deterministic claim source exists.
+      propositionSettlements: [],
       resultingEventIds: [...new Set([outcomeEvent.eventId, ...(input.resultingEventIds ?? [])])],
       logicalTime: this.sequence + 1,
       provenance: {
         sourceKind: "world-fact",
-        sourceIds: [decision.decisionId, decision.actionReceiptId, outcomeEvent.eventId, ...(input.resultingEventIds ?? [])],
+        sourceIds: [input.actionReceiptId, outcomeEvent.eventId, ...(input.resultingEventIds ?? [])],
         confidence: 1,
         createdAtLogical: this.sequence + 1,
         schemaVersion: 1
@@ -1534,64 +1353,16 @@ export class SocialCausalityLedger {
       schemaVersion: 1
     };
     const reconciliationEvent = this.append("social", "outcome.reconciled", structuredClone(reconciliation), {
-      actorId: decision.actorId,
-      characterId: decision.characterId,
+      actorId,
+      characterId,
       causationId: outcomeEvent.eventId,
       correlationId: input.actionReceiptId,
-      visibility: { kind: "actors", actorIds: [decision.actorId] }
+      visibility: { kind: "actors", actorIds: [actorId] }
     });
     reconciliation.resultingEventIds.push(reconciliationEvent.eventId);
     reconciliation.provenance.sourceIds.push(reconciliationEvent.eventId);
-    decision.outcomeReconciliationId = reconciliation.reconciliationId;
-    decision.resultingEventIds.push(...reconciliation.resultingEventIds);
     this.outcomeReconciliations.push(reconciliation);
     return structuredClone(reconciliation);
-  }
-
-  /**
-   * Bounded stand-in DecisionRecord for a receipt that never passed the
-   * command gateway. It cites only the world's own reconciliation inputs —
-   * no candidate intents, no strategy selection — so downstream UI can still
-   * join decision → reconciliation by `decisionId` without inventing agent
-   * cognition that did not happen.
-   */
-  private recordWorldFactDecision(input: OutcomeReconciliationInput): SocialDecisionRecord {
-    const envelope = this.append("domain", "decision.world-fact", {
-      actionReceiptId: input.actionReceiptId,
-      summary: input.actualOutcome.summary
-    }, {
-      correlationId: input.actionReceiptId,
-      visibility: { kind: "public" }
-    });
-    const record: SocialDecisionRecord = {
-      decisionId: `world-decision-${randomUUID()}`,
-      actorId: "world",
-      characterId: "world",
-      logicalTime: envelope.logicalTime,
-      observationRefs: [],
-      evidenceRefs: [],
-      relevantBeliefIds: [],
-      relevantActorModelIds: [],
-      relevantRelationshipIds: [],
-      openCommitmentIds: [],
-      activeDeceptionIds: [],
-      candidateIntentIds: [],
-      strategySelectionId: "world-fact",
-      selectedIntent: { intentId: "world-fact", summary: input.actualOutcome.summary },
-      predictedConsequences: [],
-      action: "world-settlement",
-      actionReceiptId: input.actionReceiptId,
-      resultingEventIds: [envelope.eventId],
-      provenance: {
-        sourceKind: "world-fact",
-        sourceIds: [envelope.eventId, input.actionReceiptId],
-        confidence: 1,
-        createdAtLogical: envelope.logicalTime,
-        schemaVersion: 1
-      }
-    };
-    this.decisions.push(record);
-    return record;
   }
 
   project(viewer: ViewerContext = {}): SocialCausalityProjection {
@@ -1631,12 +1402,7 @@ export class SocialCausalityLedger {
     }
     const commitments = [...this.commitments.values()].filter((entry) => entry.sourceEventIds.some((eventId) => eventIds.has(eventId)));
     for (const commitment of commitments) propositionIds.add(commitment.propositionId);
-    const decisions = this.decisions.filter((entry) => omniscient || entry.actorId === actorId);
-    const decisionIds = new Set(decisions.map((entry) => entry.decisionId));
-    const intentIds = new Set(decisions.flatMap((entry) => entry.candidateIntentIds));
-    const selectionIds = new Set(decisions.map((entry) => entry.strategySelectionId));
-    const strategyProfileSnapshotIds = new Set(decisions.flatMap((entry) => entry.strategyProfileSnapshotId ? [entry.strategyProfileSnapshotId] : []));
-    const outcomeReconciliations = this.outcomeReconciliations.filter((entry) => omniscient || decisionIds.has(entry.decisionId));
+    const outcomeReconciliations = this.outcomeReconciliations.filter((entry) => omniscient || entry.actorId === actorId);
     for (const reconciliation of outcomeReconciliations) {
       for (const settlement of reconciliation.propositionSettlements) propositionIds.add(settlement.propositionId);
     }
@@ -1666,16 +1432,6 @@ export class SocialCausalityLedger {
         .filter((entry) => omniscient || entry.ownerCharacterId === characterId)
         .map((entry) => structuredClone(entry)),
       commitments: structuredClone(commitments),
-      candidateIntents: this.candidateIntents.filter((entry) => omniscient || intentIds.has(entry.intentId)).map((entry) => structuredClone(entry)),
-      strategyProfileSnapshots: [...this.strategyProfileSnapshots.values()]
-        .filter((entry) => omniscient || strategyProfileSnapshotIds.has(entry.strategyProfileSnapshotId))
-        .map((entry) => structuredClone(entry)),
-      activeStrategyProfileSnapshotIds: omniscient || actorId
-        ? Object.fromEntries([...this.activeStrategyProfileSnapshotIds].filter(([entryActorId]) => omniscient || entryActorId === actorId))
-        : {},
-      strategySelections: this.strategySelections.filter((entry) => omniscient || selectionIds.has(entry.selectionId)).map((entry) => structuredClone(entry)),
-      decisions: structuredClone(decisions),
-      influenceLinks: this.influenceLinks.filter((entry) => omniscient || entry.targetCharacterId === characterId).map((entry) => structuredClone(entry)),
       outcomeReconciliations: structuredClone(outcomeReconciliations),
       deceptions: [...this.deceptions.values()].flatMap((entry): DeceptionEpisode[] => {
         if (omniscient) return [structuredClone(entry)];
@@ -1726,173 +1482,6 @@ export class SocialCausalityLedger {
         return [safe];
       })
     };
-  }
-
-  exportState(): SocialCausalityState {
-    return { roomId: this.roomId, ...this.project({ omniscient: true }) };
-  }
-
-  restoreState(state: SocialCausalityState | undefined): void {
-    if (!state) {
-      this.sequence = 0;
-      this.events.splice(0);
-      this.propositions.clear();
-      this.socialActs.splice(0);
-      this.evidence.splice(0);
-      this.beliefUpdates.splice(0);
-      this.actorModels.clear();
-      this.directedRelationships.clear();
-      this.relationshipDeltas.splice(0);
-      this.commitments.clear();
-      this.candidateIntents.splice(0);
-      this.strategyProfileSnapshots.clear();
-      this.activeStrategyProfileSnapshotIds.clear();
-      this.strategySelections.splice(0);
-      this.decisions.splice(0);
-      this.influenceLinks.splice(0);
-      this.outcomeReconciliations.splice(0);
-      this.deceptions.clear();
-      return;
-    }
-    if (state.schemaVersion !== 1 && state.schemaVersion !== 2 && state.schemaVersion !== 3 && state.schemaVersion !== 4 && state.schemaVersion !== 5 && state.schemaVersion !== SOCIAL_CAUSALITY_SCHEMA_VERSION) {
-      throw new Error(`SOCIAL_CAUSALITY_SCHEMA_UNSUPPORTED: ${state.schemaVersion}`);
-    }
-    if (state.roomId !== this.roomId) throw new Error(`SOCIAL_CAUSALITY_ROOM_MISMATCH: ${state.roomId}`);
-    this.sequence = state.lastSequence;
-    this.events.splice(0, this.events.length, ...structuredClone(state.events));
-    this.propositions.clear();
-    for (const proposition of state.propositions) this.propositions.set(proposition.propositionId, structuredClone(proposition));
-    this.socialActs.splice(0, this.socialActs.length, ...structuredClone(state.socialActs));
-    const normalizedEvidence = normalizePublicEvidence(state.evidence);
-    const remapEvidenceIds = (ids: string[]): string[] => remapUniqueIds(ids, normalizedEvidence.replacements);
-    this.evidence.splice(0, this.evidence.length, ...normalizedEvidence.evidence);
-    this.beliefUpdates.splice(0, this.beliefUpdates.length, ...structuredClone(state.beliefUpdates).map((update) => ({
-      ...update,
-      addedEvidenceIds: remapEvidenceIds(update.addedEvidenceIds),
-      removedEvidenceIds: remapEvidenceIds(update.removedEvidenceIds),
-      provenance: { ...update.provenance, sourceIds: remapEvidenceIds(update.provenance.sourceIds) }
-    })));
-    this.actorModels.clear();
-    for (const source of state.actorModels ?? []) {
-      const model = structuredClone(source);
-      model.evidenceIds = remapEvidenceIds(model.evidenceIds);
-      model.provenance.sourceIds = remapEvidenceIds(model.provenance.sourceIds);
-      this.actorModels.set(model.modelId, model);
-    }
-    this.directedRelationships.clear();
-    for (const source of state.directedRelationships ?? []) {
-      const relationship = structuredClone(source);
-      relationship.evidenceIds = remapEvidenceIds(relationship.evidenceIds);
-      relationship.provenance.sourceIds = remapEvidenceIds(relationship.provenance.sourceIds);
-      this.directedRelationships.set(relationship.relationshipId, relationship);
-    }
-    this.relationshipDeltas.splice(0, this.relationshipDeltas.length, ...structuredClone(state.relationshipDeltas ?? []).map((delta) => ({
-      ...delta,
-      evidenceIds: remapEvidenceIds(delta.evidenceIds),
-      provenance: { ...delta.provenance, sourceIds: remapEvidenceIds(delta.provenance.sourceIds) }
-    })));
-    this.commitments.clear();
-    for (const commitment of state.commitments ?? []) {
-      const restored = normalizeCommitmentRecord(commitment);
-      this.commitments.set(restored.commitmentId, restored);
-    }
-    this.candidateIntents.splice(0, this.candidateIntents.length, ...structuredClone(state.candidateIntents ?? []).map((intent) => ({
-      ...intent,
-      evidenceRefs: remapEvidenceIds(intent.evidenceRefs)
-    })));
-    this.strategyProfileSnapshots.clear();
-    for (const snapshot of state.strategyProfileSnapshots ?? []) {
-      this.strategyProfileSnapshots.set(snapshot.strategyProfileSnapshotId, structuredClone(snapshot));
-    }
-    this.activeStrategyProfileSnapshotIds.clear();
-    for (const [actorId, snapshotId] of Object.entries(state.activeStrategyProfileSnapshotIds ?? {})) {
-      if (this.strategyProfileSnapshots.has(snapshotId)) this.activeStrategyProfileSnapshotIds.set(actorId, snapshotId);
-    }
-    this.strategySelections.splice(0, this.strategySelections.length, ...structuredClone(state.strategySelections ?? []).map((selection) => ({
-      ...selection,
-      evidenceRefs: remapEvidenceIds(selection.evidenceRefs)
-    })));
-    const restoredDecisions = (state.decisions ?? []).map(normalizeDecisionRecord).map((decision) => ({
-      ...decision,
-      evidenceRefs: remapEvidenceIds(decision.evidenceRefs)
-    }));
-    for (const decision of restoredDecisions) {
-      // World-fact decisions (scenario settlements that never passed the
-      // command gateway) carry no agent cognition, so restoring must not
-      // synthesize candidate intents or strategy selections for them — the
-      // restored ledger would diverge from the exported one.
-      if (decision.actorId !== "world") {
-      if (!this.candidateIntents.some((entry) => entry.intentId === decision.selectedIntent.intentId)) {
-        this.candidateIntents.push({
-          intentId: decision.selectedIntent.intentId,
-          actorId: decision.actorId,
-          characterId: decision.characterId,
-          ...(decision.activationId ? { activationId: decision.activationId } : {}),
-          goal: "Restore a legacy recorded action",
-          summary: decision.selectedIntent.summary,
-          possibleActions: [{ action: decision.action }],
-          predictedResponses: [],
-          evidenceRefs: decision.evidenceRefs,
-          beliefRefs: decision.relevantBeliefIds,
-          actorModelRefs: decision.relevantActorModelIds,
-          source: "bounded-rule",
-          logicalTime: decision.logicalTime,
-          schemaVersion: 1
-        });
-      }
-      if (!this.strategySelections.some((entry) => entry.selectionId === decision.strategySelectionId)) {
-        this.strategySelections.push({
-          selectionId: decision.strategySelectionId,
-          actorId: decision.actorId,
-          characterId: decision.characterId,
-          ...(decision.activationId ? { activationId: decision.activationId } : {}),
-          ...(decision.strategyProfileSnapshotId ? { strategyProfileSnapshotId: decision.strategyProfileSnapshotId } : {}),
-          candidateIntentIds: decision.candidateIntentIds,
-          selectedIntentId: decision.selectedIntent.intentId,
-          selector: "bounded-rule",
-          selectorVersion: "legacy-migration-v1",
-          evidenceRefs: decision.evidenceRefs,
-          budget: { maxCandidates: 1, consideredCandidates: 1 },
-          logicalTime: decision.logicalTime,
-          schemaVersion: 1
-        });
-      }
-      }
-    }
-    this.decisions.splice(0, this.decisions.length, ...structuredClone(restoredDecisions));
-    this.influenceLinks.splice(0, this.influenceLinks.length, ...structuredClone(state.influenceLinks ?? []));
-    this.outcomeReconciliations.splice(0, this.outcomeReconciliations.length, ...structuredClone(state.outcomeReconciliations ?? []).map((reconciliation) => ({
-      ...reconciliation,
-      provenance: {
-        ...reconciliation.provenance,
-        sourceIds: remapEvidenceIds(reconciliation.provenance.sourceIds)
-      }
-    })));
-    this.deceptions.clear();
-    for (const deception of state.deceptions) {
-      const restored = structuredClone(deception);
-      restored.targetAudienceCharacterIds = Array.isArray(restored.targetAudienceCharacterIds)
-        ? restored.targetAudienceCharacterIds
-        : [];
-      restored.receivedByCharacterIds = Array.isArray(restored.receivedByCharacterIds)
-        ? restored.receivedByCharacterIds
-        : [];
-      restored.believedByCharacterIds = Array.isArray(restored.believedByCharacterIds)
-        ? restored.believedByCharacterIds
-        : [];
-      restored.rejectedByCharacterIds = Array.isArray(restored.rejectedByCharacterIds)
-        ? restored.rejectedByCharacterIds
-        : [];
-      restored.detectedByCharacterIds = Array.isArray(restored.detectedByCharacterIds)
-        ? restored.detectedByCharacterIds
-        : [];
-      restored.repairMessageIds = Array.isArray(restored.repairMessageIds) ? restored.repairMessageIds : [];
-      restored.repairAcceptedByCharacterIds = Array.isArray(restored.repairAcceptedByCharacterIds)
-        ? restored.repairAcceptedByCharacterIds
-        : [];
-      restored.schemaVersion = Math.max(3, restored.schemaVersion ?? 1);
-      this.deceptions.set(restored.deceptionId, restored);
-    }
   }
 
   private append<T>(stream: EventEnvelope["stream"], type: string, payload: T, options: {
@@ -2223,7 +1812,7 @@ export class SocialCausalityLedger {
       if (!episode.consequenceEventIds.includes(detection.eventId)) episode.consequenceEventIds.push(detection.eventId);
     }
 
-    // Planless self-identity lies (AGENTS.md §28): an extracted team claim by
+    // Planless self-identity lies: an extracted team claim by
     // the revealed player themself that the reveal proves false IS the
     // detection evidence — the episode is born detected, citing the claim's
     // message and the reveal event. Claims about OTHERS stay neutral (an
@@ -2352,220 +1941,6 @@ export class SocialCausalityLedger {
     }
   }
 
-  private buildCandidateIntents(input: {
-    actorId: string;
-    characterId: string;
-    action: string;
-    payload: Record<string, unknown>;
-    evidenceRefs: string[];
-    relevantBeliefIds: string[];
-    relevantActorModelIds: string[];
-    logicalTime: number;
-    activationId?: string;
-    characterIdFor(actorId: string): string;
-  }): CandidateIntent[] {
-    const rawCandidates = Array.isArray(input.payload.candidateIntents)
-      ? input.payload.candidateIntents.map(asRecord).slice(0, 4)
-      : [];
-    const candidates = rawCandidates.flatMap((raw): CandidateIntent[] => {
-      const summary = shortText(raw.summary, 600);
-      const goal = shortText(raw.goal, 400);
-      const action = shortText(raw.action, 120);
-      if (!summary || !goal || !action) return [];
-      const predictedResponses = Array.isArray(raw.predictedResponses)
-        ? raw.predictedResponses.map(asRecord).flatMap((response) => {
-            const targetActorId = shortText(response.targetActorId, 160);
-            const description = shortText(response.response, 500);
-            if (!targetActorId || !description) return [];
-            let targetCharacterId: string;
-            try {
-              targetCharacterId = input.characterIdFor(targetActorId);
-            } catch {
-              return [];
-            }
-            return [{ targetCharacterId, response: description, probability: clamp01(numberOr(response.probability, 0.5)) }];
-          }).slice(0, 6)
-        : [];
-      const expectedUtility = optionalFinite(raw.expectedUtility);
-      const exposureRisk = optionalFinite(raw.exposureRisk);
-      const relationshipRisk = optionalFinite(raw.relationshipRisk);
-      return [{
-        intentId: `candidate-intent-${randomUUID()}`,
-        actorId: input.actorId,
-        characterId: input.characterId,
-        ...(input.activationId ? { activationId: input.activationId } : {}),
-        goal,
-        summary,
-        ...(shortText(raw.publicStrategy, 500) ? { publicStrategy: shortText(raw.publicStrategy, 500) } : {}),
-        possibleActions: [{ action, ...(shortText(raw.payloadSummary, 300) ? { payloadSummary: shortText(raw.payloadSummary, 300) } : {}) }],
-        ...(expectedUtility === undefined ? {} : { expectedUtility }),
-        ...(exposureRisk === undefined ? {} : { exposureRisk: clamp01(exposureRisk) }),
-        ...(relationshipRisk === undefined ? {} : { relationshipRisk: clamp01(relationshipRisk) }),
-        predictedResponses,
-        evidenceRefs: input.evidenceRefs,
-        beliefRefs: input.relevantBeliefIds,
-        actorModelRefs: input.relevantActorModelIds,
-        source: "agent-self-report",
-        logicalTime: input.logicalTime,
-        schemaVersion: 1
-      }];
-    });
-    if (!candidates.some((candidate) => candidate.possibleActions.some((action) => action.action === input.action))) {
-      const fallback = this.fallbackCandidateIntent(input);
-      if (candidates.length >= 4) candidates[candidates.length - 1] = fallback;
-      else candidates.push(fallback);
-    }
-    return candidates.length ? candidates : [this.fallbackCandidateIntent(input)];
-  }
-
-  private fallbackCandidateIntent(input: {
-    actorId: string;
-    characterId: string;
-    action: string;
-    payload: Record<string, unknown>;
-    evidenceRefs: string[];
-    relevantBeliefIds: string[];
-    relevantActorModelIds: string[];
-    logicalTime: number;
-    activationId?: string;
-  }): CandidateIntent {
-    const reason = shortText(input.payload.reason, 600);
-    return {
-      intentId: `candidate-intent-${randomUUID()}`,
-      actorId: input.actorId,
-      characterId: input.characterId,
-      ...(input.activationId ? { activationId: input.activationId } : {}),
-      goal: "Complete the current legal action",
-      summary: reason || input.action,
-      possibleActions: [{ action: input.action, ...(payloadSummary(input.payload) ? { payloadSummary: payloadSummary(input.payload) } : {}) }],
-      predictedResponses: [],
-      evidenceRefs: input.evidenceRefs,
-      beliefRefs: input.relevantBeliefIds,
-      actorModelRefs: input.relevantActorModelIds,
-      source: "bounded-rule",
-      logicalTime: input.logicalTime,
-      schemaVersion: 1
-    };
-  }
-
-  private visibleEvidenceRefs(ownerCharacterId: string, refs: string[]): string[] {
-    return [...new Set(refs)].filter((id) => this.evidence.some((entry) =>
-      entry.evidenceId === id && (entry.observerCharacterId === ownerCharacterId || entry.visibility === "public")
-    ));
-  }
-
-  private ownedBeliefRefs(ownerCharacterId: string, refs: string[]): string[] {
-    return [...new Set(refs)].filter((id) => this.beliefUpdates.some((entry) =>
-      entry.beliefId === id && entry.ownerCharacterId === ownerCharacterId
-    ));
-  }
-
-  private ownedActorModelRefs(ownerCharacterId: string, refs: string[]): string[] {
-    return [...new Set(refs)].filter((id) => this.actorModels.get(id)?.ownerCharacterId === ownerCharacterId);
-  }
-
-  private ownedRelationshipRefs(ownerCharacterId: string, refs: string[]): string[] {
-    return [...new Set(refs)].filter((id) => this.directedRelationships.get(id)?.ownerCharacterId === ownerCharacterId);
-  }
-
-  private visibleCommitmentRefs(actorId: string, refs: string[]): string[] {
-    return [...new Set(refs)].filter((id) => {
-      const commitment = this.commitments.get(id);
-      return Boolean(commitment && (commitment.promisorActorId === actorId || commitment.audienceActorIds.includes(actorId)));
-    });
-  }
-
-  private ownedDeceptionRefs(actorId: string, refs: string[]): string[] {
-    return [...new Set(refs)].filter((id) => this.deceptions.get(id)?.deceiverActorId === actorId);
-  }
-
-  private linkCitedSources(decision: SocialDecisionRecord, includeCommitments: boolean): void {
-    if (includeCommitments) {
-      for (const commitmentId of decision.openCommitmentIds) {
-        const commitment = this.commitments.get(commitmentId);
-        const sourceEventId = commitment?.sourceEventIds[0];
-        if (!sourceEventId) continue;
-        this.appendInfluenceLink({
-          sourceEventId,
-          targetCharacterId: decision.characterId,
-          beliefUpdateIds: [],
-          decision,
-          confidence: 1,
-          basis: "direct-commitment-reference"
-        });
-      }
-    }
-    for (const evidenceId of decision.evidenceRefs) {
-      const evidence = this.evidence.find((entry) => entry.evidenceId === evidenceId);
-      if (!evidence?.sourceEventId) continue;
-      this.appendInfluenceLink({
-        sourceEventId: evidence.sourceEventId,
-        targetCharacterId: decision.characterId,
-        beliefUpdateIds: this.beliefUpdates
-          .filter((entry) => entry.ownerCharacterId === decision.characterId && entry.addedEvidenceIds.includes(evidenceId))
-          .map((entry) => entry.beliefUpdateId),
-        decision,
-        confidence: 0.9,
-        basis: "agent-cited"
-      });
-    }
-  }
-
-  private appendInfluenceLink(input: {
-    sourceEventId: string;
-    targetCharacterId: string;
-    beliefUpdateIds: string[];
-    decision: SocialDecisionRecord;
-    confidence: number;
-    basis: InfluenceLink["basis"];
-  }): InfluenceLink {
-    const link: InfluenceLink = {
-      influenceId: `influence-${randomUUID()}`,
-      sourceEventId: input.sourceEventId,
-      targetCharacterId: input.targetCharacterId,
-      beliefUpdateIds: [...new Set(input.beliefUpdateIds)],
-      decisionId: input.decision.decisionId,
-      resultingActionReceiptId: input.decision.actionReceiptId,
-      confidence: clamp01(input.confidence),
-      basis: input.basis,
-      logicalTime: this.sequence + 1,
-      schemaVersion: 1
-    };
-    this.influenceLinks.push(link);
-    this.append("social", "influence.linked", structuredClone(link), {
-      actorId: input.decision.actorId,
-      characterId: input.decision.characterId,
-      causationId: input.sourceEventId,
-      correlationId: input.decision.actionReceiptId,
-      visibility: { kind: "actors", actorIds: [input.decision.actorId] }
-    });
-    return link;
-  }
-
-  private reconcileDeceptionDecision(decision: SocialDecisionRecord): void {
-    const beliefPropositionIds = new Set(this.beliefUpdates
-      .filter((entry) => decision.relevantBeliefIds.includes(entry.beliefId) && entry.ownerCharacterId === decision.characterId)
-      .map((entry) => entry.propositionId));
-    for (const episode of this.deceptions.values()) {
-      if (!episode.targetAudienceIds.includes(decision.actorId)) continue;
-      if (!episode.intendedFalseBeliefIds.some((id) => beliefPropositionIds.has(id))) continue;
-      if (!episode.inducedDecisionIds.includes(decision.decisionId)) episode.inducedDecisionIds.push(decision.decisionId);
-      if (!episode.inducedActionReceiptIds.includes(decision.actionReceiptId)) episode.inducedActionReceiptIds.push(decision.actionReceiptId);
-      advanceDeceptionStatus(episode, "behaviorally-effective");
-      const consequenceEventId = decision.resultingEventIds[0];
-      if (consequenceEventId && !episode.consequenceEventIds.includes(consequenceEventId)) {
-        episode.consequenceEventIds.push(consequenceEventId);
-      }
-    }
-  }
-
-  private recentVisibleEventIds(actorId: string, limit: number, predicate?: (event: EventEnvelope) => boolean): string[] {
-    return this.events
-      .filter((event) => this.canView(event.visibility, { actorId }) && (predicate?.(event) ?? true))
-      .slice(-limit)
-      .map((event) => event.eventId);
-  }
-
   private canView(visibility: VisibilityPolicy, viewer: ViewerContext): boolean {
     if (viewer.omniscient) return true;
     if (visibility.kind === "public") return true;
@@ -2644,138 +2019,8 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string").slice(0, 20) : [];
-}
-
 function shortText(value: unknown, maxLength: number): string {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
-}
-
-function optionalFinite(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function numberOr(value: unknown, fallback: number): number {
-  return optionalFinite(value) ?? fallback;
-}
-
-function integerInRange(value: unknown, min: number, max: number): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max ? value : undefined;
-}
-
-function payloadSummary(payload: Record<string, unknown>): string {
-  const safeKeys = ["amount", "choice", "targetId", "actionType"];
-  const values = safeKeys.flatMap((key) => {
-    const value = payload[key];
-    return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
-      ? [`${key}=${String(value)}`]
-      : [];
-  });
-  return values.join(", ").slice(0, 300);
-}
-
-function parseOutcomePredictions(value: unknown): OutcomePrediction[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  return value.map(asRecord).flatMap((entry): OutcomePrediction[] => {
-    const outcomeKey = shortText(entry.outcomeKey, 120);
-    const proposition = shortText(entry.proposition, 500);
-    const probability = optionalFinite(entry.probability);
-    const horizon = entry.horizon;
-    if (
-      !outcomeKey || !proposition || probability === undefined || seen.has(outcomeKey) ||
-      (horizon !== "immediate" && horizon !== "round" && horizon !== "game" && horizon !== "future-game")
-    ) return [];
-    seen.add(outcomeKey);
-    return [{ outcomeKey, proposition, probability: clamp01(probability), horizon }];
-  }).slice(0, 8);
-}
-
-function normalizeDecisionRecord(value: SocialDecisionRecord): SocialDecisionRecord {
-  const legacy = value as SocialDecisionRecord & {
-    selectedIntent?: { intentId?: string; summary?: string; publicStrategy?: string };
-    candidateIntentIds?: string[];
-    strategySelectionId?: string;
-    relevantActorModelIds?: string[];
-    predictedConsequences?: OutcomePrediction[];
-    resultingEventIds?: string[];
-    strategyProfileSnapshotId?: string;
-  };
-  const intentId = legacy.selectedIntent?.intentId ?? `legacy-intent:${legacy.decisionId}`;
-  const summary = legacy.selectedIntent?.summary?.trim() || legacy.action;
-  const isWorldFact = legacy.actorId === "world";
-  return {
-    ...structuredClone(value),
-    observationRefs: [...(legacy.observationRefs ?? [])],
-    evidenceRefs: [...(legacy.evidenceRefs ?? [])],
-    relevantBeliefIds: [...(legacy.relevantBeliefIds ?? [])],
-    relevantActorModelIds: [...(legacy.relevantActorModelIds ?? [])],
-    relevantRelationshipIds: [...(legacy.relevantRelationshipIds ?? [])],
-    openCommitmentIds: [...(legacy.openCommitmentIds ?? [])],
-    activeDeceptionIds: [...(legacy.activeDeceptionIds ?? [])],
-    candidateIntentIds: isWorldFact
-      ? []
-      : legacy.candidateIntentIds?.length
-        ? [...legacy.candidateIntentIds]
-        : [intentId],
-    strategySelectionId: legacy.strategySelectionId ?? `legacy-selection:${legacy.decisionId}`,
-    ...(legacy.strategyProfileSnapshotId ? { strategyProfileSnapshotId: legacy.strategyProfileSnapshotId } : {}),
-    selectedIntent: {
-      intentId,
-      summary,
-      ...(legacy.selectedIntent?.publicStrategy ? { publicStrategy: legacy.selectedIntent.publicStrategy } : {})
-    },
-    predictedConsequences: structuredClone(legacy.predictedConsequences ?? []),
-    resultingEventIds: [...(legacy.resultingEventIds ?? [])]
-  };
-}
-
-function normalizeCommitmentRecord(value: CommitmentRecord): CommitmentRecord {
-  const legacy = value as CommitmentRecord & {
-    acceptedByActorIds?: string[];
-    acceptedByCommandIds?: string[];
-  };
-  return {
-    ...structuredClone(value),
-    acceptedByActorIds: [...(legacy.acceptedByActorIds ?? [])],
-    acceptedByCommandIds: [...(legacy.acceptedByCommandIds ?? [])]
-  };
-}
-
-function normalizePublicEvidence(source: EvidenceRecord[]): {
-  evidence: EvidenceRecord[];
-  replacements: Map<string, string>;
-} {
-  const evidence: EvidenceRecord[] = [];
-  const replacements = new Map<string, string>();
-  const canonicalBySource = new Map<string, EvidenceRecord>();
-  for (const sourceRecord of structuredClone(source)) {
-    if (sourceRecord.visibility !== "public") {
-      evidence.push(sourceRecord);
-      continue;
-    }
-    const key = stableJson({
-      propositionId: sourceRecord.propositionId,
-      sourceEventId: sourceRecord.sourceEventId,
-      sourceMessageId: sourceRecord.sourceMessageId,
-      sourceType: sourceRecord.sourceType,
-      supports: sourceRecord.supports
-    });
-    const canonical = canonicalBySource.get(key);
-    if (canonical) {
-      replacements.set(sourceRecord.evidenceId, canonical.evidenceId);
-      continue;
-    }
-    sourceRecord.observerCharacterId = "public";
-    canonicalBySource.set(key, sourceRecord);
-    evidence.push(sourceRecord);
-  }
-  return { evidence, replacements };
-}
-
-function remapUniqueIds(ids: string[], replacements: Map<string, string>): string[] {
-  return [...new Set(ids.map((id) => replacements.get(id) ?? id))];
 }
 
 function stableJson(value: unknown): string {

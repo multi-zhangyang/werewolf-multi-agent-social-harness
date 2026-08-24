@@ -1,4 +1,3 @@
-import { z } from "zod";
 import { setSensitiveDataLoggingEnabled } from "@openai/agents";
 import type { SocialCausalityProjection } from "./contracts";
 
@@ -8,12 +7,6 @@ import type { SocialCausalityProjection } from "./contracts";
 // boundary for logs and UI; enabling SDK error details only enriches the
 // retry hint the model receives.
 setSensitiveDataLoggingEnabled(true);
-
-const predictedResponseSchema = z.object({
-  targetActorId: z.string().min(1).max(160),
-  response: z.string().min(1).max(500),
-  probability: z.number().min(0).max(1)
-}).strict();
 
 /**
  * Parse-time validation feedback for Society tools. The SDK default reports a
@@ -33,35 +26,6 @@ export function toolArgumentFeedback(toolName: string): (context: unknown, error
     }
     const details = error instanceof Error ? error.toString() : String(error);
     return `An error occurred while running the tool. Please try again. Error: ${details.slice(0, 600)}`;
-  };
-}
-
-export function createStrategyActionShape<T extends z.ZodRawShape>(
-  actionShape: T,
-  outcomeKeys: readonly [string, ...string[]]
-) {
-  return {
-    referencedEvidenceIds: z.array(z.string().min(1).max(160)).max(8).default([]),
-    referencedBeliefIds: z.array(z.string().min(1).max(160)).max(6).default([]),
-    referencedActorModelIds: z.array(z.string().min(1).max(160)).max(4).default([]),
-    referencedRelationshipIds: z.array(z.string().min(1).max(160)).max(4).default([]),
-    candidateIntents: z.array(z.object({
-      goal: z.string().min(1).max(400),
-      summary: z.string().min(1).max(600),
-      publicStrategy: z.string().min(1).max(500).nullable().default(null),
-      expectedUtility: z.number().min(-100).max(100).nullable().default(null),
-      exposureRisk: z.number().min(0).max(1),
-      relationshipRisk: z.number().min(0).max(1),
-      predictedResponses: z.array(predictedResponseSchema).max(4).default([]),
-      ...actionShape
-    }).strict()).min(2).max(4),
-    selectedIntentIndex: z.number().int().min(0).max(3),
-    predictedConsequences: z.array(z.object({
-      outcomeKey: z.enum(outcomeKeys),
-      proposition: z.string().min(1).max(500),
-      probability: z.number().min(0).max(1),
-      horizon: z.enum(["immediate", "round", "game", "future-game"]).default("round")
-    }).strict()).min(1).max(6)
   };
 }
 

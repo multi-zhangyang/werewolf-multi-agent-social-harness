@@ -17,7 +17,7 @@ import type {
 import { scopedContext, SocialWorldBase } from "../world";
 import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
-import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import { socialReferenceContext } from "../social/context-refs";
 import type { SocialActDeclaration } from "../social/contracts";
 
 type Phase = "discussion" | "demand";
@@ -65,7 +65,7 @@ export class NegotiationWorld extends SocialWorldBase {
   }
 
   /**
-   * Sidecar extraction hints (§19): claim statements ("我至少要 7")
+   * Sidecar extraction hints: claim statements ("我至少要 7")
    * become `claimed-action` propositions reconciled against the sealed
    * demand at settlement.
    */
@@ -78,57 +78,7 @@ export class NegotiationWorld extends SocialWorldBase {
     ].join("\n");
   }
 
-  protected exportWorldState(): unknown {
-    return {
-      schemaVersion: NEGOTIATION_STATE_SCHEMA_VERSION,
-      round: this.round,
-      phase: this.phase,
-      scores: this.mapEntries(this.scores),
-      outsideOptions: this.mapEntries(this.outsideOptions),
-      demands: this.mapEntries(this.demands),
-      demandCommandIds: this.mapEntries(this.demandCommandIds),
-      offers: structuredClone(this.offers),
-      commitments: structuredClone(this.commitments),
-      history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences),
-      discussion: this.discussion ? this.discussion.exportState() : null
-    };
-  }
 
-  protected restoreWorldState(state: unknown): void {
-    const s = state as Partial<{
-      schemaVersion: number;
-      round: number; phase: string; scores: Array<[string, number]>; outsideOptions: Array<[string, number]>;
-      demands: Array<[string, number]>; demandCommandIds: Array<[string, string]>;
-      offers: NegotiationOffer[]; commitments: Commitment[];
-      history: RoundResult[]; lastExperiences: Array<[string, string]>; discussion: unknown;
-    }> | undefined;
-    if (!s) return;
-    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== NEGOTIATION_STATE_SCHEMA_VERSION) {
-      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: negotiation-game ${s.schemaVersion}`);
-    }
-    this.round = Number(s.round ?? 1);
-    this.phase = (s.phase ?? "discussion") as Phase;
-    this.fillMap(this.scores, s.scores);
-    this.fillMap(this.outsideOptions, s.outsideOptions);
-    this.fillMap(this.demands, s.demands);
-    this.fillMap(this.demandCommandIds, s.demandCommandIds);
-    this.offers.length = 0;
-    this.offers.push(...structuredClone(s.offers ?? []));
-    this.commitments.length = 0;
-    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
-    this.history.length = 0;
-    this.history.push(...structuredClone(s.history ?? []));
-    this.fillMap(this.lastExperiences, s.lastExperiences);
-    if (s.discussion) {
-      this.discussion = this.createDiscussion();
-      this.discussion.restoreState(s.discussion);
-    } else {
-      // Mirror the live lifecycle: the director is nulled when the waves run
-      // out (activation() line ~484) and recreated at the next round.
-      this.discussion = null;
-    }
-  }
 
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
@@ -190,92 +140,46 @@ export class NegotiationWorld extends SocialWorldBase {
     this.requireProfile(actorId);
     const makeOffer = tool({
       name: "make_offer",
-      description: "Compare bounded split proposals, then submit one typed offer to the other participant. The offer is not an agreement until the named recipient explicitly accepts it.",
+      description: "Submit one typed offer to the other participant. The offer is not an agreement until the named recipient explicitly accepts it.",
       parameters: z.object({
         recipientId: z.string().min(1).max(160),
         proposerDemand: z.number().int().min(0).max(10),
         recipientDemand: z.number().int().min(0).max(10),
-        message: z.string().min(1).max(500),
-        ...createStrategyActionShape({
-          recipientId: z.string().min(1).max(160),
-          proposerDemand: z.number().int().min(0).max(10),
-          recipientDemand: z.number().int().min(0).max(10)
-        }, NEGOTIATION_OFFER_OUTCOME_KEYS)
+        message: z.string().min(1).max(500)
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected
-          || selected.recipientId !== input.recipientId
-          || selected.proposerDemand !== input.proposerDemand
-          || selected.recipientDemand !== input.recipientDemand) {
-          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected split must equal the binding offer.");
-        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "make_offer", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({
-            ...candidate,
-            action: "make_offer",
-            payloadSummary: `recipientId=${candidate.recipientId}; proposerDemand=${candidate.proposerDemand}; recipientDemand=${candidate.recipientDemand}`
-          }))
-        });
+        const commit = await this.performAction(actorId, "make_offer", input);
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
     });
     const respondToOffer = tool({
       name: "respond_to_offer",
-      description: "Compare bounded responses, then explicitly accept or reject a typed offer addressed to you. Acceptance creates mutual demand commitments; rejection creates no alliance, promise, or transaction.",
+      description: "Explicitly accept or reject a typed offer addressed to you. Acceptance creates mutual demand commitments; rejection creates no alliance, promise, or transaction.",
       parameters: z.object({
         offerId: z.string().min(1).max(200),
         response: z.enum(["accept", "reject"]),
-        reason: z.string().min(1).max(500),
-        ...createStrategyActionShape({
-          offerId: z.string().min(1).max(200),
-          response: z.enum(["accept", "reject"])
-        }, NEGOTIATION_OFFER_OUTCOME_KEYS)
+        reason: z.string().min(1).max(500)
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.offerId !== input.offerId || selected.response !== input.response) {
-          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected response must equal the binding response.");
-        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "respond_to_offer", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({
-            ...candidate,
-            action: "respond_to_offer",
-            payloadSummary: `offerId=${candidate.offerId}; response=${candidate.response}`
-          }))
-        });
+        const commit = await this.performAction(actorId, "respond_to_offer", input);
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
     });
     const submitDemand = tool({
       name: "submit_demand",
-      description: "Compare bounded demand intents, predict the public transaction result, then submit one sealed binding claim. Accepted offers remain social commitments but do not bypass the typed demand.",
+      description: "Submit one sealed binding claim from 0 to 10. Accepted offers remain social commitments but do not bypass the typed demand.",
       parameters: z.object({
         demand: z.number().int().min(0).max(10),
         reason: z.string().min(1).max(2_000),
-        referencedCommitmentIds: z.array(z.string().min(1).max(200)).max(4).default([]),
-        ...createStrategyActionShape({ demand: z.number().int().min(0).max(10) }, NEGOTIATION_OUTCOME_KEYS)
+        referencedCommitmentIds: z.array(z.string().min(1).max(200)).max(4).default([])
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.demand !== input.demand) {
-          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected demand must equal the binding demand.");
-        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "submit_demand", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({
-            ...candidate,
-            action: "submit_demand",
-            payloadSummary: `demand=${candidate.demand}`
-          }))
-        });
+        const commit = await this.performAction(actorId, "submit_demand", input);
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -506,7 +410,7 @@ export class NegotiationWorld extends SocialWorldBase {
       label: `第 ${this.round} 轮叫价`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => "Review accepted offers, beliefs, actor models, and your private outside option. Call submit_demand exactly once with bounded candidates and public-result predictions; text cannot substitute for the tool call."
+      instructionFor: () => "Review accepted offers, beliefs, actor models, and your private outside option. Call submit_demand exactly once; text cannot substitute for the tool call."
     };
   }
 
@@ -635,7 +539,7 @@ export class NegotiationWorld extends SocialWorldBase {
       object: { demands: result.demands, payoffs, agreed },
       payload: { round: this.round, demands: result.demands, payoffs, agreed }
     });
-    // §28 主张对账: reconcile extracted demand claims ("我至少要 7")
+    // 主张对账: reconcile extracted demand claims ("我至少要 7")
     // against the sealed demand.
     for (const id of ids) {
       const actualDemand = result.demands[id];
@@ -668,8 +572,10 @@ export class NegotiationWorld extends SocialWorldBase {
       });
       const commandId = this.demandCommandIds.get(id);
       if (!commandId) continue;
-      const decision = this.socialCausalityFor(id).decisions.find((entry) => entry.actionReceiptId === commandId);
-      const citedCommitments = acceptedCommitments.filter((entry) => decision?.openCommitmentIds.includes(entry.commitmentId));
+      // The social ledger no longer records per-receipt decision records, so
+      // the actor's cited commitments are no longer tracked at settlement
+      // time; the citation fact stays unasserted in the reconciliation input.
+      const citedCommitments: Commitment[] = [];
       const outsideOption = result.outsideOptions[id];
       this.reconcileSocialOutcome({
         actionReceiptId: commandId,
@@ -696,7 +602,7 @@ export class NegotiationWorld extends SocialWorldBase {
         resultingEventIds: [publicResult.eventId],
       });
     }
-    // P0-09: a deal is an agreement, not an alliance; a failed deal is a
+    // A deal is an agreement, not an alliance; a failed deal is a
     // negotiation failure, not a mistake.
     const anyViolated = acceptedCommitments.some((entry) => entry.state === "violated");
     const allFulfilled = acceptedCommitments.length > 0 && acceptedCommitments.every((entry) => entry.state === "fulfilled");
@@ -790,10 +696,10 @@ export class NegotiationWorld extends SocialWorldBase {
     resultingEventIds: string[];
     perspective: "proposer" | "recipient";
   }): void {
-    const hasDecision = this.socialCausalityFor(input.actorId).decisions.some(
-      (decision) => decision.actionReceiptId === input.commandId
+    const committed = this.socialCausalityFor(input.actorId).events.some((event) =>
+      event.type === "command.committed" && (event.payload as { receiptId?: unknown }).receiptId === input.commandId
     );
-    if (!hasDecision) return;
+    if (!committed) return;
     const actorDemand = input.result.demands[input.actorId];
     const actorPayoff = input.result.payoffs[input.actorId];
     const responseSummary = input.offer.state === "expired"
@@ -850,22 +756,4 @@ interface NegotiationOffer {
   state: "proposed" | "accepted" | "rejected" | "expired";
   proposedByCommandId: string;
   respondedByCommandId?: string;
-}
-
-const NEGOTIATION_STATE_SCHEMA_VERSION = 2;
-const NEGOTIATION_OFFER_OUTCOME_KEYS = ["offer-accepted", "offer-implemented", "deal-reached"] as const;
-const NEGOTIATION_OUTCOME_KEYS = [
-  "deal-reached",
-  "actor-demand-paid",
-  "actor-payoff-at-least-outside-option",
-  "combined-demand-at-most-prize",
-  "cited-commitments-fulfilled"
-] as const;
-
-function normalizeCommitment(value: Commitment): Commitment {
-  return {
-    ...value,
-    acceptedByActorIds: [...(value.acceptedByActorIds ?? [])],
-    acceptedByCommandIds: [...(value.acceptedByCommandIds ?? [])]
-  };
 }

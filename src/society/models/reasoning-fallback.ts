@@ -56,7 +56,7 @@ export function reasoningFallbackFetch(options: ReasoningFallbackOptions = {}): 
         }, null, 2));
       } catch { /* diagnostics only */ }
     }
-    // Wire-contract enforcement (§16.2): a request whose replayed
+    // Wire-contract enforcement: a request whose replayed
     // function.arguments is not valid JSON is rejected wholesale by strict
     // endpoints. Repair the arguments and retry once so one malformed
     // model emission cannot poison the conversation for any user/model.

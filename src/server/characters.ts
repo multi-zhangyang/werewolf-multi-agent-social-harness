@@ -1,5 +1,5 @@
 /**
- * Local character library (AGENTS.md §7.2): built-in characters plus
+ * Local character library: built-in characters plus
  * user-defined ones persisted to data/characters.json (gitignored). A
  * character here is a person — persona, values, biases, voice, formative
  * memories. Roles, models and controllers stay separate concerns and never
@@ -87,10 +87,10 @@ export class CharacterLibrary {
   }
 
   /**
-   * All character ids registered under a display name — used by the season
-   * migration to resolve legacy display-name keys to stable character ids.
-   * Duplicates are legal (same-name characters coexist), so callers must
-   * treat an ambiguous match as unresolvable.
+   * All character ids registered under a display name — used to resolve
+   * display-name keys to stable character ids. Duplicates are legal
+   * (same-name characters coexist), so callers must treat an ambiguous match
+   * as unresolvable.
    */
   idsForDisplayName(displayName: string): string[] {
     const ids: string[] = [];

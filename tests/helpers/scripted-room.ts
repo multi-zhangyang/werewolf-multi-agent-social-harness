@@ -3,9 +3,6 @@
  * provider, a strict limiter, and a 2-seat trust-game SocietyRoom wired to a
  * fake provider. No model calls, no network — every request is scripted.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { assistantMessage, functionCall, modelResponse } from "@openai/agents/testing";
 import type { Model, ModelProvider, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
@@ -123,7 +120,7 @@ export function clearFastTurns(): void {
 }
 
 /** A 2-seat trust-game room wired to a fake provider and a strict limiter. */
-export function testRoom(model: Model, limiter: ActivationLimiter, options: { rounds?: number } = {}): { room: SocietyRoom; archiveDir: string; cleanup: () => void } {
+export function testRoom(model: Model, limiter: ActivationLimiter, options: { rounds?: number } = {}): { room: SocietyRoom; cleanup: () => void } {
   const roomId = `room-scripted-${randomUUID().slice(0, 8)}`;
   const profiles = createAgentProfiles(["fake-model"], 2);
   const registry = new ModelRegistry();
@@ -150,7 +147,6 @@ export function testRoom(model: Model, limiter: ActivationLimiter, options: { ro
     contextPolicyId: DEFAULT_CONTEXT_POLICY_ID,
     enabled: true
   });
-  const archiveDir = mkdtempSync(path.join(tmpdir(), "society-scripted-"));
   const room = new SocietyRoom({
     id: roomId,
     scenarioId: "trust-game",
@@ -158,66 +154,44 @@ export function testRoom(model: Model, limiter: ActivationLimiter, options: { ro
     rounds: options.rounds ?? 2,
     provider: fakeProvider(model) as unknown as OpenAIProvider,
     modelRegistry: registry,
-    limiter,
-    archiveDir
+    limiter
   });
   const cleanup = (): void => {
     room.dispose("test cleanup");
-    rmSync(archiveDir, { recursive: true, force: true });
-    for (const profile of profiles) {
-      rmSync(path.join("data", "sessions", `${roomId}:${profile.id}.json`), { force: true });
-    }
   };
-  return { room, archiveDir, cleanup };
+  return { room, cleanup };
 }
 
 /**
  * The full 2-round trust-game script used by deterministic room runs. Binding
- * tool calls carry the full strategy shape (candidate intents + predictions)
- * the scenario schemas validate — a shapeless call is rejected by zod and the
- * room would pause waiting for an action nobody can supply.
+ * tool calls carry the flat payloads the scenario schemas validate — a
+ * shapeless call is rejected by zod and the room would pause waiting for an
+ * action nobody can supply.
  */
 export function twoRoundScript(): Array<ReturnType<typeof modelResponse>> {
-  const intents = (verb: string, amount: number) => [
-    { goal: "g", summary: `${verb} ${amount}`, publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount },
-    { goal: "g2", summary: `${verb} 0`, publicStrategy: null, expectedUtility: null, exposureRisk: 0, relationshipRisk: 0, predictedResponses: [], amount: 0 }
-  ];
-  const predictions = (outcomeKey: string) => [{ outcomeKey, proposition: "p", probability: 0.8, horizon: "round" }];
   return [
     modelResponse([assistantMessage("我会先观察这轮的投资结构。")]),
     modelResponse([assistantMessage("我不会提前承诺，但会公平地看待返还。")]),
     modelResponse([functionCall("make_investment", {
       amount: 8,
-      reason: "相信对方会公平返还",
-      candidateIntents: intents("invest", 8),
-      selectedIntentIndex: 0,
-      predictedConsequences: predictions("investment-positive")
+      reason: "相信对方会公平返还"
     }, { callId: "call-inv-1" })]),
     modelResponse([assistantMessage("已完成投资。")]),
     modelResponse([functionCall("return_from_trust", {
       amount: 8,
-      reason: "按约返还",
-      candidateIntents: intents("return", 8),
-      selectedIntentIndex: 0,
-      predictedConsequences: predictions("return-at-least-investment")
+      reason: "按约返还"
     }, { callId: "call-ret-1" })]),
     modelResponse([assistantMessage("已完成返还。")]),
     modelResponse([assistantMessage("这轮换我来观察对方如何对待信任。")]),
     modelResponse([assistantMessage("我会根据上一轮的真实返还来决定这轮的投资。")]),
     modelResponse([functionCall("make_investment", {
       amount: 6,
-      reason: "对方上轮返还合理",
-      candidateIntents: intents("invest", 6),
-      selectedIntentIndex: 0,
-      predictedConsequences: predictions("investment-positive")
+      reason: "对方上轮返还合理"
     }, { callId: "call-inv-2" })]),
     modelResponse([assistantMessage("已完成投资。")]),
     modelResponse([functionCall("return_from_trust", {
       amount: 10,
-      reason: "继续维持公平",
-      candidateIntents: intents("return", 10),
-      selectedIntentIndex: 0,
-      predictedConsequences: predictions("return-at-least-investment")
+      reason: "继续维持公平"
     }, { callId: "call-ret-2" })]),
     modelResponse([assistantMessage("已完成返还。")])
   ];

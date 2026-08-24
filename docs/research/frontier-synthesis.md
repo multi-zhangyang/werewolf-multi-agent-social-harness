@@ -1,8 +1,8 @@
 # Frontier Synthesis — LLM Social Agents (2026)
 
-> **版本说明（2026-08-22）：** 本文是研究文献综述，非工程合同。文中引用的 `AGENTS.md §x` 章节号指向 2026-08-18 旧版章程，该章程已被 API-only 务实版替代（章节号已变）。本文中"把心理参数编码为可切换机制"类建议若与新版章程"只测量三类硬数据"的原则冲突，以新版章程为准。
+> **版本说明（2026-08-24）：** 本文是研究文献综述，非工程合同。文中引用的 `AGENTS.md §x` 章节号指向已被删除的旧版章程（API-only 版于 2026-08-24 连同赛季/持久化/审计表单机制一并移除），当前唯一工程文档是 `docs/agent-design.md`（标准 agent 循环 + 零运行时落盘 + 平铺工具 + 内存因果账本）。本文中"把心理参数编码为可切换机制"、记忆存储升级、决策审计类建议均与现状冲突，一律作废，不排期。
 >
-> **代码现状说明（2026-08-24）：** 文中"codebase 现状"描述以写作时为准。自 `9df7ec9`（session-as-memory）起，自建记忆系统已删除（无 `memory.ts`、无检索/评分/记忆写入策略），`AgentMemoryItem` 仅为观战展示列表，模型记忆由 SDK Session 历史承载。凡涉及"升级记忆检索/记忆存储/记忆合并"的建议（Generative Agents 记忆流、四存储拆分、consolidation 等）一律作废，不排期。
+> **代码现状说明（2026-08-24）：** 文中"codebase 现状"描述以写作时为准。自 `9df7ec9`（session-as-memory）起，自建记忆系统已删除（无 `memory.ts`、无检索/评分/记忆写入策略），`AgentMemoryItem` 仅为观战展示列表，模型记忆由 SDK 会话历史承载；2026-08-24 起运行时完全零落盘（无会话文件/检查点/赛季），会话为内存 `MemorySession`。凡涉及"升级记忆检索/记忆存储/记忆合并"的建议（Generative Agents 记忆流、四存储拆分、consolidation 等）一律作废，不排期。
 >
 > Research window: verified 2022–2026 literature. **Verification method:** every arXiv ID below
 > was checked directly against the canonical `arxiv.org/abs/{id}` HTML page (citation_* meta tags),

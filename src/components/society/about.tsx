@@ -106,18 +106,18 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
         </section>
 
         <section className="mb-16">
-          <SparkleDivider>社会季与单局</SparkleDivider>
+          <SparkleDivider>会话与记忆</SparkleDivider>
           <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="rounded-lg border border-emerald-400/30 bg-gradient-to-b from-emerald-400/10 to-card p-6">
-              <h2 className="text-base font-semibold tracking-tight">社会季模式</h2>
+              <h2 className="text-base font-semibold tracking-tight">一局一个完整会话</h2>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                同一批角色跨局延续：每个角色持有自己的持久会话，一局结束上下文不清空；下一局开始时，同一个 Agent 凭自己的记忆带着旧账回到桌前，像一群越玩越熟的老友。每局身份与阵营重新随机，过去的角色不证明本局的忠诚。历史持久化保存在本地，服务器重启也不会丢。随时可以在首页「重置社会季」，让所有人重新互不相识。
+                每个席位是一个独立 Agent，持有本局进程内的内存会话：角色从零开始，凭本局的发言、承诺与结算逐步建立关系与记忆。每局身份与阵营重新随机，过去的角色不证明本局的忠诚。
               </p>
             </div>
             <div className="rounded-lg border border-border bg-card p-6">
-              <h2 className="text-base font-semibold tracking-tight">单局模式</h2>
+              <h2 className="text-base font-semibold tracking-tight">零落盘、零跨局</h2>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                一局定胜负、零历史干扰：创建房间时选择「单局模式」，角色互不相识，不读取任何过往记忆，结束后也不写入任何历史。适合观察纯粹博弈，或者进行不受上一局恩怨影响的公平对决。
+                房间状态、会话历史、心智与账本全部只存在于进程内存：不写文件、不跨局延续、服务器重启即清零。适合观察纯粹博弈，或者进行不受上一局恩怨影响的公平对决。
               </p>
             </div>
           </div>

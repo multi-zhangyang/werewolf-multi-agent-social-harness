@@ -17,7 +17,7 @@ import type {
 import { scopedContext, SocialWorldBase } from "../world";
 import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
-import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import { socialReferenceContext } from "../social/context-refs";
 import type { SocialActDeclaration } from "../social/contracts";
 
 type Phase = "discussion" | "contribution";
@@ -29,15 +29,6 @@ interface PublicGoodsRound {
   pool: number;
   share: number;
 }
-
-const PUBLIC_GOODS_STATE_SCHEMA_VERSION = 3;
-const PUBLIC_GOODS_OUTCOME_KEYS = [
-  "group-pool-at-least-half",
-  "actor-contributes-at-least-group-average",
-  "actor-payoff-at-least-endowment",
-  "group-has-zero-contributor",
-  "cited-commitments-fulfilled"
-] as const;
 
 export class PublicGoodsWorld extends SocialWorldBase {
   private readonly totalRounds: number;
@@ -66,7 +57,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
   }
 
   /**
-   * Sidecar extraction hints (§19): contribution statements ("我会投 5 点")
+   * Sidecar extraction hints: contribution statements ("我会投 5 点")
    * become `claimed-action` propositions reconciled against the actual
    * contribution at settlement.
    */
@@ -79,46 +70,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
     ].join("\n");
   }
 
-  protected exportWorldState(): unknown {
-    return {
-      schemaVersion: PUBLIC_GOODS_STATE_SCHEMA_VERSION,
-      round: this.round,
-      phase: this.phase,
-      scores: this.mapEntries(this.scores),
-      contributions: this.mapEntries(this.contributions),
-      contributionCommandIds: this.mapEntries(this.contributionCommandIds),
-      commitments: structuredClone(this.commitments),
-      discussion: this.discussion.exportState(),
-      history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences)
-    };
-  }
 
-  protected restoreWorldState(state: unknown): void {
-    const s = state as Partial<{
-      schemaVersion: number;
-      round: number; phase: string; scores: Array<[string, number]>; contributions: Array<[string, number]>;
-      contributionCommandIds: Array<[string, string]>; commitments: Commitment[];
-      discussion: ReturnType<DiscussionDirector["exportState"]>;
-      history: PublicGoodsRound[]; lastExperiences: Array<[string, string]>;
-    }> | undefined;
-    if (!s) return;
-    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== 2 && s.schemaVersion !== PUBLIC_GOODS_STATE_SCHEMA_VERSION) {
-      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: public-goods ${s.schemaVersion}`);
-    }
-    this.round = Number(s.round ?? 1);
-    this.phase = (s.phase ?? "discussion") as Phase;
-    this.fillMap(this.scores, s.scores);
-    this.fillMap(this.contributions, s.contributions);
-    this.fillMap(this.contributionCommandIds, s.contributionCommandIds);
-    this.commitments.length = 0;
-    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
-    this.discussion = this.createDiscussion();
-    this.discussion.restoreState(s.discussion);
-    this.history.length = 0;
-    this.history.push(...structuredClone(s.history ?? []));
-    this.fillMap(this.lastExperiences, s.lastExperiences);
-  }
 
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
@@ -205,27 +157,15 @@ export class PublicGoodsWorld extends SocialWorldBase {
     });
     const contribute = tool({
       name: "contribute_to_pool",
-      description: `Compare bounded contribution intents, predict the public result, then commit an integer from 0 to ${this.endowment}. Contributions remain sealed until the barrier and cannot be changed.`,
+      description: `Commit an integer from 0 to ${this.endowment}. Contributions remain sealed until the barrier and cannot be changed.`,
       parameters: z.object({
         amount: z.number().int().min(0).max(this.endowment),
         reason: z.string().min(1).max(2_000),
-        referencedCommitmentIds: z.array(z.string().min(1).max(200)).max(8).default([]),
-        ...createStrategyActionShape({ amount: z.number().int().min(0).max(this.endowment) }, PUBLIC_GOODS_OUTCOME_KEYS)
+        referencedCommitmentIds: z.array(z.string().min(1).max(200)).max(8).default([])
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.amount !== input.amount) {
-          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected contribution must equal the binding amount.");
-        }
         const context = scopedContext(runContext, actorId);
-        const commit = await this.performAction(actorId, "contribute_to_pool", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({
-            ...candidate,
-            action: "contribute_to_pool",
-            payloadSummary: `amount=${candidate.amount}`
-          }))
-        });
+        const commit = await this.performAction(actorId, "contribute_to_pool", input);
         emitAction(context, commit.action, commit.detail);
         return commit.result;
       }
@@ -408,7 +348,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
       label: `第 ${this.round} 轮投入`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => "Review the public norm, accepted commitments, private beliefs and actor models. Call contribute_to_pool exactly once with bounded candidates and public-result predictions. Chat cannot replace the typed action."
+      instructionFor: () => "Review the public norm, accepted commitments, private beliefs and actor models. Call contribute_to_pool exactly once. Chat cannot replace the typed action."
     };
   }
 
@@ -526,7 +466,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
       object: { pool, share: roundNumber(share), contributions },
       payload: { round: this.round, pool, share: roundNumber(share), contributions, returns }
     });
-    // §28 主张对账: reconcile extracted contribution claims against the
+    // 主张对账: reconcile extracted contribution claims against the
     // actual sealed contribution.
     for (const actorId of this.profiles.keys()) {
       const actualAmount = contributions[actorId] ?? 0;
@@ -545,8 +485,10 @@ export class PublicGoodsWorld extends SocialWorldBase {
     for (const actorId of this.profiles.keys()) {
       const commandId = this.contributionCommandIds.get(actorId);
       if (!commandId) continue;
-      const decision = this.socialCausalityFor(actorId).decisions.find((entry) => entry.actionReceiptId === commandId);
-      const citedCommitments = acceptedCommitments.filter((entry) => decision?.openCommitmentIds.includes(entry.commitmentId));
+      // The social ledger no longer records per-receipt decision records, so
+      // the actor's cited commitments are no longer tracked at settlement
+      // time; the citation fact stays unasserted in the reconciliation input.
+      const citedCommitments: Commitment[] = [];
       const ownContribution = contributions[actorId] ?? 0;
       const ownReturn = returns[actorId] ?? 0;
       this.reconcileSocialOutcome({
@@ -574,7 +516,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
     }
     const highest = Math.max(...this.contributions.values());
     const lowest = Math.min(...this.contributions.values());
-    // P0-09: zero contribution is free-riding, not betrayal; even high
+    // Zero contribution is free-riding, not betrayal; even high
     // contributions are a cooperative outcome, not a kept promise.
     const anyViolated = acceptedCommitments.some((entry) => entry.state === "violated");
     const allFulfilled = acceptedCommitments.length > 0 && acceptedCommitments.every((entry) => entry.state === "fulfilled");
@@ -639,12 +581,4 @@ function roundNumber(value: number): number {
 
 function formatNumber(value: number): string {
   return roundNumber(value).toFixed(Number.isInteger(roundNumber(value)) ? 0 : 2);
-}
-
-function normalizeCommitment(value: Commitment): Commitment {
-  return {
-    ...value,
-    acceptedByActorIds: [...(value.acceptedByActorIds ?? [])],
-    acceptedByCommandIds: [...(value.acceptedByCommandIds ?? [])]
-  };
 }

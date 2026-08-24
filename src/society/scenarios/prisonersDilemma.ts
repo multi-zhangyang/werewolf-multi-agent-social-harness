@@ -17,20 +17,11 @@ import type {
 import { scopedContext, SocialWorldBase } from "../world";
 import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
 import { emitAction, boundedRounds, discussionPersonality } from "./helpers";
-import { createStrategyActionShape, socialReferenceContext } from "../social/strategy-input";
+import { socialReferenceContext } from "../social/context-refs";
 import type { SocialActDeclaration } from "../social/contracts";
 
 type Move = "cooperate" | "defect";
 type Phase = "discussion" | "choice";
-
-const PRISONERS_DILEMMA_STATE_SCHEMA_VERSION = 2;
-const PD_OUTCOME_KEYS = [
-  "opponent-cooperates",
-  "both-cooperate",
-  "actor-outscores-opponent",
-  "actor-payoff-at-least-three",
-  "cited-commitments-fulfilled"
-] as const;
 
 interface RoundResult {
   round: number;
@@ -60,7 +51,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
   }
 
   /**
-   * Sidecar extraction hints (§19): teach the extractor the move vocabulary so
+   * Sidecar extraction hints: teach the extractor the move vocabulary so
    * statements like "我会合作" become future-action `claimed-action`
    * propositions that round settlement reconciles against the sealed move.
    */
@@ -73,47 +64,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     ].join("\n");
   }
 
-  protected exportWorldState(): unknown {
-    return {
-      schemaVersion: PRISONERS_DILEMMA_STATE_SCHEMA_VERSION,
-      round: this.round,
-      phase: this.phase,
-      scores: this.mapEntries(this.scores),
-      choices: this.mapEntries(this.choices),
-      choiceCommandIds: this.mapEntries(this.choiceCommandIds),
-      commitments: structuredClone(this.commitments),
-      history: structuredClone(this.history),
-      lastExperiences: this.mapEntries(this.lastExperiences),
-      discussion: this.discussion ? this.discussion.exportState() : null
-    };
-  }
 
-  protected restoreWorldState(state: unknown): void {
-    const s = state as Partial<{
-      schemaVersion: number;
-      round: number; phase: string; scores: Array<[string, number]>; choices: Array<[string, Move]>;
-      choiceCommandIds: Array<[string, string]>; commitments: Commitment[];
-      history: RoundResult[]; lastExperiences: Array<[string, string]>; discussion: unknown;
-    }> | undefined;
-    if (!s) return;
-    if (s.schemaVersion !== undefined && s.schemaVersion !== 1 && s.schemaVersion !== PRISONERS_DILEMMA_STATE_SCHEMA_VERSION) {
-      throw new Error(`SCENARIO_STATE_SCHEMA_UNSUPPORTED: prisoners-dilemma ${s.schemaVersion}`);
-    }
-    this.round = Number(s.round ?? 1);
-    this.phase = (s.phase ?? "discussion") as Phase;
-    this.fillMap(this.scores, s.scores);
-    this.fillMap(this.choices, s.choices);
-    this.fillMap(this.choiceCommandIds, s.choiceCommandIds);
-    this.commitments.length = 0;
-    this.commitments.push(...structuredClone((s.commitments ?? []).map(normalizeCommitment)));
-    this.history.length = 0;
-    this.history.push(...structuredClone(s.history ?? []));
-    this.fillMap(this.lastExperiences, s.lastExperiences);
-    if (s.discussion) {
-      this.discussion = this.createDiscussion();
-      this.discussion.restoreState(s.discussion);
-    }
-  }
 
   snapshot(): WorldSnapshot {
     return this.worldSnapshot({
@@ -199,26 +150,18 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
     });
     const choose = tool({
       name: "choose_move",
-      description: "Compare bounded candidate intents, select one, predict the round, then commit privately to cooperate or defect. This typed move is the binding action and cannot be changed.",
+      description: "Commit privately to cooperate or defect this round. The typed move is the binding action and cannot be changed.",
       parameters: z.object({
         move: z.enum(["cooperate", "defect"]),
         reason: z.string().min(1).max(2_000),
-        referencedCommitmentIds: z.array(z.string().min(1).max(200)).max(4).default([]),
-        ...createStrategyActionShape({ move: z.enum(["cooperate", "defect"]) }, PD_OUTCOME_KEYS)
+        referencedCommitmentIds: z.array(z.string().min(1).max(200)).max(4).default([])
       }).strict(),
       execute: async (input, runContext) => {
-        const selected = input.candidateIntents[input.selectedIntentIndex];
-        if (!selected || selected.move !== input.move) {
-          throw new Error("STRATEGY_SELECTION_ACTION_MISMATCH: The selected intent move must equal the binding move.");
-        }
         const context = scopedContext(runContext, actorId);
         const commit = await this.performAction(actorId, "choose_move", {
-          ...input,
-          candidateIntents: input.candidateIntents.map((candidate) => ({
-            ...candidate,
-            action: "choose_move",
-            payloadSummary: `move=${candidate.move}`
-          }))
+          move: input.move,
+          reason: input.reason,
+          referencedCommitmentIds: input.referencedCommitmentIds
         });
         emitAction(context, commit.action, commit.detail);
         return commit.result;
@@ -400,7 +343,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
       label: `第 ${this.round} 轮选择`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => "Review incentives, accepted commitments, your beliefs and actor model. Call choose_move exactly once with bounded candidates and predictions; text cannot substitute for the tool call."
+      instructionFor: () => "Review incentives, accepted commitments, your beliefs and actor model. Call choose_move exactly once; text cannot substitute for the tool call."
     };
   }
 
@@ -521,7 +464,7 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
       payload: { round: this.round, moves: result.moves, payoffs: result.payoffs },
       kind: "past-action"
     });
-    // §28 主张对账: reconcile model-extracted action claims ("我会合作")
+    // 主张对账: reconcile model-extracted action claims ("我会合作")
     // against the actual sealed move. A contradicted claim records evidence —
     // cheap talk stays visible on the causality page instead of vanishing.
     for (const actorId of ids) {
@@ -561,8 +504,10 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
       const commandId = this.choiceCommandIds.get(actorId);
       if (!commandId) continue;
       const opponentId = ids.find((id) => id !== actorId)!;
-      const decision = this.socialCausalityFor(actorId).decisions.find((entry) => entry.actionReceiptId === commandId);
-      const citedCommitments = acceptedCommitments.filter((entry) => decision?.openCommitmentIds.includes(entry.commitmentId));
+      // The social ledger no longer records per-receipt decision records, so
+      // the actor's cited commitments are no longer tracked at settlement
+      // time; the citation fact stays unasserted in the reconciliation input.
+      const citedCommitments: Commitment[] = [];
       this.reconcileSocialOutcome({
         actionReceiptId: commandId,
         actualOutcome: {
@@ -615,16 +560,4 @@ function payoff(left: Move, right: Move): [number, number] {
   if (left === "cooperate" && right === "cooperate") return [3, 3];
   if (left === "defect" && right === "defect") return [1, 1];
   return left === "defect" ? [5, 0] : [0, 5];
-}
-
-function normalizeCommitment(value: Commitment): Commitment {
-  const legacy = value as Commitment & {
-    acceptedByActorIds?: string[];
-    acceptedByCommandIds?: string[];
-  };
-  return {
-    ...value,
-    acceptedByActorIds: [...(legacy.acceptedByActorIds ?? [])],
-    acceptedByCommandIds: [...(legacy.acceptedByCommandIds ?? [])]
-  };
 }

@@ -355,7 +355,7 @@ export interface RoomConnection {
   pause: () => Promise<void>;
   resume: () => Promise<void>;
   toggleAgentPause: (actorId: string, paused: boolean) => Promise<void>;
-  /** Swap one agent's engine (§12.4); identity, session and memory survive. */
+  /** Swap one agent's engine; identity, session and memory survive. */
   switchAgentModel: (actorId: string, modelProfileId: string) => Promise<void>;
   submitAction: (action: string, payload: unknown) => Promise<void>;
 }

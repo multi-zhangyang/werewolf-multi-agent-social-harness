@@ -30,8 +30,8 @@ export interface DiscussionMessage {
 
 /**
  * A structured social-meaning hint a scenario derives from its own rules or
- * vocabulary (AGENTS.md §13.2/§13.3): the director only turns signals into
- * response pressure; it never hardcodes any game's words.
+ * vocabulary: the director only turns signals into response pressure; it
+ * never hardcodes any game's words.
  */
 export interface ConversationSignal {
   kind:
@@ -130,7 +130,7 @@ export class DiscussionDirector {
   private readonly urgencyDecay: number;
 
   private readonly messages: DiscussionMessage[] = [];
-  /** O(1) message lookup for reply resolution (AGENTS.md §13.1). */
+  /** O(1) message lookup for reply resolution. */
   private readonly messageIndex = new Map<string, DiscussionMessage>();
   private readonly urgency = new Map<string, number>();
   private readonly spokeCounts = new Map<string, number>();
@@ -287,7 +287,7 @@ export class DiscussionDirector {
     };
   }
 
-  /** Checkpoint serialization (restart recovery, P3). */
+  /** In-memory state handoff: the director's full working state as plain data. */
   exportState(): {
     messages: DiscussionMessage[];
     urgency: Array<[string, number]>;

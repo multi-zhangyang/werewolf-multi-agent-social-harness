@@ -1,7 +1,7 @@
 /** Shared types for the create-room dialog and its section components. */
 import type { CharacterOption } from "../types";
 
-/** How models are assigned to seats (§ 建房模型分配). */
+/** How models are assigned to seats (建房模型分配). */
 export type ModelAssignMode = "unified" | "per-seat" | "random";
 
 /** Lightweight create-form preferences remembered across visits. */
@@ -13,7 +13,7 @@ export interface ModelAssignPrefs {
 
 export const MODEL_PREFS_KEY = "society:model-assign-prefs";
 
-/** A saved create-room configuration (§6.4 阵容模板). */
+/** A saved create-room configuration (阵容模板). */
 export interface RosterTemplateOption {
   id: string;
   name: string;
@@ -26,7 +26,6 @@ export interface RosterTemplateOption {
   characterIds?: string[];
   rounds?: number;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh";
-  season?: "season" | "one-shot";
 }
 
 /** One row of the seat table shown in the final-roster preview. */
