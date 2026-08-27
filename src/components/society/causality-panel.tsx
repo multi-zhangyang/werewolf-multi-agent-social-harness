@@ -1,5 +1,5 @@
 import { memo, type ReactNode } from "react";
-import { ArrowRight, ChevronDown } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type {
   DeceptionEpisode,
@@ -9,10 +9,9 @@ import type {
   SocialCausalityProjection
 } from "@/society/social/contracts";
 import { Badge } from "@/components/ui/badge";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { provenanceBadge } from "./shared";
+import { CollapsibleSection, provenanceBadge } from "./shared";
 
 /**
  * The right rail: one flat, scrollable causality column. No nested tabs —
@@ -84,12 +83,12 @@ function SocialActsSection({ projection, actorName, propositions }: {
   const acts = spectatorActs(projection).slice(-12).reverse();
   if (!acts.length) return null;
   return (
-    <Section title="社会行为" count={acts.length}>
+    <CollapsibleSection title="社会行为" count={acts.length}>
       <ul className="space-y-1.5">
         {acts.map((act) => (
           <li key={act.socialActId} className="rounded-md border border-border/50 bg-muted/20 px-2 py-1.5">
             <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
-              <span className={cn("font-medium", act.kind === "accusation" || act.kind === "threat" ? "text-rose-300" : act.kind === "promise" || act.kind === "alliance-proposal" ? "text-emerald-300" : undefined)}>
+              <span className={cn("font-medium", act.kind === "accusation" || act.kind === "threat" ? "text-suspect" : act.kind === "promise" || act.kind === "alliance-proposal" ? "text-live" : undefined)}>
                 {ACT_KIND_LABELS[act.kind] ?? act.kind}
               </span>
               <span className="truncate">{actorName(act.actorId)}</span>
@@ -112,23 +111,7 @@ function SocialActsSection({ projection, actorName, propositions }: {
           </li>
         ))}
       </ul>
-    </Section>
-  );
-}
-
-/** One flat accordion section; first section defaults open. */
-function Section({ title, count, children, defaultOpen = false }: { title: string; count?: number; children: ReactNode; defaultOpen?: boolean }): ReactNode {
-  return (
-    <Collapsible defaultOpen={defaultOpen} className="group/section rounded-lg border bg-card/40">
-      <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium hover:bg-muted/30">
-        {title}
-        {count !== undefined && count > 0 ? <Badge variant="secondary" className="ml-0.5 font-mono text-[10px]">{count}</Badge> : null}
-        <ChevronDown className="ml-auto size-3.5 text-muted-foreground transition-transform group-data-[state=open]/section:rotate-180" aria-hidden />
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="space-y-2 border-t border-border/60 px-3 py-2.5">{children}</div>
-      </CollapsibleContent>
-    </Collapsible>
+    </CollapsibleSection>
   );
 }
 
@@ -136,7 +119,7 @@ function ScoreSection({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   const ranked = [...room.world.agents].sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
   if (!ranked.some((agent) => (agent.score ?? 0) !== 0)) return null;
   return (
-    <Section title="战况" defaultOpen>
+    <CollapsibleSection title="战况" defaultOpen>
       <ul className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
         {ranked.map((agent) => (
           <li key={agent.id} className="flex items-baseline justify-between gap-2">
@@ -145,7 +128,7 @@ function ScoreSection({ room }: { room: SocietyRoomSnapshot }): ReactNode {
           </li>
         ))}
       </ul>
-    </Section>
+    </CollapsibleSection>
   );
 }
 
@@ -155,17 +138,17 @@ function SuspicionSection({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   if (!entries.length) return null;
   const names = new Map(room.world.agents.map((agent) => [agent.id, agent.displayName]));
   return (
-    <Section title="公开怀疑" count={entries.length}>
+    <CollapsibleSection title="公开怀疑" count={entries.length}>
       <ul className="space-y-1 text-xs">
         {entries.map((entry, index) => (
           <li key={`${entry.accuser}-${entry.target}-${index}`} className="flex items-center gap-1.5">
             <span className="truncate">{names.get(entry.accuser) ?? entry.accuser}</span>
-            <ArrowRight className="size-3 shrink-0 text-rose-400" aria-hidden />
+            <ArrowRight className="size-3 shrink-0 text-suspect" aria-hidden />
             <span className="truncate font-medium">{names.get(entry.target) ?? entry.target}</span>
           </li>
         ))}
       </ul>
-    </Section>
+    </CollapsibleSection>
   );
 }
 
@@ -184,7 +167,7 @@ function BeliefSection({ projection, characterNames }: {
     groups.set(key, list);
   }
   return (
-    <Section title="信念时间线" count={updates.length}>
+    <CollapsibleSection title="信念时间线" count={updates.length}>
       {[...groups.values()].slice(-8).reverse().map((group) => {
         const proposition = propositions.get(group[0].propositionId);
         return (
@@ -202,7 +185,7 @@ function BeliefSection({ projection, characterNames }: {
           </div>
         );
       })}
-    </Section>
+    </CollapsibleSection>
   );
 }
 
@@ -213,7 +196,7 @@ function CommitmentSection({ projection, actorName }: {
   const commitments = [...(projection?.commitments ?? [])].reverse();
   if (!commitments.length) return null;
   return (
-    <Section title="承诺账本" count={commitments.length}>
+    <CollapsibleSection title="承诺账本" count={commitments.length}>
       {commitments.map((commitment) => (
         <div key={commitment.commitmentId} className="rounded-md border border-border/50 p-2">
           <div className="flex items-center gap-1.5">
@@ -229,7 +212,7 @@ function CommitmentSection({ projection, actorName }: {
           </p>
         </div>
       ))}
-    </Section>
+    </CollapsibleSection>
   );
 }
 
@@ -256,11 +239,11 @@ function DeceptionSection({ projection, actorName, propositions }: {
   const episodes = [...(projection?.deceptions ?? [])].reverse();
   if (!episodes.length) return null;
   return (
-    <Section title="欺骗生命周期" count={episodes.length}>
+    <CollapsibleSection title="欺骗生命周期" count={episodes.length}>
       {episodes.map((episode) => (
         <DeceptionCard key={episode.deceptionId} episode={episode} actorName={actorName} propositions={propositions} />
       ))}
-    </Section>
+    </CollapsibleSection>
   );
 }
 
@@ -298,11 +281,11 @@ function RelationshipSection({ projection, characterNames }: {
   const relationships = [...(projection?.directedRelationships ?? [])];
   if (!relationships.length) return null;
   return (
-    <Section title="有向关系" count={relationships.length}>
+    <CollapsibleSection title="有向关系" count={relationships.length}>
       {relationships.map((relationship) => (
         <DirectedEdge key={relationship.relationshipId} relationship={relationship} nameFor={(id) => characterNames.get(id) ?? id} />
       ))}
-    </Section>
+    </CollapsibleSection>
   );
 }
 
@@ -341,11 +324,11 @@ function OutcomeSection({ projection, actorName }: {
   const reconciliations = [...(projection?.outcomeReconciliations ?? [])].reverse().slice(0, 6);
   if (!reconciliations.length) return null;
   return (
-    <Section title="结果对账（全知）" count={reconciliations.length}>
+    <CollapsibleSection title="结果对账（全知）" count={reconciliations.length}>
       {reconciliations.map((reconciliation) => (
         <OutcomeRow key={reconciliation.reconciliationId} reconciliation={reconciliation} actorName={actorName} />
       ))}
-    </Section>
+    </CollapsibleSection>
   );
 }
 

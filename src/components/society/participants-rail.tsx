@@ -1,16 +1,15 @@
-import { memo, useState, type ReactNode } from "react";
-import { BrainCircuit, ChevronDown, Cpu, Pause, Play } from "lucide-react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
+import { BrainCircuit, Cpu, Crown, Pause, Play } from "lucide-react";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { RoomConnection } from "./use-room";
-import { AgentAvatar, StatusDot, StatusLabel, readableModel } from "./shared";
+import { AgentAvatar, CollapsibleSection, StatusDot, StatusLabel, readableModel } from "./shared";
 
 /** One registered model profile as offered by /api/scenarios. */
 export interface ModelOption {
@@ -41,6 +40,11 @@ export const ParticipantsRail = memo(function ParticipantsRail({
   const [openId, setOpenId] = useState<string>();
   const selected = room.participants.find((participant) => participant.profile.id === openId);
   const seeds = new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.characterId]));
+  const leaderId = room.world.agents.reduce<string | undefined>((best, agent) => {
+    const score = agent.score ?? 0;
+    if (score <= 0) return best;
+    return score > (room.world.agents.find((entry) => entry.id === best)?.score ?? 0) ? agent.id : best;
+  }, undefined);
 
   return (
     <>
@@ -56,7 +60,8 @@ export const ParticipantsRail = memo(function ParticipantsRail({
                   onClick={() => setOpenId(agent.id)}
                   className={cn(
                     "group flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-1.5 text-left transition-colors hover:border-border hover:bg-muted/40",
-                    speaking && "border-emerald-500/25 bg-emerald-500/5"
+                    speaking && "border-live/25 bg-live/5",
+                    !speaking && agent.id === leaderId && "leader-wash"
                   )}
                 >
                   <span className={cn("relative inline-flex", speaking && "on-air")}>
@@ -65,11 +70,12 @@ export const ParticipantsRail = memo(function ParticipantsRail({
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
                       <span className="truncate text-xs font-medium">{agent.displayName}</span>
+                      {!speaking && agent.id === leaderId ? <Crown className="size-3 shrink-0 text-warn" aria-label="暂时领先" /> : null}
                       <StatusDot status={agent.status} />
                     </span>
                     <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
                       {participant?.mood ? <span className="truncate">{participant.mood}</span> : <StatusLabel status={agent.status} />}
-                      {(agent.score ?? 0) !== 0 ? <span className="ml-auto font-mono">{agent.score}</span> : null}
+                      {(agent.score ?? 0) !== 0 ? <ScoreValue value={agent.score ?? 0} /> : null}
                     </span>
                   </span>
                   {!agent.alive ? <Badge variant="outline" className="text-[9px]">离场</Badge> : null}
@@ -185,40 +191,40 @@ function MindSheet({ participant, room, privileged, onToggleAgentPause, models, 
             ) : null}
 
             {mind?.goals.length ? (
-              <Section title="目标">
+              <CollapsibleSection title="目标" icon={<BrainCircuit aria-hidden />} defaultOpen>
                 {mind.goals.filter((goal) => goal.status === "active").slice(0, 5).map((goal) => (
                   <p key={goal.id} className="text-xs leading-5">· {goal.description}{goal.progress ? <span className="text-muted-foreground">（{goal.progress}）</span> : null}</p>
                 ))}
-              </Section>
+              </CollapsibleSection>
             ) : null}
 
             {beliefs.length ? (
-              <Section title="信念">
+              <CollapsibleSection title="信念" icon={<BrainCircuit aria-hidden />} defaultOpen>
                 {beliefs.map((belief) => (
                   <p key={`${belief.subjectId}:${belief.proposition}`} className="text-xs leading-5 text-muted-foreground">
                     · {belief.proposition} <span className="font-mono">{Math.round((belief.probability ?? belief.confidence) * 100)}%</span>
                   </p>
                 ))}
-              </Section>
+              </CollapsibleSection>
             ) : null}
 
             {relationships.length ? (
-              <Section title="关系（有向）">
+              <CollapsibleSection title="关系（有向）" icon={<BrainCircuit aria-hidden />} defaultOpen>
                 {relationships.map((relationship) => (
                   <p key={relationship.targetCharacterId} className="flex justify-between text-xs">
                     <span>{mind?.relationships.find((entry) => entry.targetCharacterId === relationship.targetCharacterId)?.note ?? relationship.targetCharacterId}</span>
                     <span className="font-mono text-muted-foreground">信任 {relationship.trust.toFixed(2)}</span>
                   </p>
                 ))}
-              </Section>
+              </CollapsibleSection>
             ) : null}
 
             {memories.length ? (
-              <Section title="最近记忆">
+              <CollapsibleSection title="最近记忆" icon={<BrainCircuit aria-hidden />} defaultOpen>
                 {memories.map((memory) => (
                   <p key={memory.id} className="line-clamp-3 text-xs leading-5 text-muted-foreground">· {memory.text}</p>
                 ))}
-              </Section>
+              </CollapsibleSection>
             ) : null}
           </div>
         </ScrollArea>
@@ -236,17 +242,28 @@ function Stat({ label, value }: { label: string; value: ReactNode }): ReactNode 
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }): ReactNode {
+/** Score with a floating delta that pops when the world settles a change. */
+function ScoreValue({ value }: { value: number }): ReactNode {
+  const last = useRef(value);
+  const [delta, setDelta] = useState<number | null>(null);
+  useEffect(() => {
+    if (last.current === value) return;
+    setDelta(value - last.current);
+    last.current = value;
+  }, [value]);
+  useEffect(() => {
+    if (delta === null) return;
+    const timer = window.setTimeout(() => setDelta(null), 1_200);
+    return () => window.clearTimeout(timer);
+  }, [delta]);
   return (
-    <Collapsible defaultOpen className="rounded-lg border border-border/60">
-      <CollapsibleTrigger className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs font-medium">
-        <BrainCircuit className="size-3.5 text-muted-foreground" aria-hidden />
-        {title}
-        <ChevronDown className="ml-auto size-3.5 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" aria-hidden />
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="space-y-1 border-t border-border/50 px-3 py-2">{children}</div>
-      </CollapsibleContent>
-    </Collapsible>
+    <span className="relative ml-auto font-mono">
+      {value}
+      {delta !== null ? (
+        <span key={`${delta}:${value}`} className="score-pop absolute -top-3 right-0 text-[9px] font-normal text-warn">
+          {delta > 0 ? `+${delta}` : delta}
+        </span>
+      ) : null}
+    </span>
   );
 }

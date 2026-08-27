@@ -34,7 +34,7 @@ export function GlobalDefaultsSection({ profiles, value, onChange, onSave, savin
             </SelectGroup>
           </SelectContent>
         </Select>
-        <Button variant="outline" size="sm" className="shrink-0 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={onSave}>
+        <Button variant="tile" size="sm" className="shrink-0" disabled={saving} onClick={onSave}>
           {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
           保存全局默认
         </Button>

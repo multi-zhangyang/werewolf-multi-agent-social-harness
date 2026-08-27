@@ -134,7 +134,10 @@ export function App(): ReactNode {
     <>
       {booting ? (
         <div className="flex min-h-screen items-center justify-center">
-          <span className="size-8 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-foreground" />
+          <div className="flex flex-col items-center gap-4">
+            <span className="size-8 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-foreground" />
+            <p className="animate-pulse text-xs tracking-[0.18em] text-muted-foreground">正在唤醒世界…</p>
+          </div>
         </div>
       ) : (
         <Landing

@@ -11,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -20,7 +21,7 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { ScenarioIcon } from "../shared";
+import { ErrorNote, ScenarioIcon } from "../shared";
 import type { CharacterOption, CreateRoomInput, ModelOption } from "../types";
 import { ModelAssignSection } from "./model-assign-section";
 import { ModeButton } from "./model-assign-section";
@@ -63,6 +64,8 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
   const [templates, setTemplates] = useState<RosterTemplateOption[]>([]);
   const [templateName, setTemplateName] = useState("");
   const [loadedTemplateId, setLoadedTemplateId] = useState<string>();
+  /** Visible instead of silent: the library fetch failing must not masquerade as an empty library. */
+  const [libraryError, setLibraryError] = useState<string>();
 
   const minRounds = scenario?.minRounds ?? 2;
   const maxRounds = scenario?.maxRounds ?? 10;
@@ -105,6 +108,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    setLibraryError(undefined);
     fetch("/api/characters")
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error("CHARACTERS_UNREACHABLE"))))
       .then((data: { builtins?: CharacterOption[]; customs?: CharacterOption[] }) => {
@@ -112,7 +116,10 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
         setCharacters([...(data.builtins ?? []), ...(data.customs ?? [])]);
       })
       .catch(() => {
-        if (!cancelled) setCharacters([]);
+        if (!cancelled) {
+          setCharacters([]);
+          setLibraryError("人物库暂不可达——已回退到内置人物顺序，稍后可重新打开本对话框重试。");
+        }
       });
     fetch("/api/room-templates")
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error("TEMPLATES_UNREACHABLE"))))
@@ -121,7 +128,10 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
         setTemplates((data.templates ?? []).filter((template) => template.scenarioId === scenario?.id));
       })
       .catch(() => {
-        if (!cancelled) setTemplates([]);
+        if (!cancelled) {
+          setTemplates([]);
+          setLibraryError((current) => current ? `${current} 阵容模板也暂不可达。` : "阵容模板暂不可达——模板列表已置空。");
+        }
       });
     return () => {
       cancelled = true;
@@ -495,17 +505,18 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
               {mode === "human" ? (
                 <section>
                   <p className="mb-2.5 text-[13px] font-medium text-foreground/80">你的名字</p>
-                  <input
+                  <Input
                     value={playerName}
                     onChange={(event) => setPlayerName(event.target.value)}
                     placeholder="作为第 1 位参与者加入"
                     maxLength={40}
-                    className="h-10 w-full rounded-lg border border-border bg-card px-3.5 text-sm text-foreground placeholder:text-muted-foreground/80 focus:border-ring focus:outline-none"
+                    className="h-10 bg-card"
                   />
                 </section>
               ) : null}
 
-              {error ? <p className="text-[13px] text-red-400">{error}</p> : null}
+              {error ? <ErrorNote>{error}</ErrorNote> : null}
+              {libraryError ? <p className="flex items-start gap-1.5 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[13px] leading-5 text-warn">{libraryError}</p> : null}
 
               <section>
                 <div className="mb-2 flex items-center justify-between">
@@ -513,7 +524,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                   {loadedTemplateId ? (
                     <button
                       type="button"
-                      className="flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-red-400"
+                      className="flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-destructive"
                       disabled={submitting}
                       onClick={() => void deleteTemplate(loadedTemplateId)}
                     >
@@ -549,15 +560,15 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                     </Select>
                   ) : null}
                   <div className="flex items-center gap-2">
-                    <input
+                    <Input
                       value={templateName}
                       onChange={(event) => setTemplateName(event.target.value)}
                       onKeyDown={(event) => { if (event.key === "Enter") void saveTemplate(); }}
                       placeholder="模板名称（如：狼人杀快局）"
                       maxLength={40}
-                      className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-card px-3 text-sm text-foreground placeholder:text-muted-foreground/70 focus:border-ring focus:outline-none"
+                      className="min-w-0 flex-1 bg-card"
                     />
-                    <Button variant="outline" size="sm" className="h-9 shrink-0 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={submitting} onClick={() => void saveTemplate()}>
+                    <Button variant="tile" size="sm" className="h-9 shrink-0" disabled={submitting} onClick={() => void saveTemplate()}>
                       保存为模板
                     </Button>
                   </div>
@@ -567,14 +578,10 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
             </div>
 
             <div className="flex items-center justify-end gap-3 border-t border-border/60 bg-card px-6 py-4">
-              <Button variant="outline" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={submitting} onClick={() => onOpenChange(false)}>
+              <Button variant="tile" disabled={submitting} onClick={() => onOpenChange(false)}>
                 取消
               </Button>
-              <Button
-                onClick={submit}
-                disabled={submitting || !eligibleModels.length}
-                className="rounded-lg bg-foreground px-6 text-background hover:bg-foreground/85"
-              >
+              <Button onClick={submit} disabled={submitting || !eligibleModels.length} className="rounded-lg px-6">
                 {submitting ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
                 开始世界
               </Button>

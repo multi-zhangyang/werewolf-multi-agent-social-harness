@@ -11,11 +11,12 @@ import type { CharacterDefinition, DecisionBias } from "@/society/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { AgentAvatar } from "./shared";
+import { AgentAvatar, ErrorNote } from "./shared";
 
 interface CharactersDialogProps {
   open: boolean;
@@ -193,17 +194,17 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
                       event.target.value = "";
                     }}
                   />
-                  <Button variant="outline" size="sm" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={busy} onClick={() => fileRef.current?.click()}>
+                  <Button variant="tile" size="sm" disabled={busy} onClick={() => fileRef.current?.click()}>
                     <Upload className="size-3.5" />
                     导入
                   </Button>
-                  <Button variant="outline" size="sm" asChild className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground">
+                  <Button variant="tile" size="sm" asChild>
                     <a href="/api/characters/export" download>
                       <Download className="size-3.5" />
                       导出
                     </a>
                   </Button>
-                  <Button size="sm" className="rounded-lg bg-foreground px-3 text-background hover:bg-foreground/85" onClick={() => setEditing("new")}>
+                  <Button size="sm" className="rounded-lg px-3" onClick={() => setEditing("new")}>
                     <Plus className="size-3.5" />
                     新建人物
                   </Button>
@@ -212,7 +213,7 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
             </DialogHeader>
             <ScrollArea className="scroll-fade-y max-h-[68vh]">
               <div className="space-y-5 p-6 pb-10">
-                {error ? <p className="rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-300">{error}</p> : null}
+                {error ? <ErrorNote>{error}</ErrorNote> : null}
                 <section>
                   <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">内置人物 · {builtins.length}</p>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -224,9 +225,12 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
                 <section>
                   <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">自建人物 · {customs.length}</p>
                   {customs.length === 0 ? (
-                    <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-xs text-muted-foreground/70">
-                      还没有自建人物。「新建人物」从头写一个，或复制内置人物再修改。
-                    </p>
+                    <Empty className="rounded-lg border border-dashed py-8">
+                      <EmptyHeader>
+                        <EmptyTitle>还没有自建人物</EmptyTitle>
+                        <EmptyDescription>「新建人物」从头写一个，或复制内置人物再修改。</EmptyDescription>
+                      </EmptyHeader>
+                    </Empty>
                   ) : (
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                       {customs.map((character) => (
@@ -274,7 +278,7 @@ function CharacterRow({ character, onCopy, onEdit, onDelete, busy }: {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <p className="truncate text-sm font-semibold tracking-tight">{character.displayName}</p>
-          <Badge variant="outline" className={cn("shrink-0 rounded-full border-border font-normal", character.builtIn ? "text-muted-foreground" : "text-violet-300")}>
+          <Badge variant="outline" className={cn("shrink-0 rounded-full border-border font-normal", character.builtIn ? "text-muted-foreground" : "text-secret")}>
             {character.builtIn ? "内置" : "自建"}
           </Badge>
         </div>
@@ -290,7 +294,7 @@ function CharacterRow({ character, onCopy, onEdit, onDelete, busy }: {
           </button>
         ) : null}
         {onDelete ? (
-          <button type="button" aria-label={`删除 ${character.displayName}`} className="flex size-6 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-border hover:text-red-400" disabled={busy} onClick={onDelete}>
+          <button type="button" aria-label={`删除 ${character.displayName}`} className="flex size-6 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-border hover:text-destructive" disabled={busy} onClick={onDelete}>
             <Trash2 className="size-3.5" />
           </button>
         ) : null}
@@ -359,11 +363,11 @@ function EditorForm({ editing, builtins, onClose, onSaved }: {
       </DialogHeader>
       <ScrollArea className="scroll-fade-y max-h-[68vh]">
         <div className="space-y-5 p-6 pb-10">
-          {error ? <p className="rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-300">{error}</p> : null}
+          {error ? <ErrorNote>{error}</ErrorNote> : null}
           <section className="space-y-3">
             <Field label="名字">
               <Input value={draft.displayName} onChange={(event) => set({ displayName: event.target.value })} placeholder="如 林默" maxLength={24} />
-              {nameTaken ? <p className="text-[11px] text-amber-400">与内置人物重名，历史与关系会按名字混在一起——换一个。</p> : null}
+              {nameTaken ? <p className="text-[11px] text-warn">与内置人物重名，历史与关系会按名字混在一起——换一个。</p> : null}
             </Field>
             <Field label="人物底色（一段话）">
               <textarea
@@ -460,10 +464,10 @@ function EditorForm({ editing, builtins, onClose, onSaved }: {
           </section>
 
           <div className="flex items-center justify-end gap-2 border-t border-border/60 pt-4">
-            <Button variant="outline" size="sm" className="rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={busy} onClick={onClose}>
+            <Button variant="tile" size="sm" disabled={busy} onClick={onClose}>
               取消
             </Button>
-            <Button size="sm" className="rounded-lg bg-foreground px-4 text-background hover:bg-foreground/85" disabled={busy} onClick={() => void save()}>
+            <Button size="sm" className="rounded-lg px-4" disabled={busy} onClick={() => void save()}>
               {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />}
               {isNew ? "创建人物" : "保存修改"}
             </Button>

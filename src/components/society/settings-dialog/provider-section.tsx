@@ -12,6 +12,7 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { MiniChip } from "../shared";
 import type { ProviderDraft, ProviderView } from "./types";
 
 /** Provider list plus the dashed "add provider" form. */
@@ -31,12 +32,12 @@ export function ProviderSection({ providers, draft, onDraftChange, onAdd, saving
             <div className="min-w-0 flex-1 basis-56">
               <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px] font-medium leading-5 text-foreground/90">
                 <span className="break-all">{provider.name}</span>
-                <span className="rounded border border-border bg-card px-1 font-mono text-[9px] font-normal text-muted-foreground">{provider.kind}</span>
-                {provider.hasKey ? <span className="text-[10px] font-normal text-emerald-400">密钥已配置</span> : <span className="text-[10px] font-normal text-amber-400">未配置密钥</span>}
+                <MiniChip className="font-mono">{provider.kind}</MiniChip>
+                {provider.hasKey ? <span className="text-[10px] font-normal text-live">密钥已配置</span> : <span className="text-[10px] font-normal text-warn">未配置密钥</span>}
               </p>
               <p className="truncate font-mono text-[10px] leading-4 text-muted-foreground/80">{provider.baseURL} · {provider.apiMode}</p>
             </div>
-            <Badge variant="outline" className={cn("shrink-0 rounded-full border-border font-normal", provider.enabled ? "text-emerald-400" : "text-muted-foreground")}>
+            <Badge variant="outline" className={cn("shrink-0 rounded-full border-border font-normal", provider.enabled ? "text-live" : "text-muted-foreground")}>
               {provider.enabled ? "启用" : "停用"}
             </Badge>
           </div>
@@ -75,7 +76,7 @@ export function ProviderSection({ providers, draft, onDraftChange, onAdd, saving
         <p className="mt-2 text-[11px] leading-5 text-muted-foreground/80">
           Base URL 必须以 <span className="font-mono">/v1</span> 结尾（如 https://api.example.com/v1）；API 密钥只写入本机 .env.local，不回显、不进入模型档案与房间快照。
         </p>
-        <Button variant="outline" size="sm" className="mt-2 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={onAdd}>
+        <Button variant="tile" size="sm" className="mt-2" disabled={saving} onClick={onAdd}>
           <Plus className="size-3.5" /> 添加提供商
         </Button>
       </div>

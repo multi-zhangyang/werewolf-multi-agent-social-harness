@@ -9,6 +9,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { ErrorNote } from "../shared";
 import { GlobalDefaultsSection } from "./global-defaults-section";
 import { ModelFormSection } from "./model-form-section";
 import { ModelProfilesSection } from "./model-profiles-section";
@@ -297,7 +298,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
           <div className="shrink-0 border-b border-border/60 p-6">
             <DialogHeader className="gap-2 text-left">
               <div className="flex items-center gap-3">
-                <span className="flex size-10 items-center justify-center rounded-xl border border-white/10 bg-muted text-foreground/80">
+                <span className="flex size-10 items-center justify-center rounded-xl border border-border bg-muted text-foreground/80">
                   <Settings2 className="size-5" />
                 </span>
                 <div>
@@ -311,7 +312,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-          <div className="space-y-7 p-6">
+          <div className="space-y-6 p-6">
             <ProviderSection
               providers={config.providers}
               draft={providerDraft}
@@ -373,7 +374,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
               saving={saving}
             />
 
-            {error ? <p className="text-[13px] text-red-400">{error}</p> : null}
+            {error ? <ErrorNote>{error}</ErrorNote> : null}
           </div>
           </div>
 

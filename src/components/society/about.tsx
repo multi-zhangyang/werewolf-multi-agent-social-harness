@@ -108,7 +108,7 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
         <section className="mb-16">
           <SparkleDivider>会话与记忆</SparkleDivider>
           <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="rounded-lg border border-emerald-400/30 bg-gradient-to-b from-emerald-400/10 to-card p-6">
+            <div className="rounded-lg border border-live/30 bg-gradient-to-b from-live/10 to-card p-6">
               <h2 className="text-base font-semibold tracking-tight">一局一个完整会话</h2>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
                 每个席位是一个独立 Agent，持有本局进程内的内存会话：角色从零开始，凭本局的发言、承诺与结算逐步建立关系与记忆。每局身份与阵营重新随机，过去的角色不证明本局的忠诚。

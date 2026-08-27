@@ -3,6 +3,7 @@ import {
   ArrowLeftRight,
   BrainCircuit,
   Castle,
+  ChevronDown,
   ChevronsLeftRight,
   Dices,
   Gavel,
@@ -12,10 +13,12 @@ import {
   Scale,
   Sparkles,
   Sword,
+  TriangleAlert,
   Users,
   Waypoints
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { AgentStatus, ScenarioId, SocialChannel } from "@/society/contracts";
@@ -201,10 +204,15 @@ export function roleLabelZh(role: string | undefined): string {
   return role ? labels[role] ?? role : "未知";
 }
 
-export function formatTime(value: string): string {
+export function formatTime(value: string, options?: { seconds?: boolean }): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "--:--";
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date);
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: options?.seconds === false ? undefined : "2-digit",
+    hour12: false
+  }).format(date);
 }
 
 export function eventLabel(name: string): string {
@@ -269,4 +277,54 @@ export function provenanceBadge(source: string): ReactNode {
     presentation: "展示标签"
   };
   return <Badge variant="outline" className="text-[10px]">{labels[source] ?? source}</Badge>;
+}
+
+/** The one accordion section: icon/count shapes cover rail and causality uses. */
+export function CollapsibleSection({ title, icon, count, defaultOpen = false, className, contentClassName, children }: {
+  title: ReactNode;
+  icon?: ReactNode;
+  count?: number;
+  defaultOpen?: boolean;
+  className?: string;
+  contentClassName?: string;
+  children: ReactNode;
+}): ReactNode {
+  return (
+    <Collapsible defaultOpen={defaultOpen} className={cn("group/section rounded-lg border bg-card/40", className)}>
+      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium transition-colors hover:bg-muted/30">
+        {icon ? <span className="shrink-0 text-muted-foreground [&_svg]:size-3.5">{icon}</span> : null}
+        <span className="min-w-0 truncate">{title}</span>
+        {count !== undefined && count > 0 ? <Badge variant="secondary" className="ml-0.5 shrink-0 font-mono text-[10px]">{count}</Badge> : null}
+        <ChevronDown className="ml-auto size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/section:rotate-180" aria-hidden />
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className={cn("space-y-1.5 border-t border-border/60 px-3 py-2.5", contentClassName)}>{children}</div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+/** Tiny metadata chip; tone maps to the semantic color tokens. */
+export function MiniChip({ tone = "neutral", className, children }: {
+  tone?: "neutral" | "warn" | "secret" | "live";
+  className?: string;
+  children: ReactNode;
+}): ReactNode {
+  const tones = {
+    neutral: "border-border bg-card text-muted-foreground",
+    warn: "border-warn/40 bg-warn/10 text-warn",
+    secret: "border-secret/40 bg-secret/10 text-secret",
+    live: "border-live/40 bg-live/10 text-live"
+  };
+  return <span className={cn("inline-flex items-center gap-1 rounded border px-1 text-[9px] leading-4", tones[tone], className)}>{children}</span>;
+}
+
+/** The one inline error surface: destructive hairline box with an alert glyph. */
+export function ErrorNote({ children }: { children: ReactNode }): ReactNode {
+  return (
+    <p className="flex items-start gap-1.5 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-[13px] leading-5 text-destructive">
+      <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0">{children}</span>
+    </p>
+  );
 }

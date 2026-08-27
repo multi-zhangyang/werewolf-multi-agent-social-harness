@@ -5,7 +5,7 @@ import { MessageResponse } from "@/components/ai-elements/message";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import { cn } from "@/lib/utils";
-import { AgentAvatar, eventLabel } from "./shared";
+import { AgentAvatar, eventLabel, formatTime } from "./shared";
 
 /**
  * One activation of one agent, rendered live: thinking shimmer → reasoning
@@ -38,12 +38,15 @@ export const TurnCard = memo(function TurnCard({
       : "已完成";
 
   return (
-    <article className={cn("group relative flex gap-3 rounded-xl border bg-card/60 p-3 transition-colors", live && "border-foreground/20 shadow-[0_0_24px_-12px] shadow-foreground/30")}>
+    <article className={cn(
+      "enter-stage group relative flex gap-3 rounded-xl border bg-card/60 p-3 transition-colors",
+      live && "border-foreground/20 bg-gradient-to-b from-foreground/[0.04] to-transparent shadow-[0_0_24px_-12px] shadow-foreground/30"
+    )}>
       <div className="flex flex-col items-center gap-1.5 pt-0.5">
         <span className={cn("relative inline-flex", live && "on-air")}>
           <AgentAvatar name={name} seed={seed} size="lg" />
         </span>
-        {live ? <span className="size-1 animate-pulse rounded-full bg-emerald-400" aria-hidden /> : null}
+        {live ? <span className="size-1 animate-pulse rounded-full bg-live" aria-hidden /> : null}
       </div>
       <div className="min-w-0 flex-1 space-y-2">
         <header className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
@@ -54,7 +57,7 @@ export const TurnCard = memo(function TurnCard({
             <span className={cn("text-xs", turn.status === "error" ? "text-destructive" : "text-muted-foreground")}>{statusLine}</span>
           )}
           {channelLabel ? <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">{channelLabel}</span> : null}
-          <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatClock(turn.startedAt)}</time>
+          <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(turn.startedAt)}</time>
         </header>
 
         {canSeeCognition && turn.reasoning && (live || turn.reasoning.text) ? (
@@ -87,7 +90,7 @@ export const TurnCard = memo(function TurnCard({
 
         {live ? (
           turn.sealed ? (
-            <p className="flex items-center gap-2 rounded-lg border border-violet-500/25 bg-violet-500/5 px-3 py-2 text-xs text-violet-300/90">
+            <p className="flex items-center gap-2 rounded-lg border border-secret/25 bg-secret/5 px-3 py-2 text-xs text-secret/90">
               <Loader2 className="size-3.5 animate-spin" aria-hidden />
               密封行动进行中——选择在结算前不会公开。
             </p>
@@ -108,11 +111,5 @@ export const TurnCard = memo(function TurnCard({
 });
 
 function StreamCaret(): ReactNode {
-  return <span className="ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 animate-pulse bg-emerald-400 align-middle" aria-hidden />;
-}
-
-function formatClock(at: string): string {
-  const parsed = Date.parse(at);
-  if (!Number.isFinite(parsed)) return "";
-  return new Date(parsed).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  return <span className="ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 animate-pulse bg-live align-middle" aria-hidden />;
 }

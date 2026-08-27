@@ -106,7 +106,7 @@ export function ModelAssignSection({
                     active ? "border-foreground/60 bg-muted text-foreground" : "border-border bg-card text-muted-foreground hover:border-foreground/30"
                   )}
                 >
-                  <span className={cn("size-1.5 rounded-full", active ? "bg-emerald-400" : "bg-border")} />
+                  <span className={cn("size-1.5 rounded-full", active ? "bg-live" : "bg-border")} />
                   <span className="max-w-52 truncate font-mono">{model.name}</span>
                 </button>
               );
@@ -114,9 +114,9 @@ export function ModelAssignSection({
           </div>
           <div className="mt-2.5 flex items-center gap-2">
             <Button
-              variant="outline"
+              variant="tile"
               size="sm"
-              className="h-8 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="h-8"
               disabled={!poolIds.length}
               onClick={onReshuffle}
             >

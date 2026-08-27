@@ -11,6 +11,7 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { MiniChip } from "../shared";
 import { capabilityName, type ModelProfileView, type ProviderView, type ReasoningEffort, type ReasoningEffortSelection, type TestResult } from "./types";
 
 /** The registered model profiles: per-row reasoning effort, probe, edit, enable, remove. */
@@ -40,8 +41,8 @@ export function ModelProfilesSection({ profiles, providers, probeResults, probin
               <div className="min-w-0 flex-1 basis-56">
                 <p className="break-all text-[13px] font-medium leading-5 text-foreground/90">
                   {profile.name}
-                  <span className="ml-2 rounded border border-border bg-card px-1 font-mono text-[9px] font-normal text-muted-foreground">{profile.contextLabel}</span>
-                  <span className={cn("ml-1.5 font-mono text-[9px] font-normal", profile.contextWindowSource === "manual" ? "text-muted-foreground" : "text-amber-400/90")}>
+                  <MiniChip className="ml-2 font-mono">{profile.contextLabel}</MiniChip>
+                  <span className={cn("ml-1.5 font-mono text-[9px] font-normal", profile.contextWindowSource === "manual" ? "text-muted-foreground" : "text-warn/90")}>
                     {profile.contextWindowSource === "manual" ? "手动登记" : "已知档案"}
                   </span>
                 </p>
@@ -76,9 +77,9 @@ export function ModelProfilesSection({ profiles, providers, probeResults, probin
                   </SelectContent>
                 </Select>
                 <Button
-                  variant="outline"
+                  variant="tile"
                   size="sm"
-                  className="h-7 rounded-lg border-border bg-card px-2 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                  className="h-7 px-2 text-[11px]"
                   disabled={Boolean(probing) || savingEffort === profile.id}
                   onClick={() => onProbe(profile.id, profile.defaults?.reasoningEffort)}
                 >
@@ -96,7 +97,7 @@ export function ModelProfilesSection({ profiles, providers, probeResults, probin
                 <Button
                   variant="ghost"
                   size="sm"
-                  className={cn("h-7 rounded-lg px-2 text-[11px]", profile.enabled ? "text-emerald-400 hover:text-emerald-300" : "text-muted-foreground hover:text-foreground")}
+                  className={cn("h-7 rounded-lg px-2 text-[11px]", profile.enabled ? "text-live hover:text-live" : "text-muted-foreground hover:text-foreground")}
                   disabled={saving}
                   onClick={() => onToggle(profile)}
                 >
@@ -108,7 +109,7 @@ export function ModelProfilesSection({ profiles, providers, probeResults, probin
                   aria-label={`移除 ${profile.name}`}
                   disabled={saving || Boolean(probing)}
                   onClick={() => onRemove(profile.id)}
-                  className="size-7 rounded-md text-muted-foreground/60 hover:bg-border hover:text-red-400"
+                  className="size-7 rounded-md text-muted-foreground/60 hover:bg-border hover:text-destructive"
                 >
                   <Trash2 className="size-3.5" />
                 </Button>

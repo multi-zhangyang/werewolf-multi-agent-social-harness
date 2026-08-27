@@ -136,7 +136,7 @@ export function RoomView({ roomId, token, onBack }: {
 
       {/* Terminal rooms (finished/archived) have no live stream by design — a reconnect banner there is noise. */}
       {link !== "closed" && world.status !== "finished" && (link === "reconnecting" || connection.error) ? (
-        <p className="flex shrink-0 items-center justify-center gap-1.5 bg-amber-500/10 px-4 py-1 text-center text-[11px] text-amber-300">
+        <p className="flex shrink-0 items-center justify-center gap-1.5 bg-warn/10 px-4 py-1 text-center text-[11px] text-warn">
           <TriangleAlert className="size-3 shrink-0" aria-hidden />
           {connection.error ?? "连接中断，正在重连——快照会自愈。"}
         </p>
@@ -272,14 +272,14 @@ function PhaseStrip({ room, sealed }: { room: SocietyRoomSnapshot; sealed: boole
   const world = room.world;
   const speakingAgents = world.agents.filter((agent) => agent.status === "speaking" || agent.status === "thinking" || agent.status === "acting");
   return (
-    <div className="flex h-9 shrink-0 items-center gap-2 overflow-hidden border-b border-border bg-card/30 px-4">
-      <span className="nums shrink-0 font-mono text-[11px] text-muted-foreground">R{world.turn}/{world.totalTurns}</span>
-      <Badge variant="outline" className="shrink-0 text-[10px]">{world.phase}</Badge>
+    <div className="flex h-9 shrink-0 items-center gap-2.5 overflow-hidden border-b border-border bg-card/30 px-4">
+      <span className="nums shrink-0 font-mono text-[11px] text-muted-foreground">R{world.turn}<span className="text-muted-foreground/50">/{world.totalTurns}</span></span>
+      <Badge variant="outline" className="shrink-0 rounded-full text-[10px]">{world.phase}</Badge>
       {sealed ? (
-        <span className="flex shrink-0 items-center gap-1 text-[10px] text-violet-300"><Lock className="size-3" aria-hidden />密封阶段 · 发言流暂停公开</span>
+        <span className="flex shrink-0 items-center gap-1 text-[10px] text-secret"><Lock className="size-3" aria-hidden />密封阶段 · 发言流暂停公开</span>
       ) : speakingAgents.length ? (
-        <span className="flex min-w-0 items-center gap-1 text-[10px] text-emerald-300">
-          <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400" aria-hidden />
+        <span className="flex min-w-0 items-center gap-1.5 text-[10px] text-live">
+          <span className="eq shrink-0" aria-hidden><span /><span /><span /></span>
           <span className="truncate">{speakingAgents.map((agent) => agent.displayName).join("、")} 直播中</span>
         </span>
       ) : (

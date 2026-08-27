@@ -7,6 +7,7 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select";
+import { MiniChip } from "../shared";
 import type { ModelOption } from "../types";
 import type { CharacterOption, ModelAssignMode } from "./types";
 
@@ -66,7 +67,7 @@ export function RosterSection({
                     {isHuman ? (
                       <span className="flex items-center gap-1.5">
                         {playerName.trim() || "你"}
-                        <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1 text-[9px] text-amber-300">人类玩家</span>
+                        <MiniChip tone="warn">人类玩家</MiniChip>
                       </span>
                     ) : characters.length ? (
                       <Select
@@ -113,10 +114,8 @@ export function RosterSection({
                     </Select>
                   ) : (
                     <span className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-                      {picked ? <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1 text-[9px] text-amber-300">指定</span> : null}
-                      {option.contextLabel ? (
-                        <span className="rounded border border-border bg-card px-1 text-[9px] text-muted-foreground/80">{option.contextLabel}</span>
-                      ) : null}
+                      {picked ? <MiniChip tone="warn">指定</MiniChip> : null}
+                      {option.contextLabel ? <MiniChip>{option.contextLabel}</MiniChip> : null}
                       {option.name ?? "—"}
                     </span>
                   )}

@@ -1,13 +1,14 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Hourglass, Wrench } from "lucide-react";
+import { ChevronDown, Hourglass, Wrench } from "lucide-react";
 import type { SocialMessage } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { EffectiveViewer, LiveTurn, RoomConnection } from "./use-room";
 import { Button } from "@/components/ui/button";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { AgentAvatar, ChannelBadge, channelSurface, eventLabel, ScenarioIcon } from "./shared";
+import { AgentAvatar, ChannelBadge, channelSurface, eventLabel, formatTime, ScenarioIcon } from "./shared";
 import { TurnCard } from "./turn-card";
 
 /**
@@ -80,7 +81,12 @@ function StreamItems({ items, room, onSubmitAction }: {
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2.5 px-4 py-4">
           {items.map((item) => <div key={item.id}>{item.render}</div>)}
           {!items.length ? (
-            <p className="py-16 text-center text-sm text-muted-foreground">等待世界苏醒——第一个 agent 开始思考时，全过程会在这里直播。</p>
+            <Empty className="py-16">
+              <EmptyHeader>
+                <EmptyTitle>等待世界苏醒</EmptyTitle>
+                <EmptyDescription>第一个 agent 开始思考时，全过程会在这里直播。</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : null}
         </div>
       </ScrollArea>
@@ -173,17 +179,20 @@ const MessageBubble = memo(function MessageBubble({
   canSeeCognition: boolean;
 }): ReactNode {
   return (
-    <article className={cn("rounded-xl border p-3", channelSurface[message.channel])}>
+    <article className={cn("enter-stage rounded-xl border p-3 transition-colors", channelSurface[message.channel], "hover:border-foreground/15")}>
       <header className="mb-1.5 flex items-center gap-2">
         <AgentAvatar name={name} seed={seed} size="sm" />
         <span className="text-sm font-medium">{name}</span>
         {message.channel !== "public" ? <ChannelBadge channel={message.channel} /> : null}
-        <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatClock(message.createdAt)}</time>
+        <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(message.createdAt, { seconds: false })}</time>
       </header>
       <div className="text-sm leading-relaxed [&_p]:my-0">{message.text}</div>
       {turn && canSeeCognition && (turn.reasoning || turn.tools.length) ? (
-        <details className="mt-2 border-t border-border/50 pt-2 text-xs text-muted-foreground">
-          <summary className="cursor-pointer select-none hover:text-foreground">本轮过程</summary>
+        <details className="group/process mt-2 border-t border-border/50 pt-2 text-xs text-muted-foreground">
+          <summary className="flex w-full cursor-pointer list-none select-none items-center gap-1.5 font-mono text-[10px] tracking-[0.14em] uppercase hover:text-foreground [&::-webkit-details-marker]:hidden">
+            <ChevronDown className="size-3 transition-transform group-open/process:rotate-180" aria-hidden />
+            本轮过程
+          </summary>
           <div className="mt-1.5 space-y-1.5">
             {turn.reasoning?.text ? <pre className="whitespace-pre-wrap rounded-md bg-muted/40 p-2 font-sans leading-relaxed">{turn.reasoning.text}</pre> : null}
             {turn.tools.map((tool) => (
@@ -198,12 +207,12 @@ const MessageBubble = memo(function MessageBubble({
 
 function PhaseDivider({ text, beat }: { text: string; beat?: string }): ReactNode {
   return (
-    <div className="flex items-center gap-3 py-2" role="separator">
-      <span className="h-px w-8 shrink-0 bg-border/70 sm:flex-1 sm:w-auto" />
-      <span className={cn("min-w-0 rounded-xl border px-3 py-1 text-xs leading-5", beat ? "border-amber-500/30 bg-amber-500/5 text-amber-200/90" : "border-border bg-muted/40 text-muted-foreground")}>
+    <div className="cue-enter flex items-center gap-3 py-2" role="separator">
+      <span className="h-px w-8 shrink-0 bg-gradient-to-r from-transparent to-foreground/15 sm:w-auto sm:flex-1" />
+      <span className={cn("min-w-0 rounded-full border px-3.5 py-1 text-xs leading-5 backdrop-blur-sm", beat ? "border-warn/25 bg-warn/[0.06] text-warn/90" : "border-border bg-muted/40 text-muted-foreground")}>
         {beat ? `★ ${beat} · ` : ""}{text}
       </span>
-      <span className="h-px w-8 shrink-0 bg-border/70 sm:flex-1 sm:w-auto" />
+      <span className="h-px w-8 shrink-0 bg-gradient-to-l from-transparent to-foreground/15 sm:w-auto sm:flex-1" />
     </div>
   );
 }
@@ -250,12 +259,6 @@ function HumanActionBar({ room, onSubmitAction }: { room: SocietyRoomSnapshot; o
       </div>
     </footer>
   );
-}
-
-function formatClock(at: string): string {
-  const parsed = Date.parse(at);
-  if (!Number.isFinite(parsed)) return "";
-  return new Date(parsed).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
 // Re-export so the shell can render the scenario icon next to the phase strip.

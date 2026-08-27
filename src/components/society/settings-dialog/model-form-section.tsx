@@ -11,6 +11,7 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { MiniChip } from "../shared";
 import {
   QUICK_CAPABILITIES,
   type ModelDraft,
@@ -107,9 +108,9 @@ export function ModelFormSection({
         <div className="flex items-center justify-between gap-2">
           <p className="text-[11px] font-medium text-muted-foreground">从提供商拉取模型列表（推荐）</p>
           <Button
-            variant="outline"
+            variant="tile"
             size="sm"
-            className="h-7 rounded-lg border-border bg-card px-2 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="h-7 px-2 text-[11px]"
             disabled={saving || Boolean(providerId && catalog?.loading)}
             onClick={onLoadRemoteModels}
           >
@@ -123,7 +124,7 @@ export function ModelFormSection({
           Base URL 需以 /v1 结尾（如 https://api.example.com/v1）。勾选后批量注册，上下文窗口用上方输入值，添加后可随时逐个编辑。
         </p>
         {providerId && catalog?.result && !catalog.result.ok ? (
-          <p className="mt-1.5 text-[11px] leading-4 text-red-400">{catalog.result.message}</p>
+          <p className="mt-1.5 text-[11px] leading-4 text-destructive">{catalog.result.message}</p>
         ) : null}
         {providerId && catalog?.result?.ok ? (
           <>
@@ -147,7 +148,7 @@ export function ModelFormSection({
                       onChange={(event) => onPickedRemoteChange(event.target.checked ? [...pickedRemoteIds, modelId] : pickedRemoteIds.filter((id) => id !== modelId))}
                     />
                     <span className="min-w-0 flex-1 truncate">{modelId}</span>
-                    {registered ? <span className="rounded border border-border bg-muted px-1 text-[9px]">已添加</span> : null}
+                    {registered ? <MiniChip>已添加</MiniChip> : null}
                   </label>
                 );
               })}
@@ -156,9 +157,9 @@ export function ModelFormSection({
               <div className="mt-2 flex items-center gap-2">
                 <span className="nums text-[11px] text-muted-foreground">已选 {pickedRemoteIds.length} 个</span>
                 <Button
-                  variant="outline"
+                  variant="tile"
                   size="sm"
-                  className="h-7 rounded-lg border-border bg-card px-2 text-[11px] text-foreground hover:bg-muted"
+                  className="h-7 px-2 text-[11px] text-foreground"
                   disabled={saving}
                   onClick={onAddSelectedRemoteModels}
                 >
@@ -187,7 +188,7 @@ export function ModelFormSection({
         ))}
         <span className="self-center text-[10px] text-muted-foreground/60">未勾选 = 能力未验证，参数不会盲目发送</span>
       </div>
-      <Button variant="outline" size="sm" className="mt-2 rounded-lg border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={onAddModel}>
+      <Button variant="tile" size="sm" className="mt-2" disabled={saving} onClick={onAddModel}>
         {editingProfile ? "保存修改" : <><Plus className="size-3.5" /> 添加模型档案</>}
       </Button>
     </div>
