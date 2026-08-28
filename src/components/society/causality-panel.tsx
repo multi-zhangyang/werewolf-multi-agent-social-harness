@@ -1,4 +1,4 @@
-import { memo, type ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
 import { ArrowRight, Crown, Waypoints } from "lucide-react";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type {
@@ -30,6 +30,20 @@ export const CausalityPanel = memo(function CausalityPanel({ room, viewerPrivile
   const names = new Map(room.world.agents.map((agent) => [agent.id, agent.displayName]));
   const characterNames = new Map(room.world.agents.map((agent) => [agent.characterId, agent.displayName]));
   const actorName = (id: string | undefined): string => (id ? names.get(id) ?? characterNames.get(id) ?? id : "—");
+  // Ledger prose (predicates, summaries) is model-written and can cite raw
+  // ids like "agent-01"; rewrite every known id back into a display name.
+  const hydrateText = useMemo(() => {
+    const replacements = [...names.entries(), ...characterNames.entries()]
+      .map(([id, name]) => [id, name] as const)
+      .sort((left, right) => right[0].length - left[0].length);
+    return (text: string): string => {
+      let result = text;
+      for (const [id, name] of replacements) {
+        if (result.includes(id)) result = result.split(id).join(name);
+      }
+      return result;
+    };
+  }, [names, characterNames]);
   const omniscient = viewerPrivileged;
   const records = projection ? totalRecords(projection) : 0;
 
@@ -44,12 +58,12 @@ export const CausalityPanel = memo(function CausalityPanel({ room, viewerPrivile
         <div className="flex flex-col gap-1.5 p-3">
           <ScoreSection room={room} />
           <SuspicionSection room={room} />
-          <SocialActsSection projection={projection} actorName={actorName} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
-          <BeliefSection projection={projection} characterNames={characterNames} />
-          <CommitmentSection projection={projection} actorName={actorName} />
-          <DeceptionSection projection={projection} actorName={actorName} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
+          <SocialActsSection projection={projection} actorName={actorName} hydrateText={hydrateText} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
+          <BeliefSection projection={projection} characterNames={characterNames} hydrateText={hydrateText} />
+          <CommitmentSection projection={projection} actorName={actorName} hydrateText={hydrateText} />
+          <DeceptionSection projection={projection} actorName={actorName} hydrateText={hydrateText} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
           <RelationshipSection projection={projection} characterNames={characterNames} />
-          {omniscient ? <OutcomeSection projection={projection} actorName={actorName} /> : null}
+          {omniscient ? <OutcomeSection projection={projection} actorName={actorName} hydrateText={hydrateText} /> : null}
           {!projection || records === 0 ? (
             <Empty className="py-14">
               <EmptyHeader>
@@ -94,9 +108,10 @@ function spectatorActs(projection: SocialCausalityProjection | undefined): Socia
     .sort((left, right) => left.logicalTime - right.logicalTime);
 }
 
-function SocialActsSection({ projection, actorName, propositions }: {
+function SocialActsSection({ projection, actorName, hydrateText, propositions }: {
   projection: SocialCausalityProjection | undefined;
   actorName: (id: string | undefined) => string;
+  hydrateText: (text: string) => string;
   propositions: Map<string, SocialCausalityProjection["propositions"][number]>;
 }): ReactNode {
   const acts = spectatorActs(projection).slice(-12).reverse();
@@ -124,7 +139,7 @@ function SocialActsSection({ projection, actorName, propositions }: {
             </div>
             {act.propositionIds.length ? (
               <p className="mt-1.5 line-clamp-2 text-[11px] leading-5 text-muted-foreground">
-                {act.propositionIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；")}
+                {hydrateText(act.propositionIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；"))}
               </p>
             ) : null}
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -183,9 +198,10 @@ function SuspicionSection({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   );
 }
 
-function BeliefSection({ projection, characterNames }: {
+function BeliefSection({ projection, characterNames, hydrateText }: {
   projection: SocialCausalityProjection | undefined;
   characterNames: Map<string, string>;
+  hydrateText: (text: string) => string;
 }): ReactNode {
   const updates = [...(projection?.beliefUpdates ?? [])].sort((left, right) => left.logicalTime - right.logicalTime);
   if (!updates.length) return null;
@@ -204,7 +220,7 @@ function BeliefSection({ projection, characterNames }: {
         return (
           <div key={group[0].beliefId} className="rounded-lg border border-border/50 p-2.5">
             <p className="text-xs font-medium">{characterNames.get(group[0].ownerCharacterId) ?? group[0].ownerCharacterId}</p>
-            <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{proposition?.predicate ?? group[0].propositionId}</p>
+            <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{hydrateText(proposition?.predicate ?? group[0].propositionId)}</p>
             <div className="mt-1 flex flex-wrap items-center gap-1">
               {group.slice(-4).map((update) => (
                 <Badge key={update.beliefUpdateId} variant="outline" className="rounded-full border-border/70 bg-muted/50 font-mono text-[10px]">
@@ -220,9 +236,10 @@ function BeliefSection({ projection, characterNames }: {
   );
 }
 
-function CommitmentSection({ projection, actorName }: {
+function CommitmentSection({ projection, actorName, hydrateText }: {
   projection: SocialCausalityProjection | undefined;
   actorName: (id: string | undefined) => string;
+  hydrateText: (text: string) => string;
 }): ReactNode {
   const commitments = [...(projection?.commitments ?? [])].reverse();
   if (!commitments.length) return null;
@@ -237,7 +254,7 @@ function CommitmentSection({ projection, actorName }: {
             </Badge>
             {provenanceBadge("message-claim")}
           </div>
-          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-foreground/85">{commitment.proposition}</p>
+          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-foreground/85">{hydrateText(commitment.proposition)}</p>
           <p className="mt-1 text-[10px] text-muted-foreground/70">
             对象 {commitment.audienceActorIds.map(actorName).join("、")}{promisedActionText(commitment)}
           </p>
@@ -262,9 +279,10 @@ const STAGE_OF: Record<string, number> = {
   "behaviorally-effective": 4, detected: 5, "repair-attempted": 5, repaired: 6
 };
 
-function DeceptionSection({ projection, actorName, propositions }: {
+function DeceptionSection({ projection, actorName, hydrateText, propositions }: {
   projection: SocialCausalityProjection | undefined;
   actorName: (id: string | undefined) => string;
+  hydrateText: (text: string) => string;
   propositions: Map<string, SocialCausalityProjection["propositions"][number]>;
 }): ReactNode {
   const episodes = [...(projection?.deceptions ?? [])].reverse();
@@ -272,15 +290,16 @@ function DeceptionSection({ projection, actorName, propositions }: {
   return (
     <CollapsibleSection title="欺骗生命周期" count={episodes.length}>
       {episodes.map((episode) => (
-        <DeceptionCard key={episode.deceptionId} episode={episode} actorName={actorName} propositions={propositions} />
+        <DeceptionCard key={episode.deceptionId} episode={episode} actorName={actorName} hydrateText={hydrateText} propositions={propositions} />
       ))}
     </CollapsibleSection>
   );
 }
 
-function DeceptionCard({ episode, actorName, propositions }: {
+function DeceptionCard({ episode, actorName, hydrateText, propositions }: {
   episode: DeceptionEpisode;
   actorName: (id: string | undefined) => string;
+  hydrateText: (text: string) => string;
   propositions: Map<string, SocialCausalityProjection["propositions"][number]>;
 }): ReactNode {
   const reached = STAGE_OF[episode.status] ?? -1;
@@ -292,7 +311,7 @@ function DeceptionCard({ episode, actorName, propositions }: {
         {provenanceBadge("agent-self-report")}
       </div>
       <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
-        {episode.intendedFalseBeliefIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；") || "目标命题未引用"}
+        {hydrateText(episode.intendedFalseBeliefIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；")) || "目标命题未引用"}
       </p>
       {/* Lifecycle as chips: solid = reached, dashed + "?" = still unknown. */}
       <div className="mt-1.5 flex flex-wrap items-center gap-1">
@@ -357,26 +376,27 @@ function Metric({ label, value }: { label: string; value: number }): ReactNode {
   );
 }
 
-function OutcomeSection({ projection, actorName }: {
+function OutcomeSection({ projection, actorName, hydrateText }: {
   projection: SocialCausalityProjection | undefined;
   actorName: (id: string | undefined) => string;
+  hydrateText: (text: string) => string;
 }): ReactNode {
   const reconciliations = [...(projection?.outcomeReconciliations ?? [])].reverse().slice(0, 6);
   if (!reconciliations.length) return null;
   return (
     <CollapsibleSection title="结果对账（全知）" count={reconciliations.length}>
       {reconciliations.map((reconciliation) => (
-        <OutcomeRow key={reconciliation.reconciliationId} reconciliation={reconciliation} actorName={actorName} />
+        <OutcomeRow key={reconciliation.reconciliationId} reconciliation={reconciliation} actorName={actorName} hydrateText={hydrateText} />
       ))}
     </CollapsibleSection>
   );
 }
 
-function OutcomeRow({ reconciliation, actorName }: { reconciliation: OutcomeReconciliation; actorName: (id: string | undefined) => string }): ReactNode {
+function OutcomeRow({ reconciliation, actorName, hydrateText }: { reconciliation: OutcomeReconciliation; actorName: (id: string | undefined) => string; hydrateText: (text: string) => string }): ReactNode {
   return (
     <div className="rounded-lg border border-border/50 p-2.5 text-[11px] leading-4">
       <p className="font-medium">{actorName(reconciliation.actorId)}</p>
-      <p className="text-muted-foreground">{reconciliation.actualOutcome.summary}</p>
+      <p className="text-muted-foreground">{hydrateText(reconciliation.actualOutcome.summary)}</p>
     </div>
   );
 }

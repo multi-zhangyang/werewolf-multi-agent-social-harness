@@ -5,7 +5,9 @@ import { MessageResponse } from "@/components/ai-elements/message";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import { cn } from "@/lib/utils";
-import { AgentAvatar, eventLabel, formatTime } from "./shared";
+import { AgentAvatar, formatTime } from "./shared";
+import { ToolRow } from "./turn-cognition";
+import type { NameResolver } from "./tool-summary";
 
 /**
  * One activation of one agent, rendered live: thinking shimmer → reasoning
@@ -17,7 +19,8 @@ export const TurnCard = memo(function TurnCard({
   name,
   seed,
   canSeeCognition,
-  channelLabel
+  channelLabel,
+  resolveName
 }: {
   turn: LiveTurn;
   name: string;
@@ -25,6 +28,7 @@ export const TurnCard = memo(function TurnCard({
   /** Whether this viewer may see reasoning/tool internals (omniscient / own POV). */
   canSeeCognition: boolean;
   channelLabel?: string;
+  resolveName?: NameResolver;
 }): ReactNode {
   const live = !turn.completedAt;
   const statusLine = live
@@ -71,16 +75,8 @@ export const TurnCard = memo(function TurnCard({
         {canSeeCognition && turn.tools.length ? (
           <ul className="space-y-1.5">
             {turn.tools.map((tool) => (
-              <li key={tool.toolCallId} className="min-w-0 rounded-md border border-border/50 bg-muted/30 px-2 py-1.5 text-xs">
-                <p className="flex items-center gap-1.5">
-                  {tool.phase === "succeeded"
-                    ? <Wrench className="size-3 shrink-0 text-muted-foreground" aria-hidden />
-                    : <Loader2 className="size-3 shrink-0 animate-spin text-muted-foreground" aria-hidden />}
-                  <span className="font-medium">{tool.label ?? eventLabel(tool.toolName)}</span>
-                </p>
-                {tool.safeOutputSummary ? (
-                  <p className="mt-0.5 whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-muted-foreground">{tool.safeOutputSummary}</p>
-                ) : null}
+              <li key={tool.toolCallId} className="min-w-0">
+                <ToolRow tool={tool} resolveName={resolveName} />
               </li>
             ))}
           </ul>

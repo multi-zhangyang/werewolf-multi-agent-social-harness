@@ -217,6 +217,31 @@ export function roleLabelZh(role: string | undefined): string {
   return role ? labels[role] ?? role : "未知";
 }
 
+/** Story-beat keys (StoryBeatKind) as banner words; unknown keys pass through. */
+export function beatLabel(beat: string | undefined): string {
+  const labels: Record<string, string> = {
+    betrayal: "背叛",
+    "deception-exposed": "骗局被识破",
+    alliance: "结成同盟",
+    "promise-kept": "承诺兑现",
+    "promise-broken": "承诺违约",
+    comeback: "逆风翻盘",
+    misplay: "失手",
+    win: "一锤定音",
+    "cooperative-outcome": "达成合作",
+    "high-return": "高回报",
+    "low-return": "低回报",
+    "commitment-unresolved": "承诺未决",
+    "unilateral-defection": "单方面背离",
+    "free-riding": "搭便车",
+    "adverse-outcome": "事与愿违",
+    "agreement-reached": "达成约定",
+    "negotiation-failed": "谈判破裂",
+    "hidden-role-revealed": "隐藏身份揭晓"
+  };
+  return beat ? labels[beat] ?? beat : "";
+}
+
 export function formatTime(value: string, options?: { seconds?: boolean }): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "--:--";

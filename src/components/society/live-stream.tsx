@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, Hourglass, Wrench } from "lucide-react";
+import { Hourglass } from "lucide-react";
 import type { SocialMessage } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { EffectiveViewer, LiveTurn, RoomConnection } from "./use-room";
@@ -8,9 +8,11 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { AgentAvatar, ChannelBadge, channelSurface, eventLabel, formatTime, ScenarioIcon } from "./shared";
+import { AgentAvatar, beatLabel, ChannelBadge, channelSurface, formatTime, ScenarioIcon } from "./shared";
 import { belongsToCluster } from "./stream-cluster";
 import { TurnCard } from "./turn-card";
+import { SettledTurnProcess } from "./turn-cognition";
+import type { NameResolver } from "./tool-summary";
 
 /**
  * The centerpiece: one chronological live stream answering "谁在干什么、
@@ -45,7 +47,17 @@ export const LiveStream = memo(function LiveStream({
     || (viewer?.mode === "agent-pov" && Boolean(viewer.agentId))
     || (viewer?.mode === "postgame" && viewer.privileged === true);
 
-  const items = useMemo(() => buildStreamItems(room, turns, names, canSeeCognition, avatarSeedFor), [room, turns, names, canSeeCognition, avatarSeedFor]);
+  // Tool payloads reference actor/character ids; summaries speak in names.
+  const resolveName = useMemo<NameResolver>(() => {
+    const agentNames = new Map(room.world.agents.map((agent) => [agent.id, agent.displayName]));
+    const characterNames = new Map((room.participants ?? []).map((participant) => [participant.profile.characterId, participant.profile.displayName]));
+    return (id) => agentNames.get(id) ?? characterNames.get(id);
+  }, [room.participants, room.world.agents]);
+
+  const items = useMemo(
+    () => buildStreamItems(room, turns, names, canSeeCognition, avatarSeedFor, resolveName),
+    [room, turns, names, canSeeCognition, avatarSeedFor, resolveName]
+  );
   return <StreamItems items={items} room={room} onSubmitAction={onSubmitAction} />;
 });
 
@@ -134,7 +146,8 @@ function buildStreamItems(
   turns: LiveTurn[],
   names: Map<string, string>,
   canSeeCognition: boolean,
-  avatarSeedFor: (actorId: string) => string | undefined
+  avatarSeedFor: (actorId: string) => string | undefined,
+  resolveName: NameResolver
 ): StreamItem[] {
   const entries: StreamEntry[] = [];
   for (const entry of room.world.log) {
@@ -185,6 +198,7 @@ function buildStreamItems(
             name={names.get(entry.turn.actorId) ?? entry.turn.actorId}
             seed={avatarSeedFor(entry.turn.actorId)}
             canSeeCognition={canSeeCognition}
+            resolveName={resolveName}
           />
         )
       });
@@ -210,7 +224,7 @@ function buildStreamItems(
             id: entry.id,
             at: entry.at,
             sort: entry.sort,
-            render: <MessageBubble message={entry.message} name={name} seed={seed} turn={entry.turn} canSeeCognition={canSeeCognition} />
+            render: <MessageBubble message={entry.message} name={name} seed={seed} turn={entry.turn} canSeeCognition={canSeeCognition} resolveName={resolveName} />
           }
         : {
             id: `cluster:${cluster[0]!.id}`,
@@ -223,6 +237,7 @@ function buildStreamItems(
                 name={name}
                 seed={seed}
                 canSeeCognition={canSeeCognition}
+                resolveName={resolveName}
               />
             )
           }
@@ -237,13 +252,15 @@ const MessageBubble = memo(function MessageBubble({
   name,
   seed,
   turn,
-  canSeeCognition
+  canSeeCognition,
+  resolveName
 }: {
   message: SocialMessage;
   name: string;
   seed?: string;
   turn?: LiveTurn;
   canSeeCognition: boolean;
+  resolveName: NameResolver;
 }): ReactNode {
   return (
     <article className={cn("sheen enter-stage overflow-hidden rounded-xl border p-3 shadow-[0_1px_2px_oklch(0_0_0/0.2)] transition-colors duration-200", channelSurface[message.channel], "hover:border-foreground/15")}>
@@ -254,7 +271,7 @@ const MessageBubble = memo(function MessageBubble({
         <time className="ml-auto font-mono text-[10px] text-muted-foreground/85">{formatTime(message.createdAt, { seconds: false })}</time>
       </header>
       <div className="break-words text-sm leading-relaxed [&_p]:my-0">{message.text}</div>
-      <TurnDetails turn={turn} canSeeCognition={canSeeCognition} />
+      <TurnDetails turn={turn} canSeeCognition={canSeeCognition} resolveName={resolveName} />
     </article>
   );
 });
@@ -265,13 +282,15 @@ const MessageCluster = memo(function MessageCluster({
   turns,
   name,
   seed,
-  canSeeCognition
+  canSeeCognition,
+  resolveName
 }: {
   messages: SocialMessage[];
   turns: Map<string, LiveTurn | undefined>;
   name: string;
   seed?: string;
   canSeeCognition: boolean;
+  resolveName: NameResolver;
 }): ReactNode {
   const channel = messages[0]!.channel;
   return (
@@ -289,7 +308,7 @@ const MessageCluster = memo(function MessageCluster({
             {messageIndex > 0 ? (
               <time className="mt-0.5 block font-mono text-[10px] text-muted-foreground/75">{formatTime(message.createdAt, { seconds: false })}</time>
             ) : null}
-            <TurnDetails turn={turns.get(message.id)} canSeeCognition={canSeeCognition} />
+            <TurnDetails turn={turns.get(message.id)} canSeeCognition={canSeeCognition} resolveName={resolveName} />
           </div>
         ))}
       </div>
@@ -297,31 +316,14 @@ const MessageCluster = memo(function MessageCluster({
   );
 });
 
-/** Privileged per-turn process (reasoning + tools), collapsible. */
-function TurnDetails({ turn, canSeeCognition }: { turn?: LiveTurn; canSeeCognition: boolean }): ReactNode {
-  if (!turn || !canSeeCognition || (!turn.reasoning && !turn.tools.length)) return null;
-  return (
-    <details className="group/process mt-2 border-t border-border/50 pt-2 text-xs text-muted-foreground">
-      <summary className="flex w-full cursor-pointer list-none select-none items-center gap-1.5 rounded-md px-1 py-0.5 font-mono text-[11px] tracking-wide text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground [&::-webkit-details-marker]:hidden">
-        <ChevronDown className="size-3 transition-transform group-open/process:rotate-180" aria-hidden />
-        本轮过程
-      </summary>
-      <div className="mt-1.5 space-y-2">
-        {turn.reasoning?.text ? <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2 font-sans leading-relaxed">{turn.reasoning.text}</pre> : null}
-        {turn.tools.map((tool) => (
-          <div key={tool.toolCallId} className="min-w-0">
-            <p className="flex items-center gap-1.5">
-              <Wrench className="size-3 shrink-0" aria-hidden />
-              <span>{tool.label ?? eventLabel(tool.toolName)}</span>
-            </p>
-            {tool.safeOutputSummary ? (
-              <p className="mt-0.5 break-all pl-[18px] font-mono text-[11px] leading-5 text-muted-foreground/90">{tool.safeOutputSummary}</p>
-            ) : null}
-          </div>
-        ))}
-      </div>
-    </details>
-  );
+/** Privileged per-turn process (reasoning + tools); shared with the live card. */
+function TurnDetails({ turn, canSeeCognition, resolveName }: {
+  turn?: LiveTurn;
+  canSeeCognition: boolean;
+  resolveName: NameResolver;
+}): ReactNode {
+  if (!turn || !canSeeCognition) return null;
+  return <SettledTurnProcess turn={turn} resolveName={resolveName} />;
 }
 
 function PhaseDivider({ text, beat }: { text: string; beat?: string }): ReactNode {
@@ -332,7 +334,7 @@ function PhaseDivider({ text, beat }: { text: string; beat?: string }): ReactNod
         <span className="size-1 rotate-45 bg-foreground/25" />
       </span>
       <span className={cn("max-w-full rounded-full border px-3.5 py-1 text-center text-[11px] leading-5 tracking-wide backdrop-blur-sm shadow-[0_2px_12px_oklch(0_0_0/0.3)]", beat ? "border-warn/25 bg-warn/[0.07] text-warn/95" : "border-border bg-card/70 text-muted-foreground")}>
-        {beat ? `★ ${beat} · ` : ""}{text}
+        {beat ? `★ ${beatLabel(beat)} · ` : ""}{text}
       </span>
       <span className="hidden flex-1 items-center gap-1.5 sm:flex" aria-hidden>
         <span className="size-1 rotate-45 bg-foreground/25" />
