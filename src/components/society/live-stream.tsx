@@ -102,7 +102,7 @@ function StreamItems({ items, room, onSubmitAction }: {
             setScrolled(viewport.scrollTop > 8);
           }}
         >
-          <div ref={contentRef} className="mx-auto flex w-full max-w-3xl flex-col gap-3 px-4 pt-4 pb-8">
+          <div ref={contentRef} className="mx-auto flex w-full max-w-2xl flex-col gap-3 px-4 pt-4 pb-8">
             {items.map((item) => <div key={item.id}>{item.render}</div>)}
             {!items.length ? (
               <Empty className="py-16">
@@ -247,7 +247,7 @@ const MessageBubble = memo(function MessageBubble({
         <AgentAvatar name={name} seed={seed} size="sm" />
         <span className="text-sm font-medium tracking-tight">{name}</span>
         {message.channel !== "public" ? <ChannelBadge channel={message.channel} /> : null}
-        <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(message.createdAt, { seconds: false })}</time>
+        <time className="ml-auto font-mono text-[10px] text-muted-foreground/85">{formatTime(message.createdAt, { seconds: false })}</time>
       </header>
       <div className="break-words text-sm leading-relaxed [&_p]:my-0">{message.text}</div>
       <TurnDetails turn={turn} canSeeCognition={canSeeCognition} />
@@ -276,14 +276,14 @@ const MessageCluster = memo(function MessageCluster({
         <AgentAvatar name={name} seed={seed} size="sm" />
         <span className="text-sm font-medium tracking-tight">{name}</span>
         {channel !== "public" ? <ChannelBadge channel={channel} /> : null}
-        <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(messages[0]!.createdAt, { seconds: false })}</time>
+        <time className="ml-auto font-mono text-[10px] text-muted-foreground/85">{formatTime(messages[0]!.createdAt, { seconds: false })}</time>
       </header>
       <div className="space-y-2.5">
         {messages.map((message, messageIndex) => (
           <div key={message.id}>
             <div className="break-words text-sm leading-relaxed [&_p]:my-0">{message.text}</div>
             {messageIndex > 0 ? (
-              <time className="mt-0.5 block font-mono text-[10px] text-muted-foreground/40">{formatTime(message.createdAt, { seconds: false })}</time>
+              <time className="mt-0.5 block font-mono text-[10px] text-muted-foreground/75">{formatTime(message.createdAt, { seconds: false })}</time>
             ) : null}
             <TurnDetails turn={turns.get(message.id)} canSeeCognition={canSeeCognition} />
           </div>
@@ -298,17 +298,22 @@ function TurnDetails({ turn, canSeeCognition }: { turn?: LiveTurn; canSeeCogniti
   if (!turn || !canSeeCognition || (!turn.reasoning && !turn.tools.length)) return null;
   return (
     <details className="group/process mt-2 border-t border-border/50 pt-2 text-xs text-muted-foreground">
-      <summary className="flex w-full cursor-pointer list-none select-none items-center gap-1.5 font-mono text-[10px] tracking-[0.14em] uppercase hover:text-foreground [&::-webkit-details-marker]:hidden">
+      <summary className="flex w-full cursor-pointer list-none select-none items-center gap-1.5 rounded-md px-1 py-0.5 font-mono text-[11px] tracking-wide text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground [&::-webkit-details-marker]:hidden">
         <ChevronDown className="size-3 transition-transform group-open/process:rotate-180" aria-hidden />
         本轮过程
       </summary>
-      <div className="mt-1.5 space-y-1.5">
+      <div className="mt-1.5 space-y-2">
         {turn.reasoning?.text ? <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2 font-sans leading-relaxed">{turn.reasoning.text}</pre> : null}
         {turn.tools.map((tool) => (
-          <p key={tool.toolCallId} className="flex min-w-0 items-center gap-1.5">
-            <Wrench className="size-3 shrink-0" aria-hidden />
-            <span className="min-w-0 break-words">{tool.label ?? eventLabel(tool.toolName)}{tool.safeOutputSummary ? ` · ${tool.safeOutputSummary}` : ""}</span>
-          </p>
+          <div key={tool.toolCallId} className="min-w-0">
+            <p className="flex items-center gap-1.5">
+              <Wrench className="size-3 shrink-0" aria-hidden />
+              <span>{tool.label ?? eventLabel(tool.toolName)}</span>
+            </p>
+            {tool.safeOutputSummary ? (
+              <p className="mt-0.5 break-all pl-[18px] font-mono text-[11px] leading-5 text-muted-foreground/90">{tool.safeOutputSummary}</p>
+            ) : null}
+          </div>
         ))}
       </div>
     </details>
@@ -317,15 +322,15 @@ function TurnDetails({ turn, canSeeCognition }: { turn?: LiveTurn; canSeeCogniti
 
 function PhaseDivider({ text, beat }: { text: string; beat?: string }): ReactNode {
   return (
-    <div className="cue-enter flex items-center gap-2.5 py-2.5" role="separator">
-      <span className="flex flex-1 items-center gap-1.5" aria-hidden>
+    <div className="cue-enter flex flex-col items-center gap-1.5 py-2.5 sm:flex-row sm:gap-2.5" role="separator">
+      <span className="hidden flex-1 items-center gap-1.5 sm:flex" aria-hidden>
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-foreground/15" />
         <span className="size-1 rotate-45 bg-foreground/25" />
       </span>
-      <span className={cn("min-w-0 rounded-full border px-3.5 py-1 text-[11px] leading-5 tracking-wide backdrop-blur-sm shadow-[0_2px_12px_oklch(0_0_0/0.3)]", beat ? "border-warn/25 bg-warn/[0.07] text-warn/95" : "border-border bg-card/70 text-muted-foreground")}>
+      <span className={cn("max-w-full rounded-full border px-3.5 py-1 text-center text-[11px] leading-5 tracking-wide backdrop-blur-sm shadow-[0_2px_12px_oklch(0_0_0/0.3)]", beat ? "border-warn/25 bg-warn/[0.07] text-warn/95" : "border-border bg-card/70 text-muted-foreground")}>
         {beat ? `★ ${beat} · ` : ""}{text}
       </span>
-      <span className="flex flex-1 items-center gap-1.5" aria-hidden>
+      <span className="hidden flex-1 items-center gap-1.5 sm:flex" aria-hidden>
         <span className="size-1 rotate-45 bg-foreground/25" />
         <span className="h-px flex-1 bg-gradient-to-l from-transparent to-foreground/15" />
       </span>
@@ -350,7 +355,7 @@ function HumanActionBar({ room, onSubmitAction }: { room: SocietyRoomSnapshot; o
 
   return (
     <footer className="rule-t relative bg-background/90 p-3 backdrop-blur-md shadow-[0_-12px_28px_-20px_oklch(0_0_0/0.8)]">
-      <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-2">
+      <div className="mx-auto flex w-full max-w-2xl flex-wrap items-center gap-2">
         <Hourglass className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
         <span className="shrink-0 text-xs text-muted-foreground">{player.displayName} · 轮到你了</span>
         {messageAction ? (

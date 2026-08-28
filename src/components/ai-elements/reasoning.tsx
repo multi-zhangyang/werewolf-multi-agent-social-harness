@@ -6,7 +6,6 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { cjk } from "@streamdown/cjk";
 import { code } from "@streamdown/code";
@@ -199,28 +198,52 @@ export const ReasoningTrigger = memo(
   }
 );
 
-export type ReasoningContentProps = ComponentProps<
-  typeof CollapsibleContent
-> & {
+export type ReasoningContentProps = ComponentProps<typeof CollapsibleContent> & {
   children: string;
-  viewportClassName?: string;
 };
 
 const streamdownPlugins = { cjk, code, math, mermaid };
 
+/**
+ * Scrollable reasoning body: native overflow with a bottom fade so the height
+ * cap reads as "more below" instead of truncation.
+ */
+function ReasoningScroll({ children }: { children: string }): ReactNode {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollable, setScrollable] = useState(false);
+
+  const sync = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) setScrollable(el.scrollHeight > el.clientHeight + 4);
+  }, []);
+
+  useEffect(() => {
+    sync();
+    const el = scrollRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(sync);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [sync]);
+
+  return (
+    <div ref={scrollRef} onScroll={sync} className={cn("max-h-72 min-h-0 overflow-y-auto pr-3", scrollable && "scroll-fade-y")}>
+      <Streamdown className="[overflow-wrap:anywhere]" plugins={streamdownPlugins}>{children}</Streamdown>
+    </div>
+  );
+}
+
 export const ReasoningContent = memo(
-  ({ className, children, viewportClassName, ...props }: ReasoningContentProps) => (
+  ({ className, children, ...props }: ReasoningContentProps) => (
     <CollapsibleContent
       className={cn(
-        "mt-4 min-w-0 overflow-hidden text-sm",
+        "mt-3 min-w-0 text-sm",
         "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
         className
       )}
       {...props}
     >
-      <ScrollArea className={cn("max-h-48 overflow-hidden", viewportClassName)}>
-        <Streamdown className="pr-3 [overflow-wrap:anywhere]" plugins={streamdownPlugins}>{children}</Streamdown>
-      </ScrollArea>
+      <ReasoningScroll>{children}</ReasoningScroll>
     </CollapsibleContent>
   )
 );

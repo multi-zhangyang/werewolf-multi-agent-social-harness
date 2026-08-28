@@ -57,8 +57,8 @@ export const TurnCard = memo(function TurnCard({
           ) : (
             <span className={cn("text-xs", turn.status === "error" ? "text-destructive" : "text-muted-foreground")}>{statusLine}</span>
           )}
-          {channelLabel ? <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">{channelLabel}</span> : null}
-          <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(turn.startedAt)}</time>
+          {channelLabel ? <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{channelLabel}</span> : null}
+          <time className="ml-auto font-mono text-[10px] text-muted-foreground/85">{formatTime(turn.startedAt)}</time>
         </header>
 
         {canSeeCognition && turn.reasoning && (live || turn.reasoning.text) ? (
@@ -69,14 +69,18 @@ export const TurnCard = memo(function TurnCard({
         ) : null}
 
         {canSeeCognition && turn.tools.length ? (
-          <ul className="space-y-1">
+          <ul className="space-y-1.5">
             {turn.tools.map((tool) => (
-              <li key={tool.toolCallId} className="flex min-w-0 items-center gap-1.5 overflow-hidden rounded-md border border-border/50 bg-muted/30 px-2 py-1 text-xs">
-                {tool.phase === "succeeded"
-                  ? <Wrench className="size-3 shrink-0 text-muted-foreground" aria-hidden />
-                  : <Loader2 className="size-3 shrink-0 animate-spin text-muted-foreground" aria-hidden />}
-                <span className="shrink-0 font-medium">{tool.label ?? eventLabel(tool.toolName)}</span>
-                {tool.safeOutputSummary ? <span className="min-w-0 truncate text-muted-foreground">· {tool.safeOutputSummary}</span> : null}
+              <li key={tool.toolCallId} className="min-w-0 rounded-md border border-border/50 bg-muted/30 px-2 py-1.5 text-xs">
+                <p className="flex items-center gap-1.5">
+                  {tool.phase === "succeeded"
+                    ? <Wrench className="size-3 shrink-0 text-muted-foreground" aria-hidden />
+                    : <Loader2 className="size-3 shrink-0 animate-spin text-muted-foreground" aria-hidden />}
+                  <span className="font-medium">{tool.label ?? eventLabel(tool.toolName)}</span>
+                </p>
+                {tool.safeOutputSummary ? (
+                  <p className="mt-0.5 whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-muted-foreground">{tool.safeOutputSummary}</p>
+                ) : null}
               </li>
             ))}
           </ul>

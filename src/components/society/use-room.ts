@@ -104,7 +104,8 @@ export const EMPTY_STREAM_STATE: RoomStreamState = {
 };
 
 const TURN_OUTPUT_CAP = 8_000;
-const TURN_REASONING_CAP = 12_000;
+/** Generous bound only for pathological streams; normal reasoning never hits it. */
+const TURN_REASONING_CAP = 120_000;
 const TURN_HISTORY_CAP = 14;
 const TIMELINE_CAP = 160;
 
