@@ -24,55 +24,53 @@ import { cn } from "@/lib/utils";
 import type { AgentStatus, ScenarioId, SocialChannel } from "@/society/contracts";
 
 /**
- * Deterministic local avatars: the same character renders the same
- * face everywhere, generated offline from a stable seed — no external image
- * service, no network dependency, dark-first high-contrast silhouettes.
+ * Deterministic local avatars: a duotone gradient tile with the character
+ * initial — the same character renders the same mark everywhere, generated
+ * offline from a stable seed. No external image service, no network.
  */
-const AVATAR_SKINS = ["#f2c9a4", "#e8b48c", "#d9a273", "#c98f63", "#b57d55", "#a06a45", "#8a5638"] as const;
-const AVATAR_HAIRS = ["#1f2937", "#374151", "#111827", "#4b2e1e", "#5b3a29", "#2d1e12", "#0f172a"] as const;
-const AVATAR_CLOTHES = [
-  "#be123c", "#c2410c", "#a16207", "#3f6212",
-  "#15803d", "#0f766e", "#0369a1", "#1d4ed8",
-  "#4338ca", "#7e22ce", "#a21caf", "#be185d"
+/**
+ * Sixteen duotone gradients, ordered around the hue wheel so that palette
+ * distance ≈ hue distance — the ×6 ordinal walk then keeps any neighbouring
+ * roster entries (horizontal ±1, vertical ±2) at least 135° of hue apart.
+ */
+const AVATAR_GRADIENTS: ReadonlyArray<readonly [string, string]> = [
+  ["#b91c1c", "#ef4444"],
+  ["#c2410c", "#f97316"],
+  ["#a16207", "#eab308"],
+  ["#4d7c0f", "#84cc16"],
+  ["#15803d", "#10b981"],
+  ["#0f766e", "#14b8a6"],
+  ["#0e7490", "#06b6d4"],
+  ["#0369a1", "#38bdf8"],
+  ["#1d4ed8", "#3b82f6"],
+  ["#4338ca", "#6366f1"],
+  ["#6d28d9", "#8b5cf6"],
+  ["#7e22ce", "#a855f7"],
+  ["#a21caf", "#d946ef"],
+  ["#be185d", "#ec4899"],
+  ["#be123c", "#f43f5e"],
+  ["#334155", "#64748b"]
 ] as const;
-const AVATAR_BACKGROUNDS = [
-  "#27272a", "#1e293b", "#252528", "#20232a", "#2a2320", "#231f2a"
-] as const;
+
+const AVATAR_LETTER_SIZE = { sm: "text-[10px]", md: "text-[13px]", lg: "text-base", xl: "text-[22px]" } as const;
 
 export function AgentAvatar({ name, seed, size = "md" }: { name: string; seed?: string; size?: "sm" | "md" | "lg" | "xl" }): ReactNode {
   const sizes = { sm: "size-6", md: "size-8", lg: "size-10", xl: "size-14" };
   const stableSeed = seed ?? name;
-  const hash = avatarHash(stableSeed);
-  const initial = [...name].slice(0, 1).join("").toUpperCase() || "·";
+  const [from, to] = AVATAR_GRADIENTS[gradientIndexFor(stableSeed)];
+  const letter = [...name.trim()][0] ?? "·";
   return (
     <span
       role="img"
       aria-label={`${name} 的人物头像`}
-      className={cn("relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-lg border border-foreground/20 shadow-sm ring-1 ring-background", sizes[size])}
-      style={{ background: AVATAR_BACKGROUNDS[hash % AVATAR_BACKGROUNDS.length] }}
+      className={cn(
+        "relative inline-flex shrink-0 select-none items-center justify-center overflow-hidden rounded-lg border border-white/15 shadow-[inset_0_1px_0_oklch(1_0_0/0.25),0_1px_3px_oklch(0_0_0/0.4)]",
+        sizes[size]
+      )}
+      style={{ backgroundImage: `linear-gradient(135deg, ${from} 0%, ${to} 100%)` }}
     >
-      <svg viewBox="0 0 64 64" className="h-full w-full" aria-hidden>
-        {/* shoulders */}
-        <path d="M10 64 C12 50 22 44 32 44 C42 44 52 50 54 64 Z" fill={AVATAR_CLOTHES[(hash >> 3) % AVATAR_CLOTHES.length]} />
-        {/* neck */}
-        <rect x="27.5" y="36" width="9" height="10" rx="3.5" fill={AVATAR_SKINS[hash % AVATAR_SKINS.length]} />
-        {/* head */}
-        <circle cx="32" cy="26" r="13" fill={AVATAR_SKINS[hash % AVATAR_SKINS.length]} />
-        {/* hair: three deterministic silhouettes */}
-        {hash % 3 === 0 ? (
-          <path d="M19 24 C19 13 25 8 32 8 C39 8 45 13 45 24 C41 18 38 16 32 16 C26 16 23 18 19 24 Z" fill={AVATAR_HAIRS[(hash >> 5) % AVATAR_HAIRS.length]} />
-        ) : hash % 3 === 1 ? (
-          <path d="M18.5 26 C17 14 24 7.5 32 7.5 C40 7.5 47 14 45.5 26 L42 26 C43 18 39 14 32 14 C25 14 21 18 22 26 Z" fill={AVATAR_HAIRS[(hash >> 5) % AVATAR_HAIRS.length]} />
-        ) : (
-          <path d="M20 22 C21 12 26 8 32 8 C38 8 43 12 44 22 C44 24 42 24 41 22 C39 17 36 15 32 15 C28 15 25 17 23 22 C22 24 20 24 20 22 Z M18 30 C17 24 18 20 20 18 L22 26 Z M46 30 C47 24 46 20 44 18 L42 26 Z" fill={AVATAR_HAIRS[(hash >> 5) % AVATAR_HAIRS.length]} />
-        )}
-        {/* eyes */}
-        <circle cx="27" cy="26" r="1.4" fill="#111827" />
-        <circle cx="37" cy="26" r="1.4" fill="#111827" />
-        {/* mouth */}
-        <path d="M29 32 Q32 34.2 35 32" stroke="#111827" strokeWidth="1.2" fill="none" strokeLinecap="round" opacity="0.65" />
-      </svg>
-      <span className="pointer-events-none absolute -bottom-px right-0 font-mono text-[8px] font-bold leading-none text-foreground/80">{initial}</span>
+      <span className={cn("font-semibold leading-none text-white/95", AVATAR_LETTER_SIZE[size])}>{letter}</span>
+      <span className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white/15 to-transparent to-35%" aria-hidden />
     </span>
   );
 }
@@ -84,6 +82,21 @@ function avatarHash(value: string): number {
     hash = Math.imul(hash, 16_777_619) >>> 0;
   }
   return hash >>> 0;
+}
+
+/**
+ * Palette index for a character. Sequential roster ids ("builtin-04") walk a
+ * ×6 step around the hue-ordered palette — horizontal neighbours in a 2-column
+ * grid differ by 6 steps (~135° hue), vertical ones by 12 (~270°) — so no two
+ * adjacent cards can share a family. Ad-hoc ids fall back to the hash.
+ */
+function gradientIndexFor(seed: string): number {
+  const sequential = /(\d+)\s*$/.exec(seed);
+  if (sequential) {
+    const ordinal = Number(sequential[1]);
+    if (Number.isFinite(ordinal)) return (ordinal * 6) % AVATAR_GRADIENTS.length;
+  }
+  return (avatarHash(seed) >>> 5) % AVATAR_GRADIENTS.length;
 }
 
 export function StatusDot({ status, className }: { status: AgentStatus | "running" | "paused" | "finished" | "error"; className?: string }): ReactNode {
@@ -153,7 +166,7 @@ export function ChannelBadge({ channel }: { channel: SocialChannel }): ReactNode
 /** Channel → surface styling so public/private/team reads at a glance. */
 export const channelSurface: Record<SocialChannel, string> = {
   public: "border-border bg-card",
-  private: "border-foreground/20 bg-foreground/5",
+  private: "border-dashed border-foreground/20 bg-foreground/5",
   team: "border-foreground/30 bg-foreground/10"
 };
 
@@ -290,12 +303,12 @@ export function CollapsibleSection({ title, icon, count, defaultOpen = false, cl
   children: ReactNode;
 }): ReactNode {
   return (
-    <Collapsible defaultOpen={defaultOpen} className={cn("group/section rounded-lg border bg-card/40", className)}>
+    <Collapsible defaultOpen={defaultOpen} className={cn("group/section rounded-lg border bg-card/40 shadow-[0_1px_2px_oklch(0_0_0/0.18)]", className)}>
       <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium transition-colors hover:bg-muted/30">
         {icon ? <span className="shrink-0 text-muted-foreground [&_svg]:size-3.5">{icon}</span> : null}
         <span className="min-w-0 truncate">{title}</span>
-        {count !== undefined && count > 0 ? <Badge variant="secondary" className="ml-0.5 shrink-0 font-mono text-[10px]">{count}</Badge> : null}
-        <ChevronDown className="ml-auto size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/section:rotate-180" aria-hidden />
+        {count !== undefined && count > 0 ? <span className="ml-0.5 shrink-0 rounded-full border border-border/70 bg-muted/60 px-1.5 font-mono text-[10px] leading-4 text-muted-foreground">{count}</span> : null}
+        <ChevronDown className="ml-auto size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-200 group-data-[state=open]/section:rotate-180" aria-hidden />
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className={cn("space-y-1.5 border-t border-border/60 px-3 py-2.5", contentClassName)}>{children}</div>
