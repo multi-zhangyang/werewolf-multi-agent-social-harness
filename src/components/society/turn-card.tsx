@@ -62,7 +62,7 @@ export const TurnCard = memo(function TurnCard({
         </header>
 
         {canSeeCognition && turn.reasoning && (live || turn.reasoning.text) ? (
-          <Reasoning isStreaming={live && !turn.reasoning.done} duration={Math.round(turn.reasoning.elapsedMs / 1000)}>
+          <Reasoning isStreaming={live && !turn.reasoning.done} duration={Math.round(turn.reasoning.elapsedMs / 1000)} className="mb-0">
             <ReasoningTrigger />
             <ReasoningContent>{turn.reasoning.text}</ReasoningContent>
           </Reasoning>

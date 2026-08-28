@@ -231,6 +231,7 @@ export function formatTime(value: string, options?: { seconds?: boolean }): stri
 export function eventLabel(name: string): string {
   const labels: Record<string, string> = {
     communicate: "公开发言",
+    message: "发言",
     remember_experience: "铭刻记忆",
     recall_memory: "翻阅记忆",
     update_inner_state: "内心起了变化",
@@ -243,6 +244,15 @@ export function eventLabel(name: string): string {
     return_from_trust: "返还资源",
     propose_split: "提出分配",
     respond_to_offer: "回应分配",
+    make_offer: "提出报价",
+    accept_commitment: "接受承诺",
+    make_commitment: "立下承诺",
+    log_deception_plan: "谋划欺骗",
+    update_role_hypotheses: "推演身份",
+    charm_target: "魅惑目标",
+    dream_curse: "梦魇低语",
+    decline_lady: "婉拒仙女",
+    investigate_dead_identity: "验明出局者",
     choose_number: "提交数字",
     cast_day_vote: "白天投票",
     choose_night_target: "选定夜袭目标",

@@ -4,7 +4,7 @@ import type { SocialMessage } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { EffectiveViewer, LiveTurn, RoomConnection } from "./use-room";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
@@ -107,6 +107,10 @@ function StreamItems({ items, room, onSubmitAction }: {
             {!items.length ? (
               <Empty className="py-16">
                 <EmptyHeader>
+                  <EmptyMedia variant="icon" className="relative size-12 rounded-xl border border-border bg-card shadow-[0_0_36px_-12px_oklch(0.77_0.15_160/0.5)]">
+                    <ScenarioIcon id={room.scenarioId} className="size-5 text-muted-foreground" />
+                    <span className="live-pulse absolute -right-0.5 -top-0.5 size-2 rounded-full bg-live" aria-hidden />
+                  </EmptyMedia>
                   <EmptyTitle>等待世界苏醒</EmptyTitle>
                   <EmptyDescription>第一个 agent 开始思考时，全过程会在这里直播。</EmptyDescription>
                 </EmptyHeader>

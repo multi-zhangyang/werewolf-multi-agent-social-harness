@@ -155,13 +155,15 @@ export type ReasoningTriggerProps = ComponentProps<
 };
 
 const defaultGetThinkingMessage = (isStreaming: boolean, duration?: number) => {
-  if (isStreaming || duration === 0) {
-    return <Shimmer duration={1}>Thinking...</Shimmer>;
+  if (isStreaming) {
+    return <Shimmer duration={1}>思考中…</Shimmer>;
   }
-  if (duration === undefined) {
-    return <p>Thought for a few seconds</p>;
+  // Sub-second cognition still happened: "片刻" reads honest where "0 秒"
+  // would read as a glitch, and stops the shimmer from outliving the stream.
+  if (duration === undefined || duration === 0) {
+    return <p>思考了片刻</p>;
   }
-  return <p>Thought for {duration} seconds</p>;
+  return <p>思考了 {duration} 秒</p>;
 };
 
 export const ReasoningTrigger = memo(

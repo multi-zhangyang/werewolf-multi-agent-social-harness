@@ -68,7 +68,7 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenS
       </header>
 
       <main>
-        <section className="mx-auto w-full max-w-3xl px-6 pb-20 pt-20 text-center sm:pt-28">
+        <section className="reveal-up mx-auto w-full max-w-3xl px-6 pb-20 pt-20 text-center sm:pt-28">
           {rooms.length ? (
             <p className="mx-auto flex w-fit items-center gap-2 rounded-full border border-border bg-card px-3.5 py-1.5 text-xs text-muted-foreground">
               <span className="live-pulse size-1.5 rounded-full bg-live" />
@@ -217,7 +217,7 @@ function SectionHeading({ title, count }: { title: string; count?: number }): Re
 
 function FeatureCell({ icon: Icon, title, children }: { icon: typeof Radio; title: string; children: ReactNode }): ReactNode {
   return (
-    <div className="rounded-xl border border-border bg-card p-5">
+    <div className="sheen rounded-xl border border-border bg-card p-5">
       <Icon className="size-4.5 text-muted-foreground" />
       <h3 className="mt-3 text-[15px] font-semibold tracking-tight">{title}</h3>
       <p className="mt-1.5 text-sm leading-6 text-muted-foreground">{children}</p>
@@ -238,7 +238,7 @@ function WorldCard({ scenario, index, wide, onStart }: { scenario: ScenarioSumma
         wide && "sm:col-span-2 lg:col-span-3"
       )}
     >
-      <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground transition-colors group-hover:text-foreground">
+      <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground transition-colors group-hover:border-foreground/20 group-hover:text-foreground">
         <ScenarioIcon id={scenario.id} className="size-4.5" />
       </span>
       <span className="min-w-0 flex-1">
@@ -254,7 +254,7 @@ function WorldCard({ scenario, index, wide, onStart }: { scenario: ScenarioSumma
       </span>
       <span className="flex shrink-0 items-center gap-1.5">
         <span className="nums font-mono text-[11px] text-muted-foreground/40">{String(index + 1).padStart(2, "0")}</span>
-        <ArrowUpRight className="size-4 text-muted-foreground/30 transition-colors group-hover:text-foreground" aria-hidden />
+        <ArrowUpRight className="size-4 text-muted-foreground/30 transition-all duration-200 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-foreground" aria-hidden />
       </span>
     </button>
   );

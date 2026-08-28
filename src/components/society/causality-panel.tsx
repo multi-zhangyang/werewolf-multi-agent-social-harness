@@ -107,7 +107,11 @@ function SocialActsSection({ projection, actorName, propositions }: {
         {acts.map((act) => (
           <li key={act.socialActId} className="rounded-lg border border-border/50 bg-muted/20 px-3 py-2.5 transition-colors hover:border-border/80">
             <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-5">
-              <span className={cn("font-medium", act.kind === "accusation" || act.kind === "threat" ? "text-suspect" : act.kind === "promise" || act.kind === "alliance-proposal" ? "text-live" : undefined)}>
+              <span className={cn("font-medium",
+                act.kind === "accusation" || act.kind === "threat" || act.kind === "rejection" ? "text-suspect"
+                  : act.kind === "promise" || act.kind === "alliance-proposal" || act.kind === "acceptance" ? "text-live"
+                    : act.kind === "warning" ? "text-warn" : undefined)}
+              >
                 {ACT_KIND_LABELS[act.kind] ?? act.kind}
               </span>
               <span className="truncate">{actorName(act.actorId)}</span>
