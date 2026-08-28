@@ -282,19 +282,19 @@ function PhaseStrip({ room, sealed }: { room: SocietyRoomSnapshot; sealed: boole
         </span>
         <span className="text-muted-foreground/50">{world.totalTurns}</span>
       </span>
-      <Badge variant="outline" className="shrink-0 rounded-full border-border/70 bg-card/60 text-[10px]">{world.phase}</Badge>
+      <Badge variant="outline" className="shrink-0 rounded-full border-border/70 bg-card/60 font-normal text-muted-foreground">{world.phase}</Badge>
       {finished ? (
         <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground">
           <Flag className="size-3" aria-hidden />
           对局已结束 · 复盘见右侧因果账本
         </span>
       ) : room.status === "paused" ? (
-        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-warn">
+        <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
           <Pause className="size-3" aria-hidden />
           对局已暂停
         </span>
       ) : sealed ? (
-        <span className="flex shrink-0 items-center gap-1 text-[10px] text-secret"><Lock className="size-3" aria-hidden />密封阶段 · 发言流暂停公开</span>
+        <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-secret/30 bg-secret/10 px-2 py-0.5 text-[10px] text-secret"><Lock className="size-3" aria-hidden />密封阶段 · 发言流暂停公开</span>
       ) : speakingAgents.length ? (
         <span className="flex min-w-0 items-center gap-1.5 text-[10px] text-live">
           <span className="eq shrink-0" aria-hidden><span /><span /><span /></span>

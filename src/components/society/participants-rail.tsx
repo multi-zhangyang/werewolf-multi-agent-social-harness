@@ -78,7 +78,7 @@ export const ParticipantsRail = memo(function ParticipantsRail({
                         {!speaking && isLeader(agent) ? <Crown className="size-3 shrink-0 text-warn" aria-label="暂时领先" /> : null}
                         <StatusDot status={agent.status} className="size-2" />
                       </span>
-                      <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                      <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground/85">
                         {participant?.mood ? <span className="min-w-0 truncate">{participant.mood}</span> : <StatusLabel status={agent.status} />}
                         {(agent.score ?? 0) !== 0 ? <ScoreValue value={agent.score ?? 0} /> : null}
                       </span>

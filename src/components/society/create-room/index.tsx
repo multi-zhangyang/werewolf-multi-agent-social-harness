@@ -345,8 +345,8 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
       <DialogContent className="max-w-xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl" showCloseButton={!submitting}>
         {scenario ? (
           <div className="flex min-w-0 max-h-[82vh] flex-col">
-            <div className="scroll-fade-y min-h-0 flex-1 overflow-y-auto">
-            <div className="border-b border-border/60 p-6">
+            <div className="scroll-fade-y-lg min-h-0 flex-1 overflow-y-auto">
+            <div className="border-b border-border/60 p-6 pb-5">
               <DialogHeader className="gap-2 text-left">
                 <div className="flex items-center gap-3">
                   <span className="flex size-10 items-center justify-center rounded-lg border border-border bg-muted text-foreground/80">
@@ -363,13 +363,13 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                   </Badge>
                   <Badge variant="outline" className="rounded-full border-border bg-muted font-normal text-muted-foreground">{scenario.minRounds}–{scenario.maxRounds} 轮</Badge>
                   {scenario.capabilities.slice(0, 3).map((capability) => (
-                    <Badge key={capability} variant="outline" className="rounded-full border-border bg-card font-normal text-muted-foreground/80">{capability}</Badge>
+                    <Badge key={capability} variant="outline" className="rounded-full border-border bg-card font-normal text-muted-foreground">{capability}</Badge>
                   ))}
                 </div>
               </DialogHeader>
             </div>
 
-            <div className="space-y-6 p-6">
+            <div className="space-y-6 p-6 pb-12">
               {eligibleModels.length ? (
                 <ModelAssignSection
                   assignMode={assignMode}
@@ -392,7 +392,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                 <section>
                   <div className="mb-2.5 flex items-center justify-between">
                     <p className="text-[13px] font-medium text-foreground/80">模型分配</p>
-                    <span className="nums font-mono text-xs text-muted-foreground/80">0 个可用档案</span>
+                    <span className="nums font-mono text-xs text-muted-foreground">0 个可用档案</span>
                   </div>
                   <div className="rounded-lg border border-dashed border-border p-3.5">
                     <p className="text-xs leading-5 text-muted-foreground">
@@ -416,15 +416,15 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                     onValueChange={(value) => setPlayers(value[0] ?? scenario.playerRange!.min)}
                     className="py-1"
                   />
-                  <div className="nums mt-1 flex justify-between font-mono text-[10px] text-muted-foreground/80">
+                  <div className="nums mt-1 flex justify-between font-mono text-[10px] text-muted-foreground">
                     <span>{scenario.playerRange.min} 人</span>
                     <span>{scenario.playerRange.max} 人</span>
                   </div>
                   {scenario.id === "werewolf" ? (
-                    <p className="mt-2 text-[11px] leading-4 text-muted-foreground/70">按官方板子组牌：6–12 人各有对应牌组（狼人·狼王·预言家·女巫·猎人·守卫·小丑·村民），人数越多角色越复杂。</p>
+                    <p className="mt-2 text-[11px] leading-5 text-muted-foreground">按官方板子组牌：6–12 人各有对应牌组（狼人·狼王·预言家·女巫·猎人·守卫·小丑·村民），人数越多角色越复杂。</p>
                   ) : null}
                   {scenario.id === "avalon" ? (
-                    <p className="mt-2 text-[11px] leading-4 text-muted-foreground/70">按官方规则配置：5-10 人的忠臣/内奸比例与任务人数遵循阿瓦隆说明书（7 人及以上第四任务需要两张失败票）。</p>
+                    <p className="mt-2 text-[11px] leading-5 text-muted-foreground">按官方规则配置：5-10 人的忠臣/内奸比例与任务人数遵循阿瓦隆说明书（7 人及以上第四任务需要两张失败票）。</p>
                   ) : null}
                 </section>
               ) : null}
@@ -442,7 +442,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                   onValueChange={(value) => setRounds(value[0] ?? minRounds)}
                   className="py-1"
                 />
-                <div className="nums mt-1 flex justify-between font-mono text-[10px] text-muted-foreground/80">
+                <div className="nums mt-1 flex justify-between font-mono text-[10px] text-muted-foreground">
                   <span>{minRounds}</span>
                   <span>{maxRounds}</span>
                 </div>
@@ -524,7 +524,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                   {loadedTemplateId ? (
                     <button
                       type="button"
-                      className="flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-destructive"
+                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-destructive"
                       disabled={submitting}
                       onClick={() => void deleteTemplate(loadedTemplateId)}
                     >
@@ -533,7 +533,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                     </button>
                   ) : null}
                 </div>
-                <p className="mb-2.5 text-xs leading-5 text-muted-foreground/80">
+                <p className="mb-2.5 text-xs leading-5 text-muted-foreground">
                   把当前配置（模型分配、人物、回合数、社会季模式）存为模板，一键复用。模板按世界保存，只存本机，不含任何密钥。
                 </p>
                 <div className="space-y-2">
@@ -566,7 +566,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                       onKeyDown={(event) => { if (event.key === "Enter") void saveTemplate(); }}
                       placeholder="模板名称（如：狼人杀快局）"
                       maxLength={40}
-                      className="min-w-0 flex-1 bg-card"
+                      className="h-9 min-w-0 flex-1 bg-card"
                     />
                     <Button variant="tile" size="sm" className="h-9 shrink-0" disabled={submitting} onClick={() => void saveTemplate()}>
                       保存为模板

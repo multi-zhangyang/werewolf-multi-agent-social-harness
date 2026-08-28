@@ -6,7 +6,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { apiFetch } from "@/lib/api";
-import { Copy, Download, Loader2, Pencil, Plus, Trash2, Upload, Users } from "lucide-react";
+import { Copy, Download, Loader2, Pencil, Plus, Search, Trash2, Upload, Users } from "lucide-react";
 import type { CharacterDefinition, DecisionBias } from "@/society/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -99,6 +99,7 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
   const [editing, setEditing] = useState<CharacterDefinition | "new" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const [query, setQuery] = useState("");
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const reload = async (): Promise<void> => {
@@ -113,8 +114,17 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
     if (!open) return;
     setEditing(null);
     setError(undefined);
+    setQuery("");
     void reload().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   }, [open]);
+
+  const matches = (character: CharacterDefinition): boolean => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return true;
+    return character.displayName.toLowerCase().includes(needle) || character.persona.toLowerCase().includes(needle);
+  };
+  const shownBuiltins = builtins.filter(matches);
+  const shownCustoms = customs.filter(matches);
 
   const mutate = async (path: string, method: string, body?: unknown): Promise<void> => {
     setBusy(true);
@@ -174,7 +184,7 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
       <DialogContent className="max-w-2xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl">
         {editing === null ? (
           <>
-            <DialogHeader className="border-b border-border/60 p-6 text-left">
+            <DialogHeader className="gap-3 border-b border-border/60 p-6 pb-4 text-left">
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <DialogTitle className="text-lg tracking-tight">人物库</DialogTitle>
@@ -210,30 +220,44 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
                   </Button>
                 </div>
               </div>
+              <div className="relative">
+                <Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
+                <Input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="按名字或人物底色搜索…"
+                  className="h-9 bg-card pl-8"
+                  aria-label="搜索人物"
+                />
+              </div>
             </DialogHeader>
-            <ScrollArea className="scroll-fade-y max-h-[68vh]">
-              <div className="space-y-5 p-6 pb-10">
+            <ScrollArea className="scroll-fade-y-lg max-h-[62vh]">
+              <div className="space-y-5 p-6 pb-12">
                 {error ? <ErrorNote>{error}</ErrorNote> : null}
                 <section>
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">内置人物 · {builtins.length}</p>
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    {builtins.map((character) => (
-                      <CharacterRow key={character.id} character={character} onCopy={() => void mutate(`/api/characters/${character.id}/copy`, "POST")} busy={busy} />
-                    ))}
-                  </div>
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">内置人物 · {shownBuiltins.length}</p>
+                  {shownBuiltins.length ? (
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {shownBuiltins.map((character) => (
+                        <CharacterRow key={character.id} character={character} onCopy={() => void mutate(`/api/characters/${character.id}/copy`, "POST")} busy={busy} />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="rounded-lg border border-dashed border-border/70 px-3 py-4 text-center text-xs text-muted-foreground">没有匹配「{query.trim()}」的内置人物。</p>
+                  )}
                 </section>
                 <section>
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">自建人物 · {customs.length}</p>
-                  {customs.length === 0 ? (
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">自建人物 · {shownCustoms.length}</p>
+                  {shownCustoms.length === 0 ? (
                     <Empty className="rounded-lg border border-dashed py-8">
                       <EmptyHeader>
-                        <EmptyTitle>还没有自建人物</EmptyTitle>
+                        <EmptyTitle>{query.trim() ? "没有匹配的自建人物" : "还没有自建人物"}</EmptyTitle>
                         <EmptyDescription>「新建人物」从头写一个，或复制内置人物再修改。</EmptyDescription>
                       </EmptyHeader>
                     </Empty>
                   ) : (
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {customs.map((character) => (
+                      {shownCustoms.map((character) => (
                         <CharacterRow
                           key={character.id}
                           character={character}
@@ -273,28 +297,26 @@ function CharacterRow({ character, onCopy, onEdit, onDelete, busy }: {
   busy: boolean;
 }): ReactNode {
   return (
-    <div className="flex items-start gap-2.5 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
+    <div className="flex items-start gap-2.5 rounded-lg border border-border bg-muted/40 px-3 py-2.5 transition-colors hover:border-border/80">
       <AgentAvatar name={character.displayName} seed={character.id} size="sm" />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <p className="truncate text-sm font-semibold tracking-tight">{character.displayName}</p>
-          <Badge variant="outline" className={cn("shrink-0 rounded-full border-border font-normal", character.builtIn ? "text-muted-foreground" : "text-secret")}>
-            {character.builtIn ? "内置" : "自建"}
-          </Badge>
+          {!character.builtIn ? <Badge variant="outline" className="shrink-0 rounded-full border-secret/40 font-normal text-secret">自建</Badge> : null}
         </div>
-        <p className="mt-0.5 line-clamp-2 text-xs leading-4 text-muted-foreground/80">{character.persona}</p>
+        <p className="mt-1 line-clamp-2 min-h-10 text-xs leading-5 text-muted-foreground" title={character.persona}>{character.persona}</p>
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        <button type="button" aria-label={`复制 ${character.displayName}`} title="复制后修改" className="flex size-6 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-border hover:text-foreground" disabled={busy} onClick={onCopy}>
+        <button type="button" aria-label={`复制 ${character.displayName}`} title="复制后修改" className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-border hover:text-foreground" disabled={busy} onClick={onCopy}>
           <Copy className="size-3.5" />
         </button>
         {onEdit ? (
-          <button type="button" aria-label={`编辑 ${character.displayName}`} className="flex size-6 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-border hover:text-foreground" onClick={onEdit}>
+          <button type="button" aria-label={`编辑 ${character.displayName}`} className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-border hover:text-foreground" onClick={onEdit}>
             <Pencil className="size-3.5" />
           </button>
         ) : null}
         {onDelete ? (
-          <button type="button" aria-label={`删除 ${character.displayName}`} className="flex size-6 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-border hover:text-destructive" disabled={busy} onClick={onDelete}>
+          <button type="button" aria-label={`删除 ${character.displayName}`} className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-border hover:text-destructive" disabled={busy} onClick={onDelete}>
             <Trash2 className="size-3.5" />
           </button>
         ) : null}
@@ -459,7 +481,7 @@ function EditorForm({ editing, builtins, onClose, onSaved }: {
                 rows={5}
                 className="w-full rounded-lg border border-input bg-card px-3 py-2 font-mono text-xs leading-5 text-foreground placeholder:text-muted-foreground/50 focus:border-ring focus:outline-none"
               />
-              <p className="text-[11px] text-muted-foreground/70">最多 12 条。它们是人物为什么这样反应的来源，会在对局中作为身份记忆被检索。</p>
+              <p className="text-[11px] text-muted-foreground">最多 12 条。它们是人物为什么这样反应的来源，会在对局中作为身份记忆被检索。</p>
             </Field>
           </section>
 

@@ -103,10 +103,10 @@ function SocialActsSection({ projection, actorName, propositions }: {
   if (!acts.length) return null;
   return (
     <CollapsibleSection title="社会行为" count={acts.length} defaultOpen>
-      <ul className="space-y-1.5">
+      <ul className="space-y-2">
         {acts.map((act) => (
-          <li key={act.socialActId} className="rounded-lg border border-border/40 bg-muted/20 px-2 py-1.5 transition-colors hover:border-border/70">
-            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
+          <li key={act.socialActId} className="rounded-lg border border-border/50 bg-muted/20 px-3 py-2.5 transition-colors hover:border-border/80">
+            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-5">
               <span className={cn("font-medium", act.kind === "accusation" || act.kind === "threat" ? "text-suspect" : act.kind === "promise" || act.kind === "alliance-proposal" ? "text-live" : undefined)}>
                 {ACT_KIND_LABELS[act.kind] ?? act.kind}
               </span>
@@ -117,16 +117,18 @@ function SocialActsSection({ projection, actorName, propositions }: {
                   <span className="truncate">{act.targetActorIds.map((id) => actorName(id)).join("、")}</span>
                 </>
               ) : null}
-              {provenanceBadge("message-claim")}
-              {act.extractionMethod === "model-extracted" ? (
-                <Badge variant="outline" className="h-4 rounded-full px-1.5 text-[9px] text-muted-foreground">自动提取{act.confidence < 0.75 ? ` · ${Math.round(act.confidence * 100)}%` : ""}</Badge>
-              ) : null}
             </div>
             {act.propositionIds.length ? (
-              <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+              <p className="mt-1.5 line-clamp-2 text-[11px] leading-5 text-muted-foreground">
                 {act.propositionIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；")}
               </p>
             ) : null}
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {provenanceBadge("message-claim")}
+              {act.extractionMethod === "model-extracted" ? (
+                <Badge variant="outline" className="h-4.5 shrink-0 rounded-full border-border/70 bg-card/60 px-1.5 text-[10px] font-normal text-muted-foreground">自动提取{act.confidence < 0.75 ? ` · ${Math.round(act.confidence * 100)}%` : ""}</Badge>
+              ) : null}
+            </div>
           </li>
         ))}
       </ul>
@@ -196,7 +198,7 @@ function BeliefSection({ projection, characterNames }: {
       {[...groups.values()].slice(-8).reverse().map((group) => {
         const proposition = propositions.get(group[0].propositionId);
         return (
-          <div key={group[0].beliefId} className="rounded-lg border border-border/40 p-2">
+          <div key={group[0].beliefId} className="rounded-lg border border-border/50 p-2.5">
             <p className="text-xs font-medium">{characterNames.get(group[0].ownerCharacterId) ?? group[0].ownerCharacterId}</p>
             <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{proposition?.predicate ?? group[0].propositionId}</p>
             <div className="mt-1 flex flex-wrap items-center gap-1">
@@ -223,7 +225,7 @@ function CommitmentSection({ projection, actorName }: {
   return (
     <CollapsibleSection title="承诺账本" count={commitments.length}>
       {commitments.map((commitment) => (
-        <div key={commitment.commitmentId} className="rounded-lg border border-border/40 p-2">
+        <div key={commitment.commitmentId} className="rounded-lg border border-border/50 p-2.5">
           <div className="flex items-center gap-1.5">
             <span className="text-xs font-medium">{actorName(commitment.promisorActorId)}</span>
             <Badge variant={commitment.state === "violated" ? "destructive" : commitment.state === "fulfilled" ? "secondary" : "outline"} className="text-[10px]">
@@ -231,7 +233,7 @@ function CommitmentSection({ projection, actorName }: {
             </Badge>
             {provenanceBadge("message-claim")}
           </div>
-          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{commitment.proposition}</p>
+          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-foreground/85">{commitment.proposition}</p>
           <p className="mt-1 text-[10px] text-muted-foreground/70">
             对象 {commitment.audienceActorIds.map(actorName).join("、")}{promisedActionText(commitment)}
           </p>
@@ -279,7 +281,7 @@ function DeceptionCard({ episode, actorName, propositions }: {
 }): ReactNode {
   const reached = STAGE_OF[episode.status] ?? -1;
   return (
-    <div className="rounded-lg border border-border/40 p-2">
+    <div className="rounded-lg border border-border/50 p-2.5">
       <div className="flex items-center gap-1.5">
         <span className="text-xs font-medium">{actorName(episode.deceiverActorId)}</span>
         <Badge variant={episode.status === "detected" ? "destructive" : "outline"} className="text-[10px]">{deceptionStatusLabel(episode.status)}</Badge>
@@ -325,14 +327,14 @@ function RelationshipSection({ projection, characterNames }: {
 
 function DirectedEdge({ relationship, nameFor }: { relationship: DirectedRelationshipState; nameFor: (id: string) => string }): ReactNode {
   return (
-    <div className="rounded-lg border border-border/40 p-2 text-xs">
+    <div className="rounded-lg border border-border/50 p-2.5 text-xs">
       <p className="flex items-center gap-1.5 font-medium">
         {nameFor(relationship.ownerCharacterId)}
         <ArrowRight className="size-3 text-muted-foreground" aria-hidden />
         {nameFor(relationship.targetCharacterId)}
-        {provenanceBadge(relationship.provenance.sourceKind)}
       </p>
-      <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
+      <div className="mt-1">{provenanceBadge(relationship.provenance.sourceKind)}</div>
+      <dl className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 border-t border-border/40 pt-1.5 text-[11px] text-muted-foreground">
         <Metric label="信任" value={relationship.trust} />
         <Metric label="好感" value={relationship.affinity} />
         <Metric label="尊重" value={relationship.respect} />
@@ -344,9 +346,9 @@ function DirectedEdge({ relationship, nameFor }: { relationship: DirectedRelatio
 
 function Metric({ label, value }: { label: string; value: number }): ReactNode {
   return (
-    <div className="flex justify-between gap-2">
-      <dt>{label}</dt>
-      <dd className="font-mono">{value.toFixed(2)}</dd>
+    <div className="flex items-baseline justify-between gap-3">
+      <dt className="shrink-0">{label}</dt>
+      <dd className="nums font-mono tabular-nums text-foreground/80">{value.toFixed(2)}</dd>
     </div>
   );
 }
@@ -368,7 +370,7 @@ function OutcomeSection({ projection, actorName }: {
 
 function OutcomeRow({ reconciliation, actorName }: { reconciliation: OutcomeReconciliation; actorName: (id: string | undefined) => string }): ReactNode {
   return (
-    <div className="rounded-lg border border-border/40 p-2 text-[11px] leading-4">
+    <div className="rounded-lg border border-border/50 p-2.5 text-[11px] leading-4">
       <p className="font-medium">{actorName(reconciliation.actorId)}</p>
       <p className="text-muted-foreground">{reconciliation.actualOutcome.summary}</p>
     </div>

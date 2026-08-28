@@ -289,7 +289,7 @@ export function provenanceBadge(source: string): ReactNode {
     "system-inference": "系统推断",
     presentation: "展示标签"
   };
-  return <Badge variant="outline" className="text-[10px]">{labels[source] ?? source}</Badge>;
+  return <Badge variant="outline" className="h-4.5 shrink-0 rounded-full border-border/70 bg-card/60 px-1.5 text-[10px] font-normal text-muted-foreground">{labels[source] ?? source}</Badge>;
 }
 
 /** The one accordion section: icon/count shapes cover rail and causality uses. */
@@ -311,16 +311,17 @@ export function CollapsibleSection({ title, icon, count, defaultOpen = false, cl
         <ChevronDown className="ml-auto size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-200 group-data-[state=open]/section:rotate-180" aria-hidden />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className={cn("space-y-1.5 border-t border-border/60 px-3 py-2.5", contentClassName)}>{children}</div>
+        <div className={cn("space-y-2 border-t border-border/60 px-2.5 py-2.5", contentClassName)}>{children}</div>
       </CollapsibleContent>
     </Collapsible>
   );
 }
 
 /** Tiny metadata chip; tone maps to the semantic color tokens. */
-export function MiniChip({ tone = "neutral", className, children }: {
+export function MiniChip({ tone = "neutral", className, title, children }: {
   tone?: "neutral" | "warn" | "secret" | "live";
   className?: string;
+  title?: string;
   children: ReactNode;
 }): ReactNode {
   const tones = {
@@ -329,7 +330,7 @@ export function MiniChip({ tone = "neutral", className, children }: {
     secret: "border-secret/40 bg-secret/10 text-secret",
     live: "border-live/40 bg-live/10 text-live"
   };
-  return <span className={cn("inline-flex items-center gap-1 rounded border px-1 text-[9px] leading-4", tones[tone], className)}>{children}</span>;
+  return <span title={title} className={cn("inline-flex items-center gap-1 rounded border px-1 text-[9px] leading-4", tones[tone], className)}>{children}</span>;
 }
 
 /** The one inline error surface: destructive hairline box with an alert glyph. */

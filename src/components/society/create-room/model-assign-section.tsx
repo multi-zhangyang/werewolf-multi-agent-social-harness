@@ -83,7 +83,7 @@ export function ModelAssignSection({
               </SelectGroup>
             </SelectContent>
           </Select>
-          <p className="mt-1.5 text-[11px] leading-4 text-muted-foreground/70">全部 {players} 个 AI 席位使用同一模型。</p>
+          <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">全部 {players} 个 AI 席位使用同一模型。</p>
         </div>
       ) : null}
 
@@ -123,7 +123,7 @@ export function ModelAssignSection({
               <Shuffle className="size-3.5" />
               重新随机
             </Button>
-            <span className="text-[11px] text-muted-foreground/70">提交的就是下方预览的分配，不做服务端暗箱随机。</span>
+            <span className="text-[11px] text-muted-foreground">提交的就是下方预览的分配，不做服务端暗箱随机。</span>
           </div>
         </div>
       ) : null}
