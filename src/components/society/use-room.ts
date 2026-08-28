@@ -28,7 +28,7 @@ export interface TurnToolStep {
   toolCallId: string;
   toolName: string;
   label?: string;
-  phase: "started" | "succeeded";
+  phase: "started" | "succeeded" | "failed";
   safeInputSummary?: string;
   safeOutputSummary?: string;
 }
@@ -204,7 +204,10 @@ export function reduceRoomEvent(state: RoomStreamState, event: AgentRuntimeEvent
       return { ...state, turns: trimTurns(turns) };
     }
     case "agent.tool": {
-      if (event.phase !== "started" && event.phase !== "succeeded") return state;
+      // "failed" is terminal too: the SDK converts thrown tool executes into
+      // an output whose text is its fixed error template, so the row must
+      // settle as failed instead of spinning forever.
+      if (event.phase !== "started" && event.phase !== "succeeded" && event.phase !== "failed") return state;
       const index = state.turns.findIndex((turn) => turn.actorId === event.actorId && !turn.completedAt);
       if (index >= 0) {
         const turns = state.turns.slice();

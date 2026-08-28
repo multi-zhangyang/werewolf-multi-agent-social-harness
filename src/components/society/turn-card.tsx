@@ -6,7 +6,7 @@ import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-e
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import { cn } from "@/lib/utils";
 import { AgentAvatar, formatTime } from "./shared";
-import { ToolRow } from "./turn-cognition";
+import { ToolStep } from "./turn-cognition";
 import type { NameResolver } from "./tool-summary";
 
 /**
@@ -76,13 +76,13 @@ export const TurnCard = memo(function TurnCard({
           <ul className="space-y-1.5">
             {turn.tools.map((tool) => (
               <li key={tool.toolCallId} className="min-w-0">
-                <ToolRow tool={tool} resolveName={resolveName} />
+                <ToolStep tool={tool} resolveName={resolveName} />
               </li>
             ))}
           </ul>
         ) : !canSeeCognition && turn.tools.length ? (
           <p className="flex items-center gap-2 rounded-md border border-border/50 bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
-            {live && turn.tools.at(-1)?.phase !== "succeeded"
+            {live && turn.tools.at(-1)?.phase === "started"
               ? <Loader2 className="size-3 animate-spin" aria-hidden />
               : <Wrench className="size-3" aria-hidden />}
             {live ? "正在执行绑定行动——细节仅全知视角可见。" : "本轮以绑定行动完成，未产生公开发言。"}

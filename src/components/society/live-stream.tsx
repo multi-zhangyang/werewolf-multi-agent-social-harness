@@ -3,6 +3,7 @@ import { Hourglass } from "lucide-react";
 import type { SocialMessage } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { EffectiveViewer, LiveTurn, RoomConnection } from "./use-room";
+import { MessageResponse } from "@/components/ai-elements/message";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
@@ -270,7 +271,9 @@ const MessageBubble = memo(function MessageBubble({
         {message.channel !== "public" ? <ChannelBadge channel={message.channel} /> : null}
         <time className="ml-auto font-mono text-[10px] text-muted-foreground/85">{formatTime(message.createdAt, { seconds: false })}</time>
       </header>
-      <div className="break-words text-sm leading-relaxed [&_p]:my-0">{message.text}</div>
+      <div className="[&_*]:[overflow-wrap:anywhere] break-words text-sm leading-relaxed [&_p]:my-0">
+        <MessageResponse>{message.text}</MessageResponse>
+      </div>
       <TurnDetails turn={turn} canSeeCognition={canSeeCognition} resolveName={resolveName} />
     </article>
   );
@@ -304,7 +307,9 @@ const MessageCluster = memo(function MessageCluster({
       <div className="space-y-2.5">
         {messages.map((message, messageIndex) => (
           <div key={message.id}>
-            <div className="break-words text-sm leading-relaxed [&_p]:my-0">{message.text}</div>
+            <div className="[&_*]:[overflow-wrap:anywhere] break-words text-sm leading-relaxed [&_p]:my-0">
+              <MessageResponse>{message.text}</MessageResponse>
+            </div>
             {messageIndex > 0 ? (
               <time className="mt-0.5 block font-mono text-[10px] text-muted-foreground/75">{formatTime(message.createdAt, { seconds: false })}</time>
             ) : null}

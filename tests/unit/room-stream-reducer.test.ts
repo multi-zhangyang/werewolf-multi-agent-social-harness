@@ -86,6 +86,25 @@ it("tool steps upsert by call id and survive in the settled card", () => {
   assert.ok(state.timeline.some((entry) => entry.kind === "tool" && entry.label === "make_investment"));
 });
 
+it("a failed tool settles its row instead of spinning forever", () => {
+  let state = reduceRoomEvent(EMPTY_STREAM_STATE, status("a1", "acting", "T0"));
+  state = reduceRoomEvent(state, {
+    type: "agent.tool", roomId: "r", actorId: "a1",
+    toolCallId: "call-9", toolName: "choose_move", phase: "started", at: "T1"
+  });
+  state = reduceRoomEvent(state, {
+    type: "agent.tool", roomId: "r", actorId: "a1",
+    toolCallId: "call-9", toolName: "choose_move", phase: "failed",
+    safeOutputSummary: "An error occurred while running the tool.", at: "T2"
+  });
+  state = reduceRoomEvent(state, status("a1", "idle", "T3"));
+  const settled = state.turns.at(-1)!;
+  assert.equal(settled.tools[0].phase, "failed");
+  assert.equal(settled.tools[0].safeOutputSummary, "An error occurred while running the tool.");
+  // Failures do not masquerade as completed steps in the timeline.
+  assert.ok(!state.timeline.some((entry) => entry.kind === "tool" && entry.id === "call-9"));
+});
+
 it("sequence cursors make envelope replay idempotent", () => {
   const state: RoomStreamState = { ...EMPTY_STREAM_STATE, lastSeq: 40 };
   const before = JSON.stringify(state.turns);
