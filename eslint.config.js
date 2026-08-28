@@ -21,9 +21,11 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    // Standalone Node scripts (demo runners) see the Node global scope.
+    // Standalone Node scripts (demo runners) see the Node global scope; the
+    // browser-driving QA scripts additionally touch `window` inside page
+    // callbacks, which runs in the browser, not in Node.
     files: ["scripts/**/*.mjs"],
-    languageOptions: { globals: { ...globals.node, location: "readonly", document: "readonly" } }
+    languageOptions: { globals: { ...globals.node, location: "readonly", document: "readonly", window: "readonly", getComputedStyle: "readonly" } }
   },
   {
     files: ["**/*.ts", "**/*.tsx", "**/*.mjs", "**/*.js"],
