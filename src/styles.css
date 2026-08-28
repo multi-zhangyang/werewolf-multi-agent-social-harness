@@ -135,19 +135,6 @@ body {
   background-repeat: no-repeat;
 }
 
-/* Film grain: an almost-subliminal texture so large dark fields read as
-   material, not plastic. Sits above the UI but below toasts, never catches
-   the pointer. */
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  pointer-events: none;
-  opacity: 0.025;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-
 ::selection {
   color: #000;
   background: #fff;
@@ -354,14 +341,6 @@ body::after {
   font-variant-numeric: tabular-nums;
 }
 
-/* Hero display gradient: white falling into the void (kept readable to the last glyph). */
-.hero-ink {
-  background-image: linear-gradient(180deg, oklch(1 0 0) 0%, oklch(1 0 0 / 0.9) 60%, oklch(1 0 0 / 0.72) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
 /* Horizontally scrollable strip with edge fades so the overflow reads as
    scrollable instead of cut off (world tags, small screens). */
 .scroll-fade-x {
@@ -374,10 +353,17 @@ body::after {
 }
 
 /* Vertically scrollable area with a bottom fade so "more content below"
-   reads as scrollable instead of cut off. */
+   reads as scrollable instead of cut off. Dialog bodies use the taller
+   --dialog variant: a card border ending in a hard clip reads as breakage,
+   so the dissolve is wider and paired with bottom padding on the content. */
 .scroll-fade-y {
   mask-image: linear-gradient(to bottom, black 0, black calc(100% - 40px), transparent 100%);
   -webkit-mask-image: linear-gradient(to bottom, black 0, black calc(100% - 40px), transparent 100%);
+}
+
+.scroll-fade-y-lg {
+  mask-image: linear-gradient(to bottom, black 0, black calc(100% - 72px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 0, black calc(100% - 72px), transparent 100%);
 }
 
 /* Feed-style top fade: while scrolled away from the top, older entries
