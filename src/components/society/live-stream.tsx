@@ -9,12 +9,15 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { AgentAvatar, ChannelBadge, channelSurface, eventLabel, formatTime, ScenarioIcon } from "./shared";
+import { belongsToCluster } from "./stream-cluster";
 import { TurnCard } from "./turn-card";
 
 /**
  * The centerpiece: one chronological live stream answering "谁在干什么、
  * 说到哪了" — phase dividers, settled speech bubbles and in-flight turn
  * cards interleaved in true order, auto-following while agents speak.
+ * An actor's consecutive messages collapse into one card with stacked
+ * paragraphs, so a monologue reads as one utterance instead of card spam.
  */
 
 interface StreamItem {
@@ -52,48 +55,75 @@ function StreamItems({ items, room, onSubmitAction }: {
   onSubmitAction?: RoomConnection["submitAction"];
 }): ReactNode {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const lastCountRef = useRef(0);
+  const [scrolled, setScrolled] = useState(false);
+
+  const viewportOf = (): HTMLElement | null =>
+    scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]") as HTMLElement | null;
 
   useEffect(() => {
     if (items.length !== lastCountRef.current) {
       lastCountRef.current = items.length;
       if (stickRef.current) scrollToBottom();
+      const viewport = viewportOf();
+      if (viewport) setScrolled(viewport.scrollTop > 8);
     }
   }, [items.length]);
 
+  // A streaming turn grows without adding items; follow the bottom while the
+  // viewer is still stuck to it, or the speaking card gets sliced mid-word.
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const observer = new ResizeObserver(() => {
+      if (stickRef.current) scrollToBottom();
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+
   const scrollToBottom = (): void => {
-    const viewport = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]") as HTMLElement | null;
+    const viewport = viewportOf();
     if (viewport) viewport.scrollTop = viewport.scrollHeight;
   };
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
-      <ScrollArea
-        ref={scrollRef}
-        className="min-h-0 flex-1"
-        onScroll={(event) => {
-          const viewport = event.currentTarget.querySelector("[data-radix-scroll-area-viewport]") as HTMLElement | null;
-          if (!viewport) return;
-          stickRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 80;
-        }}
-      >
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-2.5 px-4 py-4">
-          {items.map((item) => <div key={item.id}>{item.render}</div>)}
-          {!items.length ? (
-            <Empty className="py-16">
-              <EmptyHeader>
-                <EmptyTitle>等待世界苏醒</EmptyTitle>
-                <EmptyDescription>第一个 agent 开始思考时，全过程会在这里直播。</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          ) : null}
-        </div>
-      </ScrollArea>
+      <div className={cn("min-h-0 flex-1", scrolled && "scroll-fade-top")}>
+        <ScrollArea
+          ref={scrollRef}
+          className="h-full"
+          onScroll={(event) => {
+            const viewport = event.currentTarget.querySelector("[data-radix-scroll-area-viewport]") as HTMLElement | null;
+            if (!viewport) return;
+            stickRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 80;
+            setScrolled(viewport.scrollTop > 8);
+          }}
+        >
+          <div ref={contentRef} className="mx-auto flex w-full max-w-3xl flex-col gap-3 px-4 pt-4 pb-8">
+            {items.map((item) => <div key={item.id}>{item.render}</div>)}
+            {!items.length ? (
+              <Empty className="py-16">
+                <EmptyHeader>
+                  <EmptyTitle>等待世界苏醒</EmptyTitle>
+                  <EmptyDescription>第一个 agent 开始思考时，全过程会在这里直播。</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            ) : null}
+          </div>
+        </ScrollArea>
+      </div>
       <HumanActionBar room={room} onSubmitAction={onSubmitAction} />
     </div>
   );
 }
+
+type StreamEntry =
+  | { id: string; at: number; sort: string; kind: "log"; text: string; beat?: string }
+  | { id: string; at: number; sort: string; kind: "message"; message: SocialMessage; turn?: LiveTurn }
+  | { id: string; at: number; sort: string; kind: "turn"; turn: LiveTurn };
 
 function buildStreamItems(
   room: SocietyRoomSnapshot,
@@ -102,18 +132,12 @@ function buildStreamItems(
   canSeeCognition: boolean,
   avatarSeedFor: (actorId: string) => string | undefined
 ): StreamItem[] {
-  const items: StreamItem[] = [];
+  const entries: StreamEntry[] = [];
   for (const entry of room.world.log) {
-    items.push({
-      id: `log:${entry.id}`,
-      at: Date.parse(entry.at),
-      sort: entry.at,
-      render: <PhaseDivider key={entry.id} text={entry.text} beat={entry.beat} />
-    });
+    entries.push({ id: `log:${entry.id}`, at: Date.parse(entry.at), sort: entry.at, kind: "log", text: entry.text, beat: entry.beat });
   }
-  const messages = room.world.messages ?? [];
   const matchedTurnIds = new Set<string>();
-  for (const message of messages) {
+  for (const message of room.world.messages ?? []) {
     // Attach the actor's most recent completed turn whose window covers the message.
     const turn = [...turns]
       .filter((candidate) => candidate.actorId === message.senderId)
@@ -125,21 +149,7 @@ function buildStreamItems(
         return sentAt >= start - 2_000 && sentAt <= end + 60_000;
       });
     if (turn) matchedTurnIds.add(turn.id);
-    items.push({
-      id: `msg:${message.id}`,
-      at: Date.parse(message.createdAt),
-      sort: message.createdAt,
-      render: (
-        <MessageBubble
-          key={message.id}
-          message={message}
-          name={names.get(message.senderId) ?? message.senderId}
-          seed={avatarSeedFor(message.senderId)}
-          turn={turn}
-          canSeeCognition={canSeeCognition}
-        />
-      )
-    });
+    entries.push({ id: `msg:${message.id}`, at: Date.parse(message.createdAt), sort: message.createdAt, kind: "message", message, turn });
   }
   // Turns that produced no persisted message stay visible as their own cards
   // (action-only activations, or speech still streaming before commit).
@@ -147,22 +157,75 @@ function buildStreamItems(
     if (matchedTurnIds.has(turn.id)) continue;
     const live = !turn.completedAt;
     if (!live && !turn.outputText && !turn.tools.length && !turn.reasoning) continue;
-    items.push({
-      id: `turn:${turn.id}`,
-      at: Date.parse(turn.startedAt),
-      sort: turn.startedAt,
-      render: (
-        <TurnCard
-          key={turn.id}
-          turn={turn}
-          name={names.get(turn.actorId) ?? turn.actorId}
-          seed={avatarSeedFor(turn.actorId)}
-          canSeeCognition={canSeeCognition}
-        />
-      )
-    });
+    entries.push({ id: `turn:${turn.id}`, at: Date.parse(turn.startedAt), sort: turn.startedAt, kind: "turn", turn });
   }
-  return items.sort((left, right) => left.at - right.at);
+  entries.sort((left, right) => left.at - right.at);
+
+  const items: StreamItem[] = [];
+  let index = 0;
+  while (index < entries.length) {
+    const entry = entries[index]!;
+    if (entry.kind === "log") {
+      items.push({ id: entry.id, at: entry.at, sort: entry.sort, render: <PhaseDivider text={entry.text} beat={entry.beat} /> });
+      index += 1;
+      continue;
+    }
+    if (entry.kind === "turn") {
+      items.push({
+        id: entry.id,
+        at: entry.at,
+        sort: entry.sort,
+        render: (
+          <TurnCard
+            turn={entry.turn}
+            name={names.get(entry.turn.actorId) ?? entry.turn.actorId}
+            seed={avatarSeedFor(entry.turn.actorId)}
+            canSeeCognition={canSeeCognition}
+          />
+        )
+      });
+      index += 1;
+      continue;
+    }
+    // Same actor, same channel, within 15 minutes, nothing in between: one
+    // card, stacked paragraphs (chat-app grouping for an agent's monologue).
+    const cluster: Extract<StreamEntry, { kind: "message" }>[] = [entry];
+    let cursor = index + 1;
+    while (cursor < entries.length) {
+      const next = entries[cursor]!;
+      if (next.kind !== "message") break;
+      if (!belongsToCluster(cluster[cluster.length - 1]!.message, next.message)) break;
+      cluster.push(next);
+      cursor += 1;
+    }
+    const name = names.get(entry.message.senderId) ?? entry.message.senderId;
+    const seed = avatarSeedFor(entry.message.senderId);
+    items.push(
+      cluster.length === 1
+        ? {
+            id: entry.id,
+            at: entry.at,
+            sort: entry.sort,
+            render: <MessageBubble message={entry.message} name={name} seed={seed} turn={entry.turn} canSeeCognition={canSeeCognition} />
+          }
+        : {
+            id: `cluster:${cluster[0]!.id}`,
+            at: cluster[0]!.at,
+            sort: cluster[0]!.sort,
+            render: (
+              <MessageCluster
+                messages={cluster.map((member) => member.message)}
+                turns={new Map(cluster.map((member) => [member.message.id, member.turn]))}
+                name={name}
+                seed={seed}
+                canSeeCognition={canSeeCognition}
+              />
+            )
+          }
+    );
+    index = cursor;
+  }
+  return items;
 }
 
 const MessageBubble = memo(function MessageBubble({
@@ -179,40 +242,93 @@ const MessageBubble = memo(function MessageBubble({
   canSeeCognition: boolean;
 }): ReactNode {
   return (
-    <article className={cn("enter-stage rounded-xl border p-3 transition-colors", channelSurface[message.channel], "hover:border-foreground/15")}>
+    <article className={cn("sheen enter-stage overflow-hidden rounded-xl border p-3 shadow-[0_1px_2px_oklch(0_0_0/0.2)] transition-colors duration-200", channelSurface[message.channel], "hover:border-foreground/15")}>
       <header className="mb-1.5 flex items-center gap-2">
         <AgentAvatar name={name} seed={seed} size="sm" />
-        <span className="text-sm font-medium">{name}</span>
+        <span className="text-sm font-medium tracking-tight">{name}</span>
         {message.channel !== "public" ? <ChannelBadge channel={message.channel} /> : null}
         <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(message.createdAt, { seconds: false })}</time>
       </header>
-      <div className="text-sm leading-relaxed [&_p]:my-0">{message.text}</div>
-      {turn && canSeeCognition && (turn.reasoning || turn.tools.length) ? (
-        <details className="group/process mt-2 border-t border-border/50 pt-2 text-xs text-muted-foreground">
-          <summary className="flex w-full cursor-pointer list-none select-none items-center gap-1.5 font-mono text-[10px] tracking-[0.14em] uppercase hover:text-foreground [&::-webkit-details-marker]:hidden">
-            <ChevronDown className="size-3 transition-transform group-open/process:rotate-180" aria-hidden />
-            本轮过程
-          </summary>
-          <div className="mt-1.5 space-y-1.5">
-            {turn.reasoning?.text ? <pre className="whitespace-pre-wrap rounded-md bg-muted/40 p-2 font-sans leading-relaxed">{turn.reasoning.text}</pre> : null}
-            {turn.tools.map((tool) => (
-              <p key={tool.toolCallId} className="flex items-center gap-1.5"><Wrench className="size-3 shrink-0" aria-hidden />{tool.label ?? eventLabel(tool.toolName)}{tool.safeOutputSummary ? ` · ${tool.safeOutputSummary}` : ""}</p>
-            ))}
-          </div>
-        </details>
-      ) : null}
+      <div className="break-words text-sm leading-relaxed [&_p]:my-0">{message.text}</div>
+      <TurnDetails turn={turn} canSeeCognition={canSeeCognition} />
     </article>
   );
 });
 
+/** Several utterances from one actor in a row: one card, stacked paragraphs. */
+const MessageCluster = memo(function MessageCluster({
+  messages,
+  turns,
+  name,
+  seed,
+  canSeeCognition
+}: {
+  messages: SocialMessage[];
+  turns: Map<string, LiveTurn | undefined>;
+  name: string;
+  seed?: string;
+  canSeeCognition: boolean;
+}): ReactNode {
+  const channel = messages[0]!.channel;
+  return (
+    <article className={cn("sheen enter-stage overflow-hidden rounded-xl border p-3 shadow-[0_1px_2px_oklch(0_0_0/0.2)] transition-colors duration-200", channelSurface[channel], "hover:border-foreground/15")}>
+      <header className="mb-1.5 flex items-center gap-2">
+        <AgentAvatar name={name} seed={seed} size="sm" />
+        <span className="text-sm font-medium tracking-tight">{name}</span>
+        {channel !== "public" ? <ChannelBadge channel={channel} /> : null}
+        <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(messages[0]!.createdAt, { seconds: false })}</time>
+      </header>
+      <div className="space-y-2.5">
+        {messages.map((message, messageIndex) => (
+          <div key={message.id}>
+            <div className="break-words text-sm leading-relaxed [&_p]:my-0">{message.text}</div>
+            {messageIndex > 0 ? (
+              <time className="mt-0.5 block font-mono text-[10px] text-muted-foreground/40">{formatTime(message.createdAt, { seconds: false })}</time>
+            ) : null}
+            <TurnDetails turn={turns.get(message.id)} canSeeCognition={canSeeCognition} />
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+});
+
+/** Privileged per-turn process (reasoning + tools), collapsible. */
+function TurnDetails({ turn, canSeeCognition }: { turn?: LiveTurn; canSeeCognition: boolean }): ReactNode {
+  if (!turn || !canSeeCognition || (!turn.reasoning && !turn.tools.length)) return null;
+  return (
+    <details className="group/process mt-2 border-t border-border/50 pt-2 text-xs text-muted-foreground">
+      <summary className="flex w-full cursor-pointer list-none select-none items-center gap-1.5 font-mono text-[10px] tracking-[0.14em] uppercase hover:text-foreground [&::-webkit-details-marker]:hidden">
+        <ChevronDown className="size-3 transition-transform group-open/process:rotate-180" aria-hidden />
+        本轮过程
+      </summary>
+      <div className="mt-1.5 space-y-1.5">
+        {turn.reasoning?.text ? <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2 font-sans leading-relaxed">{turn.reasoning.text}</pre> : null}
+        {turn.tools.map((tool) => (
+          <p key={tool.toolCallId} className="flex min-w-0 items-center gap-1.5">
+            <Wrench className="size-3 shrink-0" aria-hidden />
+            <span className="min-w-0 break-words">{tool.label ?? eventLabel(tool.toolName)}{tool.safeOutputSummary ? ` · ${tool.safeOutputSummary}` : ""}</span>
+          </p>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function PhaseDivider({ text, beat }: { text: string; beat?: string }): ReactNode {
   return (
-    <div className="cue-enter flex items-center gap-3 py-2" role="separator">
-      <span className="h-px w-8 shrink-0 bg-gradient-to-r from-transparent to-foreground/15 sm:w-auto sm:flex-1" />
-      <span className={cn("min-w-0 rounded-full border px-3.5 py-1 text-xs leading-5 backdrop-blur-sm", beat ? "border-warn/25 bg-warn/[0.06] text-warn/90" : "border-border bg-muted/40 text-muted-foreground")}>
+    <div className="cue-enter flex items-center gap-2.5 py-2.5" role="separator">
+      <span className="flex flex-1 items-center gap-1.5" aria-hidden>
+        <span className="h-px flex-1 bg-gradient-to-r from-transparent to-foreground/15" />
+        <span className="size-1 rotate-45 bg-foreground/25" />
+      </span>
+      <span className={cn("min-w-0 rounded-full border px-3.5 py-1 text-[11px] leading-5 tracking-wide backdrop-blur-sm shadow-[0_2px_12px_oklch(0_0_0/0.3)]", beat ? "border-warn/25 bg-warn/[0.07] text-warn/95" : "border-border bg-card/70 text-muted-foreground")}>
         {beat ? `★ ${beat} · ` : ""}{text}
       </span>
-      <span className="h-px w-8 shrink-0 bg-gradient-to-l from-transparent to-foreground/15 sm:w-auto sm:flex-1" />
+      <span className="flex flex-1 items-center gap-1.5" aria-hidden>
+        <span className="size-1 rotate-45 bg-foreground/25" />
+        <span className="h-px flex-1 bg-gradient-to-l from-transparent to-foreground/15" />
+      </span>
     </div>
   );
 }
@@ -233,7 +349,7 @@ function HumanActionBar({ room, onSubmitAction }: { room: SocietyRoomSnapshot; o
   };
 
   return (
-    <footer className="border-t border-border bg-background/80 p-3 backdrop-blur">
+    <footer className="rule-t relative bg-background/90 p-3 backdrop-blur-md shadow-[0_-12px_28px_-20px_oklch(0_0_0/0.8)]">
       <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-2">
         <Hourglass className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
         <span className="shrink-0 text-xs text-muted-foreground">{player.displayName} · 轮到你了</span>
