@@ -15,7 +15,16 @@ import { cn } from "@/lib/utils";
 import { MiniChip } from "../shared";
 import type { ProviderDraft, ProviderView } from "./types";
 
-/** Provider list plus the dashed "add provider" form. */
+function Field({ label, children, className }: { label: string; children: ReactNode; className?: string }): ReactNode {
+  return (
+    <label className={cn("flex min-w-0 flex-col gap-1.5", className)}>
+      <span className="text-[11px] font-medium text-muted-foreground">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+/** Provider list plus the "add provider" form. */
 export function ProviderSection({ providers, draft, onDraftChange, onAdd, saving }: {
   providers: ProviderView[];
   draft: ProviderDraft;
@@ -25,44 +34,53 @@ export function ProviderSection({ providers, draft, onDraftChange, onAdd, saving
 }): ReactNode {
   return (
     <section>
-      <p className="mb-2.5 text-[13px] font-medium text-foreground/80">提供商</p>
+      <div className="mb-3 flex items-baseline justify-between gap-3">
+        <h3 className="text-sm font-semibold text-foreground">提供商</h3>
+        <span className="text-xs text-muted-foreground">模型请求经提供商的 Base URL 发出</span>
+      </div>
+
       <div className="space-y-2">
         {providers.map((provider) => (
-          <div key={provider.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 rounded-lg border border-border bg-muted/60 px-3 py-2">
-            <div className="min-w-0 flex-1 basis-56">
-              <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px] font-medium leading-5 text-foreground/90">
-                <span className="break-all">{provider.name}</span>
-                <MiniChip className="font-mono">{provider.kind}</MiniChip>
-                {provider.hasKey ? <span className="text-[10px] font-normal text-live">密钥已配置</span> : <span className="text-[10px] font-normal text-warn">未配置密钥</span>}
+          <div key={provider.id} className="flex items-center gap-4 rounded-lg border border-border bg-card px-4 py-3">
+            <div className="min-w-0 flex-1">
+              <p className="flex items-center gap-2 text-sm font-medium text-foreground">
+                <span className="truncate">{provider.name}</span>
+                <MiniChip className="shrink-0 font-mono">{provider.kind}</MiniChip>
               </p>
-              <p className="truncate font-mono text-[10px] leading-4 text-muted-foreground/80">{provider.baseURL} · {provider.apiMode}</p>
+              <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">{provider.baseURL} · {provider.apiMode}</p>
             </div>
-            <Badge variant="outline" className={cn("shrink-0 rounded-full border-border font-normal", provider.enabled ? "text-live" : "text-muted-foreground")}>
-              {provider.enabled ? "启用" : "停用"}
-            </Badge>
+            <div className="flex shrink-0 items-center gap-3">
+              <span className={cn("text-[11px]", provider.hasKey ? "text-live" : "text-warn")}>
+                {provider.hasKey ? "密钥已配置" : "未配置密钥"}
+              </span>
+              <Badge variant="outline" className={cn("rounded-full border-border font-normal", provider.enabled ? "text-live" : "text-muted-foreground")}>
+                {provider.enabled ? "启用" : "停用"}
+              </Badge>
+            </div>
           </div>
         ))}
-        {providers.length === 0 ? <p className="text-xs text-muted-foreground/80">还没有提供商档案。环境变量（OPENAI_BASE_URL）会作为首个提供商自动出现。</p> : null}
+        {providers.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+            还没有提供商档案。环境变量（OPENAI_BASE_URL）会作为首个提供商自动出现。
+          </p>
+        ) : null}
       </div>
-      <div className="mt-3 rounded-lg border border-dashed border-border p-3">
-        <p className="mb-2 text-xs font-medium text-muted-foreground">添加提供商</p>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-medium text-foreground/70">名称</span>
+
+      <div className="mt-4 rounded-lg border border-border bg-muted/40 p-4">
+        <p className="text-[13px] font-medium text-foreground/90">添加提供商</p>
+        <div className="mt-3 grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
+          <Field label="名称">
             <Input value={draft.name} onChange={(event) => onDraftChange({ ...draft, name: event.target.value })} placeholder="如 MyProvider" spellCheck={false} />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-medium text-foreground/70">Base URL</span>
+          </Field>
+          <Field label="Base URL">
             <Input value={draft.baseURL} onChange={(event) => onDraftChange({ ...draft, baseURL: event.target.value })} placeholder="https://api.example.com/v1" spellCheck={false} />
-          </label>
-          <label className="flex flex-col gap-1 sm:col-span-2">
-            <span className="text-[11px] font-medium text-foreground/70">API 密钥（只写入本机 .env.local）</span>
+          </Field>
+          <Field label="API 密钥（只写入本机 .env.local）" className="sm:col-span-2">
             <Input type="password" value={draft.apiKey} onChange={(event) => onDraftChange({ ...draft, apiKey: event.target.value })} placeholder="sk-…" spellCheck={false} autoComplete="off" />
-          </label>
-          <label className="flex flex-col gap-1 sm:col-span-2">
-            <span className="text-[11px] font-medium text-foreground/70">API 模式</span>
+          </Field>
+          <Field label="API 模式" className="sm:col-span-2">
             <Select value={draft.apiMode} onValueChange={(value) => onDraftChange({ ...draft, apiMode: value })}>
-              <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="bg-card"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectGroup>
                   <SelectItem value="chat-completions">chat-completions</SelectItem>
@@ -71,14 +89,16 @@ export function ProviderSection({ providers, draft, onDraftChange, onAdd, saving
                 </SelectGroup>
               </SelectContent>
             </Select>
-          </label>
+          </Field>
         </div>
-        <p className="mt-2 text-[11px] leading-5 text-muted-foreground/80">
-          Base URL 必须以 <span className="font-mono">/v1</span> 结尾（如 https://api.example.com/v1）；API 密钥只写入本机 .env.local，不回显、不进入模型档案与房间快照。
-        </p>
-        <Button variant="tile" size="sm" className="mt-2" disabled={saving} onClick={onAdd}>
-          <Plus className="size-3.5" /> 添加提供商
-        </Button>
+        <div className="mt-3 flex flex-col-reverse items-start justify-between gap-3 sm:flex-row sm:items-center">
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            Base URL 需以 <span className="font-mono">/v1</span> 结尾；密钥不回显、不进入模型档案与房间快照。
+          </p>
+          <Button variant="tile" size="sm" className="shrink-0" disabled={saving} onClick={onAdd}>
+            <Plus className="size-3.5" /> 添加提供商
+          </Button>
+        </div>
       </div>
     </section>
   );

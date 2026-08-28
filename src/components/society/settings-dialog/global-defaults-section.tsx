@@ -20,11 +20,14 @@ export function GlobalDefaultsSection({ profiles, value, onChange, onSave, savin
   saving: boolean;
 }): ReactNode {
   return (
-    <section>
-      <p className="mb-2.5 text-[13px] font-medium text-foreground/80">全局默认</p>
-      <div className="flex items-center gap-3">
+    <section className="rounded-lg border border-border bg-card p-4">
+      <h3 className="text-sm font-semibold text-foreground">全局默认模型</h3>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+        新房间创建时预选的模型。每个 Agent 最终生效配置按「系统默认 → 模型档案 → 全局默认 → 房间 → 单 Agent 覆盖」逐级解析。
+      </p>
+      <div className="mt-3 flex items-center gap-3">
         <Select value={value || "__automatic__"} onValueChange={(selected) => onChange(selected === "__automatic__" ? "" : selected)}>
-          <SelectTrigger className="min-w-0 flex-1 rounded-lg border-border bg-card text-foreground/90"><SelectValue placeholder="新房间默认模型" /></SelectTrigger>
+          <SelectTrigger className="min-w-0 flex-1 bg-muted/40"><SelectValue placeholder="新房间默认模型" /></SelectTrigger>
           <SelectContent>
             <SelectGroup>
               <SelectItem value="__automatic__">（不指定：使用第一个启用的模型）</SelectItem>
@@ -36,12 +39,9 @@ export function GlobalDefaultsSection({ profiles, value, onChange, onSave, savin
         </Select>
         <Button variant="tile" size="sm" className="shrink-0" disabled={saving} onClick={onSave}>
           {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
-          保存全局默认
+          保存
         </Button>
       </div>
-      <p className="mt-1.5 text-xs leading-5 text-muted-foreground/80">
-        每个 Agent 最终生效配置按「系统默认 → 模型档案 → 全局默认 → 房间 → 单 Agent 覆盖」逐级解析；创建房间时可以看到每个席位的最终模型。
-      </p>
     </section>
   );
 }

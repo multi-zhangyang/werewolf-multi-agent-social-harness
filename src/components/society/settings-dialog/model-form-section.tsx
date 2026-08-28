@@ -26,6 +26,15 @@ export interface RemoteCatalogState {
   result?: RemoteModelsResult;
 }
 
+function Field({ label, children, className }: { label: string; children: ReactNode; className?: string }): ReactNode {
+  return (
+    <div className={cn("flex min-w-0 flex-col gap-1.5", className)}>
+      <span className="text-[11px] font-medium text-muted-foreground">{label}</span>
+      {children}
+    </div>
+  );
+}
+
 /** Add/edit one model profile, with the provider's live model catalog for batch registration. */
 export function ModelFormSection({
   editingProfile,
@@ -60,57 +69,72 @@ export function ModelFormSection({
   const providerId = draft.providerProfileId;
   const catalog = providerId ? remote[providerId] : undefined;
   return (
-    <div className="mt-3 rounded-lg border border-dashed border-border p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <p className="text-xs font-medium text-muted-foreground">
+    <section className="rounded-lg border border-border bg-muted/40 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-foreground">
           {editingProfile ? `编辑模型档案：${editingProfile.name}` : "添加模型档案"}
-        </p>
+        </h3>
         {editingProfile ? (
           <Button
             variant="ghost"
             size="sm"
-            className="h-6 px-2 text-[11px] text-muted-foreground"
+            className="h-7 px-2.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
             onClick={onCancelEditing}
           >
             取消编辑
           </Button>
         ) : null}
       </div>
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <Select value={providerId} onValueChange={(value) => { onPickedRemoteChange([]); onDraftChange({ ...draft, providerProfileId: value }); }}>
-          <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90"><SelectValue placeholder="所属提供商" /></SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {providers.filter((provider) => provider.enabled).map((provider) => (
-                <SelectItem key={provider.id} value={provider.id}>{provider.name}</SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
-        <Input value={draft.modelId} onChange={(event) => onDraftChange({ ...draft, modelId: event.target.value })} placeholder="模型 ID（如 org/model-name）" spellCheck={false} />
-        <Input value={draft.contextWindow} onChange={(event) => onDraftChange({ ...draft, contextWindow: event.target.value })} placeholder="上下文窗口（tokens，如 262144）" spellCheck={false} />
-        <Input value={draft.name} onChange={(event) => onDraftChange({ ...draft, name: event.target.value })} placeholder="显示名称（可选）" spellCheck={false} />
-        <Select value={draft.reasoningEffort} onValueChange={(value) => onDraftChange({ ...draft, reasoningEffort: value as ReasoningEffort })}>
-          <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90" aria-label="新模型默认思考强度">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              <SelectItem value="low">低 · low</SelectItem>
-              <SelectItem value="medium">中 · medium</SelectItem>
-              <SelectItem value="high">高 · high（默认）</SelectItem>
-              <SelectItem value="xhigh">极高 · xhigh</SelectItem>
-            </SelectGroup>
-          </SelectContent>
-        </Select>
+
+      <div className="mt-3 grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
+        <Field label="所属提供商">
+          <Select value={providerId} onValueChange={(value) => { onPickedRemoteChange([]); onDraftChange({ ...draft, providerProfileId: value }); }}>
+            <SelectTrigger className="bg-card"><SelectValue placeholder="选择提供商" /></SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {providers.filter((provider) => provider.enabled).map((provider) => (
+                  <SelectItem key={provider.id} value={provider.id}>{provider.name}</SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="模型 ID">
+          <Input value={draft.modelId} onChange={(event) => onDraftChange({ ...draft, modelId: event.target.value })} placeholder="org/model-name" spellCheck={false} />
+        </Field>
+        <Field label="上下文窗口（tokens）">
+          <Input value={draft.contextWindow} onChange={(event) => onDraftChange({ ...draft, contextWindow: event.target.value })} placeholder="262144" spellCheck={false} />
+        </Field>
+        <Field label="显示名称（可选）">
+          <Input value={draft.name} onChange={(event) => onDraftChange({ ...draft, name: event.target.value })} placeholder="默认与模型 ID 相同" spellCheck={false} />
+        </Field>
+        <Field label="默认思考强度">
+          <Select value={draft.reasoningEffort} onValueChange={(value) => onDraftChange({ ...draft, reasoningEffort: value as ReasoningEffort })}>
+            <SelectTrigger className="bg-card" aria-label="新模型默认思考强度">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="low">低 · low</SelectItem>
+                <SelectItem value="medium">中 · medium</SelectItem>
+                <SelectItem value="high">高 · high（默认）</SelectItem>
+                <SelectItem value="xhigh">极高 · xhigh</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
       </div>
-      <div className="mt-2 rounded-lg border border-border bg-muted/40 p-2.5">
+
+      <div className="mt-3 rounded-md border border-border bg-card p-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-[11px] font-medium text-muted-foreground">从提供商拉取模型列表（推荐）</p>
+          <p className="text-xs font-medium text-foreground/90">
+            从提供商拉取模型列表
+            <span className="ml-2 font-normal text-muted-foreground">推荐，免手抄 ID</span>
+          </p>
           <Button
             variant="tile"
             size="sm"
-            className="h-7 px-2 text-[11px]"
+            className="h-7 px-2.5 text-[11px]"
             disabled={saving || Boolean(providerId && catalog?.loading)}
             onClick={onLoadRemoteModels}
           >
@@ -120,15 +144,15 @@ export function ModelFormSection({
             {providerId && catalog?.result?.ok ? "重新拉取" : "获取模型列表"}
           </Button>
         </div>
-        <p className="mt-1 text-[10px] leading-4 text-muted-foreground/70">
-          Base URL 需以 /v1 结尾（如 https://api.example.com/v1）。勾选后批量注册，上下文窗口用上方输入值，添加后可随时逐个编辑。
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          按所选提供商请求其模型目录；勾选多个可批量注册，上下文窗口对所有所选模型生效，之后可逐个编辑。
         </p>
         {providerId && catalog?.result && !catalog.result.ok ? (
           <p className="mt-1.5 text-[11px] leading-4 text-destructive">{catalog.result.message}</p>
         ) : null}
         {providerId && catalog?.result?.ok ? (
           <>
-            <div className="mt-1.5 max-h-40 space-y-0.5 overflow-y-auto rounded-md border border-border bg-card p-1">
+            <div className="mt-2 max-h-44 space-y-0.5 overflow-y-auto rounded-md border border-border bg-muted/30 p-1">
               {catalog.result.modelIds.map((modelId) => {
                 const registered = registeredModelIds.has(modelId);
                 const picked = pickedRemoteIds.includes(modelId);
@@ -159,7 +183,7 @@ export function ModelFormSection({
                 <Button
                   variant="tile"
                   size="sm"
-                  className="h-7 px-2 text-[11px] text-foreground"
+                  className="h-7 px-2.5 text-[11px] text-foreground"
                   disabled={saving}
                   onClick={onAddSelectedRemoteModels}
                 >
@@ -174,23 +198,30 @@ export function ModelFormSection({
           </>
         ) : null}
       </div>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {QUICK_CAPABILITIES.map(({ key, label }) => (
-          <label key={key} className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-muted-foreground has-checked:border-foreground/60 has-checked:text-foreground">
-            <input
-              type="checkbox"
-              className="size-3 accent-foreground"
-              checked={draft[key] === true}
-              onChange={(event) => onDraftChange({ ...draft, [key]: event.target.checked })}
-            />
-            {label}
-          </label>
-        ))}
-        <span className="self-center text-[10px] text-muted-foreground/60">未勾选 = 能力未验证，参数不会盲目发送</span>
+
+      <div className="mt-3">
+        <p className="text-[11px] font-medium text-muted-foreground">能力快捷登记</p>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {QUICK_CAPABILITIES.map(({ key, label }) => (
+            <label key={key} className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-muted-foreground has-checked:border-foreground/60 has-checked:text-foreground">
+              <input
+                type="checkbox"
+                className="size-3 accent-foreground"
+                checked={draft[key] === true}
+                onChange={(event) => onDraftChange({ ...draft, [key]: event.target.checked })}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+        <p className="mt-1 text-[10px] text-muted-foreground/60">未勾选 = 能力未验证，参数不会盲目发送。</p>
       </div>
-      <Button variant="tile" size="sm" className="mt-2" disabled={saving} onClick={onAddModel}>
-        {editingProfile ? "保存修改" : <><Plus className="size-3.5" /> 添加模型档案</>}
-      </Button>
-    </div>
+
+      <div className="mt-4 flex justify-end">
+        <Button variant="tile" size="sm" disabled={saving} onClick={onAddModel}>
+          {editingProfile ? "保存修改" : <><Plus className="size-3.5" /> 添加模型档案</>}
+        </Button>
+      </div>
+    </section>
   );
 }
