@@ -212,14 +212,14 @@ export const ReasoningContent = memo(
   ({ className, children, viewportClassName, ...props }: ReasoningContentProps) => (
     <CollapsibleContent
       className={cn(
-        "mt-4 text-sm",
+        "mt-4 min-w-0 overflow-hidden text-sm",
         "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
         className
       )}
       {...props}
     >
-      <ScrollArea className={cn("max-h-48", viewportClassName)}>
-        <Streamdown className="pr-3" plugins={streamdownPlugins}>{children}</Streamdown>
+      <ScrollArea className={cn("max-h-48 overflow-hidden", viewportClassName)}>
+        <Streamdown className="pr-3 [overflow-wrap:anywhere]" plugins={streamdownPlugins}>{children}</Streamdown>
       </ScrollArea>
     </CollapsibleContent>
   )

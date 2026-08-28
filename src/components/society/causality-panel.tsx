@@ -1,5 +1,5 @@
 import { memo, type ReactNode } from "react";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, Crown, Waypoints } from "lucide-react";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type {
   DeceptionEpisode,
@@ -9,6 +9,7 @@ import type {
   SocialCausalityProjection
 } from "@/society/social/contracts";
 import { Badge } from "@/components/ui/badge";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { CollapsibleSection, provenanceBadge } from "./shared";
@@ -30,23 +31,41 @@ export const CausalityPanel = memo(function CausalityPanel({ room, viewerPrivile
   const characterNames = new Map(room.world.agents.map((agent) => [agent.characterId, agent.displayName]));
   const actorName = (id: string | undefined): string => (id ? names.get(id) ?? characterNames.get(id) ?? id : "—");
   const omniscient = viewerPrivileged;
+  const records = projection ? totalRecords(projection) : 0;
 
   return (
-    <ScrollArea className="h-full">
-      <div className="flex flex-col gap-1.5 p-3">
-        <ScoreSection room={room} />
-        <SuspicionSection room={room} />
-        <SocialActsSection projection={projection} actorName={actorName} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
-        <BeliefSection projection={projection} characterNames={characterNames} />
-        <CommitmentSection projection={projection} actorName={actorName} />
-        <DeceptionSection projection={projection} actorName={actorName} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
-        <RelationshipSection projection={projection} characterNames={characterNames} />
-        {omniscient ? <OutcomeSection projection={projection} actorName={actorName} /> : null}
-        {!projection || totalRecords(projection) === 0 ? (
-          <p className="px-1 py-6 text-center text-xs text-muted-foreground">因果账本为空——记录出现后会在这里按来源分层展示。</p>
-        ) : null}
+    <div className="panel flex h-full min-h-0 flex-col">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border/60 px-3">
+        <Waypoints className="size-3 text-muted-foreground" aria-hidden />
+        <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground/70">因果账本</span>
+        {records > 0 ? <span className="nums ml-auto font-mono text-[10px] text-muted-foreground/50">{records}</span> : null}
       </div>
-    </ScrollArea>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="flex flex-col gap-1.5 p-3">
+          <ScoreSection room={room} />
+          <SuspicionSection room={room} />
+          <SocialActsSection projection={projection} actorName={actorName} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
+          <BeliefSection projection={projection} characterNames={characterNames} />
+          <CommitmentSection projection={projection} actorName={actorName} />
+          <DeceptionSection projection={projection} actorName={actorName} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
+          <RelationshipSection projection={projection} characterNames={characterNames} />
+          {omniscient ? <OutcomeSection projection={projection} actorName={actorName} /> : null}
+          {!projection || records === 0 ? (
+            <Empty className="py-14">
+              <EmptyHeader>
+                <EmptyMedia variant="icon" className="text-muted-foreground">
+                  <Waypoints className="size-4" />
+                </EmptyMedia>
+                <EmptyTitle className="text-sm">因果账本还是空的</EmptyTitle>
+                <EmptyDescription className="text-xs">
+                  承诺、信念、怀疑与欺骗的记录出现后，会在这里按来源分层展开——谁主张了什么、谁信了、世界如何对账。
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : null}
+        </div>
+      </ScrollArea>
+    </div>
   );
 });
 
@@ -83,10 +102,10 @@ function SocialActsSection({ projection, actorName, propositions }: {
   const acts = spectatorActs(projection).slice(-12).reverse();
   if (!acts.length) return null;
   return (
-    <CollapsibleSection title="社会行为" count={acts.length}>
+    <CollapsibleSection title="社会行为" count={acts.length} defaultOpen>
       <ul className="space-y-1.5">
         {acts.map((act) => (
-          <li key={act.socialActId} className="rounded-md border border-border/50 bg-muted/20 px-2 py-1.5">
+          <li key={act.socialActId} className="rounded-lg border border-border/40 bg-muted/20 px-2 py-1.5 transition-colors hover:border-border/70">
             <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
               <span className={cn("font-medium", act.kind === "accusation" || act.kind === "threat" ? "text-suspect" : act.kind === "promise" || act.kind === "alliance-proposal" ? "text-live" : undefined)}>
                 {ACT_KIND_LABELS[act.kind] ?? act.kind}
@@ -118,13 +137,19 @@ function SocialActsSection({ projection, actorName, propositions }: {
 function ScoreSection({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   const ranked = [...room.world.agents].sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
   if (!ranked.some((agent) => (agent.score ?? 0) !== 0)) return null;
+  // Ties lead together: everyone at the top score wears the crown.
+  const topScore = ranked[0]?.score ?? 0;
+  const leaders = new Set(ranked.filter((agent) => (agent.score ?? 0) > 0 && (agent.score ?? 0) === topScore).map((agent) => agent.id));
   return (
     <CollapsibleSection title="战况" defaultOpen>
       <ul className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
         {ranked.map((agent) => (
-          <li key={agent.id} className="flex items-baseline justify-between gap-2">
-            <span className="truncate">{agent.displayName}{agent.observerRole ? <span className="ml-1 text-muted-foreground">· {agent.observerRole}</span> : null}</span>
-            <span className="font-mono">{agent.score ?? "-"}</span>
+          <li key={agent.id} className="flex items-center justify-between gap-2">
+            <span className="flex min-w-0 items-center gap-1">
+              <span className="truncate">{agent.displayName}{agent.observerRole ? <span className="ml-1 text-muted-foreground">· {agent.observerRole}</span> : null}</span>
+              {leaders.has(agent.id) ? <Crown className="size-3 shrink-0 text-warn" aria-label="暂时领先" /> : null}
+            </span>
+            <span className="nums shrink-0 font-mono tabular-nums">{agent.score ?? "-"}</span>
           </li>
         ))}
       </ul>
@@ -171,12 +196,12 @@ function BeliefSection({ projection, characterNames }: {
       {[...groups.values()].slice(-8).reverse().map((group) => {
         const proposition = propositions.get(group[0].propositionId);
         return (
-          <div key={group[0].beliefId} className="rounded-md border border-border/50 p-2">
+          <div key={group[0].beliefId} className="rounded-lg border border-border/40 p-2">
             <p className="text-xs font-medium">{characterNames.get(group[0].ownerCharacterId) ?? group[0].ownerCharacterId}</p>
             <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{proposition?.predicate ?? group[0].propositionId}</p>
             <div className="mt-1 flex flex-wrap items-center gap-1">
               {group.slice(-4).map((update) => (
-                <Badge key={update.beliefUpdateId} variant="outline" className="font-mono text-[10px]">
+                <Badge key={update.beliefUpdateId} variant="outline" className="rounded-full border-border/70 bg-muted/50 font-mono text-[10px]">
                   {Math.round(update.beforeProbability * 100)}→{Math.round(update.afterProbability * 100)}%
                 </Badge>
               ))}
@@ -198,7 +223,7 @@ function CommitmentSection({ projection, actorName }: {
   return (
     <CollapsibleSection title="承诺账本" count={commitments.length}>
       {commitments.map((commitment) => (
-        <div key={commitment.commitmentId} className="rounded-md border border-border/50 p-2">
+        <div key={commitment.commitmentId} className="rounded-lg border border-border/40 p-2">
           <div className="flex items-center gap-1.5">
             <span className="text-xs font-medium">{actorName(commitment.promisorActorId)}</span>
             <Badge variant={commitment.state === "violated" ? "destructive" : commitment.state === "fulfilled" ? "secondary" : "outline"} className="text-[10px]">
@@ -254,7 +279,7 @@ function DeceptionCard({ episode, actorName, propositions }: {
 }): ReactNode {
   const reached = STAGE_OF[episode.status] ?? -1;
   return (
-    <div className="rounded-md border border-border/50 p-2">
+    <div className="rounded-lg border border-border/40 p-2">
       <div className="flex items-center gap-1.5">
         <span className="text-xs font-medium">{actorName(episode.deceiverActorId)}</span>
         <Badge variant={episode.status === "detected" ? "destructive" : "outline"} className="text-[10px]">{deceptionStatusLabel(episode.status)}</Badge>
@@ -263,10 +288,19 @@ function DeceptionCard({ episode, actorName, propositions }: {
       <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
         {episode.intendedFalseBeliefIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；") || "目标命题未引用"}
       </p>
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-[10px]">
+      {/* Lifecycle as chips: solid = reached, dashed + "?" = still unknown. */}
+      <div className="mt-1.5 flex flex-wrap items-center gap-1">
         {DECEPTION_STAGES.map((stage, index) => (
-          <span key={stage} className={cn(index <= reached ? "font-medium text-foreground" : "text-muted-foreground/45")}>
-            {index <= reached ? stage : `${stage}?`}{index < DECEPTION_STAGES.length - 1 ? <span className="mx-0.5 opacity-40">→</span> : null}
+          <span
+            key={stage}
+            className={cn(
+              "rounded-full border px-1.5 py-px text-[9px] leading-3.5",
+              index <= reached
+                ? "border-foreground/20 bg-muted/60 font-medium text-foreground"
+                : "border-dashed border-border/80 text-muted-foreground/45"
+            )}
+          >
+            {stage}{index <= reached ? "" : "?"}
           </span>
         ))}
       </div>
@@ -291,7 +325,7 @@ function RelationshipSection({ projection, characterNames }: {
 
 function DirectedEdge({ relationship, nameFor }: { relationship: DirectedRelationshipState; nameFor: (id: string) => string }): ReactNode {
   return (
-    <div className="rounded-md border border-border/50 p-2 text-xs">
+    <div className="rounded-lg border border-border/40 p-2 text-xs">
       <p className="flex items-center gap-1.5 font-medium">
         {nameFor(relationship.ownerCharacterId)}
         <ArrowRight className="size-3 text-muted-foreground" aria-hidden />
@@ -334,7 +368,7 @@ function OutcomeSection({ projection, actorName }: {
 
 function OutcomeRow({ reconciliation, actorName }: { reconciliation: OutcomeReconciliation; actorName: (id: string | undefined) => string }): ReactNode {
   return (
-    <div className="rounded-md border border-border/50 p-2 text-[11px] leading-4">
+    <div className="rounded-lg border border-border/40 p-2 text-[11px] leading-4">
       <p className="font-medium">{actorName(reconciliation.actorId)}</p>
       <p className="text-muted-foreground">{reconciliation.actualOutcome.summary}</p>
     </div>

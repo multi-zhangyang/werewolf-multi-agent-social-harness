@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import { BrainCircuit, Cpu, Crown, Pause, Play } from "lucide-react";
+import { BrainCircuit, Cpu, Crown, Pause, Play, Users } from "lucide-react";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -40,51 +40,57 @@ export const ParticipantsRail = memo(function ParticipantsRail({
   const [openId, setOpenId] = useState<string>();
   const selected = room.participants.find((participant) => participant.profile.id === openId);
   const seeds = new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.characterId]));
-  const leaderId = room.world.agents.reduce<string | undefined>((best, agent) => {
-    const score = agent.score ?? 0;
-    if (score <= 0) return best;
-    return score > (room.world.agents.find((entry) => entry.id === best)?.score ?? 0) ? agent.id : best;
-  }, undefined);
+  // Ties lead together: everyone at the top score wears the crown.
+  const topScore = Math.max(0, ...room.world.agents.map((agent) => agent.score ?? 0));
+  const isLeader = (agent: SocietyRoomSnapshot["world"]["agents"][number]): boolean =>
+    (agent.score ?? 0) > 0 && (agent.score ?? 0) === topScore;
 
   return (
     <>
-      <ScrollArea className="h-full">
-        <ul className="flex flex-col gap-1 p-2">
-          {room.world.agents.map((agent) => {
-            const participant = room.participants.find((entry) => entry.profile.id === agent.id);
-            const speaking = agent.status === "speaking" || agent.status === "acting" || agent.status === "thinking";
-            return (
-              <li key={agent.id}>
-                <button
-                  type="button"
-                  onClick={() => setOpenId(agent.id)}
-                  className={cn(
-                    "group flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-1.5 text-left transition-colors hover:border-border hover:bg-muted/40",
-                    speaking && "border-live/25 bg-live/5",
-                    !speaking && agent.id === leaderId && "leader-wash"
-                  )}
-                >
-                  <span className={cn("relative inline-flex", speaking && "on-air")}>
-                    <AgentAvatar name={agent.displayName} seed={seeds.get(agent.id)} size="md" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-1.5">
-                      <span className="truncate text-xs font-medium">{agent.displayName}</span>
-                      {!speaking && agent.id === leaderId ? <Crown className="size-3 shrink-0 text-warn" aria-label="暂时领先" /> : null}
-                      <StatusDot status={agent.status} />
+      <div className="panel flex h-full min-h-0 flex-col">
+        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border/60 px-3">
+          <Users className="size-3 text-muted-foreground" aria-hidden />
+          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground/70">参与者</span>
+          <span className="nums ml-auto font-mono text-[10px] text-muted-foreground/50">{room.world.agents.length}</span>
+        </div>
+        <ScrollArea className="min-h-0 flex-1">
+          <ul className="flex flex-col gap-1 p-2">
+            {room.world.agents.map((agent) => {
+              const participant = room.participants.find((entry) => entry.profile.id === agent.id);
+              const speaking = agent.status === "speaking" || agent.status === "acting" || agent.status === "thinking";
+              return (
+                <li key={agent.id}>
+                  <button
+                    type="button"
+                    onClick={() => setOpenId(agent.id)}
+                    className={cn(
+                      "group flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-1.5 text-left transition-colors duration-150 hover:border-border/70 hover:bg-muted/30",
+                      speaking && "border-live/20 bg-live/[0.07] shadow-[inset_2px_0_0_oklch(0.77_0.15_160/0.7)]",
+                      !speaking && isLeader(agent) && "leader-wash"
+                    )}
+                  >
+                    <span className={cn("relative inline-flex", speaking && "on-air")}>
+                      <AgentAvatar name={agent.displayName} seed={seeds.get(agent.id)} size="md" />
                     </span>
-                    <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                      {participant?.mood ? <span className="truncate">{participant.mood}</span> : <StatusLabel status={agent.status} />}
-                      {(agent.score ?? 0) !== 0 ? <ScoreValue value={agent.score ?? 0} /> : null}
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5">
+                        <span className="min-w-0 truncate text-xs font-medium">{agent.displayName}</span>
+                        {!speaking && isLeader(agent) ? <Crown className="size-3 shrink-0 text-warn" aria-label="暂时领先" /> : null}
+                        <StatusDot status={agent.status} className="size-2" />
+                      </span>
+                      <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                        {participant?.mood ? <span className="min-w-0 truncate">{participant.mood}</span> : <StatusLabel status={agent.status} />}
+                        {(agent.score ?? 0) !== 0 ? <ScoreValue value={agent.score ?? 0} /> : null}
+                      </span>
                     </span>
-                  </span>
-                  {!agent.alive ? <Badge variant="outline" className="text-[9px]">离场</Badge> : null}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </ScrollArea>
+                    {!agent.alive ? <Badge variant="outline" className="text-[9px]">离场</Badge> : null}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </ScrollArea>
+      </div>
       <MindSheet
         participant={selected}
         room={room}
@@ -235,7 +241,7 @@ function MindSheet({ participant, room, privileged, onToggleAgentPause, models, 
 
 function Stat({ label, value }: { label: string; value: ReactNode }): ReactNode {
   return (
-    <div className="rounded-lg border border-border/60 bg-card/50 px-2 py-1.5">
+    <div className="sheen rounded-lg border border-border/60 bg-card/50 px-2 py-1.5">
       <p className="text-[10px] text-muted-foreground">{label}</p>
       <p className="truncate text-xs font-medium">{value}</p>
     </div>

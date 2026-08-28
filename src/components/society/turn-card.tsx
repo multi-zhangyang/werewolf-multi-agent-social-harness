@@ -39,8 +39,9 @@ export const TurnCard = memo(function TurnCard({
 
   return (
     <article className={cn(
-      "enter-stage group relative flex gap-3 rounded-xl border bg-card/60 p-3 transition-colors",
-      live && "border-foreground/20 bg-gradient-to-b from-foreground/[0.04] to-transparent shadow-[0_0_24px_-12px] shadow-foreground/30"
+      "enter-stage group relative flex gap-3 overflow-hidden rounded-xl border bg-card/60 p-3 shadow-[0_1px_2px_oklch(0_0_0/0.18)] transition-colors",
+      !live && "sheen",
+      live && "live-edge border-foreground/25 bg-gradient-to-b from-foreground/[0.04] to-transparent shadow-[0_0_28px_-10px] shadow-foreground/35"
     )}>
       <div className="flex flex-col items-center gap-1.5 pt-0.5">
         <span className={cn("relative inline-flex", live && "on-air")}>
@@ -70,17 +71,17 @@ export const TurnCard = memo(function TurnCard({
         {canSeeCognition && turn.tools.length ? (
           <ul className="space-y-1">
             {turn.tools.map((tool) => (
-              <li key={tool.toolCallId} className="flex items-center gap-1.5 rounded-md border border-border/50 bg-muted/40 px-2 py-1 text-xs">
+              <li key={tool.toolCallId} className="flex min-w-0 items-center gap-1.5 overflow-hidden rounded-md border border-border/50 bg-muted/30 px-2 py-1 text-xs">
                 {tool.phase === "succeeded"
-                  ? <Wrench className="size-3 text-muted-foreground" aria-hidden />
-                  : <Loader2 className="size-3 animate-spin text-muted-foreground" aria-hidden />}
-                <span className="font-medium">{tool.label ?? eventLabel(tool.toolName)}</span>
-                {tool.safeOutputSummary ? <span className="truncate text-muted-foreground">· {tool.safeOutputSummary}</span> : null}
+                  ? <Wrench className="size-3 shrink-0 text-muted-foreground" aria-hidden />
+                  : <Loader2 className="size-3 shrink-0 animate-spin text-muted-foreground" aria-hidden />}
+                <span className="shrink-0 font-medium">{tool.label ?? eventLabel(tool.toolName)}</span>
+                {tool.safeOutputSummary ? <span className="min-w-0 truncate text-muted-foreground">· {tool.safeOutputSummary}</span> : null}
               </li>
             ))}
           </ul>
         ) : !canSeeCognition && turn.tools.length ? (
-          <p className="flex items-center gap-2 rounded-md border border-border/50 bg-muted/40 px-2 py-1 text-xs text-muted-foreground">
+          <p className="flex items-center gap-2 rounded-md border border-border/50 bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
             {live && turn.tools.at(-1)?.phase !== "succeeded"
               ? <Loader2 className="size-3 animate-spin" aria-hidden />
               : <Wrench className="size-3" aria-hidden />}
@@ -95,13 +96,13 @@ export const TurnCard = memo(function TurnCard({
               密封行动进行中——选择在结算前不会公开。
             </p>
           ) : turn.outputText ? (
-            <div className="relative text-sm leading-relaxed">
+            <div className="relative break-words text-sm leading-relaxed">
               <MessageResponse isAnimating>{turn.outputText}</MessageResponse>
               <StreamCaret />
             </div>
           ) : null
         ) : turn.outputText ? (
-          <div className="text-sm leading-relaxed">
+          <div className="break-words text-sm leading-relaxed">
             <MessageResponse>{turn.outputText}</MessageResponse>
           </div>
         ) : null}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowLeft, Eye, Globe, Lock, Pause, Play, Radio, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Eye, Flag, Globe, Lock, Pause, Play, Radio, TriangleAlert } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
@@ -89,7 +89,7 @@ export function RoomView({ roomId, token, onBack }: {
 
   return (
     <div className="flex h-dvh min-h-0 flex-col bg-background text-foreground">
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
+      <header className="rule-b flex h-12 shrink-0 items-center gap-2 bg-background px-3">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="ghost" size="icon" className="size-8" onClick={onBack} aria-label="返回大厅">
@@ -103,7 +103,7 @@ export function RoomView({ roomId, token, onBack }: {
           <h1 className="truncate text-sm font-semibold leading-none">{room.title}</h1>
           <p className="mt-1 truncate text-[11px] leading-none text-muted-foreground">{world.summary}</p>
         </div>
-        {scenario ? <Badge variant="outline" className="hidden shrink-0 text-[10px] sm:inline-flex">{scenario.name}</Badge> : null}
+        {scenario && scenario.name !== room.title ? <Badge variant="outline" className="hidden shrink-0 text-[10px] sm:inline-flex">{scenario.name}</Badge> : null}
 
         <div className="ml-auto flex items-center gap-1.5">
           <ViewerBadge mode={viewer?.mode ?? "public"} privileged={viewer?.privileged === true} />
@@ -270,12 +270,30 @@ function ViewerBadge({ mode, privileged }: { mode: string; privileged: boolean }
 /** One-line phase strip replacing the old arena stage. */
 function PhaseStrip({ room, sealed }: { room: SocietyRoomSnapshot; sealed: boolean }): ReactNode {
   const world = room.world;
+  const finished = world.status === "finished" || room.status === "finished";
   const speakingAgents = world.agents.filter((agent) => agent.status === "speaking" || agent.status === "thinking" || agent.status === "acting");
+  const progress = world.totalTurns > 0 ? Math.min(100, Math.round((world.turn / world.totalTurns) * 100)) : 0;
   return (
-    <div className="flex h-9 shrink-0 items-center gap-2.5 overflow-hidden border-b border-border bg-card/30 px-4">
-      <span className="nums shrink-0 font-mono text-[11px] text-muted-foreground">R{world.turn}<span className="text-muted-foreground/50">/{world.totalTurns}</span></span>
-      <Badge variant="outline" className="shrink-0 rounded-full text-[10px]">{world.phase}</Badge>
-      {sealed ? (
+    <div className="rule-b flex h-9 shrink-0 items-center gap-2.5 overflow-hidden bg-card/20 px-4">
+      <span className="nums flex shrink-0 items-center gap-2 font-mono text-[11px] tracking-wide text-muted-foreground">
+        R{world.turn}
+        <span className="relative inline-block h-1.5 w-16 overflow-hidden rounded-full bg-foreground/10 align-middle">
+          <span className="absolute inset-y-0 left-0 rounded-full bg-foreground/60 transition-[width] duration-700 ease-out" style={{ width: `${progress}%` }} />
+        </span>
+        <span className="text-muted-foreground/50">{world.totalTurns}</span>
+      </span>
+      <Badge variant="outline" className="shrink-0 rounded-full border-border/70 bg-card/60 text-[10px]">{world.phase}</Badge>
+      {finished ? (
+        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground">
+          <Flag className="size-3" aria-hidden />
+          对局已结束 · 复盘见右侧因果账本
+        </span>
+      ) : room.status === "paused" ? (
+        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-warn">
+          <Pause className="size-3" aria-hidden />
+          对局已暂停
+        </span>
+      ) : sealed ? (
         <span className="flex shrink-0 items-center gap-1 text-[10px] text-secret"><Lock className="size-3" aria-hidden />密封阶段 · 发言流暂停公开</span>
       ) : speakingAgents.length ? (
         <span className="flex min-w-0 items-center gap-1.5 text-[10px] text-live">

@@ -345,7 +345,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
       <DialogContent className="max-w-xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl" showCloseButton={!submitting}>
         {scenario ? (
           <div className="flex min-w-0 max-h-[82vh] flex-col">
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="scroll-fade-y min-h-0 flex-1 overflow-y-auto">
             <div className="border-b border-border/60 p-6">
               <DialogHeader className="gap-2 text-left">
                 <div className="flex items-center gap-3">
