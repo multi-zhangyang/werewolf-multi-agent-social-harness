@@ -50,7 +50,7 @@ export const ToolStep = memo(function ToolStep({ tool, resolveName }: {
   // 参数 would only echo it. Binding actions' inputs are the real decision.
   const input = tool.safeInputSummary && !SPEECH_TOOLS.has(tool.toolName) ? tool.safeInputSummary : undefined;
   return (
-    <Collapsible className="min-w-0 rounded-md border border-border/50 bg-muted/30">
+    <Collapsible className="min-w-0 rounded-md border border-border/40 bg-muted/20 transition-colors hover:border-border/70">
       <CollapsibleTrigger className="group/step flex w-full min-w-0 items-center gap-1.5 px-2 py-1.5 text-left text-xs">
         <WrenchIcon className="size-3 shrink-0 text-muted-foreground" aria-hidden />
         <span className="shrink-0 font-medium">{tool.label ?? eventLabel(tool.toolName)}</span>

@@ -89,7 +89,7 @@ export function RoomView({ roomId, token, onBack }: {
 
   return (
     <div className="flex h-dvh min-h-0 flex-col bg-background text-foreground">
-      <header className="rule-b flex h-12 shrink-0 items-center gap-2 bg-background px-3">
+      <header className="rule-b flex h-14 shrink-0 items-center gap-2.5 bg-background px-4">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="ghost" size="icon" className="size-8" onClick={onBack} aria-label="返回大厅">
@@ -100,8 +100,8 @@ export function RoomView({ roomId, token, onBack }: {
         </Tooltip>
         <ScenarioIcon id={room.scenarioId} className="size-4 text-muted-foreground" />
         <div className="min-w-0">
-          <h1 className="truncate text-sm font-semibold leading-none">{room.title}</h1>
-          <p className="mt-1 truncate text-[11px] leading-none text-muted-foreground">{world.summary}</p>
+          <h1 className="truncate text-[15px] font-semibold leading-none tracking-tight">{room.title}</h1>
+          <p className="mt-1.5 truncate text-[11px] leading-none text-muted-foreground">{world.summary}</p>
         </div>
         {scenario && scenario.name !== room.title ? <Badge variant="outline" className="hidden shrink-0 text-[10px] sm:inline-flex">{scenario.name}</Badge> : null}
 
@@ -158,7 +158,7 @@ export function RoomView({ roomId, token, onBack }: {
 
       <main className="hidden min-h-0 flex-1 md:block">
         <ResizablePanelGroup orientation="horizontal" id="society-room-v2">
-          <ResizablePanel defaultSize="17" minSize="11" maxSize="26">
+          <ResizablePanel defaultSize="16" minSize="11" maxSize="24">
             <ParticipantsRail
               room={room}
               viewerPrivileged={viewer?.privileged === true}
@@ -168,7 +168,7 @@ export function RoomView({ roomId, token, onBack }: {
             />
           </ResizablePanel>
           <ResizableHandle withHandle />
-          <ResizablePanel defaultSize="57" minSize="40">
+          <ResizablePanel defaultSize="58" minSize="40">
             <div className="flex h-full min-h-0 flex-col">
               <PhaseStrip room={room} sealed={stream.turns.some((turn) => !turn.completedAt && turn.sealed)} />
               <LiveStream
@@ -274,7 +274,7 @@ function PhaseStrip({ room, sealed }: { room: SocietyRoomSnapshot; sealed: boole
   const speakingAgents = world.agents.filter((agent) => agent.status === "speaking" || agent.status === "thinking" || agent.status === "acting");
   const progress = world.totalTurns > 0 ? Math.min(100, Math.round((world.turn / world.totalTurns) * 100)) : 0;
   return (
-    <div className="rule-b flex h-9 shrink-0 items-center gap-2.5 overflow-hidden bg-card/20 px-4">
+    <div className="rule-b flex h-10 shrink-0 items-center gap-2.5 overflow-hidden bg-transparent px-5">
       <span className="nums flex shrink-0 items-center gap-2 font-mono text-[11px] tracking-wide text-muted-foreground">
         R{world.turn}
         <span className="relative inline-block h-1.5 w-16 overflow-hidden rounded-full bg-foreground/10 align-middle">
@@ -282,7 +282,7 @@ function PhaseStrip({ room, sealed }: { room: SocietyRoomSnapshot; sealed: boole
         </span>
         <span className="text-muted-foreground/50">{world.totalTurns}</span>
       </span>
-      <Badge variant="outline" className="shrink-0 rounded-full border-border/70 bg-card/60 font-normal text-muted-foreground">{world.phase}</Badge>
+      <Badge variant="outline" className="shrink-0 rounded-full border-border/70 bg-transparent font-normal text-muted-foreground">{world.phase}</Badge>
       {finished ? (
         <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground">
           <Flag className="size-3" aria-hidden />

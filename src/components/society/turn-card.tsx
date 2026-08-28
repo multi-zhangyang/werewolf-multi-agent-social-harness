@@ -43,9 +43,10 @@ export const TurnCard = memo(function TurnCard({
 
   return (
     <article className={cn(
-      "enter-stage group relative flex gap-3 overflow-hidden rounded-xl border bg-card/60 p-3 shadow-[0_1px_2px_oklch(0_0_0/0.18)] transition-colors",
-      !live && "sheen",
-      live && "live-edge border-foreground/25 bg-gradient-to-b from-foreground/[0.04] to-transparent shadow-[0_0_28px_-10px] shadow-foreground/35"
+      "enter-stage relative flex gap-3",
+      // In flight: the only boxed moment — a live accent on the stage.
+      // Settled, the activation joins the conversation as plain typography.
+      live && "live-edge rounded-xl border border-live/20 bg-live/[0.05] p-3.5 shadow-[0_0_28px_-16px_oklch(0.77_0.15_160/0.55)]"
     )}>
       <div className="flex flex-col items-center gap-1.5 pt-0.5">
         <span className={cn("relative inline-flex", live && "on-air")}>
@@ -55,7 +56,7 @@ export const TurnCard = memo(function TurnCard({
       </div>
       <div className="min-w-0 flex-1 space-y-2">
         <header className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="text-sm font-medium">{name}</span>
+          <span className="text-[13px] font-semibold tracking-tight">{name}</span>
           {live ? (
             <Shimmer className="text-xs text-muted-foreground" duration={1.4}>{`${statusLine}…`}</Shimmer>
           ) : (
@@ -95,14 +96,14 @@ export const TurnCard = memo(function TurnCard({
               <Loader2 className="size-3.5 animate-spin" aria-hidden />
               密封行动进行中——选择在结算前不会公开。
             </p>
-          ) : turn.outputText ? (
-            <div className="relative break-words text-sm leading-relaxed">
+          ) : turn.outputText.trim() ? (
+            <div className="relative break-words text-[15px] leading-7">
               <MessageResponse isAnimating>{turn.outputText}</MessageResponse>
               <StreamCaret />
             </div>
           ) : null
         ) : turn.outputText ? (
-          <div className="break-words text-sm leading-relaxed">
+          <div className="break-words text-[15px] leading-7">
             <MessageResponse>{turn.outputText}</MessageResponse>
           </div>
         ) : null}

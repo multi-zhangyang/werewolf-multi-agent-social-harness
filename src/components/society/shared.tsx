@@ -163,11 +163,13 @@ export function ChannelBadge({ channel }: { channel: SocialChannel }): ReactNode
   );
 }
 
-/** Channel → surface styling so public/private/team reads at a glance. */
+/** Channel → surface styling so public/private/team reads at a glance.
+ *  Public speech is the stage default: no box at all — whitespace is the
+ *  chrome. Private and team messages earn a quiet container instead. */
 export const channelSurface: Record<SocialChannel, string> = {
-  public: "border-border bg-card",
-  private: "border-dashed border-foreground/20 bg-foreground/5",
-  team: "border-foreground/30 bg-foreground/10"
+  public: "",
+  private: "rounded-xl border border-dashed border-foreground/20 bg-foreground/[0.03] p-3.5",
+  team: "rounded-xl border border-foreground/25 bg-foreground/[0.06] p-3.5"
 };
 
 export function ModelLabel({ model, className }: { model: string; className?: string }): ReactNode {
@@ -327,7 +329,23 @@ export function provenanceBadge(source: string): ReactNode {
   return <Badge variant="outline" className="h-4.5 shrink-0 rounded-full border-border/70 bg-card/60 px-1.5 text-[10px] font-normal text-muted-foreground">{labels[source] ?? source}</Badge>;
 }
 
-/** The one accordion section: icon/count shapes cover rail and causality uses. */
+const PROVENANCE_META: Record<string, { label: string; className: string }> = {
+  "world-fact": { label: "世界事实", className: "bg-warn" },
+  "authorized-observation": { label: "合法观察", className: "bg-live" },
+  "message-claim": { label: "消息主张", className: "bg-muted-foreground/60" },
+  "agent-self-report": { label: "Agent 自述", className: "bg-secret" },
+  "system-inference": { label: "系统推断", className: "bg-info" },
+  presentation: { label: "展示标签", className: "bg-muted-foreground/40" }
+};
+
+/** Provenance as a quiet colored dot; the label lives on hover. */
+export function ProvenanceDot({ source, note }: { source: string; note?: string }): ReactNode {
+  const meta = PROVENANCE_META[source] ?? { label: source, className: "bg-muted-foreground/50" };
+  const title = note ? `${meta.label} · ${note}` : meta.label;
+  return <span title={title} aria-label={meta.label} className={cn("inline-block size-1.5 shrink-0 rounded-full", meta.className)} />;
+}
+
+/** The one accordion section: typography-led — mono label, hairline, count. */
 export function CollapsibleSection({ title, icon, count, defaultOpen = false, className, contentClassName, children }: {
   title: ReactNode;
   icon?: ReactNode;
@@ -338,15 +356,16 @@ export function CollapsibleSection({ title, icon, count, defaultOpen = false, cl
   children: ReactNode;
 }): ReactNode {
   return (
-    <Collapsible defaultOpen={defaultOpen} className={cn("group/section rounded-lg border bg-card/40 shadow-[0_1px_2px_oklch(0_0_0/0.18)]", className)}>
-      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium transition-colors hover:bg-muted/30">
+    <Collapsible defaultOpen={defaultOpen} className={cn("group/section", className)}>
+      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-md py-1 text-left transition-colors hover:text-foreground">
         {icon ? <span className="shrink-0 text-muted-foreground [&_svg]:size-3.5">{icon}</span> : null}
-        <span className="min-w-0 truncate">{title}</span>
-        {count !== undefined && count > 0 ? <span className="ml-0.5 shrink-0 rounded-full border border-border/70 bg-muted/60 px-1.5 font-mono text-[10px] leading-4 text-muted-foreground">{count}</span> : null}
-        <ChevronDown className="ml-auto size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-200 group-data-[state=open]/section:rotate-180" aria-hidden />
+        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{title}</span>
+        {count !== undefined && count > 0 ? <span className="nums shrink-0 font-mono text-[10px] text-muted-foreground/50">{count}</span> : null}
+        <span className="h-px flex-1 bg-border/60" aria-hidden />
+        <ChevronDown className="size-3 shrink-0 text-muted-foreground/60 transition-transform duration-200 group-data-[state=open]/section:rotate-180" aria-hidden />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className={cn("space-y-2 border-t border-border/60 px-2.5 py-2.5", contentClassName)}>{children}</div>
+        <div className={cn("space-y-2 pt-2.5 pb-1", contentClassName)}>{children}</div>
       </CollapsibleContent>
     </Collapsible>
   );

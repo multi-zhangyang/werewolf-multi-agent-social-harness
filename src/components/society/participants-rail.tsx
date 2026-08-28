@@ -48,13 +48,13 @@ export const ParticipantsRail = memo(function ParticipantsRail({
   return (
     <>
       <div className="panel flex h-full min-h-0 flex-col">
-        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border/60 px-3">
+        <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border/60 px-4">
           <Users className="size-3 text-muted-foreground" aria-hidden />
           <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground/70">参与者</span>
           <span className="nums ml-auto font-mono text-[10px] text-muted-foreground/50">{room.world.agents.length}</span>
         </div>
         <ScrollArea className="min-h-0 flex-1">
-          <ul className="flex flex-col gap-1 p-2">
+          <ul className="flex flex-col gap-0.5 p-2">
             {room.world.agents.map((agent) => {
               const participant = room.participants.find((entry) => entry.profile.id === agent.id);
               const speaking = agent.status === "speaking" || agent.status === "acting" || agent.status === "thinking";
@@ -64,8 +64,8 @@ export const ParticipantsRail = memo(function ParticipantsRail({
                     type="button"
                     onClick={() => setOpenId(agent.id)}
                     className={cn(
-                      "group flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-1.5 text-left transition-colors duration-150 hover:border-border/70 hover:bg-muted/30",
-                      speaking && "border-live/20 bg-live/[0.07] shadow-[inset_2px_0_0_oklch(0.77_0.15_160/0.7)]",
+                      "group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors duration-150 hover:bg-muted/40",
+                      speaking && "bg-live/[0.08] shadow-[inset_2px_0_0_oklch(0.77_0.15_160/0.7)]",
                       !speaking && isLeader(agent) && "leader-wash"
                     )}
                   >

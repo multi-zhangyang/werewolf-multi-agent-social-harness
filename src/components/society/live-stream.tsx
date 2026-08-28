@@ -115,7 +115,7 @@ function StreamItems({ items, room, onSubmitAction }: {
             setScrolled(viewport.scrollTop > 8);
           }}
         >
-          <div ref={contentRef} className="mx-auto flex w-full max-w-2xl flex-col gap-3 px-4 pt-4 pb-8">
+          <div ref={contentRef} className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-5 pt-6 pb-10">
             {items.map((item) => <div key={item.id}>{item.render}</div>)}
             {!items.length ? (
               <Empty className="py-16">
@@ -264,14 +264,14 @@ const MessageBubble = memo(function MessageBubble({
   resolveName: NameResolver;
 }): ReactNode {
   return (
-    <article className={cn("sheen enter-stage overflow-hidden rounded-xl border p-3 shadow-[0_1px_2px_oklch(0_0_0/0.2)] transition-colors duration-200", channelSurface[message.channel], "hover:border-foreground/15")}>
+    <article className={cn("enter-stage", channelSurface[message.channel])}>
       <header className="mb-1.5 flex items-center gap-2">
         <AgentAvatar name={name} seed={seed} size="sm" />
-        <span className="text-sm font-medium tracking-tight">{name}</span>
+        <span className="text-[13px] font-semibold tracking-tight">{name}</span>
         {message.channel !== "public" ? <ChannelBadge channel={message.channel} /> : null}
-        <time className="ml-auto font-mono text-[10px] text-muted-foreground/85">{formatTime(message.createdAt, { seconds: false })}</time>
+        <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(message.createdAt, { seconds: false })}</time>
       </header>
-      <div className="[&_*]:[overflow-wrap:anywhere] break-words text-sm leading-relaxed [&_p]:my-0">
+      <div className="space-y-1.5 break-words text-[15px] leading-7">
         <MessageResponse>{message.text}</MessageResponse>
       </div>
       <TurnDetails turn={turn} canSeeCognition={canSeeCognition} resolveName={resolveName} />
@@ -297,21 +297,21 @@ const MessageCluster = memo(function MessageCluster({
 }): ReactNode {
   const channel = messages[0]!.channel;
   return (
-    <article className={cn("sheen enter-stage overflow-hidden rounded-xl border p-3 shadow-[0_1px_2px_oklch(0_0_0/0.2)] transition-colors duration-200", channelSurface[channel], "hover:border-foreground/15")}>
+    <article className={cn("enter-stage", channelSurface[channel])}>
       <header className="mb-1.5 flex items-center gap-2">
         <AgentAvatar name={name} seed={seed} size="sm" />
-        <span className="text-sm font-medium tracking-tight">{name}</span>
+        <span className="text-[13px] font-semibold tracking-tight">{name}</span>
         {channel !== "public" ? <ChannelBadge channel={channel} /> : null}
-        <time className="ml-auto font-mono text-[10px] text-muted-foreground/85">{formatTime(messages[0]!.createdAt, { seconds: false })}</time>
+        <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(messages[0]!.createdAt, { seconds: false })}</time>
       </header>
-      <div className="space-y-2.5">
+      <div className="space-y-3">
         {messages.map((message, messageIndex) => (
           <div key={message.id}>
-            <div className="[&_*]:[overflow-wrap:anywhere] break-words text-sm leading-relaxed [&_p]:my-0">
+            <div className="space-y-1.5 break-words text-[15px] leading-7">
               <MessageResponse>{message.text}</MessageResponse>
             </div>
             {messageIndex > 0 ? (
-              <time className="mt-0.5 block font-mono text-[10px] text-muted-foreground/75">{formatTime(message.createdAt, { seconds: false })}</time>
+              <time className="mt-1 block font-mono text-[10px] text-muted-foreground/60">{formatTime(message.createdAt, { seconds: false })}</time>
             ) : null}
             <TurnDetails turn={turns.get(message.id)} canSeeCognition={canSeeCognition} resolveName={resolveName} />
           </div>
@@ -333,7 +333,7 @@ function TurnDetails({ turn, canSeeCognition, resolveName }: {
 
 function PhaseDivider({ text, beat }: { text: string; beat?: string }): ReactNode {
   return (
-    <div className="cue-enter flex flex-col items-center gap-1.5 py-2.5 sm:flex-row sm:gap-2.5" role="separator">
+    <div className="cue-enter flex flex-col items-center gap-1.5 py-3 sm:flex-row sm:gap-2.5" role="separator">
       <span className="hidden flex-1 items-center gap-1.5 sm:flex" aria-hidden>
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-foreground/15" />
         <span className="size-1 rotate-45 bg-foreground/25" />

@@ -63,6 +63,11 @@ const BOOLEAN_LABELS: Record<string, [string, string]> = {
 
 /** Common enum-ish values worth translating; unknown values pass through. */
 const VALUE_LABELS: Record<string, string> = {
+  accepted: "已接受",
+  rejected: "已拒绝",
+  proposed: "待接受",
+  fulfilled: "已履约",
+  violated: "已违约",
   cooperate: "合作",
   defect: "背叛",
   invest: "投入",
