@@ -26,7 +26,7 @@ export interface ModelProfileView {
 export interface ModelConfigView {
   providers: ProviderView[];
   modelProfiles: ModelProfileView[];
-  globalDefaults: { modelProfileId?: string; contextPolicyId?: string };
+  globalDefaults: { modelProfileId?: string; contextPolicyId?: string; randomPoolProfileIds?: string[] };
 }
 
 export interface TestResult {

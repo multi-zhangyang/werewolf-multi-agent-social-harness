@@ -17,6 +17,12 @@ export interface RegistryGlobalDefaults {
   modelProfileId?: string;
   tuning?: Partial<ModelTuning>;
   contextPolicyId?: string;
+  /**
+   * Default random-assignment pool: model-profile ids that clients (room
+   * creation's 随机混合, the demo script) deal seats from when the user has
+   * not picked a pool of their own. Empty/absent = no configured preference.
+   */
+  randomPoolProfileIds?: string[];
 }
 
 export interface ModelRegistryState {
@@ -110,6 +116,11 @@ export class ModelRegistry {
 
   removeModelProfile(id: string): void {
     this.modelProfiles.delete(id);
+    // A removed profile cannot stay in the random pool: references are
+    // pruned so the pool never points at a missing id.
+    if (this.global.randomPoolProfileIds?.includes(id)) {
+      this.global.randomPoolProfileIds = this.global.randomPoolProfileIds.filter((entry) => entry !== id);
+    }
   }
 }
 

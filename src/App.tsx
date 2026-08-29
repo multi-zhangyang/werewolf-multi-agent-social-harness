@@ -15,6 +15,8 @@ import type { ArchiveOption, CreateRoomInput, CreateRoomResult, ModelOption } fr
 interface CatalogResponse {
   scenarios: ScenarioSummary[];
   models: ModelOption[];
+  /** Registry-configured default random pool (model-profile ids, enabled only). */
+  randomPoolProfileIds?: string[];
 }
 
 interface RoomListResponse {
@@ -34,6 +36,7 @@ type Route = { name: "landing" } | { name: "room"; id: string } | { name: "caste
 export function App(): ReactNode {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
+  const [defaultPoolProfileIds, setDefaultPoolProfileIds] = useState<string[]>([]);
   const [rooms, setRooms] = useState<SocietyRoomSnapshot[]>([]);
   const [archives, setArchives] = useState<ArchiveOption[]>([]);
   const [standings, setStandings] = useState<LeaderboardResponse["models"]>([]);
@@ -70,6 +73,7 @@ export function App(): ReactNode {
     ]);
     setScenarios(catalog.scenarios);
     setModels(catalog.models);
+    setDefaultPoolProfileIds(Array.isArray(catalog.randomPoolProfileIds) ? catalog.randomPoolProfileIds : []);
     setRooms(list.rooms);
     setArchives(archiveList.archives);
     setStandings(leaderboard.models);
@@ -190,6 +194,7 @@ export function App(): ReactNode {
         open={createScenarioId !== undefined}
         scenario={scenario}
         models={models}
+        defaultPoolProfileIds={defaultPoolProfileIds}
         onOpenChange={(open) => { if (!open) setCreateScenarioId(undefined); }}
         onCreated={createRoom}
       />

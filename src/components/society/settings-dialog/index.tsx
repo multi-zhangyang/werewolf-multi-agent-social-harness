@@ -41,6 +41,8 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState<SettingsTab>("providers");
   const [globalModel, setGlobalModel] = useState<string>("");
+  /** Random-assignment pool (model-profile ids); the registry prunes removed profiles server-side. */
+  const [globalPool, setGlobalPool] = useState<string[]>([]);
   const [providerDraft, setProviderDraft] = useState<ProviderDraft>({ name: "", baseURL: "", apiKey: "", apiMode: "chat-completions" });
   const [modelDraft, setModelDraft] = useState<ModelDraft>(EMPTY_MODEL_DRAFT);
   const [probing, setProbing] = useState<string>();
@@ -70,6 +72,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
       const next = await response.json() as ModelConfigView;
       setConfig(next);
       setGlobalModel(next.globalDefaults.modelProfileId ?? "");
+      setGlobalPool(Array.isArray(next.globalDefaults.randomPoolProfileIds) ? next.globalDefaults.randomPoolProfileIds : []);
       setLoaded(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -101,7 +104,13 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
   };
 
   const save = (): Promise<void> => putConfig(
-    globalModel ? { globalDefaults: { modelProfileId: globalModel } } : { globalDefaults: {} },
+    {
+      globalDefaults: {
+        ...(globalModel ? { modelProfileId: globalModel } : {}),
+        // An empty pool is a meaningful "no configured preference" and clears it.
+        randomPoolProfileIds: globalPool
+      }
+    },
     { saved: true }
   ).then(() => undefined);
 
@@ -233,7 +242,10 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
 
   const removeModel = async (id: string): Promise<void> => {
     const ok = await putConfig({ removeModelProfileIds: [id] });
-    if (ok && globalModel === id) setGlobalModel("");
+    if (ok) {
+      if (globalModel === id) setGlobalModel("");
+      setGlobalPool((current) => current.filter((entry) => entry !== id));
+    }
   };
 
   const saveReasoningEffort = async (profile: ModelProfileView, reasoningEffort: ReasoningEffortSelection): Promise<void> => {
@@ -436,6 +448,8 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                   profiles={config.modelProfiles}
                   value={globalModel}
                   onChange={setGlobalModel}
+                  pool={globalPool}
+                  onPoolChange={setGlobalPool}
                   onSave={() => void save()}
                   saving={saving}
                 />

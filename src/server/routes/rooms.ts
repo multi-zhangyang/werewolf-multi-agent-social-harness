@@ -212,7 +212,11 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
           capabilitySummary: summarizeCapabilities(profile)
         }))
       : modelCatalogForEnv(context);
-    response.json({ scenarios: ALL_SCENARIOS, models });
+    // The registry-configured random pool, filtered to enabled profiles —
+    // room creation's 随机混合 deals seats from it by default.
+    const pool = context.models.globalDefaults().randomPoolProfileIds ?? [];
+    const randomPoolProfileIds = profiles.length ? pool.filter((id) => profiles.some((profile) => profile.id === id)) : [];
+    response.json({ scenarios: ALL_SCENARIOS, models, randomPoolProfileIds });
   });
 
   app.get("/api/model-config", (_request, response) => {
@@ -270,6 +274,23 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     if (!requireGlobalOperator(request, response, context.auth)) return;
     try {
       const input = modelConfigSchema.parse(request.body ?? {});
+      // The random pool may reference profiles registered now or created by
+      // this same update; anything else is a typo and is rejected outright.
+      const pool = input.globalDefaults?.randomPoolProfileIds;
+      if (pool) {
+        const known = new Set([
+          ...context.models.listModelProfiles().map((profile) => profile.id),
+          ...(input.modelProfiles ?? []).map((profile) => profile.id)
+        ]);
+        const unknown = pool.filter((id) => !known.has(id));
+        if (unknown.length) {
+          response.status(400).json({
+            error: "MODEL_PROFILE_MISSING",
+            message: `The random pool references unregistered model profiles: ${unknown.join(", ")}.`
+          });
+          return;
+        }
+      }
       const state = applyModelConfig(context, input);
       response.json(state);
     } catch (error) {
@@ -544,7 +565,9 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
 const modelConfigSchema = z.object({
   globalDefaults: z.object({
     modelProfileId: z.string().min(1).max(120).optional(),
-    contextPolicyId: z.string().min(1).max(120).optional()
+    contextPolicyId: z.string().min(1).max(120).optional(),
+    /** Default random-assignment pool: model-profile ids, validated on apply. */
+    randomPoolProfileIds: z.array(z.string().min(1).max(120)).max(16).optional()
   }).strict().optional(),
   providers: z.array(z.object({
     id: z.string().min(1).max(120),

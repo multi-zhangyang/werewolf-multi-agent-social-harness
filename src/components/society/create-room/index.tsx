@@ -33,12 +33,14 @@ interface CreateRoomProps {
   open: boolean;
   scenario: ScenarioSummary | undefined;
   models: ModelOption[];
+  /** Registry-configured default pool for 随机混合, used before the user picks one. */
+  defaultPoolProfileIds?: string[];
   /** How many characters carry cross-game history into this room. */
   onOpenChange: (open: boolean) => void;
   onCreated: (input: CreateRoomInput) => Promise<{ roomId: string }>;
 }
 
-export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
+export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
   /** Only registry-backed models can be assigned per seat. */
   const eligibleModels = useMemo(() => models.filter((model) => Boolean(model.profileId)), [models]);
   const profileById = useMemo(() => new Map(eligibleModels.map((model) => [model.profileId as string, model])), [eligibleModels]);
@@ -145,8 +147,12 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
   const unifiedId = profileById.has(unifiedProfileId) ? unifiedProfileId : eligibleModels[0]?.profileId ?? "";
   const poolIds = useMemo(() => {
     const known = randomPoolIds.filter((id) => profileById.has(id));
-    return known.length ? known : eligibleModels.map((model) => model.profileId as string);
-  }, [randomPoolIds, profileById, eligibleModels]);
+    if (known.length) return known;
+    // No saved preference: the registry-configured default pool (model
+    // center 全局默认) comes next, then every eligible model.
+    const configured = (defaultPoolProfileIds ?? []).filter((id) => profileById.has(id));
+    return configured.length ? configured : eligibleModels.map((model) => model.profileId as string);
+  }, [randomPoolIds, profileById, eligibleModels, defaultPoolProfileIds]);
 
   /** Balanced shuffle: cycle the shuffled pool so every model gets an even share. */
   const dealBalancedRoster = useCallback((pool: string[], seats: number): string[] => {

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
  * Boots a real room against the configured providers and waits for it to
- * finish. Seats are assigned model profiles round-robin (registry first,
- * SOCIETY_MODELS fallback), so one room can pit different models against
- * each other.
+ * finish. By default every seat is randomly dealt a model from the random
+ * pool configured in the model center (globalDefaults.randomPoolProfileIds);
+ * without one, all enabled profiles round-robin. DEMO_MODEL_PROFILES pins an
+ * explicit round-robin roster instead.
  *
  * Usage:
  *   node scripts/demo.mjs                     # run every scenario (heavy)
@@ -21,21 +22,30 @@ const requested = process.argv.slice(2);
 const targets = requested.length ? requested : SCENARIOS;
 const outputDir = resolve("artifacts/transcripts");
 
-/** Enabled model-profile ids from the registry, in catalog order. */
-async function resolveProfileIds() {
+/**
+ * Model-profile ids for the seats plus how to deal them: the registry's
+ * configured random pool is dealt per seat at random; anything else
+ * round-robins over the resolved ids.
+ */
+async function resolveProfiles() {
   const forced = (process.env.DEMO_MODEL_PROFILES ?? "").split(",").map((id) => id.trim()).filter(Boolean);
-  if (forced.length) return forced;
+  if (forced.length) return { ids: forced, random: false };
   const config = await getJson("/api/model-config");
   const profiles = Array.isArray(config.modelProfiles) ? config.modelProfiles : [];
-  const enabled = profiles.filter((entry) => entry.enabled !== false).map((entry) => entry.id);
-  if (enabled.length) return enabled;
+  const enabled = profiles.filter((entry) => entry.enabled !== false);
+  const enabledIds = new Set(enabled.map((entry) => entry.id));
+  const pool = Array.isArray(config.globalDefaults?.randomPoolProfileIds)
+    ? config.globalDefaults.randomPoolProfileIds.filter((id) => enabledIds.has(id))
+    : [];
+  if (pool.length) return { ids: pool, random: true };
+  if (enabled.length) return { ids: enabled.map((entry) => entry.id), random: false };
   throw new Error("NO_MODEL_PROFILES: The model registry has no enabled profiles. Configure the model center first.");
 }
 
 async function main() {
   await mkdir(outputDir, { recursive: true });
-  const catalog = await getJson("/api/scenarios");
-  const profileIds = await resolveProfileIds();
+    const catalog = await getJson("/api/scenarios");
+    const { ids: profileIds, random } = await resolveProfiles();
   const config = await getJson("/api/model-config");
   const nameFor = new Map((config.modelProfiles ?? []).map((entry) => [entry.id, entry.modelId]));
   const rounds = Number(process.env.DEMO_ROUNDS ?? "3");
@@ -47,11 +57,14 @@ async function main() {
       console.error(`[demo] unknown scenario: ${scenarioId}`);
       continue;
     }
-    // Every seat gets a model profile: round-robin through all enabled
-    // profiles so a room can pit different models against each other.
+    // Every seat gets a model profile: the registry's configured random pool
+    // is dealt per seat; a forced DEMO_MODEL_PROFILES list round-robins so
+    // explicit multi-model rosters keep their even coverage.
     const players = Number(process.env.DEMO_PLAYERS ?? "0");
     const seatCount = players > 0 ? players : meta.players;
-    const roster = Array.from({ length: seatCount }, (_, index) => profileIds[index % profileIds.length]);
+    const roster = random
+      ? Array.from({ length: seatCount }, () => profileIds[Math.floor(Math.random() * profileIds.length)])
+      : Array.from({ length: seatCount }, (_, index) => profileIds[index % profileIds.length]);
     const rosterLabels = roster.map((id) => nameFor.get(id) ?? id).join(", ");
     console.log(`[demo] starting ${scenarioId} (${rosterLabels})`);
     const created = await postJson("/api/rooms", {
