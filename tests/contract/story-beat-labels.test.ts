@@ -38,6 +38,16 @@ function skipDiscussion(world: SocialWorldBase): void {
   throw new Error("discussion never ended");
 }
 
+/** The vote may leave a last word; complete it silently so the flow advances. */
+function passLastWords(world: SocialWorldBase): void {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const activation = world.activation();
+    if (!activation || !activation.id.includes(":lastwords:")) return;
+    world.completeActivation(activation);
+  }
+  throw new Error("last words never ended");
+}
+
 function lastBeat(world: SocialWorldBase): StoryBeatKind | undefined {
   return world.snapshot().log.at(-1)?.beat;
 }
@@ -236,6 +246,7 @@ async function voteOut(world: SocialWorldBase, target: string, fallback: string)
     await world.performDomainAction(actor, "cast_day_vote", { targetId: actor === target ? fallback : target, reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
 }
 
 check("werewolf: voting out a wolf is a role reveal, not a caught lie", async () => {

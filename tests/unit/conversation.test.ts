@@ -65,6 +65,13 @@ it("generic interrogatives pressure everyone without any game vocabulary", () =>
   assert.ok(director.urgencyFor("a3") > 0);
 });
 
+it("the suggestion particle 吧 is not a question and pressures nobody", () => {
+  const director = makeDirector(["a1", "a2", "a3"]);
+  director.onMessage(msg("m1", "a1", "就这样吧，先听听大家的。"));
+  assert.equal(director.urgencyFor("a2"), 0, "a bare statement ending in 吧 does not interrogate the table");
+  assert.equal(director.urgencyFor("a3"), 0);
+});
+
 it("scenario signals raise structured pressure on their targets only", () => {
   const director = makeDirector(["a1", "a2", "a3"]);
   const accusation: ConversationSignal = {

@@ -117,3 +117,22 @@ it("stays honest when the mind and world carry nothing", () => {
   const blocks = formatSocialContext(emptyMind, emptyWorld, "agent-01");
   assert.deepEqual(blocks, [], "no invented state is injected");
 });
+
+it("re-injects the agent's own recent reflections so thinking survives compaction", () => {
+  const reflective = {
+    ...mind(),
+    cognitivePasses: [
+      { kind: "reflection" as const, text: "旧反思，应该被挤出窗口。", turn: 1, at: "2026-08-29T09:00:00.000Z" },
+      { kind: "reflection" as const, text: "第一轮的观察：苏遥话少但守约记录好。", turn: 1, at: "2026-08-29T10:00:00.000Z" },
+      { kind: "plan" as const, text: "计划：先承诺返还比例，再观察对方是否投资。", turn: 2, at: "2026-08-29T11:00:00.000Z" }
+    ]
+  };
+  const blocks = formatSocialContext(reflective, world, "agent-01");
+  const text = blocks.join("\n");
+  assert.ok(text.includes("[YOUR RECENT THINKING]"), "the reflection block is part of the turn input");
+  assert.ok(text.includes("先承诺返还比例"), "the latest plan note reaches the input");
+  assert.ok(!text.includes("旧反思"), "only the two most recent passes are injected");
+  // Without recorded passes, the block stays absent — nothing is invented.
+  const quiet = formatSocialContext(mind(), world, "agent-01");
+  assert.ok(!quiet.join("\n").includes("[YOUR RECENT THINKING]"), "no reflections recorded, no block");
+});

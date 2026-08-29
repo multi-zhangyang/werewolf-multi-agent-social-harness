@@ -10,7 +10,7 @@ import type { OpenAIProvider } from "@openai/agents";
 import { ActivationLimiter } from "../../src/society/activation-limiter";
 import { ModelRegistry } from "../../src/society/models";
 import { defaultCapabilities, DEFAULT_CONTEXT_POLICY_ID } from "../../src/society/models/defaults";
-import { SocietyRoom } from "../../src/society/room";
+import { SocietyRoom, type SocietyRoomArchive } from "../../src/society/room";
 import { createAgentProfiles } from "../../src/society/profiles";
 
 /** One scripted provider call: wait, emit events, then optionally hang. */
@@ -119,10 +119,9 @@ export function clearFastTurns(): void {
   for (const key of Object.keys(FAST_TURNS)) delete process.env[key];
 }
 
-/** A 2-seat trust-game room wired to a fake provider and a strict limiter. */
-export function testRoom(model: Model, limiter: ActivationLimiter, options: { rounds?: number } = {}): { room: SocietyRoom; cleanup: () => void } {
-  const roomId = `room-scripted-${randomUUID().slice(0, 8)}`;
-  const profiles = createAgentProfiles(["fake-model"], 2);
+/** Registry with one fake provider/model pair: rooms wired to the injected
+ * provider resolve their model without any network or key. */
+export function fakeModelRegistry(): ModelRegistry {
   const registry = new ModelRegistry();
   registry.upsertProvider({
     id: "p-fake",
@@ -147,14 +146,22 @@ export function testRoom(model: Model, limiter: ActivationLimiter, options: { ro
     contextPolicyId: DEFAULT_CONTEXT_POLICY_ID,
     enabled: true
   });
+  return registry;
+}
+
+/** A 2-seat trust-game room wired to a fake provider and a strict limiter. */
+export function testRoom(model: Model, limiter: ActivationLimiter, options: { rounds?: number; archiveSink?: (archive: SocietyRoomArchive) => void } = {}): { room: SocietyRoom; cleanup: () => void } {
+  const roomId = `room-scripted-${randomUUID().slice(0, 8)}`;
+  const profiles = createAgentProfiles(["fake-model"], 2);
   const room = new SocietyRoom({
     id: roomId,
     scenarioId: "trust-game",
     profiles,
     rounds: options.rounds ?? 2,
     provider: fakeProvider(model) as unknown as OpenAIProvider,
-    modelRegistry: registry,
-    limiter
+    modelRegistry: fakeModelRegistry(),
+    limiter,
+    ...(options.archiveSink ? { archiveSink: options.archiveSink } : {})
   });
   const cleanup = (): void => {
     room.dispose("test cleanup");

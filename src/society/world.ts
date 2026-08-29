@@ -17,10 +17,12 @@ import type {
   WorldActivation,
   WorldAgentSnapshot,
   WorldLogEntry,
+  WorldQualityMetrics,
   WorldSnapshot
 } from "./contracts";
 import type { Tool } from "@openai/agents";
 import { SocialCausalityLedger } from "./social/ledger";
+import { conversationSignalsFromSocialActs, type ConversationSignal } from "./conversation";
 import type {
   ActorModel,
   ActorModelInput,
@@ -36,6 +38,13 @@ import type {
   SocialActDeclaration,
   SocialCausalityProjection
 } from "./social/contracts";
+
+/**
+ * Sidecar extractions must clear a higher bar than display to earn perception
+ * feedback: 0.55 lets an act onto the causality page, but only confident ones
+ * may move emotions, suspicion and turn-taking.
+ */
+const EXTRACTED_ACT_FEEDBACK_CONFIDENCE = 0.7;
 
 export abstract class SocialWorldBase implements SocialWorld {
   readonly roomId: string;
@@ -440,6 +449,61 @@ export abstract class SocialWorldBase implements SocialWorld {
     });
   }
 
+  /**
+   * Agent-quality signals from the omniscient ledger view (owner/operator
+   * surface only — it carries ground truth). Observation aggregates: nothing
+   * here ever feeds back into an agent's context.
+   */
+  qualityMetrics(): WorldQualityMetrics {
+    const projection = this.socialCausalityFor(undefined, true);
+    const actorFor = (characterId: string): string => {
+      for (const [actorId, profile] of this.profiles) {
+        if (profile.characterId === characterId) return actorId;
+      }
+      return characterId;
+    };
+
+    const deception = new Map<string, { episodes: number; believed: number; detected: number; repaired: number }>();
+    for (const episode of projection.deceptions) {
+      const entry = deception.get(episode.deceiverActorId) ?? { episodes: 0, believed: 0, detected: 0, repaired: 0 };
+      entry.episodes += 1;
+      if (episode.status === "believed" || episode.status === "behaviorally-effective") entry.believed += 1;
+      if (episode.status === "detected") entry.detected += 1;
+      if (episode.status === "repaired") entry.repaired += 1;
+      deception.set(episode.deceiverActorId, entry);
+    }
+
+    // Latest SELF-REPORTED stance per (owner, proposition), scored against
+    // world resolution. World-resolution updates overwrite the belief to the
+    // ground truth; scoring those would make everyone perfectly calibrated —
+    // so they are excluded and the agent's own last stance is what counts.
+    const propositions = new Map(projection.propositions.map((entry) => [entry.propositionId, entry]));
+    const stance = new Map<string, { actorId: string; probability: number; outcome: number }>();
+    for (const update of projection.beliefUpdates) {
+      if (update.reasonCode === "world-resolution") continue;
+      const proposition = propositions.get(update.propositionId);
+      if (!proposition || (proposition.truthStatus !== "true" && proposition.truthStatus !== "false")) continue;
+      stance.set(`${update.ownerCharacterId}:${update.propositionId}`, {
+        actorId: actorFor(update.ownerCharacterId),
+        probability: update.afterProbability,
+        outcome: proposition.truthStatus === "true" ? 1 : 0
+      });
+    }
+    const brierByActor = new Map<string, number[]>();
+    for (const entry of stance.values()) {
+      brierByActor.set(entry.actorId, [...(brierByActor.get(entry.actorId) ?? []), (entry.probability - entry.outcome) ** 2]);
+    }
+
+    return {
+      deception: [...deception.entries()].map(([actorId, entry]) => ({ actorId, ...entry })),
+      beliefCalibration: [...brierByActor.entries()].map(([actorId, scores]) => ({
+        actorId,
+        resolvedBeliefs: scores.length,
+        brier: Math.round((scores.reduce((sum, value) => sum + value, 0) / scores.length) * 1000) / 1000
+      }))
+    };
+  }
+
   recordBeliefUpdate(actorId: string, input: BeliefSelfReportInput): BeliefUpdateRecord {
     const profile = this.requireProfile(actorId);
     const visibleMessageIds = new Set(this.visibleMessages(actorId).map((message) => message.id));
@@ -614,6 +678,11 @@ export abstract class SocialWorldBase implements SocialWorld {
    * Record sidecar-extracted social acts for an already-persisted message.
    * Called by the room's extractor; acts land with `model-extracted` provenance
    * and never carry deception links. Idempotent per message.
+   *
+   * High-confidence extractions no longer stop at the causality page: they
+   * feed the same perception stack a declared act feeds — appraisal events
+   * for the people concerned, the scenario hook (suspicion climate), and
+   * conversation response pressure — so an undeclared accusation still lands.
    */
   recordExtractedSocialActs(messageId: string, declarations: SocialActDeclaration[]): string[] {
     const message = this.messages.find((entry) => entry.id === messageId);
@@ -625,10 +694,37 @@ export abstract class SocialWorldBase implements SocialWorld {
       allActorIds: [...this.profiles.keys()],
       characterIdFor: (actorId) => this.requireProfile(actorId).characterId
     });
-    // New causality records must reach spectator projections promptly.
-    if (actIds.length) this.emitUpdate();
+    if (actIds.length) {
+      // New causality records must reach spectator projections promptly.
+      this.emitUpdate();
+      this.feedExtractedActs(message, declarations);
+    }
     return actIds;
   }
+
+  /**
+   * Perception feedback for extracted acts. Duplicates of the speaker's own
+   * declarations are dropped (the declared path already fed them), and only
+   * confident extractions act — the rest stay display-only for the causality
+   * page, so extractor noise cannot stir emotion or turn-taking.
+   */
+  private feedExtractedActs(message: SocialMessage, declarations: SocialActDeclaration[]): void {
+    const declaredKeys = this.socialCausality.declaredActKeysFor(message.id);
+    const feedback = declarations.filter((declaration) => {
+      if ((declaration.confidence ?? 1) < EXTRACTED_ACT_FEEDBACK_CONFIDENCE) return false;
+      return !declaredKeys.has(`${declaration.kind}|${[...new Set(declaration.targetActorIds ?? [])].sort().join(",")}`);
+    });
+    if (!feedback.length) return;
+    this.queueMessageAppraisals(message, feedback);
+    this.onExtractedSocialActs(message, feedback);
+    this.handleExtractedConversationSignals(conversationSignalsFromSocialActs(message.senderId, message.id, feedback));
+  }
+
+  /** Scenario hook: extracted acts with their scenario consequences (suspicion…). */
+  protected onExtractedSocialActs(_message: SocialMessage, _declarations: SocialActDeclaration[]): void {}
+
+  /** Route late conversation signals from extracted acts; default: drop. */
+  protected handleExtractedConversationSignals(_signals: ConversationSignal[]): void {}
 
   private async runActExtraction(message: SocialMessage): Promise<void> {
     const extractor = this.socialActExtractor;

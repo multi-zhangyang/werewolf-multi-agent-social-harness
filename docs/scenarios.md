@@ -56,11 +56,11 @@
 
 | 场景 | 规则与结算 | 密封/信息边界 | typed 承诺 | 主张对账 | 结果对账 | 真实对局 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 狼人杀 | ✅ 32 项（含 §28 两项） | ✅ 投票密封 | ❌ 无 | ✅ 提取/显式主张均对账 | ✅ ×10 | ✅ 4 |
+| 狼人杀 | ✅ 35 项（含 §28 两项、遗言、平票 PK） | ✅ 投票密封 | ❌ 无 | ✅ 提取/显式主张均对账 | ✅ ×10 | ✅ 4 |
 | 囚徒困境 | ✅ 11 项 | ✅ 不越权断言 | ✅ `choose-move` | ✅ | ✅ | ✅ 6 |
 | 谈判博弈 | ✅ 9 项 | ✅ 不越权断言 | ✅ 成交自动 typed | ✅ | ✅ | ✅ 4 |
 | 公共品 | ✅ 10 项 | ✅ 不越权断言 | ✅ `contribute-at-least` | ✅ | ✅ | ✅ 8 |
-| 阿瓦隆 | ✅ 7 项+官方表 | ✅ 组队/任务票密封 | ✅ `team-vote`/`quest-outcome` | ❌ 见缺口② | ✅ ×6 | ✅ 2 |
+| 阿瓦隆 | ✅ 8 项+官方表 | ✅ 组队/任务票密封 | ✅ `team-vote`/`quest-outcome` | ✅ hints 已补（见缺口②） | ✅ ×6 | ✅ 2 |
 | 最后通牒 | ✅ 9 项 | —（顺序行动） | ✅ `offer/accept-at-least` | ✅ | ✅ | ✅ 3 |
 | 蜈蚣博弈 | ✅ 5 项 | —（顺序行动） | ✅ `centipede-move` | ✅ | ✅ | ✅ 2 |
 | 胆小鬼 | ✅ 5 项 | 🟡 见缺口④ | ✅ `chicken-choice` | ✅ | ✅ | ✅ 2 |
@@ -79,7 +79,7 @@
 ## 缺口清单（Phase C 工作清单）
 
 1. **~~① 狼人杀主张对账缺失~~**：已补齐（§28 两项契约测试 + observe 显式主张词表修正 + ledger 无计划路径支持 `has-role` 自述假主张），2026-08-24。
-2. **② 阿瓦隆**：无 `extractionHints`（旁路提取缺位）；阵营主张对账缺失（现有"minion claimed loyalty is exposed by the reveal"走 identity 路径，需扩展提取后的阵营主张对账）。
+2. **~~② 阿瓦隆主张对账~~**：`extractionHints` 已补（`avalon teaches the extractor its allegiance vocabulary`，狼人杀契约测试文件内），阵营主张（loyal/evil）现在会进入旁路提取；终局 revealIdentity 对账原本已走 identity 路径（"minion claimed loyalty is exposed by the reveal"），两者合上。2026-08-29。
 3. **③ 密封拍卖无 `extractionHints`**：讨论阶段的出价意图无法旁路提取，补与选美同模式的主张提取提示。
 4. **④ 密封边界断言缺失**：吹牛骰（`hiddenDice` 已在投影白名单 redact，但无"私有骰面不越观察边界"的专属测试）；胆小鬼、猎鹿（同时选择有密封状态，但无专属不越权断言）。各补一个边界测试。
 

@@ -101,7 +101,10 @@ updates, actor models, directed relationships, commitments, deception episodes a
 outcome reconciliations — all with provenance. Commitment reconciliation
 (fulfilled / violated / void) is the settlement backbone for the causality page. Message
 sidecar extraction annotates every persisted message with structured social acts
-(`model-extracted`), strictly serialized off the send path.
+(`model-extracted`), strictly serialized off the send path. High-confidence extractions
+(≥ 0.7, not duplicating the speaker's own declaration) feed the same perception stack a
+declared act feeds — appraisal events, the scenario's suspicion hook and conversation
+response pressure — so an undeclared accusation still lands.
 
 ## Spectator boundary
 
@@ -121,10 +124,13 @@ browser reduces those envelopes into the current room view.
 
 ## Zero-disk invariant
 
-The runtime never writes to disk. The only permitted writes are the model configuration
-(`data/model-settings.json`, user data) and the `SOCIETY_DEBUG_PROVIDER=1` failure-exchange
-dump (explicit debugging switch). Room state, session history, minds, the ledger and
-checkpoint-style recovery all exist in process memory only.
+The runtime never writes to disk by default. The permitted writes are the model configuration
+(`data/model-settings.json`, user data), the `SOCIETY_DEBUG_PROVIDER=1` failure-exchange
+dump (explicit debugging switch), and — only when a room's creator opts in at creation —
+one archive file per finished game under `data/archives/` (opt-in postgame persistence;
+contains the omniscient end state and opens only for its owner or the operator).
+Room state, session history, minds, the ledger and checkpoint-style recovery all exist in
+process memory only.
 
 ## Adding a scene
 

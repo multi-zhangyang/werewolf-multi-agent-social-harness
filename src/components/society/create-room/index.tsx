@@ -21,6 +21,7 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
+import { Toggle } from "@/components/ui/toggle";
 import { ErrorNote, ScenarioIcon } from "../shared";
 import type { CharacterOption, CreateRoomInput, ModelOption } from "../types";
 import { ModelAssignSection } from "./model-assign-section";
@@ -54,6 +55,8 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
   const [mode, setMode] = useState<"ai" | "human">("ai");
   const [playerName, setPlayerName] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState<"low" | "medium" | "high" | "xhigh">("high");
+  /** Explicit opt-in: write the finished game to a local archive file. */
+  const [archive, setArchive] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
   /** Character library: built-ins + user-defined characters. */
@@ -314,6 +317,7 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
         mode,
         ...(mode === "human" ? { playerName: playerName.trim() } : {}),
         reasoningEffort,
+        ...(archive ? { archive: true } : {}),
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -472,6 +476,25 @@ export function CreateRoomDialog({ open, scenario, models, onOpenChange, onCreat
                     </SelectContent>
                   </Select>
                 </div>
+              </section>
+
+              <section className="flex items-center justify-between gap-4 rounded-lg border border-border bg-muted/30 px-3.5 py-3">
+                <div className="min-w-0">
+                  <p className="text-[13px] font-medium text-foreground/80">保存对局（赛后存档）</p>
+                  <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+                    对局结束后写入本地 data/archives，重启后仍可复盘。默认关闭——保持零落盘。
+                  </p>
+                </div>
+                <Toggle
+                  pressed={archive}
+                  onPressedChange={setArchive}
+                  variant="outline"
+                  size="sm"
+                  aria-label="保存对局"
+                  className="shrink-0 rounded-full px-3 text-xs data-[state=on]:border-live/40 data-[state=on]:bg-live/10 data-[state=on]:text-live data-[state=on]:hover:bg-live/15"
+                >
+                  {archive ? "已开启" : "关闭"}
+                </Toggle>
               </section>
 
               {eligibleModels.length ? (

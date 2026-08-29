@@ -12,10 +12,11 @@ import type {
   SocietyAgentContext,
   WorldActionCommit,
   WorldActivation,
+  WorldQualityMetrics,
   WorldSnapshot
 } from "../../contracts";
 import { scopedContext, SocialWorldBase } from "../../world";
-import { conversationSignalsFromSocialActs, DiscussionDirector } from "../../conversation";
+import { conversationSignalsFromSocialActs, DiscussionDirector, type ConversationSignal } from "../../conversation";
 import { SuspicionClimate } from "../../suspicion";
 import { boundedRounds, discussionPersonality, emitAction } from "../helpers";
 import { roleHypothesisTool } from "../../cognition";
@@ -30,7 +31,7 @@ import {
   type WerewolfRoleId
 } from "./roles";
 
-type Phase = "day-discussion" | "day-knight" | "day-vote" | "night";
+type Phase = "day-discussion" | "day-knight" | "day-vote" | "day-pk" | "night";
 
 /**
  * SDK `tool()` with Society validation feedback: when the model's arguments
@@ -119,6 +120,12 @@ export class WerewolfWorld extends SocialWorldBase {
   private lastGuardTargetId?: string;
   /** Death skills waiting for their owner's decision (hunter / wolf-king). */
   private readonly pendingShots: PendingShot[] = [];
+  /** Day-vote-eliminated players still owed one public last statement (遗言). */
+  private readonly pendingLastWords: string[] = [];
+  /** Tied-vote PK: the two accused still owe their defense speech. */
+  private pkCandidates: string[] = [];
+  /** PK happened today — a second tie eliminates nobody instead of looping. */
+  private pkHeld = false;
   private jesterWon = false;
   /** Idiots who flipped their card: alive, but without a vote. */
   private readonly idiotRevealed = new Set<string>();
@@ -770,6 +777,19 @@ export class WerewolfWorld extends SocialWorldBase {
 
   activation(): WorldActivation | null {
     if (this.status !== "running") return null;
+    // Last words first: a voted-out player states their final public case
+    // before any death skill fires or the day moves on.
+    const lastWordsSpeaker = this.pendingLastWords[0];
+    if (lastWordsSpeaker) {
+      return {
+        id: `ww:${this.day}:lastwords:${lastWordsSpeaker}`,
+        label: `${this.profiles.get(lastWordsSpeaker)?.displayName ?? lastWordsSpeaker} 的遗言`,
+        actorIds: [lastWordsSpeaker],
+        mode: "sequential",
+        instructionFor: () =>
+          "You have been voted out. You have ONE final public statement (遗言): a role claim, an accusation, a hint for your side — or a dignified silence. Call communicate once on the public channel; nothing else is possible now."
+      };
+    }
     // Death skills resolve before anything else — the room must not advance the
     // phase while a hunter or wolf-king still has a pending shot.
     const pendingShot = this.pendingShots[0];
@@ -813,6 +833,16 @@ export class WerewolfWorld extends SocialWorldBase {
       };
     }
     if (this.phase === "day-knight") return this.knightActivation();
+    if (this.phase === "day-pk") {
+      return {
+        id: `ww:${this.day}:pk`,
+        label: `第 ${this.day} 天平票 PK`,
+        actorIds: [...this.pkCandidates],
+        mode: "sequential",
+        instructionFor: (_actorId) =>
+          "The vote tied and you are one of the two accused. This is your PK speech (平票陈词): state your final case to the village — defend yourself, present your evidence, counter the other candidate. The table re-votes right after both speeches; you will not vote. Call communicate once on the public channel."
+      };
+    }
     if (this.phase === "day-vote") return this.voteActivation();
     return this.nightActivation(aliveIds);
   }
@@ -835,12 +865,15 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   private voteActivation(): WorldActivation {
+    const reVote = this.pkCandidates.length > 0;
     return {
       id: `ww:${this.day}:vote`,
-      label: `第 ${this.day} 天投票`,
-      actorIds: [...this.alive].filter((id) => !this.idiotRevealed.has(id) && id !== this.nightmareCurse),
+      label: reVote ? `第 ${this.day} 天重新投票（PK 后）` : `第 ${this.day} 天投票`,
+      actorIds: [...this.alive].filter((id) => !this.idiotRevealed.has(id) && id !== this.nightmareCurse && !this.pkCandidates.includes(id)),
       mode: "parallel",
-      instructionFor: () => "The discussion is closed. You must call cast_day_vote exactly once against a living participant. Consider not only hidden roles but how every faction benefits from being suspected or eliminated."
+      instructionFor: () => reVote
+        ? "The tied candidates have made their PK speeches. You must call cast_day_vote exactly once against a living participant — the two candidates do not vote. A second tie eliminates nobody."
+        : "The discussion is closed. You must call cast_day_vote exactly once against a living participant. Consider not only hidden roles but how every faction benefits from being suspected or eliminated."
     };
   }
 
@@ -875,6 +908,19 @@ export class WerewolfWorld extends SocialWorldBase {
   completeActivation(activation: WorldActivation): ActivationCompletion {
     if (activation.id.includes(":discussion")) {
       this.discussion?.endWave();
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.includes(":lastwords:")) {
+      const speakerId = activation.actorIds[0];
+      if (this.pendingLastWords[0] === speakerId) this.pendingLastWords.shift();
+      // Silence is a legitimate last word; either way the day continues.
+      this.afterEliminationChecks();
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":pk")) {
+      // Both candidates spoke (or stayed silent): the re-vote opens without them.
+      this.phase = "day-vote";
+      this.emitUpdate();
       return { completed: true, missingActorIds: [] };
     }
     if (activation.id.includes(":shot:")) {
@@ -955,7 +1001,10 @@ export class WerewolfWorld extends SocialWorldBase {
 
   /**
    * Apply accusation declarations to the scenario's suspicion climate. The
-   * shared world already handles each recipient's emotional reaction.
+   * shared world already handles each recipient's emotional reaction, and the
+   * discussion signals arrive through conversationSignalsFromSocialActs — both
+   * for declared acts (sendMessage) and extracted ones (the base feeds them
+   * through handleExtractedConversationSignals), so no signal is raised here.
    */
   private detectSocialActs(message: SocialMessage, declarations: SocialActDeclaration[]): void {
     for (const declaration of declarations) {
@@ -964,17 +1013,42 @@ export class WerewolfWorld extends SocialWorldBase {
         if (id === message.senderId || !this.alive.has(id)) continue;
         if (declaration.kind === "accusation") {
           this.suspicion.noteAccusation(this.day, message.senderId, id);
-          // The scenario knows this was an accusation — feed it to the director
-          // as a structured signal instead of hardcoding werewolf words there.
-          this.discussion?.raiseSignal({
-            kind: "accusation",
-            sourceActorId: message.senderId,
-            targetActorIds: [id],
-            sourceMessageId: message.id
-          });
         }
       }
     }
+  }
+
+  /** Extracted acts count in the suspicion climate exactly like declared ones. */
+  protected override onExtractedSocialActs(message: SocialMessage, declarations: SocialActDeclaration[]): void {
+    if (message.channel === "public" && this.phase === "day-discussion") {
+      this.detectSocialActs(message, declarations);
+    }
+  }
+
+  /**
+   * Base quality signals plus vote accuracy: a day vote "hits" when its
+   * target is a true wolf. Ground truth from the internal role table — this
+   * is why the metrics surface is owner/operator only.
+   */
+  override qualityMetrics(): WorldQualityMetrics {
+    const voteAccuracy = new Map<string, { votesCast: number; hits: number }>();
+    for (const record of this.history) {
+      for (const [voterId, targetId] of Object.entries(record.votes ?? {})) {
+        const entry = voteAccuracy.get(voterId) ?? { votesCast: 0, hits: 0 };
+        entry.votesCast += 1;
+        if (isWolfRole(this.roles.get(targetId))) entry.hits += 1;
+        voteAccuracy.set(voterId, entry);
+      }
+    }
+    return {
+      ...super.qualityMetrics(),
+      voteAccuracy: [...voteAccuracy.entries()].map(([actorId, entry]) => ({ actorId, ...entry }))
+    };
+  }
+
+  /** Late (extracted) signals still reach the live discussion director. */
+  protected override handleExtractedConversationSignals(signals: ConversationSignal[]): void {
+    for (const signal of signals) this.discussion?.raiseSignal(signal);
   }
 
   protected currentTurn(): number {
@@ -1020,7 +1094,15 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   protected validateMessage(senderId: string, channel: "public" | "private" | "team", recipientIds: string[]): void {
-    if (!this.alive.has(senderId)) throw new Error("ACTOR_ELIMINATED: Eliminated participants cannot communicate.");
+    // 遗言: the eliminated player speaks once, publicly, before leaving.
+    const inLastWords = this.pendingLastWords[0] === senderId;
+    if (inLastWords && channel !== "public") {
+      throw new Error("LAST_WORDS_PUBLIC_ONLY: 遗言只能公开陈述。");
+    }
+    if (!this.alive.has(senderId) && !inLastWords) throw new Error("ACTOR_ELIMINATED: Eliminated participants cannot communicate.");
+    if (this.phase === "day-pk" && !this.pkCandidates.includes(senderId) && this.alive.has(senderId)) {
+      throw new Error("PK_SPEAKERS_ONLY: 平票陈词阶段只有被平票的玩家可以发言，其余人保持安静。");
+    }
     if (channel === "private") {
       if (recipientIds.length === 0) throw new Error("RECIPIENT_REQUIRED: Private messages require recipientIds.");
       for (const id of recipientIds) this.assertLivingTarget(id);
@@ -1035,9 +1117,11 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   private availableActions(actorId: string, role: WerewolfRoleId): string[] {
+    if (this.pendingLastWords[0] === actorId) return ["communicate", "recall_memory"];
     if (!this.alive.has(actorId)) return [];
     if (this.phase === "day-discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "read_the_room", "log_deception_plan", "update_inner_state"];
     if (this.phase === "day-knight") return role === "knight" && !this.knightUsed ? ["knight_challenge"] : [];
+    if (this.phase === "day-pk") return this.pkCandidates.includes(actorId) ? ["communicate", "recall_memory"] : [];
     if (this.phase === "day-vote") return this.idiotRevealed.has(actorId) ? [] : ["cast_day_vote"];
     if (role === "nightmare") return ["communicate:team", "choose_night_target", "dream_curse"];
     if (role === "wolf-beauty") return ["communicate:team", "choose_night_target", "charm_target"];
@@ -1093,6 +1177,9 @@ export class WerewolfWorld extends SocialWorldBase {
     const idiotSurvives = eliminatedId !== undefined && eliminatedRole === "idiot" && !this.idiotRevealed.has(eliminatedId);
     if (idiotSurvives) this.idiotRevealed.add(eliminatedId);
     else if (eliminatedId) this.alive.delete(eliminatedId);
+    // The eliminated player is owed one public last statement — unless the
+    // revealed idiot survives, or the solo-winning jester leaves the stage.
+    if (eliminatedId && !idiotSurvives && eliminatedRole !== "jester") this.pendingLastWords.push(eliminatedId);
     // White wolf king explosion: everyone who voted for it dies with it
     // (its own death is the vote-out itself; the boom takes the voters).
     const whiteWolfBoom = eliminatedId !== undefined && eliminatedRole === "white-wolf-king" && !idiotSurvives;
@@ -1105,15 +1192,21 @@ export class WerewolfWorld extends SocialWorldBase {
       ? (this.alive.has(this.charmTarget) ? this.charmTarget : undefined)
       : undefined;
     if (charmVictim) this.alive.delete(charmVictim);
-    const record: DayRecord = {
-      day: this.day,
-      votes: Object.fromEntries(this.votes),
-      ...(eliminatedId ? { eliminatedId, eliminatedRole } : {}),
-      ...(idiotSurvives ? { idiotSurvived: true } : {}),
-      ...(boomVictims.length ? { boomVictims } : {}),
-      ...(charmVictim ? { charmVictim } : {})
-    };
-    this.history.push(record);
+    // One record per day: a PK re-vote updates today's record instead of
+    // duplicating it, so the calendar and the director see a single day.
+    let record = this.history.at(-1);
+    if (!record || record.day !== this.day) {
+      record = { day: this.day, votes: {} };
+      this.history.push(record);
+    }
+    record.votes = Object.fromEntries(this.votes);
+    if (eliminatedId) {
+      record.eliminatedId = eliminatedId;
+      record.eliminatedRole = eliminatedRole;
+    }
+    if (idiotSurvives) record.idiotSurvived = true;
+    if (boomVictims.length) record.boomVictims = boomVictims;
+    if (charmVictim) record.charmVictim = charmVictim;
     const voteText = idiotSurvives
       ? `${this.profiles.get(eliminatedId!)?.displayName} 被投票放逐，亮明白痴身份——免于一死，但从此失去投票权。`
       : eliminatedId
@@ -1255,6 +1348,25 @@ export class WerewolfWorld extends SocialWorldBase {
     // The wolf beauty chooses a fresh companion each night; the previous bond
     // has either fired during this vote or expired with the vote result.
     this.charmTarget = undefined;
+
+    // A tied vote opens the PK cycle: the two accused state their case, then
+    // the table re-votes without them. A second tie eliminates nobody —
+    // pkHeld keeps the loop closed.
+    if (hasTie && !this.pkHeld) {
+      this.pkHeld = true;
+      this.pkCandidates = ranked
+        .filter(([, count]) => count === ranked[0][1])
+        .map(([id]) => id)
+        .slice(0, 2);
+      this.addLog(
+        `第 ${this.day} 天投票平票：${this.pkCandidates.map((id) => this.profiles.get(id)?.displayName ?? id).join("、")} 进入 PK 陈词，发言后重新投票（平票者本轮不投票）。`,
+        this.day
+      );
+      this.phase = "day-pk";
+      this.emitUpdate();
+      return;
+    }
+    this.pkCandidates = [];
 
     if (eliminatedRole === "jester") {
       // The jester wins alone and leaves; the main game continues.
@@ -1746,8 +1858,8 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   private afterEliminationChecks(): void {
-    if (this.pendingShots.length) {
-      // Stay in the current phase: the shot activation runs first.
+    if (this.pendingLastWords.length || this.pendingShots.length) {
+      // Stay in the current phase: the last word / shot activation runs first.
       return;
     }
     if (this.wolvesAlive().length === 0) {
@@ -1777,6 +1889,9 @@ export class WerewolfWorld extends SocialWorldBase {
     }
     this.day += 1;
     this.suspicion.decay(0.75);
+    // A new day resets the PK cycle: one PK per day, candidates cleared.
+    this.pkHeld = false;
+    this.pkCandidates = [];
     this.phase = "day-discussion";
     this.discussion = this.createDiscussion();
     this.emitUpdate();
@@ -1842,6 +1957,7 @@ export class WerewolfWorld extends SocialWorldBase {
 function situationFor(phase: Phase, role: WerewolfRoleId, aliveCount: number, wolvesAlive: number): string {
   if (phase === "day-discussion") return `${aliveCount} participants remain. Hidden objectives conflict, and public behavior may not reveal private strategy. Your role is ${roleLabel(role)}.`;
   if (phase === "day-knight") return `The knight's daytime duel is open: one challenge, before the vote. ${wolvesAlive} wolves remain, known only to the pack.`;
+  if (phase === "day-pk") return `The vote tied: the two accused are giving their PK speeches, then the table re-votes without them. ${wolvesAlive} wolves remain, known only to the pack.`;
   if (phase === "day-vote") return `Discussion is closed. Every living participant is choosing one binding vote. ${wolvesAlive} wolves remain, known only to the pack.`;
   return isWolfRole(role)
     ? "Night phase: coordinate privately with the pack and choose a non-wolf target."
@@ -1858,6 +1974,7 @@ function phaseLabel(phase: Phase): string {
   if (phase === "day-discussion") return "白天讨论";
   if (phase === "day-knight") return "骑士决斗";
   if (phase === "day-vote") return "白天投票";
+  if (phase === "day-pk") return "平票 PK";
   return "夜晚行动";
 }
 

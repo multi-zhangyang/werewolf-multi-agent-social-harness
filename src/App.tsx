@@ -7,9 +7,10 @@ import { About } from "@/components/society/about";
 import { CharactersDialog } from "@/components/society/characters-dialog";
 import { CreateRoomDialog } from "@/components/society/create-room";
 import { Landing } from "@/components/society/landing";
-import { RoomView } from "@/components/society/room-view";
+import { ArchiveRoomView, RoomView } from "@/components/society/room-view";
+import { CasterRoomView } from "@/components/society/caster-view";
 import { SettingsDialog } from "@/components/society/settings-dialog";
-import type { CreateRoomInput, CreateRoomResult, ModelOption } from "@/components/society/types";
+import type { ArchiveOption, CreateRoomInput, CreateRoomResult, ModelOption } from "@/components/society/types";
 
 interface CatalogResponse {
   scenarios: ScenarioSummary[];
@@ -20,12 +21,22 @@ interface RoomListResponse {
   rooms: SocietyRoomSnapshot[];
 }
 
-type Route = { name: "landing" } | { name: "room"; id: string } | { name: "about" };
+interface ArchiveListResponse {
+  archives: ArchiveOption[];
+}
+
+interface LeaderboardResponse {
+  models: Array<{ model: string; seats: number; wins: number; avgScore: number | null }>;
+}
+
+type Route = { name: "landing" } | { name: "room"; id: string } | { name: "caster"; id: string } | { name: "archive"; id: string } | { name: "about" };
 
 export function App(): ReactNode {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [rooms, setRooms] = useState<SocietyRoomSnapshot[]>([]);
+  const [archives, setArchives] = useState<ArchiveOption[]>([]);
+  const [standings, setStandings] = useState<LeaderboardResponse["models"]>([]);
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
   const [createScenarioId, setCreateScenarioId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -39,8 +50,10 @@ export function App(): ReactNode {
   }, []);
 
   useEffect(() => {
-    if (route.name === "room") {
+    if (route.name === "room" || route.name === "archive") {
       document.title = `${route.id.slice(0, 8)} · Society — 多智能体社会博弈竞技场`;
+    } else if (route.name === "caster") {
+      document.title = `${route.id.slice(0, 8)} 直播 · Society`;
     } else if (route.name === "about") {
       document.title = "关于 · Society — 多智能体社会博弈竞技场";
     } else {
@@ -49,13 +62,17 @@ export function App(): ReactNode {
   }, [route]);
 
   const loadCatalog = useCallback(async (): Promise<void> => {
-    const [catalog, list] = await Promise.all([
+    const [catalog, list, archiveList, leaderboard] = await Promise.all([
       getJson<CatalogResponse>("/api/scenarios"),
-      getJson<RoomListResponse>("/api/rooms")
+      getJson<RoomListResponse>("/api/rooms"),
+      getJson<ArchiveListResponse>("/api/archives").catch(() => ({ archives: [] as ArchiveOption[] })),
+      getJson<LeaderboardResponse>("/api/leaderboard").catch(() => ({ models: [] as LeaderboardResponse["models"] }))
     ]);
     setScenarios(catalog.scenarios);
     setModels(catalog.models);
     setRooms(list.rooms);
+    setArchives(archiveList.archives);
+    setStandings(leaderboard.models);
   }, []);
 
   useEffect(() => {
@@ -126,6 +143,20 @@ export function App(): ReactNode {
     );
   }
 
+  if (route.name === "caster") {
+    return <CasterRoomView key={route.id} roomId={route.id} />;
+  }
+
+  if (route.name === "archive") {
+    return (
+      <ArchiveRoomView
+        key={`archive:${route.id}`}
+        archiveId={route.id}
+        onBack={() => { location.hash = "#/"; }}
+      />
+    );
+  }
+
   if (route.name === "about") {
     return <About onBack={() => { location.hash = "#/"; }} />;
   }
@@ -144,8 +175,11 @@ export function App(): ReactNode {
           scenarios={scenarios}
           models={models}
           rooms={rooms}
+          archives={archives}
+          standings={standings}
           onStart={(scenarioId) => setCreateScenarioId(scenarioId)}
           onOpenRoom={(roomId) => { location.hash = `#/rooms/${encodeURIComponent(roomId)}`; }}
+          onOpenArchive={(archiveId) => { location.hash = `#/archives/${encodeURIComponent(archiveId)}`; }}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenCharacters={() => setCharactersOpen(true)}
           onOpenAbout={() => { location.hash = "#/about"; }}
@@ -174,8 +208,12 @@ export function App(): ReactNode {
 }
 
 function parseHash(hash: string): Route {
-  const match = /^#\/rooms\/([^/?#]+)/.exec(hash);
-  if (match) return { name: "room", id: decodeURIComponent(match[1]) };
+  const roomMatch = /^#\/rooms\/([^/?#]+)/.exec(hash);
+  if (roomMatch) return { name: "room", id: decodeURIComponent(roomMatch[1]) };
+  const casterMatch = /^#\/caster\/([^/?#]+)/.exec(hash);
+  if (casterMatch) return { name: "caster", id: decodeURIComponent(casterMatch[1]) };
+  const archiveMatch = /^#\/archives\/([^/?#]+)/.exec(hash);
+  if (archiveMatch) return { name: "archive", id: decodeURIComponent(archiveMatch[1]) };
   if (/^#\/about/.test(hash)) return { name: "about" };
   return { name: "landing" };
 }

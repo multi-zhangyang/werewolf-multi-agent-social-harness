@@ -152,31 +152,6 @@ export function traitStatesFromTemperament(temperament: AgentTemperament | undef
   return states;
 }
 
-/**
- * Away-from-table decay: while a character is not playing, unreinforced
- * drift erodes partway back toward the baseline (slow change, with
- * regression). Long-term changes survive; a single game's nudge fades.
- */
-export const SEASON_BOUNDARY_DECAY = 0.6;
-
-export function decayAcrossSeason(
-  states: Record<AdaptableTrait, TraitState> | undefined
-): Record<AdaptableTrait, TraitState> | undefined {
-  if (!states) return undefined;
-  const next: Record<AdaptableTrait, TraitState> = {} as Record<AdaptableTrait, TraitState>;
-  for (const [trait, state] of Object.entries(states) as Array<[AdaptableTrait, TraitState]>) {
-    const adaptation = state.adaptation * SEASON_BOUNDARY_DECAY;
-    if (Math.abs(adaptation) < 0.004) {
-      // Faded entirely: back to the original person, and the old causes no
-      // longer explain current behavior.
-      next[trait] = { ...state, adaptation: 0, effective: state.baseline, lastCauses: [] };
-    } else {
-      next[trait] = { ...state, adaptation, effective: clamp(state.baseline + adaptation, 0, 1) };
-    }
-  }
-  return next;
-}
-
 /** Which event types can drive lasting adaptation at all. */
 function isAdaptationTrigger(event: SocialEvent): boolean {
   return event.type in TRAIT_RULES;

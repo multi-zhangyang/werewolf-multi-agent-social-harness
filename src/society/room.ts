@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { OpenAIProvider, type OpenAIProvider as OpenAIProviderType } from "@openai/agents";
 import OpenAI from "openai";
 import type {
@@ -74,7 +74,44 @@ export interface SocietyRoomCreateOptions {
    * fan out more concurrent activations than the deployment can bear.
    */
   limiter?: ActivationLimiter;
+  /**
+   * Explicit opt-in archive sink. When provided, the room hands its finished
+   * state to this callback exactly once — the server wires it to a disk
+   * write. The runtime core stays fs-free: without a sink, nothing is ever
+   * persisted (zero-disk default).
+   */
+  archiveSink?: (archive: SocietyRoomArchive) => void;
 }
+
+/**
+ * One finished game as plain data — produced by the room at finish time and
+ * consumed by the server's opt-in archive writer. `ownerTokenHash` is
+ * sha256(owner token) so the archive can authenticate its owner without
+ * storing the raw secret.
+ */
+export interface SocietyRoomArchive {
+  schemaVersion: 1;
+  id: string;
+  scenarioId: ScenarioId;
+  title: string;
+  createdAt: string;
+  finishedAt: string;
+  ownerTokenHash: string;
+  /** The full observer seat: revealed world, private minds, complete causality. */
+  room: SocietyRoomSnapshot;
+  /** The postgame public seat: revealed world, no private minds. */
+  publicRoom: SocietyRoomSnapshot;
+  /** Presentation envelopes for a static client-side replay (no token streams, no snapshot payloads). */
+  envelopes: SocietyRoomEventEnvelope[];
+}
+
+/** sha256 hex of a room owner token — archive ownership check without storing the secret. */
+export function archiveOwnerTokenHash(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+/** Token streams and full snapshots never enter an archive file. */
+const ARCHIVE_EVENT_BLOCKLIST: ReadonlySet<string> = new Set(["agent.delta", "agent.reasoning-content", "world.updated"]);
 
 export interface SocietyRoomEventEnvelope {
   /** Stable, unique event id (replay / dedupe). */
@@ -213,6 +250,8 @@ export class SocietyRoom {
   private readonly extractionProviders = new Map<string, OpenAIProviderType>();
   /** Process-wide activation pool; absent in embedded single-room use. */
   private readonly limiter?: ActivationLimiter;
+  /** Opt-in archive sink; absent means the game leaves no trace on disk. */
+  private readonly archiveSink?: (archive: SocietyRoomArchive) => void;
   private readonly pausedAgents = new Set<string>();
   /** Per-agent abort controllers for turns that are running right now. */
   private readonly activeSignals = new Map<string, AbortController>();
@@ -255,6 +294,7 @@ export class SocietyRoom {
     this.roomDefaults = options.roomDefaults;
     this.agentBindings = options.agentBindings ?? {};
     this.limiter = options.limiter;
+    this.archiveSink = options.archiveSink;
     this.director = new CinematicDirector({
       roomId: this.id,
       emit: (event) => this.emit(event)
@@ -312,6 +352,28 @@ export class SocietyRoom {
     const expected = Buffer.from(this.ownerToken);
     const given = Buffer.from(token);
     return expected.length === given.length && timingSafeEqual(expected, given);
+  }
+
+  /**
+   * The finished game as plain data. The owner seat gets the omniscient room
+   * (minds included); everyone else gets the postgame public room. Envelopes
+   * exclude token streams and snapshot payloads — the client reducer rebuilds
+   * the presentation layer from what remains.
+   */
+  buildArchive(): SocietyRoomArchive {
+    return {
+      schemaVersion: 1,
+      id: this.id,
+      scenarioId: this.scenarioId,
+      title: this.world.snapshot().title,
+      createdAt: this.createdAt,
+      finishedAt: this.updatedAt,
+      ownerTokenHash: archiveOwnerTokenHash(this.ownerToken),
+      room: this.snapshotForViewer({ mode: "omniscient" }),
+      publicRoom: this.snapshotForViewer({ mode: "postgame", privileged: false }),
+      envelopes: this.events.toArray()
+        .filter((envelope) => !ARCHIVE_EVENT_BLOCKLIST.has(envelope.event.type))
+    };
   }
 
   snapshotFor(actorId?: string): SocietyRoomSnapshot {
@@ -373,6 +435,11 @@ export class SocietyRoom {
         updatedAt: this.updatedAt,
         world: publicWorld,
         participants: this.participantCards(publicWorld, false),
+        // Highlights derive from public-facts-only cues, so the endgame reveal
+        // may show them to the public seat too — but only once the game ends.
+        ...(this.status === "finished" && this.highlights.length
+          ? { highlights: this.highlights.map((highlight) => structuredClone(highlight)) }
+          : {}),
         ...(this.error ? { error: this.error } : {})
       };
     }
@@ -716,7 +783,9 @@ export class SocietyRoom {
       extraction: {
         byMethod: counts(projection.socialActs.map((act) => act.extractionMethod)),
         extractionFailures: this.extractionFailures
-      }
+      },
+      // Agent-quality signals (ground truth included — owner/operator only).
+      quality: this.world.qualityMetrics()
     };
   }
 
@@ -776,6 +845,15 @@ export class SocietyRoom {
           this.status = "finished";
           this.director.dispose();
           this.emit({ type: "room.status", roomId: this.id, status: "finished", at: now() });
+          // Opt-in persistence: the finished game is handed to the sink once.
+          // The room stays fs-free — writing (if any) belongs to the server.
+          if (this.archiveSink) {
+            try {
+              this.archiveSink(this.buildArchive());
+            } catch (cause) {
+              console.warn(`[room ${this.id}] archive sink failed:`, cause instanceof Error ? cause.message : cause);
+            }
+          }
         }
         return;
       }
@@ -1433,6 +1511,16 @@ export class SocietyRoomRegistry {
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
+  /**
+   * Model-vs-model standings over finished games in this process: per model,
+   * seat-slots played, wins (faction games publish winners) and mean score.
+   * Derived from public end-of-game facts only — winners and scores are
+   * revealed at finish — so this needs no authority gate.
+   */
+  modelStandings(): Array<{ model: string; seats: number; wins: number; avgScore: number | null }> {
+    return modelStandingsFromRooms(this.rooms.values());
+  }
+
   /** True when the token is the owner token of any live room in the process. */
   hasOwnerToken(token: string): boolean {
     for (const room of this.rooms.values()) {
@@ -1488,6 +1576,41 @@ function apiKeyForRef(profile: ProviderProfile): string {
     return key;
   }
   return apiKeyFromEnv();
+}
+
+/**
+ * Model-vs-model standings over finished rooms. Public end-of-game facts
+ * only (winners and scores are revealed at finish), so it needs no gate.
+ */
+export function modelStandingsFromRooms(rooms: Iterable<{ currentStatus(): RoomStatus; snapshotFor(): SocietyRoomSnapshot }>): Array<{ model: string; seats: number; wins: number; avgScore: number | null }> {
+  const perModel = new Map<string, { seats: number; wins: number; scoreSum: number; scoreCount: number }>();
+  for (const room of rooms) {
+    if (room.currentStatus() !== "finished") continue;
+    const snapshot = room.snapshotFor();
+    const winners = new Set((snapshot.world.details as { winners?: string[] }).winners ?? []);
+    for (const participant of snapshot.participants) {
+      const model = participant.profile.model;
+      // Human seats carry no engine to compare.
+      if (!model || model === "human") continue;
+      const entry = perModel.get(model) ?? { seats: 0, wins: 0, scoreSum: 0, scoreCount: 0 };
+      entry.seats += 1;
+      if (winners.has(participant.profile.id)) entry.wins += 1;
+      const score = snapshot.world.agents.find((agent) => agent.id === participant.profile.id)?.score;
+      if (typeof score === "number") {
+        entry.scoreSum += score;
+        entry.scoreCount += 1;
+      }
+      perModel.set(model, entry);
+    }
+  }
+  return [...perModel.entries()]
+    .map(([model, entry]) => ({
+      model,
+      seats: entry.seats,
+      wins: entry.wins,
+      avgScore: entry.scoreCount ? Math.round((entry.scoreSum / entry.scoreCount) * 100) / 100 : null
+    }))
+    .sort((left, right) => right.wins - left.wins || (right.avgScore ?? 0) - (left.avgScore ?? 0));
 }
 
 /** Rooms without a server registry fall back to an env-seeded one. */

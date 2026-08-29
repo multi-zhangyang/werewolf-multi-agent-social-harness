@@ -178,6 +178,16 @@ export class SocialCausalityLedger {
     )];
   }
 
+  /** Dedupe keys of one message's explicitly-declared acts (kind + sorted targets). */
+  declaredActKeysFor(messageId: string): Set<string> {
+    const keys = new Set<string>();
+    for (const act of this.socialActs) {
+      if (act.messageId !== messageId || act.extractionMethod !== "explicit-tool") continue;
+      keys.add(`${act.kind}|${[...act.targetActorIds].sort().join(",")}`);
+    }
+    return keys;
+  }
+
   /** Shared materialization for explicit-tool and model-extracted declarations. */
   private materializeAct(
     declaration: SocialActDeclaration,
@@ -753,10 +763,16 @@ export class SocialCausalityLedger {
       characterId: input.subjectCharacterId,
       visibility: { kind: "public" }
     });
+    // An identity reveal settles BOTH claim vocabularies when ground truth is
+    // available: `has-role` claims against the actual role, and — when the
+    // scenario defines camps — `has-team` claims against the revealed team.
     const relevant = [...this.propositions.values()].filter((proposition) =>
-      proposition.kind === "identity" && proposition.subjectId === input.subjectCharacterId && proposition.predicate === "has-role"
+      proposition.kind === "identity"
+      && proposition.subjectId === input.subjectCharacterId
+      && (proposition.predicate === "has-role"
+        || (input.revealedTeam !== undefined && proposition.predicate === "has-team"))
     );
-    if (!relevant.some((proposition) => proposition.object === input.actualRoleId)) {
+    if (!relevant.some((proposition) => proposition.predicate === "has-role" && proposition.object === input.actualRoleId)) {
       relevant.push(this.upsertProposition({
         kind: "identity",
         subjectId: input.subjectCharacterId,
@@ -768,7 +784,10 @@ export class SocialCausalityLedger {
       }));
     }
     for (const proposition of relevant) {
-      proposition.truthStatus = proposition.object === input.actualRoleId ? "true" : "false";
+      const matches = proposition.predicate === "has-team"
+        ? proposition.object === input.revealedTeam
+        : proposition.object === input.actualRoleId;
+      proposition.truthStatus = matches ? "true" : "false";
       proposition.groundTruthVisibility = "public";
       if (!proposition.sourceEventIds.includes(envelope.eventId)) proposition.sourceEventIds.push(envelope.eventId);
       const resolutionEvidence: EvidenceRecord = {

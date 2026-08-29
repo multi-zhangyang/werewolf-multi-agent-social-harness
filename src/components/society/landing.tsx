@@ -1,9 +1,11 @@
 import type { ReactNode } from "react";
 import {
+  Archive,
   ArrowDown,
   ArrowRight,
   ArrowUpRight,
   BrainCircuit,
+  Crown,
   MessagesSquare,
   Play,
   Radio,
@@ -16,16 +18,21 @@ import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ScenarioIcon, StatusDot, StatusLabel } from "./shared";
-import type { ModelOption } from "./types";
+import { ScenarioIcon, StatusDot, StatusLabel, formatTime } from "./shared";
+import type { ArchiveOption, ModelOption } from "./types";
 import { cn } from "@/lib/utils";
 
 interface LandingProps {
   scenarios: ScenarioSummary[];
   models: ModelOption[];
   rooms: SocietyRoomSnapshot[];
+  /** Finished games their creator chose to persist; postgame replays. */
+  archives: ArchiveOption[];
+  /** Model-vs-model standings over finished games in this process. */
+  standings: Array<{ model: string; seats: number; wins: number; avgScore: number | null }>;
   onStart: (scenarioId: string) => void;
   onOpenRoom: (roomId: string) => void;
+  onOpenArchive: (archiveId: string) => void;
   onOpenSettings: () => void;
   onOpenCharacters: () => void;
   onOpenAbout: () => void;
@@ -33,7 +40,7 @@ interface LandingProps {
   onRemoveRoom: (roomId: string) => void;
 }
 
-export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenSettings, onOpenCharacters, onOpenAbout, onRemoveRoom }: LandingProps): ReactNode {
+export function Landing({ scenarios, models, rooms, archives, standings, onStart, onOpenRoom, onOpenArchive, onOpenSettings, onOpenCharacters, onOpenAbout, onRemoveRoom }: LandingProps): ReactNode {
   return (
     <div className="min-h-screen bg-background">
       <header className="rule-b sticky top-0 z-20 bg-background/90 backdrop-blur">
@@ -180,6 +187,68 @@ export function Landing({ scenarios, models, rooms, onStart, onOpenRoom, onOpenS
                     </button>
                   ) : null}
                   <ArrowRight className="size-4 shrink-0 -translate-x-1 text-muted-foreground/40 opacity-0 transition-all duration-200 group-hover:translate-x-0 group-hover:text-foreground group-hover:opacity-100" />
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {archives.length ? (
+          <section className="mx-auto w-full max-w-6xl px-6 pb-28">
+            <SectionHeading title="赛后存档" count={archives.length} />
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {archives.slice(0, 6).map((archive) => (
+                <button
+                  key={archive.id}
+                  onClick={() => onOpenArchive(archive.id)}
+                  className="group flex items-center gap-4 rounded-lg border border-border bg-card p-4 text-left transition-colors hover:border-foreground/30"
+                >
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground transition-colors group-hover:border-foreground/20 group-hover:text-foreground">
+                    <ScenarioIcon id={archive.scenarioId as ScenarioSummary["id"]} className="size-4.5" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold tracking-tight">{archive.title}</span>
+                    <span className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/80">
+                      <Archive className="size-3" aria-hidden />
+                      已归档
+                      <span className="text-muted-foreground/50">·</span>
+                      <span className="nums">{formatTime(archive.finishedAt, { seconds: false })}</span>
+                    </span>
+                  </span>
+                  <ArrowRight className="size-4 shrink-0 -translate-x-1 text-muted-foreground/40 opacity-0 transition-all duration-200 group-hover:translate-x-0 group-hover:text-foreground group-hover:opacity-100" />
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {standings.length ? (
+          <section className="mx-auto w-full max-w-6xl px-6 pb-28">
+            <SectionHeading title="模型战绩" count={standings.length} />
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+              {standings.map((standing, index) => (
+                <div
+                  key={standing.model}
+                  className="flex items-center gap-3.5 rounded-lg border border-border bg-card p-4"
+                >
+                  <span className="nums flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-muted font-mono text-[11px] text-muted-foreground">
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold tracking-tight">{standing.model}</p>
+                    <p className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/80">
+                      <span className="nums">{standing.seats} 席</span>
+                      <span className="text-muted-foreground/50">·</span>
+                      <span className="nums">{standing.wins} 胜</span>
+                      {standing.avgScore !== null ? (
+                        <>
+                          <span className="text-muted-foreground/50">·</span>
+                          <span className="nums">均分 {standing.avgScore}</span>
+                        </>
+                      ) : null}
+                    </p>
+                  </div>
+                  {index === 0 && standing.wins > 0 ? <Crown className="size-4 shrink-0 text-warn" aria-label="当前领先" /> : null}
                 </div>
               ))}
             </div>

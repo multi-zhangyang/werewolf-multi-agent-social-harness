@@ -116,7 +116,11 @@ function StreamItems({ items, room, onSubmitAction }: {
           }}
         >
           <div ref={contentRef} className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-5 pt-6 pb-10">
-            {items.map((item) => <div key={item.id}>{item.render}</div>)}
+            {items.map((item) => (
+              // The anchor id lets the storyline bar scroll the stream to any
+              // retained chapter (log entries render as phase dividers).
+              <div key={item.id} id={`anchor:${item.id}`}>{item.render}</div>
+            ))}
             {!items.length ? (
               <Empty className="py-16">
                 <EmptyHeader>

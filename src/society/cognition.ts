@@ -269,6 +269,7 @@ export function roleHypothesisTool(actorId: string): Tool<SocietyAgentContext> {
  */
 export function createCognitionTools(context: SocietyAgentContext): Tool<SocietyAgentContext>[] {
   return [
+    createRecallTool(context),
     cognitivePassTool(context, "reflect_on_social_situation",
       [
         "Your own private reflection pass. Appraise the current situation before you act:",
@@ -288,6 +289,104 @@ export function createCognitionTools(context: SocietyAgentContext): Tool<Society
       ].join("\n"),
       "plan", "plan", "谋划行动")
   ];
+}
+
+/**
+ * recall_memory — search the agent's own authorized records: autobiographical
+ * and outcome notes, commitments it made or received, claims it witnessed,
+ * its own belief updates and its own deception plans. Read-only, strictly
+ * scoped to this actor's projection — it can never surface what another
+ * participant is entitled to hide. The scenarios advertise this tool by name,
+ * so it must exist and stay flat.
+ */
+function createRecallTool(context: SocietyAgentContext): Tool<SocietyAgentContext> {
+  return tool({
+    name: "recall_memory",
+    description: [
+      "Search your own memory before you act: commitments you made or received, claims you witnessed (who said what), your own belief updates, your active deception plans, and your autobiographical anchors and past outcome notes.",
+      "- query: optional keywords; entries mentioning any term are returned, otherwise the most recent entries.",
+      "- aboutActorId: optional — restrict commitments and witnessed claims to ones involving that participant.",
+      "This is read-only and shows only what you are entitled to know. Use it when the recent context blocks no longer cover something older that matters."
+    ].join("\n"),
+    parameters: z.object({
+      query: z.string().max(200).nullable().default(null),
+      aboutActorId: z.string().min(1).max(160).nullable().default(null)
+    }).strict(),
+    execute: async ({ query, aboutActorId }, runContext) => {
+      const ctx = scopedContext(runContext, context.actorId, context);
+      const names = new Map(ctx.world.snapshot().agents.map((agent) => [agent.id, agent.displayName]));
+      const nameOf = (id: string | undefined): string | undefined => (id ? names.get(id) ?? id : undefined);
+      const causality = ctx.world.socialCausalityFor(ctx.actorId);
+      const terms = (query ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+      const matches = (text: string | undefined | null): boolean =>
+        terms.length === 0 || terms.some((term) => (text ?? "").toLowerCase().includes(term));
+
+      const propositionById = new Map(causality.propositions.map((proposition) => [proposition.propositionId, proposition]));
+      const lines: string[] = [];
+
+      // Commitments involving this actor — the full ledger, not the recent-6 window.
+      for (const commitment of causality.commitments
+        .filter((record) =>
+          (record.promisorActorId === ctx.actorId || record.audienceActorIds.includes(ctx.actorId))
+          && matches(record.proposition)
+          && (!aboutActorId || record.promisorActorId === aboutActorId || record.audienceActorIds.includes(aboutActorId)))
+        .slice(-6)
+        .reverse()) {
+        const scope = commitment.promisorActorId === ctx.actorId
+          ? `你承诺过`
+          : `${nameOf(commitment.promisorActorId)} 承诺过`;
+        const audience = commitment.audienceActorIds.length === 1 && commitment.audienceActorIds[0] === ctx.actorId
+          ? ""
+          : `（对 ${commitment.audienceActorIds.map((id) => nameOf(id)).join("、")}）`;
+        lines.push(`[承诺] ${scope}「${commitment.proposition}」${audience} → ${commitment.state}`);
+      }
+
+      // Witnessed claims — who performed which social act, joined to the
+      // proposition text the actor's projection is allowed to show.
+      for (const act of causality.socialActs
+        .filter((record) =>
+          (!aboutActorId || record.actorId === aboutActorId || record.targetActorIds.includes(aboutActorId))
+          && record.propositionIds.some((id) => {
+            const proposition = propositionById.get(id);
+            return matches(proposition?.predicate);
+          }))
+        .slice(-6)
+        .reverse()) {
+        const claim = act.propositionIds
+          .map((id) => propositionById.get(id)?.predicate)
+          .filter(Boolean)
+          .slice(0, 2)
+          .join("；");
+        const targets = act.targetActorIds.map((id) => nameOf(id)).filter(Boolean).join("、");
+        lines.push(`[言行] ${nameOf(act.actorId)} ${act.kind}${targets ? ` → ${targets}` : ""}${claim ? `：「${claim}」` : ""}`);
+      }
+
+      // Own belief updates — latest position on each belief.
+      const ownBeliefUpdates = causality.beliefUpdates.filter((record) => record.ownerCharacterId === ctx.profile.characterId);
+      for (const record of ownBeliefUpdates.slice(-5).reverse()) {
+        const proposition = propositionById.get(record.propositionId);
+        if (!matches(proposition?.predicate) && terms.length > 0) continue;
+        lines.push(`[信念] 「${proposition?.predicate ?? record.propositionId}」${Math.round(record.beforeProbability * 100)}% → ${Math.round(record.afterProbability * 100)}%`);
+      }
+
+      // Own deception plans — where each stands.
+      for (const episode of causality.deceptions
+        .filter((record) => record.deceiverActorId === ctx.actorId)
+        .slice(-3)
+        .reverse()) {
+        lines.push(`[欺骗] ${episode.mode}，目标 ${episode.targetAudienceIds.map((id) => nameOf(id)).filter(Boolean).join("、")} → ${episode.status}`);
+      }
+
+      // Autobiography and outcome notes.
+      for (const memory of ctx.mind.memories.filter((entry) => matches(entry.text)).slice(-8).reverse()) {
+        lines.push(`[记忆·T${memory.turn}] ${memory.text}`);
+      }
+
+      const summary = lines.length ? lines.join("\n") : "没有匹配的记录——最近的上下文块已经覆盖了你记得的全部。";
+      emitThoughtBeat(ctx, "recall", "翻阅记忆", query?.trim() ? `检索「${query.trim()}」` : "回顾自己的记录", aboutActorId ? [aboutActorId] : []);
+      return { recalled: lines.length, records: summary };
+    }
+  }) as Tool<SocietyAgentContext>;
 }
 
 function createActorModelTool(context: SocietyAgentContext): Tool<SocietyAgentContext> {

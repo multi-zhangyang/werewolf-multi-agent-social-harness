@@ -138,7 +138,6 @@ describe("room control authority", () => {
     const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}/pause`, { method: "POST" });
     assert.equal(response.status, 403);
   });
-
   it("a room's own owner token may pause it", async () => {
     const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}/pause`, {
       method: "POST",
@@ -158,6 +157,41 @@ describe("room control authority", () => {
   it("removing a room needs the owner token too", async () => {
     const response = await fetch(`${harness.base}/api/rooms/${harness.roomB}`, { method: "DELETE" });
     assert.equal(response.status, 403);
+  });
+});
+
+describe("metrics authority (ground truth is owner/operator only)", () => {
+  let harness: Harness;
+  beforeAll(async () => { harness = await startHarness({}); });
+  afterAll(async () => { await stopHarness(harness); });
+
+  it("anonymous and cross-room requests cannot read metrics", async () => {
+    assert.equal((await fetch(`${harness.base}/api/rooms/${harness.roomA}/metrics`)).status, 403,
+      "metrics carry true roles and resolved beliefs — no anonymous access");
+    assert.equal((await fetch(`${harness.base}/api/rooms/${harness.roomA}/metrics`, {
+      headers: withBearer(harness.roomBToken)
+    })).status, 403, "owner tokens stay scoped to their own room");
+  });
+
+  it("the room's owner reads metrics including the quality block", async () => {
+    const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}/metrics`, {
+      headers: withBearer(harness.roomAToken)
+    });
+    assert.equal(response.status, 200);
+    const metrics = await response.json() as {
+      quality: { deception: unknown[]; beliefCalibration: unknown[]; voteAccuracy?: unknown[] };
+    };
+    assert.ok(Array.isArray(metrics.quality.deception), "deception outcomes are present");
+    assert.ok(Array.isArray(metrics.quality.beliefCalibration), "belief calibration is present");
+    assert.ok(Array.isArray(metrics.quality.voteAccuracy), "werewolf publishes vote accuracy");
+  });
+
+  it("the leaderboard is public but only surfaces finished games", async () => {
+    const response = await fetch(`${harness.base}/api/leaderboard`);
+    assert.equal(response.status, 200);
+    const payload = await response.json() as { models: unknown[] };
+    assert.ok(Array.isArray(payload.models), "standings are an array (empty until a game finishes)");
+    assert.equal(payload.models.length, 0, "no finished games yet — nothing to rank");
   });
 });
 

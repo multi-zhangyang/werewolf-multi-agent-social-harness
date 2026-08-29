@@ -8,8 +8,9 @@ Agent 看到了什么、提出了什么主张、相信了什么、通过工具�
 
 - **一名参与者 = 一个标准 SDK Agent**：每个席位一个 `@openai/agents` 的 `Agent` + 内存会话
   （`MemorySession`），一个激活回合内以 模型→工具→模型 的 agent 循环多步执行；
-- **零运行时落盘**：不写会话文件、不写房间检查点、无恢复、无归档、无赛季。重启即清零；
-  唯一磁盘写入是模型配置（用户数据）与显式调试开关；
+- **默认零运行时落盘**：不写会话文件、不写房间检查点、无恢复、无赛季。重启即清零；
+  磁盘写入只有模型配置（用户数据）、显式调试开关，以及创建房间时显式勾选的
+  「保存对局」赛后归档（`data/archives/`，仅房主/操作员可打开，默认关闭）；
 - **平铺工具面**：`communicate`、领域行动工具（`targetId/choice/amount + reason`）与三个轻量
   认知工具；工具 schema 里没有候选意图、预测后果或审计表单——思考发生在 agent 循环里，
   行动只提交结果；
@@ -18,7 +19,10 @@ Agent 看到了什么、提出了什么主张、相信了什么、通过工具�
 - **社会因果账本（纯内存）**：承诺对账（fulfilled/violated/void）、身份主张对账、信念自报、
   有向关系与欺骗生命周期，全部在内存账本中带来源记录；观战因果页据此分层展示；
 - **权限化观战**：public / agent-pov / omniscient 服务端硬边界投影，密封阶段隐藏 token 流，
-  私聊与心智不进 public。
+  私聊与心智不进 public；
+- **主播直播面（无剧透）**：`#/caster/:roomId` 单列纯流视图，直播期间锁定公开投影、无任何
+  切换入口；终局自动切到赛后揭晓（与匿名观众的复盘同边界，不带心智）。OBS 浏览器源直接采集，
+  房间头部可一键弹出。
 
 ## 十三个社会压力场景
 
@@ -90,16 +94,31 @@ node scripts/demo.mjs prisoners-dilemma
 不带场景参数会依次运行全部十三个场景，调用真实模型并输出对局记录。这是显式 opt-in 的
 付费/联网操作。
 
+### 直播与 OBS 采集
+
+开着的房间右上角「弹出无剧透纯流窗口」一键打开 `#/caster/<roomId>`，或直接把该地址
+填进 OBS 浏览器源。caster 面是无剧透的广播面：只请求 public（终局后 postgame）投影，
+服务端按请求的 mode 过滤事件流——即使窗口带着房主凭证（localStorage token / cookie），
+拿到的数据仍与匿名观众完全一致。页面为广播面刻意做了死端设计（无返回按钮），避免主播
+误点到带全知视角的页面；运行状态 toast 也不会出现在画面上。caster 面有零成本 e2e 审计
+（进程内脚本模型房间 + 真实 Chrome，断言线上只出现 public/postgame 投影）：
+
+```bash
+UI_AUDIT=1 npx vitest run tests/ui/caster-view-audit.test.ts   # 需本地 Chrome 与已构建 dist
+```
+
 ### 指标与 smoke
 
 每个房间提供内存指标端点：`GET /api/rooms/:id/metrics`（有效行动率、行动完成率、上下文
-压力分布、turn 耗时 p50/p95、承诺分布、notice 码）。对局结束后：
+压力分布、turn 耗时 p50/p95、承诺分布、notice 码，以及 Agent 质量信号——欺骗结局、信念
+校准 Brier、投票命中率）。指标携带 ground truth（真实角色、已裁决信念），因此**仅
+房主/操作员 token 可访问**。对局结束后：
 
 ```bash
-node scripts/smoke-report.mjs [roomId ...]
+OPERATOR_TOKEN=... node scripts/smoke-report.mjs [roomId ...]
 ```
 
-只读 stdout，不落盘。
+只读 stdout，不落盘。模型混排对局的战绩在 `GET /api/leaderboard` 与终局揭晓屏可见。
 
 ## 质量命令
 

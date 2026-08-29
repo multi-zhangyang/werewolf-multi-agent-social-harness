@@ -362,11 +362,6 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       throw error;
     }
     const finalOutput = String(result.finalOutput ?? "").trim();
-    if (finalOutput) {
-      // The final model text is transient working state, not canonical social
-      // memory. Long-term writes happen only after appraisal/reconciliation.
-      this.mind.latestReflection = finalOutput;
-    }
     this.mind.mood.energy = clampUnit(this.mind.mood.energy - 0.03);
     emitStatus(this.context, "idle");
     this.context.emit({
@@ -891,6 +886,18 @@ export function formatSocialContext(mind: AgentMindState, world: SocietyAgentCon
           .slice(0, 4)
           .map((entry) => `${entry.role} ${entry.probability.toFixed(2)}`)
           .join(" · ")}`)
+        .join("\n")}`
+    );
+  }
+  // The reflection layer: the agent's own recorded cognitive passes, re-fed
+  // each turn so its strategic thinking survives context compaction. The raw
+  // tool calls may be summarized away by the digest; this block keeps the
+  // conclusions in play without touching the deterministic pinned facts.
+  const recentPasses = mind.cognitivePasses.slice(-2);
+  if (recentPasses.length) {
+    blocks.push(
+      `[YOUR RECENT THINKING] Your own recent private reflections — build on them instead of restarting your reasoning:\n${recentPasses
+        .map((pass) => `- (T${pass.turn} ${pass.kind === "plan" ? "plan" : "reflection"}) ${pass.text.slice(0, 240)}`)
         .join("\n")}`
     );
   }

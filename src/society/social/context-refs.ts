@@ -56,8 +56,39 @@ export function socialReferenceContext(projection: SocialCausalityProjection): s
     `Your belief references: ${beliefReferences.join("; ") || "none"}.`,
     `Your actor-model references: ${actorModelReferences.join("; ") || "none"}.`,
     `Your relationship references: ${relationshipReferences.join("; ") || "none"}.`,
-    `Your evidence references: ${evidenceReferences.join("; ") || "none"}.`
+    `Your evidence references: ${evidenceReferences.join("; ") || "none"}.`,
+    ...(publicReputation(projection) ? [publicReputation(projection)!] : [])
   ];
+}
+
+/**
+ * Publicly settled reputation per character: claims the world has falsified
+ * plus commitments settled as violated. It reaches the agent as plain context
+ * — how much to trust someone stays the model's own judgment in the agent
+ * loop; this never edits beliefs mechanically.
+ */
+function publicReputation(projection: SocialCausalityProjection): string | undefined {
+  const propositions = new Map(projection.propositions.map((entry) => [entry.propositionId, entry]));
+  const falsified = new Map<string, number>();
+  for (const act of projection.socialActs) {
+    const caught = act.propositionIds.filter((id) => propositions.get(id)?.truthStatus === "false").length;
+    if (caught > 0) falsified.set(act.actorCharacterId, (falsified.get(act.actorCharacterId) ?? 0) + caught);
+  }
+  const broken = new Map<string, number>();
+  for (const commitment of projection.commitments) {
+    if (commitment.state === "violated") {
+      broken.set(commitment.promisorCharacterId, (broken.get(commitment.promisorCharacterId) ?? 0) + 1);
+    }
+  }
+  const entries = [...new Set([...falsified.keys(), ...broken.keys()])]
+    .map((characterId) => {
+      const parts: string[] = [];
+      if (falsified.get(characterId)) parts.push(`${falsified.get(characterId)} falsified claim${falsified.get(characterId)! > 1 ? "s" : ""}`);
+      if (broken.get(characterId)) parts.push(`${broken.get(characterId)} broken commitment${broken.get(characterId)! > 1 ? "s" : ""}`);
+      return `${characterId}: ${parts.join(" and ")}`;
+    });
+  if (!entries.length) return undefined;
+  return `Publicly settled reputation (world-falsified claims and violated commitments — weigh it yourself): ${entries.join("; ")}.`;
 }
 
 function propositionSummary(proposition: SocialCausalityProjection["propositions"][number] | undefined): string {

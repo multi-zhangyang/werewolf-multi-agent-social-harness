@@ -16,7 +16,7 @@ import type {
   WorldSnapshot
 } from "../contracts";
 import { scopedContext, SocialWorldBase } from "../world";
-import { conversationSignalsFromSocialActs, DiscussionDirector } from "../conversation";
+import { conversationSignalsFromSocialActs, DiscussionDirector, type ConversationSignal } from "../conversation";
 import { SuspicionClimate } from "../suspicion";
 import { boundedRounds, discussionPersonality, emitAction } from "./helpers";
 import { socialReferenceContext } from "../social/context-refs";
@@ -124,6 +124,20 @@ const MAX_REJECTIONS = 5; // five consecutive rejections hand evil the win
  * assassination: one shot at Merlin's identity.
  */
 export class AvalonWorld extends SocialWorldBase {
+  /**
+   * Sidecar extraction hints: teach the extractor the allegiance vocabulary
+   * so identity claims ("我是梅林" / "X 是莫甘娜") become `identity/has-team`
+   * propositions that the endgame role reveal can reconcile.
+   */
+  extractionHints?(): string {
+    return [
+      "本局是阿瓦隆。身份主张判定：",
+      '- 当说话者断言某人属于哪个阵营时，输出 claims 条目：aboutSelf（说自己为 true）、targetName（说别人时报名字）、assertedTeam（"evil"=属于莫德雷德阵营（邪恶方），"loyal"=属于亚瑟阵营（正义方））、confidence。',
+      '- 例：「我是梅林」→ {aboutSelf:true, assertedTeam:"loyal"}；「我不是爪牙」→ {aboutSelf:true, assertedTeam:"loyal"}；「X 是莫甘娜」→ {aboutSelf:false, targetName:"X", assertedTeam:"evil"}；「我相信你」→ 不算主张。',
+      '- 疑问、反问、要求他人表态、转述他人观点都不算主张。'
+    ].join("\n");
+  }
+
   private readonly totalQuests: number;
   private readonly teamSizes: number[];
   private readonly roles = new Map<string, Role>();
@@ -804,6 +818,12 @@ export class AvalonWorld extends SocialWorldBase {
     return message;
   }
 
+  /**
+   * Suspicion climate only — discussion pressure arrives via
+   * conversationSignalsFromSocialActs for both declared acts (sendMessage) and
+   * extracted ones (handleExtractedConversationSignals), so no signal is
+   * raised here.
+   */
   private detectSocialActs(message: SocialMessage, declarations: SocialActDeclaration[]): void {
     for (const declaration of declarations) {
       if (
@@ -816,15 +836,21 @@ export class AvalonWorld extends SocialWorldBase {
         if (id === message.senderId || !this.profiles.has(id)) continue;
         if (declaration.kind === "accusation") {
           this.suspicion.noteAccusation(this.quest, message.senderId, id);
-          this.discussion?.raiseSignal({
-            kind: "accusation",
-            sourceActorId: message.senderId,
-            targetActorIds: [id],
-            sourceMessageId: message.id
-          });
         }
       }
     }
+  }
+
+  /** Extracted acts count in the suspicion climate exactly like declared ones. */
+  protected override onExtractedSocialActs(message: SocialMessage, declarations: SocialActDeclaration[]): void {
+    if (message.channel === "public" && this.phase === "discussion") {
+      this.detectSocialActs(message, declarations);
+    }
+  }
+
+  /** Late (extracted) signals still reach the live discussion director. */
+  protected override handleExtractedConversationSignals(signals: ConversationSignal[]): void {
+    for (const signal of signals) this.discussion?.raiseSignal(signal);
   }
 
   private proposalActivation(): WorldActivation {

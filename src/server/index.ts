@@ -9,8 +9,9 @@ import { registerTemplateRoutes } from "./templates";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
-/** Shared server context, created once at module scope. */
-const context = createServerContext();
+/** Shared server context, created once at module scope. Exported for
+ * in-process tooling (e.g. UI audits registering a scripted room). */
+export const context = createServerContext();
 
 export function createServerApp(): express.Express {
   const app = express();

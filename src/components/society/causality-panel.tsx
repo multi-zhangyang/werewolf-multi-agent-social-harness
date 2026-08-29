@@ -1,5 +1,5 @@
 import { memo, useMemo, type ReactNode } from "react";
-import { ArrowRight, Crown, Waypoints } from "lucide-react";
+import { ArrowRight, Crown, MessageSquare, Waypoints } from "lucide-react";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type {
   DeceptionEpisode,
@@ -9,10 +9,13 @@ import type {
   SocialCausalityProjection
 } from "@/society/social/contracts";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { CollapsibleSection, ProvenanceDot } from "./shared";
+import { DayHistorySection } from "./cinematics";
 
 /**
  * The right rail: one flat, scrollable causality column. No nested tabs —
@@ -57,7 +60,9 @@ export const CausalityPanel = memo(function CausalityPanel({ room, viewerPrivile
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-4 p-4">
           <ScoreSection room={room} />
+          <DayHistorySection room={room} />
           <SuspicionSection room={room} />
+          <ReputationSection projection={projection} characterNames={characterNames} />
           <SocialActsSection projection={projection} actorName={actorName} hydrateText={hydrateText} propositions={new Map((projection?.propositions ?? []).map((entry) => [entry.propositionId, entry]))} />
           <BeliefSection projection={projection} characterNames={characterNames} hydrateText={hydrateText} />
           <CommitmentSection projection={projection} actorName={actorName} hydrateText={hydrateText} />
@@ -137,6 +142,24 @@ function SocialActsSection({ projection, actorName, hydrateText, propositions }:
                   <span className="truncate">{act.targetActorIds.map((id) => actorName(id)).join("、")}</span>
                 </>
               ) : null}
+              {act.messageId ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="ml-auto size-5 shrink-0 text-muted-foreground/60 hover:text-foreground"
+                      aria-label="跳转到源消息"
+                      onClick={() => {
+                        document.getElementById(`anchor:msg:${act.messageId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+                      }}
+                    >
+                      <MessageSquare className="size-3" aria-hidden />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>在直播流中查看源消息</TooltipContent>
+                </Tooltip>
+              ) : null}
             </div>
             {act.propositionIds.length ? (
               <p className="mt-1 line-clamp-2 pl-3 text-[11px] leading-5 text-muted-foreground">
@@ -193,6 +216,57 @@ function SuspicionSection({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   );
 }
 
+/**
+ * 信誉对账 — the client mirror of the reputation line every agent sees in
+ * its observations: world-falsified claims plus commitments settled as
+ * violated. Nobody's trust is edited mechanically; this is the public record.
+ */
+function ReputationSection({ projection, characterNames }: {
+  projection: SocialCausalityProjection | undefined;
+  characterNames: Map<string, string>;
+}): ReactNode {
+  const entries = reputationEntries(projection);
+  if (!entries.length) return null;
+  return (
+    <CollapsibleSection title="信誉对账" count={entries.length}>
+      <ul className="space-y-1.5 text-xs">
+        {entries.map((entry) => (
+          <li key={entry.characterId} className="flex items-center gap-1.5">
+            <span className="shrink-0 font-medium">{characterNames.get(entry.characterId) ?? entry.characterId}</span>
+            <span className="truncate text-muted-foreground">
+              {entry.falsifiedClaims > 0 ? `${entry.falsifiedClaims} 条主张被证伪` : ""}
+              {entry.falsifiedClaims > 0 && entry.brokenCommitments > 0 ? " · " : ""}
+              {entry.brokenCommitments > 0 ? `${entry.brokenCommitments} 次承诺违约` : ""}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </CollapsibleSection>
+  );
+}
+
+export function reputationEntries(projection: SocialCausalityProjection | undefined): Array<{ characterId: string; falsifiedClaims: number; brokenCommitments: number }> {
+  if (!projection) return [];
+  const propositions = new Map(projection.propositions.map((entry) => [entry.propositionId, entry]));
+  const falsified = new Map<string, number>();
+  for (const act of projection.socialActs) {
+    const caught = act.propositionIds.filter((id) => propositions.get(id)?.truthStatus === "false").length;
+    if (caught > 0) falsified.set(act.actorCharacterId, (falsified.get(act.actorCharacterId) ?? 0) + caught);
+  }
+  const broken = new Map<string, number>();
+  for (const commitment of projection.commitments) {
+    if (commitment.state === "violated") {
+      broken.set(commitment.promisorCharacterId, (broken.get(commitment.promisorCharacterId) ?? 0) + 1);
+    }
+  }
+  return [...new Set([...falsified.keys(), ...broken.keys()])]
+    .map((characterId) => ({
+      characterId,
+      falsifiedClaims: falsified.get(characterId) ?? 0,
+      brokenCommitments: broken.get(characterId) ?? 0
+    }));
+}
+
 function BeliefSection({ projection, characterNames, hydrateText }: {
   projection: SocialCausalityProjection | undefined;
   characterNames: Map<string, string>;
@@ -217,6 +291,7 @@ function BeliefSection({ projection, characterNames, hydrateText }: {
             <p className="text-xs font-medium">{characterNames.get(group[0].ownerCharacterId) ?? group[0].ownerCharacterId}</p>
             <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{hydrateText(proposition?.predicate ?? group[0].propositionId)}</p>
             <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              <TruthMark status={proposition?.truthStatus} />
               {group.slice(-4).map((update) => (
                 <Badge key={update.beliefUpdateId} variant="outline" className="rounded-full border-border/70 bg-muted/50 font-mono text-[10px]">
                   {Math.round(update.beforeProbability * 100)}→{Math.round(update.afterProbability * 100)}%
@@ -229,6 +304,27 @@ function BeliefSection({ projection, characterNames, hydrateText }: {
       })}
     </CollapsibleSection>
   );
+}
+
+/**
+ * The world's verdict on a believed proposition once it resolves: 属实 /
+ * 不实 get color; future-contingent and subjective stay quiet; unknown is
+ * the default and stays unmarked — no noise for the common case.
+ */
+function TruthMark({ status }: { status: string | undefined }): ReactNode {
+  if (status === "true") {
+    return <Badge variant="outline" className="rounded-full border-live/40 bg-live/10 font-normal text-live">属实</Badge>;
+  }
+  if (status === "false") {
+    return <Badge variant="outline" className="rounded-full border-suspect/40 bg-suspect/10 font-normal text-suspect">不实</Badge>;
+  }
+  if (status === "future-contingent") {
+    return <Badge variant="outline" className="rounded-full border-border/70 font-normal text-muted-foreground">待兑现</Badge>;
+  }
+  if (status === "subjective") {
+    return <Badge variant="outline" className="rounded-full border-border/70 font-normal text-muted-foreground/80">主观</Badge>;
+  }
+  return null;
 }
 
 function CommitmentSection({ projection, actorName, hydrateText }: {
@@ -334,39 +430,115 @@ function RelationshipSection({ projection, characterNames }: {
 }): ReactNode {
   const relationships = [...(projection?.directedRelationships ?? [])];
   if (!relationships.length) return null;
+  const nameFor = (id: string): string => characterNames.get(id) ?? id;
   return (
     <CollapsibleSection title="有向关系" count={relationships.length} contentClassName="space-y-0">
-      {relationships.map((relationship) => (
-        <DirectedEdge key={relationship.relationshipId} relationship={relationship} nameFor={(id) => characterNames.get(id) ?? id} />
-      ))}
+      <RelationshipGraph relationships={relationships} nameFor={nameFor} />
     </CollapsibleSection>
   );
 }
 
-function DirectedEdge({ relationship, nameFor }: { relationship: DirectedRelationshipState; nameFor: (id: string) => string }): ReactNode {
-  return (
-    <div className="border-b border-border/40 py-2.5 text-xs first:pt-0 last:border-b-0 last:pb-0">
-      <p className="flex items-center gap-1.5 font-medium">
-        <ProvenanceDot source={relationship.provenance.sourceKind} />
-        {nameFor(relationship.ownerCharacterId)}
-        <ArrowRight className="size-3 text-muted-foreground" aria-hidden />
-        {nameFor(relationship.targetCharacterId)}
-      </p>
-      <dl className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-        <Metric label="信任" value={relationship.trust} />
-        <Metric label="好感" value={relationship.affinity} />
-        <Metric label="尊重" value={relationship.respect} />
-        <Metric label="张力" value={relationship.tension} />
-      </dl>
-    </div>
+/**
+ * The relationship map: characters on a circle, one curved arrow per directed
+ * relationship — green for trust ≥ 0.5, red below; thicker means further from
+ * neutral. The exact four dimensions live on each edge's tooltip.
+ */
+function RelationshipGraph({ relationships, nameFor }: {
+  relationships: DirectedRelationshipState[];
+  nameFor: (id: string) => string;
+}): ReactNode {
+  const nodeIds = [...new Set(relationships.flatMap((edge) => [edge.ownerCharacterId, edge.targetCharacterId]))];
+  const size = 320;
+  const center = size / 2;
+  const ringRadius = size / 2 - 44;
+  const nodeRadius = 15;
+  const position = new Map<string, { x: number; y: number }>(
+    nodeIds.map((id, index) => {
+      const angle = (index / nodeIds.length) * Math.PI * 2 - Math.PI / 2;
+      return [id, { x: center + Math.cos(angle) * ringRadius, y: center + Math.sin(angle) * ringRadius }];
+    })
   );
-}
-
-function Metric({ label, value }: { label: string; value: number }): ReactNode {
   return (
-    <div className="flex items-baseline justify-between gap-3">
-      <dt className="shrink-0">{label}</dt>
-      <dd className="nums font-mono tabular-nums text-foreground/80">{value.toFixed(2)}</dd>
+    <div className="pb-1">
+      <svg
+        viewBox={`0 0 ${size} ${size}`}
+        role="img"
+        aria-label="有向关系图：节点为角色，箭头为关系方向；绿色信任高，红色信任低，线条越粗偏离中性越远"
+        className="mx-auto block w-full max-w-[300px]"
+      >
+        <defs>
+          <marker id="rel-arrow-live" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--live)" />
+          </marker>
+          <marker id="rel-arrow-suspect" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--suspect)" />
+          </marker>
+        </defs>
+        {relationships.map((edge) => {
+          const from = position.get(edge.ownerCharacterId);
+          const to = position.get(edge.targetCharacterId);
+          if (!from || !to || from === to) return null;
+          const dx = to.x - from.x;
+          const dy = to.y - from.y;
+          const length = Math.hypot(dx, dy) || 1;
+          const unitX = dx / length;
+          const unitY = dy / length;
+          const startX = from.x + unitX * (nodeRadius + 2);
+          const startY = from.y + unitY * (nodeRadius + 2);
+          const endX = to.x - unitX * (nodeRadius + 8);
+          const endY = to.y - unitY * (nodeRadius + 8);
+          // Curve the pair apart so A→B and B→A never overlap.
+          const midX = (startX + endX) / 2 - (unitY * 12);
+          const midY = (startY + endY) / 2 + (unitX * 12);
+          const path = `M ${startX.toFixed(1)} ${startY.toFixed(1)} Q ${midX.toFixed(1)} ${midY.toFixed(1)} ${endX.toFixed(1)} ${endY.toFixed(1)}`;
+          const positive = edge.trust >= 0.5;
+          const strength = Math.min(1, Math.abs(edge.trust - 0.5) * 2);
+          return (
+            <g key={edge.relationshipId}>
+              <path
+                d={path}
+                fill="none"
+                stroke={positive ? "var(--live)" : "var(--suspect)"}
+                strokeOpacity={0.4 + strength * 0.45}
+                strokeWidth={0.9 + strength * 2.2}
+                strokeLinecap="round"
+                markerEnd={`url(#${positive ? "rel-arrow-live" : "rel-arrow-suspect"})`}
+                pointerEvents="none"
+              />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <path d={path} fill="none" stroke="transparent" strokeWidth={12} pointerEvents="stroke" className="cursor-help" />
+                </TooltipTrigger>
+                <TooltipContent className="text-xs">
+                  <p className="font-medium">{nameFor(edge.ownerCharacterId)} → {nameFor(edge.targetCharacterId)}</p>
+                  <p className="mt-0.5 text-muted-foreground">
+                    信任 {edge.trust.toFixed(2)} · 好感 {edge.affinity.toFixed(2)} · 尊重 {edge.respect.toFixed(2)} · 张力 {edge.tension.toFixed(2)}
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+            </g>
+          );
+        })}
+        {nodeIds.map((id) => {
+          const spot = position.get(id)!;
+          return (
+            <Tooltip key={id}>
+              <TooltipTrigger asChild>
+                <g className="cursor-default">
+                  <circle cx={spot.x} cy={spot.y} r={nodeRadius} className="fill-card stroke-border" strokeWidth={1.2} />
+                  <text x={spot.x} y={spot.y + 3.5} textAnchor="middle" className="fill-foreground font-mono text-[9px] font-medium">
+                    {nameFor(id).slice(0, 2)}
+                  </text>
+                </g>
+              </TooltipTrigger>
+              <TooltipContent className="text-xs">{nameFor(id)}</TooltipContent>
+            </Tooltip>
+          );
+        })}
+      </svg>
+      <p className="mt-1 text-center text-[10px] leading-4 text-muted-foreground/70">
+        绿色箭头 = 信任 ≥ 0.5，红色 = 低于；悬停查看四维数值
+      </p>
     </div>
   );
 }

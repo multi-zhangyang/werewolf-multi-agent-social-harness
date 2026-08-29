@@ -92,8 +92,13 @@ export interface DiscussionSnapshot {
   spokeCounts: Record<string, number>;
 }
 
-/** Generic interrogative markers — language surface, not game vocabulary. */
-const QUESTION_HINT = /？|\?|吗|呢|吧|怎么|为什么|凭什么|谁/;
+/**
+ * Generic interrogative markers — language surface, not game vocabulary.
+ * 吧 is deliberately excluded: it marks suggestions/assumptions, not
+ * questions, and it ends most Chinese statements, so it would pressure the
+ * whole table on nearly every message.
+ */
+const QUESTION_HINT = /？|\?|吗|呢|怎么|为什么|凭什么|谁/;
 
 const SIGNAL_URGENCY: Record<ConversationSignal["kind"], number> = {
   question: 1.2,

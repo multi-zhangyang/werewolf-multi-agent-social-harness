@@ -389,7 +389,6 @@ export interface AgentMindState {
   beliefs: AgentBelief[];
   relationships: AgentRelationship[];
   memories: AgentMemoryItem[];
-  latestReflection?: string;
   /** Private analyses produced by this agent's own internal cognitive passes. */
   cognitivePasses: AgentCognitivePass[];
   /** Planned strategic deceptions, typed and audience-scoped. */
@@ -456,6 +455,37 @@ export interface WorldAgentSnapshot {
   alive: boolean;
   score?: number;
   observerRole?: string;
+}
+
+/**
+ * Agent-quality signals, computed from the omniscient ledger view. These are
+ * observation aggregates — they never feed back into any agent's context.
+ */
+export interface WorldQualityMetrics {
+  /** Deception lifecycle outcomes per deceiver. */
+  deception: Array<{
+    actorId: string;
+    episodes: number;
+    believed: number;
+    detected: number;
+    repaired: number;
+  }>;
+  /**
+   * Belief calibration: mean Brier score of each actor's latest stance on
+   * propositions the world has resolved (truthStatus true/false). Lower is
+   * better; 0.25 is the always-0.5 baseline.
+   */
+  beliefCalibration: Array<{
+    actorId: string;
+    resolvedBeliefs: number;
+    brier: number;
+  }>;
+  /** Day votes that hit a true wolf; only hidden-role worlds publish this. */
+  voteAccuracy?: Array<{
+    actorId: string;
+    votesCast: number;
+    hits: number;
+  }>;
 }
 
 export type StoryBeatKind =
@@ -884,6 +914,14 @@ export interface SocialWorld {
    * claim semantics omit it.
    */
   extractionHints?(): string;
+  /**
+   * Agent-quality signals from the omniscient ledger view: deception
+   * outcomes per deceiver, belief calibration (Brier) against
+   * world-resolved propositions, and — where the scenario publishes a
+   * vote history with ground-truth roles — vote accuracy. Owner/operator
+   * surface only: it carries ground truth.
+   */
+  qualityMetrics(): WorldQualityMetrics;
   /** Record sidecar-extracted social acts for a persisted message; idempotent per message. */
   recordExtractedSocialActs(messageId: string, declarations: import("./social/contracts").SocialActDeclaration[]): string[];
   /**

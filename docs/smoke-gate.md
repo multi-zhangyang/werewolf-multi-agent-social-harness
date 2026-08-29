@@ -23,7 +23,9 @@ node scripts/demo.mjs werewolf prisoners-dilemma
 
 ```bash
 # 3. 汇总指标（读运行时内存 /api/rooms/:id/metrics，不落盘）
-node scripts/smoke-report.mjs
+#    metrics 端点携带 ground truth（真实角色、已裁决信念），需要鉴权：
+#    设置 OPERATOR_TOKEN=$SOCIETY_OPERATOR_TOKEN（或用某房间的 owner token 走 ROOM_TOKEN）
+OPERATOR_TOKEN=... node scripts/smoke-report.mjs
 ```
 
 ## 报告里看什么
@@ -33,7 +35,11 @@ node scripts/smoke-report.mjs
 - **上下文压力**：level 分布与峰值 pressureRatio；
 - **Provider 延迟**：成功 turn 墙钟耗时的 p50 / p95；
 - **承诺对账**：建立数与 fulfilled / violated / void 分布；
-- **社会行为提取**：按来源分布（explicit-tool / model-extracted）与提取失败计数。
+- **社会行为提取**：按来源分布（explicit-tool / model-extracted）与提取失败计数；
+- **Agent 质量（全知视角）**：每个 agent 的欺骗结局（被信/被识破）、信念校准
+  （对已裁决命题的 Brier 分，越低越好，0.25 = 永远说 50% 的基线）、
+  投票命中率（狼人杀：投中真狼的票数）——这些衡量"演得好不好"，
+  与合规指标衡量"协议对不对"互补。
 
 ## 人工抽检与结果记录
 

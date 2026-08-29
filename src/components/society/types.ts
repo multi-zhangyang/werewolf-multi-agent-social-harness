@@ -39,6 +39,20 @@ export interface CreateRoomInput {
   mode: "ai" | "human";
   playerName?: string;
   reasoningEffort: "low" | "medium" | "high" | "xhigh";
+  /** Explicit opt-in: persist the finished game as a local archive file. */
+  archive?: boolean;
+}
+
+/**
+ * Client-side alias of the server's ArchiveMeta — kept out of the server
+ * module so the browser bundle never imports node:fs.
+ */
+export interface ArchiveOption {
+  id: string;
+  scenarioId: string;
+  title: string;
+  createdAt: string;
+  finishedAt: string;
 }
 
 export interface CreateRoomResult {

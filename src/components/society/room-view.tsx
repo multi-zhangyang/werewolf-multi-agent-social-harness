@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowLeft, Eye, Flag, Globe, Lock, Pause, Play, Radio, TriangleAlert } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ArrowLeft, Cast, Eye, Flag, Globe, Lock, Pause, Play, Radio, Share2, TriangleAlert } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
@@ -14,16 +14,16 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { CausalityPanel } from "./causality-panel";
+import { CueBanner, EndgameOverlay, NightRevealBanner, StorylineBar, TensionMeter } from "./cinematics";
 import { LiveStream } from "./live-stream";
 import { ParticipantsRail, type ModelOption } from "./participants-rail";
-import { useRoom, type RoomConnection } from "./use-room";
+import { useArchiveRoom, useRoom, type EffectiveViewer, type RoomConnection, type RoomStreamState, type RoomTension } from "./use-room";
 import { ScenarioIcon } from "./shared";
 
-type ViewerChoice = "public" | "omniscient";
+type ViewerChoice = "public" | "omniscient" | "postgame";
 
 /**
- * Room shell: header + three columns. The center LiveStream is the product;
- * the rails answer "who are these people" and "why did it happen".
+ * Live room: one SSE connection with an owner-promotable viewer seat.
  */
 export function RoomView({ roomId, token, onBack }: {
   roomId: string;
@@ -37,6 +37,63 @@ export function RoomView({ roomId, token, onBack }: {
   const viewerParam = useMemo<{ mode: ViewerChoice }>(() => ({ mode: requestedMode }), [requestedMode]);
 
   const connection = useRoom(roomId, token, viewerParam);
+  const viewer = connection.viewer;
+
+  // Promote privileged viewers to omniscient exactly once, after the server
+  // reports what this connection may actually see.
+  useEffect(() => {
+    if (autoPromoted || !viewer?.privileged || viewer.mode !== "public") return;
+    setAutoPromoted(true);
+    setRequestedMode("omniscient");
+  }, [viewer, autoPromoted]);
+
+  return (
+    <RoomShell
+      connection={connection}
+      requestedMode={requestedMode}
+      onModeChange={setRequestedMode}
+      onBack={onBack}
+      interactive
+      routePrefix="rooms"
+      routeId={roomId}
+    />
+  );
+}
+
+/**
+ * An archived, finished game: the same shell over a read-only connection —
+ * no SSE, no controls; the reveal and the static replay come from the
+ * archive file, so the full postgame experience survives a restart.
+ */
+export function ArchiveRoomView({ archiveId, onBack }: { archiveId: string; onBack: () => void }): ReactNode {
+  const connection = useArchiveRoom(archiveId);
+  return (
+    <RoomShell
+      connection={connection}
+      requestedMode="postgame"
+      onModeChange={() => undefined}
+      onBack={onBack}
+      interactive={false}
+      routePrefix="archives"
+      routeId={archiveId}
+    />
+  );
+}
+
+/**
+ * Room shell: header + three columns. The center LiveStream is the product;
+ * the rails answer "who are these people" and "why did it happen".
+ */
+function RoomShell({ connection, requestedMode, onModeChange, onBack, interactive, routePrefix, routeId }: {
+  connection: RoomConnection;
+  requestedMode: ViewerChoice;
+  onModeChange: (mode: ViewerChoice) => void;
+  onBack: () => void;
+  /** Live rooms offer mode switching and controls; archives are read-only. */
+  interactive: boolean;
+  routePrefix: "rooms" | "archives";
+  routeId: string;
+}): ReactNode {
   const { room, viewer, connection: link, stream } = connection;
 
   const [scenarioCatalog, setScenarioCatalog] = useState<ScenarioSummary[]>([]);
@@ -53,14 +110,6 @@ export function RoomView({ roomId, token, onBack }: {
     return () => { cancelled = true; };
   }, []);
 
-  // Promote privileged viewers to omniscient exactly once, after the server
-  // reports what this connection may actually see.
-  useEffect(() => {
-    if (autoPromoted || !viewer?.privileged || viewer.mode !== "public") return;
-    setAutoPromoted(true);
-    setRequestedMode("omniscient");
-  }, [viewer, autoPromoted]);
-
   const scenario = useMemo(
     () => scenarioCatalog.find((entry) => entry.id === room?.scenarioId),
     [scenarioCatalog, room?.scenarioId]
@@ -70,6 +119,17 @@ export function RoomView({ roomId, token, onBack }: {
     const seeds = new Map((room?.participants ?? []).map((participant) => [participant.profile.id, participant.profile.characterId]));
     return (actorId: string): string | undefined => seeds.get(actorId);
   }, [room?.participants]);
+
+  const finished = room?.world.status === "finished" || room?.status === "finished";
+
+  // The reveal screen owns the stage when a game ends; the viewer can always
+  // drop into the transcript below, or bring the reveal back from the strip.
+  const [endgameDismissed, setEndgameDismissed] = useState(false);
+  const roomIdRef = useRef(room?.id);
+  if (roomIdRef.current !== room?.id) {
+    roomIdRef.current = room?.id;
+    if (endgameDismissed) setEndgameDismissed(false);
+  }
 
   if (!room) {
     return (
@@ -84,7 +144,7 @@ export function RoomView({ roomId, token, onBack }: {
   }
 
   const world = room.world;
-  const canControl = Boolean(viewer?.privileged);
+  const canControl = interactive && Boolean(viewer?.privileged);
   const paused = room.status === "paused";
 
   return (
@@ -106,17 +166,73 @@ export function RoomView({ roomId, token, onBack }: {
         {scenario && scenario.name !== room.title ? <Badge variant="outline" className="hidden shrink-0 text-[10px] sm:inline-flex">{scenario.name}</Badge> : null}
 
         <div className="ml-auto flex items-center gap-1.5">
+          {interactive ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8"
+                  aria-label="打开主播纯流窗口"
+                  onClick={() => {
+                    window.open(
+                      `#/caster/${encodeURIComponent(routeId)}`,
+                      "society-caster",
+                      "popup=yes,width=640,height=960"
+                    );
+                  }}
+                >
+                  <Cast className="size-4" aria-hidden />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>弹出无剧透纯流窗口 — 直播采集用</TooltipContent>
+            </Tooltip>
+          ) : null}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                aria-label={interactive ? "分享观战链接" : "分享复盘链接"}
+                onClick={() => {
+                  const url = `${window.location.origin}${window.location.pathname}#/${routePrefix}/${encodeURIComponent(routeId)}`;
+                  void navigator.clipboard?.writeText(url)
+                    .then(() => toast(interactive ? "观战链接已复制——公开视角无需凭证" : "复盘链接已复制"))
+                    .catch(() => toast.error("复制失败，请手动复制地址栏链接"));
+                }}
+              >
+                <Share2 className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{interactive ? "复制观战链接" : "复制复盘链接"}</TooltipContent>
+          </Tooltip>
           <ViewerBadge mode={viewer?.mode ?? "public"} privileged={viewer?.privileged === true} />
-          {viewer?.privileged ? (
-            <Select value={requestedMode} onValueChange={(value) => setRequestedMode(value as ViewerChoice)}>
+          {interactive && viewer?.privileged ? (
+            <Select value={requestedMode} onValueChange={(value) => onModeChange(value as ViewerChoice)}>
               <SelectTrigger size="sm" className="w-28 text-xs" aria-label="切换视角">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="omniscient">全知直播</SelectItem>
                 <SelectItem value="public">公开视角</SelectItem>
+                {finished ? <SelectItem value="postgame">赛后复盘</SelectItem> : null}
               </SelectContent>
             </Select>
+          ) : interactive && finished ? (
+            // Postgame reveals the world to everyone once a game ends; minds
+            // stay behind owner permission server-side. Anonymous spectators
+            // get a plain toggle instead of the privileged seat's select.
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 px-2.5 text-xs"
+              aria-pressed={requestedMode === "postgame"}
+              onClick={() => onModeChange(requestedMode === "postgame" ? "public" : "postgame")}
+            >
+              <Radio className="size-3.5" aria-hidden />
+              {requestedMode === "postgame" ? "返回公开视角" : "赛后复盘"}
+            </Button>
           ) : null}
           {canControl ? (
             <Button
@@ -144,7 +260,16 @@ export function RoomView({ roomId, token, onBack }: {
 
       <main className="flex min-h-0 flex-1 flex-col md:hidden">
         <div className="min-h-0 flex-1">
-          <LiveStream room={room} turns={stream.turns} viewer={viewer} avatarSeedFor={avatarSeedFor} />
+          <CenterColumn
+            room={room}
+            stream={stream}
+            viewer={viewer}
+            finished={Boolean(finished)}
+            endgameDismissed={endgameDismissed}
+            onDismissEndgame={() => setEndgameDismissed(true)}
+            onRevealEndgame={() => setEndgameDismissed(false)}
+            avatarSeedFor={avatarSeedFor}
+          />
         </div>
         <MobileRails
           room={room}
@@ -169,16 +294,17 @@ export function RoomView({ roomId, token, onBack }: {
           </ResizablePanel>
           <ResizableHandle withHandle />
           <ResizablePanel defaultSize="58" minSize="40">
-            <div className="flex h-full min-h-0 flex-col">
-              <PhaseStrip room={room} sealed={stream.turns.some((turn) => !turn.completedAt && turn.sealed)} />
-              <LiveStream
-                room={room}
-                turns={stream.turns}
-                viewer={viewer}
-                onSubmitAction={room.player ? connection.submitAction : undefined}
-                avatarSeedFor={avatarSeedFor}
-              />
-            </div>
+            <CenterColumn
+              room={room}
+              stream={stream}
+              viewer={viewer}
+              finished={Boolean(finished)}
+              endgameDismissed={endgameDismissed}
+              onDismissEndgame={() => setEndgameDismissed(true)}
+              onRevealEndgame={() => setEndgameDismissed(false)}
+              onSubmitAction={room.player ? connection.submitAction : undefined}
+              avatarSeedFor={avatarSeedFor}
+            />
           </ResizablePanel>
           <ResizableHandle withHandle />
           <ResizablePanel defaultSize="26" minSize="18" maxSize="36">
@@ -195,6 +321,59 @@ async function apiCatalog(): Promise<{ scenarios: ScenarioSummary[]; models: Mod
   if (!response.ok) return { scenarios: [], models: [] };
   const payload = await response.json() as { scenarios?: ScenarioSummary[]; models?: ModelOption[] };
   return { scenarios: payload.scenarios ?? [], models: payload.models ?? [] };
+}
+
+/**
+ * The product column: phase HUD on top, the live stream as the body, with the
+ * director's cue banner floating over it — and, when a game ends, the reveal
+ * screen taking the stage above the transcript. Shared by the live room and
+ * the caster broadcast surface.
+ */
+export function CenterColumn({ room, stream, viewer, finished, endgameDismissed, onDismissEndgame, onRevealEndgame, onSubmitAction, avatarSeedFor }: {
+  room: SocietyRoomSnapshot;
+  stream: RoomStreamState;
+  viewer: EffectiveViewer | null;
+  finished: boolean;
+  endgameDismissed: boolean;
+  onDismissEndgame: () => void;
+  onRevealEndgame: () => void;
+  onSubmitAction?: RoomConnection["submitAction"];
+  avatarSeedFor: (actorId: string) => string | undefined;
+}): ReactNode {
+  const names = useMemo(
+    () => new Map(room.world.agents.map((agent) => [agent.id, agent.displayName])),
+    [room.world.agents]
+  );
+  return (
+    <div className="relative flex h-full min-h-0 flex-col">
+      <PhaseStrip
+        room={room}
+        sealed={stream.turns.some((turn) => !turn.completedAt && turn.sealed)}
+        tension={stream.tension}
+        finished={finished}
+        onRevealEndgame={onRevealEndgame}
+      />
+      <StorylineBar world={room.world} />
+      <div className="relative min-h-0 flex-1">
+        <LiveStream
+          room={room}
+          turns={stream.turns}
+          viewer={viewer}
+          onSubmitAction={onSubmitAction}
+          avatarSeedFor={avatarSeedFor}
+        />
+        {!finished ? (
+          <>
+            <NightRevealBanner world={room.world} />
+            <CueBanner cue={stream.cue} names={names} />
+          </>
+        ) : null}
+        {finished && !endgameDismissed ? (
+          <EndgameOverlay room={room} avatarSeedFor={avatarSeedFor} onDismiss={onDismissEndgame} />
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -267,10 +446,15 @@ function ViewerBadge({ mode, privileged }: { mode: string; privileged: boolean }
   );
 }
 
-/** One-line phase strip replacing the old arena stage. */
-function PhaseStrip({ room, sealed }: { room: SocietyRoomSnapshot; sealed: boolean }): ReactNode {
+/** One-line phase strip: game state on the left, the tension HUD on the right. */
+function PhaseStrip({ room, sealed, tension, finished, onRevealEndgame }: {
+  room: SocietyRoomSnapshot;
+  sealed: boolean;
+  tension: RoomTension | null;
+  finished: boolean;
+  onRevealEndgame: () => void;
+}): ReactNode {
   const world = room.world;
-  const finished = world.status === "finished" || room.status === "finished";
   const speakingAgents = world.agents.filter((agent) => agent.status === "speaking" || agent.status === "thinking" || agent.status === "acting");
   const progress = world.totalTurns > 0 ? Math.min(100, Math.round((world.turn / world.totalTurns) * 100)) : 0;
   return (
@@ -284,10 +468,15 @@ function PhaseStrip({ room, sealed }: { room: SocietyRoomSnapshot; sealed: boole
       </span>
       <Badge variant="outline" className="shrink-0 rounded-full border-border/70 bg-transparent font-normal text-muted-foreground">{world.phase}</Badge>
       {finished ? (
-        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-6 shrink-0 gap-1.5 rounded-full border-warn/30 bg-warn/10 px-2 text-[10px] font-normal text-warn hover:bg-warn/20 hover:text-warn"
+          onClick={onRevealEndgame}
+        >
           <Flag className="size-3" aria-hidden />
-          对局已结束 · 复盘见右侧因果账本
-        </span>
+          终局揭晓
+        </Button>
       ) : room.status === "paused" ? (
         <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
           <Pause className="size-3" aria-hidden />
@@ -303,6 +492,7 @@ function PhaseStrip({ room, sealed }: { room: SocietyRoomSnapshot; sealed: boole
       ) : (
         <span className="shrink-0 text-[10px] text-muted-foreground">等待下一个行动者…</span>
       )}
+      {!finished ? <span className="ml-auto flex shrink-0 items-center"><TensionMeter tension={tension} /></span> : null}
     </div>
   );
 }

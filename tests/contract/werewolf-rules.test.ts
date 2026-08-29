@@ -54,6 +54,20 @@ function skipDiscussion(world: SocialWorldBase): void {
   throw new Error("discussion never ended");
 }
 
+/**
+ * The day vote may leave the eliminated player one last word; the driver
+ * completes it silently (silence is a legitimate last word) so the flow can
+ * advance to the death shot or the night.
+ */
+function passLastWords(world: SocialWorldBase): void {
+  for (let i = 0; i < 3; i += 1) {
+    const activation = world.activation();
+    if (!activation || !activation.id.includes(":lastwords:")) return;
+    world.completeActivation(activation);
+  }
+  throw new Error("last words never ended");
+}
+
 // --- deck composition ---
 check("werewolf decks match their player counts and standard wolf tables", () => {
   const expectedWolves: Record<number, number> = { 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 4, 12: 4 };
@@ -83,6 +97,97 @@ check("werewolf decks match their player counts and standard wolf tables", () =>
   }
 });
 
+// --- last words (遗言): the voted-out player speaks once, publicly ---
+check("a voted-out player gets one public last word, then the night", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  skipDiscussion(world);
+  const vote = world.activation()!;
+  const target = byRole("villager")[0];
+  for (const actor of vote.actorIds) {
+    void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === target ? byRole("villager")[1] : target, reason: "t" });
+  }
+  world.completeActivation(vote);
+  const lastWords = world.activation()!;
+  assert.ok(lastWords && lastWords.id.includes(":lastwords:") && lastWords.actorIds[0] === target,
+    "the eliminated player is owed one last word before anything else");
+  // 遗言 is a public stage: a private attempt is refused.
+  await assert.rejects(
+    () => world.sendMessage({ senderId: target, text: "悄悄告诉你。", channel: "private", recipientIds: [byRole("wolf")[0]] }),
+    /LAST_WORDS_PUBLIC_ONLY/
+  );
+  const message = await world.sendMessage({ senderId: target, text: "我以性命作保：查他。", channel: "public" });
+  assert.ok(message.id, "the last word is a normal public message");
+  world.completeActivation(lastWords);
+  assert.equal(world.snapshot().phase, "夜晚行动", "the night opens after the last word");
+});
+
+// --- tied vote PK (平票 PK): speeches, then a re-vote without the candidates ---
+check("a tied vote opens PK speeches, then a re-vote without the candidates", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  skipDiscussion(world);
+  const vote = world.activation()!;
+  assert.ok(vote);
+  const [a, b] = [byRole("villager")[0], byRole("villager")[1]];
+  const voters = [...vote.actorIds];
+  assert.equal(voters.length % 2, 0, "an even table can tie");
+  for (let index = 0; index < voters.length; index += 1) {
+    void world.performDomainAction(voters[index]!, "cast_day_vote", { targetId: index % 2 === 0 ? a : b, reason: "t" });
+  }
+  world.completeActivation(vote);
+
+  assert.equal(world.snapshot().phase, "平票 PK", "a tied vote opens the PK cycle");
+  const pk = world.activation()!;
+  assert.ok(pk && pk.id.endsWith(":pk"), "the PK activation opens");
+  assert.deepEqual([...pk.actorIds].sort(), [a, b].sort(), "only the tied candidates speak");
+  const outsider = voters.find((id) => id !== a && id !== b)!;
+  await assert.rejects(() => world.sendMessage({ senderId: outsider, text: "我也想说两句。", channel: "public" }), /PK_SPEAKERS_ONLY/,
+    "the audience stays silent during the PK speeches");
+  await world.sendMessage({ senderId: a, text: "我不是狼，我的发言记录可以查。", channel: "public" });
+  world.completeActivation(pk);
+
+  const reVote = world.activation()!;
+  assert.ok(reVote && reVote.id.endsWith(":vote"), "the re-vote opens after the speeches");
+  assert.ok(!reVote.actorIds.includes(a) && !reVote.actorIds.includes(b), "the candidates do not vote");
+  for (const actor of reVote.actorIds) {
+    void world.performDomainAction(actor, "cast_day_vote", { targetId: a, reason: "t" });
+  }
+  world.completeActivation(reVote);
+  passLastWords(world);
+  const after = world.snapshot();
+  assert.ok(!after.agents.find((agent) => agent.id === a)?.alive, "the re-vote eliminates the accused");
+  const history = after.details.history as Array<{ day: number; votes: Record<string, string>; eliminatedId?: string }>;
+  const firstDay = history.filter((record) => record.day === 1);
+  assert.equal(firstDay.length, 1, "the PK re-vote updates the same day record instead of duplicating it");
+  assert.equal(firstDay[0]!.eliminatedId, a, "the merged record carries the final elimination");
+});
+
+check("a second tie eliminates nobody — the PK cycle closes after one round", () => {
+  const { world, byRole } = makeWerewolf(6);
+  skipDiscussion(world);
+  const vote = world.activation()!;
+  assert.ok(vote);
+  const [a, b] = [byRole("villager")[0], byRole("villager")[1]];
+  const voters = [...vote.actorIds];
+  for (let index = 0; index < voters.length; index += 1) {
+    void world.performDomainAction(voters[index]!, "cast_day_vote", { targetId: index % 2 === 0 ? a : b, reason: "t" });
+  }
+  world.completeActivation(vote);
+  const pk = world.activation()!;
+  assert.ok(pk && pk.id.endsWith(":pk"));
+  world.completeActivation(pk);
+  const reVote = world.activation()!;
+  assert.ok(reVote && reVote.id.endsWith(":vote"));
+  // The table ties AGAIN: the day closes with nobody eliminated.
+  const reVoters = [...reVote.actorIds];
+  for (let index = 0; index < reVoters.length; index += 1) {
+    void world.performDomainAction(reVoters[index]!, "cast_day_vote", { targetId: index % 2 === 0 ? a : b, reason: "t" });
+  }
+  world.completeActivation(reVote);
+  const after = world.snapshot();
+  assert.ok(after.agents.every((agent) => agent.alive), "a second tie eliminates nobody");
+  assert.equal(after.phase, "夜晚行动", "the day closes and the night opens");
+});
+
 // --- day flow: discussion ends, votes eliminate ---
 check("day vote eliminates the plurality target and reveals the role", () => {
   const { world, byRole } = makeWerewolf(8);
@@ -94,6 +199,7 @@ check("day vote eliminates the plurality target and reveals the role", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === target ? byRole("villager")[1] : target, reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const after = world.snapshot();
   assert.ok(!after.agents.find((agent) => agent.id === target)?.alive, "voted target is eliminated");
   assert.equal(after.phase, "夜晚行动", "phase advances to night");
@@ -128,6 +234,7 @@ function voteOut(world: SocialWorldBase, target: string, byRole: (role: string) 
     void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === target ? byRole("villager")[0] : target, reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
 }
 
 check("a wolf's extracted good-camp claim is detected at the vote-out reveal", async () => {
@@ -165,6 +272,48 @@ check("a wolf's explicit villager claim is detected at the vote-out reveal", asy
   assert.ok(episode.contradictionEventIds.length >= 1, "the reveal event contradicts the claim");
 });
 
+// --- §28 quality metrics: deception outcomes, vote accuracy, belief calibration ---
+check("quality metrics score the vote, the lies and the beliefs against ground truth", async () => {
+  const { world, byRole } = makeWerewolf(8);
+  const wolf = byRole("wolf")[0];
+  const villager = byRole("villager")[0];
+  // The wolf falsely claims the good camp; the villager mostly believes it.
+  const message = await world.sendMessage({ senderId: wolf, channel: "public", text: "我是好人阵营的，别投我。" });
+  world.recordExtractedSocialActs(message.id, [{
+    kind: "assertion",
+    proposition: { kind: "identity", subjectId: wolf, predicate: "has-team", object: "good" }
+  }]);
+  world.recordBeliefUpdate(villager, {
+    subjectId: wolf,
+    proposition: "has-team",
+    kind: "identity",
+    object: "good",
+    probability: 0.8,
+    confidence: 0.7,
+    source: "他自称好人",
+    sourceMessageIds: [message.id],
+    supports: true
+  });
+  voteOut(world, wolf, byRole);
+
+  const quality = (world as SocialWorldBase).qualityMetrics();
+  // Vote accuracy: everyone who voted the true wolf has one hit.
+  const voter = quality.voteAccuracy?.find((entry) => entry.actorId === villager);
+  assert.ok(voter, "the villager's day vote is scored");
+  assert.equal(voter.votesCast, 1);
+  assert.equal(voter.hits, 1, "voting out the true wolf counts as a hit");
+  // Deception: the revealed false camp claim is one detected episode.
+  const deceiver = quality.deception.find((entry) => entry.actorId === wolf);
+  assert.ok(deceiver, "the wolf's deception outcome is aggregated");
+  assert.equal(deceiver.episodes, 1);
+  assert.equal(deceiver.detected, 1);
+  // Calibration: the villager held p=0.8 on a proposition the reveal falsified.
+  const calibration = quality.beliefCalibration.find((entry) => entry.actorId === villager);
+  assert.ok(calibration, "the villager's resolved beliefs are scored");
+  assert.equal(calibration.resolvedBeliefs, 1);
+  assert.equal(calibration.brier, 0.64, "p=0.8 on a falsified claim is Brier (0.8-0)² = 0.64");
+});
+
 // --- idiot rules ---
 check("idiot voted out flips, survives and loses the vote", async () => {
   const { world, byRole } = makeWerewolf(10);
@@ -177,6 +326,7 @@ check("idiot voted out flips, survives and loses the vote", async () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === idiot ? byRole("villager")[0] : idiot, reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const after = world.snapshot();
   assert.ok(after.agents.find((agent) => agent.id === idiot)?.alive, "the idiot survives the vote-out");
   assert.ok(after.log.some((entry) => /白痴身份/.test(entry.text)), "the flip is logged");
@@ -196,6 +346,7 @@ check("a second vote-out eliminates the revealed idiot", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === idiot ? byRole("villager")[0] : idiot, reason: "t" });
   }
   world.completeActivation(vote1);
+  passLastWords(world);
   // A quiet night: wolves kill one villager, witch passes, guard skips.
   const night = world.activation()!;
   for (const wolf of [...byRole("wolf"), ...byRole("wolf-king"), ...byRole("nightmare")]) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("villager")[0], reason: "t" });
@@ -212,6 +363,7 @@ check("a second vote-out eliminates the revealed idiot", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: idiot, reason: "t" });
   }
   world.completeActivation(vote2);
+  passLastWords(world);
   const after = world.snapshot();
   assert.ok(!after.agents.find((agent) => agent.id === idiot)?.alive, "the revealed idiot dies on the second vote-out");
 });
@@ -260,6 +412,7 @@ check("a knight who passes never gets a second duel", () => {
   const villager = byRole("villager")[0];
   for (const actor of vote.actorIds) void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === villager ? byRole("seer")[0] : villager, reason: "t" });
   world.completeActivation(vote);
+  passLastWords(world);
   const night = world.activation()!;
   const guard = byRole("guard")[0];
   for (const wolf of [...byRole("wolf"), ...byRole("wolf-king"), ...byRole("hidden-wolf"), ...byRole("white-wolf-king")]) void world.performDomainAction(wolf, "choose_night_target", { targetId: guard, reason: "t" });
@@ -281,6 +434,7 @@ check("witch cannot save herself", async () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: byRole("villager")[0], reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const witch = byRole("witch")[0];
   await assert.rejects(
     () => world.performDomainAction(witch, "witch_night_choice", { saveTargetId: witch }),
@@ -296,6 +450,7 @@ check("witch cannot use both potions in the same night", async () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: byRole("villager")[0], reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const witch = byRole("witch")[0];
   await assert.rejects(
     () => world.performDomainAction(witch, "witch_night_choice", { saveTargetId: byRole("villager")[1], poisonTargetId: byRole("seer")[0] }),
@@ -312,6 +467,7 @@ check("guard blocks the wolf kill", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: byRole("villager")[0], reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const night = world.activation()!;
   const wolves = byRole("wolf");
   const victim = byRole("hunter")[0];
@@ -333,6 +489,7 @@ check("同守同救: guard + antidote on the same victim still kills", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: byRole("villager")[0], reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const night = world.activation()!;
   const victim = byRole("hunter")[0];
   for (const wolf of byRole("wolf")) void world.performDomainAction(wolf, "choose_night_target", { targetId: victim, reason: "t" });
@@ -353,6 +510,7 @@ check("witch antidote saves the wolf victim", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: byRole("villager")[0], reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const night = world.activation()!;
   const victim = byRole("seer")[0];
   for (const wolf of byRole("wolf")) void world.performDomainAction(wolf, "choose_night_target", { targetId: victim, reason: "t" });
@@ -372,6 +530,7 @@ check("poisoned hunter dies without a shot", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: byRole("villager")[0], reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const night = world.activation()!;
   const hunter = byRole("hunter")[0];
   for (const wolf of byRole("wolf")) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("villager")[1], reason: "t" });
@@ -392,6 +551,7 @@ check("hunter killed by wolves gets a death shot that eliminates", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: byRole("villager")[0], reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const night = world.activation()!;
   const hunter = byRole("hunter")[0];
   for (const wolf of byRole("wolf")) void world.performDomainAction(wolf, "choose_night_target", { targetId: hunter, reason: "t" });
@@ -416,6 +576,7 @@ check("hunter voted out gets a day shot and the phase then advances", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: hunter, reason: "t" });
   }
   world.completeActivation(vote!);
+  passLastWords(world);
   const after = world.snapshot();
   assert.ok(!after.agents.find((agent) => agent.id === hunter)?.alive, "hunter is eliminated by vote");
   const shot = world.activation()!;
@@ -437,6 +598,7 @@ check("jester voted out wins solo and the game continues", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: jester, reason: "t" });
   }
   world.completeActivation(vote!);
+  passLastWords(world);
   const after = world.snapshot();
   assert.equal(after.status, "running", "the game continues after a jester win");
   assert.equal((after.details.jesterWon), true, "the solo win is recorded");
@@ -460,6 +622,7 @@ check("white wolf king explodes on vote-out and takes its voters", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: voters.includes(actor) ? wwk : byRole("villager")[0], reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const after = world.snapshot();
   assert.ok(!after.agents.find((agent) => agent.id === wwk)?.alive, "the white wolf king is voted out");
   for (const voter of voters) {
@@ -485,6 +648,7 @@ check("white wolf king explosion silences death skills", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: boomVoters.includes(actor) ? wwk : byRole("seer")[0], reason: "t" });
   }
   world.completeActivation(vote);
+  passLastWords(world);
   const next = world.activation();
   assert.ok(!next?.id.includes(":shot:"), "no hunter shot after being exploded");
 });
@@ -498,6 +662,7 @@ check("nightmare curse blocks the next day's vote", async () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === villager ? byRole("seer")[0] : villager, reason: "t" });
   }
   world.completeActivation(vote1);
+  passLastWords(world);
   const night = world.activation()!;
   const nightmare = byRole("nightmare")[0];
   for (const wolf of [...byRole("wolf"), ...byRole("wolf-king"), nightmare]) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("seer")[0], reason: "t" });
@@ -527,6 +692,7 @@ check("wolf beauty's charmed companion dies with her on vote-out", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === target ? byRole("seer")[0] : target, reason: "t" });
   }
   world.completeActivation(vote1);
+  passLastWords(world);
   const night = world.activation()!;
   const beauty = byRole("wolf-beauty")[0];
   for (const wolf of [...byRole("wolf"), ...byRole("hidden-wolf"), ...byRole("wolf-king"), beauty]) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("seer")[0], reason: "t" });
@@ -544,6 +710,7 @@ check("wolf beauty's charmed companion dies with her on vote-out", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === beauty ? guard : beauty, reason: "t" });
   }
   world.completeActivation(vote2);
+  passLastWords(world);
   const after = world.snapshot();
   assert.ok(!after.agents.find((agent) => agent.id === beauty)?.alive, "the wolf beauty is voted out");
   assert.ok(!after.agents.find((agent) => agent.id === guard)?.alive, "the charmed guard dies with her");
@@ -559,6 +726,7 @@ check("spirit seer reads a dead player's true role", async () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: actor === target ? byRole("seer")[0] : target, reason: "t" });
   }
   world.completeActivation(vote1);
+  passLastWords(world);
   const night = world.activation()!;
   const spirit = byRole("spirit-seer")[0];
   for (const wolf of [...byRole("wolf"), ...byRole("hidden-wolf"), ...byRole("wolf-king")]) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("witch")[0], reason: "t" });
@@ -584,6 +752,7 @@ check("wolves win at parity after a night kill", () => {
     void world.performDomainAction(actor, "cast_day_vote", { targetId: byRole("villager")[0], reason: "t" });
   }
   world.completeActivation(vote!);
+  passLastWords(world);
   const night = world.activation()!;
   for (const wolf of byRole("wolf")) void world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("seer")[0], reason: "t" });
   void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
@@ -595,8 +764,16 @@ check("wolves win at parity after a night kill", () => {
 });
 
 // --- avalon official tables ---
-check("avalon decks match the official good/evil split", () => {
-  const expected: Record<number, [number, number]> = { 5: [3, 2], 6: [4, 2], 7: [4, 3], 8: [5, 3], 9: [6, 3], 10: [6, 4] };
+check("avalon teaches the extractor its allegiance vocabulary", () => {
+  const world = createWorld({ roomId: "r-av-hints", scenarioId: "avalon", profiles: profiles(5), rounds: 3 });
+  const hints = (world as unknown as { extractionHints?: () => string }).extractionHints?.();
+  assert.ok(hints, "avalon publishes extraction hints");
+  assert.ok(hints.includes("loyal") && hints.includes("evil"), "the hints use the camp vocabulary the reveal reconciliation checks");
+  assert.ok(hints.includes("梅林"), "merlin-style claims are covered");
+});
+
+// --- avalon tables ---
+check("avalon decks match the official good/evil split", () => {  const expected: Record<number, [number, number]> = { 5: [3, 2], 6: [4, 2], 7: [4, 3], 8: [5, 3], 9: [6, 3], 10: [6, 4] };
   for (const count of [5, 6, 7, 8, 9, 10]) {
     const deck = avalonDeck(count);
     assert.equal(deck.length, count, `${count}P deck size`);

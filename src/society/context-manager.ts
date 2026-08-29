@@ -346,7 +346,8 @@ export class SessionContextManager {
           "2) accusations, defenses, and who said what about whom;",
           "3) relationships, grudges, debts and trust changes;",
           "4) the current situation, roles, and open questions;",
-          "5) this participant's goals, beliefs and plans.",
+          "5) this participant's goals, beliefs and plans;",
+          "6) this participant's own recorded reflections and strategic notes (reflect_on_social_situation / plan_social_strategy outputs) — their conclusions and any unfinished plan must survive compression.",
           pinned.length
             ? `These pinned facts are already preserved verbatim elsewhere — do not contradict them:\n${pinned.map((fact) => `- ${fact}`).join("\n")}`
             : "",
@@ -416,7 +417,7 @@ function fallbackExtraction(items: AgentInputItem[]): string {
   const lines = renderItems(items).split("\n").filter(Boolean);
   const kept = [
     ...lines.filter((line) => /(承诺|答应|保证|约定|发誓|purpose|promise|commit|pledge|vow)/i.test(line)),
-    ...lines.filter((line) => /(指控|怀疑|投票|accommodation|accus|vote)/i.test(line))
+    ...lines.filter((line) => /(指控|怀疑|投票|背叛|accuse|suspicion|accus|betray|vote)/i.test(line))
   ];
   const unique = [...new Set(kept)].slice(0, 40);
   return unique.length

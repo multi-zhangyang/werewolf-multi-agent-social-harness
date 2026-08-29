@@ -106,8 +106,9 @@ export const EMPTY_STREAM_STATE: RoomStreamState = {
 const TURN_OUTPUT_CAP = 8_000;
 /** Generous bound only for pathological streams; normal reasoning never hits it. */
 const TURN_REASONING_CAP = 120_000;
-const TURN_HISTORY_CAP = 14;
-const TIMELINE_CAP = 160;
+/** Retained completed turns — the in-page rewatch window for long games. */
+const TURN_HISTORY_CAP = 60;
+const TIMELINE_CAP = 400;
 
 export const COMPLETED_STATUSES: ReadonlySet<string> = new Set(["idle", "finished", "error"]);
 
@@ -368,11 +369,20 @@ interface SnapshotWithViewer extends SocietyRoomSnapshot {
   viewer?: EffectiveViewer;
 }
 
+/** Optional connection behavior — the caster broadcast surface uses `silent`. */
+export interface UseRoomOptions {
+  /** Suppress runtime-notice toasts: privileged viewers' operational noise
+   * (model degradations, persistence state) must never hit a broadcast page. */
+  silentNotices?: boolean;
+}
+
 export function useRoom(
   roomId: string | undefined,
   token?: string,
-  viewer: { mode: SpectatorModeLike; agentId?: string } = { mode: "public" }
+  viewer: { mode: SpectatorModeLike; agentId?: string } = { mode: "public" },
+  options: UseRoomOptions = {}
 ): RoomConnection {
+  const { silentNotices = false } = options;
   const [room, setRoom] = useState<SocietyRoomSnapshot | null>(null);
   const [effectiveViewer, setEffectiveViewer] = useState<EffectiveViewer | null>(null);
   const [connection, setConnection] = useState<RoomConnection["connection"]>("closed");
@@ -499,9 +509,11 @@ export function useRoom(
     };
   }, [roomId, token, viewer.mode, viewer.agentId]);
 
-  // Surface runtime notices as toasts exactly once each.
+  // Surface runtime notices as toasts exactly once each — unless the page is a
+  // broadcast surface that must stay chrome-free.
   const lastNotifiedRef = useRef(0);
   useEffect(() => {
+    if (silentNotices) return;
     const pending = stream.notices.slice(lastNotifiedRef.current);
     lastNotifiedRef.current = stream.notices.length;
     for (const notice of pending) {
@@ -510,7 +522,7 @@ export function useRoom(
       else if (notice.severity === "warning") toast.warning(notice.message, payload);
       else toast.info(notice.message, payload);
     }
-  }, [stream.notices]);
+  }, [stream.notices, silentNotices]);
 
   const pause = useCallback(async (): Promise<void> => {
     await postControl(`/api/rooms/${encodeURIComponent(roomId ?? "")}/pause`, token, setError);
@@ -588,6 +600,69 @@ function resetStaleTurns(state: RoomStreamState, snapshot: SocietyRoomSnapshot):
         : turn
     )
   };
+}
+
+/**
+ * A finished, archived game as a read-only RoomConnection. The archive's
+ * envelopes are reduced through the same pure reducer the live stream uses,
+ * so the presentation layer (turns, tension, cues, timeline) is rebuilt
+ * statically — no SSE, no server room, no writes.
+ */
+export function useArchiveRoom(archiveId: string | undefined): RoomConnection {
+  const [room, setRoom] = useState<SocietyRoomSnapshot | null>(null);
+  const [viewer, setViewer] = useState<EffectiveViewer | null>(null);
+  const [error, setError] = useState<string>();
+  const [stream, setStream] = useState<RoomStreamState>(EMPTY_STREAM_STATE);
+
+  useEffect(() => {
+    if (!archiveId) return;
+    let cancelled = false;
+    setRoom(null);
+    setViewer(null);
+    setError(undefined);
+    setStream(EMPTY_STREAM_STATE);
+    apiFetch(`/api/archives/${encodeURIComponent(archiveId)}`)
+      .then(async (response) => {
+        const payload = await response.json().catch(() => undefined) as
+          | { viewer?: { privileged?: boolean }; room?: SocietyRoomSnapshot; envelopes?: SocietyRoomEventEnvelope[]; message?: string }
+          | undefined;
+        if (!response.ok || !payload?.room) {
+          throw new Error(payload?.message ?? `HTTP ${response.status}`);
+        }
+        if (cancelled) return;
+        setRoom(payload.room);
+        setViewer({ mode: "postgame", privileged: payload.viewer?.privileged === true });
+        let state = EMPTY_STREAM_STATE;
+        for (const envelope of payload.envelopes ?? []) {
+          state = ingestEnvelope(state, envelope);
+        }
+        setStream(state);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => { cancelled = true; };
+  }, [archiveId]);
+
+  const readonlyAction = useCallback(async (): Promise<void> => {
+    toast.info("已归档的对局是只读的。");
+  }, []);
+
+  return useMemo(
+    () => ({
+      room,
+      viewer,
+      connection: room ? "closed" : "reconnecting",
+      error,
+      stream,
+      pause: readonlyAction,
+      resume: readonlyAction,
+      toggleAgentPause: readonlyAction,
+      switchAgentModel: readonlyAction,
+      submitAction: readonlyAction
+    }),
+    [room, viewer, error, stream, readonlyAction]
+  );
 }
 
 async function postControl(path: string, token: string | undefined, setError: React.Dispatch<React.SetStateAction<string | undefined>>): Promise<void> {

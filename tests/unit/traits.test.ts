@@ -1,7 +1,7 @@
 /**
  * Trait-adaptation checks: pins the bounded slow-personality-drift engine —
- * step size, cap, decay, effective computation, season-boundary erosion and
- * baseline immutability. No model calls, no network.
+ * step size, cap, decay, effective computation and baseline immutability.
+ * No model calls, no network.
  */
 import { strict as assert } from "node:assert";
 import { it } from "vitest";
@@ -9,7 +9,6 @@ import {
   ADAPTATION_CAP,
   MAX_ADAPTATION_STEP,
   adaptTraits,
-  decayAcrossSeason,
   effectiveTemperament,
   traitStatesFromTemperament
 } from "../../src/society/traits";
@@ -106,28 +105,11 @@ check("effective temperament applies drift without mutating the baseline profile
   assert.deepEqual(states.openness, { baseline: TEMPERAMENT.openness, adaptation: 0, effective: TEMPERAMENT.openness, lastCauses: [], updatedAtTurn: 0 }, "undrifted traits stay untouched");
 });
 
-check("season-boundary decay erodes drift partway and clears tiny remnants", () => {
-  let states = traitStatesFromTemperament(TEMPERAMENT, 0);
-  states = adaptTraits({ temperament: TEMPERAMENT, events: [event("accused", 1)], turn: 1, current: states }).states;
-  const raised = states.neuroticism.adaptation;
-  const carried = decayAcrossSeason(states)!;
-  assert.ok(carried.neuroticism.adaptation > 0, "drift survives one game boundary");
-  assert.ok(carried.neuroticism.adaptation < raised, "but erodes while away from the table");
-  assert.equal(carried.neuroticism.effective, carried.neuroticism.baseline + carried.neuroticism.adaptation, "effective stays consistent");
-  assert.equal(carried.neuroticism.lastCauses.length, states.neuroticism.lastCauses.length, "causes are preserved");
-  // Tiny drift is cleared entirely.
-  states.neuroticism = { ...states.neuroticism, adaptation: 0.002 };
-  const cleared = decayAcrossSeason(states)!;
-  assert.equal(cleared.neuroticism.adaptation, 0);
-  assert.equal(cleared.neuroticism.effective, cleared.neuroticism.baseline);
-});
-
 check("missing temperament and missing states degrade to no-ops", () => {
   const empty = adaptTraits({ temperament: undefined, events: [event("accused", 1)], turn: 1 });
   assert.equal(Object.keys(empty.states).length, 0);
   assert.equal(empty.moved.length, 0);
   assert.equal(effectiveTemperament(undefined, undefined), undefined);
-  assert.equal(decayAcrossSeason(undefined), undefined);
 });
 
 check("event types outside the adaptation rules never move traits", () => {

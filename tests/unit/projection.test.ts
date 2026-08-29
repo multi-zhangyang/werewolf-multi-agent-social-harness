@@ -79,6 +79,10 @@ const cue: AgentRuntimeEvent = { type: "cinematic.cue", roomId: "r", cue: { id: 
 const omniscient: SpectatorViewer = { mode: "omniscient" };
 const publicView: SpectatorViewer = { mode: "public" };
 const pov01: SpectatorViewer = { mode: "agent-pov", agentId: "agent-01" };
+const privilegedPublic: SpectatorViewer = { mode: "public", privileged: true };
+const postgameView: SpectatorViewer = { mode: "postgame" };
+const notice: AgentRuntimeEvent = { type: "runtime.notice", roomId: "r", actorId: "agent-01", category: "reasoning", severity: "warning", code: "TEST", message: "m", at };
+const sealedDelta: AgentRuntimeEvent = { type: "agent.delta", roomId: "r", actorId: "agent-01", delta: "hidden choice draft", sealed: true, at };
 
 check("omniscient passes everything through unchanged", () => {
   // Legacy raw provider reasoning is never viewer-facing (§12), even for the
@@ -128,6 +132,32 @@ check("agent-pov message boundary: public, own, addressed-to — nothing else", 
   assert.equal(projectEventFor(message("agent-02", "private", ["agent-01"]), pov01)?.type, "agent.message", "mail addressed to the watched agent visible");
   assert.equal(projectEventFor(message("agent-02", "private", ["agent-03"]), pov01), undefined, "others' private exchanges hidden");
   assert.equal(projectEventFor(message("agent-02", "team", []), pov01), undefined, "team channel hidden from non-recipients");
+});
+
+check("caster broadcast seat: privileged credentials riding a public request never widen the boundary", () => {
+  // The caster window is popped out from the operator's browser, so it rides
+  // the stored owner token / cookie. The granted mode — not the credential —
+  // is what filters the stream: everything the anonymous public seat cannot
+  // see, the authenticated caster seat cannot see either.
+  assert.equal(projectEventFor(thought, privilegedPublic), undefined, "thought-beats stay private");
+  assert.equal(projectEventFor(pressure, privilegedPublic), undefined, "context pressure stays private");
+  assert.equal(projectEventFor(sealedDelta, privilegedPublic), undefined, "sealed token streams never cross the public seat");
+  assert.equal(projectEventFor({ ...tool, sealed: true }, privilegedPublic), undefined, "sealed-phase tools stay hidden");
+  const pulse = projectEventFor(tool, privilegedPublic);
+  assert.ok(pulse && pulse.type === "agent.tool", "open-phase tools remain an anonymous activity pulse");
+  assert.equal((pulse as { toolName: string }).toolName, "");
+  assert.equal(projectEventFor(worldAction, privilegedPublic), undefined, "hidden world actions stay hidden");
+  // Runtime notices are the one privilege-visible family in public mode —
+  // operational noise the caster view suppresses client-side (silentNotices).
+  assert.equal(projectEventFor(notice, privilegedPublic)?.type, "runtime.notice");
+  assert.equal(projectEventFor(notice, publicView), undefined, "anonymous public seat gets no notices");
+});
+
+check("caster reveal: postgame flows the full transcript but never private minds", () => {
+  assert.equal(projectEventFor(thought, postgameView), undefined, "cognition stays hidden even postgame");
+  assert.equal(projectEventFor(pressure, postgameView), undefined);
+  assert.equal(projectEventFor(sealedDelta, postgameView), undefined, "sealed streams stay sealed in replay");
+  assert.equal(projectEventFor(cue, postgameView), cue, "cues flow for the reveal");
 });
 
 check("werewolf world hides roles from the public projection and shows wolf teammates to wolves", () => {

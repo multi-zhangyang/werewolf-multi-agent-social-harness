@@ -4,7 +4,8 @@ import { characterAgentProfile } from "../../society/profiles";
 import { ALL_SCENARIOS, SCENARIO_METADATA } from "../../society/scenarios";
 import type { AgentProfile, ScenarioId, ScenarioSummary, SpectatorMode } from "../../society/contracts";
 import { contextLabel } from "../../society/context-manager";
-import type { SocietyRoom, SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "../../society/room";
+import type { SocietyRoom, SocietyRoomArchive, SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "../../society/room";
+import { deleteRoomArchive, isArchiveOwner, listRoomArchives, readRoomArchive, writeRoomArchive } from "../../server/archives";
 import { defaultCapabilities, defaultContextPolicy, persistRegistry, type AgentModelBinding, type ContextPolicy, type ModelProfile } from "../../society/models";
 import { projectEventFor, type SpectatorViewer } from "../../society/spectator/projection";
 import type { ServerContext } from "../context";
@@ -113,7 +114,9 @@ const createRoomSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   mode: z.enum(["ai", "human"]).default("ai"),
   playerName: z.string().trim().min(1).max(40).optional(),
-  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("high")
+  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
+  /** Explicit opt-in: persist the finished game as a local archive file. */
+  archive: z.boolean().default(false)
 }).strict().superRefine((input, issueContext) => {
   if (input.mode === "human" && !input.playerName) {
     issueContext.addIssue({ code: z.ZodIssueCode.custom, path: ["playerName"], message: "Human mode requires a playerName." });
@@ -143,6 +146,57 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
         max: context.limiter.maxConcurrent
       }
     });
+  });
+
+  // ── Archives (opt-in persistence of finished games) ─────────────────────────
+  //
+  // Listing is metadata-only and open; opening one serves the full omniscient
+  // room (minds included) to the archive's owner or the operator, and the
+  // postgame public room to everyone else. The raw owner token is never
+  // stored — only its sha256, compared in constant time.
+
+  app.get("/api/archives", (_request, response) => {
+    void listRoomArchives()
+      .then((archives) => response.json({ archives }))
+      .catch(() => response.status(500).json({ error: "ARCHIVE_LIST_FAILED", message: "读取归档列表失败。" }));
+  });
+
+  app.get("/api/archives/:archiveId", (request, response) => {
+    const archiveId = request.params.archiveId;
+    void readRoomArchive(archiveId)
+      .then((archive) => {
+        if (!archive) {
+          response.status(404).json({ error: "ARCHIVE_NOT_FOUND", message: "归档不存在。" });
+          return;
+        }
+        const token = tokenFromRequest(request);
+        const privileged = context.auth.isOperatorToken(token) || isArchiveOwner(archive, token);
+        response.json({
+          viewer: { mode: "postgame" as SpectatorMode, privileged },
+          room: privileged ? archive.room : archive.publicRoom,
+          envelopes: privileged ? archive.envelopes : []
+        });
+      })
+      .catch(() => response.status(500).json({ error: "ARCHIVE_READ_FAILED", message: "读取归档失败。" }));
+  });
+
+  app.delete("/api/archives/:archiveId", (request, response) => {
+    const archiveId = request.params.archiveId;
+    void readRoomArchive(archiveId)
+      .then(async (archive) => {
+        if (!archive) {
+          response.status(404).json({ error: "ARCHIVE_NOT_FOUND", message: "归档不存在。" });
+          return;
+        }
+        const token = tokenFromRequest(request);
+        if (!context.auth.isOperatorToken(token) && !isArchiveOwner(archive, token)) {
+          response.status(403).json({ error: "ARCHIVE_DELETE_FORBIDDEN", message: "只有房主或操作员可以删除归档。" });
+          return;
+        }
+        const removed = await deleteRoomArchive(archiveId);
+        response.json({ removed, archiveId });
+      })
+      .catch(() => response.status(500).json({ error: "ARCHIVE_DELETE_FAILED", message: "删除归档失败。" }));
   });
 
   app.get("/api/scenarios", (_request, response) => {
@@ -273,7 +327,18 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
         modelRegistry: context.models,
         limiter: context.limiter,
         ...(roomDefaults ? { roomDefaults } : {}),
-        ...(agentBindings ? { agentBindings } : {})
+        ...(agentBindings ? { agentBindings } : {}),
+        // Opt-in persistence: the sink writes the finished game to disk once.
+        // Default (archive=false) keeps the strict zero-disk runtime.
+        ...(input.archive
+          ? {
+              archiveSink: (archive: SocietyRoomArchive) => {
+                void writeRoomArchive(archive).catch((cause) => {
+                  console.error(`[archive ${archive.id}] write failed:`, cause instanceof Error ? cause.message : cause);
+                });
+              }
+            }
+          : {})
       });
       void room.start();
       const created = room.creationResult();
@@ -284,13 +349,22 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     }
   });
 
+  // Metrics carry ground truth (true roles, resolved beliefs) on top of the
+  // compliance counters — an owner/operator surface, never a public one.
   app.get("/api/rooms/:roomId/metrics", (request, response) => {
     const room = context.rooms.get(request.params.roomId);
     if (!room) {
       response.status(404).json({ error: "ROOM_NOT_FOUND", message: "The requested room does not exist in this process." });
       return;
     }
+    if (!requireRoomControl(request, response, room, context.auth)) return;
     response.json(room.metrics());
+  });
+
+  // Model-vs-model standings over finished games (public end-of-game facts
+  // only: winners and scores are revealed at finish).
+  app.get("/api/leaderboard", (_request, response) => {
+    response.json({ models: context.rooms.modelStandings() });
   });
 
   app.get("/api/rooms/:roomId", (request, response) => {
