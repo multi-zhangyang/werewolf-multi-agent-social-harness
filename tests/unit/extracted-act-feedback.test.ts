@@ -106,7 +106,14 @@ it("werewolf: an extracted accusation raises the public suspicion climate", asyn
   world.start();
   const agents = world.snapshot().agents.map((agent) => agent.id);
   const [P1, P2] = [agents[0]!, agents[1]!];
-  assert.ok(String(world.snapshot().phase).includes("讨论"), "the first day opens with discussion");
+  // Day 1 now opens with the sheriff election: decline for everyone so the
+  // accusation lands in a normal public discussion, as this check expects.
+  const election = world.activation();
+  assert.ok(election && election.id.endsWith(":sheriff-run"), "the game opens with the sheriff election");
+  for (const actor of election.actorIds) {
+    void world.performDomainAction(actor, "run_for_sheriff", { run: false, reason: "t" });
+  }
+  world.completeActivation(election);  assert.ok(String(world.snapshot().phase).includes("讨论"), "declining the election opens the first discussion");
 
   const before = (world.snapshot().details.suspicion as { entries?: unknown[] }).entries?.length ?? 0;
   const message = await speak(world, P1, []);

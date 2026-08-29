@@ -26,6 +26,15 @@ function makeWorld(scenarioId: "avalon" | "werewolf", count: number): SocialWorl
 }
 
 function skipDiscussion(world: SocialWorldBase): void {
+  // Day 1 opens with the sheriff election (警长竞选): decline for everyone so
+  // the flow lands in the first discussion wave, as the rest of the suite expects.
+  const election = world.activation();
+  if (election && election.id.endsWith(":sheriff-run")) {
+    for (const actor of election.actorIds) {
+      void world.performDomainAction(actor, "run_for_sheriff", { run: false, reason: "t" });
+    }
+    world.completeActivation(election);
+  }
   for (let wave = 0; wave < 40; wave += 1) {
     const activation = world.activation();
     if (!activation || !activation.id.includes(":discussion")) return;

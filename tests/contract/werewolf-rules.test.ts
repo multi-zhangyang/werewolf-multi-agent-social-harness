@@ -46,6 +46,15 @@ function makeWerewolf(count: number) {
 
 /** Drive through discussion waves until the vote (or next phase) opens. */
 function skipDiscussion(world: SocialWorldBase): void {
+  // Day 1 opens with the sheriff election (警长竞选): decline for everyone so
+  // the flow lands in the first discussion wave, as the rest of the suite expects.
+  const election = world.activation();
+  if (election && election.id.endsWith(":sheriff-run")) {
+    for (const actor of election.actorIds) {
+      void world.performDomainAction(actor, "run_for_sheriff", { run: false, reason: "t" });
+    }
+    world.completeActivation(election);
+  }
   for (let i = 0; i < 20; i += 1) {
     const activation = world.activation();
     if (!activation || !activation.id.includes(":discussion")) return;
@@ -761,6 +770,328 @@ check("wolves win at parity after a night kill", () => {
   const after = world.snapshot();
   assert.equal(after.status, "finished", "parity ends the game");
   assert.ok(/狼人阵营获胜/.test(after.details.outcome as string), "wolves win by parity");
+});
+
+// --- 警长竞选 (sheriff election) / 警徽流 (badge flow) ---
+/** Drive the run decisions; two given candidates stay on the ballot. */
+async function runForSheriff(world: SocialWorldBase, runnerIds: string[]): Promise<void> {
+  const run = world.activation()!;
+  for (const actor of run.actorIds) {
+    await world.performDomainAction(actor, "run_for_sheriff", { run: runnerIds.includes(actor), reason: "t" });
+  }
+  world.completeActivation(run);
+}
+
+/** Skip the campaign and withdrawal stages with everyone staying put. */
+async function stayOnBallot(world: SocialWorldBase): Promise<void> {
+  world.completeActivation(world.activation()!); // campaign speeches
+  const withdraw = world.activation()!;
+  for (const actor of withdraw.actorIds) {
+    await world.performDomainAction(actor, "withdraw_sheriff_run", { withdraw: false, reason: "t" });
+  }
+  world.completeActivation(withdraw);
+}
+
+function sheriffDetail(world: SocialWorldBase): string | undefined {
+  return (world.snapshot().details as { sheriffId?: string }).sheriffId;
+}
+
+check("the sheriff election campaigns, withdraws and elects by sealed ballot", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  const [a, b] = [byRole("villager")[0], byRole("villager")[1]];
+  const run = world.activation()!;
+  assert.equal(run.mode, "parallel", "run decisions are sealed and simultaneous");
+  for (const actor of run.actorIds) {
+    await world.performDomainAction(actor, "run_for_sheriff", { run: actor === a || actor === b, reason: "t" });
+  }
+  world.completeActivation(run);
+  const campaign = world.activation()!;
+  assert.ok(campaign.id.endsWith(":sheriff-campaign") && campaign.mode === "sequential", "two runners campaign in seat order");
+  assert.deepEqual([...campaign.actorIds].sort(), [a, b].sort(), "only the candidates hold the floor");
+  await assert.rejects(
+    () => world.sendMessage({ senderId: byRole("seer")[0], text: "我推荐 P1。", channel: "public" }),
+    /SHERIFF_CAMPAIGN_SPEAKERS_ONLY/
+  );
+  await world.sendMessage({ senderId: a, text: "我的发言记录干净，警徽给我。", channel: "public" });
+  world.completeActivation(campaign);
+  const withdraw = world.activation()!;
+  assert.ok(withdraw.id.endsWith(":sheriff-withdraw"), "candidates decide whether to stay");
+  for (const actor of withdraw.actorIds) {
+    await world.performDomainAction(actor, "withdraw_sheriff_run", { withdraw: false, reason: "t" });
+  }
+  world.completeActivation(withdraw);
+  const vote = world.activation()!;
+  assert.ok(vote.id.endsWith(":sheriff-vote"), "the never-ran electors vote");
+  assert.ok(!vote.actorIds.includes(a) && !vote.actorIds.includes(b), "candidates cannot vote in their own election");
+  for (const voter of vote.actorIds) {
+    await world.performDomainAction(voter, "cast_sheriff_vote", { targetId: a, reason: "t" });
+  }
+  world.completeActivation(vote);
+  const snap = world.snapshot();
+  assert.equal((snap.details as { sheriffId?: string }).sheriffId, a, "the badge is a public detail");
+  assert.ok(String(snap.phase).includes("讨论"), "the election flows into the day discussion");
+  const day1 = (snap.details.history as Array<{ day: number; sheriffElectedId?: string }>).find((record) => record.day === 1);
+  assert.equal(day1?.sheriffElectedId, a, "the day record remembers the election");
+  assert.ok(world.observe(byRole("wolf")[0]).privateContext.includes("sheriff"), "observations announce the sitting sheriff");
+  const events = (world as unknown as {
+    socialCausalityFor(actorId?: string, omniscient?: boolean): { events: Array<{ type: string }> };
+  }).socialCausalityFor(undefined, true).events;
+  assert.ok(events.some((event) => event.type === "werewolf.sheriff-elected"), "the election is a public world fact");
+});
+
+check("an election nobody enters leaves the village without a sheriff", async () => {
+  const { world } = makeWerewolf(6);
+  await runForSheriff(world, []);
+  const snap = world.snapshot();
+  assert.ok(String(snap.phase).includes("讨论"), "the day opens straight into discussion");
+  assert.ok(!("sheriffId" in snap.details), "no badge was handed out");
+  assert.ok(snap.log.some((entry) => entry.text.includes("无人上警")), "the day log explains why");
+});
+
+check("a single runner takes the badge without a vote", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  const solo = byRole("villager")[0];
+  await runForSheriff(world, [solo]);
+  const snap = world.snapshot();
+  assert.equal((snap.details as { sheriffId?: string }).sheriffId, solo, "elected unopposed");
+  assert.ok(String(snap.phase).includes("讨论"), "no campaign or vote was held");
+  assert.ok(snap.log.some((entry) => entry.text.includes("唯一上警者直接当选")), "the log notes the uncontested election");
+});
+
+check("withdrawal elects the last candidate standing; the last one cannot withdraw", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  const [a, b] = [byRole("villager")[0], byRole("villager")[1]];
+  await runForSheriff(world, [a, b]);
+  world.completeActivation(world.activation()!); // campaign
+  const withdraw = world.activation()!;
+  await assert.rejects(
+    () => world.performDomainAction(byRole("witch")[0], "withdraw_sheriff_run", { withdraw: true, reason: "t" }),
+    /SHERIFF_WITHDRAW_FORBIDDEN/
+  );
+  await world.performDomainAction(a, "withdraw_sheriff_run", { withdraw: true, reason: "t" });
+  // a quit: b is the last candidate standing and cannot quit.
+  await assert.rejects(
+    () => world.performDomainAction(b, "withdraw_sheriff_run", { withdraw: true, reason: "t" }),
+    /LAST_CANDIDATE_CANNOT_WITHDRAW/
+  );
+  await world.performDomainAction(b, "withdraw_sheriff_run", { withdraw: false, reason: "t" });
+  world.completeActivation(withdraw);
+  const snap = world.snapshot();
+  assert.equal((snap.details as { sheriffId?: string }).sheriffId, b, "the remaining candidate takes the badge");
+  assert.ok(snap.log.some((entry) => entry.text.includes("唯一留任者")), "the log notes the walkover");
+});
+
+check("a tied election goes to PK; a second tie leaves no sheriff", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  const [a, b] = [byRole("villager")[0], byRole("villager")[1]];
+  await runForSheriff(world, [a, b]);
+  await stayOnBallot(world);
+  const vote = world.activation()!;
+  const electors = [...vote.actorIds];
+  assert.equal(electors.length, 4, "the four never-ran players elect");
+  for (let index = 0; index < electors.length; index += 1) {
+    await world.performDomainAction(electors[index], "cast_sheriff_vote", { targetId: index % 2 === 0 ? a : b, reason: "t" });
+  }
+  world.completeActivation(vote);
+  const pk = world.activation()!;
+  assert.ok(pk.id.endsWith(":sheriff-pk") && pk.actorIds.length === 2, "the tied candidates give PK speeches");
+  await assert.rejects(
+    () => world.sendMessage({ senderId: byRole("seer")[0], text: "我投 P1。", channel: "public" }),
+    /SHERIFF_PK_SPEAKERS_ONLY/
+  );
+  await world.sendMessage({ senderId: a, text: "最后一句话：警徽给我。", channel: "public" });
+  world.completeActivation(pk);
+  const reVote = world.activation()!;
+  assert.ok(reVote.id.endsWith(":sheriff-vote"), "the electors vote again after the PK");
+  for (const voter of reVote.actorIds) {
+    const index = electors.indexOf(voter);
+    await world.performDomainAction(voter, "cast_sheriff_vote", { targetId: index % 2 === 0 ? a : b, reason: "t" });
+  }
+  world.completeActivation(reVote);
+  const snap = world.snapshot();
+  assert.ok(!("sheriffId" in snap.details), "two ties mean no sheriff this game");
+  assert.ok(String(snap.phase).includes("讨论"), "the day moves on without a badge");
+  assert.ok(snap.log.some((entry) => entry.text.includes("两次平票")), "the log explains the outcome");
+});
+
+check("the sheriff's day vote counts 1.5 and breaks a would-be tie", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  const sheriff = byRole("villager")[0];
+  await runForSheriff(world, [sheriff]);
+  skipDiscussion(world);
+  const vote = world.activation()!;
+  assert.ok(vote.id.endsWith(":vote"), "the day vote opens");
+  const doomed = byRole("villager")[1];
+  const rival = byRole("seer")[0];
+  // 3 plain votes for the rival vs 2 plain + the sheriff's 1.5 for the doomed:
+  // without the badge this table ties 3:3 and goes to PK.
+  for (const actor of vote.actorIds) {
+    const target = actor === sheriff || actor === byRole("witch")[0] || actor === byRole("wolf")[0] ? doomed : rival;
+    await world.performDomainAction(actor, "cast_day_vote", { targetId: target, reason: "t" });
+  }
+  world.completeActivation(vote);
+  const snap = world.snapshot();
+  const day1 = (snap.details.history as Array<{ day: number; eliminatedId?: string }>).find((record) => record.day === 1);
+  assert.equal(day1?.eliminatedId, doomed, "the weighted 3.5 beats the plain 3 without a PK");
+  passLastWords(world);
+  assert.ok(world.activation()!.id.endsWith(":night"), "no PK round opened — the tie was broken");
+});
+
+check("a sheriff killed at night hands the badge on before the day advances", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  const sheriff = byRole("villager")[0];
+  const heir = byRole("villager")[1];
+  await runForSheriff(world, [sheriff]);
+  skipDiscussion(world);
+  // Vote out one wolf so a single wolf remains to do the night kill.
+  const vote = world.activation()!;
+  for (const actor of vote.actorIds) {
+    await world.performDomainAction(actor, "cast_day_vote", { targetId: byRole("wolf")[1], reason: "t" });
+  }
+  world.completeActivation(vote);
+  passLastWords(world);
+  const night = world.activation()!;
+  await world.performDomainAction(byRole("wolf")[0], "choose_night_target", { targetId: sheriff, reason: "t" });
+  await world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
+  await world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
+  world.completeActivation(night);
+  const badge = world.activation()!;
+  assert.ok(badge.id.includes(":badge:") && badge.actorIds[0] === sheriff, "the dying sheriff owes the badge first");
+  // The decision is exclusive: a target XOR tearing, never both, never neither.
+  await assert.rejects(
+    () => world.performDomainAction(sheriff, "pass_badge", { targetId: heir, tear: true, reason: "t" }),
+    /BADGE_DECISION_CONFLICT/
+  );
+  await assert.rejects(
+    () => world.performDomainAction(sheriff, "pass_badge", { reason: "t" }),
+    /BADGE_DECISION_REQUIRED/
+  );
+  await assert.rejects(
+    () => world.performDomainAction(sheriff, "pass_badge", { targetId: byRole("wolf")[1], reason: "t" }),
+    /TARGET_INACTIVE/
+  );
+  await world.performDomainAction(sheriff, "pass_badge", { targetId: heir, reason: "t" });
+  world.completeActivation(badge);
+  assert.equal(sheriffDetail(world), heir, "the heir wears the badge");
+  // The badge decision carried the night: day 2 opens normally, no re-election.
+  skipDiscussion(world);
+  const vote2 = world.activation()!;
+  assert.ok(vote2.id.endsWith(":vote"), "day 2 votes normally");
+  const doomed2 = byRole("witch")[0];
+  const rival2 = byRole("seer")[0];
+  for (const actor of vote2.actorIds) {
+    const target = actor === heir || actor === byRole("wolf")[0] ? doomed2 : rival2;
+    await world.performDomainAction(actor, "cast_day_vote", { targetId: target, reason: "t" });
+  }
+  world.completeActivation(vote2);
+  const day2 = (world.snapshot().details.history as Array<{ day: number; eliminatedId?: string }>).find((record) => record.day === 2);
+  assert.equal(day2?.eliminatedId, doomed2, "the inherited badge still weighs 1.5");
+});
+
+check("a voted-out sheriff decides the badge before speaking, and can tear it", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  const sheriff = byRole("villager")[0];
+  await runForSheriff(world, [sheriff]);
+  skipDiscussion(world);
+  const vote = world.activation()!;
+  for (const actor of vote.actorIds) {
+    await world.performDomainAction(actor, "cast_day_vote", { targetId: sheriff, reason: "t" });
+  }
+  world.completeActivation(vote);
+  const badge = world.activation()!;
+  assert.ok(badge.id.includes(":badge:"), "the badge decision precedes everything else");
+  assert.deepEqual(world.domainActionsFor(sheriff).map((spec) => spec.name), ["pass_badge"], "the dying sheriff's seat offers exactly the badge");
+  await assert.rejects(
+    () => world.performDomainAction(byRole("seer")[0], "pass_badge", { targetId: byRole("witch")[0], reason: "t" }),
+    /BADGE_PASS_FORBIDDEN/
+  );
+  await world.performDomainAction(sheriff, "pass_badge", { tear: true, reason: "t" });
+  world.completeActivation(badge);
+  const snap = world.snapshot();
+  assert.ok(!("sheriffId" in snap.details), "a torn badge means no sheriff for the rest of the game");
+  assert.ok(snap.log.some((entry) => entry.text.includes("撕掉") || entry.text.includes("撕了")), "the log records the tearing");
+  const lastWords = world.activation()!;
+  assert.ok(lastWords.id.includes(":lastwords:") && lastWords.actorIds[0] === sheriff, "last words follow the badge");
+  await world.sendMessage({ senderId: sheriff, text: "撕了警徽，你们自己看着办。", channel: "public" });
+  world.completeActivation(lastWords);
+  assert.ok(world.activation()!.id.endsWith(":night"), "the night follows the last words");
+});
+
+check("the election's action guards reject cross-phase and duplicate attempts", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  const [a, b] = [byRole("villager")[0], byRole("villager")[1]];
+  const outsider = byRole("seer")[0];
+  const run = world.activation()!;
+  await assert.rejects(
+    () => world.performDomainAction(byRole("witch")[0], "withdraw_sheriff_run", { withdraw: true, reason: "t" }),
+    /SHERIFF_WITHDRAW_NOT_OPEN/
+  );
+  await assert.rejects(
+    () => world.performDomainAction(outsider, "cast_sheriff_vote", { targetId: a, reason: "t" }),
+    /SHERIFF_VOTE_NOT_OPEN/
+  );
+  await world.performDomainAction(a, "run_for_sheriff", { run: true, reason: "t" });
+  await assert.rejects(
+    () => world.performDomainAction(a, "run_for_sheriff", { run: false, reason: "t" }),
+    /SHERIFF_RUN_LOCKED/
+  );
+  for (const actor of run.actorIds) {
+    if (actor !== a) await world.performDomainAction(actor, "run_for_sheriff", { run: actor === b, reason: "t" });
+  }
+  world.completeActivation(run);
+  world.completeActivation(world.activation()!); // campaign: no speech is a valid campaign
+  const withdraw = world.activation()!;
+  await world.performDomainAction(a, "withdraw_sheriff_run", { withdraw: false, reason: "t" });
+  // A stay is sealed exactly like a quit: the decision cannot be revisited.
+  await assert.rejects(
+    () => world.performDomainAction(a, "withdraw_sheriff_run", { withdraw: false, reason: "t" }),
+    /SHERIFF_WITHDRAW_LOCKED/
+  );
+  await world.performDomainAction(b, "withdraw_sheriff_run", { withdraw: false, reason: "t" });
+  world.completeActivation(withdraw);
+  const vote = world.activation()!;
+  await assert.rejects(
+    () => world.performDomainAction(vote.actorIds[0], "cast_sheriff_vote", { targetId: outsider, reason: "t" }),
+    /INVALID_SHERIFF_VOTE_TARGET/
+  );
+  await world.performDomainAction(vote.actorIds[0], "cast_sheriff_vote", { targetId: a, reason: "t" });
+  await assert.rejects(
+    () => world.performDomainAction(vote.actorIds[0], "cast_sheriff_vote", { targetId: a, reason: "t" }),
+    /SHERIFF_VOTE_ALREADY_CAST/
+  );
+  for (const voter of vote.actorIds.slice(1)) {
+    await world.performDomainAction(voter, "cast_sheriff_vote", { targetId: a, reason: "t" });
+  }
+  world.completeActivation(vote);
+  // The election is over: standing now is refused.
+  await assert.rejects(
+    () => world.performDomainAction(outsider, "run_for_sheriff", { run: true, reason: "t" }),
+    /SHERIFF_ELECTION_NOT_OPEN/
+  );
+});
+
+check("an election everyone joins cannot be voted on — the village plays without a sheriff", async () => {
+  const { world } = makeWerewolf(6);
+  await runForSheriff(world, world.snapshot().agents.map((agent) => agent.id));
+  await stayOnBallot(world);
+  const snap = world.snapshot();
+  assert.ok(!("sheriffId" in snap.details), "no electors means no badge");
+  assert.ok(String(snap.phase).includes("讨论"), "the day continues without a sheriff");
+  assert.ok(snap.log.some((entry) => entry.text.includes("全员上警")), "the log explains the walkout");
+});
+
+check("the election exposes its choices to human seats at the right moments", async () => {
+  const { world, byRole } = makeWerewolf(6);
+  const [a, b] = [byRole("villager")[0], byRole("villager")[1]];
+  const outsider = byRole("seer")[0];
+  const seat = (id: string) => world.domainActionsFor(id).map((spec) => spec.name);
+  assert.deepEqual(seat(a), ["run_for_sheriff"], "the run decision is offered");
+  await runForSheriff(world, [a, b]);
+  assert.deepEqual(seat(a), [], "campaigners speak, they do not click");
+  assert.deepEqual(seat(outsider), [], "and spectators act in no election phase");
+  await stayOnBallot(world);
+  assert.deepEqual(seat(outsider), ["cast_sheriff_vote"], "electors get the ballot");
+  assert.deepEqual(seat(a), [], "candidates do not");
 });
 
 // --- avalon official tables ---

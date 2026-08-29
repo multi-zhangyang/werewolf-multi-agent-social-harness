@@ -31,7 +31,17 @@ import {
   type WerewolfRoleId
 } from "./roles";
 
-type Phase = "day-discussion" | "day-knight" | "day-vote" | "day-pk" | "night";
+type Phase =
+  | "sheriff-run"
+  | "sheriff-campaign"
+  | "sheriff-withdraw"
+  | "sheriff-vote"
+  | "sheriff-pk"
+  | "day-discussion"
+  | "day-knight"
+  | "day-vote"
+  | "day-pk"
+  | "night";
 
 /**
  * SDK `tool()` with Society validation feedback: when the model's arguments
@@ -62,6 +72,8 @@ interface DayRecord {
   boomVictims?: string[];
   /** The wolf beauty's charmed companion, if she was voted out. */
   charmVictim?: string;
+  /** Day-1 sheriff election: who won the badge. */
+  sheriffElectedId?: string;
 }
 
 /** A pending death skill: hunter or wolf-king must decide a target (or hold). */
@@ -103,8 +115,25 @@ export class WerewolfWorld extends SocialWorldBase {
   private readonly suspicion = new SuspicionClimate();
   private winners: string[] = [];
   private outcome = "";
-  private phase: Phase = "day-discussion";
+  /** Day 1 opens with the sheriff election before any discussion. */
+  private phase: Phase = "sheriff-run";
   private day = 1;
+  /** Sheriff election (day 1 only): everyone decided whether to run. */
+  private readonly sheriffRunDecided = new Set<string>();
+  /** Everyone who ever stood for sheriff — candidates and ex-candidates. */
+  private readonly sheriffCandidates = new Set<string>();
+  /** Candidates who decided the withdraw round. */
+  private readonly sheriffWithdrawDecided = new Set<string>();
+  private readonly sheriffWithdrawn = new Set<string>();
+  /** Electors' sealed ballots: only those who never ran may vote. */
+  private readonly sheriffVotes = new Map<string, string>();
+  private readonly sheriffVoteCommandIds = new Map<string, string>();
+  private sheriffPkCandidates: string[] = [];
+  private sheriffPkHeld = false;
+  /** The sitting sheriff; their day vote counts 1.5. */
+  private sheriffId?: string;
+  /** Dead sheriffs still owed a badge decision (hand over or tear). */
+  private readonly pendingBadgePass: string[] = [];
   /** Witch potions: one antidote, one poison, once each for the whole game. */
   private antidoteAvailable = true;
   private poisonAvailable = true;
@@ -179,6 +208,9 @@ export class WerewolfWorld extends SocialWorldBase {
         deckName: this.deckName,
         roles: Object.fromEntries(this.roles),
         aliveIds: [...this.alive],
+        // The badge is worn in the open: the sitting sheriff is public to every
+        // viewer (agent, human seat, spectator), not only via the day log.
+        ...(this.sheriffId ? { sheriffId: this.sheriffId } : {}),
         pendingVotes: Object.fromEntries(this.votes),
         pendingNightTargets: Object.fromEntries(this.wolfTargets),
         history: this.history,
@@ -242,6 +274,9 @@ export class WerewolfWorld extends SocialWorldBase {
       ...(role === "jester" ? ["Rules: 只有被白天投票出局你才获胜；被毒杀、被夜袭或被开枪带走都不算。"] : []),
       "For an explicit identity claim in communicate.socialActs, use kind=assertion (or denial when claiming you are NOT something), proposition.kind=identity, predicate=has-role, subjectId=the claimed actor id, object=the role id. Link deceptionId only when executing your own recorded deception plan.",
       ...socialReferenceContext(causality),
+      ...(this.sheriffId
+        ? [`Sheriff: ${this.displayName(this.sheriffId)} — the sheriff's daytime elimination vote counts 1.5.`]
+        : ["Sheriff: none this game."]),
       `Your vote: ${this.votes.get(actorId) ?? "not cast"}.`,
       `You are ${this.alive.has(actorId) ? "alive" : "eliminated"}.`
     ];
@@ -250,7 +285,11 @@ export class WerewolfWorld extends SocialWorldBase {
       scenarioId: this.scenario.id,
       turn: this.day,
       phase: this.phase,
-      situation: `${situationFor(this.phase, role, this.alive.size, this.wolvesAlive().length)}\nPublic suspicion climate: ${this.suspicion.climateText((id) => this.profiles.get(id)?.displayName ?? id)}`,
+      situation: `${situationFor(this.phase, role, this.alive.size, this.wolvesAlive().length)}${
+        this.phase.startsWith("sheriff-") && this.sheriffCandidates.size
+          ? `\nSheriff candidates: ${this.currentSheriffCandidates().map((id) => this.displayName(id)).join("、") || "（其余已退选）"}。`
+          : ""
+      }\nPublic suspicion climate: ${this.suspicion.climateText((id) => this.profiles.get(id)?.displayName ?? id)}`,
       privateContext: privateContext.filter(Boolean).join("\n"),
       self: { id: self.id, displayName: self.displayName, alive: this.alive.has(actorId), role },
       others: this.otherProfiles(actorId).map((profile) => ({
@@ -290,6 +329,78 @@ export class WerewolfWorld extends SocialWorldBase {
       }
     });
     tools.push(vote as Tool<SocietyAgentContext>);
+
+    // Sheriff election (day 1): the tools exist only while their phase is
+    // live, so the model never carries irrelevant ballot schema into the night.
+    if (this.phase === "sheriff-run") {
+      const runTool = societyTool({
+        name: "run_for_sheriff",
+        description: "Decide whether to stand in the sheriff election (上警). Sealed until everyone has decided. Candidates campaign and cannot vote in the election; the elected sheriff's day vote counts 1.5x.",
+        parameters: z.object({
+          run: z.boolean(),
+          reason: z.string().min(1).max(2_000)
+        }).strict(),
+        execute: async (input, runContext) => {
+          const context = scopedContext(runContext, actorId);
+          const commit = await this.performAction(actorId, "run_for_sheriff", input);
+          emitAction(context, commit.action, commit.detail);
+          return commit.result;
+        }
+      });
+      tools.push(runTool as Tool<SocietyAgentContext>);
+    }
+    if (this.phase === "sheriff-withdraw" && this.sheriffCandidates.has(actorId) && !this.sheriffWithdrawn.has(actorId)) {
+      const withdrawTool = societyTool({
+        name: "withdraw_sheriff_run",
+        description: "Withdraw from (or stay in) the sheriff election after the campaign speeches. The last remaining candidate cannot withdraw; withdrawn candidates still cannot vote.",
+        parameters: z.object({
+          withdraw: z.boolean(),
+          reason: z.string().min(1).max(2_000)
+        }).strict(),
+        execute: async (input, runContext) => {
+          const context = scopedContext(runContext, actorId);
+          const commit = await this.performAction(actorId, "withdraw_sheriff_run", input);
+          emitAction(context, commit.action, commit.detail);
+          return commit.result;
+        }
+      });
+      tools.push(withdrawTool as Tool<SocietyAgentContext>);
+    }
+    if (this.phase === "sheriff-vote" && !this.sheriffCandidates.has(actorId)) {
+      const sheriffVote = societyTool({
+        name: "cast_sheriff_vote",
+        description: "Cast a sealed ballot for one of the sheriff candidates. Only players who never ran may vote. Revealed after everyone has voted.",
+        parameters: z.object({
+          targetId: targetRef,
+          reason: z.string().min(1).max(2_000)
+        }).strict(),
+        execute: async (input, runContext) => {
+          const context = scopedContext(runContext, actorId);
+          const commit = await this.performAction(actorId, "cast_sheriff_vote", input);
+          emitAction(context, commit.action, commit.detail);
+          return commit.result;
+        }
+      });
+      tools.push(sheriffVote as Tool<SocietyAgentContext>);
+    }
+    if (this.pendingBadgePass[0] === actorId) {
+      const passBadge = societyTool({
+        name: "pass_badge",
+        description: "The dying sheriff's badge decision: hand it to one living participant (targetId) or tear it (tear=true — no sheriff for the rest of the game).",
+        parameters: z.object({
+          targetId: targetRef.optional(),
+          tear: z.boolean().optional(),
+          reason: z.string().min(1).max(2_000)
+        }).strict(),
+        execute: async (input, runContext) => {
+          const context = scopedContext(runContext, actorId);
+          const commit = await this.performAction(actorId, "pass_badge", input);
+          emitAction(context, commit.action, commit.detail);
+          return commit.result;
+        }
+      });
+      tools.push(passBadge as Tool<SocietyAgentContext>);
+    }
 
     if (isWolfRole(role)) {
       const chooseNightTarget = societyTool({
@@ -475,7 +586,47 @@ export class WerewolfWorld extends SocialWorldBase {
   domainActionsFor(actorId: string): PlayerActionSpec[] {
     const role = this.roles.get(actorId);
     if (!role) throw new Error(`ACTOR_NOT_FOUND: '${actorId}' is not in this room.`);
+    // The dying sheriff owes the badge a decision even though they are no
+    // longer alive — without this spec the human seat would have no action.
+    if (this.pendingBadgePass[0] === actorId) {
+      return [{
+        name: "pass_badge",
+        label: "移交警徽",
+        description: "把警徽移交给一名存活玩家（targetId），或撕掉警徽（tear: true，本局不再有警长）。",
+        kind: "target",
+        field: "targetId",
+        targetFilter: "any-living"
+      }];
+    }
     if (!this.alive.has(actorId)) return [];
+    if (this.phase === "sheriff-run" && !this.sheriffRunDecided.has(actorId)) {
+      return [{
+        name: "run_for_sheriff",
+        label: "上警决定",
+        description: "决定是否竞选警长：警长的白天投票计 1.5 票；竞选者发言但不投票。",
+        kind: "choice",
+        field: "run"
+      }];
+    }
+    if (this.phase === "sheriff-withdraw" && this.sheriffCandidates.has(actorId) && !this.sheriffWithdrawn.has(actorId)) {
+      return [{
+        name: "withdraw_sheriff_run",
+        label: "退选决定",
+        description: "竞选演讲结束：退选或留任。最后一名竞选者不能退选。",
+        kind: "choice",
+        field: "withdraw"
+      }];
+    }
+    if (this.phase === "sheriff-vote" && !this.sheriffCandidates.has(actorId) && !this.sheriffVotes.has(actorId)) {
+      return [{
+        name: "cast_sheriff_vote",
+        label: "警长投票",
+        description: "为一名竞选人投票；所有人提交后统一公开。",
+        kind: "target",
+        field: "targetId",
+        targetFilter: "any-living"
+      }];
+    }
     if (this.phase === "day-knight" && role === "knight" && !this.knightUsed) {
       return [{
         name: "knight_challenge",
@@ -576,9 +727,9 @@ export class WerewolfWorld extends SocialWorldBase {
     const value = recordPayload(payload);
     const targetId = typeof value.targetId === "string" && value.targetId ? value.targetId : undefined;
     const reason = typeof value.reason === "string" ? value.reason.trim() : "";
-    // Death shots belong to a dying actor: they are legal even though the
-    // shooter just left the alive set.
-    if (action !== "hunter_shoot" && action !== "wolf_king_shoot") this.assertActiveActor(actorId);
+    // Death shots and the badge pass belong to a dying actor: they are legal
+    // even though the actor just left the alive set.
+    if (action !== "hunter_shoot" && action !== "wolf_king_shoot" && action !== "pass_badge") this.assertActiveActor(actorId);
 
     if (action === "knight_challenge") {
       if (this.phase !== "day-knight" || role !== "knight" || this.knightUsed) throw new Error("KNIGHT_NOT_READY: The daytime duel is not available now.");
@@ -636,6 +787,72 @@ export class WerewolfWorld extends SocialWorldBase {
       this.voteCommandIds.set(actorId, commandId);
       this.emitUpdate();
       return { action, commandId, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId } };
+    }
+    if (action === "run_for_sheriff") {
+      if (this.phase !== "sheriff-run") throw new Error("SHERIFF_ELECTION_NOT_OPEN: 上警阶段已结束。");
+      if (this.sheriffRunDecided.has(actorId)) throw new Error("SHERIFF_RUN_LOCKED: 你的上警决定已锁定。");
+      const run = value.run === true;
+      const commandId = `cmd-${randomUUID()}`;
+      this.sheriffRunDecided.add(actorId);
+      if (run) this.sheriffCandidates.add(actorId);
+      this.emitUpdate();
+      return { action, commandId, detail: run ? "run" : "skip", result: { accepted: true, run } };
+    }
+    if (action === "withdraw_sheriff_run") {
+      if (this.phase !== "sheriff-withdraw") throw new Error("SHERIFF_WITHDRAW_NOT_OPEN: 退选阶段未开放。");
+      if (!this.sheriffCandidates.has(actorId) || this.sheriffWithdrawn.has(actorId)) throw new Error("SHERIFF_WITHDRAW_FORBIDDEN: 只有当前候选人可以退选。");
+      if (this.sheriffWithdrawDecided.has(actorId)) throw new Error("SHERIFF_WITHDRAW_LOCKED: 你的退选决定已锁定。");
+      const withdraw = value.withdraw === true;
+      const remaining = this.currentSheriffCandidates();
+      if (withdraw && remaining.length === 1 && remaining[0] === actorId) {
+        throw new Error("LAST_CANDIDATE_CANNOT_WITHDRAW: 你是最后一名竞选者，必须留任并直接当选警长。");
+      }
+      const commandId = `cmd-${randomUUID()}`;
+      this.sheriffWithdrawDecided.add(actorId);
+      if (withdraw) this.sheriffWithdrawn.add(actorId);
+      this.emitUpdate();
+      return { action, commandId, detail: withdraw ? "withdraw" : "stay", result: { accepted: true, withdraw } };
+    }
+    if (action === "cast_sheriff_vote") {
+      if (this.phase !== "sheriff-vote") throw new Error("SHERIFF_VOTE_NOT_OPEN: 警长竞选投票未开放。");
+      if (this.sheriffCandidates.has(actorId)) throw new Error("SHERIFF_CANDIDATE_CANNOT_VOTE: 竞选者（含已退选者）不能参与警长投票。");
+      if (!targetId) throw new Error("TARGET_REQUIRED: Select a candidate.");
+      if (!this.sheriffCandidates.has(targetId) || this.sheriffWithdrawn.has(targetId)) throw new Error("INVALID_SHERIFF_VOTE_TARGET: 只能投给当前候选人。");
+      if (this.sheriffVotes.has(actorId)) throw new Error("SHERIFF_VOTE_ALREADY_CAST: 你的警长票已锁定。");
+      const commandId = `cmd-${randomUUID()}`;
+      this.sheriffVotes.set(actorId, targetId);
+      this.sheriffVoteCommandIds.set(actorId, commandId);
+      this.emitUpdate();
+      return { action, commandId, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId } };
+    }
+    if (action === "pass_badge") {
+      if (this.pendingBadgePass[0] !== actorId) throw new Error("BADGE_PASS_FORBIDDEN: 只有正在离场的警长可以处置警徽。");
+      const tear = value.tear === true;
+      if (!tear && !targetId) throw new Error("BADGE_DECISION_REQUIRED: 提供 targetId 移交警徽，或 tear=true 撕掉警徽。");
+      if (tear && targetId) throw new Error("BADGE_DECISION_CONFLICT: 撕警徽时不能同时指定移交目标。");
+      if (!tear) {
+        this.assertLivingTarget(targetId!);
+        if (targetId === actorId) throw new Error("INVALID_BADGE_TARGET: 不能把警徽移交给自己。");
+      }
+      this.pendingBadgePass.shift();
+      const sheriffName = this.displayName(actorId);
+      if (tear) {
+        this.addLog(`${sheriffName} 撕掉了警徽——本局从此没有警长。`, this.day);
+        this.setLastExperiences(`${sheriffName} 撕掉了警徽，本局从此没有警长。`);
+      } else {
+        this.sheriffId = targetId;
+        const newSheriffName = this.displayName(targetId!);
+        this.addLog(`${sheriffName} 在离场前把警徽移交给了 ${newSheriffName}——TA 的白天投票计 1.5 票。`, this.day);
+        this.setLastExperiences(`${sheriffName} 把警徽移交给了 ${newSheriffName}：TA 的白天投票计 1.5 票。`);
+        this.pushEvent(targetId!, {
+          type: "endorsed",
+          targetId,
+          facts: { sheriff: true },
+          detail: `前任警长在弥留之际把警徽交给了你——你的白天投票计 1.5 票，出局时需移交警徽或撕掉。`
+        });
+      }
+      this.emitUpdate();
+      return { action, commandId: `cmd-${randomUUID()}`, detail: tear ? "tear" : `${targetId}`, result: { accepted: true, ...(tear ? { tear: true } : { targetId }) } };
     }
     if (action === "choose_night_target") {
       if (!targetId) throw new Error("TARGET_REQUIRED: Select a participant.");
@@ -777,6 +994,19 @@ export class WerewolfWorld extends SocialWorldBase {
 
   activation(): WorldActivation | null {
     if (this.status !== "running") return null;
+    // A dead sheriff owes the badge decision before anything else moves: the
+    // hand-over (or the tearing) is the table's next public fact.
+    const badgeSheriff = this.pendingBadgePass[0];
+    if (badgeSheriff) {
+      return {
+        id: `ww:${this.day}:badge:${badgeSheriff}`,
+        label: `${this.profiles.get(badgeSheriff)?.displayName ?? badgeSheriff} 移交警徽`,
+        actorIds: [badgeSheriff],
+        mode: "sequential",
+        instructionFor: () =>
+          "You are the dying sheriff. Decide the badge's fate: call pass_badge with targetId to hand it to one living participant, or with tear=true to destroy it — a torn badge means no sheriff for the rest of the game."
+      };
+    }
     // Last words first: a voted-out player states their final public case
     // before any death skill fires or the day moves on.
     const lastWordsSpeaker = this.pendingLastWords[0];
@@ -807,6 +1037,58 @@ export class WerewolfWorld extends SocialWorldBase {
       };
     }
     const aliveIds = [...this.alive];
+    if (this.phase === "sheriff-run") {
+      return {
+        id: "ww:1:sheriff-run",
+        label: "警长竞选 · 上警",
+        actorIds: aliveIds,
+        mode: "parallel",
+        instructionFor: () =>
+          "The sheriff election (警长竞选) opens. Decide whether to run: call run_for_sheriff with run=true to stand, or run=false to abstain. The elected sheriff's daytime elimination vote counts 1.5x and decides the badge's fate when dying; candidates give campaign speeches and do not vote in the election."
+      };
+    }
+    if (this.phase === "sheriff-campaign") {
+      return {
+        id: "ww:1:sheriff-campaign",
+        label: "警长竞选 · 竞选发言",
+        actorIds: this.currentSheriffCandidates(),
+        mode: "sequential",
+        instructionFor: () =>
+          "You are running for sheriff. Give your campaign speech (竞选演讲): why should the village trust you with the badge and the 1.5x vote? Claim experience, read the table, or make your case. Call communicate once on the public channel."
+      };
+    }
+    if (this.phase === "sheriff-withdraw") {
+      return {
+        id: "ww:1:sheriff-withdraw",
+        label: "警长竞选 · 退选",
+        actorIds: this.currentSheriffCandidates(),
+        mode: "parallel",
+        instructionFor: () =>
+          "The campaign speeches are done. You may withdraw from the election (call withdraw_sheriff_run with withdraw=true) or stay on the ballot (withdraw=false). The last remaining candidate cannot withdraw — they become sheriff directly. Withdrawn candidates still cannot vote in the election."
+      };
+    }
+    if (this.phase === "sheriff-vote") {
+      const reVote = this.sheriffPkCandidates.length > 0;
+      return {
+        id: "ww:1:sheriff-vote",
+        label: reVote ? "警长竞选 · 重新投票" : "警长竞选 · 投票",
+        actorIds: this.sheriffElectorate(),
+        mode: "parallel",
+        instructionFor: () => reVote
+          ? "The tied candidates have made their PK speeches. Call cast_sheriff_vote exactly once for one of the candidates. A second tie leaves the village without a sheriff."
+          : "Elect the sheriff: call cast_sheriff_vote exactly once for one of the candidates on the ballot. Candidates do not vote; the elected sheriff's daytime elimination vote counts 1.5x."
+      };
+    }
+    if (this.phase === "sheriff-pk") {
+      return {
+        id: "ww:1:sheriff-pk",
+        label: "警长竞选 · 平票 PK",
+        actorIds: [...this.sheriffPkCandidates],
+        mode: "sequential",
+        instructionFor: () =>
+          "The sheriff election tied and you are one of the tied candidates. Give your PK speech (平票陈词): your final case for the badge. The electors re-vote right after both speeches. Call communicate once on the public channel."
+      };
+    }
     if (this.phase === "day-discussion") {
       if (!this.discussion) this.discussion = this.createDiscussion();
       const actors = this.discussion.nextWave();
@@ -908,6 +1190,54 @@ export class WerewolfWorld extends SocialWorldBase {
   completeActivation(activation: WorldActivation): ActivationCompletion {
     if (activation.id.includes(":discussion")) {
       this.discussion?.endWave();
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.includes(":badge:")) {
+      const sheriffId = activation.actorIds[0];
+      if (this.pendingBadgePass[0] === sheriffId) {
+        return {
+          completed: false,
+          missingActorIds: [sheriffId],
+          retryInstruction: "Your badge decision is still pending. Call pass_badge now (targetId to hand it over, or tear=true to destroy it)."
+        };
+      }
+      this.resolveBadgePassCascade();
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":sheriff-run")) {
+      const missingActorIds = activation.actorIds.filter((id) => !this.sheriffRunDecided.has(id));
+      if (missingActorIds.length) {
+        return { completed: false, missingActorIds, retryInstruction: "Your sheriff-run decision is missing. Call run_for_sheriff now with run=true (stand) or run=false (abstain)." };
+      }
+      this.resolveSheriffRun();
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":sheriff-campaign")) {
+      // Candidates spoke (or stayed silent); the withdraw round opens.
+      this.phase = "sheriff-withdraw";
+      this.emitUpdate();
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":sheriff-withdraw")) {
+      const missingActorIds = activation.actorIds.filter((id) => !this.sheriffWithdrawDecided.has(id));
+      if (missingActorIds.length) {
+        return { completed: false, missingActorIds, retryInstruction: "Your withdraw decision is missing. Call withdraw_sheriff_run now with withdraw=true (quit) or withdraw=false (stay)." };
+      }
+      this.resolveSheriffWithdraw();
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":sheriff-vote")) {
+      const missingActorIds = activation.actorIds.filter((id) => !this.sheriffVotes.has(id));
+      if (missingActorIds.length) {
+        return { completed: false, missingActorIds, retryInstruction: "Your sheriff vote is missing. Call cast_sheriff_vote now for one candidate." };
+      }
+      this.resolveSheriffVote();
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":sheriff-pk")) {
+      // The tied candidates made their cases; the electors re-vote.
+      this.phase = "sheriff-vote";
+      this.emitUpdate();
       return { completed: true, missingActorIds: [] };
     }
     if (activation.id.includes(":lastwords:")) {
@@ -1100,6 +1430,12 @@ export class WerewolfWorld extends SocialWorldBase {
       throw new Error("LAST_WORDS_PUBLIC_ONLY: 遗言只能公开陈述。");
     }
     if (!this.alive.has(senderId) && !inLastWords) throw new Error("ACTOR_ELIMINATED: Eliminated participants cannot communicate.");
+    if (this.phase === "sheriff-campaign" && !this.currentSheriffCandidates().includes(senderId) && this.alive.has(senderId)) {
+      throw new Error("SHERIFF_CAMPAIGN_SPEAKERS_ONLY: 竞选发言阶段只有候选人可以发言，其余人保持安静。");
+    }
+    if (this.phase === "sheriff-pk" && !this.sheriffPkCandidates.includes(senderId) && this.alive.has(senderId)) {
+      throw new Error("SHERIFF_PK_SPEAKERS_ONLY: 警长竞选平票陈词阶段只有被平票的候选人可以发言，其余人保持安静。");
+    }
     if (this.phase === "day-pk" && !this.pkCandidates.includes(senderId) && this.alive.has(senderId)) {
       throw new Error("PK_SPEAKERS_ONLY: 平票陈词阶段只有被平票的玩家可以发言，其余人保持安静。");
     }
@@ -1117,8 +1453,14 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   private availableActions(actorId: string, role: WerewolfRoleId): string[] {
+    if (this.pendingBadgePass[0] === actorId) return ["pass_badge"];
     if (this.pendingLastWords[0] === actorId) return ["communicate", "recall_memory"];
     if (!this.alive.has(actorId)) return [];
+    if (this.phase === "sheriff-run") return ["run_for_sheriff"];
+    if (this.phase === "sheriff-campaign") return this.currentSheriffCandidates().includes(actorId) ? ["communicate", "recall_memory"] : [];
+    if (this.phase === "sheriff-withdraw") return this.currentSheriffCandidates().includes(actorId) ? ["withdraw_sheriff_run"] : [];
+    if (this.phase === "sheriff-vote") return this.sheriffElectorate().includes(actorId) ? ["cast_sheriff_vote"] : [];
+    if (this.phase === "sheriff-pk") return this.sheriffPkCandidates.includes(actorId) ? ["communicate", "recall_memory"] : [];
     if (this.phase === "day-discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "read_the_room", "log_deception_plan", "update_inner_state"];
     if (this.phase === "day-knight") return role === "knight" && !this.knightUsed ? ["knight_challenge"] : [];
     if (this.phase === "day-pk") return this.pkCandidates.includes(actorId) ? ["communicate", "recall_memory"] : [];
@@ -1167,7 +1509,13 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   private resolveVote(): void {
-    const tally = tallyTargets(this.votes);
+    // The sitting sheriff's ballot counts 1.5 (警长票): half-votes break ties
+    // instead of creating them.
+    const tally = new Map<string, number>();
+    for (const [voterId, targetId] of this.votes) {
+      const weight = voterId === this.sheriffId ? 1.5 : 1;
+      tally.set(targetId, (tally.get(targetId) ?? 0) + weight);
+    }
     const ranked = [...tally].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
     const hasTie = ranked.length > 1 && ranked[0][1] === ranked[1][1];
     const eliminatedId = hasTie ? undefined : ranked[0]?.[0];
@@ -1388,6 +1736,143 @@ export class WerewolfWorld extends SocialWorldBase {
     this.afterEliminationChecks();
   }
 
+  // --- Sheriff election & badge flow (警长竞选 / 警徽流) ---
+
+  /** Candidates still on the ballot: ran, not withdrawn, still alive. */
+  private currentSheriffCandidates(): string[] {
+    return [...this.profiles.keys()].filter((id) =>
+      this.sheriffCandidates.has(id) && !this.sheriffWithdrawn.has(id) && this.alive.has(id)
+    );
+  }
+
+  /** The election's electors: living players who never ran for sheriff. */
+  private sheriffElectorate(): string[] {
+    return [...this.alive].filter((id) => !this.sheriffCandidates.has(id));
+  }
+
+  private resolveSheriffRun(): void {
+    const candidates = this.currentSheriffCandidates();
+    if (candidates.length === 0) {
+      this.addLog("警长竞选：无人上警，本局没有警长。", this.day);
+      this.setLastExperiences("无人上警，本局没有警长。");
+      this.phase = "day-discussion";
+      this.emitUpdate();
+      return;
+    }
+    if (candidates.length === 1) {
+      this.electSheriff(candidates[0], "唯一上警者直接当选警长。");
+      return;
+    }
+    this.addLog(`警长竞选：${candidates.map((id) => this.displayName(id)).join("、")} 上警，依次发表竞选演讲。`, this.day);
+    this.setLastExperiences(`警长竞选开始，上警者：${candidates.map((id) => this.displayName(id)).join("、")}。`);
+    this.phase = "sheriff-campaign";
+    this.emitUpdate();
+  }
+
+  private resolveSheriffWithdraw(): void {
+    const remaining = this.currentSheriffCandidates();
+    if (remaining.length === 1) {
+      this.electSheriff(remaining[0], "其余竞选者全部退选，唯一留任者当选警长。");
+      return;
+    }
+    // 全员上警: nobody kept the right to vote, so the election cannot resolve.
+    if (this.sheriffElectorate().length === 0) {
+      this.addLog("警长竞选：全员上警，无人拥有警长投票权，本局没有警长。", this.day);
+      this.setLastExperiences("全员上警，无人有警长投票权，本局没有警长。");
+      this.phase = "day-discussion";
+      this.emitUpdate();
+      return;
+    }
+    const withdrawn = [...this.sheriffWithdrawn].map((id) => this.displayName(id));
+    this.addLog(
+      `警长竞选：${withdrawn.length ? `${withdrawn.join("、")} 退选，` : ""}最终候选人为 ${remaining.map((id) => this.displayName(id)).join("、")}，未上警的玩家开始投票。`,
+      this.day
+    );
+    this.setLastExperiences(`警长竞选进入投票，候选人：${remaining.map((id) => this.displayName(id)).join("、")}。`);
+    this.phase = "sheriff-vote";
+    this.emitUpdate();
+  }
+
+  private resolveSheriffVote(): void {
+    const tally = tallyTargets(this.sheriffVotes);
+    const ranked = [...tally].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+    const hasTie = ranked.length > 1 && ranked[0][1] === ranked[1][1];
+    const sheriffElectedId = hasTie ? undefined : ranked[0]?.[0];
+    this.sheriffVotes.clear();
+    this.sheriffVoteCommandIds.clear();
+    if (hasTie && !this.sheriffPkHeld) {
+      this.sheriffPkHeld = true;
+      this.sheriffPkCandidates = ranked
+        .filter(([, count]) => count === ranked[0][1])
+        .map(([id]) => id)
+        .slice(0, 2);
+      this.addLog(
+        `警长竞选投票平票：${this.sheriffPkCandidates.map((id) => this.displayName(id)).join("、")} 进入 PK 陈词，发言后重新投票（竞选者不投票）。`,
+        this.day
+      );
+      this.setLastExperiences("警长竞选投票平票，进入 PK 陈词。");
+      this.phase = "sheriff-pk";
+      this.emitUpdate();
+      return;
+    }
+    if (hasTie) {
+      // A second tie ends the election: the village plays without a sheriff.
+      this.addLog("警长竞选两次平票，本局没有警长。", this.day);
+      this.setLastExperiences("警长竞选两次平票，本局没有警长。");
+      this.phase = "day-discussion";
+      this.emitUpdate();
+      return;
+    }
+    if (sheriffElectedId) this.electSheriff(sheriffElectedId, "赢得警长竞选投票。");
+  }
+
+  private electSheriff(sheriffId: string, note: string): void {
+    this.sheriffId = sheriffId;
+    this.sheriffPkCandidates = [];
+    let record = this.history.at(-1);
+    if (!record || record.day !== this.day) {
+      record = { day: this.day, votes: {} };
+      this.history.push(record);
+    }
+    record.sheriffElectedId = sheriffId;
+    const name = this.displayName(sheriffId);
+    this.addLog(`${name} ${note}警长的白天投票计 1.5 票，出局时需移交警徽或撕掉。`, this.day);
+    this.setLastExperiences(`${name} 当选警长：TA 的白天投票计 1.5 票。`);
+    this.pushEvent(sheriffId, {
+      type: "endorsed",
+      targetId: sheriffId,
+      facts: { sheriff: true },
+      detail: `你当选警长——白天的放逐投票计 1.5 票；你出局时需要移交警徽或撕掉。`
+    });
+    this.recordPublicWorldFact({
+      factKey: `werewolf-sheriff:${this.day}`,
+      eventType: "werewolf.sheriff-elected",
+      predicate: "werewolf-sheriff-result",
+      object: { sheriffId },
+      payload: { day: this.day, sheriffId },
+      kind: "past-action"
+    });
+    this.phase = "day-discussion";
+    this.emitUpdate();
+  }
+
+  /** After a badge decision settles, carry the day on like any other queue item. */
+  private resolveBadgePassCascade(): void {
+    if (this.phase === "night") {
+      this.afterNightChecks();
+      return;
+    }
+    this.afterEliminationChecks();
+  }
+
+  private displayName(actorId: string): string {
+    return this.profiles.get(actorId)?.displayName ?? actorId;
+  }
+
+  private setLastExperiences(text: string): void {
+    for (const id of this.profiles.keys()) this.lastExperiences.set(id, `${text}`);
+  }
+
   private resolveNight(): void {
     const wolfTargetId = this.currentWolfTarget();
     const guardId = this.guardTargetId === "__none__" ? undefined : this.guardTargetId;
@@ -1507,7 +1992,7 @@ export class WerewolfWorld extends SocialWorldBase {
     this.nightmareCurseCommandId = undefined;
     this.charmCommandId = undefined;
 
-    if (this.pendingShots.length) return; // shots resolve before phase transition
+    if (this.pendingShots.length || this.pendingBadgePass.length) return; // shots and badge decisions resolve before the phase transition
     this.afterNightChecks();
   }
 
@@ -1783,6 +2268,12 @@ export class WerewolfWorld extends SocialWorldBase {
     if (detectedDeceptions.length) {
       this.addLog(`身份揭晓证伪了 ${detectedDeceptions.length} 条带计划、带消息引用的身份欺骗。`, this.day, "deception-exposed");
     }
+    // A dying sheriff owes the badge a decision — hand it over or tear it.
+    // The badge leaves with them right here, so no half-dead state lingers.
+    if (targetId === this.sheriffId) {
+      this.sheriffId = undefined;
+      this.pendingBadgePass.push(targetId);
+    }
     this.pushEvent(targetId, {
       type: "eliminated",
       targetId,
@@ -1858,8 +2349,8 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   private afterEliminationChecks(): void {
-    if (this.pendingLastWords.length || this.pendingShots.length) {
-      // Stay in the current phase: the last word / shot activation runs first.
+    if (this.pendingBadgePass.length || this.pendingLastWords.length || this.pendingShots.length) {
+      // Stay in the current phase: the badge / last word / shot activation runs first.
       return;
     }
     if (this.wolvesAlive().length === 0) {
@@ -1875,6 +2366,7 @@ export class WerewolfWorld extends SocialWorldBase {
   }
 
   private afterNightChecks(): void {
+    if (this.pendingBadgePass.length || this.pendingLastWords.length || this.pendingShots.length) return;
     if (this.wolvesAlive().length === 0) {
       this.endGame(this.factionMembers(["seer", "witch", "hunter", "knight", "guard", "idiot", "villager"]), this.jesterWon ? "所有狼人都已出局，村庄阵营获胜（小丑已单独获胜离场）。" : "所有狼人都已出局，村庄阵营获胜。");
       return;
@@ -1955,6 +2447,11 @@ export class WerewolfWorld extends SocialWorldBase {
 }
 
 function situationFor(phase: Phase, role: WerewolfRoleId, aliveCount: number, wolvesAlive: number): string {
+  if (phase === "sheriff-run") return "The sheriff election opens: every living participant decides whether to run (上警). The elected sheriff's day vote counts 1.5x; candidates campaign but cannot vote in the election.";
+  if (phase === "sheriff-campaign") return "Sheriff campaign: the candidates give one speech each, in seat order — everyone else listens.";
+  if (phase === "sheriff-withdraw") return "The speeches are done. Candidates may withdraw (退选); the last one standing cannot. Withdrawn candidates still cannot vote.";
+  if (phase === "sheriff-vote") return "Sheriff election vote: everyone who never ran casts one sealed ballot for a candidate. The badge carries a 1.5x day vote.";
+  if (phase === "sheriff-pk") return "The sheriff election tied: the tied candidates give their PK speeches, then the electors re-vote. A second tie leaves the village without a sheriff.";
   if (phase === "day-discussion") return `${aliveCount} participants remain. Hidden objectives conflict, and public behavior may not reveal private strategy. Your role is ${roleLabel(role)}.`;
   if (phase === "day-knight") return `The knight's daytime duel is open: one challenge, before the vote. ${wolvesAlive} wolves remain, known only to the pack.`;
   if (phase === "day-pk") return `The vote tied: the two accused are giving their PK speeches, then the table re-votes without them. ${wolvesAlive} wolves remain, known only to the pack.`;
@@ -1971,6 +2468,11 @@ function situationFor(phase: Phase, role: WerewolfRoleId, aliveCount: number, wo
 }
 
 function phaseLabel(phase: Phase): string {
+  if (phase === "sheriff-run") return "警长竞选 · 上警";
+  if (phase === "sheriff-campaign") return "警长竞选 · 发言";
+  if (phase === "sheriff-withdraw") return "警长竞选 · 退选";
+  if (phase === "sheriff-vote") return "警长竞选 · 投票";
+  if (phase === "sheriff-pk") return "警长竞选 · 平票 PK";
   if (phase === "day-discussion") return "白天讨论";
   if (phase === "day-knight") return "骑士决斗";
   if (phase === "day-vote") return "白天投票";
