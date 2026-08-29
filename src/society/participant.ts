@@ -387,7 +387,8 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   /**
    * Deterministic facts that must survive every context compaction: identity,
    * the current role/win-condition context, active goals and active deception
-   * plans. These are preserved as a verbatim pinned block, never model-prose.
+   * plans, plus the agent's own recent conclusions (bounded reflections) —
+   * everything here is preserved as a verbatim pinned block, never model-prose.
    */
   private pinnedFacts(): string[] {
     const observation = this.context.world.observe(this.profile.id);
@@ -402,6 +403,15 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     ];
     for (const plan of this.mind.deceptions.filter((entry) => entry.deceptionId && activeDeceptionIds.has(entry.deceptionId)).slice(-2)) {
       facts.push(`活跃欺骗计划（${plan.type}）：想让他人相信「${plan.intendedBelief}」，公开口径「${plan.coverStory}」，被质疑时说「${plan.fallback}」`);
+    }
+    // The agent's own recent conclusions are the one model-authored content
+    // that earns a verbatim pin: bounded (last 3, 240 chars each) so the
+    // "thinking layer" survives compaction deterministically instead of
+    // relying on the summarize prompt's compliance.
+    for (const pass of this.mind.cognitivePasses.slice(-3)) {
+      const text = pass.text.length > 240 ? `${pass.text.slice(0, 240)}…` : pass.text;
+      const label = pass.kind === "mind-read" ? "读心" : pass.kind === "plan" ? "计划" : "反思";
+      facts.push(`自己的近期${label}（第 ${pass.turn} 回合）：${text}`);
     }
     return facts;
   }
@@ -483,6 +493,17 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     const changed = summary.changed || adapted.moved.length > 0;
     if (!changed) return;
     this.mind.mood = refreshMood(this.mind.mood, turn);
+    // Engine-side behavior shaping reads current mood + adapted temperament
+    // through the world's mood mirror (never another agent's context).
+    const current = effective ?? this.profile.temperament;
+    this.context.world.noteMood(this.profile.id, {
+      pleasure: this.mind.mood.pad.pleasure,
+      arousal: this.mind.mood.pad.arousal,
+      dominance: this.mind.mood.pad.dominance,
+      extraversion: current?.extraversion ?? 0.5,
+      neuroticism: current?.neuroticism ?? 0.5,
+      conscientiousness: current?.conscientiousness ?? 0.5
+    });
     this.context.emit({
       type: "agent.updated",
       roomId: this.context.roomId,

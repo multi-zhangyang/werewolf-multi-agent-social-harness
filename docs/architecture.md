@@ -44,7 +44,10 @@ and recomputes the context budget; the session and mind are carried over verbati
 
 `src/society/appraisal.ts` turns world events into inner state: PAD / core emotion /
 social emotion / need / relationship deltas, modulated by the character's Big Five
-profile and stable judgment biases. Settlement outcomes become display-only memory
+profile and stable judgment biases, and by relationship history: the same event does not
+land the same way from a warm ally and from a cold rival — hostile acts from an ally cost
+more trust, a rival's cooperation is more diagnostic, and both intensity and repair scale
+with directed warmth. Settlement outcomes become display-only memory
 notes for the spectator MindSheet; the model's own session history carries what the
 character actually remembers. Emotions are event-driven, never self-reported.
 
@@ -58,7 +61,9 @@ agent's run context.
 Context is budgeted per agent (`src/society/context-manager.ts`): once a turn's estimated
 input crosses the compaction threshold, the manager rewrites session history through the
 SDK's `sessionInputCallback`, compressing older turns into a pinned-facts + digest block
-and keeping recent exchanges verbatim.
+and keeping recent exchanges verbatim. The pinned block carries identity, the current
+role context, active deceptions and the agent's own last few bounded conclusions
+verbatim, so the thinking layer survives compression deterministically.
 
 An SDK input guardrail (`injection-shield`) scans every turn's input for manipulation
 attempts hidden in other players' speech; it never halts a turn, but flags the attempt
@@ -85,7 +90,10 @@ for observers as live suspicion bars.
 `src/society/conversation.ts` implements turn-taking as response pressure (adjacency
 pairs). Every public utterance raises the urgency of the people it concerns; the director
 opens with a full round, then activates only those with real pressure, wave after wave.
-Silence is a legitimate move. Personality modulates urgency.
+Silence is a legitimate move. Personality modulates urgency — talkativeness, dominance and
+sensitivity are computed from the adapted temperament plus the character's live PAD mood
+(a world-side mirror each participant pushes after appraisal; it never enters another
+agent's observations), so an energized character speaks up sooner and presses harder.
 
 ## World boundary
 
@@ -98,7 +106,11 @@ gateway counters exposed via `/api/rooms/:id/metrics`.
 
 `src/society/social/ledger.ts` records propositions, social acts, evidence, belief
 updates, actor models, directed relationships, commitments, deception episodes and
-outcome reconciliations — all with provenance. Commitment reconciliation
+outcome reconciliations — all with provenance. Belief updates fuse instead of overwrite:
+a self-reported probability moves the prior by trust = confidence × evidence backing ×
+recency damping (Jeffrey conditioning), where backing comes only from newly-cited
+evidence and stale repetitions decay geometrically, with the result clamped to
+[0.02, 0.98] so no testimony alone ever reaches certainty. Commitment reconciliation
 (fulfilled / violated / void) is the settlement backbone for the causality page. Message
 sidecar extraction annotates every persisted message with structured social acts
 (`model-extracted`), strictly serialized off the send path. High-confidence extractions

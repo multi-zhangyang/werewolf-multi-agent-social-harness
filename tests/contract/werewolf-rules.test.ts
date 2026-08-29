@@ -316,11 +316,17 @@ check("quality metrics score the vote, the lies and the beliefs against ground t
   assert.ok(deceiver, "the wolf's deception outcome is aggregated");
   assert.equal(deceiver.episodes, 1);
   assert.equal(deceiver.detected, 1);
-  // Calibration: the villager held p=0.8 on a proposition the reveal falsified.
+  // Calibration: the self-report is fused, not taken at face value. The belief
+  // cites the wolf's message, which the ledger carries as two events (the
+  // utterance plus the extracted identity claim), so confidence 0.7 over two
+  // fresh citations earns trust 0.7 × (0.5 + 0.5·0.75) = 0.6125 and the stored
+  // belief is 0.6125·0.8 + 0.3875·0.5 = 0.68375. Brier on the falsified claim
+  // is 0.68375² ≈ 0.468 — fusion pulls an uncertain overclaim back toward the
+  // prior, which scores better than the raw 0.8 report's 0.64.
   const calibration = quality.beliefCalibration.find((entry) => entry.actorId === villager);
   assert.ok(calibration, "the villager's resolved beliefs are scored");
   assert.equal(calibration.resolvedBeliefs, 1);
-  assert.equal(calibration.brier, 0.64, "p=0.8 on a falsified claim is Brier (0.8-0)² = 0.64");
+  assert.equal(calibration.brier, 0.468, "fused p≈0.684 on a falsified claim is Brier ≈ 0.468");
 });
 
 // --- idiot rules ---

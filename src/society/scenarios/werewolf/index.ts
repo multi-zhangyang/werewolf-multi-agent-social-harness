@@ -2428,7 +2428,7 @@ export class WerewolfWorld extends SocialWorldBase {
     return new DiscussionDirector({
       actorIds: aliveIds,
       displayName: (id) => this.profiles.get(id)?.displayName ?? id,
-      ...discussionPersonality(this.profiles)
+      ...discussionPersonality(this.profiles, (id) => this.moodSignalFor(id))
     });
   }
 

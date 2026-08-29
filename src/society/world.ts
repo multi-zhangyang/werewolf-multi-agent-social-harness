@@ -5,6 +5,7 @@ import type {
   AgentProfile,
   AgentStatus,
   Commitment,
+  MoodSignal,
   OpenCommitmentView,
   PlayerActionSpec,
   ScenarioSummary,
@@ -87,6 +88,24 @@ export abstract class SocialWorldBase implements SocialWorld {
    */
   socialActExtractor?: (message: SocialMessage) => Promise<void>;
   private readonly extractionAttempted = new Set<string>();
+
+  /**
+   * Mood mirror: participants push their post-appraisal mood and adapted
+   * temperament here so engine-side behavior shaping (discussion pressure)
+   * can read current state without touching participant-owned minds. It is
+   * engine-internal — never surfaced in another agent's observations.
+   */
+  private readonly moodSignals = new Map<string, MoodSignal>();
+
+  /** Participant-side push after appraisal; a no-op for worlds that never read it. */
+  noteMood(actorId: string, signal: MoodSignal): void {
+    this.moodSignals.set(actorId, signal);
+  }
+
+  /** Latest mood signal for an actor, when one has been pushed. */
+  moodSignalFor(actorId: string): MoodSignal | undefined {
+    return this.moodSignals.get(actorId);
+  }
 
   constructor(roomId: string, scenario: ScenarioSummary, profiles: AgentProfile[]) {
     this.roomId = roomId;

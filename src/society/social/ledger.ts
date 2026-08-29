@@ -1041,7 +1041,15 @@ export class SocialCausalityLedger {
       ownerCharacterId,
       propositionId: proposition.propositionId,
       beforeProbability: previous?.afterProbability ?? 0.5,
-      afterProbability: clamp01(input.probability),
+      afterProbability: fuseSelfReport({
+        prior: previous?.afterProbability ?? 0.5,
+        reported: clamp01(input.probability),
+        confidence: clamp01(input.confidence),
+        evidenceIds,
+        history: this.beliefUpdates.filter((entry) =>
+          entry.ownerCharacterId === ownerCharacterId && entry.propositionId === proposition.propositionId
+        )
+      }),
       confidence: clamp01(input.confidence),
       addedEvidenceIds: evidenceIds,
       removedEvidenceIds: [],
@@ -2022,6 +2030,55 @@ function advanceDeceptionStatus(episode: DeceptionEpisode, next: DeceptionEpisod
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+/**
+ * Evidence-weighted fusion of a self-reported belief with its prior — the
+ * belief layer's core update, replacing the old `clamp01(input.probability)`
+ * overwrite.
+ *
+ * A self-report is opinion-like testimony, so the update is Jeffrey
+ * conditioning on partially trusted evidence: `b' = r·p + (1−r)·b`
+ * (Jeffrey, The Logic of Decision, 2nd ed., 1990, ch. 11). The r = 1 special
+ * case is exactly the old overwrite rule; every r < 1 gives the belief
+ * inertia, so a single push cannot whiplash a stance.
+ *
+ * The effective trust r combines three factors:
+ *  - stated confidence (a low-certainty report moves the belief less);
+ *  - saturating backing from freshly cited evidence — ids this update is
+ *    first to cite for this belief (0 fresh → half weight, 2+ → ~full);
+ *  - geometric damping of repeats: consecutive updates that cite nothing
+ *    the belief has not already seen compound by 0.6 each, because
+ *    dependent reports must not compound to certainty (Genest & Zidek,
+ *    Statistical Science 1(1), 1986; Clemen & Winkler, Operations Research
+ *    33(2), 1985).
+ *
+ * The result obeys Cromwell's rule and stays off the absorbing endpoints
+ * (Lindley, Making Decisions, 2nd ed., 1985): only world resolution writes
+ * exact 0/1, and it bypasses this path.
+ */
+export function fuseSelfReport(input: {
+  prior: number;
+  reported: number;
+  confidence: number;
+  evidenceIds: string[];
+  history: BeliefUpdateRecord[];
+}): number {
+  const seen = new Set<string>();
+  const freshAt: number[] = [];
+  for (const update of input.history) {
+    const fresh = update.addedEvidenceIds.filter((id) => !seen.has(id)).length;
+    for (const id of update.addedEvidenceIds) seen.add(id);
+    freshAt.push(fresh);
+  }
+  const fresh = input.evidenceIds.filter((id) => !seen.has(id)).length;
+  let trailingStale = 0;
+  for (let index = freshAt.length - 1; index >= 0 && freshAt[index] === 0; index -= 1) trailingStale += 1;
+
+  const backing = 1 - Math.pow(0.5, fresh);
+  const damping = fresh > 0 ? 1 : Math.pow(0.6, 1 + trailingStale);
+  const trust = input.confidence * (0.5 + 0.5 * backing) * damping;
+  return Math.max(0.02, Math.min(0.98, trust * input.reported + (1 - trust) * input.prior));
 }
 
 function relationshipDimensions(value: RelationshipDimensions): RelationshipDimensions {

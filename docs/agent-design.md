@@ -18,8 +18,9 @@ Society 的运行形态：一名参与者 = 一个标准 SDK Agent，房间调�
 - 认知工具（可选、轻量）：`recall_memory`（只读检索自己的承诺、见证的主张、信念与记忆）、
   `update_inner_state`、`read_the_room`、`log_deception_plan`。
   认知工具写下的反思笔记（cognitivePasses）每回合以 `[YOUR RECENT THINKING]` 回注到
-  观察输入，并在压缩摘要提示词中明确保留——反思因此能跨回合存活，而不是被压缩抹掉；
-  确定性 pinned facts 块保持纯事实，不混入模型自述文本。
+  观察输入；压缩时双保险——摘要提示词要求保留反思结论，确定性 pinned facts 块则把
+  最近 3 条（每条 240 字截断）逐字钉死。这是 pinned 块里**唯一**的模型自述文本，
+  其余条目保持纯事实。
 
 **禁止**在工具 schema 里塞思考产物（候选意图、预测后果、引用数组、审计表单）。思考发生在
 agent 循环的上下文里；行动只提交结果。模型坏 JSON 概率由此降到平铺工具的量级；线上修复

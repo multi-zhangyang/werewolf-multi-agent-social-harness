@@ -115,7 +115,11 @@ it("an audience belief moving toward the intended lie marks the episode believed
   });
   const after = ledger.project({ omniscient: true }).deceptions[0];
   assert.equal(after.status, "believed");
-  assert.ok(after.audienceBeliefsAfter.some((entry) => entry.characterId === "builtin-02" && entry.probability === 0.9));
+  // Evidence-weighted fusion: the self-report (0.9, confidence 0.8, one
+  // fresh citation) tempers toward the prior instead of overwriting, so the
+  // audience belief lands part-way toward the lie — substantially moved,
+  // never the verbatim claim.
+  assert.ok(after.audienceBeliefsAfter.some((entry) => entry.characterId === "builtin-02" && entry.probability > 0.7 && entry.probability < 0.9));
 });
 
 it("unexecuted plans are abandoned when the room closes; executed-but-unexposed ones fail", () => {

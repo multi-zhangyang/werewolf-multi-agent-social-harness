@@ -34,11 +34,14 @@ function mind(): AgentMindState {
     goals: [],
     beliefs: [],
     memories: [],
+    // Neutral warmth (0.5) keeps the relationship modulation at exactly 1×,
+    // so this file tests the commitment branches in isolation; the
+    // relationship multipliers have their own file (appraisal-relationship).
     relationships: [{
       targetCharacterId: "char-b",
-      trust: 0.7,
-      affinity: 0.6,
-      respect: 0.6,
+      trust: 0.5,
+      affinity: 0.5,
+      respect: 0.5,
       tension: 0.2,
       familiarity: 0.5,
       updatedAtTurn: 1,
@@ -78,7 +81,7 @@ it("a violated promise drops trust and raises tension with a citable note", () =
   );
   const relationship = state.relationships.find((entry) => entry.targetCharacterId === "char-b");
   assert.ok(relationship, "the directed relationship exists");
-  assert.equal(relationship!.trust, 0.7 - 0.25, "trust dropped by the violation delta");
+  assert.equal(relationship!.trust, 0.5 - 0.25, "trust dropped by the violation delta");
   assert.equal(relationship!.tension, 0.2 + 0.2, "tension rose by the violation delta");
   assert.ok(relationship!.note.includes("承诺破裂"), "the note cites the violation");
   assert.ok(state.lastAppraisals.some((note) => note.text.includes("承诺破裂")), "the appraisal note records the cause");
@@ -96,7 +99,7 @@ it("a fulfilled promise raises trust and records the kept promise", () => {
     resolveCharacterId
   );
   const relationship = state.relationships.find((entry) => entry.targetCharacterId === "char-b")!;
-  assert.equal(relationship.trust, 0.7 + 0.12, "trust rose by the fulfillment delta");
+  assert.equal(relationship.trust, 0.5 + 0.12, "trust rose by the fulfillment delta");
   assert.ok(state.lastAppraisals.some((note) => note.text.includes("承诺兑现")), "the kept promise is recorded");
 });
 
@@ -111,5 +114,5 @@ it("a declaration alone moves no relationship — nothing has been kept yet", ()
     resolveCharacterId
   );
   const relationship = state.relationships.find((entry) => entry.targetCharacterId === "char-b")!;
-  assert.equal(relationship.trust, 0.7, "a promise is only a claim until it settles");
+  assert.equal(relationship.trust, 0.5, "a promise is only a claim until it settles");
 });

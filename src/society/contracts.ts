@@ -216,6 +216,21 @@ export interface AgentRelationship {
 }
 
 /**
+ * World-side mirror of one agent's mood and adapted temperament, pushed by
+ * the participant after each appraisal. Used by engine-side behavior shaping
+ * (e.g. the discussion director's personality signals) — it is never injected
+ * into another agent's observation context.
+ */
+export interface MoodSignal {
+  pleasure: number;
+  arousal: number;
+  dominance: number;
+  extraversion: number;
+  neuroticism: number;
+  conscientiousness: number;
+}
+
+/**
  * Display-only memory entry: a plain capped list on the mind for the spectator
  * MindSheet. It is NOT a retrieval system — the model's own SDK session carries
  * what the agent actually remembers.
@@ -908,6 +923,13 @@ export interface SocialWorld {
    * must never reach the send path.
    */
   socialActExtractor?: (message: SocialMessage) => Promise<void>;
+  /**
+   * Mood mirror: participants push their post-appraisal mood and adapted
+   * temperament; engine-side behavior shaping (discussion pressure) reads
+   * it back. Never surfaced in another agent's observations.
+   */
+  noteMood(actorId: string, signal: MoodSignal): void;
+  moodSignalFor(actorId: string): MoodSignal | undefined;
   /**
    * Scenario-specific guidance for the message sidecar extractor — e.g.
    * identity-claim vocabulary for werewolf. Optional; scenarios without

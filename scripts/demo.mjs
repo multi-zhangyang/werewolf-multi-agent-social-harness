@@ -10,12 +10,15 @@
  *   node scripts/demo.mjs                     # run every scenario (heavy)
  *   node scripts/demo.mjs prisoners-dilemma   # run one scenario
  *   DEMO_MODEL_PROFILES=mp-a,mp-b node scripts/demo.mjs werewolf
+ *   DEMO_TIMEOUT_MIN=90 node scripts/demo.mjs werewolf   # long games (9-seat werewolf runs 60-90+ min)
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const API = process.env.DEMO_API ?? "http://127.0.0.1:8787";
+const timeoutMinutes = Number(process.env.DEMO_TIMEOUT_MIN ?? "20");
+const timeoutMs = (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0 ? timeoutMinutes : 20) * 60_000;
 const SCENARIOS = ["prisoners-dilemma", "ultimatum-game", "trust-game", "public-goods", "beauty-contest", "sealed-bid-auction", "werewolf", "avalon", "centipede-game", "chicken-game", "stag-hunt", "negotiation-game", "liars-dice"];
 
 const requested = process.argv.slice(2);
@@ -95,8 +98,8 @@ async function main() {
           break;
         }
       }
-      if (Date.now() - started > 20 * 60_000) {
-        console.error(`[demo] ${scenarioId} timed out after 20 minutes`);
+      if (Date.now() - started > timeoutMs) {
+        console.error(`[demo] ${scenarioId} timed out after ${Math.round(timeoutMs / 60_000)} minutes`);
         failures += 1;
         break;
       }

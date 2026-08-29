@@ -15,7 +15,8 @@ npm run server
 
 # 2. 开 2-3 局真实小局（旗舰 + 一个普通场景；demo 会等待每局 finished）
 node scripts/demo.mjs werewolf prisoners-dilemma
-#    可选：DEMO_ROUNDS=3（默认）、DEMO_PLAYERS、DEMO_REASONING_EFFORT（默认 high）
+#    可选：DEMO_ROUNDS=3（默认）、DEMO_PLAYERS、DEMO_REASONING_EFFORT（默认 high）、
+#    DEMO_TIMEOUT_MIN（默认 20；狼人杀等 9 席长局实际跑 60-90+ 分钟，需调大，如 90）
 ```
 
 `demo.mjs` 会轮询房间状态，paused 时自动 resume（需要 `DEMO_OPERATOR_TOKEN` 与

@@ -55,6 +55,130 @@ function mod(base: number, trait: number | undefined, strength = 1): number {
   return base * (1 + (trait - 0.5) * 2 * strength);
 }
 
+/**
+ * Directed valence of an event toward the recipient: +1 an act of goodwill
+ * from the other, -1 an act of hostility, 0 self-events and world outcomes
+ * with no other-directed source. Only ±1 events are relationship-modulated.
+ */
+const EVENT_VALENCE: Record<SocialEvent["type"], -1 | 0 | 1> = {
+  defended: 1,
+  endorsed: 1,
+  "apologized-to": 1,
+  "socially-accepted": 1,
+  "voted-with": 1,
+  included: 1,
+  "alliance-proposed": 1,
+  "agreement-reached": 1,
+  "commitment-proposed": 1,
+  "commitment-accepted": 1,
+  "commitment-fulfilled": 1,
+  "opponent-cooperated": 1,
+  "warning-received": 1,
+  "offer-proposed": 1,
+  accused: -1,
+  threatened: -1,
+  "socially-rejected": -1,
+  "vote-against": -1,
+  excluded: -1,
+  "commitment-violated": -1,
+  "opponent-defected": -1,
+  "offer-rejected": -1,
+  "negotiation-failed": -1,
+  "competitive-bid-received": -1,
+  "bid-challenged": -1,
+  assassinated: -1,
+  "vote-cast": 0,
+  eliminated: 0,
+  "eliminated-other": 0,
+  revealed: 0,
+  investigation: 0,
+  "night-kill": 0,
+  "quest-passed": 0,
+  "quest-failed": 0,
+  "investment-made": 0,
+  "return-made": 0,
+  win: 0,
+  lose: 0
+};
+
+/**
+ * Relationship modulation of appraisal intensity: the same act no longer
+ * lands identically regardless of who did it.
+ *
+ * Theory: OCC's fortunes-of-others branch treats liking as both the gate and
+ * a local intensity variable for other-directed emotions (Ortony, Clore &
+ * Collins, The Cognitive Structure of Emotions, CUP 1988, ch. 5; formalized by
+ * Adam, Herzig & Longin, Synthese 168:201-248, 2009), and computational OCC
+ * systems modulate empathic intensity linearly with relationship factors
+ * (Boukricha & Wachsmuth, AAMAS 2011). Harm from a trusted source is
+ * amplified — the betrayal/black-sheep effect (Koehler & Gershoff, OBHDP
+ * 90(2), 2003; Marques, Yzerbyt & Leyens, EJSP 18(1), 1988) — while harm
+ * from a known adversary is discounted as disposition-consistent and
+ * therefore uninformative (Jones & Davis, Advances in Experimental Social
+ * Psychology 2, 1965). Goodwill works the same way reversed: an ally's
+ * support lands harder, but cooperation from a cold relationship is the
+ * informative event that actually moves trust.
+ *
+ *  - Warmth w = (trust + affinity) / 2 toward the actor sets the felt
+ *    intensity of the act: intensity = 0.6 + 0.8·w ∈ [0.6, 1.4] (a bounded
+ *    reading of OCC's monotone intensity variables — allies cut deeper,
+ *    rivals are braced against).
+ *  - Hostile acts pay the trust cost scaled by intensity (betrayal
+ *    amplification: an ally's betrayal is the expensive move).
+ *  - Goodwill acts gain trust scaled by repair = 1.4 − 0.8·w (an
+ *    antagonist's cooperation is informative, an established ally's nth
+ *    favour is not — reconciliation stays possible, warm bonds do not
+ *    inflate into certainty).
+ *
+ * All multipliers stay inside [0.6, 1.4] and only scale magnitudes — no
+ * sign is ever flipped, so the appraisal table stays the source of meaning.
+ */
+function modulateByRelationship(
+  deltas: Deltas,
+  event: SocialEvent,
+  mind: AgentMindState,
+  resolveCharacterId?: (actorId: string) => string | undefined
+): Deltas {
+  const valence = EVENT_VALENCE[event.type];
+  if (valence === 0 || !event.actorId || !resolveCharacterId) return deltas;
+  const characterId = resolveCharacterId(event.actorId);
+  const relationship = mind.relationships.find((entry) => entry.targetCharacterId === characterId);
+  if (!relationship) return deltas;
+  const warmth = (relationship.trust + relationship.affinity) / 2;
+  const intensity = 0.6 + 0.8 * warmth;
+  const repair = 1.4 - 0.8 * warmth;
+  const next: Deltas = structuredClone(deltas);
+  if (next.emotions) {
+    for (const [key, value] of Object.entries(next.emotions)) {
+      if (value !== undefined) next.emotions[key as keyof typeof next.emotions] = value * intensity;
+    }
+  }
+  if (next.social) {
+    for (const [key, value] of Object.entries(next.social)) {
+      if (value !== undefined) next.social[key as keyof typeof next.social] = value * intensity;
+    }
+  }
+  if (next.pad) {
+    for (const [key, value] of Object.entries(next.pad)) {
+      if (value !== undefined) next.pad[key as keyof typeof next.pad] = value * intensity;
+    }
+  }
+  if (next.needs) {
+    for (const [key, value] of Object.entries(next.needs)) {
+      if (value !== undefined) next.needs[key as keyof typeof next.needs] = value * intensity;
+    }
+  }
+  if (next.energy !== undefined) next.energy *= intensity;
+  if (next.salience !== undefined) next.salience *= intensity;
+  if (next.relationship) {
+    const factor = valence < 0 ? intensity : repair;
+    for (const [key, value] of Object.entries(next.relationship)) {
+      if (value !== undefined) next.relationship[key as keyof typeof next.relationship] = value * factor;
+    }
+  }
+  return next;
+}
+
 export function appraiseEvents(
   mind: AgentMindState,
   profile: AgentProfile,
@@ -73,7 +197,8 @@ export function appraiseEvents(
   for (const event of events) {
     const raw = appraisalFor(mind, event, temperament);
     if (!raw) continue;
-    const biased = modulateByBiases(raw, biases);
+    const relational = modulateByRelationship(raw, event, mind, resolveCharacterId);
+    const biased = modulateByBiases(relational, biases);
     const deltas = modulateByRegulation(biased, profile.regulation);
     changed = true;
     apply(mind, event, deltas, turn, resolveCharacterId);

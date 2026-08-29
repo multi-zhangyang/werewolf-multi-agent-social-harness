@@ -549,7 +549,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
     return new DiscussionDirector({
       actorIds: [...this.profiles.keys()],
       displayName: (id) => this.profiles.get(id)?.displayName ?? id,
-      ...discussionPersonality(this.profiles),
+      ...discussionPersonality(this.profiles, (id) => this.moodSignalFor(id)),
       maxWaves: 4,
       waveSizeCap: Math.min(4, this.profiles.size)
     });

@@ -433,7 +433,7 @@ export class UltimatumWorld extends SocialWorldBase {
     return new DiscussionDirector({
       actorIds: this.rolesForRound(),
       displayName: (id) => this.profiles.get(id)?.displayName ?? id,
-      ...discussionPersonality(this.profiles)
+      ...discussionPersonality(this.profiles, (id) => this.moodSignalFor(id))
     });
   }
 
