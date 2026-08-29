@@ -598,6 +598,56 @@ check("hunter voted out gets a day shot and the phase then advances", () => {
   assert.equal(next.phase, "夜晚行动", "after the shot the day advances to night");
 });
 
+// A held shot (压枪) must cascade exactly like a fired one: the regression
+// behind the phantom second day vote — the phase stayed on day-vote and the
+// room opened another binding vote on the same day.
+check("a voted-out hunter who holds the shot ends the day — no phantom second vote", () => {
+  const { world, byRole } = makeWerewolf(8);
+  skipDiscussion(world);
+  const vote = world.activation()!;
+  const hunter = byRole("hunter")[0];
+  for (const actor of vote.actorIds) {
+    void world.performDomainAction(actor, "cast_day_vote", { targetId: hunter, reason: "t" });
+  }
+  world.completeActivation(vote!);
+  passLastWords(world);
+  const shot = world.activation()!;
+  assert.ok(shot && shot.id.includes(":shot:"), "the hunter's shot activation opens");
+  void world.performDomainAction(hunter, "hunter_shoot", {});
+  world.completeActivation(shot);
+  const next = world.activation()!;
+  assert.ok(next && next.id.endsWith(":night"), "a held shot still advances to the night");
+  const after = world.snapshot();
+  const day1 = (after.details.history as Array<{ day: number; eliminatedId?: string }>).find((record) => record.day === 1);
+  assert.equal(day1?.eliminatedId, hunter, "exactly one elimination is recorded for the day");
+  assert.equal(after.agents.filter((agent) => !agent.alive).length, 1, "nobody else was voted out");
+});
+
+check("a night-killed hunter who holds the shot still lets the night resolve", () => {
+  const { world, byRole } = makeWerewolf(8);
+  skipDiscussion(world);
+  const vote = world.activation()!;
+  for (const actor of vote.actorIds) {
+    void world.performDomainAction(actor, "cast_day_vote", { targetId: byRole("villager")[0], reason: "t" });
+  }
+  world.completeActivation(vote!);
+  passLastWords(world);
+  const night = world.activation()!;
+  const hunter = byRole("hunter")[0];
+  for (const wolf of byRole("wolf")) {
+    void world.performDomainAction(wolf, "choose_night_target", { targetId: hunter, reason: "t" });
+  }
+  void world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
+  void world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
+  world.completeActivation(night);
+  const shot = world.activation()!;
+  assert.ok(shot && shot.id.includes(":shot:"), "the night-killed hunter's shot activation opens");
+  void world.performDomainAction(hunter, "hunter_shoot", {});
+  world.completeActivation(shot);
+  const next = world.activation()!;
+  assert.ok(next && next.id.startsWith("ww:2:"), "a held night shot still advances to day 2");
+});
+
 check("jester voted out wins solo and the game continues", () => {
   const { world, byRole } = makeWerewolf(8);
   skipDiscussion(world);
@@ -772,8 +822,7 @@ check("wolves win at parity after a night kill", () => {
   assert.ok(/狼人阵营获胜/.test(after.details.outcome as string), "wolves win by parity");
 });
 
-// --- 警长竞选 (sheriff election) / 警徽流 (badge flow) ---
-/** Drive the run decisions; two given candidates stay on the ballot. */
+// --- 警长竞选 (sheriff election) / 警徽流 (badge flow) ---/** Drive the run decisions; two given candidates stay on the ballot. */
 async function runForSheriff(world: SocialWorldBase, runnerIds: string[]): Promise<void> {
   const run = world.activation()!;
   for (const actor of run.actorIds) {
@@ -1092,6 +1141,35 @@ check("the election exposes its choices to human seats at the right moments", as
   await stayOnBallot(world);
   assert.deepEqual(seat(outsider), ["cast_sheriff_vote"], "electors get the ballot");
   assert.deepEqual(seat(a), [], "candidates do not");
+});
+
+check("a seat's agent toolset is phase-agnostic from construction time (room snapshot contract)", () => {
+  const { world, roles } = makeWerewolf(6);
+  // The room snapshots world.toolsFor(actorId) exactly once, when the seat is
+  // constructed — before the first activation, while the phase is sheriff-run.
+  // Every tool any later phase will need must already be in that snapshot:
+  // a phase-gated tool is missing from the agent precisely when its phase
+  // arrives, and the model's tool call dies with "Tool not found".
+  const universal = ["run_for_sheriff", "withdraw_sheriff_run", "cast_sheriff_vote", "pass_badge", "cast_day_vote"];
+  const byRoleTools: Record<string, string> = {
+    wolf: "choose_night_target",
+    "wolf-king": "choose_night_target",
+    "hidden-wolf": "choose_night_target",
+    "white-wolf-king": "choose_night_target",
+    "wolf-beauty": "charm_target",
+    seer: "investigate_identity",
+    "spirit-seer": "investigate_dead_identity",
+    witch: "witch_night_choice",
+    guard: "guard_tonight",
+    nightmare: "dream_curse",
+    hunter: "hunter_shoot"
+  };
+  for (const [seat, role] of Object.entries(roles)) {
+    const names = new Set(world.toolsFor(seat).map((entry) => entry.name));
+    for (const required of [...universal, ...(byRoleTools[role] ? [byRoleTools[role]] : [])]) {
+      assert.ok(names.has(required), `${required} must be in ${seat}'s (${role}) construction-time toolset`);
+    }
+  }
 });
 
 // --- avalon official tables ---

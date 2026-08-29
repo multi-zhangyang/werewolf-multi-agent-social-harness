@@ -1234,6 +1234,11 @@ export class SocietyRoom {
         if (failure !== undefined || result === undefined) {
           const error = failure ?? new Error("AGENT_TURN_EMPTY: The turn produced no result.");
           const safeReason = friendlyFailure(error);
+          // The operator console keeps the full raw diagnostic (never shown to
+          // viewers): without this line a turn-level provider failure leaves
+          // no trace anywhere, because the notice below only carries the
+          // redacted friendly text.
+          console.error(`[room ${this.id}] turn failed for ${actorId} (${runtime.profile.model}): ${errorMessage(error)}`);
           this.emit({
             type: "runtime.notice",
             roomId: this.id,

@@ -56,7 +56,7 @@
 
 | 场景 | 规则与结算 | 密封/信息边界 | typed 承诺 | 主张对账 | 结果对账 | 真实对局 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 狼人杀 | ✅ 46 项（含 §28 两项、遗言、平票 PK、警长竞选/警徽流） | ✅ 投票密封 | ❌ 无 | ✅ 提取/显式主张均对账 | ✅ ×10 | ✅ 4 |
+| 狼人杀 | ✅ 44 项（重清点：本文件狼人杀专属用例；含 §28 两项、遗言、平票 PK、警长竞选/警徽流、压枪级联、工具集快照契约） | ✅ 投票密封 | ❌ 无 | ✅ 提取/显式主张均对账 | ✅ ×10 | ✅ 5 |
 | 囚徒困境 | ✅ 11 项 | ✅ 不越权断言 | ✅ `choose-move` | ✅ | ✅ | ✅ 6 |
 | 谈判博弈 | ✅ 9 项 | ✅ 不越权断言 | ✅ 成交自动 typed | ✅ | ✅ | ✅ 4 |
 | 公共品 | ✅ 10 项 | ✅ 不越权断言 | ✅ `contribute-at-least` | ✅ | ✅ | ✅ 8 |
@@ -74,6 +74,7 @@
 
 - **狼人杀规则与 §28 谎言闭环**：`tests/contract/werewolf-rules.test.ts`（牌堆表、白天投票、骑士决斗、女巫、守卫、猎人、小丑、白狼王、梦魇、狼美人、通灵师、狼人平衡、Avalon 官方人数表与湖中仙女、输入校验；`a wolf's extracted good-camp claim is detected at the vote-out reveal` 与 `a wolf's explicit villager claim is detected at the vote-out reveal` 钉住"主张→淘汰→揭晓→对账→detected"全链）。
 - **警长竞选/警徽流（2026-08-29）**：同文件 11 项契约测试——五相位全流程（上警→竞选发言→退选→密封投票→当选公共世界事实）、无人上警/唯一上警/全员上警、退选与`最后一人不可退选`、两次平票流局、警长 1.5 票破平票、夜死警长移交警徽后继承人 1.5 票、放逐警长先警徽后遗言、撕警徽、跨相位/重复行动的全部守卫、人类席位 spec 面。
+- **真实模型验证局（hy3 全席，2026-08-29）**：9 人标准局完整打完（警长竞选→退选→投票当选→3 天放逐/夜晚→猎人开枪终结→村庄胜）。该局暴露并修复了两个引擎 bug：①四个警长工具按相位门控注册，违反"座位工具集在构造时一次性快照"的房间契约（`Tool not found` 卡死退选相位，26 次 PROVIDER_TURN_FAILED）——现在全部世界工具无条件注册，配构造时快照回归测试；②猎人压枪分支不级联（相位卡在 day-vote，开出幻影第二次白天投票）——压枪现与开枪同样级联，配 2 项回归测试。对局证据：`artifacts/transcripts/werewolf-hy3-validation-2026-08-29.json`（终局零 notice 码、零重试、零弃置回合，延迟 p50 61s / p95 163s，共 114 个模型回合）。
 - **密封**：`tests/contract/sealed-actions.test.ts`（阿瓦隆组队票/任务票、狼人杀白天投票在全员提交前保持密封）；各场景契约测试内含"sealed … never cross an observation boundary"断言（囚徒困境/公共品/谈判/选美/密封拍卖）。
 - **中性标签门禁**：`tests/contract/story-beat-labels.test.ts`（22 项：无证据时 betrayal / promise-kept / alliance / deception-exposed / misplay 一律降级为中性结局标签）。
 

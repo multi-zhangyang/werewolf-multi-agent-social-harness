@@ -330,12 +330,15 @@ export class WerewolfWorld extends SocialWorldBase {
     });
     tools.push(vote as Tool<SocietyAgentContext>);
 
-    // Sheriff election (day 1): the tools exist only while their phase is
-    // live, so the model never carries irrelevant ballot schema into the night.
-    if (this.phase === "sheriff-run") {
+    // Sheriff election (day 1). All four tools are registered unconditionally:
+    // the room snapshots a seat's toolset once at construction (before the
+    // election even opens), so a phase-gated tool would be missing from the
+    // agent exactly when its phase arrives — the engine guards phases in
+    // performDomainAction instead.
+    {
       const runTool = societyTool({
         name: "run_for_sheriff",
-        description: "Decide whether to stand in the sheriff election (上警). Sealed until everyone has decided. Candidates campaign and cannot vote in the election; the elected sheriff's day vote counts 1.5x.",
+        description: "Day 1, sheriff election run phase (上警) only: decide whether to stand. Sealed until everyone has decided. Candidates campaign and cannot vote in the election; the elected sheriff's day vote counts 1.5x.",
         parameters: z.object({
           run: z.boolean(),
           reason: z.string().min(1).max(2_000)
@@ -349,10 +352,10 @@ export class WerewolfWorld extends SocialWorldBase {
       });
       tools.push(runTool as Tool<SocietyAgentContext>);
     }
-    if (this.phase === "sheriff-withdraw" && this.sheriffCandidates.has(actorId) && !this.sheriffWithdrawn.has(actorId)) {
+    {
       const withdrawTool = societyTool({
         name: "withdraw_sheriff_run",
-        description: "Withdraw from (or stay in) the sheriff election after the campaign speeches. The last remaining candidate cannot withdraw; withdrawn candidates still cannot vote.",
+        description: "Day 1, sheriff election withdraw phase only: withdraw from (or stay in) the race after the campaign speeches. The last remaining candidate cannot withdraw; withdrawn candidates still cannot vote.",
         parameters: z.object({
           withdraw: z.boolean(),
           reason: z.string().min(1).max(2_000)
@@ -366,10 +369,10 @@ export class WerewolfWorld extends SocialWorldBase {
       });
       tools.push(withdrawTool as Tool<SocietyAgentContext>);
     }
-    if (this.phase === "sheriff-vote" && !this.sheriffCandidates.has(actorId)) {
+    {
       const sheriffVote = societyTool({
         name: "cast_sheriff_vote",
-        description: "Cast a sealed ballot for one of the sheriff candidates. Only players who never ran may vote. Revealed after everyone has voted.",
+        description: "Day 1, sheriff election vote phase only: cast a sealed ballot for one of the sheriff candidates. Only players who never ran may vote. Revealed after everyone has voted.",
         parameters: z.object({
           targetId: targetRef,
           reason: z.string().min(1).max(2_000)
@@ -383,10 +386,10 @@ export class WerewolfWorld extends SocialWorldBase {
       });
       tools.push(sheriffVote as Tool<SocietyAgentContext>);
     }
-    if (this.pendingBadgePass[0] === actorId) {
+    {
       const passBadge = societyTool({
         name: "pass_badge",
-        description: "The dying sheriff's badge decision: hand it to one living participant (targetId) or tear it (tear=true — no sheriff for the rest of the game).",
+        description: "Dying sheriff only: hand the badge to one living participant (targetId) or tear it (tear=true — no sheriff for the rest of the game).",
         parameters: z.object({
           targetId: targetRef.optional(),
           tear: z.boolean().optional(),
@@ -2319,7 +2322,18 @@ export class WerewolfWorld extends SocialWorldBase {
       for (const id of this.profiles.keys()) {
         this.lastExperiences.set(id, `${shooterName} held their death shot.`);
       }
-      this.emitUpdate();
+      // A held shot must still cascade like a fired one: without this the
+      // phase stays where the death left it (e.g. day-vote after a vote-out),
+      // and the room opens a phantom second day vote on the same day.
+      if (this.pendingShots.length) {
+        this.emitUpdate();
+        return;
+      }
+      if (this.phase === "night") {
+        this.afterNightChecks();
+        return;
+      }
+      this.afterEliminationChecks();
       return;
     }
     this.assertLivingTarget(targetId);
