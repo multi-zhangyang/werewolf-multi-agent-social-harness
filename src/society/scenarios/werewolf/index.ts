@@ -106,6 +106,15 @@ export class WerewolfWorld extends SocialWorldBase {
   private readonly voteCommandIds = new Map<string, string>();
   private readonly wolfTargets = new Map<string, string>();
   private readonly wolfTargetCommandIds = new Map<string, string>();
+  /**
+   * Pack coordination state. With two or more living wolves the night opens
+   * with a team-channel discussion round (the pact) before any nomination is
+   * fixed; a split plurality then earns exactly one realignment round in
+   * which wolves may switch their nomination. Both flags reset when the night
+   * settles; a lone wolf nominates without the ceremony.
+   */
+  private wolfPactDone = false;
+  private wolfRealignOpen = false;
   private readonly seerKnowledge = new Map<string, Map<string, WerewolfRoleId>>();
   private readonly seerTargets = new Map<string, string>();
   private readonly seerTargetCommandIds = new Map<string, string>();
@@ -863,12 +872,13 @@ export class WerewolfWorld extends SocialWorldBase {
       if (this.phase !== "night" || !isWolfRole(role)) throw new Error("NIGHT_ACTION_FORBIDDEN: Only a living wolf can choose this target at night.");
       if (targetId === actorId) throw new Error("INVALID_WOLF_TARGET: You may not nominate yourself.");
       if (isWolfRole(this.roles.get(targetId))) throw new Error("INVALID_WOLF_TARGET: Choose a living non-wolf participant.");
-      if (this.wolfTargets.has(actorId)) throw new Error("NIGHT_TARGET_ALREADY_CHOSEN: Your nomination is fixed.");
+      if (this.packPactPending()) throw new Error("NIGHT_TARGET_EARLY: The pack discusses first — use the team channel, then nominate.");
+      if (this.wolfTargets.has(actorId) && !this.wolfRealignOpen) throw new Error("NIGHT_TARGET_ALREADY_CHOSEN: Your nomination is fixed.");
       const commandId = `cmd-${randomUUID()}`;
       this.wolfTargets.set(actorId, targetId);
       this.wolfTargetCommandIds.set(actorId, commandId);
       this.emitUpdate();
-      return { action, commandId, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId } };
+      return { action, commandId, detail: reason ? `${targetId}; ${reason}` : targetId, result: { accepted: true, targetId, ...(this.wolfRealignOpen ? { realignment: true } : {}) } };
     }
     if (action === "investigate_identity") {
       if (!targetId) throw new Error("TARGET_REQUIRED: Select a participant.");
@@ -1129,6 +1139,16 @@ export class WerewolfWorld extends SocialWorldBase {
       };
     }
     if (this.phase === "day-vote") return this.voteActivation();
+    // The night runs in pack sub-rounds before the published board order:
+    // pact (wolves discuss) → wolves nominate → realign (only on a split) →
+    // the remaining night roles settle in one batch.
+    if (this.phase === "night") {
+      const livingWolves = aliveIds.filter((id) => isWolfRole(this.roles.get(id)));
+      if (this.packPactPending()) return this.wolfPactActivation(livingWolves);
+      const wolvesPending = livingWolves.filter((id) => !this.nightActionCommitted(id));
+      if (wolvesPending.length) return this.wolfNominationActivation(wolvesPending);
+      if (this.wolfRealignOpen) return this.wolfRealignActivation(livingWolves);
+    }
     return this.nightActivation(aliveIds);
   }
 
@@ -1162,6 +1182,60 @@ export class WerewolfWorld extends SocialWorldBase {
     };
   }
 
+  /** True while the pack owes its team-channel discussion round: two or more living wolves, none of it spent yet. */
+  private packPactPending(): boolean {
+    return this.phase === "night"
+      && [...this.alive].filter((id) => isWolfRole(this.roles.get(id))).length >= 2
+      && !this.wolfPactDone;
+  }
+
+  /** The pack's private discussion round: converge on tonight's kill before any nomination is fixed. */
+  private wolfPactActivation(wolves: string[]): WorldActivation {
+    return {
+      id: `ww:${this.day}:night-pact`,
+      label: `第 ${this.day} 夜 · 狼队合谋`,
+      actorIds: wolves,
+      mode: "sequential",
+      instructionFor: () =>
+        "The pack meets before the kill is chosen. Discuss on the team channel: share your reads (who claims what, who feels like the seer or the guard, who has been quietly steering the vote), and converge on tonight's target. Call communicate once on the team channel. Do NOT call choose_night_target yet — nominations open after this round."
+    };
+  }
+
+  private wolfNominationActivation(wolves: string[]): WorldActivation {
+    return {
+      id: `ww:${this.day}:night-wolves`,
+      label: `第 ${this.day} 夜 · 狼队定刀`,
+      actorIds: wolves,
+      mode: "sequential",
+      instructionFor: (actorId) => this.wolfNightInstruction(actorId)
+    };
+  }
+
+  /**
+   * The one realignment round, opened only when the pack's nominations have
+   * no strict plurality. Wolves may switch (choose_night_target overwrites);
+   * staying silent keeps the current nomination. After this round the kill
+   * falls to plurality — the lexicographic tiebreak stays as the bounded
+   * last resort for a pack that still refuses to converge.
+   */
+  private wolfRealignActivation(wolves: string[]): WorldActivation {
+    return {
+      id: `ww:${this.day}:night-realign`,
+      label: `第 ${this.day} 夜 · 狼队对齐刀口`,
+      actorIds: wolves,
+      mode: "sequential",
+      instructionFor: () =>
+        "The pack's nominations are split (刀口未统一). This is the single realignment round: call choose_night_target to switch your nomination to the pack's emerging target, or stay silent to keep your current one. The kill falls to plurality after this round."
+    };
+  }
+
+  private wolfNightInstruction(actorId: string): string {
+    const role = this.roles.get(actorId);
+    if (role === "nightmare") return "Complete both night duties in this turn: call choose_night_target exactly once, then call dream_curse exactly once against a living non-wolf or pass with targetId=null.";
+    if (role === "wolf-beauty") return "Complete both night duties in this turn: call choose_night_target exactly once, then call charm_target exactly once against a living non-wolf or pass with targetId=null.";
+    return "Use the private team channel if coordination is useful, then call choose_night_target exactly once against a living non-wolf.";
+  }
+
   /** Night order: wolves → guard → seer → witch (published board order). */
   private nightActivation(aliveIds: string[]): WorldActivation {
     const ordered: string[] = [];
@@ -1179,9 +1253,7 @@ export class WerewolfWorld extends SocialWorldBase {
       mode: "sequential",
       instructionFor: (actorId) => {
         const role = this.roles.get(actorId);
-        if (role === "nightmare") return "Complete both night duties in this turn: call choose_night_target exactly once, then call dream_curse exactly once against a living non-wolf or pass with targetId=null.";
-        if (role === "wolf-beauty") return "Complete both night duties in this turn: call choose_night_target exactly once, then call charm_target exactly once against a living non-wolf or pass with targetId=null.";
-        if (isWolfRole(role)) return "Use the private team channel if coordination is useful, then call choose_night_target exactly once against a living non-wolf.";
+        if (isWolfRole(role)) return this.wolfNightInstruction(actorId);
         if (role === "guard") return "Call guard_tonight once: protect a player from the wolf kill, or omit targetId to skip. Remember you cannot guard the same target two nights in a row.";
         if (role === "seer") return "Call investigate_identity exactly once on another living participant. Keep the result private unless revealing it later serves your strategy.";
         if (role === "spirit-seer") return "Call investigate_dead_identity exactly once on a dead participant to read their true role. Keep it private unless revealing it serves your strategy.";
@@ -1276,6 +1348,31 @@ export class WerewolfWorld extends SocialWorldBase {
         this.emitUpdate();
       }
       if (this.knightCommandId) this.reconcileKnightAction();
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":night-pact")) {
+      // Silence is a legitimate pact; nominations open next either way.
+      this.wolfPactDone = true;
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":night-wolves")) {
+      const missingActorIds = activation.actorIds.filter((id) => !this.nightActionCommitted(id));
+      if (missingActorIds.length) {
+        return {
+          completed: false,
+          missingActorIds,
+          retryInstruction: "Your night duties are still missing. Wolves call choose_night_target exactly once (nightmare and wolf-beauty also finish their curse or charm)."
+        };
+      }
+      // A split pack earns exactly one realignment round before the
+      // plurality fallback decides the kill.
+      if (this.wolfTargets.size >= 2 && !hasStrictPlurality(this.wolfTargets)) this.wolfRealignOpen = true;
+      return { completed: true, missingActorIds: [] };
+    }
+    if (activation.id.endsWith(":night-realign")) {
+      // Taken or declined, this was the pack's only alignment round; the
+      // nomination lock returns and plurality settles the kill.
+      this.wolfRealignOpen = false;
       return { completed: true, missingActorIds: [] };
     }
     if (activation.id.endsWith(":vote")) {
@@ -1468,6 +1565,7 @@ export class WerewolfWorld extends SocialWorldBase {
     if (this.phase === "day-knight") return role === "knight" && !this.knightUsed ? ["knight_challenge"] : [];
     if (this.phase === "day-pk") return this.pkCandidates.includes(actorId) ? ["communicate", "recall_memory"] : [];
     if (this.phase === "day-vote") return this.idiotRevealed.has(actorId) ? [] : ["cast_day_vote"];
+    if (this.packPactPending() && isWolfRole(role)) return ["communicate:team", "recall_memory"];
     if (role === "nightmare") return ["communicate:team", "choose_night_target", "dream_curse"];
     if (role === "wolf-beauty") return ["communicate:team", "choose_night_target", "charm_target"];
     if (isWolfRole(role)) return ["communicate:team", "choose_night_target"];
@@ -1981,6 +2079,8 @@ export class WerewolfWorld extends SocialWorldBase {
 
     this.wolfTargets.clear();
     this.wolfTargetCommandIds.clear();
+    this.wolfPactDone = false;
+    this.wolfRealignOpen = false;
     this.seerTargets.clear();
     this.seerTargetCommandIds.clear();
     this.spiritTargets.clear();
@@ -2500,6 +2600,18 @@ function tallyTargets(votes: Map<string, string>): Map<string, number> {
   return tally;
 }
 
+/** Strict plurality: one target strictly ahead of the runner-up (a lone vote always counts). */
+function hasStrictPlurality(votes: Map<string, string>): boolean {
+  const counts = [...tallyTargets(votes).values()].sort((left, right) => right - left);
+  return counts.length <= 1 || counts[0] > counts[1];
+}
+
+/**
+ * The pack's kill: plurality of nominations. A split pack first gets one
+ * explicit realignment round (see completeActivation for `:night-wolves`);
+ * this lexicographic tiebreak is only the bounded last resort for a pack
+ * that still refuses to converge after being asked.
+ */
 function pluralityTarget(votes: Map<string, string>): string | undefined {
   return [...tallyTargets(votes)].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0]?.[0];
 }

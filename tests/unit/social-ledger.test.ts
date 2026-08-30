@@ -122,6 +122,121 @@ it("an audience belief moving toward the intended lie marks the episode believed
   assert.ok(after.audienceBeliefsAfter.some((entry) => entry.characterId === "builtin-02" && entry.probability > 0.7 && entry.probability < 0.9));
 });
 
+it("a believed deception becomes behaviorally-effective when a believer's action settles", () => {
+  const ledger = ledgerWithTwoActors();
+  const episode = ledger.recordDeceptionPlan("agent-01", "builtin-01", {
+    mode: "direct-lie",
+    targetActorIds: ["agent-02"],
+    intendedBelief: "我是无辜的",
+    subjectId: "agent-01"
+  }, characterIdFor);
+  const lie = message({ senderId: "agent-01" });
+  ledger.recordMessage({
+    message: lie,
+    declarations: [{ kind: "assertion" as const, proposition: { predicate: "我是无辜的" }, deceptionId: episode.deceptionId }],
+    allActorIds: ["agent-01", "agent-02"],
+    characterIdFor
+  });
+  ledger.recordBeliefUpdate("agent-02", "builtin-02", {
+    subjectId: "builtin-01",
+    proposition: "我是无辜的",
+    probability: 0.9,
+    confidence: 0.8,
+    source: "他亲口说的",
+    sourceMessageIds: [lie.id]
+  });
+  assert.equal(ledger.project({ omniscient: true }).deceptions[0].status, "believed");
+
+  // The believer commits a binding action and its settlement lands: the lie
+  // shaped a real move, so the episode cites the settled receipt.
+  ledger.recordAction({
+    actorId: "agent-02",
+    characterId: "builtin-02",
+    action: "cast_day_vote",
+    commit: { action: "cast_day_vote", detail: "voted the deceiver's rival", commandId: "cmd-vote-1" }
+  });
+  ledger.recordOutcomeReconciliation({
+    actionReceiptId: "cmd-vote-1",
+    actualOutcome: { summary: "Voted; the table eliminated the deceiver's rival.", metrics: { targetEliminated: true } },
+    actualFacts: { "target-eliminated": true }
+  });
+  const effective = ledger.project({ omniscient: true }).deceptions[0];
+  assert.equal(effective.status, "behaviorally-effective", "a believer's settled action marks the lie behaviorally effective");
+  assert.deepEqual(effective.inducedActionReceiptIds, ["cmd-vote-1"], "the settled receipt is cited as induced");
+  assert.ok(effective.consequenceEventIds.length >= 1, "the behavior-effective event is citable");
+
+  // The same receipt settles once: the idempotent repeat adds no second link.
+  ledger.recordOutcomeReconciliation({
+    actionReceiptId: "cmd-vote-1",
+    actualOutcome: { summary: "idempotent repeat", metrics: {} },
+    actualFacts: {}
+  });
+  assert.equal(
+    ledger.project({ omniscient: true }).deceptions[0].inducedActionReceiptIds.filter((id) => id === "cmd-vote-1").length,
+    1,
+    "one receipt, one link"
+  );
+});
+
+it("a believer who later rejected the claim stops counting as induced", () => {
+  const ledger = ledgerWithTwoActors();
+  const episode = ledger.recordDeceptionPlan("agent-01", "builtin-01", {
+    mode: "direct-lie",
+    targetActorIds: ["agent-02"],
+    intendedBelief: "我是无辜的",
+    subjectId: "agent-01"
+  }, characterIdFor);
+  const lie = message({ senderId: "agent-01" });
+  ledger.recordMessage({
+    message: lie,
+    declarations: [{ kind: "assertion" as const, proposition: { predicate: "我是无辜的" }, deceptionId: episode.deceptionId }],
+    allActorIds: ["agent-01", "agent-02"],
+    characterIdFor
+  });
+  ledger.recordBeliefUpdate("agent-02", "builtin-02", {
+    subjectId: "builtin-01",
+    proposition: "我是无辜的",
+    probability: 0.9,
+    confidence: 0.8,
+    source: "他亲口说的",
+    sourceMessageIds: [lie.id]
+  });
+  // Fresh contradicting evidence pulls the belief below the rejection bar.
+  // The update cites both the new exposure and the lie itself: the ledger
+  // only re-scores a deception's audience belief when the lie's own message
+  // is re-cited, and the fresh citation is what gives fusion the weight to
+  // move that far that fast.
+  const expose = message({ senderId: "agent-01", text: "被拆穿了" });
+  ledger.recordMessage({
+    message: expose,
+    declarations: [],
+    allActorIds: ["agent-01", "agent-02"],
+    characterIdFor
+  });
+  ledger.recordBeliefUpdate("agent-02", "builtin-02", {
+    subjectId: "builtin-01",
+    proposition: "我是无辜的",
+    probability: 0.05,
+    confidence: 0.9,
+    source: "证据摆在眼前",
+    sourceMessageIds: [expose.id, lie.id]
+  });
+  ledger.recordAction({
+    actorId: "agent-02",
+    characterId: "builtin-02",
+    action: "cast_day_vote",
+    commit: { action: "cast_day_vote", detail: "voted after rejecting", commandId: "cmd-vote-2" }
+  });
+  ledger.recordOutcomeReconciliation({
+    actionReceiptId: "cmd-vote-2",
+    actualOutcome: { summary: "Voted after rejecting the claim.", metrics: {} },
+    actualFacts: {}
+  });
+  const after = ledger.project({ omniscient: true }).deceptions[0];
+  assert.equal(after.status, "believed", "rejection keeps the episode at believed — the action is not induced");
+  assert.deepEqual(after.inducedActionReceiptIds, [], "no receipt is cited for a rejected audience");
+});
+
 it("unexecuted plans are abandoned when the room closes; executed-but-unexposed ones fail", () => {
   const ledger = new SocialCausalityLedger(ROOM);
   ledger.recordDeceptionPlan("agent-01", "builtin-01", { mode: "false-implication", targetActorIds: ["agent-02"], intendedBelief: "b" }, characterIdFor);

@@ -1389,7 +1389,40 @@ export class SocialCausalityLedger {
     reconciliation.resultingEventIds.push(reconciliationEvent.eventId);
     reconciliation.provenance.sourceIds.push(reconciliationEvent.eventId);
     this.outcomeReconciliations.push(reconciliation);
+    this.linkOutcomeToDeceptions(reconciliation);
     return structuredClone(reconciliation);
+  }
+
+  /**
+   * The "behaviorally-effective" link of the deception ladder. A deception
+   * that was BELIEVED shaped the game when a believer then committed a
+   * binding action whose settlement lands here: the episode cites the settled
+   * receipt as induced and advances to behaviorally-effective. The semantic
+   * is deliberately narrow — believed-then-acted, recorded in settlement
+   * order, never a causal proof — and a believer who has since rejected the
+   * claim stops counting. Detection still overrides the ladder.
+   */
+  private linkOutcomeToDeceptions(reconciliation: OutcomeReconciliation): void {
+    if (!reconciliation.characterId || reconciliation.characterId === "world") return;
+    for (const episode of this.deceptions.values()) {
+      if (episode.status !== "believed" && episode.status !== "behaviorally-effective") continue;
+      if (!episode.believedByCharacterIds.includes(reconciliation.characterId)) continue;
+      if (episode.rejectedByCharacterIds.includes(reconciliation.characterId)) continue;
+      if (episode.inducedActionReceiptIds.includes(reconciliation.actionReceiptId)) continue;
+      episode.inducedActionReceiptIds.push(reconciliation.actionReceiptId);
+      const event = this.append("social", "deception.behavior-effective", {
+        deceptionId: episode.deceptionId,
+        audienceCharacterId: reconciliation.characterId,
+        audienceActorId: reconciliation.actorId,
+        actionReceiptId: reconciliation.actionReceiptId
+      }, {
+        causationId: reconciliation.resultingEventIds[0],
+        correlationId: episode.deceptionId,
+        visibility: { kind: "operator" }
+      });
+      episode.consequenceEventIds.push(event.eventId);
+      advanceDeceptionStatus(episode, "behaviorally-effective");
+    }
   }
 
   project(viewer: ViewerContext = {}): SocialCausalityProjection {

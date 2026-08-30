@@ -57,6 +57,30 @@ function passLastWords(world: SocialWorldBase): void {
   throw new Error("last words never ended");
 }
 
+/**
+ * The night opens with the pack's team-channel pact (狼队合谋) whenever at
+ * least two wolves live; silence is a legitimate pact, so the driver
+ * completes it quietly before the suite's direct night-action calls.
+ */
+function passPackPact(world: SocialWorldBase): void {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const activation = world.activation();
+    if (!activation || !activation.id.endsWith(":night-pact")) return;
+    world.completeActivation(activation);
+  }
+  throw new Error("pack pact never ended");
+}
+
+/** After the wolves' nomination round: a silent realignment (if the pack split), then the remaining-roles settlement. */
+function settleNightTail(world: SocialWorldBase): void {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const activation = world.activation();
+    if (!activation || !(activation.id.endsWith(":night") || activation.id.endsWith(":night-realign"))) return;
+    world.completeActivation(activation);
+  }
+  throw new Error("night never settled");
+}
+
 function lastBeat(world: SocialWorldBase): StoryBeatKind | undefined {
   return world.snapshot().log.at(-1)?.beat;
 }
@@ -273,6 +297,7 @@ check("werewolf: voting out an innocent is an adverse outcome, not a misplay", a
 check("werewolf: a night kill is an adverse outcome, not a betrayal", async () => {
   const { world, byRole } = makeWerewolf(8);
   await voteOut(world, byRole("villager")[0], byRole("villager")[1]);
+  passPackPact(world);
   const night = world.activation()!;
   for (const wolf of byRole("wolf")) {
     await world.performDomainAction(wolf, "choose_night_target", { targetId: byRole("seer")[0], reason: "t" });
@@ -281,6 +306,7 @@ check("werewolf: a night kill is an adverse outcome, not a betrayal", async () =
   await world.performDomainAction(byRole("seer")[0], "investigate_identity", { targetId: byRole("wolf")[0] });
   await world.performDomainAction(byRole("witch")[0], "witch_night_choice", {});
   world.completeActivation(night);
+  settleNightTail(world);
   assert.equal(lastBeat(world), "adverse-outcome");
 });
 
