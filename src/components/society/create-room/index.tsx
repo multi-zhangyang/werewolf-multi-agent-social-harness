@@ -1,16 +1,23 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { apiFetch } from "@/lib/api";
-import { Loader2, Play, Trash2 } from "lucide-react";
+import { ArrowLeft, Play, Settings2, Trash2 } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import { Badge } from "@/components/ui/badge";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog";
+  Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator
+} from "@/components/ui/breadcrumb";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -21,26 +28,27 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Toggle } from "@/components/ui/toggle";
+import { Spinner } from "@/components/ui/spinner";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ErrorNote, ScenarioIcon } from "../shared";
 import type { CharacterOption, CreateRoomInput, ModelOption } from "../types";
 import { ModelAssignSection } from "./model-assign-section";
-import { ModeButton } from "./model-assign-section";
 import { RosterSection } from "./roster-section";
 import { MODEL_PREFS_KEY, type ModelAssignMode, type ModelAssignPrefs, type RosterPreviewRow, type RosterTemplateOption } from "./types";
 
 interface CreateRoomProps {
-  open: boolean;
   scenario: ScenarioSummary | undefined;
+  scenarios: ScenarioSummary[];
   models: ModelOption[];
   /** Registry-configured default pool for 随机混合, used before the user picks one. */
   defaultPoolProfileIds?: string[];
-  /** How many characters carry cross-game history into this room. */
-  onOpenChange: (open: boolean) => void;
+  onScenarioChange: (scenarioId: string) => void;
+  onBack: () => void;
+  onOpenSettings: () => void;
   onCreated: (input: CreateRoomInput) => Promise<{ roomId: string }>;
 }
 
-export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds, onOpenChange, onCreated }: CreateRoomProps): ReactNode {
+export function CreateRoomPage({ scenario, scenarios, models, defaultPoolProfileIds, onScenarioChange, onBack, onOpenSettings, onCreated }: CreateRoomProps): ReactNode {
   /** Only registry-backed models can be assigned per seat. */
   const eligibleModels = useMemo(() => models.filter((model) => Boolean(model.profileId)), [models]);
   const profileById = useMemo(() => new Map(eligibleModels.map((model) => [model.profileId as string, model])), [eligibleModels]);
@@ -69,6 +77,7 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
   const [templates, setTemplates] = useState<RosterTemplateOption[]>([]);
   const [templateName, setTemplateName] = useState("");
   const [loadedTemplateId, setLoadedTemplateId] = useState<string>();
+  const [pendingTemplateRemoval, setPendingTemplateRemoval] = useState<string>();
   /** Visible instead of silent: the library fetch failing must not masquerade as an empty library. */
   const [libraryError, setLibraryError] = useState<string>();
 
@@ -98,7 +107,6 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
   }, [assignMode, unifiedProfileId, randomPoolIds]);
 
   useEffect(() => {
-    if (!open) return;
     setSeatPicks({});
     setSeatCharacters({});
     setRounds(scenario?.defaultRounds ?? Math.min(5, maxRounds));
@@ -107,11 +115,10 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
     setPlayerName("");
     setReasoningEffort("high");
     setError(undefined);
-  }, [open, scenario, maxRounds]);
+  }, [scenario, maxRounds]);
 
-  // The character library is small; refresh it whenever the dialog opens.
+  // The character library is small; refresh it when the selected world changes.
   useEffect(() => {
-    if (!open) return;
     let cancelled = false;
     setLibraryError(undefined);
     fetch("/api/characters")
@@ -123,7 +130,7 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
       .catch(() => {
         if (!cancelled) {
           setCharacters([]);
-          setLibraryError("人物库暂不可达——已回退到内置人物顺序，稍后可重新打开本对话框重试。");
+          setLibraryError("人物库暂不可达——已回退到内置人物顺序，刷新本页后可重试。");
         }
       });
     fetch("/api/room-templates")
@@ -141,7 +148,7 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
     return () => {
       cancelled = true;
     };
-  }, [open, scenario]);
+  }, [scenario]);
 
   /** Unified pick falls back to the first registered model until the user chooses. */
   const unifiedId = profileById.has(unifiedProfileId) ? unifiedProfileId : eligibleModels[0]?.profileId ?? "";
@@ -300,7 +307,7 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
   const submit = async (): Promise<void> => {
     if (!scenario) return;
     if (!rosterProfileIds.length) {
-      setError("还没有可用的模型档案：请先在「设置」中注册模型。");
+      setError("还没有可用的模型档案：请先在「设置」中启用模型并通过 Agents SDK 协议检查。");
       return;
     }
     if (mode === "human" && !playerName.trim()) {
@@ -351,23 +358,41 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
   };
 
   return (
-    <Dialog open={open} onOpenChange={(next) => { if (!next && !submitting) onOpenChange(false); }}>
-      <DialogContent className="max-w-xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl" showCloseButton={!submitting}>
+    <>
+      <div className="min-h-screen bg-background text-foreground">
+        <header className="rule-b sticky top-0 z-20 bg-background/90 backdrop-blur">
+          <div className="mx-auto flex h-16 w-full max-w-7xl items-center gap-3 px-4 sm:px-6">
+            <Button variant="ghost" size="icon-sm" aria-label="返回大厅" onClick={onBack}><ArrowLeft /></Button>
+            <Breadcrumb>
+              <BreadcrumbList>
+                <BreadcrumbItem><BreadcrumbLink asChild><Button variant="link" className="h-auto p-0" onClick={onBack}>大厅</Button></BreadcrumbLink></BreadcrumbItem>
+                <BreadcrumbSeparator />
+                <BreadcrumbItem><BreadcrumbPage>创建世界</BreadcrumbPage></BreadcrumbItem>
+              </BreadcrumbList>
+            </Breadcrumb>
+            <Button variant="outline" size="sm" className="ml-auto" onClick={onOpenSettings}><Settings2 />模型设置</Button>
+          </div>
+        </header>
+        <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6">
         {scenario ? (
-          <div className="flex min-w-0 max-h-[82vh] flex-col">
-            <div className="scroll-fade-y-lg min-h-0 flex-1 overflow-y-auto">
-            <div className="border-b border-border/60 p-6 pb-5">
-              <DialogHeader className="gap-2 text-left">
+          <div className="flex min-w-0 flex-col gap-6">
+            <div className="rounded-xl border border-border bg-card p-5 sm:p-6">
+              <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_18rem] lg:items-start">
                 <div className="flex items-center gap-3">
                   <span className="flex size-10 items-center justify-center rounded-lg border border-border bg-muted text-foreground/80">
                     <ScenarioIcon id={scenario.id} className="size-5" />
                   </span>
                   <div>
-                    <DialogTitle className="text-lg tracking-tight">{scenario.name}</DialogTitle>
-                    <DialogDescription className="mt-0.5 max-w-md leading-5 text-muted-foreground">{scenario.description}</DialogDescription>
+                    <h1 className="text-2xl font-semibold tracking-tight">创建「{scenario.name}」</h1>
+                    <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">{scenario.description}</p>
                   </div>
                 </div>
-                <div className="mt-3 flex flex-wrap gap-1.5">
+                <Select value={scenario.id} onValueChange={onScenarioChange}>
+                  <SelectTrigger className="w-full" aria-label="切换场景"><SelectValue /></SelectTrigger>
+                  <SelectContent>{scenarios.map((entry) => <SelectItem key={entry.id} value={entry.id}>{entry.name}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-1.5">
                   <Badge variant="outline" className="rounded-full border-border bg-muted font-normal text-muted-foreground">
                     {scenario.playerRange ? `${scenario.playerRange.min}-${scenario.playerRange.max} 名参与者` : `${scenario.players} 名参与者`}
                   </Badge>
@@ -375,11 +400,11 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
                   {scenario.capabilities.slice(0, 3).map((capability) => (
                     <Badge key={capability} variant="outline" className="rounded-full border-border bg-card font-normal text-muted-foreground">{capability}</Badge>
                   ))}
-                </div>
-              </DialogHeader>
+              </div>
             </div>
 
-            <div className="space-y-6 p-6 pb-12">
+            <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
+            <div className="flex flex-col gap-6 rounded-xl border border-border bg-card p-5 sm:p-6">
               {eligibleModels.length ? (
                 <ModelAssignSection
                   assignMode={assignMode}
@@ -401,12 +426,12 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
               ) : (
                 <section>
                   <div className="mb-2.5 flex items-center justify-between">
-                    <p className="text-[13px] font-medium text-foreground/80">模型分配</p>
+                    <p className="text-sm font-medium text-foreground/80">模型分配</p>
                     <span className="nums font-mono text-xs text-muted-foreground">0 个可用档案</span>
                   </div>
                   <div className="rounded-lg border border-dashed border-border p-3.5">
                     <p className="text-xs leading-5 text-muted-foreground">
-                      还没有已注册的模型档案。请先打开右上角「设置」，在模型配置中心添加模型（支持从提供商一键拉取列表），再回来创建房间。
+                      没有“已启用且协议检查通过”的模型。请先打开右上角「设置」，对模型执行真实 Agents SDK 协议检查，再回来创建房间。
                     </p>
                   </div>
                 </section>
@@ -415,7 +440,7 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
               {scenario.playerRange ? (
                 <section>
                   <div className="mb-2.5 flex items-center justify-between">
-                    <p className="text-[13px] font-medium text-foreground/80">人数</p>
+                    <p className="text-sm font-medium text-foreground/80">人数</p>
                     <span className="nums font-mono text-xs text-muted-foreground">{players} 人</span>
                   </div>
                   <Slider
@@ -426,22 +451,22 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
                     onValueChange={(value) => setPlayers(value[0] ?? scenario.playerRange!.min)}
                     className="py-1"
                   />
-                  <div className="nums mt-1 flex justify-between font-mono text-[10px] text-muted-foreground">
+                  <div className="nums mt-1 flex justify-between font-mono text-xs text-muted-foreground">
                     <span>{scenario.playerRange.min} 人</span>
                     <span>{scenario.playerRange.max} 人</span>
                   </div>
                   {scenario.id === "werewolf" ? (
-                    <p className="mt-2 text-[11px] leading-5 text-muted-foreground">按官方板子组牌：6–12 人各有对应牌组（狼人·狼王·预言家·女巫·猎人·守卫·小丑·村民），人数越多角色越复杂。</p>
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">按官方板子组牌：6–12 人各有对应牌组（狼人·狼王·预言家·女巫·猎人·守卫·小丑·村民），人数越多角色越复杂。</p>
                   ) : null}
                   {scenario.id === "avalon" ? (
-                    <p className="mt-2 text-[11px] leading-5 text-muted-foreground">按官方规则配置：5-10 人的忠臣/内奸比例与任务人数遵循阿瓦隆说明书（7 人及以上第四任务需要两张失败票）。</p>
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">按官方规则配置：5-10 人的忠臣/内奸比例与任务人数遵循阿瓦隆说明书（7 人及以上第四任务需要两张失败票）。</p>
                   ) : null}
                 </section>
               ) : null}
 
               <section>
                 <div className="mb-2.5 flex items-center justify-between">
-                  <p className="text-[13px] font-medium text-foreground/80">回合数</p>
+                  <p className="text-sm font-medium text-foreground/80">回合数</p>
                   <span className="nums font-mono text-xs text-muted-foreground">{rounds}</span>
                 </div>
                 <Slider
@@ -452,7 +477,7 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
                   onValueChange={(value) => setRounds(value[0] ?? minRounds)}
                   className="py-1"
                 />
-                <div className="nums mt-1 flex justify-between font-mono text-[10px] text-muted-foreground">
+                <div className="nums mt-1 flex justify-between font-mono text-xs text-muted-foreground">
                   <span>{minRounds}</span>
                   <span>{maxRounds}</span>
                 </div>
@@ -460,14 +485,21 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
 
               <section className="grid grid-cols-2 gap-4">
                 <div>
-                  <p className="mb-2.5 text-[13px] font-medium text-foreground/80">参与者</p>
-                  <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
-                    <ModeButton active={mode === "ai"} onClick={() => setMode("ai")}>全 AI</ModeButton>
-                    <ModeButton active={mode === "human"} onClick={() => setMode("human")}>真人加入</ModeButton>
-                  </div>
+                  <p className="mb-2.5 text-sm font-medium text-foreground/80">参与者</p>
+                  <ToggleGroup
+                    type="single"
+                    value={mode}
+                    onValueChange={(value) => { if (value) setMode(value as "ai" | "human"); }}
+                    spacing={1}
+                    className="grid w-full grid-cols-2 rounded-lg border border-border bg-muted p-1"
+                    aria-label="参与方式"
+                  >
+                    <ToggleGroupItem value="ai" className="h-8 rounded-md text-sm">全 AI</ToggleGroupItem>
+                    <ToggleGroupItem value="human" className="h-8 rounded-md text-sm">真人加入</ToggleGroupItem>
+                  </ToggleGroup>
                 </div>
                 <div>
-                  <p className="mb-2.5 text-[13px] font-medium text-foreground/80">推理强度</p>
+                  <p className="mb-2.5 text-sm font-medium text-foreground/80">推理强度</p>
                   <Select value={reasoningEffort} onValueChange={(value) => setReasoningEffort(value as "low" | "medium" | "high" | "xhigh")}>
                     <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90">
                       <SelectValue />
@@ -484,23 +516,14 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
                 </div>
               </section>
 
-              <section className="flex items-center justify-between gap-4 rounded-lg border border-border bg-muted/30 px-3.5 py-3">
-                <div className="min-w-0">
-                  <p className="text-[13px] font-medium text-foreground/80">保存对局（赛后存档）</p>
-                  <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+              <section className="flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3.5 py-3">
+                <Checkbox id="archive-room" aria-label="保存对局" checked={archive} onCheckedChange={(checked) => setArchive(checked === true)} />
+                <label htmlFor="archive-room" className="min-w-0 flex-1 cursor-pointer">
+                  <span className="block text-sm font-medium text-foreground/80">保存对局（赛后存档）</span>
+                  <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
                     对局结束后写入本地 data/archives，重启后仍可复盘。默认关闭——保持零落盘。
-                  </p>
-                </div>
-                <Toggle
-                  pressed={archive}
-                  onPressedChange={setArchive}
-                  variant="outline"
-                  size="sm"
-                  aria-label="保存对局"
-                  className="shrink-0 rounded-full px-3 text-xs data-[state=on]:border-live/40 data-[state=on]:bg-live/10 data-[state=on]:text-live data-[state=on]:hover:bg-live/15"
-                >
-                  {archive ? "已开启" : "关闭"}
-                </Toggle>
+                  </span>
+                </label>
               </section>
 
               {eligibleModels.length ? (
@@ -533,7 +556,7 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
 
               {mode === "human" ? (
                 <section>
-                  <p className="mb-2.5 text-[13px] font-medium text-foreground/80">你的名字</p>
+                  <p className="mb-2.5 text-sm font-medium text-foreground/80">你的名字</p>
                   <Input
                     value={playerName}
                     onChange={(event) => setPlayerName(event.target.value)}
@@ -545,27 +568,29 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
               ) : null}
 
               {error ? <ErrorNote>{error}</ErrorNote> : null}
-              {libraryError ? <p className="flex items-start gap-1.5 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[13px] leading-5 text-warn">{libraryError}</p> : null}
+              {libraryError ? <p className="flex items-start gap-1.5 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-sm leading-5 text-warn">{libraryError}</p> : null}
 
               <section>
                 <div className="mb-2 flex items-center justify-between">
-                  <p className="text-[13px] font-medium text-foreground/80">阵容模板</p>
+                  <p className="text-sm font-medium text-foreground/80">阵容模板</p>
                   {loadedTemplateId ? (
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       type="button"
-                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-destructive"
+                      className="h-auto gap-1 p-0 text-xs text-muted-foreground hover:bg-transparent hover:text-destructive"
                       disabled={submitting}
-                      onClick={() => void deleteTemplate(loadedTemplateId)}
+                      onClick={() => setPendingTemplateRemoval(loadedTemplateId)}
                     >
                       <Trash2 className="size-3" />
                       删除当前模板
-                    </button>
+                    </Button>
                   ) : null}
                 </div>
                 <p className="mb-2.5 text-xs leading-5 text-muted-foreground">
                   把当前配置（模型分配、人物、回合数、社会季模式）存为模板，一键复用。模板按世界保存，只存本机，不含任何密钥。
                 </p>
-                <div className="space-y-2">
+                <div className="flex flex-col gap-2">
                   {templates.length ? (
                     <Select
                       value={loadedTemplateId ?? "__none"}
@@ -604,20 +629,58 @@ export function CreateRoomDialog({ open, scenario, models, defaultPoolProfileIds
                 </div>
               </section>
             </div>
+            <aside className="sticky top-24 hidden rounded-xl border border-border bg-card p-5 lg:block" aria-label="最终阵容摘要">
+              <h2 className="text-lg font-semibold">最终阵容</h2>
+              <p className="mt-1 text-sm text-muted-foreground">提交前确认席位、回合与本机落盘选项。</p>
+              <div className="mt-5 flex flex-col gap-3">
+                {previewRows.map((row) => (
+                  <div key={row.index} className="flex items-start justify-between gap-3 border-b border-border/60 pb-3 text-sm last:border-0 last:pb-0">
+                    <span className="min-w-0"><span className="block truncate font-medium">{row.characterLabel}</span><span className="block truncate text-xs text-muted-foreground">{row.modelLabel}</span></span>
+                    <Badge variant="outline">{row.index + 1}</Badge>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-5 grid grid-cols-2 gap-2 text-center">
+                <div className="rounded-lg border border-border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">回合</p><p className="mt-1 text-base font-semibold">{rounds}</p></div>
+                <div className="rounded-lg border border-border bg-muted/30 p-3"><p className="text-xs text-muted-foreground">归档</p><p className="mt-1 text-base font-semibold">{archive ? "保存" : "不保存"}</p></div>
+              </div>
+            </aside>
             </div>
 
-            <div className="flex items-center justify-end gap-3 border-t border-border/60 bg-card px-6 py-4">
-              <Button variant="tile" disabled={submitting} onClick={() => onOpenChange(false)}>
-                取消
+            <div className="sticky bottom-0 z-10 flex items-center justify-between gap-3 rounded-xl border border-border bg-background/95 px-4 py-3 backdrop-blur sm:px-6">
+              <p className="hidden text-xs text-muted-foreground sm:block">{players} 名参与者 · {rounds} 回合 · {archive ? "赛后保存" : "不落盘"}</p>
+              <Button variant="tile" className="ml-auto" disabled={submitting} onClick={onBack}>
+                返回大厅
               </Button>
               <Button onClick={submit} disabled={submitting || !eligibleModels.length} className="rounded-lg px-6">
-                {submitting ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+                {submitting ? <Spinner className="size-4" /> : <Play className="size-4" />}
                 开始世界
               </Button>
             </div>
           </div>
         ) : null}
-      </DialogContent>
-    </Dialog>
+        </main>
+      </div>
+      <AlertDialog open={pendingTemplateRemoval !== undefined} onOpenChange={(next) => { if (!next) setPendingTemplateRemoval(undefined); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除当前阵容模板？</AlertDialogTitle>
+            <AlertDialogDescription>只删除本机保存的创建配置，不影响已创建或已归档的房间。</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                if (!pendingTemplateRemoval) return;
+                void deleteTemplate(pendingTemplateRemoval).finally(() => setPendingTemplateRemoval(undefined));
+              }}
+            >
+              删除模板
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

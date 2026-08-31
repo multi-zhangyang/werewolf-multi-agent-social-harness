@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
-import { Check, Loader2 } from "lucide-react";
+import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { Toggle } from "@/components/ui/toggle";
 import {
   Select,
   SelectContent,
@@ -26,7 +28,7 @@ export function GlobalDefaultsSection({ profiles, value, onChange, pool, onPoolC
   onSave: () => void;
   saving: boolean;
 }): ReactNode {
-  const enabled = profiles.filter((profile) => profile.enabled);
+  const enabled = profiles.filter((profile) => profile.enabled && profile.protocolCheck?.status === "passed");
   const togglePoolModel = (profileId: string): void => {
     onPoolChange(pool.includes(profileId) ? pool.filter((id) => id !== profileId) : [...pool, profileId]);
   };
@@ -49,7 +51,7 @@ export function GlobalDefaultsSection({ profiles, value, onChange, pool, onPoolC
           </SelectContent>
         </Select>
         <Button variant="tile" size="sm" className="shrink-0" disabled={saving} onClick={onSave}>
-          {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+          {saving ? <Spinner className="size-3.5" /> : <Check className="size-3.5" />}
           保存
         </Button>
       </div>
@@ -62,24 +64,25 @@ export function GlobalDefaultsSection({ profiles, value, onChange, pool, onPoolC
         {enabled.length ? enabled.map((profile) => {
           const active = pool.includes(profile.id);
           return (
-            <button
+            <Toggle
               key={profile.id}
-              onClick={() => togglePoolModel(profile.id)}
+              pressed={active}
+              onPressedChange={() => togglePoolModel(profile.id)}
               className={cn(
-                "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                "h-auto min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
                 active ? "border-foreground/60 bg-muted text-foreground" : "border-border bg-card text-muted-foreground hover:border-foreground/30"
               )}
             >
               <span className={cn("size-1.5 rounded-full", active ? "bg-live" : "bg-border")} />
               <span className="max-w-52 truncate font-mono">{profile.name}</span>
-            </button>
+            </Toggle>
           );
         }) : (
-          <p className="text-[11px] text-muted-foreground">没有已启用的模型档案。</p>
+          <p className="text-xs text-muted-foreground">没有已启用的模型档案。</p>
         )}
       </div>
       <Button variant="tile" size="sm" className="mt-3" disabled={saving} onClick={onSave}>
-        {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+        {saving ? <Spinner className="size-3.5" /> : <Check className="size-3.5" />}
         保存
       </Button>
     </section>

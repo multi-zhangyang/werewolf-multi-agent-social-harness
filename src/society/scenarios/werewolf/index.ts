@@ -1,5 +1,6 @@
 import { randomInt, randomUUID } from "node:crypto";
-import { tool, type Tool } from "@openai/agents";
+import type { Tool } from "@openai/agents";
+import { societyTool } from "../../tools";
 import { z } from "zod";
 import type {
   ActivationCompletion,
@@ -20,7 +21,7 @@ import { conversationSignalsFromSocialActs, DiscussionDirector, type Conversatio
 import { SuspicionClimate } from "../../suspicion";
 import { boundedRounds, discussionPersonality, emitAction } from "../helpers";
 import { roleHypothesisTool } from "../../cognition";
-import { socialReferenceContext, toolArgumentFeedback } from "../../social/context-refs";
+import { socialReferenceContext } from "../../social/context-refs";
 import type { SocialActDeclaration } from "../../social/contracts";
 import {
   WEREWOLF_ROLES,
@@ -42,19 +43,6 @@ type Phase =
   | "day-vote"
   | "day-pk"
   | "night";
-
-/**
- * SDK `tool()` with Society validation feedback: when the model's arguments
- * fail schema parsing, the retry hint names the failing fields and their legal
- * values instead of the SDK's bare "invalid input", so the model can repair
- * its own call on the next attempt.
- */
-const societyTool = ((options: Record<string, unknown>) =>
-  tool({
-    ...options,
-    // Society tools standardize on field-level validation feedback.
-    errorFunction: toolArgumentFeedback(typeof options.name === "string" ? options.name : "tool")
-  } as Parameters<typeof tool>[0])) as unknown as typeof tool;
 
 interface DayRecord {
   day: number;
@@ -281,7 +269,7 @@ export class WerewolfWorld extends SocialWorldBase {
       ...(role === "hunter" ? ["Rules: 你被投票放逐或被狼人夜袭时可以开枪带走一名玩家；被女巫毒杀不能开枪。"] : []),
       ...(role === "wolf-king" ? ["Rules: 你被投票放逐或被猎人击杀时可以开枪带走一名玩家；被女巫毒杀不能开枪。"] : []),
       ...(role === "jester" ? ["Rules: 只有被白天投票出局你才获胜；被毒杀、被夜袭或被开枪带走都不算。"] : []),
-      "For an explicit identity claim in communicate.socialActs, use kind=assertion (or denial when claiming you are NOT something), proposition.kind=identity, predicate=has-role, subjectId=the claimed actor id, object=the role id. Link deceptionId only when executing your own recorded deception plan.",
+      "For an explicit identity claim in prepare_message.socialActs, use kind=assertion (or denial when claiming you are NOT something), proposition.kind=identity, predicate=has-role, subjectId=the claimed actor id, object=the role id. Link deceptionId only when executing your own recorded deception plan.",
       ...socialReferenceContext(causality),
       ...(this.sheriffId
         ? [`Sheriff: ${this.displayName(this.sheriffId)} — the sheriff's daytime elimination vote counts 1.5.`]
@@ -1030,7 +1018,7 @@ export class WerewolfWorld extends SocialWorldBase {
         actorIds: [lastWordsSpeaker],
         mode: "sequential",
         instructionFor: () =>
-          "You have been voted out. You have ONE final public statement (遗言): a role claim, an accusation, a hint for your side — or a dignified silence. Call communicate once on the public channel; nothing else is possible now."
+          "You have been voted out. You have ONE final public statement (遗言): a role claim, an accusation, a hint for your side — or a dignified silence. Call prepare_message once for the public channel, then make the final response the exact statement; nothing else is possible now."
       };
     }
     // Death skills resolve before anything else — the room must not advance the
@@ -1067,7 +1055,7 @@ export class WerewolfWorld extends SocialWorldBase {
         actorIds: this.currentSheriffCandidates(),
         mode: "sequential",
         instructionFor: () =>
-          "You are running for sheriff. Give your campaign speech (竞选演讲): why should the village trust you with the badge and the 1.5x vote? Claim experience, read the table, or make your case. Call communicate once on the public channel."
+          "You are running for sheriff. Give your campaign speech (竞选演讲): why should the village trust you with the badge and the 1.5x vote? Claim experience, read the table, or make your case. Call prepare_message once for the public channel, then make the final response the exact speech."
       };
     }
     if (this.phase === "sheriff-withdraw") {
@@ -1099,7 +1087,7 @@ export class WerewolfWorld extends SocialWorldBase {
         actorIds: [...this.sheriffPkCandidates],
         mode: "sequential",
         instructionFor: () =>
-          "The sheriff election tied and you are one of the tied candidates. Give your PK speech (平票陈词): your final case for the badge. The electors re-vote right after both speeches. Call communicate once on the public channel."
+          "The sheriff election tied and you are one of the tied candidates. Give your PK speech (平票陈词): your final case for the badge. The electors re-vote right after both speeches. Call prepare_message once for the public channel, then make the final response the exact speech."
       };
     }
     if (this.phase === "day-discussion") {
@@ -1135,7 +1123,7 @@ export class WerewolfWorld extends SocialWorldBase {
         actorIds: [...this.pkCandidates],
         mode: "sequential",
         instructionFor: (_actorId) =>
-          "The vote tied and you are one of the two accused. This is your PK speech (平票陈词): state your final case to the village — defend yourself, present your evidence, counter the other candidate. The table re-votes right after both speeches; you will not vote. Call communicate once on the public channel."
+          "The vote tied and you are one of the two accused. This is your PK speech (平票陈词): state your final case to the village — defend yourself, present your evidence, counter the other candidate. The table re-votes right after both speeches; you will not vote. Call prepare_message once for the public channel, then make the final response the exact speech."
       };
     }
     if (this.phase === "day-vote") return this.voteActivation();
@@ -1197,7 +1185,7 @@ export class WerewolfWorld extends SocialWorldBase {
       actorIds: wolves,
       mode: "sequential",
       instructionFor: () =>
-        "The pack meets before the kill is chosen. Discuss on the team channel: share your reads (who claims what, who feels like the seer or the guard, who has been quietly steering the vote), and converge on tonight's target. Call communicate once on the team channel. Do NOT call choose_night_target yet — nominations open after this round."
+        "The pack meets before the kill is chosen. Discuss on the team channel: share your reads (who claims what, who feels like the seer or the guard, who has been quietly steering the vote), and converge on tonight's target. Call prepare_message once with channel=team, then make the final response the exact speech. Do NOT call choose_night_target yet — nominations open after this round."
     };
   }
 
@@ -1554,21 +1542,21 @@ export class WerewolfWorld extends SocialWorldBase {
 
   private availableActions(actorId: string, role: WerewolfRoleId): string[] {
     if (this.pendingBadgePass[0] === actorId) return ["pass_badge"];
-    if (this.pendingLastWords[0] === actorId) return ["communicate", "recall_memory"];
+    if (this.pendingLastWords[0] === actorId) return ["final_response", "recall_memory"];
     if (!this.alive.has(actorId)) return [];
     if (this.phase === "sheriff-run") return ["run_for_sheriff"];
-    if (this.phase === "sheriff-campaign") return this.currentSheriffCandidates().includes(actorId) ? ["communicate", "recall_memory"] : [];
+    if (this.phase === "sheriff-campaign") return this.currentSheriffCandidates().includes(actorId) ? ["final_response", "recall_memory"] : [];
     if (this.phase === "sheriff-withdraw") return this.currentSheriffCandidates().includes(actorId) ? ["withdraw_sheriff_run"] : [];
     if (this.phase === "sheriff-vote") return this.sheriffElectorate().includes(actorId) ? ["cast_sheriff_vote"] : [];
-    if (this.phase === "sheriff-pk") return this.sheriffPkCandidates.includes(actorId) ? ["communicate", "recall_memory"] : [];
-    if (this.phase === "day-discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "read_the_room", "log_deception_plan", "update_inner_state"];
+    if (this.phase === "sheriff-pk") return this.sheriffPkCandidates.includes(actorId) ? ["final_response", "recall_memory"] : [];
+    if (this.phase === "day-discussion") return ["final_response", "recall_memory", "reflect_on_social_situation", "read_the_room", "log_deception_plan", "update_inner_state"];
     if (this.phase === "day-knight") return role === "knight" && !this.knightUsed ? ["knight_challenge"] : [];
-    if (this.phase === "day-pk") return this.pkCandidates.includes(actorId) ? ["communicate", "recall_memory"] : [];
+    if (this.phase === "day-pk") return this.pkCandidates.includes(actorId) ? ["final_response", "recall_memory"] : [];
     if (this.phase === "day-vote") return this.idiotRevealed.has(actorId) ? [] : ["cast_day_vote"];
-    if (this.packPactPending() && isWolfRole(role)) return ["communicate:team", "recall_memory"];
-    if (role === "nightmare") return ["communicate:team", "choose_night_target", "dream_curse"];
-    if (role === "wolf-beauty") return ["communicate:team", "choose_night_target", "charm_target"];
-    if (isWolfRole(role)) return ["communicate:team", "choose_night_target"];
+    if (this.packPactPending() && isWolfRole(role)) return ["final_response:team", "recall_memory"];
+    if (role === "nightmare") return ["final_response:team", "choose_night_target", "dream_curse"];
+    if (role === "wolf-beauty") return ["final_response:team", "choose_night_target", "charm_target"];
+    if (isWolfRole(role)) return ["final_response:team", "choose_night_target"];
     if (role === "seer") return ["investigate_identity"];
     if (role === "spirit-seer") return ["investigate_dead_identity"];
     if (role === "witch") return ["witch_night_choice"];

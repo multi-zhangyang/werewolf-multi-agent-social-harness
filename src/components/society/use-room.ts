@@ -3,7 +3,13 @@ import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import type { AgentRuntimeEvent, CinematicCue } from "@/society/contracts";
 import type { SpectatorModeLike } from "@/components/society/viewer-types";
-import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "@/society/room";
+import type {
+  AgentTurnRecord,
+  AgentTurnRecordStatus,
+  AgentTurnToolRecord,
+  SocietyRoomEventEnvelope,
+  SocietyRoomSnapshot
+} from "@/society/room";
 
 /**
  * Live-stream data layer.
@@ -15,7 +21,7 @@ import type { SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "@/society/ro
  * the server is what the UI displays.
  */
 
-export type TurnStatus = "thinking" | "acting" | "speaking" | "paused" | "error";
+export type TurnStatus = AgentTurnRecordStatus;
 
 export interface TurnReasoning {
   text: string;
@@ -23,15 +29,7 @@ export interface TurnReasoning {
   done: boolean;
 }
 
-export interface TurnToolStep {
-  kind: "tool";
-  toolCallId: string;
-  toolName: string;
-  label?: string;
-  phase: "started" | "succeeded" | "failed";
-  safeInputSummary?: string;
-  safeOutputSummary?: string;
-}
+export type TurnToolStep = AgentTurnToolRecord;
 
 /**
  * One activation of one agent, rendered as a single live card: thinking →
@@ -107,7 +105,7 @@ const TURN_OUTPUT_CAP = 8_000;
 /** Generous bound only for pathological streams; normal reasoning never hits it. */
 const TURN_REASONING_CAP = 120_000;
 /** Retained completed turns — the in-page rewatch window for long games. */
-const TURN_HISTORY_CAP = 60;
+const TURN_HISTORY_CAP = 1_000;
 const TIMELINE_CAP = 400;
 
 export const COMPLETED_STATUSES: ReadonlySet<string> = new Set(["idle", "finished", "error"]);
@@ -116,9 +114,9 @@ function pushTimeline(state: RoomStreamState, entry: StreamEventEntry): RoomStre
   return { ...state, timeline: [entry, ...state.timeline].slice(0, TIMELINE_CAP) };
 }
 
-function openTurn(state: RoomStreamState, actorId: string, status: TurnStatus, at: string): LiveTurn {
+function openTurn(actorId: string, status: TurnStatus, at: string, turnId?: string): LiveTurn {
   return {
-    id: `${actorId}:${at}`,
+    id: turnId ?? `${actorId}:${at}`,
     actorId,
     status,
     outputText: "",
@@ -127,6 +125,14 @@ function openTurn(state: RoomStreamState, actorId: string, status: TurnStatus, a
     startedAt: at,
     updatedAt: at
   };
+}
+
+function openTurnIndex(turns: LiveTurn[], actorId: string, turnId?: string): number {
+  if (turnId) {
+    const exact = turns.findIndex((turn) => turn.id === turnId && !turn.completedAt);
+    if (exact >= 0) return exact;
+  }
+  return turns.findIndex((turn) => turn.actorId === actorId && !turn.completedAt);
 }
 
 /** Deltas only apply to the actor's OPEN turn — closed turns never resurrect, so replayed backlogs cannot create ghosts. */
@@ -151,7 +157,7 @@ export function reduceRoomEvent(state: RoomStreamState, event: AgentRuntimeEvent
     case "world.updated":
       return state; // snapshot merge handled by the hook, not the reducer
     case "agent.delta": {
-      const index = state.turns.findIndex((turn) => turn.actorId === event.actorId && !turn.completedAt);
+      const index = openTurnIndex(state.turns, event.actorId, event.turnId);
       if (index < 0) return state;
       const turns = state.turns.slice();
       const next = applyDelta(turns[index], event.delta, event.sealed === true, event.at);
@@ -160,7 +166,7 @@ export function reduceRoomEvent(state: RoomStreamState, event: AgentRuntimeEvent
       return { ...state, turns };
     }
     case "agent.reasoning-content": {
-      const index = state.turns.findIndex((turn) => turn.actorId === event.actorId && !turn.completedAt);
+      const index = openTurnIndex(state.turns, event.actorId, event.turnId);
       if (index < 0) return state;
       const turns = state.turns.slice();
       const turn = turns[index];
@@ -178,7 +184,7 @@ export function reduceRoomEvent(state: RoomStreamState, event: AgentRuntimeEvent
     }
     case "agent.status": {
       const closed = COMPLETED_STATUSES.has(event.status);
-      const index = state.turns.findIndex((turn) => turn.actorId === event.actorId && !turn.completedAt);
+      const index = openTurnIndex(state.turns, event.actorId, event.turnId);
       if (!closed) {
         const turns = state.turns.slice();
         if (index >= 0) {
@@ -187,7 +193,7 @@ export function reduceRoomEvent(state: RoomStreamState, event: AgentRuntimeEvent
           return { ...state, turns };
         }
         if (event.status === "thinking" || event.status === "acting" || event.status === "speaking") {
-          turns.push(openTurn(state, event.actorId, normalizeStatus(event.status, "thinking"), event.at));
+          turns.push(openTurn(event.actorId, normalizeStatus(event.status, "thinking"), event.at, event.turnId));
           return { ...state, turns: trimTurns(turns) };
         }
         return state;
@@ -209,7 +215,7 @@ export function reduceRoomEvent(state: RoomStreamState, event: AgentRuntimeEvent
       // an output whose text is its fixed error template, so the row must
       // settle as failed instead of spinning forever.
       if (event.phase !== "started" && event.phase !== "succeeded" && event.phase !== "failed") return state;
-      const index = state.turns.findIndex((turn) => turn.actorId === event.actorId && !turn.completedAt);
+      const index = openTurnIndex(state.turns, event.actorId, event.turnId);
       if (index >= 0) {
         const turns = state.turns.slice();
         const turn = turns[index];
@@ -345,6 +351,45 @@ function trimTurns(turns: LiveTurn[]): LiveTurn[] {
   return [...open, ...closed];
 }
 
+function turnFromRecord(record: AgentTurnRecord): LiveTurn {
+  return {
+    id: record.id,
+    actorId: record.actorId,
+    status: record.status,
+    outputText: "",
+    sealed: record.sealed,
+    tools: record.tools.map((tool) => ({ ...tool })),
+    ...(record.messageId ? { messageId: record.messageId } : {}),
+    startedAt: record.startedAt,
+    updatedAt: record.updatedAt,
+    ...(record.completedAt ? { completedAt: record.completedAt } : {})
+  };
+}
+
+/** Snapshot transcript is durable truth; richer live deltas remain ephemeral. */
+function mergeSnapshotTurns(state: RoomStreamState, snapshot: SocietyRoomSnapshot): RoomStreamState {
+  if (!snapshot.agentTurns) return state;
+  const currentById = new Map(state.turns.map((turn) => [turn.id, turn]));
+  const durableIds = new Set(snapshot.agentTurns.map((turn) => turn.id));
+  const merged = snapshot.agentTurns.map((record) => {
+    const durable = turnFromRecord(record);
+    const current = currentById.get(record.id);
+    if (!current) return durable;
+    return {
+      ...durable,
+      outputText: current.outputText,
+      ...(current.reasoning ? { reasoning: current.reasoning } : {}),
+      tools: durable.tools,
+      updatedAt: record.updatedAt,
+      ...(record.completedAt ? { completedAt: record.completedAt } : {})
+    };
+  });
+  for (const turn of state.turns) {
+    if (!durableIds.has(turn.id)) merged.push(turn);
+  }
+  return { ...state, turns: trimTurns(merged) };
+}
+
 function normalizeStatus(status: string, fallback: TurnStatus): TurnStatus {
   if (status === "thinking" || status === "acting" || status === "speaking" || status === "paused") return status;
   return fallback;
@@ -414,7 +459,7 @@ export function useRoom(
       // Snapshots anchor truth: live turns whose activations already ended in
       // the snapshot's participant statuses are dropped so a reconnect starts
       // clean instead of resuming stale streams.
-      setStream((current) => resetStaleTurns(current, next));
+      setStream((current) => resetStaleTurns(mergeSnapshotTurns(current, next), next));
     };
 
     const connect = async (): Promise<void> => {
@@ -592,10 +637,11 @@ function resetStaleTurns(state: RoomStreamState, snapshot: SocietyRoomSnapshot):
   const alive = new Set(
     snapshot.world.agents.filter((agent) => activeStatuses.has(agent.status)).map((agent) => agent.id)
   );
+  const durableOpen = new Set((snapshot.agentTurns ?? []).filter((turn) => !turn.completedAt).map((turn) => turn.id));
   return {
     ...state,
     turns: state.turns.map((turn) =>
-      !turn.completedAt && !alive.has(turn.actorId)
+      !turn.completedAt && !alive.has(turn.actorId) && !durableOpen.has(turn.id)
         ? { ...turn, completedAt: turn.updatedAt }
         : turn
     )
@@ -632,7 +678,7 @@ export function useArchiveRoom(archiveId: string | undefined): RoomConnection {
         if (cancelled) return;
         setRoom(payload.room);
         setViewer({ mode: "postgame", privileged: payload.viewer?.privileged === true });
-        let state = EMPTY_STREAM_STATE;
+        let state = mergeSnapshotTurns(EMPTY_STREAM_STATE, payload.room);
         for (const envelope of payload.envelopes ?? []) {
           state = ingestEnvelope(state, envelope);
         }

@@ -1,15 +1,20 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useMemo, useState, type ReactNode } from "react";
 import { Hourglass } from "lucide-react";
 import type { SocialMessage } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import type { EffectiveViewer, LiveTurn, RoomConnection } from "./use-room";
-import { MessageResponse } from "@/components/ai-elements/message";
+import {
+  Conversation,
+  ConversationContent,
+  ConversationEmptyState,
+  ConversationScrollButton
+} from "@/components/ai-elements/conversation";
+import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { cn } from "@/lib/utils";
-import { AgentAvatar, beatLabel, ChannelBadge, channelSurface, formatTime, ScenarioIcon } from "./shared";
+import { Separator } from "@/components/ui/separator";
+import { AgentAvatar, beatLabel, ChannelBadge, formatTime, ScenarioIcon } from "./shared";
 import { belongsToCluster } from "./stream-cluster";
 import { TurnCard } from "./turn-card";
 import { SettledTurnProcess } from "./turn-cognition";
@@ -67,75 +72,25 @@ function StreamItems({ items, room, onSubmitAction }: {
   room: SocietyRoomSnapshot;
   onSubmitAction?: RoomConnection["submitAction"];
 }): ReactNode {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
-  const stickRef = useRef(true);
-  const lastCountRef = useRef(0);
-  const [scrolled, setScrolled] = useState(false);
-
-  const viewportOf = (): HTMLElement | null =>
-    scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]") as HTMLElement | null;
-
-  useEffect(() => {
-    if (items.length !== lastCountRef.current) {
-      lastCountRef.current = items.length;
-      if (stickRef.current) scrollToBottom();
-      const viewport = viewportOf();
-      if (viewport) setScrolled(viewport.scrollTop > 8);
-    }
-  }, [items.length]);
-
-  // A streaming turn grows without adding items; follow the bottom while the
-  // viewer is still stuck to it, or the speaking card gets sliced mid-word.
-  useEffect(() => {
-    const content = contentRef.current;
-    if (!content) return;
-    const observer = new ResizeObserver(() => {
-      if (stickRef.current) scrollToBottom();
-    });
-    observer.observe(content);
-    return () => observer.disconnect();
-  }, []);
-
-  const scrollToBottom = (): void => {
-    const viewport = viewportOf();
-    if (viewport) viewport.scrollTop = viewport.scrollHeight;
-  };
-
   return (
     <div className="relative flex h-full min-h-0 flex-col">
-      <div className={cn("min-h-0 flex-1", scrolled && "scroll-fade-top")}>
-        <ScrollArea
-          ref={scrollRef}
-          className="h-full"
-          onScroll={(event) => {
-            const viewport = event.currentTarget.querySelector("[data-radix-scroll-area-viewport]") as HTMLElement | null;
-            if (!viewport) return;
-            stickRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 80;
-            setScrolled(viewport.scrollTop > 8);
-          }}
-        >
-          <div ref={contentRef} className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-5 pt-6 pb-10">
-            {items.map((item) => (
-              // The anchor id lets the storyline bar scroll the stream to any
-              // retained chapter (log entries render as phase dividers).
-              <div key={item.id} id={`anchor:${item.id}`}>{item.render}</div>
-            ))}
-            {!items.length ? (
-              <Empty className="py-16">
-                <EmptyHeader>
-                  <EmptyMedia variant="icon" className="relative size-12 rounded-xl border border-border bg-card shadow-[0_0_36px_-12px_oklch(0.77_0.15_160/0.5)]">
-                    <ScenarioIcon id={room.scenarioId} className="size-5 text-muted-foreground" />
-                    <span className="live-pulse absolute -right-0.5 -top-0.5 size-2 rounded-full bg-live" aria-hidden />
-                  </EmptyMedia>
-                  <EmptyTitle>等待世界苏醒</EmptyTitle>
-                  <EmptyDescription>第一个 agent 开始思考时，全过程会在这里直播。</EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            ) : null}
-          </div>
-        </ScrollArea>
-      </div>
+      <Conversation className="min-h-0 flex-1">
+        <ConversationContent className="mx-auto w-full max-w-2xl gap-6 px-5 pt-6 pb-10">
+          {items.map((item) => (
+            // The anchor id lets the storyline bar scroll the stream to any
+            // retained chapter (log entries render as phase dividers).
+            <div key={item.id} id={`anchor:${item.id}`}>{item.render}</div>
+          ))}
+          {!items.length ? (
+            <ConversationEmptyState
+              title="等待世界苏醒"
+              description="第一个 agent 开始思考时，全过程会在这里直播。"
+              icon={<ScenarioIcon id={room.scenarioId} className="size-5" />}
+            />
+          ) : null}
+        </ConversationContent>
+        <ConversationScrollButton aria-label="回到最新动态" />
+      </Conversation>
       <HumanActionBar room={room} onSubmitAction={onSubmitAction} />
     </div>
   );
@@ -160,9 +115,11 @@ function buildStreamItems(
   }
   const matchedTurnIds = new Set<string>();
   for (const message of room.world.messages ?? []) {
-    // Attach the actor's most recent completed turn whose window covers the message.
-    const turn = [...turns]
-      .filter((candidate) => candidate.actorId === message.senderId)
+    // New records carry an exact message link. The time window remains only
+    // for backward-compatible archives created before durable turns existed.
+    const exact = turns.find((candidate) => candidate.messageId === message.id);
+    const turn = exact ?? [...turns]
+      .filter((candidate) => candidate.actorId === message.senderId && !candidate.messageId)
       .reverse()
       .find((candidate) => {
         const start = Date.parse(candidate.startedAt);
@@ -268,18 +225,18 @@ const MessageBubble = memo(function MessageBubble({
   resolveName: NameResolver;
 }): ReactNode {
   return (
-    <article className={cn("enter-stage", channelSurface[message.channel])}>
-      <header className="mb-1.5 flex items-center gap-2">
+    <Message from="assistant" className="enter-stage max-w-full">
+      <div className="flex items-center gap-2">
         <AgentAvatar name={name} seed={seed} size="sm" />
-        <span className="text-[13px] font-semibold tracking-tight">{name}</span>
+        <span className="text-sm font-semibold tracking-tight">{name}</span>
         {message.channel !== "public" ? <ChannelBadge channel={message.channel} /> : null}
-        <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(message.createdAt, { seconds: false })}</time>
-      </header>
-      <div className="space-y-1.5 break-words text-[15px] leading-7">
-        <MessageResponse>{message.text}</MessageResponse>
+        <time className="ml-auto font-mono text-xs text-muted-foreground/60">{formatTime(message.createdAt, { seconds: false })}</time>
       </div>
-      <TurnDetails turn={turn} canSeeCognition={canSeeCognition} resolveName={resolveName} />
-    </article>
+      <MessageContent className="w-full max-w-full break-words text-base leading-7">
+        <TurnDetails turn={turn} canSeeCognition={canSeeCognition} resolveName={resolveName} />
+        <MessageResponse>{message.text}</MessageResponse>
+      </MessageContent>
+    </Message>
   );
 });
 
@@ -301,27 +258,25 @@ const MessageCluster = memo(function MessageCluster({
 }): ReactNode {
   const channel = messages[0]!.channel;
   return (
-    <article className={cn("enter-stage", channelSurface[channel])}>
-      <header className="mb-1.5 flex items-center gap-2">
+    <Message from="assistant" className="enter-stage max-w-full">
+      <div className="flex items-center gap-2">
         <AgentAvatar name={name} seed={seed} size="sm" />
-        <span className="text-[13px] font-semibold tracking-tight">{name}</span>
+        <span className="text-sm font-semibold tracking-tight">{name}</span>
         {channel !== "public" ? <ChannelBadge channel={channel} /> : null}
-        <time className="ml-auto font-mono text-[10px] text-muted-foreground/60">{formatTime(messages[0]!.createdAt, { seconds: false })}</time>
-      </header>
-      <div className="space-y-3">
+        <time className="ml-auto font-mono text-xs text-muted-foreground/60">{formatTime(messages[0]!.createdAt, { seconds: false })}</time>
+      </div>
+      <MessageContent className="flex w-full max-w-full flex-col gap-3">
         {messages.map((message, messageIndex) => (
-          <div key={message.id}>
-            <div className="space-y-1.5 break-words text-[15px] leading-7">
-              <MessageResponse>{message.text}</MessageResponse>
-            </div>
-            {messageIndex > 0 ? (
-              <time className="mt-1 block font-mono text-[10px] text-muted-foreground/60">{formatTime(message.createdAt, { seconds: false })}</time>
-            ) : null}
+          <div key={message.id} className="break-words text-base leading-7">
             <TurnDetails turn={turns.get(message.id)} canSeeCognition={canSeeCognition} resolveName={resolveName} />
+            <MessageResponse>{message.text}</MessageResponse>
+            {messageIndex > 0 ? (
+              <time className="mt-1 block font-mono text-xs text-muted-foreground/60">{formatTime(message.createdAt, { seconds: false })}</time>
+            ) : null}
           </div>
         ))}
-      </div>
-    </article>
+      </MessageContent>
+    </Message>
   );
 });
 
@@ -337,18 +292,12 @@ function TurnDetails({ turn, canSeeCognition, resolveName }: {
 
 function PhaseDivider({ text, beat }: { text: string; beat?: string }): ReactNode {
   return (
-    <div className="cue-enter flex flex-col items-center gap-1.5 py-3 sm:flex-row sm:gap-2.5" role="separator">
-      <span className="hidden flex-1 items-center gap-1.5 sm:flex" aria-hidden>
-        <span className="h-px flex-1 bg-gradient-to-r from-transparent to-foreground/15" />
-        <span className="size-1 rotate-45 bg-foreground/25" />
-      </span>
-      <span className={cn("max-w-full rounded-full border px-3.5 py-1 text-center text-[11px] leading-5 tracking-wide backdrop-blur-sm shadow-[0_2px_12px_oklch(0_0_0/0.3)]", beat ? "border-warn/25 bg-warn/[0.07] text-warn/95" : "border-border bg-card/70 text-muted-foreground")}>
+    <div className="cue-enter flex items-center gap-2.5 py-3" role="separator">
+      <Separator className="hidden flex-1 sm:block" />
+      <Badge variant={beat ? "secondary" : "outline"} className="max-w-full whitespace-normal px-3 py-1 text-center text-xs leading-5 font-normal tracking-wide">
         {beat ? `★ ${beatLabel(beat)} · ` : ""}{text}
-      </span>
-      <span className="hidden flex-1 items-center gap-1.5 sm:flex" aria-hidden>
-        <span className="size-1 rotate-45 bg-foreground/25" />
-        <span className="h-px flex-1 bg-gradient-to-l from-transparent to-foreground/15" />
-      </span>
+      </Badge>
+      <Separator className="hidden flex-1 sm:block" />
     </div>
   );
 }

@@ -43,8 +43,8 @@ export function RosterSection({
   return (
     <section>
       <div className="mb-2.5 flex items-center justify-between">
-        <p className="text-[13px] font-medium text-foreground/80">参与者阵容</p>
-        <span className="text-[11px] text-muted-foreground">{assignMode === "per-seat" ? "逐席模式：每行可单独选模型" : "人物可选；模型按上方分配"}</span>
+        <p className="text-sm font-medium text-foreground/80">参与者阵容</p>
+        <span className="text-xs text-muted-foreground">{assignMode === "per-seat" ? "逐席模式：每行可单独选模型" : "人物可选；模型按上方分配"}</span>
       </div>
       {characters.length ? (
         <p className="mb-2 text-xs leading-5 text-muted-foreground">
@@ -52,7 +52,7 @@ export function RosterSection({
         </p>
       ) : null}
       <div className="rounded-lg border border-border bg-muted/60 p-3" data-model>
-        <div className="space-y-2.5">
+        <div className="flex flex-col gap-2.5">
           {Array.from({ length: players }).map((_, index) => {
             const isHuman = mode === "human" && index === 0;
             const picked = seatPicks[String(index)];
@@ -61,7 +61,7 @@ export function RosterSection({
               <div key={index} className="rounded-md border border-transparent px-1.5 py-1.5 transition-colors hover:border-border/60 hover:bg-card/50">
                 <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 text-xs">
                   <span className="flex items-center gap-2 text-muted-foreground">
-                    <span className="flex size-5 items-center justify-center rounded bg-card font-mono text-[9px] text-muted-foreground/80 ring-1 ring-border">
+                    <span className="flex size-5 items-center justify-center rounded bg-card font-mono text-xs text-muted-foreground/80 ring-1 ring-border">
                       {String(index + 1).padStart(2, "0")}
                     </span>
                     {isHuman ? (
@@ -74,7 +74,7 @@ export function RosterSection({
                         value={seatCharacters[String(index)] ?? "__default"}
                         onValueChange={(value) => onSeatCharacterChange(index, value === "__default" ? undefined : value)}
                       >
-                        <SelectTrigger aria-label={`第 ${index + 1} 位参与者的人物`} className="h-7 w-44 justify-start rounded-md border-border bg-card text-[11px] text-foreground/80">
+                        <SelectTrigger aria-label={`第 ${index + 1} 位参与者的人物`} className="h-7 w-44 justify-start rounded-md border-border bg-card text-xs text-foreground/80">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -93,13 +93,13 @@ export function RosterSection({
                     )}
                   </span>
                   {isHuman ? (
-                    <span className="font-mono text-[11px] text-muted-foreground">本人操控</span>
+                    <span className="font-mono text-xs text-muted-foreground">本人操控</span>
                   ) : assignMode === "per-seat" ? (
                     <Select
                       value={picked ?? unifiedId}
                       onValueChange={(value) => onSeatPicksChange(index, value === unifiedId ? undefined : value)}
                     >
-                      <SelectTrigger aria-label={`第 ${index + 1} 席位的模型`} className="h-7 w-56 justify-end rounded-md border-border bg-card font-mono text-[11px] text-muted-foreground">
+                      <SelectTrigger aria-label={`第 ${index + 1} 席位的模型`} className="h-7 w-56 justify-end rounded-md border-border bg-card font-mono text-xs text-muted-foreground">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -113,7 +113,7 @@ export function RosterSection({
                       </SelectContent>
                     </Select>
                   ) : (
-                    <span className="flex items-center gap-1.5 font-mono text-[11px] text-foreground/80">
+                    <span className="flex items-center gap-1.5 font-mono text-xs text-foreground/80">
                       {picked ? <MiniChip tone="warn">指定</MiniChip> : null}
                       {option.contextLabel ? <MiniChip title={`上下文窗口 ${option.contextLabel}`}>{option.contextLabel}</MiniChip> : null}
                       <span className="max-w-52 truncate">{option.name ?? "—"}</span>
@@ -125,7 +125,7 @@ export function RosterSection({
           })}
         </div>
         {assignMode === "per-seat" ? (
-          <p className="mt-2.5 border-t border-border/60 pt-2.5 text-[11px] leading-5 text-muted-foreground">
+          <p className="mt-2.5 border-t border-border/60 pt-2.5 text-xs leading-5 text-muted-foreground">
             每个参与者仍是一个独立 Agent：这里只决定每个席位的模型档案；人格、记忆与关系不变。想恢复某席位的统一模型，把它重新选成与上方一致即可。
           </p>
         ) : null}

@@ -5,10 +5,8 @@
  *  - anonymous viewers stay PUBLIC, always;
  *  - the room owner token unlocks omniscient viewing + control of THAT room
  *    only (cross-room tokens are refused);
- *  - global operations (model config, characters, templates) require
- *    SOCIETY_OPERATOR_TOKEN — ownership never escalates into operator
- *    authority, and with no token configured every global write is refused
- *    (fail closed);
+ *  - tokenless loopback mode is the trusted local operator; configuring an
+ *    operator token restores strict token checks for every global write;
  *  - private state never leaks: roles stay hidden from public seats, and the
  *    public room view strips world internals.
  *
@@ -27,6 +25,7 @@ import { registerRoomRoutes } from "../../src/server/routes/rooms";
 import { registerCharacterRoutes } from "../../src/server/characters";
 import { registerTemplateRoutes } from "../../src/server/templates";
 import { createServerContext, type ServerContext } from "../../src/server/context";
+import { defaultCapabilities, protocolCheckFingerprint, type ModelProfile, type ProviderProfile } from "../../src/society/models";
 
 interface Harness {
   context: ServerContext;
@@ -45,6 +44,8 @@ async function startHarness(env: Record<string, string | undefined>): Promise<Ha
   const overrides: Record<string, string | undefined> = {
     SOCIETY_CHARACTERS_FILE: path.join(dir, "characters.json"),
     SOCIETY_TEMPLATES_FILE: path.join(dir, "templates.json"),
+    SOCIETY_MODEL_SETTINGS_FILE: path.join(dir, "model-settings.json"),
+    HOST: "127.0.0.1",
     OPENAI_API_KEY: undefined,
     ...env
   };
@@ -54,6 +55,37 @@ async function startHarness(env: Record<string, string | undefined>): Promise<Ha
     else process.env[key] = value;
   }
   const context = createServerContext();
+  const now = new Date().toISOString();
+  const provider: ProviderProfile = {
+    id: "security-provider",
+    name: "security provider",
+    kind: "openai-compatible",
+    baseURL: "http://127.0.0.1:9/v1",
+    apiMode: "chat-completions",
+    enabled: true,
+    createdAt: now,
+    updatedAt: now
+  };
+  context.models.upsertProvider(provider);
+  const profile: ModelProfile = {
+    id: "security-model",
+    name: "security model",
+    providerProfileId: provider.id,
+    modelId: "security-model",
+    contextWindow: 128_000,
+    contextWindowSource: "manual",
+    capabilities: { ...defaultCapabilities(), tools: "yes", streaming: "yes" },
+    defaults: {},
+    contextPolicyId: "policy-balanced-auto",
+    enabled: true
+  };
+  profile.protocolCheck = {
+    status: "passed",
+    fingerprint: protocolCheckFingerprint(profile, provider),
+    checkedAt: now,
+    latencyMs: 1
+  };
+  context.models.upsertModelProfile(profile);
   const app = express();
   app.use(express.json());
   registerCharacterRoutes(app, context);
@@ -129,14 +161,14 @@ describe("viewer projection boundaries", () => {
   });
 });
 
-describe("room control authority", () => {
+describe("room control authority in tokenless loopback mode", () => {
   let harness: Harness;
   beforeAll(async () => { harness = await startHarness({}); });
   afterAll(async () => { await stopHarness(harness); });
 
-  it("anonymous control requests are forbidden", async () => {
+  it("the local user can control a room without copying its owner token", async () => {
     const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}/pause`, { method: "POST" });
-    assert.equal(response.status, 403);
+    assert.equal(response.status, 200);
   });
   it("a room's own owner token may pause it", async () => {
     const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}/pause`, {
@@ -146,31 +178,30 @@ describe("room control authority", () => {
     assert.equal(response.status, 200);
   });
 
-  it("another room's owner token cannot control this room", async () => {
+  it("local administration remains available even when another room token is present", async () => {
     const response = await fetch(`${harness.base}/api/rooms/${harness.roomA}/resume`, {
       method: "POST",
       headers: withBearer(harness.roomBToken)
     });
-    assert.equal(response.status, 403, "owner tokens are scoped to their room");
+    assert.equal(response.status, 200);
   });
 
-  it("removing a room needs the owner token too", async () => {
+  it("the local user may remove a room without an owner token", async () => {
     const response = await fetch(`${harness.base}/api/rooms/${harness.roomB}`, { method: "DELETE" });
-    assert.equal(response.status, 403);
+    assert.equal(response.status, 200);
   });
 });
 
-describe("metrics authority (ground truth is owner/operator only)", () => {
+describe("metrics authority", () => {
   let harness: Harness;
   beforeAll(async () => { harness = await startHarness({}); });
   afterAll(async () => { await stopHarness(harness); });
 
-  it("anonymous and cross-room requests cannot read metrics", async () => {
-    assert.equal((await fetch(`${harness.base}/api/rooms/${harness.roomA}/metrics`)).status, 403,
-      "metrics carry true roles and resolved beliefs — no anonymous access");
+  it("the loopback local operator may read metrics", async () => {
+    assert.equal((await fetch(`${harness.base}/api/rooms/${harness.roomA}/metrics`)).status, 200);
     assert.equal((await fetch(`${harness.base}/api/rooms/${harness.roomA}/metrics`, {
       headers: withBearer(harness.roomBToken)
-    })).status, 403, "owner tokens stay scoped to their own room");
+    })).status, 200);
   });
 
   it("the room's owner reads metrics including the quality block", async () => {
@@ -220,43 +251,72 @@ describe("public projection strips world internals", () => {
   });
 });
 
-describe("global writes fail closed without an operator token", () => {
+describe("tokenless loopback local administration", () => {
   let harness: Harness;
   beforeAll(async () => { harness = await startHarness({}); });
   afterAll(async () => { await stopHarness(harness); });
 
-  it("anonymous writes to model config, characters and templates are forbidden", async () => {
+  it("health reports only room, protocol-readiness and path-free storage status", async () => {
+    const payload = await fetch(`${harness.base}/api/health`).then((response) => response.json()) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(payload).sort(), ["models", "ok", "rooms", "storage"]);
+    assert.equal(payload.ok, true);
+    assert.equal(typeof payload.rooms, "number");
+    assert.deepEqual(Object.keys(payload.models as Record<string, unknown>).sort(), ["enabled", "failed", "ready", "stale"]);
+    const storage = payload.storage as { status: string; issues: unknown[] };
+    assert.equal(["ok", "degraded"].includes(storage.status), true);
+    assert.equal(Array.isArray(storage.issues), true);
+    assert.equal(JSON.stringify(payload).includes("baseURL"), false);
+    assert.equal(JSON.stringify(payload).includes("model-settings.json"), false);
+  });
+
+  it("the local user can manage model config, characters and templates", async () => {
     assert.equal((await fetch(`${harness.base}/api/model-config`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ providers: [{ id: "intruder", name: "入侵者", kind: "openai-compatible", baseURL: "https://example.invalid", apiMode: "chat-completions", enabled: true }] })
-    })).status, 403);
+    })).status, 200);
     assert.equal((await fetch(`${harness.base}/api/characters`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ displayName: "入侵者", persona: "一位试图越权创建人物的测试。", traits: ["测试"], values: ["验证"], goals: ["破坏"] })
-    })).status, 403);
+    })).status, 201);
     assert.equal((await fetch(`${harness.base}/api/room-templates`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "入侵模板", scenarioId: "trust-game" })
-    })).status, 403);
+      body: JSON.stringify({ name: "入侵模板", scenarioId: "trust-game", models: ["security-model"] })
+    })).status, 201);
   });
 
-  it("an owner token cannot perform global operations either", async () => {
+  it("local administration does not require stripping an existing room token", async () => {
     const characters = await fetch(`${harness.base}/api/characters`, {
       method: "POST",
       headers: { ...withBearer(harness.roomAToken), "Content-Type": "application/json" },
       body: JSON.stringify({ displayName: "房主自建", persona: "一位试图通过房主令牌越权的人物。", traits: ["测试"], values: ["验证"], goals: ["越权"] })
     });
-    assert.equal(characters.status, 403, "character creation is operator-gated");
+    assert.equal(characters.status, 201);
 
     const templates = await fetch(`${harness.base}/api/room-templates`, {
       method: "POST",
       headers: { ...withBearer(harness.roomAToken), "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "房主模板", scenarioId: "trust-game" })
+      body: JSON.stringify({ name: "房主模板", scenarioId: "trust-game", models: ["security-model"] })
     });
-    assert.equal(templates.status, 403, "template creation is operator-gated");
+    assert.equal(templates.status, 201);
+  });
+});
+
+describe("non-loopback startup protection", () => {
+  it("refuses a tokenless non-loopback bind and accepts it with an operator token", () => {
+    assert.throws(
+      () => createServerContext({ ...process.env, HOST: "0.0.0.0", SOCIETY_OPERATOR_TOKEN: undefined }),
+      /LOCAL_ADMIN_UNSAFE_BIND/
+    );
+    const context = createServerContext({
+      ...process.env,
+      HOST: "0.0.0.0",
+      SOCIETY_OPERATOR_TOKEN: "configured",
+      SOCIETY_MODEL_SETTINGS_FILE: path.join(tmpdir(), `society-safe-bind-${Date.now()}.json`)
+    });
+    assert.equal(context.auth.localAdministrationEnabled(), false);
   });
 });
 

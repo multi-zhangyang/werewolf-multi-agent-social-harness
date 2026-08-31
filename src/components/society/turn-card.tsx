@@ -1,10 +1,11 @@
 import { memo, type ReactNode } from "react";
-import { Loader2, Wrench } from "lucide-react";
+import { Wrench } from "lucide-react";
 import type { LiveTurn } from "./use-room";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import { cn } from "@/lib/utils";
+import { Spinner } from "@/components/ui/spinner";
 import { AgentAvatar, formatTime } from "./shared";
 import { ToolStep } from "./turn-cognition";
 import type { NameResolver } from "./tool-summary";
@@ -54,16 +55,16 @@ export const TurnCard = memo(function TurnCard({
         </span>
         {live ? <span className="size-1 animate-pulse rounded-full bg-live" aria-hidden /> : null}
       </div>
-      <div className="min-w-0 flex-1 space-y-2">
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
         <header className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="text-[13px] font-semibold tracking-tight">{name}</span>
+          <span className="text-sm font-semibold tracking-tight">{name}</span>
           {live ? (
             <Shimmer className="text-xs text-muted-foreground" duration={1.4}>{`${statusLine}…`}</Shimmer>
           ) : (
             <span className={cn("text-xs", turn.status === "error" ? "text-destructive" : "text-muted-foreground")}>{statusLine}</span>
           )}
-          {channelLabel ? <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{channelLabel}</span> : null}
-          <time className="ml-auto font-mono text-[10px] text-muted-foreground/85">{formatTime(turn.startedAt)}</time>
+          {channelLabel ? <span className="text-xs uppercase tracking-wider text-muted-foreground">{channelLabel}</span> : null}
+          <time className="ml-auto font-mono text-xs text-muted-foreground/85">{formatTime(turn.startedAt)}</time>
         </header>
 
         {canSeeCognition && turn.reasoning && (live || turn.reasoning.text) ? (
@@ -74,7 +75,7 @@ export const TurnCard = memo(function TurnCard({
         ) : null}
 
         {canSeeCognition && turn.tools.length ? (
-          <ul className="space-y-1.5">
+          <ul className="flex flex-col gap-1.5">
             {turn.tools.map((tool) => (
               <li key={tool.toolCallId} className="min-w-0">
                 <ToolStep tool={tool} resolveName={resolveName} />
@@ -84,7 +85,7 @@ export const TurnCard = memo(function TurnCard({
         ) : !canSeeCognition && turn.tools.length ? (
           <p className="flex items-center gap-2 rounded-md border border-border/50 bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
             {live && turn.tools.at(-1)?.phase === "started"
-              ? <Loader2 className="size-3 animate-spin" aria-hidden />
+              ? <Spinner className="size-3" aria-hidden />
               : <Wrench className="size-3" aria-hidden />}
             {live ? "正在执行绑定行动——细节仅全知视角可见。" : "本轮以绑定行动完成，未产生公开发言。"}
           </p>
@@ -93,17 +94,17 @@ export const TurnCard = memo(function TurnCard({
         {live ? (
           turn.sealed ? (
             <p className="flex items-center gap-2 rounded-lg border border-secret/25 bg-secret/5 px-3 py-2 text-xs text-secret/90">
-              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              <Spinner className="size-3.5" aria-hidden />
               密封行动进行中——选择在结算前不会公开。
             </p>
           ) : turn.outputText.trim() ? (
-            <div className="relative break-words text-[15px] leading-7">
+            <div className="relative break-words text-base leading-7">
               <MessageResponse isAnimating>{turn.outputText}</MessageResponse>
               <StreamCaret />
             </div>
           ) : null
         ) : turn.outputText ? (
-          <div className="break-words text-[15px] leading-7">
+          <div className="break-words text-base leading-7">
             <MessageResponse>{turn.outputText}</MessageResponse>
           </div>
         ) : null}

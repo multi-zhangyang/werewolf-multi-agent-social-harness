@@ -6,7 +6,7 @@
  * enter this store.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import express from "express";
 import { z } from "zod";
@@ -14,6 +14,7 @@ import type { CharacterDefinition } from "../society/contracts";
 import { builtinCharacter, builtinCharacters } from "../society/profiles";
 import { requireGlobalOperator } from "./auth";
 import type { ServerContext } from "./context";
+import { atomicWriteJson, quarantineCorruptFile, type StorageHealth } from "./storage";
 
 const MAX_CUSTOM_CHARACTERS = 100;
 const MAX_ANCHORS = 12;
@@ -56,7 +57,7 @@ export class CharacterLibrary {
   private readonly file: string;
   private customs: CharacterDefinition[] = [];
 
-  constructor(file = defaultCharacterLibraryPath()) {
+  constructor(file = defaultCharacterLibraryPath(), private readonly storage?: StorageHealth) {
     this.file = file;
     this.load();
   }
@@ -64,22 +65,26 @@ export class CharacterLibrary {
   private load(): void {
     if (!existsSync(this.file)) return;
     try {
-      const raw = JSON.parse(readFileSync(this.file, "utf8")) as { characters?: CharacterDefinition[] };
+      const raw = JSON.parse(readFileSync(this.file, "utf8")) as { schemaVersion?: 1; characters?: CharacterDefinition[] };
       const characters = Array.isArray(raw?.characters) ? raw.characters : [];
       this.customs = characters
         .filter((entry) => entry && typeof entry.id === "string" && !entry.builtIn)
         .slice(0, MAX_CUSTOM_CHARACTERS);
     } catch (error) {
+      const quarantined = quarantineCorruptFile(this.file);
+      this.storage?.record({ store: "characters", code: quarantined ? "CORRUPT_FILE_QUARANTINED" : "READ_FAILED" });
       console.warn("[society] character library unreadable; starting empty:", error instanceof Error ? error.message : error);
       this.customs = [];
     }
   }
 
   private persist(): void {
-    mkdirSync(path.dirname(this.file), { recursive: true });
-    const temp = `${this.file}.${randomUUID().slice(0, 8)}.tmp`;
-    writeFileSync(temp, JSON.stringify({ characters: this.customs }, null, 2), { mode: 0o600 });
-    renameSync(temp, this.file);
+    try {
+      atomicWriteJson(this.file, { schemaVersion: 1, characters: this.customs });
+    } catch (error) {
+      this.storage?.record({ store: "characters", code: "WRITE_FAILED" });
+      throw error;
+    }
   }
 
   list(): { builtins: CharacterDefinition[]; customs: CharacterDefinition[] } {

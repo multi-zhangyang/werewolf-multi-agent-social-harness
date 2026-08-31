@@ -1,24 +1,25 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, Cast, Eye, Flag, Globe, Lock, Pause, Play, Radio, Share2, TriangleAlert } from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ArrowLeft, Cast, Eye, Flag, Globe, Lock, Pause, Play, Radio, Share2, TriangleAlert, Users, Waypoints } from "lucide-react";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup
-} from "@/components/ui/resizable";
+import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Spinner } from "@/components/ui/spinner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { CausalityPanel } from "./causality-panel";
-import { CueBanner, EndgameOverlay, NightRevealBanner, StorylineBar, TensionMeter } from "./cinematics";
-import { LiveStream } from "./live-stream";
+import { CueBanner, NightRevealBanner, StorylineBar, TensionMeter } from "./cinematics";
 import { ParticipantsRail, type ModelOption } from "./participants-rail";
 import { useArchiveRoom, useRoom, type EffectiveViewer, type RoomConnection, type RoomStreamState, type RoomTension } from "./use-room";
-import { ScenarioIcon } from "./shared";
+import { AgentAvatar, ScenarioIcon } from "./shared";
+
+const LazyCausalityPanel = lazy(() => import("./causality-panel").then((module) => ({ default: module.CausalityPanel })));
+const LazyLiveStream = lazy(() => import("./live-stream").then((module) => ({ default: module.LiveStream })));
+const LazyEndgameOverlay = lazy(() => import("./endgame-overlay").then((module) => ({ default: module.EndgameOverlay })));
 
 type ViewerChoice = "public" | "omniscient" | "postgame";
 
@@ -98,6 +99,7 @@ function RoomShell({ connection, requestedMode, onModeChange, onBack, interactiv
 
   const [scenarioCatalog, setScenarioCatalog] = useState<ScenarioSummary[]>([]);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [storageIssueCount, setStorageIssueCount] = useState(0);
   useEffect(() => {
     let cancelled = false;
     void apiCatalog()
@@ -105,6 +107,12 @@ function RoomShell({ connection, requestedMode, onModeChange, onBack, interactiv
         if (cancelled) return;
         setScenarioCatalog(catalog.scenarios);
         setModelOptions(catalog.models);
+      })
+      .catch(() => undefined);
+    void fetch("/api/health")
+      .then(async (response) => response.ok ? response.json() as Promise<{ storage?: { status?: string; issues?: unknown[] } }> : undefined)
+      .then((health) => {
+        if (!cancelled && health?.storage?.status === "degraded") setStorageIssueCount(health.storage.issues?.length ?? 1);
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
@@ -125,6 +133,7 @@ function RoomShell({ connection, requestedMode, onModeChange, onBack, interactiv
   // The reveal screen owns the stage when a game ends; the viewer can always
   // drop into the transcript below, or bring the reveal back from the strip.
   const [endgameDismissed, setEndgameDismissed] = useState(false);
+  const [sidePanel, setSidePanel] = useState<"none" | "people" | "causality">("none");
   const roomIdRef = useRef(room?.id);
   if (roomIdRef.current !== room?.id) {
     roomIdRef.current = room?.id;
@@ -134,7 +143,7 @@ function RoomShell({ connection, requestedMode, onModeChange, onBack, interactiv
   if (!room) {
     return (
       <div className="flex h-dvh flex-col items-center justify-center gap-3 bg-background">
-        <span className="size-7 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-foreground" />
+        <Spinner className="size-7" />
         <p className={cn("text-sm text-muted-foreground", link === "reconnecting" && "animate-pulse")}>
           {connection.error ?? "连接房间中…"}
         </p>
@@ -160,10 +169,10 @@ function RoomShell({ connection, requestedMode, onModeChange, onBack, interactiv
         </Tooltip>
         <ScenarioIcon id={room.scenarioId} className="size-4 text-muted-foreground" />
         <div className="min-w-0">
-          <h1 className="truncate text-[15px] font-semibold leading-none tracking-tight">{room.title}</h1>
-          <p className="mt-1.5 truncate text-[11px] leading-none text-muted-foreground">{world.summary}</p>
+          <h1 className="truncate text-base font-semibold leading-none tracking-tight">{room.title}</h1>
+          <p className="mt-1.5 truncate text-xs leading-none text-muted-foreground">{world.summary}</p>
         </div>
-        {scenario && scenario.name !== room.title ? <Badge variant="outline" className="hidden shrink-0 text-[10px] sm:inline-flex">{scenario.name}</Badge> : null}
+        {scenario && scenario.name !== room.title ? <Badge variant="outline" className="hidden shrink-0 text-xs sm:inline-flex">{scenario.name}</Badge> : null}
 
         <div className="ml-auto flex items-center gap-1.5">
           {interactive ? (
@@ -252,48 +261,48 @@ function RoomShell({ connection, requestedMode, onModeChange, onBack, interactiv
 
       {/* Terminal rooms (finished/archived) have no live stream by design — a reconnect banner there is noise. */}
       {link !== "closed" && world.status !== "finished" && (link === "reconnecting" || connection.error) ? (
-        <p className="flex shrink-0 items-center justify-center gap-1.5 bg-warn/10 px-4 py-1 text-center text-[11px] text-warn">
+        <p className="flex shrink-0 items-center justify-center gap-1.5 bg-warn/10 px-4 py-1 text-center text-xs text-warn">
           <TriangleAlert className="size-3 shrink-0" aria-hidden />
           {connection.error ?? "连接中断，正在重连——快照会自愈。"}
         </p>
       ) : null}
 
-      <main className="flex min-h-0 flex-1 flex-col md:hidden">
-        <div className="min-h-0 flex-1">
-          <CenterColumn
-            room={room}
-            stream={stream}
-            viewer={viewer}
-            finished={Boolean(finished)}
-            endgameDismissed={endgameDismissed}
-            onDismissEndgame={() => setEndgameDismissed(true)}
-            onRevealEndgame={() => setEndgameDismissed(false)}
-            avatarSeedFor={avatarSeedFor}
-          />
-        </div>
-        <MobileRails
-          room={room}
-          viewerMode={viewer?.mode}
-          viewerPrivileged={viewer?.privileged === true}
-          onToggleAgentPause={viewer?.privileged ? connection.toggleAgentPause : undefined}
-          models={modelOptions}
-          onSwitchModel={viewer?.privileged ? connection.switchAgentModel : undefined}
-        />
-      </main>
+      {room.status === "paused" && room.error ? (
+        <Alert variant="destructive" className="shrink-0 rounded-none border-x-0 border-t-0 px-4 py-2">
+          <TriangleAlert aria-hidden />
+          <AlertTitle>房间已暂停</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+            <span>{room.error}</span>
+            {canControl ? (
+              <Button variant="outline" size="sm" className="h-7" onClick={() => void connection.resume()}>
+                <Play aria-hidden />
+                修复或切换模型后恢复
+              </Button>
+            ) : null}
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
-      <main className="hidden min-h-0 flex-1 md:block">
-        <ResizablePanelGroup orientation="horizontal" id="society-room-v2">
-          <ResizablePanel defaultSize="16" minSize="11" maxSize="24">
-            <ParticipantsRail
-              room={room}
-              viewerPrivileged={viewer?.privileged === true}
-              onToggleAgentPause={viewer?.privileged ? connection.toggleAgentPause : undefined}
-              models={modelOptions}
-              onSwitchModel={viewer?.privileged ? connection.switchAgentModel : undefined}
-            />
-          </ResizablePanel>
-          <ResizableHandle withHandle />
-          <ResizablePanel defaultSize="58" minSize="40">
+      {storageIssueCount > 0 ? (
+        <Alert className="shrink-0 rounded-none border-x-0 border-t-0 px-4 py-2">
+          <TriangleAlert aria-hidden />
+          <AlertTitle>本机存储处于降级状态</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+            <span>检测到 {storageIssueCount} 个存储问题；当前对局可以继续，但归档前请检查服务终端告警。</span>
+            <Button variant="outline" size="sm" className="h-7" onClick={() => { location.hash = "#/settings"; }}>
+              返回设置
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      <ParticipantDock
+        room={room}
+        onOpenPeople={() => setSidePanel("people")}
+        onOpenCausality={() => setSidePanel("causality")}
+      />
+      <main className="min-h-0 flex-1 overflow-hidden">
+        <div className="mx-auto h-full w-full max-w-5xl border-x border-border/60 bg-background">
             <CenterColumn
               room={room}
               stream={stream}
@@ -305,13 +314,18 @@ function RoomShell({ connection, requestedMode, onModeChange, onBack, interactiv
               onSubmitAction={room.player ? connection.submitAction : undefined}
               avatarSeedFor={avatarSeedFor}
             />
-          </ResizablePanel>
-          <ResizableHandle withHandle />
-          <ResizablePanel defaultSize="26" minSize="18" maxSize="36">
-            <CausalityPanel room={room} viewerMode={viewer?.mode} viewerPrivileged={viewer?.privileged === true} />
-          </ResizablePanel>
-        </ResizablePanelGroup>
+        </div>
       </main>
+      <RoomSidePanels
+        panel={sidePanel}
+        onClose={() => setSidePanel("none")}
+        room={room}
+        viewerMode={viewer?.mode}
+        viewerPrivileged={viewer?.privileged === true}
+        onToggleAgentPause={viewer?.privileged ? connection.toggleAgentPause : undefined}
+        models={modelOptions}
+        onSwitchModel={viewer?.privileged ? connection.switchAgentModel : undefined}
+      />
     </div>
   );
 }
@@ -355,13 +369,15 @@ export function CenterColumn({ room, stream, viewer, finished, endgameDismissed,
       />
       <StorylineBar world={room.world} />
       <div className="relative min-h-0 flex-1">
-        <LiveStream
-          room={room}
-          turns={stream.turns}
-          viewer={viewer}
-          onSubmitAction={onSubmitAction}
-          avatarSeedFor={avatarSeedFor}
-        />
+        <Suspense fallback={<StageFallback />}>
+          <LazyLiveStream
+            room={room}
+            turns={stream.turns}
+            viewer={viewer}
+            onSubmitAction={onSubmitAction}
+            avatarSeedFor={avatarSeedFor}
+          />
+        </Suspense>
         {!finished ? (
           <>
             <NightRevealBanner world={room.world} />
@@ -369,18 +385,44 @@ export function CenterColumn({ room, stream, viewer, finished, endgameDismissed,
           </>
         ) : null}
         {finished && !endgameDismissed ? (
-          <EndgameOverlay room={room} avatarSeedFor={avatarSeedFor} onDismiss={onDismissEndgame} />
+          <Suspense fallback={<div className="absolute inset-0 z-20 grid place-items-center bg-background/92"><Spinner className="size-7" /></div>}>
+            <LazyEndgameOverlay room={room} avatarSeedFor={avatarSeedFor} onDismiss={onDismissEndgame} />
+          </Suspense>
         ) : null}
       </div>
     </div>
   );
 }
 
-/**
- * Narrow screens cannot fit the three-column shell: the rails collapse into
- * two toggleable drawers under the stream instead of being unreachable.
- */
-function MobileRails({ room, viewerMode, viewerPrivileged, onToggleAgentPause, models, onSwitchModel }: {
+function ParticipantDock({ room, onOpenPeople, onOpenCausality }: {
+  room: SocietyRoomSnapshot;
+  onOpenPeople: () => void;
+  onOpenCausality: () => void;
+}): ReactNode {
+  const seeds = new Map(room.participants.map((participant) => [participant.profile.id, participant.profile.characterId]));
+  return (
+    <div className="rule-b flex h-16 shrink-0 items-center gap-2 overflow-hidden px-3 sm:px-4">
+      <Button variant="ghost" size="sm" className="shrink-0" onClick={onOpenPeople}><Users />参与者</Button>
+      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-2" aria-label="参与者状态">
+        {room.world.agents.map((agent) => {
+          const active = agent.status === "speaking" || agent.status === "thinking" || agent.status === "acting";
+          return (
+            <Button key={agent.id} variant="ghost" size="sm" onClick={onOpenPeople} className={cn("h-11 shrink-0 gap-2 rounded-full border border-transparent px-2", active && "border-live/40 bg-live/10")}>
+              <span className={cn("relative", active && "on-air")}><AgentAvatar name={agent.displayName} seed={seeds.get(agent.id)} size="sm" /></span>
+              <span className="hidden max-w-24 truncate text-xs sm:block">{agent.displayName}</span>
+              {!agent.alive ? <Badge variant="outline">离场</Badge> : null}
+            </Button>
+          );
+        })}
+      </div>
+      <Button variant="ghost" size="sm" className="shrink-0" onClick={onOpenCausality}><Waypoints />因果</Button>
+    </div>
+  );
+}
+
+function RoomSidePanels({ panel, onClose, room, viewerMode, viewerPrivileged, onToggleAgentPause, models, onSwitchModel }: {
+  panel: "none" | "people" | "causality";
+  onClose: () => void;
   room: SocietyRoomSnapshot;
   viewerMode: string | undefined;
   viewerPrivileged: boolean;
@@ -388,46 +430,46 @@ function MobileRails({ room, viewerMode, viewerPrivileged, onToggleAgentPause, m
   models: ModelOption[];
   onSwitchModel?: RoomConnection["switchAgentModel"];
 }): ReactNode {
-  const [tab, setTab] = useState<"none" | "people" | "causality">("none");
+  const compact = useMediaQuery("(max-width: 767px)");
+  const title = panel === "people" ? "参与者" : "因果账本";
+  const description = panel === "people" ? "查看状态、模型与可见的心智信息。" : "按来源追踪承诺、指控、怀疑与结算。";
+  const content = panel === "people" ? (
+    <ParticipantsRail room={room} viewerPrivileged={viewerPrivileged} onToggleAgentPause={onToggleAgentPause} models={models} onSwitchModel={onSwitchModel} />
+  ) : panel === "causality" ? (
+    <Suspense fallback={<StageFallback />}><LazyCausalityPanel room={room} viewerMode={viewerMode} viewerPrivileged={viewerPrivileged} /></Suspense>
+  ) : null;
+  if (compact) {
+    return (
+      <Drawer open={panel !== "none"} onOpenChange={(open) => { if (!open) onClose(); }}>
+        <DrawerContent className="h-[78dvh]">
+          <DrawerHeader className="border-b border-border text-left"><DrawerTitle>{title}</DrawerTitle><DrawerDescription>{description}</DrawerDescription></DrawerHeader>
+          <div className="min-h-0 flex-1">{content}</div>
+        </DrawerContent>
+      </Drawer>
+    );
+  }
   return (
-    <div className="shrink-0 border-t border-border bg-background">
-      <div className="grid grid-cols-2 gap-1.5 p-1.5">
-        <Button
-          variant="outline"
-          size="sm"
-          aria-pressed={tab === "people"}
-          className={cn("rounded-lg", tab === "people" && "border-foreground/40 bg-muted text-foreground")}
-          onClick={() => setTab((current) => (current === "people" ? "none" : "people"))}
-        >
-          参与者
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          aria-pressed={tab === "causality"}
-          className={cn("rounded-lg", tab === "causality" && "border-foreground/40 bg-muted text-foreground")}
-          onClick={() => setTab((current) => (current === "causality" ? "none" : "causality"))}
-        >
-          因果
-        </Button>
-      </div>
-      {tab !== "none" ? (
-        <div className="h-[46vh] border-t border-border">
-          {tab === "people" ? (
-            <ParticipantsRail
-              room={room}
-              viewerPrivileged={viewerPrivileged}
-              onToggleAgentPause={onToggleAgentPause}
-              models={models}
-              onSwitchModel={onSwitchModel}
-            />
-          ) : (
-            <CausalityPanel room={room} viewerMode={viewerMode} viewerPrivileged={viewerPrivileged} />
-          )}
-        </div>
-      ) : null}
-    </div>
+    <Sheet open={panel !== "none"} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <SheetContent side={panel === "people" ? "left" : "right"} className="flex w-[26rem] flex-col gap-0 p-0 sm:max-w-[26rem]">
+        <SheetHeader className="border-b border-border p-4 text-left"><SheetTitle>{title}</SheetTitle><SheetDescription>{description}</SheetDescription></SheetHeader>
+        <div className="min-h-0 flex-1">{content}</div>
+      </SheetContent>
+    </Sheet>
   );
+}
+
+function StageFallback(): ReactNode { return <div className="flex h-full min-h-40 items-center justify-center"><Spinner /></div>; }
+
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const update = (): void => setMatches(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, [query]);
+  return matches;
 }
 
 /** The boundary actually granted by the server — never the one requested. */
@@ -440,7 +482,7 @@ function ViewerBadge({ mode, privileged }: { mode: string; privileged: boolean }
   };
   const entry = labels[mode] ?? labels.public;
   return (
-    <Badge variant={privileged ? "secondary" : "outline"} className="gap-1 text-[10px]">
+    <Badge variant={privileged ? "secondary" : "outline"} className="gap-1 text-xs">
       {entry.icon}{entry.label}
     </Badge>
   );
@@ -459,7 +501,7 @@ function PhaseStrip({ room, sealed, tension, finished, onRevealEndgame }: {
   const progress = world.totalTurns > 0 ? Math.min(100, Math.round((world.turn / world.totalTurns) * 100)) : 0;
   return (
     <div className="rule-b flex h-10 shrink-0 items-center gap-2.5 overflow-hidden bg-transparent px-5">
-      <span className="nums flex shrink-0 items-center gap-2 font-mono text-[11px] tracking-wide text-muted-foreground">
+      <span className="nums flex shrink-0 items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground">
         R{world.turn}
         <span className="relative inline-block h-1.5 w-16 overflow-hidden rounded-full bg-foreground/10 align-middle">
           <span className="absolute inset-y-0 left-0 rounded-full bg-foreground/60 transition-[width] duration-700 ease-out" style={{ width: `${progress}%` }} />
@@ -471,26 +513,26 @@ function PhaseStrip({ room, sealed, tension, finished, onRevealEndgame }: {
         <Button
           variant="outline"
           size="sm"
-          className="h-6 shrink-0 gap-1.5 rounded-full border-warn/30 bg-warn/10 px-2 text-[10px] font-normal text-warn hover:bg-warn/20 hover:text-warn"
+          className="h-6 shrink-0 gap-1.5 rounded-full border-warn/30 bg-warn/10 px-2 text-xs font-normal text-warn hover:bg-warn/20 hover:text-warn"
           onClick={onRevealEndgame}
         >
           <Flag className="size-3" aria-hidden />
           终局揭晓
         </Button>
       ) : room.status === "paused" ? (
-        <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
+        <Badge variant="outline" className="shrink-0 gap-1.5 rounded-full border-warn/30 bg-warn/10 px-2 py-0.5 text-xs font-normal text-warn">
           <Pause className="size-3" aria-hidden />
           对局已暂停
-        </span>
+        </Badge>
       ) : sealed ? (
-        <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-secret/30 bg-secret/10 px-2 py-0.5 text-[10px] text-secret"><Lock className="size-3" aria-hidden />密封阶段 · 发言流暂停公开</span>
+        <Badge variant="outline" className="shrink-0 gap-1.5 rounded-full border-secret/30 bg-secret/10 px-2 py-0.5 text-xs font-normal text-secret"><Lock className="size-3" aria-hidden />密封阶段 · 发言流暂停公开</Badge>
       ) : speakingAgents.length ? (
-        <span className="flex min-w-0 items-center gap-1.5 text-[10px] text-live">
+        <span className="flex min-w-0 items-center gap-1.5 text-xs text-live">
           <span className="eq shrink-0" aria-hidden><span /><span /><span /></span>
           <span className="truncate">{speakingAgents.map((agent) => agent.displayName).join("、")} 直播中</span>
         </span>
       ) : (
-        <span className="shrink-0 text-[10px] text-muted-foreground">等待下一个行动者…</span>
+        <span className="shrink-0 text-xs text-muted-foreground">等待下一个行动者…</span>
       )}
       {!finished ? <span className="ml-auto flex shrink-0 items-center"><TensionMeter tension={tension} /></span> : null}
     </div>

@@ -6,14 +6,15 @@
  * cognition (reflection, theory-of-mind, planning) runs as internal passes of
  * this same identity, recorded through private tools into its own mind — there
  * are no specialist sub-agents, no `Agent.asTool()` delegation, and no second
- * "discussion" identity. Only successful SDK tool calls can change the shared
- * world, and every world write goes through the tools owned by this agent.
+ * "discussion" identity. Binding actions change the shared world only through
+ * SDK tools; observable speech is the SDK run's final response and is committed
+ * exactly once by the room after the run completes.
  */
 import {
   Agent,
   MemorySession,
   OpenAIProvider,
-  Runner,
+  type Runner,
   type AgentInputItem,
   retryPolicies,
   isOpenAIChatCompletionsRawModelStreamEvent,
@@ -26,7 +27,6 @@ import {
   type Tool
 } from "@openai/agents";
 import { randomUUID } from "node:crypto";
-import OpenAI from "openai";
 import type {
   AgentMindState,
   AgentMoodState,
@@ -35,13 +35,15 @@ import type {
   AgentRuntimeEvent,
   AgentTurnResult,
   DecisionBias,
+  PreparedAgentMessage,
   SocialEvent,
   SocietyAgentContext,
   SocietyAgentRuntime
 } from "./contracts";
 import type { ResolvedModelConfig } from "./models";
 import { reasoningFallbackFetch, type ReasoningFallbackNotice } from "./models/reasoning-fallback";
-import { sanitizeFunctionCallArgs } from "./wire-json";
+import { createSocietyProvider, createSocietyRunner } from "./agent-runner";
+import { isSocietyToolFailure } from "./tools";
 import { clampUnit, decayMood, describeEmotions, describeNeeds, describeSocialEmotions, initialMood, refreshMood } from "./affect";
 import { appraiseEvents } from "./appraisal";
 import { SessionContextManager, contextLimitForModel, estimateTokens, type ContextSummaryArtifact } from "./context-manager";
@@ -112,29 +114,17 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       emit: options.emit
     };
     this.seedDirectedRelationships();
-    const provider = options.provider ?? new OpenAIProvider({
+    const provider = options.provider ?? createSocietyProvider({
+      apiKey: options.apiKey ?? apiKeyFromEnv(),
+      baseURL: options.baseURL ?? baseUrlFromEnv(),
       useResponses: false,
-      openAIClient: new OpenAI({
-        apiKey: options.apiKey ?? apiKeyFromEnv(),
-        baseURL: options.baseURL ?? baseUrlFromEnv(),
-        fetch: reasoningFallbackFetch({
-          onNotice: (notice) => options.emit(reasoningNoticeEvent(options.roomId, options.profile.id, notice))
-        })
+      timeoutMs: numberFromEnv("SOCIETY_AGENT_TURN_TIMEOUT_MS", 300_000) + 60_000,
+      fetch: reasoningFallbackFetch({
+        onNotice: (notice) => options.emit(reasoningNoticeEvent(options.roomId, options.profile.id, notice))
       })
     });
     this.contextManager = this.buildContextManager(provider, options.resolvedConfig);
-    // Within a single run the Runner replays its own just-produced tool calls
-    // on the next model call. A model that emits malformed JSON arguments
-    // (unescaped quotes — a known GLM quirk) would poison every subsequent
-    // call with an endpoint-side 400. Sanitize at the one choke point every
-    // model call passes through.
-    const budgetedInput = this.contextManager.sessionInputCallback;
-    this.runner = new Runner({
-      modelProvider: provider,
-      tracingDisabled: true,
-      sessionInputCallback: async (historyItems, newItems) =>
-        sanitizeFunctionCallArgs(await budgetedInput(historyItems, newItems))
-    });
+    this.runner = this.buildRunner(provider);
     // Per-agent runtime backpressure: the resolved tuning's
     // maxTurns / requestTimeoutMs / retry fields take precedence over the
     // process-wide env defaults, so a seat can carry its own limits.
@@ -215,11 +205,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
     const nextModel = next.resolvedConfig.modelId;
     this.profile.model = nextModel;
     this.contextManager = this.buildContextManager(next.provider, next.resolvedConfig);
-    this.runner = new Runner({
-      modelProvider: next.provider,
-      tracingDisabled: true,
-      sessionInputCallback: this.contextManager.sessionInputCallback
-    });
+    this.runner = this.buildRunner(next.provider);
     this.agent = this.buildAgent(next.resolvedConfig);
     this.context.emit({
       type: "agent.model.switched",
@@ -230,6 +216,17 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       at: new Date().toISOString()
     });
     return { previousModel, model: nextModel };
+  }
+
+  /**
+   * One protocol-level Runner construction path for initial binding and live
+   * model switches. The SDK may replay a malformed function-call item on its
+   * next step; wire-valid history is required by every OpenAI-compatible
+   * endpoint, independent of model or provider identity.
+   */
+  private buildRunner(provider: OpenAIProvider): Runner {
+    const budgetedInput = this.contextManager.sessionInputCallback;
+    return createSocietyRunner(provider, budgetedInput);
   }
 
   /**
@@ -303,6 +300,16 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
   }
 
   async runTurn(input: string, options: { signal: AbortSignal; turn: number; maxTurns?: number; mode?: "discussion" | "full" }): Promise<AgentTurnResult> {
+    // Every attempt gets isolated delivery/tool state. Its session is also a
+    // transaction: only a fully completed, still-active run replaces the
+    // canonical history. A timed-out provider may settle later, but it cannot
+    // poison a recovered turn's session or tool budget.
+    const turnContext: SocietyAgentContext = {
+      ...this.context,
+      preparedMessage: undefined,
+      toolFailureState: {},
+      turnScope: { signal: options.signal }
+    };
     this.mind.mood = decayMood(this.mind.mood, options.turn);
     const observation = this.context.world.observe(this.profile.id);
     const socialContext = formatSocialContext(this.mind, this.context.world, this.profile.id);
@@ -320,6 +327,10 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       content: [{ type: "input_text", text: fixedInput }]
     } as unknown as AgentInputItem;
     const history = await this.session.getItems();
+    const attemptSession = new MemorySession({
+      sessionId: `${await this.session.getSessionId()}:turn:${randomUUID()}`,
+      initialItems: history
+    });
     // Preflight exists purely for compaction planning: no retrieval runs here —
     // the model's own session history IS its memory.
     this.contextManager.preflight(history, estimateTokens([fixedItem]));
@@ -345,23 +356,38 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
       const combinedSignal = AbortSignal.any([options.signal, timeoutSignal]);
       result = await this.runner.run(this.agent, runInput, {
-        context: this.context,
-        session: this.session,
+        context: turnContext,
+        session: attemptSession,
         stream: true,
         maxTurns: options.maxTurns ?? this.maxTurns,
         signal: combinedSignal
       });
-      for await (const event of result) this.consumeEvent(event, toolCalls);
+      for await (const event of result) {
+        if (!options.signal.aborted) this.consumeEvent(event, toolCalls);
+      }
+      if (options.signal.aborted) throw new Error("TURN_SCOPE_CLOSED: The provider settled after this Agent Turn ended.");
       this.flushDelta();
       this.flushReasoning(true);
       await result.completed;
+      if (options.signal.aborted) throw new Error("TURN_SCOPE_CLOSED: The provider settled after this Agent Turn ended.");
+      const completedHistory = await attemptSession.getItems();
+      await this.session.clearSession();
+      await this.session.addItems(completedHistory);
     } catch (error) {
-      this.flushDelta();
-      this.flushReasoning(true);
-      emitStatus(this.context, "error");
+      turnContext.preparedMessage = undefined;
+      if (!options.signal.aborted) {
+        this.flushDelta();
+        this.flushReasoning(true);
+        emitStatus(this.context, "error");
+      }
       throw error;
     }
     const finalOutput = String(result.finalOutput ?? "").trim();
+    const prepared = turnContext.preparedMessage as PreparedAgentMessage | undefined;
+    const preparedMessage = prepared
+      ? structuredClone(prepared)
+      : undefined;
+    turnContext.preparedMessage = undefined;
     this.mind.mood.energy = clampUnit(this.mind.mood.energy - 0.03);
     emitStatus(this.context, "idle");
     this.context.emit({
@@ -379,6 +405,7 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
       actorId: this.profile.id,
       turn: options.turn,
       finalOutput,
+      ...(preparedMessage && finalOutput ? { finalMessage: { ...preparedMessage, text: finalOutput } } : {}),
       toolCalls,
       usage: usageFromResult(result)
     };
@@ -523,14 +550,17 @@ export class AutonomousSocietyAgent implements SocietyAgentRuntime {
         this.flushReasoning(true);
         const name = toolName(item) ?? "unknown_tool";
         toolCalls.push(name);
-        emitStatus(this.context, name === "communicate" ? "speaking" : "acting");
+        emitStatus(this.context, name === "prepare_message" ? "speaking" : "acting");
         emitTool(this.context, toolCallId(item), name, "started", toolInput(item));
       } else if (event.name === "tool_output") {
-        // The SDK converts a thrown tool execute into a normal output whose
-        // text matches its fixed error template — surface that as a failed
-        // phase instead of pretending every tool call succeeded.
+        // Tool failure is a machine-readable Society result. The old SDK
+        // English prefix remains only as backward compatibility for callers
+        // that explicitly disable the shared error function.
+        const rawOutput = toolOutputValue(item);
         const output = toolOutput(item) ?? "";
-        const failed = output.startsWith("An error occurred while running the tool.");
+        const failed = isSocietyToolFailure(rawOutput)
+          || output.startsWith("An error occurred while running the tool.")
+          || output.startsWith("An error occurred while parsing tool arguments.");
         emitTool(
           this.context,
           toolCallId(item),
@@ -835,15 +865,16 @@ export function protocolInstructions(): string[] {
     "Maintain your own goals, beliefs about others, emotion, and relationships across turns.",
     "Promises are social commitments people make with words and actions. Judge each one by the person, your relationship, and the evidence you have — never by a blanket rule.",
     "You may cooperate, persuade, withhold information, challenge, repair trust, or deceive when your character and the situation justify it.",
-    "When you choose to keep a structured record of a strategic deception, use log_deception_plan before acting and cite the returned deceptionId on the exact communicate socialAct that executes it; logging is optional.",
-    "When a message clearly asserts, questions, accuses, offers, accepts, rejects, promises or apologizes, declare that meaning in communicate.socialActs. The original message remains authoritative.",
+    "When you choose to keep a structured record of a strategic deception, use log_deception_plan before acting and cite the returned deceptionId on the relevant prepare_message socialAct; logging is optional.",
+    "When your final message clearly asserts, questions, accuses, offers, accepts, rejects, promises or apologizes, declare that meaning in prepare_message.socialActs. The final natural-language response remains authoritative.",
     "In hidden-identity worlds, keep your role inferences as probabilities with update_role_hypotheses; renormalize when new evidence arrives.",
     "Your cognition is your own. In high-stakes moments you may call read_the_room or update_inner_state to record what you see and feel; these notes stay private.",
     "Use at most one cognition pass per turn unless the situation is urgent; prefer acting once you have enough clarity.",
-    "All speech and all actions that change the world must use tools. Never claim an action happened unless its tool completed.",
-    "You may stay silent when there is nothing worth saying: silence, watching and withholding are real choices, not failures.",
+    "Actions that change binding world state must use tools. Never claim an action happened unless its tool completed.",
+    "To speak, first call prepare_message for delivery metadata, then make your final response the exact words others should hear. Do not put the speech text inside the tool call.",
+    "You may stay silent when there is nothing worth saying: do not call prepare_message, and keep the final response to a private one-line acknowledgment such as SILENT; the room will not publish it.",
     "Do not reveal private role information unless doing so serves your strategy. Do not output hidden chain-of-thought.",
-    "After the required tool succeeds, stop with a brief confirmation."
+    "After required tools succeed, either prepare one final message and speak once, or finish silently."
   ];
 }
 
@@ -1095,9 +1126,13 @@ function toolCallId(item: Record<string, unknown>): string | undefined {
 }
 
 function toolOutput(item: Record<string, unknown>): string | undefined {
-  const raw = item.rawItem as Record<string, unknown> | undefined;
-  const output = item.output ?? raw?.output;
+  const output = toolOutputValue(item);
   return output === undefined ? undefined : safeToolSummary(output);
+}
+
+function toolOutputValue(item: Record<string, unknown>): unknown {
+  const raw = item.rawItem as Record<string, unknown> | undefined;
+  return item.output ?? raw?.output;
 }
 
 function toolInput(item: Record<string, unknown>): string | undefined {

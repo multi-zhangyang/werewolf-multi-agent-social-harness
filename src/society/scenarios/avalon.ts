@@ -1,5 +1,6 @@
 import { randomInt, randomUUID } from "node:crypto";
-import { tool, type Tool } from "@openai/agents";
+import type { Tool } from "@openai/agents";
+import { societyTool as tool } from "../tools";
 import { z } from "zod";
 import type {
   ActivationCompletion,
@@ -359,7 +360,7 @@ export class AvalonWorld extends SocialWorldBase {
     if (this.ladyHolderId === actorId) {
       const inspect = tool({
         name: "inspect_with_lady",
-        description: "Privately inspect one eligible player who has never held the Lady token. The token passes to the inspected player. You may decline; silence is a legitimate choice.",
+        description: "Privately inspect one eligible player who has never held the Lady token. The token passes to the inspected player.",
         parameters: z.object({
           targetId: z.string().min(1),
           reason: z.string().min(1).max(2_000)
@@ -372,6 +373,20 @@ export class AvalonWorld extends SocialWorldBase {
         }
       });
       tools.push(inspect as Tool<SocietyAgentContext>);
+      const decline = tool({
+        name: "decline_lady",
+        description: "Explicitly decline to use the Lady of the Lake this quest. The token stays with you.",
+        parameters: z.object({
+          reason: z.string().min(1).max(2_000).optional()
+        }).strict(),
+        execute: async (input, runContext) => {
+          const context = scopedContext(runContext, actorId);
+          const commit = await this.performAction(actorId, "decline_lady", input);
+          emitAction(context, commit.action, commit.detail);
+          return commit.result;
+        }
+      });
+      tools.push(decline as Tool<SocietyAgentContext>);
     }
     if (role === "assassin") {
       const assassinate = tool({
@@ -710,7 +725,7 @@ export class AvalonWorld extends SocialWorldBase {
         label: "湖中仙女",
         actorIds: [this.ladyHolderId],
         mode: "sequential",
-        instructionFor: () => `You hold the Lady of the Lake. You may call inspect_with_lady once against a player who has never held the token. Ineligible holder history: [${[...this.ladyHolderHistory].join(", ")}]. The loyalty verdict is revealed only to you, and the token passes to the inspected player. Declining is legitimate: simply do not call the tool.`
+        instructionFor: () => `You hold the Lady of the Lake. Call exactly one tool: inspect_with_lady against a player who has never held the token, or decline_lady to pass this phase without inspecting. Ineligible holder history: [${[...this.ladyHolderHistory].join(", ")}]. An inspection verdict is revealed only to you, and the token passes to the inspected player.`
       };
     }
     const assassin = [...this.roles].find(([, candidate]) => candidate === "assassin")?.[0];
@@ -979,11 +994,11 @@ export class AvalonWorld extends SocialWorldBase {
   }
 
   private availableActions(actorId: string, role: Role): string[] {
-    if (this.phase === "discussion") return ["communicate", "recall_memory", "reflect_on_social_situation", "read_the_room", "log_deception_plan", "update_inner_state"];
-    if (this.phase === "proposal") return this.leaderId === actorId ? ["propose_team", "communicate"] : [];
+    if (this.phase === "discussion") return ["final_response", "recall_memory", "reflect_on_social_situation", "read_the_room", "log_deception_plan", "update_inner_state"];
+    if (this.phase === "proposal") return this.leaderId === actorId ? ["propose_team", "final_response"] : [];
     if (this.phase === "vote") return this.teamVotes.has(actorId) ? [] : ["cast_team_vote"];
     if (this.phase === "quest") return this.proposedTeam.includes(actorId) && !this.questVotes.has(actorId) ? ["cast_quest_vote"] : [];
-    if (this.phase === "lady") return this.ladyHolderId === actorId ? ["inspect_with_lady"] : [];
+    if (this.phase === "lady") return this.ladyHolderId === actorId ? ["inspect_with_lady", "decline_lady"] : [];
     if (this.phase === "assassination") return role === "assassin" ? ["assassinate_merlin"] : [];
     return [];
   }

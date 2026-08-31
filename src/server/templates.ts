@@ -5,12 +5,13 @@
  * Templates hold configuration only: no secrets, no runtime state.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { requireGlobalOperator } from "./auth";
 import type { ServerContext } from "./context";
 import path from "node:path";
 import express from "express";
 import { z } from "zod";
+import { atomicWriteJson, quarantineCorruptFile, type StorageHealth } from "./storage";
 
 const MAX_TEMPLATES = 50;
 
@@ -45,25 +46,29 @@ export interface RosterTemplate extends RosterTemplateInput {
 export class RosterTemplateStore {
   private templates: RosterTemplate[] = [];
 
-  constructor(private readonly file = defaultTemplatePath()) {
+  constructor(private readonly file = defaultTemplatePath(), private readonly storage?: StorageHealth) {
     this.load();
   }
 
   private load(): void {
     if (!existsSync(this.file)) return;
     try {
-      const parsed = JSON.parse(readFileSync(this.file, "utf8")) as { templates?: RosterTemplate[] };
+      const parsed = JSON.parse(readFileSync(this.file, "utf8")) as { schemaVersion?: 1; templates?: RosterTemplate[] };
       this.templates = Array.isArray(parsed?.templates) ? parsed.templates.slice(0, MAX_TEMPLATES) : [];
     } catch {
+      const quarantined = quarantineCorruptFile(this.file);
+      this.storage?.record({ store: "templates", code: quarantined ? "CORRUPT_FILE_QUARANTINED" : "READ_FAILED" });
       this.templates = [];
     }
   }
 
   private persist(): void {
-    const tmp = `${this.file}.tmp`;
-    mkdirSync(path.dirname(this.file), { recursive: true });
-    writeFileSync(tmp, JSON.stringify({ templates: this.templates }, null, 2), { mode: 0o600 });
-    renameSync(tmp, this.file);
+    try {
+      atomicWriteJson(this.file, { schemaVersion: 1, templates: this.templates });
+    } catch (error) {
+      this.storage?.record({ store: "templates", code: "WRITE_FAILED" });
+      throw error;
+    }
   }
 
   list(): RosterTemplate[] {

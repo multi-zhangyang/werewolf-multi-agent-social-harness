@@ -18,6 +18,7 @@ import {
   Waypoints
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -52,7 +53,7 @@ const AVATAR_GRADIENTS: ReadonlyArray<readonly [string, string]> = [
   ["#334155", "#64748b"]
 ] as const;
 
-const AVATAR_LETTER_SIZE = { sm: "text-[10px]", md: "text-[13px]", lg: "text-base", xl: "text-[22px]" } as const;
+const AVATAR_LETTER_SIZE = { sm: "text-xs", md: "text-sm", lg: "text-base", xl: "text-2xl" } as const;
 
 export function AgentAvatar({ name, seed, size = "md" }: { name: string; seed?: string; size?: "sm" | "md" | "lg" | "xl" }): ReactNode {
   const sizes = { sm: "size-6", md: "size-8", lg: "size-10", xl: "size-14" };
@@ -157,7 +158,7 @@ export function ChannelBadge({ channel }: { channel: SocialChannel }): ReactNode
   };
   const entry = config[channel];
   return (
-    <Badge variant="outline" className={cn("h-4.5 rounded-full border px-1.5 text-[10px] font-medium", entry.className)}>
+    <Badge variant="outline" className={cn("h-4.5 rounded-full border px-1.5 text-xs font-medium", entry.className)}>
       {entry.label}
     </Badge>
   );
@@ -177,7 +178,7 @@ export function ModelLabel({ model, className }: { model: string; className?: st
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span data-model className={cn("truncate font-mono text-[10px] text-muted-foreground/80", className)}>{label}</span>
+        <span data-model className={cn("truncate font-mono text-xs text-muted-foreground/80", className)}>{label}</span>
       </TooltipTrigger>
       <TooltipContent>{model}</TooltipContent>
     </Tooltip>
@@ -258,6 +259,7 @@ export function formatTime(value: string, options?: { seconds?: boolean }): stri
 export function eventLabel(name: string): string {
   const labels: Record<string, string> = {
     communicate: "公开发言",
+    prepare_message: "准备最终发言",
     message: "发言",
     remember_experience: "铭刻记忆",
     recall_memory: "翻阅记忆",
@@ -311,7 +313,7 @@ export function SparkleDivider({ children }: { children?: ReactNode }): ReactNod
   return (
     <div className="flex items-center gap-2 text-muted-foreground/80">
       <Sparkles className="size-3" />
-      <span className="text-[10px] font-medium uppercase tracking-[0.18em]">{children}</span>
+      <span className="text-xs font-medium uppercase tracking-[0.18em]">{children}</span>
     </div>
   );
 }
@@ -326,7 +328,7 @@ export function provenanceBadge(source: string): ReactNode {
     "system-inference": "系统推断",
     presentation: "展示标签"
   };
-  return <Badge variant="outline" className="h-4.5 shrink-0 rounded-full border-border/70 bg-card/60 px-1.5 text-[10px] font-normal text-muted-foreground">{labels[source] ?? source}</Badge>;
+  return <Badge variant="outline" className="h-4.5 shrink-0 rounded-full border-border/70 bg-card/60 px-1.5 text-xs font-normal text-muted-foreground">{labels[source] ?? source}</Badge>;
 }
 
 const PROVENANCE_META: Record<string, { label: string; className: string }> = {
@@ -359,13 +361,13 @@ export function CollapsibleSection({ title, icon, count, defaultOpen = false, cl
     <Collapsible defaultOpen={defaultOpen} className={cn("group/section", className)}>
       <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-md py-1 text-left transition-colors hover:text-foreground">
         {icon ? <span className="shrink-0 text-muted-foreground [&_svg]:size-3.5">{icon}</span> : null}
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{title}</span>
-        {count !== undefined && count > 0 ? <span className="nums shrink-0 font-mono text-[10px] text-muted-foreground/50">{count}</span> : null}
+        <span className="font-mono text-xs uppercase tracking-[0.18em] text-muted-foreground">{title}</span>
+        {count !== undefined && count > 0 ? <span className="nums shrink-0 font-mono text-xs text-muted-foreground/50">{count}</span> : null}
         <span className="h-px flex-1 bg-border/60" aria-hidden />
         <ChevronDown className="size-3 shrink-0 text-muted-foreground/60 transition-transform duration-200 group-data-[state=open]/section:rotate-180" aria-hidden />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className={cn("space-y-2 pt-2.5 pb-1", contentClassName)}>{children}</div>
+        <div className={cn("flex flex-col gap-2 pt-2.5 pb-1", contentClassName)}>{children}</div>
       </CollapsibleContent>
     </Collapsible>
   );
@@ -384,15 +386,15 @@ export function MiniChip({ tone = "neutral", className, title, children }: {
     secret: "border-secret/40 bg-secret/10 text-secret",
     live: "border-live/40 bg-live/10 text-live"
   };
-  return <span title={title} className={cn("inline-flex items-center gap-1 rounded border px-1 text-[9px] leading-4", tones[tone], className)}>{children}</span>;
+  return <Badge variant="outline" title={title} className={cn("h-auto gap-1 rounded px-1 py-0 text-xs font-normal leading-4", tones[tone], className)}>{children}</Badge>;
 }
 
 /** The one inline error surface: destructive hairline box with an alert glyph. */
 export function ErrorNote({ children }: { children: ReactNode }): ReactNode {
   return (
-    <p className="flex items-start gap-1.5 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-[13px] leading-5 text-destructive">
+    <Alert variant="destructive" className="py-2 text-sm leading-5">
       <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-      <span className="min-w-0">{children}</span>
-    </p>
+      <AlertDescription className="min-w-0">{children}</AlertDescription>
+    </Alert>
   );
 }

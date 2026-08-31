@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { tool, type Tool } from "@openai/agents";
+import type { Tool } from "@openai/agents";
+import { societyTool as tool } from "../tools";
 import { z } from "zod";
 import type {
   ActivationCompletion,
@@ -122,7 +123,7 @@ export class BeautyContestWorld extends SocialWorldBase {
       })),
       recentMessages: this.visibleMessages(actorId).slice(-30),
       availableActions: this.phase === "discussion"
-        ? ["communicate", "reflect_on_social_situation", "read_the_room", "update_inner_state"]
+        ? ["final_response", "reflect_on_social_situation", "read_the_room", "update_inner_state"]
         : ["choose_number"]
     };
   }

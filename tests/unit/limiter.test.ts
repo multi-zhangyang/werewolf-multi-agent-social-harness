@@ -6,6 +6,7 @@
 import { strict as assert } from "node:assert";
 import { it } from "vitest";
 import { ActivationLimiter, limiterFromEnv } from "../../src/society/activation-limiter";
+import { LiveConnectionRegistry } from "../../src/server/context";
 
 function check(name: string, fn: () => void | Promise<void>): void {
   it(name, fn);
@@ -75,6 +76,45 @@ check("abort while waiting rejects with ACTIVATION_ABORTED and frees the queue s
   holder();
   const release = await successor;
   release();
+});
+
+check("graceful shutdown waiting resolves on lease release and is bounded on a stuck lease", async () => {
+  const limiter = new ActivationLimiter(1);
+  const release = await limiter.acquire();
+  const draining = limiter.waitForIdle(500);
+  await tick();
+  release();
+  assert.equal(await draining, true, "lease release wakes the shutdown waiter");
+
+  const stuck = await limiter.acquire();
+  assert.equal(await limiter.waitForIdle(25), false, "shutdown grace expires instead of hanging forever");
+  stuck();
+  assert.equal(await limiter.waitForIdle(25), true, "pool is idle after the final release");
+});
+
+check("graceful shutdown closes every tracked SSE stream and forgets released streams", () => {
+  const registry = new LiveConnectionRegistry();
+  const chunks: string[] = [];
+  let firstEnded = false;
+  let releasedEnded = false;
+  registry.track({
+    get writableEnded() { return firstEnded; },
+    write(chunk) { chunks.push(chunk); },
+    end() { firstEnded = true; }
+  });
+  const release = registry.track({
+    get writableEnded() { return releasedEnded; },
+    write() { throw new Error("released SSE must not be touched"); },
+    end() { releasedEnded = true; }
+  });
+  release();
+
+  assert.equal(registry.count(), 1);
+  registry.closeAll();
+  assert.equal(firstEnded, true, "tracked SSE is ended before provider draining");
+  assert.equal(releasedEnded, false, "already released SSE is ignored");
+  assert.deepEqual(chunks, [": society shutdown\n\n"]);
+  assert.equal(registry.count(), 0);
 });
 
 check("limiterFromEnv parses the size with sane bounds and a default", () => {

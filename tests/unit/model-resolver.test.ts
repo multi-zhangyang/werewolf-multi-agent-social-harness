@@ -9,10 +9,14 @@ import {
   ModelRegistry,
   defaultCapabilities,
   defaultContextPolicy,
+  effectiveProtocolCheck,
+  isModelProtocolReady,
   negotiateTuning,
+  protocolCheckFingerprint,
   resolveAgentModelConfig,
   type ModelProfile
 } from "../../src/society/models";
+import { validateProtocolTranscript, type ProtocolTranscriptEvent } from "../../src/server/probe";
 
 function check(name: string, fn: () => void): void {
   it(name, fn);
@@ -167,5 +171,49 @@ check("missing model profile raises a clear error instead of guessing", () => {
       }
     }),
     /MODEL_PROFILE_MISSING/
+  );
+});
+
+check("protocol admission becomes stale when provider, model or reasoning settings change", () => {
+  const provider = registry.providerProfile("p1")!;
+  const profile = mkProfile("mp-protocol", "model-protocol", 256_000, { reasoningEffort: "high" });
+  profile.protocolCheck = {
+    status: "passed",
+    fingerprint: protocolCheckFingerprint(profile, provider),
+    checkedAt: new Date().toISOString(),
+    latencyMs: 12
+  };
+  assert.equal(effectiveProtocolCheck(profile, provider).status, "passed");
+  assert.equal(isModelProtocolReady(profile, provider), true);
+  assert.equal(effectiveProtocolCheck({ ...profile, modelId: "model-changed" }, provider).status, "stale");
+  assert.equal(effectiveProtocolCheck({ ...profile, defaults: { reasoningEffort: "low" } }, provider).status, "stale");
+  assert.equal(effectiveProtocolCheck(profile, { ...provider, apiMode: "responses" }).status, "stale");
+  assert.equal(effectiveProtocolCheck({ ...profile, protocolCheck: undefined }, provider).status, "unknown");
+});
+
+check("protocol transcript distinguishes correct order, early speech, unknown tools and wrong receipts", () => {
+  const expected = { toolName: "confirm_protocol_receipt", challenge: "challenge-1", receipt: "receipt-1" };
+  const correct: ProtocolTranscriptEvent[] = [
+    { type: "tool-call", toolName: expected.toolName, callId: "call-1", arguments: JSON.stringify({ challenge: expected.challenge }) },
+    { type: "tool-result", callId: "call-1" },
+    { type: "final", text: `PROTOCOL_OK:${expected.receipt}` }
+  ];
+  assert.deepEqual(validateProtocolTranscript(correct, expected), { ok: true });
+  assert.equal(validateProtocolTranscript([
+    { type: "final", text: "too early" },
+    ...correct
+  ], expected).ok, false);
+  const unknown = structuredClone(correct);
+  (unknown[0] as Extract<ProtocolTranscriptEvent, { type: "tool-call" }>).toolName = "made_up_tool";
+  assert.deepEqual(validateProtocolTranscript(unknown, expected), {
+    ok: false,
+    errorCode: "PROTOCOL_UNKNOWN_TOOL",
+    message: "模型调用了未知工具 made_up_tool。"
+  });
+  const wrongReceipt = structuredClone(correct);
+  (wrongReceipt[2] as Extract<ProtocolTranscriptEvent, { type: "final" }>).text = "PROTOCOL_OK:receipt-wrong";
+  assert.equal(
+    validateProtocolTranscript(wrongReceipt, expected).ok,
+    false
   );
 });

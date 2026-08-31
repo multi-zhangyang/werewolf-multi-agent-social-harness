@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { tool, type Tool } from "@openai/agents";
+import type { Tool } from "@openai/agents";
+import { societyTool as tool } from "../tools";
 import { z } from "zod";
 import type {
   ActivationCompletion,
@@ -95,17 +96,31 @@ export class PublicGoodsWorld extends SocialWorldBase {
     const ownContribution = this.contributions.get(actorId);
     const openCommitments = this.openCommitmentsFor(actorId);
     const causality = this.socialCausalityFor(actorId);
+    const counterpart = this.strategicCounterpartFor(actorId);
+    const latestRound = this.history.at(-1);
+    const latestDirectedMessage = this.latestDirectedMessageFor(actorId);
+    const ownMarginalReturn = this.multiplier / this.profiles.size;
+    const marginalIncentive = `Immediate round score = ${this.endowment} - your contribution + (${this.multiplier} * total pool / ${this.profiles.size}). The pool share alone is not your round score. Each extra point you contribute changes your own immediate score by ${formatNumber(ownMarginalReturn - 1)} and the group's combined immediate score by +${formatNumber(this.multiplier - 1)}. Social consequences, commitments, reputation, and future rounds may still change your strategic choice.`;
     return {
       roomId: this.roomId,
       scenarioId: this.scenario.id,
       turn: this.round,
       phase: this.phase,
       situation: this.phase === "discussion"
-        ? `Each participant has ${this.endowment} points. Contributions are multiplied by ${this.multiplier} and split equally. Only typed promises that another participant explicitly accepts are settlement-eligible.`
-        : "All contributions are private until everyone commits. You keep what you do not contribute and receive an equal share of the multiplied pool.",
+        ? `Each participant has ${this.endowment} points. Contributions are multiplied by ${this.multiplier} and split equally. Only typed promises that another participant explicitly accepts are settlement-eligible. ${marginalIncentive}`
+        : `All contributions are private until everyone commits. You keep what you do not contribute and receive an equal share of the multiplied pool. ${marginalIncentive}`,
       privateContext: [
         `Your cumulative score: ${formatNumber(this.scores.get(actorId) ?? 0)}.`,
         `Your committed contribution: ${ownContribution ?? "not committed"}.`,
+        counterpart
+          ? `Current strategic counterpart: ${counterpart.displayName} (${counterpart.id}). Direct a concrete request, offer, test, challenge, or reply at this person instead of addressing a faceless group.`
+          : "Current strategic counterpart: none.",
+        latestDirectedMessage
+          ? `Latest message requiring your attention: [${latestDirectedMessage.id}] from ${latestDirectedMessage.senderName}: ${latestDirectedMessage.text}`
+          : "Latest message requiring your attention: none.",
+        latestRound
+          ? `Last public outcome: ${Object.entries(latestRound.contributions).map(([id, amount]) => `${this.profiles.get(id)?.displayName ?? id}=${amount}`).join(", ")}. Use this evidence when judging reliability.`
+          : "Last public outcome: none yet. Use this round to test one participant's reliability.",
         openCommitments.length
           ? `Open commitments:\n${openCommitments.map((commitment) => `- [${commitment.commitmentId}] ${commitment.proposition} (${commitment.state})`).join("\n")}`
           : "Open commitments: none.",
@@ -122,16 +137,64 @@ export class PublicGoodsWorld extends SocialWorldBase {
       })),
       recentMessages: this.visibleMessages(actorId).slice(-30),
       availableActions: this.phase === "discussion"
-        ? ["communicate", "make_commitment", "accept_commitment", "recall_memory", "reflect_on_social_situation", "read_the_room", "update_inner_state"]
+        ? ["final_response", "prepare_message", "calculate_public_goods_outcome", "make_commitment", "accept_commitment", "recall_memory", "reflect_on_social_situation", "read_the_room", "update_inner_state"]
         : ["contribute_to_pool"]
     };
   }
 
   toolsFor(actorId: string): Tool<SocietyAgentContext>[] {
     this.requireProfile(actorId);
+    const calculateOutcome = tool({
+      name: "calculate_public_goods_outcome",
+      description: [
+        "Calculate the authoritative pool, equal pool share, and final round score for every participant under one proposed contribution profile. This tool is read-only and has no social or binding effect.",
+        `Before you state any numerical pool, share, payoff, or payoff difference during discussion, call this tool with exactly one entry for every actor: ${[...this.profiles.keys()].join(", ")}. Copy its results instead of doing arithmetic in prose.`,
+        `Final round score is ${this.endowment} - own contribution + pool share; pool share alone is not final score.`
+      ].join("\n"),
+      parameters: z.object({
+        contributions: z.array(z.object({
+          actorId: z.string().min(1).max(200),
+          amount: z.number().int().min(0).max(this.endowment)
+        }).strict()).length(this.profiles.size)
+      }).strict(),
+      execute: async ({ contributions }) => {
+        const amounts = new Map<string, number>();
+        for (const entry of contributions) {
+          if (!this.profiles.has(entry.actorId)) {
+            throw new Error(`CALCULATION_ACTOR_INVALID: '${entry.actorId}' is not a participant.`);
+          }
+          if (amounts.has(entry.actorId)) {
+            throw new Error(`CALCULATION_ACTOR_DUPLICATED: '${entry.actorId}' appears more than once.`);
+          }
+          amounts.set(entry.actorId, entry.amount);
+        }
+        const missing = [...this.profiles.keys()].filter((id) => !amounts.has(id));
+        if (missing.length) throw new Error(`CALCULATION_ACTOR_MISSING: ${missing.join(", ")}.`);
+        const pool = [...amounts.values()].reduce((sum, amount) => sum + amount, 0);
+        const multipliedPool = pool * this.multiplier;
+        const share = multipliedPool / this.profiles.size;
+        return {
+          pool,
+          multipliedPool: roundNumber(multipliedPool),
+          equalPoolShare: roundNumber(share),
+          finalRoundScores: Object.fromEntries([...this.profiles.values()].map((profile) => [
+            profile.id,
+            {
+              displayName: profile.displayName,
+              contribution: amounts.get(profile.id) ?? 0,
+              finalRoundScore: roundNumber(this.endowment - (amounts.get(profile.id) ?? 0) + share)
+            }
+          ]))
+        };
+      }
+    });
     const makeCommitment = tool({
       name: "make_commitment",
-      description: `Propose a public, typed promise to contribute at least an integer from 0 to ${this.endowment} this round. It is settled only if another participant explicitly accepts it.`,
+      description: [
+        `Create a public, binding-capable promise to contribute at least an integer from 0 to ${this.endowment} this round and return its commitmentId.`,
+        "Use only during discussion and only when you genuinely want other participants to rely on the promise. It becomes settlement-eligible after another participant calls accept_commitment.",
+        "This call does not send speech: prepare delivery metadata with prepare_message, then put the proposal in your final response and cite the amount. At most two proposals are allowed per round; do not retry after a successful result because a retry creates another promise."
+      ].join("\n"),
       parameters: z.object({
         amount: z.number().int().min(0).max(this.endowment),
         proposition: z.string().min(1).max(400),
@@ -146,7 +209,10 @@ export class PublicGoodsWorld extends SocialWorldBase {
     });
     const acceptCommitment = tool({
       name: "accept_commitment",
-      description: "Explicitly accept one public contribution promise. One real acceptance makes that promisor's amount eligible for deterministic settlement.",
+      description: [
+        "Accept one visible public contribution promise by commitmentId, making the promisor's promised minimum eligible for deterministic settlement.",
+        "Use only during discussion. You cannot accept your own promise or accept the same promise twice. On success, do not retry. Communicate why you accept or what reciprocity you expect if that matters strategically."
+      ].join("\n"),
       parameters: z.object({ commitmentId: z.string().min(1).max(200) }).strict(),
       execute: async (input, runContext) => {
         const context = scopedContext(runContext, actorId);
@@ -157,7 +223,11 @@ export class PublicGoodsWorld extends SocialWorldBase {
     });
     const contribute = tool({
       name: "contribute_to_pool",
-      description: `Commit an integer from 0 to ${this.endowment}. Contributions remain sealed until the barrier and cannot be changed.`,
+      description: [
+        `Complete your required binding action by sealing one integer contribution from 0 to ${this.endowment}.`,
+        "Use exactly once during the contribution phase. The amount is private until every participant commits and cannot be changed after success; do not retry a successful call.",
+        "referencedCommitmentIds may contain only visible current-round commitment IDs that actually informed the decision. Speech, reasoning, or cognition tools do not complete this action."
+      ].join("\n"),
       parameters: z.object({
         amount: z.number().int().min(0).max(this.endowment),
         reason: z.string().min(1).max(2_000),
@@ -170,7 +240,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
         return commit.result;
       }
     });
-    return [makeCommitment, acceptCommitment, contribute] as Tool<SocietyAgentContext>[];
+    return [calculateOutcome, makeCommitment, acceptCommitment, contribute] as Tool<SocietyAgentContext>[];
   }
 
   domainActionsFor(actorId: string): PlayerActionSpec[] {
@@ -327,6 +397,12 @@ export class PublicGoodsWorld extends SocialWorldBase {
   activation(): WorldActivation | null {
     if (this.status !== "running" || this.round > this.totalRounds) return null;
     if (this.phase === "discussion") {
+      if (this.acceptedCommitmentChainIsClosed()) {
+        this.phase = "contribution";
+        this.emitUpdate();
+      }
+    }
+    if (this.phase === "discussion") {
       const actors = this.discussion.nextWave();
       if (actors.length) {
         const wave = this.discussion.waveNumber;
@@ -334,10 +410,11 @@ export class PublicGoodsWorld extends SocialWorldBase {
           id: `pg:${this.round}:discussion:${wave}`,
           label: wave === 1 ? `第 ${this.round} 轮协商` : `第 ${this.round} 轮协商 · 回应 ${wave - 1}`,
           actorIds: actors,
-          mode: "sequential",
-          instructionFor: () => wave === 1
-            ? "Address the group. You may propose a contribution norm, use make_commitment for a typed promise, accept a visible promise, question prior behavior, or stay strategically vague."
-            : "Respond to the actual promises, questions, objections or private messages directed at you. Do not repeat your opening statement."
+          // Opening positions do not depend on one another and can run
+          // concurrently; later waves retain turn-taking so replies can cite
+          // messages and commitments created earlier in that wave.
+          mode: wave === 1 ? "parallel" : "sequential",
+          instructionFor: (actorId) => this.discussionInstructionFor(actorId, wave)
         };
       }
       this.phase = "contribution";
@@ -348,7 +425,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
       label: `第 ${this.round} 轮投入`,
       actorIds: [...this.profiles.keys()],
       mode: "parallel",
-      instructionFor: () => "Review the public norm, accepted commitments, private beliefs and actor models. Call contribute_to_pool exactly once. Chat cannot replace the typed action."
+      instructionFor: (actorId) => this.contributionInstructionFor(actorId)
     };
   }
 
@@ -362,7 +439,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
       return {
         completed: false,
         missingActorIds,
-        retryInstruction: "Your contribution is missing. Call contribute_to_pool now with an integer from 0 to 10."
+        retryInstruction: `Required action still missing. Do not prepare a message or call cognition tools. Call contribute_to_pool now exactly once with amount as an integer from 0 to ${this.endowment}, a short reason, and only visible current-round IDs in referencedCommitmentIds (or []). Finish silently after the tool succeeds.`
       };
     }
     this.resolveRound();
@@ -422,7 +499,7 @@ export class PublicGoodsWorld extends SocialWorldBase {
     for (const id of this.profiles.keys()) {
       const payoff = this.endowment - (this.contributions.get(id) ?? 0) + share;
       returns[id] = roundNumber(payoff);
-      this.scores.set(id, (this.scores.get(id) ?? 0) + payoff);
+      this.scores.set(id, roundNumber((this.scores.get(id) ?? 0) + payoff));
       this.lastExperiences.set(
         id,
         `Round ${this.round}: the group contributed ${pool}. You contributed ${this.contributions.get(id)} and received ${formatNumber(payoff)} points. Contributions by participant: ${Object.entries(contributions).map(([actorId, amount]) => `${actorId}=${amount}`).join(", ")}.`
@@ -550,9 +627,90 @@ export class PublicGoodsWorld extends SocialWorldBase {
       actorIds: [...this.profiles.keys()],
       displayName: (id) => this.profiles.get(id)?.displayName ?? id,
       ...discussionPersonality(this.profiles, (id) => this.moodSignalFor(id)),
-      maxWaves: 4,
+      maxWaves: 3,
       waveSizeCap: Math.min(4, this.profiles.size)
     });
+  }
+
+  private discussionInstructionFor(actorId: string, wave: number): string {
+    if (this.acceptedCommitmentChainIsClosed()) {
+      return "Every participant already has an accepted typed contribution promise for this round. The negotiation has reached a structured outcome. Do not call prepare_message or any other tool; end this turn silently so the sealed contribution phase can begin.";
+    }
+    const counterpart = this.strategicCounterpartFor(actorId);
+    const directed = this.latestDirectedMessageFor(actorId);
+    const target = counterpart
+      ? `${counterpart.displayName} (actor ID ${counterpart.id})`
+      : "one concrete participant";
+    const response = directed
+      ? `Reply directly to ${directed.senderName}'s visible message [${directed.id}] by passing replyTo: "${directed.id}" to prepare_message, then make the final response your actual reply. Take a position on what they actually said.`
+      : `Direct this move at ${target}; address them by name and include their actor ID in socialActs.targetActorIds.`;
+    const historyEvidence = this.history.length
+      ? "Use the last revealed contribution as evidence: reward reliability, pressure a low contributor, or explain why the evidence does not persuade you."
+      : "There is no contribution history yet, so use a concrete amount or reciprocal condition to test this counterpart's reliability.";
+    const opening = wave === 1
+      ? "Make one concise strategic move: a request, offer, question, challenge, acceptance, or deliberate refusal. Do not deliver a generic speech to everyone."
+      : "Advance or change the negotiation. Do not repeat your opening, merely summarize the room, or answer a different participant.";
+    return [
+      opening,
+      response,
+      historyEvidence,
+      `Before stating any numerical pool, share, final score, or payoff difference, call calculate_public_goods_outcome with one contribution for each of the ${this.profiles.size} actors and quote its result. Do not calculate payoffs in prose.`,
+      "If you promise an amount, call make_commitment, then call prepare_message and state it in the final response. If you rely on another participant's visible promise, call accept_commitment with its exact ID. A spoken promise alone is non-binding.",
+      "For any utterance, call prepare_message first and encode its real social act, then make the final response the exact speech. Strategic silence means skipping prepare_message."
+    ].join("\n");
+  }
+
+  private contributionInstructionFor(actorId: string): string {
+    const accepted = this.openCommitmentsFor(actorId).filter((entry) => entry.state === "accepted");
+    const acceptedIds = accepted.map((entry) => entry.commitmentId);
+    const ownAccepted = accepted.filter((entry) => entry.promisorActorId === actorId);
+    return [
+      "Now make the private, binding decision. Weigh the public negotiation, last-round behavior, your private beliefs, relationships, goals, and incentives.",
+      ownAccepted.length
+        ? `You made accepted promise(s): ${ownAccepted.map((entry) => `[${entry.commitmentId}] at least ${entry.promisedAction.actionType === "contribute-at-least" ? entry.promisedAction.amount : "the recorded amount"}`).join(", ")}. You may honor or violate them, but the world will settle the result publicly.`
+        : "You have no accepted promise of your own this round.",
+      `Visible accepted commitment IDs: ${acceptedIds.length ? acceptedIds.join(", ") : "none"}. Cite only IDs that actually influenced the decision; otherwise pass [].`,
+      `Call contribute_to_pool exactly once with an integer from 0 to ${this.endowment}. Do not call prepare_message or cognition tools first. Finish silently after the tool succeeds.`
+    ].join("\n");
+  }
+
+  private acceptedCommitmentChainIsClosed(): boolean {
+    return [...this.profiles.keys()].every((actorId) => this.commitments.some((entry) =>
+      entry.round === this.round
+      && entry.promisorActorId === actorId
+      && entry.state === "accepted"
+      && entry.promisedAction.actionType === "contribute-at-least"
+    ));
+  }
+
+  private strategicCounterpartFor(actorId: string): AgentProfile | undefined {
+    const others = [...this.profiles.values()].filter((profile) => profile.id !== actorId);
+    const latestRound = this.history.at(-1);
+    if (latestRound) {
+      return others.sort((left, right) =>
+        (latestRound.contributions[left.id] ?? 0) - (latestRound.contributions[right.id] ?? 0)
+        || left.id.localeCompare(right.id)
+      )[0];
+    }
+    const actorIds = [...this.profiles.keys()];
+    const ownIndex = actorIds.indexOf(actorId);
+    const counterpartId = actorIds[(ownIndex + 1) % actorIds.length];
+    return counterpartId && counterpartId !== actorId ? this.profiles.get(counterpartId) : others[0];
+  }
+
+  private latestDirectedMessageFor(actorId: string): SocialMessage | undefined {
+    const self = this.requireProfile(actorId);
+    const messages = this.visibleMessages(actorId).filter((message) =>
+      message.turn === this.round && message.senderId !== actorId
+    );
+    const ownMessageIds = new Set(this.visibleMessages(actorId)
+      .filter((message) => message.senderId === actorId)
+      .map((message) => message.id));
+    return messages.findLast((message) =>
+      (message.recipientIds?.includes(actorId) ?? false)
+      || (message.replyTo ? ownMessageIds.has(message.replyTo) : false)
+      || message.text.includes(self.displayName)
+    );
   }
 
   private summary(): string {

@@ -6,21 +6,36 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { apiFetch } from "@/lib/api";
-import { Copy, Download, Loader2, Pencil, Plus, Search, Trash2, Upload, Users } from "lucide-react";
+import { ArrowLeft, Copy, Download, Pencil, Plus, Search, Trash2, Upload, Users } from "lucide-react";
 import type { CharacterDefinition, DecisionBias } from "@/society/contracts";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Field as FormField, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Slider } from "@/components/ui/slider";
+import { Spinner } from "@/components/ui/spinner";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
+import { Toggle } from "@/components/ui/toggle";
 import { cn } from "@/lib/utils";
 import { AgentAvatar, ErrorNote } from "./shared";
 
 interface CharactersDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onBack: () => void;
   onChanged: () => void;
 }
 
@@ -93,13 +108,14 @@ function draftFrom(character: CharacterDefinition): Draft {
   };
 }
 
-export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDialogProps): ReactNode {
+export function CharactersPage({ onBack, onChanged }: CharactersDialogProps): ReactNode {
   const [builtins, setBuiltins] = useState<CharacterDefinition[]>([]);
   const [customs, setCustoms] = useState<CharacterDefinition[]>([]);
   const [editing, setEditing] = useState<CharacterDefinition | "new" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [query, setQuery] = useState("");
+  const [pendingRemoval, setPendingRemoval] = useState<CharacterDefinition>();
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const reload = async (): Promise<void> => {
@@ -111,12 +127,11 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
   };
 
   useEffect(() => {
-    if (!open) return;
     setEditing(null);
     setError(undefined);
     setQuery("");
     void reload().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-  }, [open]);
+  }, []);
 
   const matches = (character: CharacterDefinition): boolean => {
     const needle = query.trim().toLowerCase();
@@ -180,20 +195,28 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl rounded-xl border-border bg-card p-0 text-foreground shadow-2xl">
+    <>
+      <div className="min-h-screen bg-background text-foreground">
+        <header className="rule-b sticky top-0 z-20 bg-background/90 backdrop-blur">
+          <div className="mx-auto flex h-16 w-full max-w-7xl items-center gap-3 px-4 sm:px-6">
+            <Button variant="ghost" size="icon-sm" aria-label="返回大厅" onClick={onBack}><ArrowLeft /></Button>
+            <Breadcrumb><BreadcrumbList><BreadcrumbItem><BreadcrumbLink asChild><Button variant="link" className="h-auto p-0" onClick={onBack}>大厅</Button></BreadcrumbLink></BreadcrumbItem><BreadcrumbSeparator /><BreadcrumbItem><BreadcrumbPage>人物库</BreadcrumbPage></BreadcrumbItem></BreadcrumbList></Breadcrumb>
+          </div>
+        </header>
+        <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6">
+          <div className="overflow-hidden rounded-xl border border-border bg-card">
         {editing === null ? (
           <>
-            <DialogHeader className="gap-3 border-b border-border/60 p-6 pb-4 text-left">
+            <div className="flex flex-col gap-3 border-b border-border/60 p-6 pb-4 text-left">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <DialogTitle className="text-lg tracking-tight">人物库</DialogTitle>
-                  <DialogDescription className="mt-1 leading-5 text-muted-foreground">
+                  <h1 className="text-2xl font-semibold tracking-tight">人物库</h1>
+                  <p className="mt-1 text-sm leading-6 text-muted-foreground">
                     人物是持续的人格——与游戏角色、模型和控制方式分开。自建人物保存在本机，可导入导出；内置人物可以复制后修改。
-                  </DialogDescription>
+                  </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <input
+                  <Input
                     ref={fileRef}
                     type="file"
                     accept="application/json"
@@ -230,18 +253,18 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
                   aria-label="搜索人物"
                 />
               </div>
-            </DialogHeader>
+            </div>
             <ScrollArea className="scroll-fade-y-lg max-h-[62vh]">
-              <div className="space-y-5 p-6 pb-12">
+              <div className="flex flex-col gap-5 p-6 pb-12">
                 {error ? <ErrorNote>{error}</ErrorNote> : null}
                 <section>
                   <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">内置人物 · {shownBuiltins.length}</p>
                   {shownBuiltins.length ? (
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {shownBuiltins.map((character) => (
-                        <CharacterRow key={character.id} character={character} onCopy={() => void mutate(`/api/characters/${character.id}/copy`, "POST")} busy={busy} />
-                      ))}
-                    </div>
+                    <CharacterCollection
+                      characters={shownBuiltins}
+                      busy={busy}
+                      onCopy={(character) => void mutate(`/api/characters/${character.id}/copy`, "POST")}
+                    />
                   ) : (
                     <p className="rounded-lg border border-dashed border-border/70 px-3 py-4 text-center text-xs text-muted-foreground">没有匹配「{query.trim()}」的内置人物。</p>
                   )}
@@ -256,18 +279,13 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
                       </EmptyHeader>
                     </Empty>
                   ) : (
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {shownCustoms.map((character) => (
-                        <CharacterRow
-                          key={character.id}
-                          character={character}
-                          onCopy={() => void mutate(`/api/characters/${character.id}/copy`, "POST")}
-                          onEdit={() => setEditing(character)}
-                          onDelete={() => { if (window.confirm(`删除「${character.displayName}」？历史对局不受影响。`)) void removeCharacter(character.id); }}
-                          busy={busy}
-                        />
-                      ))}
-                    </div>
+                    <CharacterCollection
+                      characters={shownCustoms}
+                      busy={busy}
+                      onCopy={(character) => void mutate(`/api/characters/${character.id}/copy`, "POST")}
+                      onEdit={setEditing}
+                      onDelete={setPendingRemoval}
+                    />
                   )}
                 </section>
               </div>
@@ -284,8 +302,104 @@ export function CharactersDialog({ open, onOpenChange, onChanged }: CharactersDi
             }}
           />
         )}
-      </DialogContent>
-    </Dialog>
+          </div>
+        </main>
+      </div>
+      <AlertDialog open={pendingRemoval !== undefined} onOpenChange={(next) => { if (!next) setPendingRemoval(undefined); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除「{pendingRemoval?.displayName}」？</AlertDialogTitle>
+            <AlertDialogDescription>人物会从本机人物库移除，历史对局不受影响。</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                if (!pendingRemoval) return;
+                void removeCharacter(pendingRemoval.id).finally(() => setPendingRemoval(undefined));
+              }}
+            >
+              删除人物
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
+function CharacterCollection({ characters, busy, onCopy, onEdit, onDelete }: {
+  characters: CharacterDefinition[];
+  busy: boolean;
+  onCopy: (character: CharacterDefinition) => void;
+  onEdit?: (character: CharacterDefinition) => void;
+  onDelete?: (character: CharacterDefinition) => void;
+}): ReactNode {
+  return (
+    <>
+      <div className="grid grid-cols-1 gap-2 md:hidden">
+        {characters.map((character) => (
+          <CharacterRow
+            key={character.id}
+            character={character}
+            onCopy={() => onCopy(character)}
+            onEdit={onEdit ? () => onEdit(character) : undefined}
+            onDelete={onDelete ? () => onDelete(character) : undefined}
+            busy={busy}
+          />
+        ))}
+      </div>
+      <div className="hidden overflow-hidden rounded-lg border border-border md:block">
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="w-52">人物</TableHead>
+              <TableHead>人物底色</TableHead>
+              <TableHead className="w-24">类型</TableHead>
+              <TableHead className="w-32 text-right">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {characters.map((character) => (
+              <TableRow key={character.id}>
+                <TableCell>
+                  <div className="flex items-center gap-2.5">
+                    <AgentAvatar name={character.displayName} seed={character.id} size="sm" />
+                    <span className="truncate font-medium">{character.displayName}</span>
+                  </div>
+                </TableCell>
+                <TableCell className="max-w-0 whitespace-normal text-muted-foreground">
+                  <p className="line-clamp-2 leading-5" title={character.persona}>{character.persona}</p>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className="rounded-full font-normal">
+                    {character.builtIn ? "内置" : "自建"}
+                  </Badge>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center justify-end gap-1">
+                    <Button variant="ghost" size="icon-xs" type="button" aria-label={`复制 ${character.displayName}`} title="复制后修改" disabled={busy} onClick={() => onCopy(character)}>
+                      <Copy className="size-3.5" />
+                    </Button>
+                    {onEdit ? (
+                      <Button variant="ghost" size="icon-xs" type="button" aria-label={`编辑 ${character.displayName}`} onClick={() => onEdit(character)}>
+                        <Pencil className="size-3.5" />
+                      </Button>
+                    ) : null}
+                    {onDelete ? (
+                      <Button variant="ghost" size="icon-xs" type="button" aria-label={`删除 ${character.displayName}`} className="hover:text-destructive" disabled={busy} onClick={() => onDelete(character)}>
+                        <Trash2 className="size-3.5" />
+                      </Button>
+                    ) : null}
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </>
   );
 }
 
@@ -307,18 +421,18 @@ function CharacterRow({ character, onCopy, onEdit, onDelete, busy }: {
         <p className="mt-1 line-clamp-2 min-h-10 text-xs leading-5 text-muted-foreground" title={character.persona}>{character.persona}</p>
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        <button type="button" aria-label={`复制 ${character.displayName}`} title="复制后修改" className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-border hover:text-foreground" disabled={busy} onClick={onCopy}>
+        <Button variant="ghost" size="icon-xs" type="button" aria-label={`复制 ${character.displayName}`} title="复制后修改" className="text-muted-foreground hover:bg-border hover:text-foreground" disabled={busy} onClick={onCopy}>
           <Copy className="size-3.5" />
-        </button>
+        </Button>
         {onEdit ? (
-          <button type="button" aria-label={`编辑 ${character.displayName}`} className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-border hover:text-foreground" onClick={onEdit}>
+          <Button variant="ghost" size="icon-xs" type="button" aria-label={`编辑 ${character.displayName}`} className="text-muted-foreground hover:bg-border hover:text-foreground" onClick={onEdit}>
             <Pencil className="size-3.5" />
-          </button>
+          </Button>
         ) : null}
         {onDelete ? (
-          <button type="button" aria-label={`删除 ${character.displayName}`} className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-border hover:text-destructive" disabled={busy} onClick={onDelete}>
+          <Button variant="ghost" size="icon-xs" type="button" aria-label={`删除 ${character.displayName}`} className="text-muted-foreground hover:bg-border hover:text-destructive" disabled={busy} onClick={onDelete}>
             <Trash2 className="size-3.5" />
-          </button>
+          </Button>
         ) : null}
       </div>
     </div>
@@ -360,7 +474,7 @@ function EditorForm({ editing, builtins, onClose, onSaved }: {
         temperament: draft.temperament,
         ...(split(draft.anchors).length ? { autobiographicalAnchors: split(draft.anchors) } : {})
       };
-      const response = await fetch(isNew ? "/api/characters" : `/api/characters/${editing.id}`, {
+      const response = await apiFetch(isNew ? "/api/characters" : `/api/characters/${editing.id}`, {
         method: isNew ? "POST" : "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
@@ -377,43 +491,49 @@ function EditorForm({ editing, builtins, onClose, onSaved }: {
 
   return (
     <>
-      <DialogHeader className="border-b border-border/60 p-6 text-left">
-        <DialogTitle className="text-lg tracking-tight">{isNew ? "新建人物" : `编辑 ${editing.displayName}`}</DialogTitle>
-        <DialogDescription className="mt-1 leading-5 text-muted-foreground">
+      <div className="border-b border-border/60 p-6 text-left">
+        <h2 className="text-lg font-semibold tracking-tight">{isNew ? "新建人物" : `编辑 ${editing.displayName}`}</h2>
+        <p className="mt-1 text-sm leading-6 text-muted-foreground">
           人物是谁、为什么这样反应、怎么说话——与角色、模型无关。留空的自传记忆不会生成。
-        </DialogDescription>
-      </DialogHeader>
+        </p>
+      </div>
       <ScrollArea className="scroll-fade-y max-h-[68vh]">
-        <div className="space-y-5 p-6 pb-10">
+        <div className="flex flex-col gap-5 p-6 pb-10">
           {error ? <ErrorNote>{error}</ErrorNote> : null}
-          <section className="space-y-3">
-            <Field label="名字">
+          <FieldGroup className="gap-3">
+            <FormField>
+              <FieldLabel>名字</FieldLabel>
               <Input value={draft.displayName} onChange={(event) => set({ displayName: event.target.value })} placeholder="如 林默" maxLength={24} />
-              {nameTaken ? <p className="text-[11px] text-warn">与内置人物重名，历史与关系会按名字混在一起——换一个。</p> : null}
-            </Field>
-            <Field label="人物底色（一段话）">
-              <textarea
+              {nameTaken ? <p className="text-xs text-warn">与内置人物重名，历史与关系会按名字混在一起——换一个。</p> : null}
+            </FormField>
+            <FormField>
+              <FieldLabel>人物底色（一段话）</FieldLabel>
+              <Textarea
                 value={draft.persona}
                 onChange={(event) => set({ persona: event.target.value })}
                 placeholder="谨慎、克制，先建立可靠预测再下注……"
                 rows={2}
                 maxLength={400}
-                className="w-full rounded-lg border border-input bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/50 focus:border-ring focus:outline-none"
+                className="bg-card"
               />
-            </Field>
-            <Field label="性格标签（顿号分隔）">
+            </FormField>
+            <FormField>
+              <FieldLabel>性格标签（顿号分隔）</FieldLabel>
               <Input value={draft.traits} onChange={(event) => set({ traits: event.target.value })} placeholder="谨慎、耐心、重视一致性" />
-            </Field>
-            <Field label="价值观（顿号分隔）">
+            </FormField>
+            <FormField>
+              <FieldLabel>价值观（顿号分隔）</FieldLabel>
               <Input value={draft.values} onChange={(event) => set({ values: event.target.value })} placeholder="互惠、自主、长期安全" />
-            </Field>
-            <Field label="目标（顿号分隔）">
+            </FormField>
+            <FormField>
+              <FieldLabel>目标（顿号分隔）</FieldLabel>
               <Input value={draft.goals} onChange={(event) => set({ goals: event.target.value })} placeholder="识别他人的真实动机、保持主动" />
-            </Field>
-            <Field label="说话口吻">
+            </FormField>
+            <FormField>
+              <FieldLabel>说话口吻</FieldLabel>
               <Input value={draft.voice} onChange={(event) => set({ voice: event.target.value })} placeholder="短句为主，常用「让我把账算清楚」" />
-            </Field>
-          </section>
+            </FormField>
+          </FieldGroup>
 
           <section>
             <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">稳定认知倾向（0–3 个）</p>
@@ -421,17 +541,18 @@ function EditorForm({ editing, builtins, onClose, onSaved }: {
               {BIASES.map((bias) => {
                 const active = draft.biases.includes(bias.id);
                 return (
-                  <button
+                  <Toggle
                     key={bias.id}
                     type="button"
-                    onClick={() => set({ biases: active ? draft.biases.filter((entry) => entry !== bias.id) : [...draft.biases, bias.id].slice(0, 3) })}
+                    pressed={active}
+                    onPressedChange={() => set({ biases: active ? draft.biases.filter((entry) => entry !== bias.id) : [...draft.biases, bias.id].slice(0, 3) })}
                     className={cn(
-                      "rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                      "rounded-full border px-2.5 py-1 text-xs transition-colors",
                       active ? "border-foreground/60 bg-muted text-foreground" : "border-border bg-card text-muted-foreground hover:text-foreground"
                     )}
                   >
                     {bias.label}
-                  </button>
+                  </Toggle>
                 );
               })}
             </div>
@@ -439,28 +560,28 @@ function EditorForm({ editing, builtins, onClose, onSaved }: {
 
           <section>
             <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">大五人格（0–1）</p>
-            <div className="space-y-2.5">
+            <div className="flex flex-col gap-2.5">
               {TRAITS.map((trait) => (
                 <div key={trait.key} className="flex items-center gap-3">
                   <span className="w-14 shrink-0 text-xs text-muted-foreground">{trait.label}</span>
-                  <input
-                    type="range"
+                  <Slider
                     min={0}
                     max={1}
                     step={0.05}
-                    value={draft.temperament[trait.key]}
-                    onChange={(event) => set({ temperament: { ...draft.temperament, [trait.key]: Number(event.target.value) } })}
-                    className="h-1 flex-1 accent-foreground"
+                    value={[draft.temperament[trait.key]]}
+                    onValueChange={([value]) => set({ temperament: { ...draft.temperament, [trait.key]: value ?? draft.temperament[trait.key] } })}
+                    className="flex-1"
                     aria-label={trait.label}
                   />
-                  <span className="nums w-8 shrink-0 text-right font-mono text-[11px] text-muted-foreground">{draft.temperament[trait.key].toFixed(2)}</span>
+                  <span className="nums w-8 shrink-0 text-right font-mono text-xs text-muted-foreground">{draft.temperament[trait.key].toFixed(2)}</span>
                 </div>
               ))}
             </div>
           </section>
 
-          <section className="space-y-3">
-            <Field label="情绪调节方式">
+          <FieldGroup className="gap-3">
+            <FormField>
+              <FieldLabel>情绪调节方式</FieldLabel>
               <Select value={draft.regulation || "__none"} onValueChange={(value) => set({ regulation: value === "__none" ? "" : value as Draft["regulation"] })}>
                 <SelectTrigger className="rounded-lg border-border bg-card text-foreground/90">
                   <SelectValue placeholder="不指定" />
@@ -472,39 +593,31 @@ function EditorForm({ editing, builtins, onClose, onSaved }: {
                   ))}
                 </SelectContent>
               </Select>
-            </Field>
-            <Field label="自传记忆（每行一条，塑造本能的经历）">
-              <textarea
+            </FormField>
+            <FormField>
+              <FieldLabel>自传记忆（每行一条，塑造本能的经历）</FieldLabel>
+              <Textarea
                 value={draft.anchors}
                 onChange={(event) => set({ anchors: event.target.value })}
                 placeholder={"小时候替朋友担保被连累，从此先看清再信任。\n第一次创业被合伙人卷走积蓄……"}
                 rows={5}
-                className="w-full rounded-lg border border-input bg-card px-3 py-2 font-mono text-xs leading-5 text-foreground placeholder:text-muted-foreground/50 focus:border-ring focus:outline-none"
+                className="bg-card font-mono text-xs leading-5"
               />
-              <p className="text-[11px] text-muted-foreground">最多 12 条。它们是人物为什么这样反应的来源，会在对局中作为身份记忆被检索。</p>
-            </Field>
-          </section>
+              <FieldDescription className="text-xs">最多 12 条。它们是人物为什么这样反应的来源，会在对局中作为身份记忆被检索。</FieldDescription>
+            </FormField>
+          </FieldGroup>
 
           <div className="flex items-center justify-end gap-2 border-t border-border/60 pt-4">
             <Button variant="tile" size="sm" disabled={busy} onClick={onClose}>
               取消
             </Button>
             <Button size="sm" className="rounded-lg px-4" disabled={busy} onClick={() => void save()}>
-              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />}
+              {busy ? <Spinner className="size-3.5" /> : <Users className="size-3.5" />}
               {isNew ? "创建人物" : "保存修改"}
             </Button>
           </div>
         </div>
       </ScrollArea>
     </>
-  );
-}
-
-function Field({ label, children }: { label: string; children: ReactNode }): ReactNode {
-  return (
-    <div>
-      <p className="mb-1.5 text-xs font-medium text-foreground/75">{label}</p>
-      {children}
-    </div>
   );
 }

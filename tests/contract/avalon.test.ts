@@ -67,6 +67,31 @@ async function succeedQuest(world: SocialWorldBase): Promise<void> {
   world.completeActivation(quest);
 }
 
+it("the Lady phase exposes an explicit tool for both inspect and decline choices", async () => {
+  const world = makeWorld();
+  for (let questNumber = 1; questNumber <= 2; questNumber += 1) {
+    driveDiscussion(world);
+    const proposal = world.activation()!;
+    const leader = proposal.actorIds[0];
+    await world.performDomainAction(leader, "propose_team", { memberIds: questTeamFor(world, leader), reason: "t" });
+    world.completeActivation(proposal);
+    const vote = world.activation()!;
+    for (const actor of vote.actorIds) await world.performDomainAction(actor, "cast_team_vote", { accept: true, reason: "t" });
+    world.completeActivation(vote);
+    await succeedQuest(world);
+  }
+
+  const lady = world.activation();
+  assert.ok(lady && lady.id.endsWith(":lady"));
+  const holder = lady.actorIds[0];
+  const toolNames = world.toolsFor(holder).map((entry) => entry.name);
+  assert.ok(toolNames.includes("inspect_with_lady"));
+  assert.ok(toolNames.includes("decline_lady"), "every advertised domain action has a real SDK tool");
+  await world.performDomainAction(holder, "decline_lady", { reason: "skip this inspection" });
+  world.completeActivation(lady);
+  assert.notEqual(world.snapshot().phase, "湖中仙女", "explicit decline resolves the phase");
+});
+
 async function declareAndAccept(world: SocialWorldBase, promisor: string, commitmentType: "team-vote" | "quest-outcome", choice: string, proposition: string, acceptor = P2): Promise<string> {
   const declared = await world.performDomainAction(promisor, "make_commitment", { commitmentType, choice, proposition });
   const commitmentId = (declared.result as { commitmentId: string }).commitmentId;

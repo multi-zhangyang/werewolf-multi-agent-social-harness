@@ -9,12 +9,10 @@
  * agent thinks, and each pass emits a structured ThoughtBeat so observers can
  * watch the private mind at work without raw protocol traffic.
  */
-import {
-  tool,
-  type Tool
-} from "@openai/agents";
+import type { Tool } from "@openai/agents";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
+import { societyTool as tool } from "./tools";
 import type {
   AgentBelief,
   AgentCognitivePass,
@@ -53,25 +51,36 @@ const socialActDeclarationSchema = z.object({
 }).strict();
 
 export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
-  const communicate = tool({
-    name: "communicate",
+  const prepareMessage = tool({
+    name: "prepare_message",
     description: [
-      "Send one observable message to other participants. Use public for everyone, private with recipientIds for selected participants, or team only when the scenario grants a team channel.",
-      "Optionally declare the concrete social acts this exact message performs (claim, question, accusation, offer, promise, acceptance, etc.). These declarations interpret the message but never replace its original text and never change binding world state.",
+      "Prepare delivery metadata for your FINAL natural-language response. This tool does not send speech and has no world side effect. After it succeeds, finish the run with the exact words you want the other participants to hear; the room publishes that final response exactly once.",
+      "Use public for everyone, private with recipientIds for selected participants, or team only when the scenario grants a team channel. If you choose silence, do not call this tool.",
+      "Optionally declare the concrete social acts the final response performs (claim, question, accusation, offer, promise, acceptance, etc.). These declarations interpret the final speech but never replace it and never change binding world state.",
       "For any act directed at a person, include that person's actor ID in targetActorIds so they can react to it. Use replyTo with the visible message ID when answering a specific message.",
+      "socialActs is optional metadata. If a rich annotation is rejected, retry once with socialActs: [] instead of repeating malformed nested JSON; your final speech remains separate.",
       "A promise declaration is only communicated speech; when a scenario exposes a commitment tool, use that tool for a promise the world can settle.",
       "If this message executes a private deception plan, cite the deceptionId returned by log_deception_plan on the relevant social act.",
       "After a deception is detected, the deceiver may cite repairDeceptionId on an apology/disclosure; a targeted participant may cite it on an acceptance/endorsement to confirm repair."
     ].join("\n"),
     parameters: z.object({
-      text: z.string().min(1).max(4_000),
       channel: z.enum(["public", "private", "team"]).default("public"),
       recipientIds: z.array(z.string().min(1)).max(8).default([]),
       replyTo: z.string().max(120).nullable().default(null),
       socialActs: z.array(socialActDeclarationSchema).max(6).default([])
     }).strict(),
-    execute: async ({ text, channel, recipientIds, replyTo, socialActs }, runContext) => {
+    execute: async ({ channel, recipientIds, replyTo, socialActs }, runContext) => {
       const ctx = scopedContext(runContext, context.actorId, context);
+      const trimmedReplyTo = replyTo?.trim();
+      const normalizedReplyTo = trimmedReplyTo && !/^(null|none|undefined)$/i.test(trimmedReplyTo)
+        ? trimmedReplyTo
+        : undefined;
+      if (
+        normalizedReplyTo
+        && !ctx.world.observe(ctx.actorId).recentMessages.some((message) => message.id === normalizedReplyTo)
+      ) {
+        throw new Error(`MESSAGE_REPLY_NOT_VISIBLE: '${normalizedReplyTo}' is not visible to '${ctx.actorId}'.`);
+      }
       const declarations = socialActs.map((act) => ({
         kind: act.kind,
         ...(act.targetActorIds.length ? { targetActorIds: act.targetActorIds } : {}),
@@ -89,15 +98,19 @@ export function createSocialTools(context: SocietyAgentContext): SocialToolkit {
         ...(act.deceptionId ? { deceptionId: act.deceptionId } : {}),
         ...(act.repairDeceptionId ? { repairDeceptionId: act.repairDeceptionId } : {})
       }));
-      const commit = await ctx.world.performAction(ctx.actorId, "communicate", {
-        text,
+      ctx.preparedMessage = {
+        channel,
+        ...(recipientIds.length ? { recipientIds } : {}),
+        ...(normalizedReplyTo ? { replyTo: normalizedReplyTo } : {}),
+        ...(declarations.length ? { socialActs: declarations } : {})
+      };
+      return {
+        prepared: true,
         channel,
         recipientIds,
-        ...(replyTo ? { replyTo } : {}),
-        socialActs: declarations
-      });
-      emitWorldAction(ctx, commit.action, commit.detail);
-      return commit.result;
+        replyTo: normalizedReplyTo ?? null,
+        instruction: "Now finish with the exact natural-language message only. Do not describe this preparation step."
+      };
     }
   }) as Tool<SocietyAgentContext>;
 
@@ -162,7 +175,7 @@ const updateInnerState = createInnerStateTool(context);
     }
   }) as Tool<SocietyAgentContext>;
 
-  return { all: [communicate, updateInnerState, logDeception], innerState: updateInnerState };
+  return { all: [prepareMessage, updateInnerState, logDeception], innerState: updateInnerState };
 }
 
 /**
@@ -704,17 +717,6 @@ function updateBelief(mind: AgentMindState, input: Omit<AgentBelief, "updatedAtT
   }
   mind.beliefs.push({ ...input, updatedAtTurn: turn });
   if (mind.beliefs.length > 80) mind.beliefs.splice(0, mind.beliefs.length - 80);
-}
-
-function emitWorldAction(context: SocietyAgentContext, action: string, detail: string): void {
-  context.emit({
-    type: "world.action",
-    roomId: context.roomId,
-    actorId: context.actorId,
-    action,
-    detail,
-    at: new Date().toISOString()
-  });
 }
 
 export function formatObservation(observation: ReturnType<SocietyAgentContext["world"]["observe"]>): string {

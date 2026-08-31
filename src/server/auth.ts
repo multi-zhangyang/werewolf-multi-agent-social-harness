@@ -22,14 +22,34 @@ import type { SocietyRoom } from "../society/room";
 export interface ServerAuth {
   operatorTokenConfigured(): boolean;
   isOperatorToken(token?: string): boolean;
+  localAdministrationEnabled(): boolean;
 }
 
-export function createServerAuth(env: NodeJS.ProcessEnv = process.env): ServerAuth {
+export function createServerAuth(
+  env: NodeJS.ProcessEnv = process.env,
+  bindHost = env.HOST?.trim() || "127.0.0.1"
+): ServerAuth {
   const operatorToken = env.SOCIETY_OPERATOR_TOKEN?.trim();
+  assertSafeBindConfiguration(bindHost, operatorToken);
+  const localAdministration = !operatorToken && isLoopbackHost(bindHost);
   return {
     operatorTokenConfigured: () => Boolean(operatorToken),
-    isOperatorToken: (token) => Boolean(token && operatorToken && safeEqual(token, operatorToken))
+    isOperatorToken: (token) => Boolean(token && operatorToken && safeEqual(token, operatorToken)),
+    localAdministrationEnabled: () => localAdministration
   };
+}
+
+export function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "127.0.0.1" || normalized === "::1" || normalized === "localhost";
+}
+
+/** A tokenless server must never become reachable beyond this machine. */
+export function assertSafeBindConfiguration(host: string, operatorToken?: string): void {
+  if (operatorToken || isLoopbackHost(host)) return;
+  throw new Error(
+    `LOCAL_ADMIN_UNSAFE_BIND: HOST=${host} is not a loopback address. Configure SOCIETY_OPERATOR_TOKEN before binding Society beyond 127.0.0.1/::1.`
+  );
 }
 
 export function tokenFromRequest(request: Request): string | undefined {
@@ -69,10 +89,10 @@ export function roomAuthorityFor(request: Request, room: SocietyRoom): RoomAutho
   };
 }
 
-/** Global authority is always an explicitly configured operator token. */
+/** Global authority is a strict token, or tokenless loopback-only local mode. */
 export function isOperatorFor(auth: ServerAuth, request: Request): boolean {
   const token = tokenFromRequest(request);
-  return auth.isOperatorToken(token);
+  return auth.localAdministrationEnabled() || auth.isOperatorToken(token);
 }
 
 function safeEqual(left: string, right: string): boolean {
@@ -96,7 +116,7 @@ export function requireGlobalOperator(
     error: "OPERATOR_REQUIRED",
     message: auth.operatorTokenConfigured()
       ? "A valid operator token is required."
-      : "Global operations are disabled until SOCIETY_OPERATOR_TOKEN is configured."
+      : "Global operations require loopback-only local mode or SOCIETY_OPERATOR_TOKEN."
   });
   return false;
 }

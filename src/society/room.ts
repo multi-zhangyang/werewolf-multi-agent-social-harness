@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { OpenAIProvider, type OpenAIProvider as OpenAIProviderType } from "@openai/agents";
+import { NoopTrace, OpenAIProvider, withTrace, type OpenAIProvider as OpenAIProviderType } from "@openai/agents";
 import OpenAI from "openai";
 import type {
   AgentMindState,
@@ -22,6 +22,7 @@ import type { SpectatorViewer } from "./spectator/projection";
 import { apiKeyFromEnv, baseUrlFromEnv, createSocietyAgent, type AutonomousSocietyAgent } from "./participant";
 import { createWorld } from "./scenarios";
 import {
+  isModelProtocolReady,
   ModelRegistry,
   resolveAgentModelConfig,
   seedRegistryFromEnv,
@@ -37,6 +38,7 @@ import { extractText } from "./context-manager";
 import { EnvelopeWindow, type EnvelopeWindowBudget } from "./envelope-window";
 import { CinematicDirector } from "./spectator/cinematic-director";
 import { ActivationLimiter } from "./activation-limiter";
+import { createSocietyProvider } from "./agent-runner";
 
 /**
  * Rolling event windows: both buffers are capped by count AND bytes —
@@ -53,6 +55,7 @@ const REPLAY_WINDOW_BUDGET: EnvelopeWindowBudget = {
   maxBytes: positiveIntegerFromEnv("SOCIETY_REPLAY_BUDGET_BYTES", 8 * 1024 * 1024),
   minKeep: 100
 };
+const TURN_RECORD_CAP = positiveIntegerFromEnv("SOCIETY_TURN_RECORD_CAP", 1_000);
 
 export interface SocietyRoomCreateOptions {
   id?: string;
@@ -173,6 +176,42 @@ export interface HighlightSummary {
   focusAgentIds: string[];
 }
 
+export type AgentTurnRecordStatus = "thinking" | "acting" | "speaking" | "paused" | "error";
+
+/** Compact, replay-safe function-call item belonging to one SDK run. */
+export interface AgentTurnToolRecord {
+  kind: "tool";
+  toolCallId: string;
+  toolName: string;
+  label?: string;
+  phase: "started" | "succeeded" | "failed";
+  safeInputSummary?: string;
+  safeOutputSummary?: string;
+}
+
+/**
+ * Durable room-side transcript item. Token and raw reasoning deltas stay in
+ * SSE; this compact record preserves the standard tool-call → final-message
+ * linkage across reconnects and postgame replay.
+ */
+export interface AgentTurnRecord {
+  id: string;
+  activationId: string;
+  activationLabel: string;
+  actorId: string;
+  round: number;
+  attempt: number;
+  mode: "discussion" | "full";
+  status: AgentTurnRecordStatus;
+  sealed: boolean;
+  tools: AgentTurnToolRecord[];
+  messageId?: string;
+  errorCode?: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
 export interface SocietyRoomSnapshot {
   id: string;
   scenarioId: ScenarioId;
@@ -183,6 +222,8 @@ export interface SocietyRoomSnapshot {
   updatedAt: string;
   world: WorldSnapshot;
   participants: SocietyParticipantCard[];
+  /** Compact agent transcript, projected to this viewer's authority. */
+  agentTurns?: AgentTurnRecord[];
   player?: SocietyPlayerState;
   /** Endgame highlights derived from high-priority cinematic cues. */
   highlights?: HighlightSummary[];
@@ -230,6 +271,10 @@ export class SocietyRoom {
   private readonly world: SocialWorld;
   private readonly cards = new Map<string, RuntimeCard>();
   private readonly agents = new Map<string, AutonomousSocietyAgent>();
+  /** Stable compact turns survive rolling SSE-window eviction. */
+  private readonly agentTurns: AgentTurnRecord[] = [];
+  private readonly activeAgentTurnIds = new Map<string, string>();
+  private readonly toolTurnIds = new Map<string, string>();
   private readonly events = new EnvelopeWindow<SocietyRoomEventEnvelope>(EVENT_WINDOW_BUDGET, envelopeByteSize);
   private readonly replayEvents = new EnvelopeWindow<SocietyRoomEventEnvelope>(REPLAY_WINDOW_BUDGET, envelopeByteSize);
   private readonly listeners = new Set<RoomListener>();
@@ -392,6 +437,7 @@ export class SocietyRoom {
       updatedAt: this.updatedAt,
       world,
       participants: this.participantCards(world, actorId === undefined),
+      agentTurns: this.projectedAgentTurns(actorId === undefined ? "all" : new Set([actorId])),
       ...(actorId
         ? {
             player: {
@@ -435,6 +481,7 @@ export class SocietyRoom {
         updatedAt: this.updatedAt,
         world: publicWorld,
         participants: this.participantCards(publicWorld, false),
+        agentTurns: this.projectedAgentTurns(new Set()),
         // Highlights derive from public-facts-only cues, so the endgame reveal
         // may show them to the public seat too — but only once the game ends.
         ...(this.status === "finished" && this.highlights.length
@@ -464,6 +511,7 @@ export class SocietyRoom {
         updatedAt: this.updatedAt,
         world: reveal,
         participants: this.participantCards(reveal, false),
+        agentTurns: this.projectedAgentTurns(viewer.privileged ? "all" : new Set()),
         ...(this.highlights.length ? { highlights: this.highlights.map((highlight) => structuredClone(highlight)) } : {}),
         ...(this.error ? { error: this.error } : {})
       };
@@ -483,6 +531,7 @@ export class SocietyRoom {
         updatedAt: this.updatedAt,
         world: povWorld,
         participants: this.participantCards(povWorld, false),
+        agentTurns: this.projectedAgentTurns(target ? new Set([target]) : new Set()),
         ...(target && target === this.humanActorId
           ? {
               player: {
@@ -524,6 +573,7 @@ export class SocietyRoom {
         updatedAt: this.updatedAt,
         world: reveal,
         participants: this.participantCards(reveal, true),
+        agentTurns: this.projectedAgentTurns("all"),
         ...(this.highlights.length ? { highlights: this.highlights.map((highlight) => structuredClone(highlight)) } : {}),
         ...(this.error ? { error: this.error } : {})
       };
@@ -587,6 +637,7 @@ export class SocietyRoom {
   pause(reason = "房间已暂停"): void {
     if (this.status !== "running") return;
     this.status = "paused";
+    this.error = reason;
     const pauseError = new Error(reason);
     if (!this.abortController.signal.aborted) this.abortController.abort(pauseError);
     if (this.waitingHuman) {
@@ -594,6 +645,11 @@ export class SocietyRoom {
       const waiter = this.waitingHuman;
       this.waitingHuman = undefined;
       waiter.reject(pauseError);
+    }
+    for (const actorId of this.activeSignals.keys()) {
+      const card = this.cards.get(actorId);
+      if (card && !this.pausedAgents.has(actorId)) card.status = "paused";
+      this.world.setAgentStatus(actorId, "paused");
     }
     this.world.pause();
     // Close the command gate so requests the room gave up on cannot mutate
@@ -609,6 +665,7 @@ export class SocietyRoom {
    */
   private failToPause(reason: string): void {
     this.status = "paused";
+    this.error = reason;
     if (!this.abortController.signal.aborted) this.abortController.abort(new Error(reason));
     this.world.pause();
     this.world.endActivation();
@@ -625,6 +682,12 @@ export class SocietyRoom {
     if (this.status !== "paused") return;
     this.abortController = new AbortController();
     this.status = "running";
+    this.error = undefined;
+    for (const card of this.cards.values()) {
+      if (this.pausedAgents.has(card.profile.id)) continue;
+      card.status = "idle";
+      this.world.setAgentStatus(card.profile.id, "idle");
+    }
     this.world.start();
     this.emit({ type: "room.status", roomId: this.id, status: "running", detail: "房间已恢复", at: now() });
     this.runningPromise = this.run().catch((error) => {
@@ -699,8 +762,8 @@ export class SocietyRoom {
       throw new Error("ROOM_NOT_PAUSED: Pause the room (or this participant) before switching its model.");
     }
     const modelProfile = this.modelRegistry.modelProfile(modelProfileId);
-    if (!modelProfile || modelProfile.enabled === false) {
-      throw new Error(`MODEL_PROFILE_MISSING: '${modelProfileId}' is not an enabled model profile.`);
+    if (!modelProfile || !isModelProtocolReady(modelProfile, this.modelRegistry.providerProfile(modelProfile.providerProfileId))) {
+      throw new Error(`MODEL_PROTOCOL_NOT_READY: '${modelProfileId}' is not an enabled, protocol-checked model profile.`);
     }
     const binding: AgentModelBinding = {
       ...(this.agentBindings[actorId] ?? {}),
@@ -859,6 +922,10 @@ export class SocietyRoom {
       }
       this.world.beginActivation(activation);
       await this.runActivation(activation, activation.actorIds);
+      if (this.currentStatus() === "paused" || this.abortController.signal.aborted) {
+        this.world.endActivation();
+        return;
+      }
       // Command epoch gate: the window stays open for the whole activation —
       // retries and human waits included — and closes before the next one.
       // Tool calls that arrive late from a request the room already gave up
@@ -875,7 +942,24 @@ export class SocietyRoom {
       }
       this.world.endActivation();
       if (!completion.completed) {
-        this.pause(`行动未完成：${completion.missingActorIds.join(", ")}。房间没有自动代打。`);
+        const failed = completion.missingActorIds.map((actorId) => {
+          const card = this.cards.get(actorId);
+          const model = card?.profile.model ?? "unknown";
+          this.emit({
+            type: "runtime.notice",
+            roomId: this.id,
+            actorId,
+            category: "reasoning",
+            severity: "error",
+            code: "BINDING_ACTION_INCOMPLETE",
+            message: `${card?.profile.displayName ?? actorId} 在两次有界 Turn 后仍未完成必需工具动作。`,
+            modelId: model,
+            retrying: false,
+            at: now()
+          });
+          return `${card?.profile.displayName ?? actorId}/${model}`;
+        });
+        this.pause(`必需工具动作未完成（BINDING_ACTION_INCOMPLETE）：${failed.join("、")}。请切换模型后恢复房间。`);
         return;
       }
       this.completedActivations += 1;
@@ -959,9 +1043,13 @@ export class SocietyRoom {
     // apiKey/baseURL when a client is injected — the client owns them.
     const fallbackKey = this.apiKey ?? apiKeyFromEnv();
     const fallbackBaseURL = this.baseURL ?? baseUrlFromEnv();
-    const fallback = new OpenAIProvider({
+    const fallback = createSocietyProvider({
+      apiKey: fallbackKey,
+      baseURL: fallbackBaseURL,
       useResponses: false,
-      openAIClient: this.makeOpenAIClient(fallbackKey, fallbackBaseURL)
+      timeoutMs: this.turnTimeoutMs + this.turnGraceMs + 60_000,
+      maxRetries: 1,
+      fetch: reasoningFallbackFetch({ onNotice: (notice) => this.emitReasoningNotice(notice) })
     });
     if (providerProfileId === "") return fallback;
     const profile = this.modelRegistry.providerProfile(providerProfileId);
@@ -969,22 +1057,16 @@ export class SocietyRoom {
       this.providerClients.set(providerProfileId, fallback);
       return fallback;
     }
-    const client = new OpenAIProvider({
+    const client = createSocietyProvider({
+      apiKey: apiKeyForRef(profile),
+      baseURL: profile.baseURL || baseUrlFromEnv(),
       useResponses: profile.apiMode === "responses",
-      openAIClient: this.makeOpenAIClient(apiKeyForRef(profile), profile.baseURL || baseUrlFromEnv())
-    });
-    this.providerClients.set(providerProfileId, client);
-    return client;
-  }
-
-  private makeOpenAIClient(apiKey: string, baseURL: string | undefined): OpenAI {
-    return new OpenAI({
-      apiKey,
-      baseURL,
-      timeout: this.turnTimeoutMs + this.turnGraceMs + 60_000,
+      timeoutMs: this.turnTimeoutMs + this.turnGraceMs + 60_000,
       maxRetries: 1,
       fetch: reasoningFallbackFetch({ onNotice: (notice) => this.emitReasoningNotice(notice) })
     });
+    this.providerClients.set(providerProfileId, client);
+    return client;
   }
 
   /** Serialize sidecar extractions: one in flight at a time, never blocking sends. */
@@ -1006,7 +1088,7 @@ export class SocietyRoom {
       const runOnce = async (): Promise<string> => {
         const provider = this.extractionProviderFor(profile.providerProfileId);
         const model = await provider.getModel(profile.modelId);
-        const response = await model.getResponse({
+        const response = await withTrace(new NoopTrace(), async () => model.getResponse({
           systemInstructions: request.systemInstructions,
           input: request.input,
           // Low effort + temperature 0: the sidecar must be fast and stable —
@@ -1016,7 +1098,7 @@ export class SocietyRoom {
           outputType: "text",
           handoffs: [],
           tracing: false
-        });
+        }));
         return extractText(response.output);
       };
       let raw: string;
@@ -1135,7 +1217,6 @@ export class SocietyRoom {
       if (!runtime) throw new Error(`AGENT_RUNTIME_NOT_FOUND: '${actorId}' has no SDK Agent instance.`);
       const turnController = new AbortController();
       this.activeSignals.set(actorId, turnController);
-      const signal = AbortSignal.any([this.abortController.signal, AbortSignal.timeout(this.turnTimeoutMs), turnController.signal]);
       const instruction = overrideInstruction ?? activation.instructionFor(actorId);
       const isDiscussion = activation.id.includes(":discussion");
       // Discussion waves run the same peer agent with a lighter tool budget;
@@ -1145,11 +1226,39 @@ export class SocietyRoom {
         : undefined;
       let result: AgentTurnResult | undefined;
       let failure: unknown;
-      const attemptTurn = async (): Promise<AgentTurnResult> => {
+      let successfulTurnRecordId: string | undefined;
+      const attemptTurn = async (attempt: number): Promise<AgentTurnResult> => {
+        // A whole-turn replay is a genuinely new bounded attempt. Reusing the
+        // first attempt's expired timeout signal would make the advertised
+        // retry abort immediately without ever reaching the provider.
+        const attemptTimeoutSignal = AbortSignal.timeout(this.turnTimeoutMs);
+        const signal = AbortSignal.any([
+          this.abortController.signal,
+          turnController.signal,
+          attemptTimeoutSignal
+        ]);
         // Cross-room backpressure: wait for a provider slot before the call.
         // Releasing happens in `lease` so aborted and timed-out turns free
         // their slot only when the underlying request truly settles.
-        const release = this.limiter ? await this.limiter.acquire(signal) : undefined;
+        let release: (() => void) | undefined;
+        try {
+          release = this.limiter ? await this.limiter.acquire(signal) : undefined;
+        } catch (error) {
+          if (
+            attemptTimeoutSignal.aborted
+            && !this.abortController.signal.aborted
+            && !turnController.signal.aborted
+          ) {
+            throw new Error(`TURN_TIMEOUT after ${this.turnTimeoutMs}ms while waiting for a provider lease`, { cause: error });
+          }
+          throw error;
+        }
+        const turnRecordId = this.beginAgentTurn({
+          activation,
+          actorId,
+          attempt,
+          mode: isDiscussion ? "discussion" : "full"
+        });
         // Turn wall-clock duration for provider latency percentiles;
         // only locally successful turns are counted (failures/abandoned skip).
         const startedAt = Date.now();
@@ -1164,6 +1273,16 @@ export class SocietyRoom {
           turn: this.world.snapshot().turn,
           ...(maxTurns ? { maxTurns } : {}),
           mode: isDiscussion ? "discussion" : "full"
+        });
+        const normalizedRunPromise = runPromise.catch((error: unknown) => {
+          if (
+            attemptTimeoutSignal.aborted
+            && !this.abortController.signal.aborted
+            && !turnController.signal.aborted
+          ) {
+            throw new Error(`TURN_TIMEOUT after ${this.turnTimeoutMs}ms`, { cause: error });
+          }
+          throw error;
         });
         let abandoned = false;
         // The settle chain is attached for its side effects only: it releases
@@ -1190,21 +1309,27 @@ export class SocietyRoom {
           );
           signal.addEventListener("abort", () => {
             clearTimeout(graceTimer);
-            reject(new Error("TURN_ABORTED: The activation was interrupted before the provider settled."));
+            reject(attemptTimeoutSignal.aborted
+              && !this.abortController.signal.aborted
+              && !turnController.signal.aborted
+              ? new Error(`TURN_TIMEOUT after ${this.turnTimeoutMs}ms`)
+              : new Error("TURN_ABORTED: The activation was interrupted before the provider settled."));
           }, { once: true });
         });
         try {
-          const result = await Promise.race([runPromise, timeoutPromise]);
+          const result = await Promise.race([normalizedRunPromise, timeoutPromise]);
           this.providerTurnDurationsMs.push(Date.now() - startedAt);
           if (this.providerTurnDurationsMs.length > 500) {
             this.providerTurnDurationsMs.splice(0, this.providerTurnDurationsMs.length - 500);
           }
+          successfulTurnRecordId = turnRecordId;
           return result;
         } catch (error) {
           // The race was lost locally while the request may still be
           // streaming; the lease stays held until the request settles.
           abandoned = /^TURN_(TIMEOUT|ABORTED)/.test(errorMessage(error));
           if (abandoned) this.abandonedRunningTurns += 1;
+          this.finishAgentTurn(turnRecordId, { error });
           throw error;
         } finally {
           // The guard timer dies on every path — success, failure,
@@ -1212,22 +1337,25 @@ export class SocietyRoom {
           if (graceTimer) clearTimeout(graceTimer);
         }
       };
-      // Discussion turns get one immediate retry on provider-side transient
-      // failures (5xx / 429 / timeout / connection): the same agent runs the
-      // same turn once more before the wave accepts its silence. Binding
-      // action turns retry through completeActivation instead, so the room
-      // never substitutes a decision for anyone.
-      const attempts = isDiscussion ? 2 : 1;
+      // Every Agent Turn gets at most one whole-turn replay for a transient
+      // provider failure or unknown-tool protocol rejection. Binding-action
+      // absence still has its separate activation-level correction below;
+      // neither path can loop without a fixed upper bound.
+      const attempts = 2;
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
         try {
-          result = await attemptTurn();
+          result = await attemptTurn(attempt);
           failure = undefined;
           break;
         } catch (error) {
-          if (this.pausedAgents.has(actorId)) return;
-          if (this.abortController.signal.aborted) return; // the room is stopping
+          if (this.pausedAgents.has(actorId) || this.abortController.signal.aborted) {
+            // A concurrent room/agent pause can interrupt this branch before
+            // it reaches the normal cleanup block below.
+            this.activeSignals.delete(actorId);
+            return;
+          }
           failure = error;
-          if (attempt < attempts && !isTransientProviderFailure(error)) break;
+          if (attempt < attempts && !isRetryableTurnFailure(error)) break;
         }
       }
       try {
@@ -1243,40 +1371,29 @@ export class SocietyRoom {
             type: "runtime.notice",
             roomId: this.id,
             actorId,
-            category: "provider",
+            category: isToolProtocolFailure(error) ? "reasoning" : "provider",
             severity: "error",
             code: runtimeFailureCode(error),
-            message: `${runtime.profile.displayName} 的模型请求失败：${safeReason}`,
+            message: `${runtime.profile.displayName} 的 Agent Turn 失败：${safeReason}`,
             modelId: runtime.profile.model,
-            retrying: !isDiscussion,
+            retrying: false,
             at: now()
           });
-          // Speaking is optional: an agent that fails to produce a coherent
-          // turn simply stays quiet for this wave instead of sinking the room.
-          if (isDiscussion) {
-            const reason = safeReason;
-            // A budget/timeout cut ends a turn that may already have spoken —
-            // say what happened instead of claiming the agent stayed silent.
-            const cutShort = /行动次数已达上限|思考时间超时/.test(reason);
-            const note = cutShort
-              ? `${runtime.profile.displayName} 本轮讨论中断（${reason}）`
-              : `${runtime.profile.displayName} 本轮未发言（${reason}）`;
-            this.world.addWorldLog(note);
-            this.emit({ type: "agent.status", roomId: this.id, actorId, status: "idle", at: now() });
-            return;
-          }
-          // Binding actions (votes, night targets, bids) stay mandatory, but a
-          // single failed turn must not sink the room: report it, let
-          // completeActivation flag the missing action, and the room retries
-          // the actor once. Only a repeated failure pauses the room.
-          const note = `${runtime.profile.displayName} 行动未完成（${friendlyFailure(error)}），稍后重试`;
+          const code = runtimeFailureCode(error);
+          const note = `${runtime.profile.displayName} 的 Agent Turn 已停止（${safeReason}，${code}）`;
           this.world.addWorldLog(note);
           this.emit({ type: "agent.status", roomId: this.id, actorId, status: "error", at: now() });
+          this.pause(`模型 ${runtime.profile.model} 的 Agent Turn 无法恢复（${code}）：${safeReason}。请切换模型后恢复房间。`);
           return;
         }
       } finally {
         this.activeSignals.delete(actorId);
       }
+      let messageId: string | undefined;
+      if (result.finalMessage) {
+        messageId = await this.commitAgentFinalMessage(actorId, result.finalMessage);
+      }
+      if (successfulTurnRecordId) this.finishAgentTurn(successfulTurnRecordId, { messageId });
       card.turnCount += 1;
       this.notify();
     };
@@ -1285,6 +1402,187 @@ export class SocietyRoom {
       return;
     }
     for (const actorId of actorIds) await execute(actorId);
+  }
+
+  /** Redact tool names and summaries unless this viewer owns the cognition. */
+  private projectedAgentTurns(fullScope: "all" | ReadonlySet<string>): AgentTurnRecord[] {
+    return this.agentTurns.map((turn) => {
+      const full = fullScope === "all" || fullScope.has(turn.actorId);
+      return structuredClone(full
+        ? turn
+        : {
+            ...turn,
+            tools: turn.tools.map((tool) => ({
+              kind: "tool" as const,
+              toolCallId: tool.toolCallId,
+              toolName: "",
+              phase: tool.phase
+            }))
+          });
+    });
+  }
+
+  private beginAgentTurn(input: {
+    activation: WorldActivation;
+    actorId: string;
+    attempt: number;
+    mode: "discussion" | "full";
+  }): string {
+    const startedAt = now();
+    const id = `turn_${randomUUID()}`;
+    this.agentTurns.push({
+      id,
+      activationId: input.activation.id,
+      activationLabel: input.activation.label,
+      actorId: input.actorId,
+      round: this.world.snapshot().turn,
+      attempt: input.attempt,
+      mode: input.mode,
+      status: "thinking",
+      sealed: !this.world.publicStreamingAllowed(),
+      tools: [],
+      startedAt,
+      updatedAt: startedAt
+    });
+    this.activeAgentTurnIds.set(input.actorId, id);
+    while (this.agentTurns.length > TURN_RECORD_CAP) {
+      const removable = this.agentTurns.findIndex((turn) => Boolean(turn.completedAt));
+      if (removable < 0) break;
+      this.agentTurns.splice(removable, 1);
+    }
+    return id;
+  }
+
+  private finishAgentTurn(turnId: string, input: { messageId?: string; error?: unknown } = {}): void {
+    const turn = this.agentTurns.find((entry) => entry.id === turnId);
+    if (!turn || turn.completedAt) return;
+    const completedAt = now();
+    turn.updatedAt = completedAt;
+    turn.completedAt = completedAt;
+    if (input.error !== undefined) {
+      turn.status = "error";
+      turn.errorCode = runtimeFailureCode(input.error);
+    }
+    if (input.messageId) turn.messageId = input.messageId;
+    if (this.activeAgentTurnIds.get(turn.actorId) === turnId) {
+      this.activeAgentTurnIds.delete(turn.actorId);
+    }
+    for (const tool of turn.tools) {
+      if (this.toolTurnIds.get(tool.toolCallId) === turnId) this.toolTurnIds.delete(tool.toolCallId);
+    }
+  }
+
+  private attachTurnId(event: AgentRuntimeEvent): AgentRuntimeEvent {
+    if (!("actorId" in event) || typeof event.actorId !== "string") return event;
+    let turnId: string | undefined;
+    if (event.type === "agent.tool") {
+      turnId = event.turnId ?? this.toolTurnIds.get(event.toolCallId) ?? this.activeAgentTurnIds.get(event.actorId);
+      if (turnId && (event.phase === "queued" || event.phase === "started")) {
+        this.toolTurnIds.set(event.toolCallId, turnId);
+      }
+    } else {
+      turnId = "turnId" in event && typeof event.turnId === "string"
+        ? event.turnId
+        : this.activeAgentTurnIds.get(event.actorId);
+    }
+    if (!turnId) return event;
+    switch (event.type) {
+      case "agent.status":
+      case "agent.updated":
+      case "agent.delta":
+      case "agent.reasoning-content":
+      case "agent.reasoning-summary":
+      case "agent.tool":
+      case "world.action":
+        return { ...event, turnId };
+      default:
+        return event;
+    }
+  }
+
+  private recordAgentTurnEvent(event: AgentRuntimeEvent): void {
+    if (!("turnId" in event) || typeof event.turnId !== "string") return;
+    const turn = this.agentTurns.find((entry) => entry.id === event.turnId);
+    if (!turn || turn.completedAt) return;
+    if ("at" in event && typeof event.at === "string") turn.updatedAt = event.at;
+    if ((event.type === "agent.delta" || event.type === "agent.tool") && event.sealed) turn.sealed = true;
+    if (event.type === "agent.status") {
+      if (
+        event.status === "thinking"
+        || event.status === "acting"
+        || event.status === "speaking"
+        || event.status === "paused"
+        || event.status === "error"
+      ) {
+        turn.status = event.status;
+      }
+      return;
+    }
+    if (event.type !== "agent.tool") return;
+    if (event.phase !== "started" && event.phase !== "succeeded" && event.phase !== "failed") return;
+    const existing = turn.tools.find((tool) => tool.toolCallId === event.toolCallId);
+    if (existing) {
+      existing.phase = event.phase;
+      if (event.toolName) existing.toolName = event.toolName;
+      if (event.label) existing.label = event.label;
+      if (event.safeInputSummary) existing.safeInputSummary = event.safeInputSummary;
+      if (event.safeOutputSummary) existing.safeOutputSummary = event.safeOutputSummary;
+      return;
+    }
+    turn.tools.push({
+      kind: "tool",
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      ...(event.label ? { label: event.label } : {}),
+      ...(event.safeInputSummary ? { safeInputSummary: event.safeInputSummary } : {}),
+      ...(event.safeOutputSummary ? { safeOutputSummary: event.safeOutputSummary } : {}),
+      phase: event.phase
+    });
+  }
+
+  /**
+   * The model's final natural-language response becomes observable speech
+   * exactly once, after every preceding SDK tool call has settled. Delivery
+   * metadata was prepared without side effects inside the run; the canonical
+   * world command gateway still validates visibility, reply links and epoch.
+   */
+  private async commitAgentFinalMessage(
+    actorId: string,
+    message: NonNullable<AgentTurnResult["finalMessage"]>
+  ): Promise<string | undefined> {
+    this.world.setAgentStatus(actorId, "speaking");
+    try {
+      const commit = await this.world.performAction(actorId, "communicate", message);
+      this.emit({
+        type: "world.action",
+        roomId: this.id,
+        actorId,
+        ...(this.activeAgentTurnIds.get(actorId) ? { turnId: this.activeAgentTurnIds.get(actorId) } : {}),
+        action: commit.action,
+        detail: commit.detail,
+        at: now()
+      });
+      const result = commit.result as { messageId?: unknown } | undefined;
+      return typeof result?.messageId === "string" ? result.messageId : undefined;
+    } catch (error) {
+      const name = this.cards.get(actorId)?.profile.displayName ?? actorId;
+      const reason = friendlyFailure(error);
+      console.error(`[room ${this.id}] final message rejected for ${actorId}: ${errorMessage(error)}`);
+      this.world.addWorldLog(`${name} 的最终发言未发布（${reason}）`);
+      this.emit({
+        type: "runtime.notice",
+        roomId: this.id,
+        actorId,
+        category: "persistence",
+        severity: "error",
+        code: "FINAL_MESSAGE_REJECTED",
+        message: `${name} 的最终发言未通过世界规则校验：${reason}`,
+        at: now()
+      });
+    } finally {
+      this.world.setAgentStatus(actorId, "idle");
+    }
+    return undefined;
   }
 
   /** Block until the given agents are resumed (or the room aborts). */
@@ -1361,6 +1659,8 @@ export class SocietyRoom {
   }
 
   private handleAgentEvent(event: AgentRuntimeEvent): void {
+    event = this.attachTurnId(event);
+    this.recordAgentTurnEvent(event);
     if (event.type === "agent.status") {
       const card = this.cards.get(event.actorId);
       if (card) {
@@ -1516,6 +1816,12 @@ export class SocietyRoomRegistry {
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
+  /** Abort and forget every live room during process shutdown. */
+  disposeAll(reason = "服务正在关闭"): void {
+    for (const room of this.rooms.values()) room.dispose(reason);
+    this.rooms.clear();
+  }
+
   /**
    * Model-vs-model standings over finished games in this process: per model,
    * seat-slots played, wins (faction games publish winners) and mean score.
@@ -1655,6 +1961,15 @@ export function isTransientProviderFailure(error: unknown): boolean {
   return /429|rate limit|502|503|504|500|Internal server error|ECONN|ETIMEDOUT|socket|network|fetch failed|TURN_TIMEOUT/i.test(errorMessage(error));
 }
 
+/** SDK-level protocol failures may retry once, without inventing tool aliases. */
+export function isRetryableTurnFailure(error: unknown): boolean {
+  return isTransientProviderFailure(error) || isToolProtocolFailure(error);
+}
+
+function isToolProtocolFailure(error: unknown): boolean {
+  return /Tool .+ not found(?: in agent)?/i.test(errorMessage(error));
+}
+
 export function friendlyFailure(error: unknown): string {
   const message = errorMessage(error);
   const maxTurns = /Max turns \((\d+)\) exceeded/i.exec(message);
@@ -1663,6 +1978,8 @@ export function friendlyFailure(error: unknown): string {
   if (/aborted|abort/i.test(message)) return "本轮被中断";
   if (/OPENAI_API_KEY_REQUIRED/i.test(message)) return "提供商密钥未配置";
   if (/CONTEXT_HARD_GUARD/i.test(message)) return "上下文压力达到硬上限，正在压缩";
+  if (isToolProtocolFailure(error)) return "模型调用了当前 Agent 未开放的工具";
+  if (/MESSAGE_[A-Z_]+/i.test(message)) return "发言投递信息无效，本轮未发布";
   if (/reused for a different invocation/i.test(message)) return "工具调用标识冲突，本轮重试";
   if (/400\s|openai_error/i.test(message) && /400/i.test(message)) return "提供商拒绝了本次请求（400），稍后重试";
   if (/422/i.test(message)) return "提供商拒绝了本次请求（422），稍后重试";
@@ -1690,6 +2007,7 @@ function explicitlyRequestedCapabilities(
 
 function runtimeFailureCode(error: unknown): string {
   const message = errorMessage(error);
+  if (isToolProtocolFailure(error)) return "AGENT_TOOL_NOT_FOUND";
   if (/TURN_TIMEOUT/i.test(message)) return "PROVIDER_TIMEOUT";
   if (/aborted|abort/i.test(message)) return "PROVIDER_ABORTED";
   if (/OPENAI_API_KEY_REQUIRED|401|unauthorized|authentication/i.test(message)) return "PROVIDER_AUTH_FAILED";

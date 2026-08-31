@@ -17,8 +17,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const API = process.env.DEMO_API ?? "http://127.0.0.1:8787";
-const timeoutMinutes = Number(process.env.DEMO_TIMEOUT_MIN ?? "20");
-const timeoutMs = (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0 ? timeoutMinutes : 20) * 60_000;
+const timeoutMinutes = Number(process.env.DEMO_TIMEOUT_MIN ?? "60");
+const timeoutMs = (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0 ? timeoutMinutes : 60) * 60_000;
 const SCENARIOS = ["prisoners-dilemma", "ultimatum-game", "trust-game", "public-goods", "beauty-contest", "sealed-bid-auction", "werewolf", "avalon", "centipede-game", "chicken-game", "stag-hunt", "negotiation-game", "liars-dice"];
 
 const requested = process.argv.slice(2);
@@ -35,14 +35,18 @@ async function resolveProfiles() {
   if (forced.length) return { ids: forced, random: false };
   const config = await getJson("/api/model-config");
   const profiles = Array.isArray(config.modelProfiles) ? config.modelProfiles : [];
-  const enabled = profiles.filter((entry) => entry.enabled !== false);
+  // The public catalog is the server's admission source of truth: it contains
+  // only enabled profiles whose protocol check is currently passed.
+  const catalog = await getJson("/api/scenarios");
+  const readyIds = new Set((catalog.models ?? []).map((entry) => entry.profileId).filter(Boolean));
+  const enabled = profiles.filter((entry) => entry.enabled !== false && readyIds.has(entry.id));
   const enabledIds = new Set(enabled.map((entry) => entry.id));
   const pool = Array.isArray(config.globalDefaults?.randomPoolProfileIds)
     ? config.globalDefaults.randomPoolProfileIds.filter((id) => enabledIds.has(id))
     : [];
   if (pool.length) return { ids: pool, random: true };
   if (enabled.length) return { ids: enabled.map((entry) => entry.id), random: false };
-  throw new Error("NO_MODEL_PROFILES: The model registry has no enabled profiles. Configure the model center first.");
+  throw new Error("NO_MODEL_PROFILES: No enabled model has a current passed protocol check. Run npm run doctor first.");
 }
 
 async function main() {
@@ -54,7 +58,7 @@ async function main() {
   const rounds = Number(process.env.DEMO_ROUNDS ?? "3");
   let failures = 0;
 
-  for (const scenarioId of targets) {
+  for (const [scenarioIndex, scenarioId] of targets.entries()) {
     const meta = catalog.scenarios.find((entry) => entry.id === scenarioId);
     if (!meta) {
       console.error(`[demo] unknown scenario: ${scenarioId}`);
@@ -64,10 +68,11 @@ async function main() {
     // is dealt per seat; a forced DEMO_MODEL_PROFILES list round-robins so
     // explicit multi-model rosters keep their even coverage.
     const players = Number(process.env.DEMO_PLAYERS ?? "0");
-    const seatCount = players > 0 ? players : meta.players;
+    const minimumPlayers = process.env.DEMO_MIN_PLAYERS === "1" ? meta.playerRange?.min : undefined;
+    const seatCount = players > 0 ? players : minimumPlayers ?? meta.players;
     const roster = random
       ? Array.from({ length: seatCount }, () => profileIds[Math.floor(Math.random() * profileIds.length)])
-      : Array.from({ length: seatCount }, (_, index) => profileIds[index % profileIds.length]);
+      : Array.from({ length: seatCount }, (_, index) => profileIds[(scenarioIndex + index) % profileIds.length]);
     const rosterLabels = roster.map((id) => nameFor.get(id) ?? id).join(", ");
     console.log(`[demo] starting ${scenarioId} (${rosterLabels})`);
     const created = await postJson("/api/rooms", {
@@ -76,7 +81,7 @@ async function main() {
       rounds: Math.max(meta.minRounds, Math.min(rounds, meta.maxRounds)),
       mode: "ai",
       reasoningEffort: process.env.DEMO_REASONING_EFFORT ?? "high",
-      ...(players > 0 ? { players } : {})
+      ...(meta.playerRange ? { players: seatCount } : {})
     });
     const roomId = created.room.id;
     const started = Date.now();
@@ -90,11 +95,11 @@ async function main() {
       // operator: resume it and let the same seat retry its activation.
       if (room.status === "paused" && resumes < 20) {
         const token = process.env.DEMO_OPERATOR_TOKEN;
-        if (token) {
+        try {
           await postJson(`/api/rooms/${roomId}/resume`, {}, token);
           resumes += 1;
-        } else {
-          console.error(`[demo] ${scenarioId} paused; set DEMO_OPERATOR_TOKEN to resume it automatically`);
+        } catch (error) {
+          console.error(`[demo] ${scenarioId} paused and could not resume: ${error instanceof Error ? error.message : error}`);
           break;
         }
       }

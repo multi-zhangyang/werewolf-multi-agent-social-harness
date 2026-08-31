@@ -1436,25 +1436,25 @@ check("werewolf target fields reject sentinels and names at parse time", async (
   assert.ok(witch, "witch_night_choice is available");
   assert.match(
     await call(witch, { action: "save", targetId: "null", reason: "test" }),
-    /rejected by schema validation/,
+    /"code":"TOOL_INPUT_INVALID"/,
     '"null" sentinel rejected'
   );
   assert.match(
     await call(witch, { action: "save", targetId: "P3", reason: "test" }),
-    /rejected by schema validation/,
+    /"code":"TOOL_INPUT_INVALID"/,
     "display names rejected"
   );
   assert.match(
     await call(witch, { action: "heal", targetId: byRole("wolf")[0], reason: "test" }),
-    /rejected by schema validation/,
+    /"code":"TOOL_INPUT_INVALID"/,
     "unknown potion actions rejected"
   );
   // The flat action field is the single source of truth: save and poison can
   // no longer be submitted together (inexpressible in the schema), and a valid
   // selection passes straight through.
-  assert.ok(!await call(witch, { action: "save", targetId: byRole("wolf")[0], reason: "test" }).then((out) => out.includes("rejected by schema validation")), "real ids pass the schema");
+  assert.ok(!await call(witch, { action: "save", targetId: byRole("wolf")[0], reason: "test" }).then((out) => out.includes('"code":"TOOL_INPUT_INVALID"')), "real ids pass the schema");
   assert.ok(
-    !await call(witch, { action: "pass", targetId: null, reason: "test" }).then((out) => out.includes("rejected by schema validation")),
+    !await call(witch, { action: "pass", targetId: null, reason: "test" }).then((out) => out.includes('"code":"TOOL_INPUT_INVALID"')),
     "explicit null targets pass the schema"
   );
   // Required-target tools reject the sentinel too.
@@ -1462,6 +1462,6 @@ check("werewolf target fields reject sentinels and names at parse time", async (
   const voteTarget = Object.keys((world.snapshot().details as { roles: Record<string, string> }).roles).find((id) => id !== voter)!;
   const vote = toolset.toolsFor(voter).find((t) => t.name === "cast_day_vote");
   assert.ok(vote, "cast_day_vote is available");
-  assert.match(await call(vote, { targetId: "null", reason: "test" }), /rejected by schema validation/, "sentinel vote rejected");
-  assert.ok(!await call(vote, { targetId: voteTarget, reason: "test" }).then((out) => out.includes("rejected by schema validation")), "valid vote passes the schema");
+  assert.match(await call(vote, { targetId: "null", reason: "test" }), /"code":"TOOL_INPUT_INVALID"/, "sentinel vote rejected");
+  assert.ok(!await call(vote, { targetId: voteTarget, reason: "test" }).then((out) => out.includes('"code":"TOOL_INPUT_INVALID"')), "valid vote passes the schema");
 });

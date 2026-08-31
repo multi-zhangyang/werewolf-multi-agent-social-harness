@@ -96,7 +96,7 @@ export function About({ onBack }: { onBack: () => void }): ReactNode {
           <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
             {WORLDS.map(([name, description], index) => (
               <div key={name} className={cn("flex items-start gap-3 rounded-lg border border-border bg-card px-4 py-3.5", index === WORLDS.length - 1 && "sm:col-span-2")}>
-                <span className="nums mt-0.5 font-mono text-[10px] text-muted-foreground/80">{String(index + 1).padStart(2, "0")}</span>
+                <span className="nums mt-0.5 font-mono text-xs text-muted-foreground/80">{String(index + 1).padStart(2, "0")}</span>
                 <div>
                   <p className="text-sm font-semibold tracking-tight">{name}</p>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>

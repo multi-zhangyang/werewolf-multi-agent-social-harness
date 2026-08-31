@@ -102,10 +102,29 @@ export type NameResolver = (id: string) => string | undefined;
  */
 export function summarizeToolOutput(raw: string | undefined, resolveName?: NameResolver): string | undefined {
   if (!raw) return undefined;
-  const parts = payloadParts(parsePayload(raw), resolveName);
+  const payload = parsePayload(raw);
+  const failure = failurePayload(payload);
+  if (failure) {
+    const label = failure.kind === "input_validation" ? "参数不符合 Schema" : "执行被拒绝";
+    return `${label} · ${failure.code}`;
+  }
+  const parts = payloadParts(payload, resolveName);
   if (!parts.length) return undefined;
   const summary = parts.join(" · ");
   return summary.length > SUMMARY_CAP ? `${summary.slice(0, SUMMARY_CAP - 1)}…` : summary;
+}
+
+/** Friendly body for the official AI Elements Tool error slot. */
+export function summarizeToolFailure(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const failure = failurePayload(parsePayload(raw));
+  if (!failure) return raw;
+  const lines = [
+    `${failure.code}: ${failure.message}`,
+    ...(failure.expected ? [`Expected: ${failure.expected}`] : []),
+    failure.recovery
+  ];
+  return lines.join("\n");
 }
 
 function parsePayload(raw: string): unknown {
@@ -114,6 +133,27 @@ function parsePayload(raw: string): unknown {
   } catch {
     return raw;
   }
+}
+
+function failurePayload(payload: unknown): {
+  code: string;
+  kind: string;
+  message: string;
+  expected?: string;
+  recovery: string;
+} | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const record = payload as Record<string, unknown>;
+  if (record.ok !== false || !record.error || typeof record.error !== "object") return undefined;
+  const error = record.error as Record<string, unknown>;
+  if (typeof error.code !== "string" || typeof error.message !== "string" || typeof error.recovery !== "string") return undefined;
+  return {
+    code: error.code,
+    kind: typeof error.kind === "string" ? error.kind : "execution",
+    message: error.message,
+    ...(typeof error.expected === "string" ? { expected: error.expected } : {}),
+    recovery: error.recovery
+  };
 }
 
 function payloadParts(payload: unknown, resolveName: NameResolver | undefined): string[] {

@@ -50,8 +50,8 @@ export const ParticipantsRail = memo(function ParticipantsRail({
       <div className="panel flex h-full min-h-0 flex-col">
         <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border/60 px-4">
           <Users className="size-3 text-muted-foreground" aria-hidden />
-          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground/70">参与者</span>
-          <span className="nums ml-auto font-mono text-[10px] text-muted-foreground/50">{room.world.agents.length}</span>
+          <span className="font-mono text-xs uppercase tracking-[0.22em] text-muted-foreground/70">参与者</span>
+          <span className="nums ml-auto font-mono text-xs text-muted-foreground/50">{room.world.agents.length}</span>
         </div>
         <ScrollArea className="min-h-0 flex-1">
           <ul className="flex flex-col gap-0.5 p-2">
@@ -60,11 +60,12 @@ export const ParticipantsRail = memo(function ParticipantsRail({
               const speaking = agent.status === "speaking" || agent.status === "acting" || agent.status === "thinking";
               return (
                 <li key={agent.id}>
-                  <button
+                  <Button
+                    variant="ghost"
                     type="button"
                     onClick={() => setOpenId(agent.id)}
                     className={cn(
-                      "group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors duration-150 hover:bg-muted/40",
+                      "group h-auto w-full justify-start gap-2 whitespace-normal rounded-lg px-2 py-1.5 text-left transition-colors duration-150 hover:bg-muted/40",
                       speaking && "bg-live/[0.08] shadow-[inset_2px_0_0_oklch(0.77_0.15_160/0.7)]",
                       !speaking && isLeader(agent) && "leader-wash"
                     )}
@@ -78,13 +79,13 @@ export const ParticipantsRail = memo(function ParticipantsRail({
                         {!speaking && isLeader(agent) ? <Crown className="size-3 shrink-0 text-warn" aria-label="暂时领先" /> : null}
                         <StatusDot status={agent.status} className="size-2" />
                       </span>
-                      <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground/85">
+                      <span className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground/85">
                         {participant?.mood ? <span className="min-w-0 truncate">{participant.mood}</span> : <StatusLabel status={agent.status} />}
                         {(agent.score ?? 0) !== 0 ? <ScoreValue value={agent.score ?? 0} /> : null}
                       </span>
                     </span>
-                    {!agent.alive ? <Badge variant="outline" className="text-[9px]">离场</Badge> : null}
-                  </button>
+                    {!agent.alive ? <Badge variant="outline" className="text-xs">离场</Badge> : null}
+                  </Button>
                 </li>
               );
             })}
@@ -137,7 +138,7 @@ function MindSheet({ participant, room, privileged, onToggleAgentPause, models, 
           </div>
         </SheetHeader>
         <ScrollArea className="min-h-0 flex-1">
-          <div className="space-y-3 p-4">
+          <div className="flex flex-col gap-3 p-4">
             <section className="grid grid-cols-3 gap-2 text-center">
               <Stat label="状态" value={<StatusLabel status={worldAgent?.status ?? participant.status} />} />
               <Stat label="心情" value={participant.mood ?? "—"} />
@@ -157,8 +158,8 @@ function MindSheet({ participant, room, privileged, onToggleAgentPause, models, 
             ) : null}
 
             {canSwitchModel ? (
-              <div className="space-y-1.5">
-                <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+              <div className="flex flex-col gap-1.5">
+                <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
                   <Cpu className="size-3.5" aria-hidden />
                   运行模型
                 </p>
@@ -179,13 +180,13 @@ function MindSheet({ participant, room, privileged, onToggleAgentPause, models, 
                     {models.map((option) => (
                       <SelectItem key={option.profileId} value={option.profileId} className="text-xs">
                         {option.name}
-                        {option.contextLabel ? <span className="ml-1.5 text-[10px] text-muted-foreground">{option.contextLabel}</span> : null}
+                        {option.contextLabel ? <span className="ml-1.5 text-xs text-muted-foreground">{option.contextLabel}</span> : null}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
                 {!currentOption && participant.profile.model ? (
-                  <p className="text-[10px] leading-4 text-muted-foreground">当前引擎 {readableModel(participant.profile.model)} 未在模型中心登记，切换后将无法切回。</p>
+                  <p className="text-xs leading-4 text-muted-foreground">当前引擎 {readableModel(participant.profile.model)} 未在模型中心登记，切换后将无法切回。</p>
                 ) : null}
               </div>
             ) : null}
@@ -242,7 +243,7 @@ function MindSheet({ participant, room, privileged, onToggleAgentPause, models, 
 function Stat({ label, value }: { label: string; value: ReactNode }): ReactNode {
   return (
     <div className="sheen rounded-lg border border-border/60 bg-card/50 px-2 py-1.5">
-      <p className="text-[10px] text-muted-foreground">{label}</p>
+      <p className="text-xs text-muted-foreground">{label}</p>
       <p className="truncate text-xs font-medium">{value}</p>
     </div>
   );
@@ -266,7 +267,7 @@ function ScoreValue({ value }: { value: number }): ReactNode {
     <span className="relative ml-auto font-mono">
       {value}
       {delta !== null ? (
-        <span key={`${delta}:${value}`} className="score-pop absolute -top-3 right-0 text-[9px] font-normal text-warn">
+        <span key={`${delta}:${value}`} className="score-pop absolute -top-3 right-0 text-xs font-normal text-warn">
           {delta > 0 ? `+${delta}` : delta}
         </span>
       ) : null}

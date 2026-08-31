@@ -7,11 +7,12 @@
  * entry (`OPENAI_BASE_URL`, `SOCIETY_MODELS`, `SOCIETY_MODEL_CONTEXTS`): when
  * no persisted profile file exists, the registry seeds itself from them.
  */
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ContextPolicy, ModelProfile, ModelTuning, ProviderProfile } from "./contracts";
 import { defaultCapabilities, defaultContextPolicy, DEFAULT_CONTEXT_POLICY_ID } from "./defaults";
+import { atomicWriteJson, quarantineCorruptFile, type StorageHealth } from "../../server/storage";
 
 export interface RegistryGlobalDefaults {
   modelProfileId?: string;
@@ -30,6 +31,10 @@ export interface ModelRegistryState {
   modelProfiles: ModelProfile[];
   contextPolicies: ContextPolicy[];
   globalDefaults: RegistryGlobalDefaults;
+}
+
+interface ModelRegistryDocument extends ModelRegistryState {
+  schemaVersion: 1;
 }
 
 export class ModelRegistry {
@@ -129,7 +134,7 @@ export function defaultRegistryFile(cwd: string = process.cwd()): string {
 }
 
 /** Load the persisted registry; returns a fresh default registry when absent. */
-export function loadRegistry(file = defaultRegistryFile()): ModelRegistry {
+export function loadRegistry(file = defaultRegistryFile(), storage?: StorageHealth): ModelRegistry {
   if (!existsSync(file)) return new ModelRegistry();
   try {
     const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<ModelRegistryState>;
@@ -140,26 +145,26 @@ export function loadRegistry(file = defaultRegistryFile()): ModelRegistry {
       globalDefaults: raw.globalDefaults ?? {}
     };
     return new ModelRegistry(state);
-  } catch {
+  } catch (error) {
+    const quarantined = quarantineCorruptFile(file);
+    storage?.record({ store: "models", code: quarantined ? "CORRUPT_FILE_QUARANTINED" : "READ_FAILED" });
+    console.warn("[society] model registry unreadable; starting empty:", error instanceof Error ? error.message : error);
     return new ModelRegistry();
   }
 }
 
-export function persistRegistry(registry: ModelRegistry, file = defaultRegistryFile()): void {
-  mkdirSync(path.dirname(file), { recursive: true });
+export function persistRegistry(registry: ModelRegistry, file = defaultRegistryFile(), storage?: StorageHealth): void {
   const state = registry.snapshot();
   // Secrets must never reach this file even by accident.
   state.providers = state.providers.map((profile) => ({
     ...profile,
     ...(profile.apiKeyRef === undefined ? {} : { apiKeyRef: profile.apiKeyRef })
   }));
-  const temporary = `${file}.tmp`;
-  writeFileSync(temporary, JSON.stringify(state, null, 2), { mode: 0o600 });
-  writeFileSync(file, JSON.stringify(state, null, 2), { mode: 0o600 });
   try {
-    unlinkSync(temporary);
-  } catch {
-    // best-effort cleanup
+    atomicWriteJson(file, { schemaVersion: 1, ...state } satisfies ModelRegistryDocument);
+  } catch (error) {
+    storage?.record({ store: "models", code: "WRITE_FAILED" });
+    throw error;
   }
 }
 

@@ -21,6 +21,13 @@ export interface ModelProfileView {
   enabled: boolean;
   capabilities: Record<string, string>;
   defaults?: { reasoningEffort?: ReasoningEffort };
+  protocolCheck?: {
+    status: "unknown" | "passed" | "failed" | "stale";
+    checkedAt?: string;
+    latencyMs?: number;
+    errorCode?: string;
+    message?: string;
+  };
 }
 
 export interface ModelConfigView {
@@ -42,6 +49,13 @@ export interface TestResult {
     status: number;
     reason: string;
   }>;
+  capability?: TestResult;
+  protocol?: {
+    ok: boolean;
+    message: string;
+    check: NonNullable<ModelProfileView["protocolCheck"]>;
+    detail?: Array<{ step: string; result: string }>;
+  };
 }
 
 /** Live catalog fetched from the provider's own GET /models endpoint. */

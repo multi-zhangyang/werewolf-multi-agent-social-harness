@@ -1,5 +1,6 @@
 import { randomInt, randomUUID } from "node:crypto";
-import { tool, type Tool } from "@openai/agents";
+import type { Tool } from "@openai/agents";
+import { societyTool as tool } from "../tools";
 import { z } from "zod";
 import type {
   ActivationCompletion,
@@ -131,7 +132,7 @@ export class NegotiationWorld extends SocialWorldBase {
       })),
       recentMessages: this.visibleMessages(actorId).slice(-20),
       availableActions: this.phase === "discussion"
-        ? ["communicate", "make_offer", "respond_to_offer", "recall_memory", "reflect_on_social_situation", "read_the_room", "update_inner_state"]
+        ? ["final_response", "make_offer", "respond_to_offer", "recall_memory", "reflect_on_social_situation", "read_the_room", "update_inner_state"]
         : ["submit_demand"]
     };
   }

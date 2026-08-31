@@ -6,7 +6,16 @@ import type { AgentProfile, ScenarioId, ScenarioSummary, SpectatorMode } from ".
 import { contextLabel } from "../../society/context-manager";
 import type { SocietyRoom, SocietyRoomArchive, SocietyRoomEventEnvelope, SocietyRoomSnapshot } from "../../society/room";
 import { deleteRoomArchive, isArchiveOwner, listRoomArchives, readRoomArchive, writeRoomArchive } from "../../server/archives";
-import { defaultCapabilities, defaultContextPolicy, persistRegistry, type AgentModelBinding, type ContextPolicy, type ModelProfile } from "../../society/models";
+import {
+  defaultCapabilities,
+  defaultContextPolicy,
+  effectiveProtocolCheck,
+  isModelProtocolReady,
+  persistRegistry,
+  type AgentModelBinding,
+  type ContextPolicy,
+  type ModelProfile
+} from "../../society/models";
 import { projectEventFor, type SpectatorViewer } from "../../society/spectator/projection";
 import type { ServerContext } from "../context";
 import {
@@ -17,7 +26,8 @@ import {
   type RoomAuthority
 } from "../auth";
 import { getProviderSettings, writeEnvKey } from "../settings";
-import { fetchRemoteModels, mergeProbeResult, probeCapabilities } from "../probe";
+import { fetchRemoteModels } from "../probe";
+import { resolveKeyRef, runModelProbe } from "../model-probe-service";
 
 function sanitizeEnvName(id: string): string {
   return id.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase();
@@ -83,6 +93,7 @@ function requireRoomControl(
 ): RoomAuthority | undefined {
   const authority = roomAuthorityFor(request, room);
   if (authority.owner) return authority;
+  if (auth.localAdministrationEnabled()) return authority;
   if (auth.isOperatorToken(tokenFromRequest(request))) return authority;
   response.status(403).json({
     error: "CONTROL_FORBIDDEN",
@@ -134,17 +145,24 @@ const createRoomSchema = z.object({
 
 export function registerRoomRoutes(app: express.Express, context: ServerContext): void {
   app.get("/api/health", (_request, response) => {
-    const settings = getProviderSettings();
+    const profiles = context.models.listModelProfiles().filter((profile) => profile.enabled);
+    const checks = profiles.map((profile) => effectiveProtocolCheck(
+      profile,
+      context.models.providerProfile(profile.providerProfileId)
+    ));
     response.json({
-      status: "ok",
-      runtime: "@openai/agents",
-      providerConfigured: Boolean(settings.apiKey),
-      baseURL: settings.baseURL ? "configured" : "default",
-      activations: {
-        active: context.limiter.concurrency(),
-        pending: context.limiter.pending(),
-        max: context.limiter.maxConcurrent
-      }
+      ok: true,
+      rooms: context.rooms.list().length,
+      models: {
+        enabled: profiles.length,
+        ready: profiles.filter((profile) => isModelProtocolReady(
+          profile,
+          context.models.providerProfile(profile.providerProfileId)
+        )).length,
+        failed: checks.filter((check) => check.status === "failed").length,
+        stale: checks.filter((check) => check.status === "stale").length
+      },
+      storage: context.storage.snapshot()
     });
   });
 
@@ -156,14 +174,14 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   // stored — only its sha256, compared in constant time.
 
   app.get("/api/archives", (_request, response) => {
-    void listRoomArchives()
+    void listRoomArchives(context.storage)
       .then((archives) => response.json({ archives }))
       .catch(() => response.status(500).json({ error: "ARCHIVE_LIST_FAILED", message: "读取归档列表失败。" }));
   });
 
   app.get("/api/archives/:archiveId", (request, response) => {
     const archiveId = request.params.archiveId;
-    void readRoomArchive(archiveId)
+    void readRoomArchive(archiveId, context.storage)
       .then((archive) => {
         if (!archive) {
           response.status(404).json({ error: "ARCHIVE_NOT_FOUND", message: "归档不存在。" });
@@ -182,7 +200,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
 
   app.delete("/api/archives/:archiveId", (request, response) => {
     const archiveId = request.params.archiveId;
-    void readRoomArchive(archiveId)
+    void readRoomArchive(archiveId, context.storage)
       .then(async (archive) => {
         if (!archive) {
           response.status(404).json({ error: "ARCHIVE_NOT_FOUND", message: "归档不存在。" });
@@ -200,9 +218,10 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
   });
 
   app.get("/api/scenarios", (_request, response) => {
-    const profiles = context.models.listModelProfiles().filter((profile) => profile.enabled);
-    const models = profiles.length
-      ? profiles.map((profile) => ({
+    const profiles = context.models.listModelProfiles().filter((profile) =>
+      isModelProtocolReady(profile, context.models.providerProfile(profile.providerProfileId))
+    );
+    const models = profiles.map((profile) => ({
           id: profile.modelId,
           profileId: profile.id,
           name: profile.name,
@@ -210,12 +229,11 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
           context: profile.contextWindow,
           contextLabel: contextLabel(profile.contextWindow),
           capabilitySummary: summarizeCapabilities(profile)
-        }))
-      : modelCatalogForEnv(context);
-    // The registry-configured random pool, filtered to enabled profiles —
+        }));
+    // The registry-configured random pool, filtered to protocol-ready profiles —
     // room creation's 随机混合 deals seats from it by default.
     const pool = context.models.globalDefaults().randomPoolProfileIds ?? [];
-    const randomPoolProfileIds = profiles.length ? pool.filter((id) => profiles.some((profile) => profile.id === id)) : [];
+    const randomPoolProfileIds = pool.filter((id) => profiles.some((profile) => profile.id === id));
     response.json({ scenarios: ALL_SCENARIOS, models, randomPoolProfileIds });
   });
 
@@ -257,17 +275,9 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
       response.status(400).json({ error: "PROVIDER_PROFILE_MISSING", message: "The profile's provider does not exist." });
       return;
     }
-    void probeCapabilities({
-      baseURL: provider.baseURL,
-      apiKey: resolveKeyRef(provider.apiKeyRef),
-      modelId: profile.modelId,
-      reasoningEffort: probeInput.data.reasoningEffort
-    }).then((result) => {
-      const merged = { ...profile, capabilities: mergeProbeResult(profile.capabilities, result.capabilities) };
-      context.models.upsertModelProfile(merged);
-      persistRegistry(context.models);
-      response.json({ ...result, capabilities: merged.capabilities });
-    }).catch(next);
+    void runModelProbe(context, profile.id, probeInput.data.reasoningEffort)
+      .then((result) => response.json(result))
+      .catch(next);
   });
 
   app.put("/api/model-config", (request, response, next) => {
@@ -354,7 +364,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
         ...(input.archive
           ? {
               archiveSink: (archive: SocietyRoomArchive) => {
-                void writeRoomArchive(archive).catch((cause) => {
+                void writeRoomArchive(archive, context.storage).catch((cause) => {
                   console.error(`[archive ${archive.id}] write failed:`, cause instanceof Error ? cause.message : cause);
                 });
               }
@@ -521,6 +531,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     response.setHeader("Connection", "keep-alive");
     response.setHeader("X-Accel-Buffering", "no");
     response.flushHeaders?.();
+    const untrackConnection = context.liveConnections.track(response);
 
     // SSE cursor recovery: a (re)connecting client resumes
     // from its last sequence via ?afterSequence= or the Last-Event-ID header
@@ -558,6 +569,7 @@ export function registerRoomRoutes(app: express.Express, context: ServerContext)
     request.on("close", () => {
       clearInterval(heartbeat);
       unsubscribe();
+      untrackConnection();
     });
   });
 }
@@ -648,6 +660,7 @@ function publicModelConfig(context: ServerContext): Record<string, unknown> {
     contextWindowSource: profile.contextWindowSource,
     contextLabel: contextLabel(profile.contextWindow),
     capabilities: profile.capabilities,
+    protocolCheck: effectiveProtocolCheck(profile, context.models.providerProfile(profile.providerProfileId)),
     defaults: profile.defaults,
     contextPolicyId: profile.contextPolicyId,
     enabled: profile.enabled
@@ -661,7 +674,6 @@ function publicModelConfig(context: ServerContext): Record<string, unknown> {
 }
 
 function applyModelConfig(context: ServerContext, input: z.infer<typeof modelConfigSchema>): Record<string, unknown> {
-  if (input.globalDefaults) context.models.setGlobalDefaults(input.globalDefaults);
   if (input.providers) {
     for (const update of input.providers) {
       const existing = context.models.providerProfile(update.id);
@@ -737,7 +749,19 @@ function applyModelConfig(context: ServerContext, input: z.infer<typeof modelCon
       context.models.upsertContextPolicy(merged);
     }
   }
-  persistRegistry(context.models);
+  if (input.globalDefaults) {
+    const requestedDefault = input.globalDefaults.modelProfileId;
+    if (requestedDefault) assertReadyModelProfile(context, requestedDefault);
+    const readyPool = input.globalDefaults.randomPoolProfileIds?.filter((id) => {
+      const profile = context.models.modelProfile(id);
+      return Boolean(profile && isModelProtocolReady(profile, context.models.providerProfile(profile.providerProfileId)));
+    });
+    context.models.setGlobalDefaults({
+      ...input.globalDefaults,
+      ...(readyPool ? { randomPoolProfileIds: readyPool } : {})
+    });
+  }
+  persistRegistry(context.models, context.modelRegistryFile, context.storage);
   return publicModelConfig(context);
 }
 
@@ -749,12 +773,6 @@ function mergeReasoningDefaults(
   if (update.reasoningEffort) next.reasoningEffort = update.reasoningEffort;
   else delete next.reasoningEffort;
   return next;
-}
-
-function resolveKeyRef(ref: string | undefined): string {
-  if (!ref) return process.env.OPENAI_API_KEY ?? "";
-  if (ref.startsWith("env:")) return process.env[ref.slice(4)] ?? "";
-  return "";
 }
 
 /** Seat count for a room: creator choice clamped to the scenario's own range. */
@@ -770,16 +788,28 @@ function resolveModelIds(context: ServerContext, input: z.infer<typeof createRoo
   const profileIds = input.modelProfileIds ?? Object.values(input.agentModelOverrides ?? {});
   if (profileIds && profileIds.length) {
     const ids = profileIds
-      .map((id) => context.models.modelProfile(id)?.modelId)
+      .map((id) => {
+        const profile = context.models.modelProfile(id);
+        return profile && isModelProtocolReady(profile, context.models.providerProfile(profile.providerProfileId))
+          ? profile.modelId
+          : undefined;
+      })
       .filter((id): id is string => Boolean(id));
     if (ids.length) return ids;
   }
-  const profiles = context.models.listModelProfiles().filter((profile) => profile.enabled);
+  const profiles = context.models.listModelProfiles().filter((profile) =>
+    isModelProtocolReady(profile, context.models.providerProfile(profile.providerProfileId))
+  );
   if (profiles.length) {
     const ids = profiles.map((profile) => profile.modelId);
     return Array.from({ length: seatCount }, (_, index) => ids[index % ids.length]);
   }
-  return input.models ?? getProviderSettings().models;
+  if (input.models?.length) {
+    const readyIds = new Set(profiles.map((profile) => profile.modelId));
+    const selected = input.models.filter((id) => readyIds.has(id));
+    if (selected.length) return selected;
+  }
+  throw new Error("MODEL_PROTOCOL_NOT_READY: 请先在模型设置中启用模型并通过 Agents SDK 协议检查。");
 }
 
 /** Per-agent model bindings from profile-id / per-seat override input. */
@@ -791,6 +821,7 @@ function buildAgentBindings(
   const bindings: Record<string, AgentModelBinding> = {};
   if (input.modelProfileIds && input.modelProfileIds.length) {
     profiles.forEach((profile, index) => {
+      assertReadyModelProfile(context, input.modelProfileIds![index % input.modelProfileIds!.length]);
       bindings[profile.id] = {
         defaultModelProfileId: input.modelProfileIds![index % input.modelProfileIds!.length]
       };
@@ -800,10 +831,7 @@ function buildAgentBindings(
     profiles.forEach((profile, index) => {
       const override = input.agentModelOverrides![String(index)];
       if (!override) return;
-      const modelProfile = context.models.modelProfile(override);
-      if (!modelProfile) {
-        throw new Error(`MODEL_PROFILE_MISSING: '${override}' is not a registered model profile.`);
-      }
+      assertReadyModelProfile(context, override);
       bindings[profile.id] = { ...(bindings[profile.id] ?? {}), defaultModelProfileId: override };
     });
   }
@@ -826,7 +854,10 @@ function roomDefaultsFor(context: ServerContext, input: z.infer<typeof createRoo
     ?? Object.values(input.agentModelOverrides ?? {})[0]
     ?? global.modelProfileId;
   const defaults: Record<string, unknown> = {};
-  if (roomModelProfileId) defaults.modelProfileId = roomModelProfileId;
+  if (roomModelProfileId) {
+    assertReadyModelProfile(context, roomModelProfileId);
+    defaults.modelProfileId = roomModelProfileId;
+  }
   if (global.contextPolicyId) defaults.contextPolicyId = global.contextPolicyId;
   if (input.temperature !== undefined) defaults.tuning = { temperature: input.temperature };
   if (input.reasoningEffort) defaults.tuning = { ...(defaults.tuning as Record<string, unknown> ?? {}), reasoningEffort: input.reasoningEffort };
@@ -843,13 +874,13 @@ function summarizeCapabilities(profile: ModelProfile): string {
   return parts.join(",");
 }
 
-function modelCatalogForEnv(context: ServerContext): Array<{ id: string; name: string; provider: string; context: number; contextLabel: string }> {
-  const ids = getProviderSettings().models;
-  return ids.map((id) => {
-    const profile = context.models.listModelProfiles().find((entry) => entry.modelId === id);
-    const contextWindow = profile?.contextWindow ?? 256_000;
-    return { id, name: id, provider: "OpenAI-compatible", context: contextWindow, contextLabel: contextLabel(contextWindow) };
-  });
+function assertReadyModelProfile(context: ServerContext, id: string): ModelProfile {
+  const profile = context.models.modelProfile(id);
+  if (!profile) throw new Error(`MODEL_PROFILE_MISSING: '${id}' is not a registered model profile.`);
+  if (!isModelProtocolReady(profile, context.models.providerProfile(profile.providerProfileId))) {
+    throw new Error(`MODEL_PROTOCOL_NOT_READY: '${profile.name}' 尚未通过当前配置的 Agents SDK 协议检查。`);
+  }
+  return profile;
 }
 
 /**

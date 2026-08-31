@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Cpu, Plug, Plus, Settings2, SlidersHorizontal } from "lucide-react";
+import { ArrowLeft, Cpu, Plug, Plus, Settings2, SlidersHorizontal } from "lucide-react";
 import { apiFetch } from "@/lib/api";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle
-} from "@/components/ui/dialog";
+import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from "@/components/ui/alert-dialog";
 import { ErrorNote } from "../shared";
 import { GlobalDefaultsSection } from "./global-defaults-section";
 import { ModelFormSection } from "./model-form-section";
@@ -30,13 +35,12 @@ import {
 type SettingsTab = "providers" | "models" | "defaults";
 
 interface SettingsDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onBack: () => void;
   onSaved: () => void;
 }
 
 /** Model configuration center: providers, model profiles, global defaults. */
-export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogProps): ReactNode {
+export function SettingsPage({ onBack, onSaved }: SettingsDialogProps): ReactNode {
   const [config, setConfig] = useState<ModelConfigView>({ providers: [], modelProfiles: [], globalDefaults: {} });
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState<SettingsTab>("providers");
@@ -54,6 +58,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
   const [editingProfile, setEditingProfile] = useState<ModelProfileView | null>(null);
   /** The add/edit form is collapsed to a one-line entry by default; adding is rare. */
   const [formOpen, setFormOpen] = useState(false);
+  const [pendingModelRemoval, setPendingModelRemoval] = useState<string>();
   const formRef = useRef<HTMLDivElement>(null);
 
   // Bring the form into view whenever it expands (add entry or edit action).
@@ -79,7 +84,9 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
     }
   };
 
-  if (open && !loaded) void load();
+  useEffect(() => {
+    if (!loaded) void load();
+  }, [loaded]);
 
   const putConfig = async (body: unknown, options?: { saved?: boolean }): Promise<boolean> => {
     setSaving(true);
@@ -301,6 +308,8 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
         const next = await refreshed.json() as ModelConfigView;
         setConfig(next);
         setGlobalModel(next.globalDefaults.modelProfileId ?? "");
+        setGlobalPool(Array.isArray(next.globalDefaults.randomPoolProfileIds) ? next.globalDefaults.randomPoolProfileIds : []);
+        onSaved();
       }
     } catch (cause) {
       setProbeResults((current) => ({ ...current, [profileId]: { ok: false, message: cause instanceof Error ? cause.message : String(cause) } }));
@@ -338,17 +347,24 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
   };
 
   return (
-    <Dialog open={open} onOpenChange={(next) => { if (!next) { setLoaded(false); setError(undefined); } onOpenChange(next); }}>
-      <DialogContent className="flex h-[90dvh] max-w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden rounded-xl border-border bg-card p-0 text-foreground shadow-2xl sm:h-[min(780px,90vh)] sm:max-w-4xl">
-        <div className="flex shrink-0 items-center gap-3 border-b border-border px-6 py-4">
+    <>
+      <div className="min-h-screen bg-background text-foreground">
+        <header className="rule-b sticky top-0 z-20 bg-background/90 backdrop-blur">
+          <div className="mx-auto flex h-16 w-full max-w-7xl items-center gap-3 px-4 sm:px-6">
+            <Button variant="ghost" size="icon-sm" aria-label="返回大厅" onClick={onBack}><ArrowLeft /></Button>
+            <Breadcrumb><BreadcrumbList><BreadcrumbItem><BreadcrumbLink asChild><Button variant="link" className="h-auto p-0" onClick={onBack}>大厅</Button></BreadcrumbLink></BreadcrumbItem><BreadcrumbSeparator /><BreadcrumbItem><BreadcrumbPage>模型设置</BreadcrumbPage></BreadcrumbItem></BreadcrumbList></Breadcrumb>
+          </div>
+        </header>
+        <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6">
+        <div className="flex items-center gap-3 pb-6">
           <span className="flex size-9 items-center justify-center rounded-lg border border-border bg-muted text-foreground/80">
             <Settings2 className="size-4.5" />
           </span>
           <div className="min-w-0">
-            <DialogTitle className="text-[15px] font-semibold tracking-tight">模型配置中心</DialogTitle>
-            <DialogDescription className="mt-0.5 truncate text-xs leading-4 text-muted-foreground">
+            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">模型配置中心</h1>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
               提供商、模型档案与全局默认。密钥只写入本机 <span className="font-mono">.env.local</span>，档案保存在本机 <span className="font-mono">data/model-settings.json</span>，不进入代码仓库。
-            </DialogDescription>
+            </p>
           </div>
         </div>
 
@@ -358,30 +374,29 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
           </div>
         ) : null}
 
-        <div className="flex min-h-0 flex-1">
-          <nav className="flex w-full shrink-0 gap-1 overflow-x-auto border-b border-border p-2 sm:w-44 sm:flex-col sm:gap-0.5 sm:overflow-visible sm:border-b-0 sm:border-r sm:p-3" aria-label="设置分区">
+        <Tabs
+          value={tab}
+          onValueChange={(value) => setTab(value as SettingsTab)}
+          className="flex min-h-[36rem] flex-col gap-0 overflow-hidden rounded-xl border border-border bg-card sm:flex-row"
+        >
+          <TabsList className="flex h-auto w-full shrink-0 justify-start gap-1 overflow-x-auto rounded-none border-b border-border bg-transparent p-2 sm:w-44 sm:flex-col sm:gap-0.5 sm:overflow-visible sm:border-r sm:border-b-0 sm:p-3" aria-label="设置分区">
             {tabs.map(({ id, label, icon: Icon, count }) => (
-              <button
+              <TabsTrigger
                 key={id}
-                onClick={() => setTab(id)}
-                aria-current={tab === id ? "page" : undefined}
-                className={cn(
-                  "flex h-8 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 text-[13px] transition-colors sm:h-9 sm:flex-none sm:justify-start",
-                  tab === id ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                )}
+                value={id}
+                className="h-8 flex-1 justify-center gap-2 whitespace-nowrap rounded-md px-3 text-sm sm:h-9 sm:w-full sm:flex-none sm:justify-start"
               >
                 <Icon className="size-3.5 shrink-0" />
                 {label}
                 {count !== undefined ? (
-                  <span className="nums hidden text-[11px] text-muted-foreground/70 sm:ml-auto sm:inline">{count}</span>
+                  <span className="nums hidden text-xs text-muted-foreground/70 sm:ml-auto sm:inline">{count}</span>
                 ) : null}
-              </button>
+              </TabsTrigger>
             ))}
-          </nav>
+          </TabsList>
 
-          <div className="scroll-fade-y-lg min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
-            {tab === "providers" ? (
-              <div className="p-6 pb-10">
+          <div className="min-w-0 flex-1 overflow-x-hidden">
+            <TabsContent value="providers" className="m-0 p-6 pb-10">
                 <ProviderSection
                   providers={config.providers}
                   draft={providerDraft}
@@ -389,11 +404,9 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                   onAdd={() => void addProvider()}
                   saving={saving}
                 />
-              </div>
-            ) : null}
+            </TabsContent>
 
-            {tab === "models" ? (
-              <div className="space-y-4 p-6 pb-10">
+            <TabsContent value="models" className="m-0 flex flex-col gap-4 p-6 pb-10">
                 <ModelProfilesSection
                   profiles={config.modelProfiles}
                   providers={config.providers}
@@ -404,7 +417,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                   onProbe={(profileId, reasoningEffort) => void probe(profileId, reasoningEffort)}
                   onEdit={editProfile}
                   onToggle={(profile) => void toggleModel(profile)}
-                  onRemove={(id) => void removeModel(id)}
+                  onRemove={setPendingModelRemoval}
                   onSaveReasoningEffort={(profile, reasoningEffort) => void saveReasoningEffort(profile, reasoningEffort)}
                 />
                 {formOpen || editingProfile ? (
@@ -431,7 +444,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                   </div>
                 ) : (
                   <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-4 py-3">
-                    <p className="min-w-0 text-[13px] leading-5 text-muted-foreground">
+                    <p className="min-w-0 text-sm leading-5 text-muted-foreground">
                       从提供商拉取模型列表批量添加，或手动登记一个模型 ID。
                     </p>
                     <Button variant="tile" size="sm" className="shrink-0" onClick={() => setFormOpen(true)}>
@@ -439,11 +452,9 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                     </Button>
                   </div>
                 )}
-              </div>
-            ) : null}
+            </TabsContent>
 
-            {tab === "defaults" ? (
-              <div className="p-6 pb-10">
+            <TabsContent value="defaults" className="m-0 p-6 pb-10">
                 <GlobalDefaultsSection
                   profiles={config.modelProfiles}
                   value={globalModel}
@@ -453,18 +464,38 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
                   onSave={() => void save()}
                   saving={saving}
                 />
-              </div>
-            ) : null}
+            </TabsContent>
           </div>
-        </div>
+        </Tabs>
 
-        <div className="flex shrink-0 items-center justify-between border-t border-border px-6 py-3.5">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-4 py-3.5 sm:px-6">
           <p className="text-xs text-muted-foreground">「测试」会向提供商发起一次真实请求；其余操作只写入本机配置。</p>
-          <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={() => { setLoaded(false); onOpenChange(false); }}>
-            关闭
+          <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={onBack}>
+            返回大厅
           </Button>
         </div>
-      </DialogContent>
-    </Dialog>
+        </main>
+      </div>
+      <AlertDialog open={pendingModelRemoval !== undefined} onOpenChange={(next) => { if (!next) setPendingModelRemoval(undefined); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>移除这个模型档案？</AlertDialogTitle>
+            <AlertDialogDescription>它会从默认模型和随机池中同步移除；历史对局不受影响。</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                if (!pendingModelRemoval) return;
+                void removeModel(pendingModelRemoval).finally(() => setPendingModelRemoval(undefined));
+              }}
+            >
+              移除档案
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

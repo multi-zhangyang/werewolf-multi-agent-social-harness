@@ -65,7 +65,7 @@ export function TensionMeter({ tension }: { tension: RoomTension | null }): Reac
               />
             ))}
           </span>
-          <span className={cn("text-[10px] leading-none transition-colors duration-500", TENSION_LABEL_CLASSES[levelIndex]!)}>
+          <span className={cn("text-xs leading-none transition-colors duration-500", TENSION_LABEL_CLASSES[levelIndex]!)}>
             {TENSION_LEVELS[levelIndex]!.label}
           </span>
         </span>
@@ -127,9 +127,9 @@ export function CueBanner({ cue, names, minPriority = 4 }: {
         <meta.icon className={cn("size-3.5 shrink-0", meta.className)} aria-hidden />
         <span className="min-w-0 shrink-0 text-xs font-medium tracking-tight">{cue.title}</span>
         {cue.subtitle
-          ? <span className="min-w-0 truncate text-[11px] text-muted-foreground">{cue.subtitle}</span>
+          ? <span className="min-w-0 truncate text-xs text-muted-foreground">{cue.subtitle}</span>
           : focus.length
-            ? <span className="min-w-0 truncate text-[11px] text-muted-foreground">{focus.join(" · ")}</span>
+            ? <span className="min-w-0 truncate text-xs text-muted-foreground">{focus.join(" · ")}</span>
             : null}
       </div>
     </div>
@@ -199,7 +199,7 @@ export function EndgameOverlay({ room, avatarSeedFor, onDismiss }: {
           <span className="flex size-11 items-center justify-center rounded-2xl border border-warn/25 bg-warn/10">
             <Trophy className="size-5 text-warn" aria-hidden />
           </span>
-          <p className="text-[10px] font-medium tracking-[0.22em] text-muted-foreground">终局揭晓</p>
+          <p className="text-xs font-medium tracking-[0.22em] text-muted-foreground">终局揭晓</p>
           <h2 className="max-w-md text-balance text-xl font-semibold leading-snug tracking-tight">{summary.headline}</h2>
         </div>
 
@@ -220,8 +220,8 @@ export function EndgameOverlay({ room, avatarSeedFor, onDismiss }: {
               >
                 <AgentAvatar name={agent.displayName} seed={avatarSeedFor(agent.id)} size="sm" />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13px] font-medium leading-tight">{agent.displayName}</p>
-                  <p className="mt-1 truncate text-[11px] leading-none text-muted-foreground">{roleLine}</p>
+                  <p className="truncate text-sm font-medium leading-tight">{agent.displayName}</p>
+                  <p className="mt-1 truncate text-xs leading-none text-muted-foreground">{roleLine}</p>
                 </div>
                 {agent.score !== undefined ? <span className="nums shrink-0 font-mono text-xs">{agent.score}</span> : null}
               </div>
@@ -231,32 +231,32 @@ export function EndgameOverlay({ room, avatarSeedFor, onDismiss }: {
 
         {modelRows.length ? (
           <section aria-label="模型战绩" className="flex flex-col gap-2">
-            <p className="text-[10px] font-medium tracking-[0.22em] text-muted-foreground">模型战绩</p>
+            <p className="text-xs font-medium tracking-[0.22em] text-muted-foreground">模型战绩</p>
             <ul className="flex flex-col gap-1.5">
               {modelRows.map((row) => (
                 <li key={row.model} className="flex items-baseline gap-2.5 rounded-lg border border-border/60 bg-card/40 px-3 py-2">
-                  <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-tight">{row.model}</span>
-                  <span className="nums shrink-0 font-mono text-[11px] text-muted-foreground">
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium leading-tight">{row.model}</span>
+                  <span className="nums shrink-0 font-mono text-xs text-muted-foreground">
                     {row.seats} 席{winners.size ? ` · 胜 ${row.wins}` : ""}{row.avgScore !== undefined ? ` · 均分 ${Math.round(row.avgScore * 100) / 100}` : ""}
                   </span>
                 </li>
               ))}
             </ul>
-            {humanSeats ? <p className="text-[11px] leading-4 text-muted-foreground/70">{humanSeats} 个真人席位不计入模型战绩。</p> : null}
+            {humanSeats ? <p className="text-xs leading-4 text-muted-foreground/70">{humanSeats} 个真人席位不计入模型战绩。</p> : null}
           </section>
         ) : null}
 
         {highlights.length ? (
           <section aria-label="本场高光" className="flex flex-col gap-2">
-            <p className="text-[10px] font-medium tracking-[0.22em] text-muted-foreground">本场高光</p>
+            <p className="text-xs font-medium tracking-[0.22em] text-muted-foreground">本场高光</p>
             <ol className="flex flex-col gap-1.5">
               {highlights.map((highlight) => (
                 <li key={highlight.id} className="flex items-baseline gap-2.5 rounded-lg border border-border/60 bg-card/40 px-3 py-2">
-                  <time className="shrink-0 font-mono text-[10px] text-muted-foreground/70">{formatTime(highlight.at, { seconds: false })}</time>
+                  <time className="shrink-0 font-mono text-xs text-muted-foreground/70">{formatTime(highlight.at, { seconds: false })}</time>
                   <span className="min-w-0 flex-1">
-                    <span className="text-[13px] font-medium leading-tight">{highlight.title}</span>
+                    <span className="text-sm font-medium leading-tight">{highlight.title}</span>
                     {highlight.subtitle
-                      ? <span className="mt-0.5 block truncate text-[11px] leading-tight text-muted-foreground">{highlight.subtitle}</span>
+                      ? <span className="mt-0.5 block truncate text-xs leading-tight text-muted-foreground">{highlight.subtitle}</span>
                       : null}
                   </span>
                 </li>
@@ -353,7 +353,7 @@ export function NightRevealBanner({ world }: { world: SocietyRoomSnapshot["world
     <div className="reveal-up absolute inset-x-0 top-3 z-10 mx-auto flex w-[min(94%,30rem)] flex-col gap-2.5 rounded-xl border border-warn/30 bg-card/95 p-4 shadow-[0_18px_50px_-16px_oklch(0_0_0/0.6)] backdrop-blur-md" role="status" aria-live="polite">
       <header className="flex items-center gap-2">
         <Moon className="size-3.5 text-warn" aria-hidden />
-        <span className="text-[10px] font-medium tracking-[0.22em] text-muted-foreground">第 {record.day} 天 · 夜晚结算</span>
+        <span className="text-xs font-medium tracking-[0.22em] text-muted-foreground">第 {record.day} 天 · 夜晚结算</span>
         <Button
           variant="ghost"
           size="icon"
@@ -374,11 +374,11 @@ export function NightRevealBanner({ world }: { world: SocietyRoomSnapshot["world
           return (
             <li key={event.key} className="flex items-center gap-2.5 rounded-lg border border-border/60 bg-muted/25 px-3 py-2">
               <event.icon className={cn("size-4 shrink-0", event.tone === "kill" ? "text-warn" : "text-secret")} aria-hidden />
-              <span className="min-w-0 flex-1 truncate text-[13px]">
+              <span className="min-w-0 flex-1 truncate text-sm">
                 {id ? <span className="font-medium">{nameOf(id)}</span> : null}
                 <span className="text-muted-foreground"> · {event.detail}</span>
               </span>
-              {event.role ? <Badge variant="outline" className="shrink-0 text-[10px]">{roleLabelZh(event.role)}</Badge> : null}
+              {event.role ? <Badge variant="outline" className="shrink-0 text-xs">{roleLabelZh(event.role)}</Badge> : null}
             </li>
           );
         })}
@@ -422,13 +422,13 @@ export function StorylineBar({ world }: { world: SocietyRoomSnapshot["world"] })
       className="rule-b flex h-7 shrink-0 items-center gap-1 overflow-x-auto px-5 pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       aria-label="故事线导航"
     >
-      <span className="shrink-0 pr-0.5 font-mono text-[10px] text-muted-foreground/60">故事线</span>
+      <span className="shrink-0 pr-0.5 font-mono text-xs text-muted-foreground/60">故事线</span>
       {log.map((entry) => {
         const turnBoundary = entry.turn !== lastTurn;
         lastTurn = entry.turn;
         return (
           <span key={entry.id} className="flex shrink-0 items-center gap-1">
-            {turnBoundary ? <span className="nums font-mono text-[9px] text-muted-foreground/40">R{entry.turn}</span> : null}
+            {turnBoundary ? <span className="nums font-mono text-xs text-muted-foreground/40">R{entry.turn}</span> : null}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -441,7 +441,7 @@ export function StorylineBar({ world }: { world: SocietyRoomSnapshot["world"] })
                 </Button>
               </TooltipTrigger>
               <TooltipContent className="max-w-xs text-xs">
-                <p className="font-mono text-[10px] text-muted-foreground">{formatTime(entry.at, { seconds: false })}</p>
+                <p className="font-mono text-xs text-muted-foreground">{formatTime(entry.at, { seconds: false })}</p>
                 <p className="mt-0.5">{entry.text}</p>
               </TooltipContent>
             </Tooltip>
@@ -474,7 +474,7 @@ export function DayHistorySection({ room }: { room: SocietyRoomSnapshot }): Reac
   const events = nightEvents(active);
 
   return (
-    <CollapsibleSection title="对局日历" count={history.length} defaultOpen contentClassName="space-y-3">
+    <CollapsibleSection title="对局日历" count={history.length} defaultOpen contentClassName="gap-3">
       <div className="flex flex-wrap gap-1.5">
         {history.map((record) => (
           <Button
@@ -484,7 +484,7 @@ export function DayHistorySection({ room }: { room: SocietyRoomSnapshot }): Reac
             aria-pressed={record.day === active.day}
             onClick={() => setSelectedDay(record.day)}
             className={cn(
-              "h-6 gap-1.5 rounded-full px-2.5 font-mono text-[11px] font-normal",
+              "h-6 gap-1.5 rounded-full px-2.5 font-mono text-xs font-normal",
               record.day === active.day
                 ? "border-foreground/35 bg-muted text-foreground"
                 : "border-border/70 bg-transparent text-muted-foreground"
@@ -497,10 +497,10 @@ export function DayHistorySection({ room }: { room: SocietyRoomSnapshot }): Reac
         ))}
       </div>
 
-      <div className="space-y-1.5">
-        <p className="text-[10px] font-medium tracking-[0.22em] text-muted-foreground">第 {active.day} 天 · 夜晚</p>
+      <div className="flex flex-col gap-1.5">
+        <p className="text-xs font-medium tracking-[0.22em] text-muted-foreground">第 {active.day} 天 · 夜晚</p>
         {events.length ? (
-          <ul className="space-y-1">
+          <ul className="flex flex-col gap-1">
             {events.map((event) => {
               const id = event.key === "kill" ? active.nightKillId
                 : event.key === "poison" ? active.poisonId
@@ -521,11 +521,11 @@ export function DayHistorySection({ room }: { room: SocietyRoomSnapshot }): Reac
       </div>
 
       {rows.length ? (
-        <div className="space-y-1.5">
-          <p className="text-[10px] font-medium tracking-[0.22em] text-muted-foreground">放逐投票</p>
-          <ul className="space-y-1.5">
+        <div className="flex flex-col gap-1.5">
+          <p className="text-xs font-medium tracking-[0.22em] text-muted-foreground">放逐投票</p>
+          <ul className="flex flex-col gap-1.5">
             {rows.map(([target, voters]) => (
-              <li key={target} className="space-y-1">
+              <li key={target} className="flex flex-col gap-1">
                 <div className="flex items-center gap-2">
                   <span className={cn("w-16 shrink-0 truncate text-xs", target === active.eliminatedId ? "font-semibold text-warn" : "font-medium")}>{nameOf(target)}</span>
                   <span className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-foreground/8">
@@ -534,14 +534,14 @@ export function DayHistorySection({ room }: { room: SocietyRoomSnapshot }): Reac
                       style={{ width: `${Math.max(6, (voters.length / maxCount) * 100)}%` }}
                     />
                   </span>
-                  <span className="nums shrink-0 font-mono text-[11px] text-muted-foreground">{voters.length}</span>
+                  <span className="nums shrink-0 font-mono text-xs text-muted-foreground">{voters.length}</span>
                 </div>
-                <p className="truncate pl-[4.5rem] text-[11px] leading-4 text-muted-foreground/80">{voters.map(nameOf).join(" · ")}</p>
+                <p className="truncate pl-[4.5rem] text-xs leading-4 text-muted-foreground/80">{voters.map(nameOf).join(" · ")}</p>
               </li>
             ))}
           </ul>
-          {active.idiotSurvived ? <p className="text-[11px] text-warn">白痴翻牌——免于放逐，但失去投票权。</p> : null}
-          {!active.eliminatedId && !active.idiotSurvived ? <p className="text-[11px] text-muted-foreground">平票——本日无人出局。</p> : null}
+          {active.idiotSurvived ? <p className="text-xs text-warn">白痴翻牌——免于放逐，但失去投票权。</p> : null}
+          {!active.eliminatedId && !active.idiotSurvived ? <p className="text-xs text-muted-foreground">平票——本日无人出局。</p> : null}
         </div>
       ) : null}
     </CollapsibleSection>

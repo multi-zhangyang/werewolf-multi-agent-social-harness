@@ -76,6 +76,22 @@ export interface ModelTuning {
   providerData?: Record<string, unknown>;
 }
 
+export type ProtocolCheckStatus = "unknown" | "passed" | "failed" | "stale";
+
+/**
+ * Result of the real Agents SDK tool -> result -> final response handshake.
+ * The fingerprint deliberately excludes credentials, while covering every
+ * provider/model setting whose change can alter the wire protocol.
+ */
+export interface ModelProtocolCheck {
+  status: ProtocolCheckStatus;
+  fingerprint: string;
+  checkedAt?: string;
+  latencyMs?: number;
+  errorCode?: string;
+  message?: string;
+}
+
 export interface ModelProfile {
   id: string;
   name: string;
@@ -88,6 +104,8 @@ export interface ModelProfile {
   defaults: ModelTuning;
   contextPolicyId: string;
   enabled: boolean;
+  /** Missing on legacy profiles; exposed as `unknown` until checked. */
+  protocolCheck?: ModelProtocolCheck;
 }
 
 /**

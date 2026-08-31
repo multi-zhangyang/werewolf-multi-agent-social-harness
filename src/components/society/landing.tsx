@@ -1,330 +1,169 @@
 import type { ReactNode } from "react";
-import {
-  Archive,
-  ArrowDown,
-  ArrowRight,
-  ArrowUpRight,
-  BrainCircuit,
-  Crown,
-  MessagesSquare,
-  Play,
-  Radio,
-  Settings2,
-  Trash2,
-  Users,
-  Waypoints
-} from "lucide-react";
+import { Archive, ArrowRight, CircleCheck, HardDrive, Play, Radio, Settings2, Trash2, Users } from "lucide-react";
+import type { HealthResponse } from "@/App";
 import type { ScenarioSummary } from "@/society/contracts";
 import type { SocietyRoomSnapshot } from "@/society/room";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Separator } from "@/components/ui/separator";
+import { cn } from "@/lib/utils";
 import { ScenarioIcon, StatusDot, StatusLabel, formatTime } from "./shared";
 import type { ArchiveOption, ModelOption } from "./types";
-import { cn } from "@/lib/utils";
 
 interface LandingProps {
   scenarios: ScenarioSummary[];
   models: ModelOption[];
   rooms: SocietyRoomSnapshot[];
-  /** Finished games their creator chose to persist; postgame replays. */
   archives: ArchiveOption[];
-  /** Model-vs-model standings over finished games in this process. */
-  standings: Array<{ model: string; seats: number; wins: number; avgScore: number | null }>;
+  health?: HealthResponse;
   onStart: (scenarioId: string) => void;
   onOpenRoom: (roomId: string) => void;
   onOpenArchive: (archiveId: string) => void;
   onOpenSettings: () => void;
   onOpenCharacters: () => void;
   onOpenAbout: () => void;
-  /** Stop and release a room; nothing is persisted. */
   onRemoveRoom: (roomId: string) => void;
 }
 
-export function Landing({ scenarios, models, rooms, archives, standings, onStart, onOpenRoom, onOpenArchive, onOpenSettings, onOpenCharacters, onOpenAbout, onRemoveRoom }: LandingProps): ReactNode {
+export function Landing(props: LandingProps): ReactNode {
+  const { scenarios, models, rooms, archives, health, onStart, onOpenRoom, onOpenArchive, onOpenSettings, onOpenCharacters, onOpenAbout, onRemoveRoom } = props;
+  const ready = health?.models.ready ?? models.length;
+  const firstScenario = scenarios[0]?.id ?? "werewolf";
   return (
     <div className="min-h-screen bg-background">
       <header className="rule-b sticky top-0 z-20 bg-background/90 backdrop-blur">
-        <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-6">
-          <button className="flex items-center gap-2.5" onClick={() => { location.hash = "#/"; }}>
+        <div className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between gap-3 px-4 sm:px-6">
+          <Button variant="ghost" className="h-auto gap-2.5 p-0 hover:bg-transparent" onClick={() => { location.hash = "#/"; }}>
             <span className="flex size-7 items-center justify-center rounded-md bg-foreground font-mono text-xs text-background">◆</span>
-            <span className="text-[15px] font-semibold tracking-tight">Society</span>
-          </button>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" className="rounded-lg px-3 text-[13px] text-muted-foreground hover:bg-muted hover:text-foreground" onClick={onOpenCharacters}>
-              <Users className="size-3.5" />
-              人物库
-            </Button>
-            <Button variant="ghost" size="sm" className="hidden rounded-lg px-3 text-[13px] text-muted-foreground hover:bg-muted hover:text-foreground sm:inline-flex" onClick={onOpenAbout}>
-              关于
-            </Button>
-            {rooms.length ? (
-              <Badge variant="outline" className="hidden gap-1.5 rounded-full border-border px-3 py-1 font-normal text-muted-foreground sm:inline-flex">
-                <span className="live-pulse size-1.5 rounded-full bg-foreground" />
-                {rooms.length} 个活跃世界
-              </Badge>
-            ) : null}
-            <Button variant="tile" size="icon-sm" aria-label="模型提供商设置" onClick={onOpenSettings}>
-              <Settings2 className="size-3.5" />
-            </Button>
-            <Button size="sm" className="rounded-lg px-4" onClick={() => onStart(scenarios[0]?.id ?? "werewolf")}>
-              <Play className="size-3.5" />
-              创建世界
-            </Button>
-          </div>
+            <span className="text-base font-semibold tracking-tight">Society</span>
+          </Button>
+          <nav className="flex items-center gap-1" aria-label="主要导航">
+            <Button variant="ghost" size="sm" className="hidden text-muted-foreground sm:inline-flex" onClick={onOpenCharacters}><Users />人物库</Button>
+            <Button variant="ghost" size="sm" className="hidden text-muted-foreground md:inline-flex" onClick={onOpenAbout}>关于</Button>
+            <Button variant="tile" size="icon-sm" aria-label="模型设置" onClick={onOpenSettings}><Settings2 /></Button>
+            <Button size="sm" onClick={() => onStart(firstScenario)} disabled={ready === 0}><Play />创建世界</Button>
+          </nav>
         </div>
       </header>
 
-      <main>
-        <section className="reveal-up mx-auto w-full max-w-3xl px-6 pb-20 pt-20 text-center sm:pt-28">
-          {rooms.length ? (
-            <p className="mx-auto flex w-fit items-center gap-2 rounded-full border border-border bg-card px-3.5 py-1.5 text-xs text-muted-foreground">
-              <span className="live-pulse size-1.5 rounded-full bg-live" />
-              {rooms.length} 个世界正在直播
-              <span className="text-muted-foreground/50">·</span>
-              <button className="font-medium text-foreground underline-offset-4 hover:underline" onClick={() => onOpenRoom(rooms[0]!.id)}>进去看看</button>
+      <main className="mx-auto flex w-full max-w-7xl flex-col gap-12 px-4 py-8 sm:px-6 sm:py-12">
+        <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-end">
+          <div>
+            <Badge variant="outline" className="mb-4 gap-2 rounded-full py-1">
+              <span className={cn("size-1.5 rounded-full", ready > 0 ? "bg-live" : "bg-warn")} />
+              {ready > 0 ? `${ready} 个模型已就绪` : "需要完成模型协议检查"}
+            </Badge>
+            <h1 className="max-w-3xl text-balance text-3xl font-semibold tracking-tight sm:text-4xl">观察 Agent 如何谈判、结盟与背叛</h1>
+            <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">
+              本机运行的多智能体社会博弈舞台。工具调用、工具结果与最终发言按真实顺序直播，并在终局保留可复盘的因果证据。
             </p>
-          ) : null}
-          <h1 className="text-balance text-4xl font-semibold leading-[1.15] tracking-tight sm:text-5xl">
-            多智能体社会博弈竞技场
-          </h1>
-          <p className="mx-auto mt-6 max-w-xl text-balance text-base leading-7 text-muted-foreground sm:text-lg sm:leading-8">
-            真实的模型 Agent 在 {scenarios.length} 个社会压力场景里谈判、结盟、欺骗与背叛。每个参与者都有独立的会话、情绪与立场，记得发生过的事。
-          </p>
-          <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
-            <Button size="lg" className="h-11 rounded-lg px-8" onClick={() => onStart(scenarios[0]?.id ?? "werewolf")}>
-              开始一场博弈
-              <ArrowRight className="size-4" />
+          </div>
+          <div className="flex flex-col gap-3 sm:flex-row lg:flex-col">
+            <Button size="lg" className="h-11 flex-1" onClick={() => onStart(firstScenario)} disabled={ready === 0}>
+              <Play />创建世界<ArrowRight />
             </Button>
-            <Button size="lg" variant="ghost" asChild className="h-11 rounded-lg border border-border/70 bg-transparent px-7 text-foreground/80 hover:bg-muted/60 hover:text-foreground">
-              <a href="#scenarios">
-                浏览全部世界
-                <ArrowDown className="size-4" />
-              </a>
-            </Button>
-          </div>
-          <p className="mt-10 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
-            <span className="text-foreground">{scenarios.length}</span> 个世界
-            <span className="text-border">·</span>
-            {models.length > 0 ? (
-              <>
-                <span className="text-foreground">{models.length}</span> 个可用模型
-                <span className="text-border">·</span>
-              </>
-            ) : null}
-            {rooms.length > 0 ? (
-              <>
-                <span className="text-foreground">{rooms.length}</span> 场进行中
-              </>
-            ) : null}
-          </p>
-        </section>
-
-        <section className="mx-auto w-full max-w-6xl px-6 pb-24">
-          <SectionHeading title="核心能力" />
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <FeatureCell icon={Radio} title="全程直播">
-              思考、推理、工具调用与发言逐字流出，每一次转折背后都是真实的工具调用。
-            </FeatureCell>
-            <FeatureCell icon={Waypoints} title="因果账本">
-              承诺、指控、怀疑与欺骗按来源分层记录，承诺有履约与违约的结算。
-            </FeatureCell>
-            <FeatureCell icon={BrainCircuit} title="情绪与信念">
-              世界事件经评估引擎写成情绪、需求与关系，只有全知视角看得见。
-            </FeatureCell>
-            <FeatureCell icon={MessagesSquare} title="多模型混编">
-              每个席位可以运行不同的模型；夜间行动与同时投票在结算前不进入公开画面。
-            </FeatureCell>
+            <Button variant="outline" size="lg" className="h-11 flex-1" onClick={onOpenSettings}><Settings2 />模型设置</Button>
           </div>
         </section>
 
-        <section id="scenarios" className="mx-auto w-full max-w-6xl scroll-mt-20 px-6 pb-24">
-          <SectionHeading title="全部世界" count={scenarios.length} />
-          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-            {scenarios.map((scenario, index) => (
-              <WorldCard
-                key={scenario.id}
-                scenario={scenario}
-                index={index}
-                wide={scenarios.length % 3 === 1 && index === scenarios.length - 1}
-                onStart={() => onStart(scenario.id)}
-              />
-            ))}
-          </div>
-        </section>
+        {ready === 0 ? (
+          <Alert variant="destructive">
+            <Settings2 aria-hidden />
+            <AlertTitle>没有可参赛的模型</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+              <span>只有已启用且通过真实 Agents SDK 协议检查的模型才会进入创建页。</span>
+              <Button variant="outline" size="sm" onClick={onOpenSettings}>前往模型设置</Button>
+            </AlertDescription>
+          </Alert>
+        ) : null}
 
-        {rooms.length ? (
-          <section className="mx-auto w-full max-w-6xl px-6 pb-28">
-            <SectionHeading title="进行中的房间" />
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {health?.storage.status === "degraded" ? (
+          <Alert variant="destructive">
+            <HardDrive aria-hidden />
+            <AlertTitle>本机存储处于降级状态</AlertTitle>
+            <AlertDescription>检测到 {health.storage.issues.length} 个存储问题。损坏文件已隔离，服务仍可运行；请先备份 data 目录并检查终端告警。</AlertDescription>
+          </Alert>
+        ) : null}
+
+        <section aria-labelledby="active-heading">
+          <SectionHeading id="active-heading" title="正在发生" meta={rooms.length ? `${rooms.length} 个活跃世界` : "当前没有运行中的房间"} />
+          {rooms.length ? (
+            <div className="grid gap-3 lg:grid-cols-2">
               {rooms.slice(0, 6).map((room) => (
-                <div
-                  key={room.id}
-                  className="group flex items-center gap-3 rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/30"
-                >
-                  <button onClick={() => onOpenRoom(room.id)} className="flex min-w-0 flex-1 items-center gap-4 text-left">
-                    <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground">
-                      <ScenarioIcon id={room.scenarioId} className="size-4.5" />
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-semibold tracking-tight">{room.title}</span>
-                      <span className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/80">
-                        <StatusDot status={room.status} className="[&>span]:bg-foreground" />
-                        <StatusLabel status={room.status} />
-                        <span className="text-muted-foreground/50">·</span>
-                        <span className="nums">{room.participants.length} 名参与者</span>
+                <Card key={room.id} className="group transition-colors hover:border-foreground/30">
+                  <CardContent className="flex items-center gap-3 p-4">
+                    <Button variant="ghost" onClick={() => onOpenRoom(room.id)} className="h-auto min-w-0 flex-1 justify-start gap-4 p-0 text-left hover:bg-transparent">
+                      <span className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground"><ScenarioIcon id={room.scenarioId} /></span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-base font-semibold">{room.title}</span>
+                        <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <StatusDot status={room.status} /><StatusLabel status={room.status} />
+                          <Separator orientation="vertical" className="h-3" />
+                          {room.participants.length} 名参与者
+                        </span>
                       </span>
-                    </span>
-                  </button>
-                  {room.mode === "ai" ? (
-                    <button
-                      type="button"
-                      aria-label={`移除 ${room.title}`}
-                      title="停止并移除：对局立即结束且不可恢复"
-                      onClick={() => onRemoveRoom(room.id)}
-                      className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/50 transition-colors hover:bg-border hover:text-background"
-                    >
-                      <Trash2 className="size-3.5" />
-                    </button>
-                  ) : null}
-                  <ArrowRight className="size-4 shrink-0 -translate-x-1 text-muted-foreground/40 opacity-0 transition-all duration-200 group-hover:translate-x-0 group-hover:text-foreground group-hover:opacity-100" />
-                </div>
+                      <span className="hidden items-center gap-1 text-sm text-muted-foreground group-hover:text-foreground sm:flex">继续观看<ArrowRight className="size-4" /></span>
+                    </Button>
+                    {room.mode === "ai" ? <Button variant="ghost" size="icon-xs" aria-label={`移除 ${room.title}`} onClick={() => onRemoveRoom(room.id)}><Trash2 /></Button> : null}
+                  </CardContent>
+                </Card>
               ))}
             </div>
-          </section>
-        ) : null}
+          ) : (
+            <Empty className="rounded-xl border border-dashed py-10">
+              <EmptyHeader><EmptyMedia variant="icon"><Radio /></EmptyMedia><EmptyTitle>舞台正在等待第一场对局</EmptyTitle><EmptyDescription>选择一个世界，配置阵容后即可开始直播。</EmptyDescription></EmptyHeader>
+              <Button onClick={() => onStart(firstScenario)} disabled={ready === 0}><Play />创建世界</Button>
+            </Empty>
+          )}
+        </section>
 
-        {archives.length ? (
-          <section className="mx-auto w-full max-w-6xl px-6 pb-28">
-            <SectionHeading title="赛后存档" count={archives.length} />
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <section aria-labelledby="archive-heading">
+          <SectionHeading id="archive-heading" title="最近归档" meta={archives.length ? `${archives.length} 份本机复盘` : "归档由创建者明确选择保存"} />
+          {archives.length ? (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {archives.slice(0, 6).map((archive) => (
-                <button
-                  key={archive.id}
-                  onClick={() => onOpenArchive(archive.id)}
-                  className="group flex items-center gap-4 rounded-lg border border-border bg-card p-4 text-left transition-colors hover:border-foreground/30"
-                >
-                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground transition-colors group-hover:border-foreground/20 group-hover:text-foreground">
-                    <ScenarioIcon id={archive.scenarioId as ScenarioSummary["id"]} className="size-4.5" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-semibold tracking-tight">{archive.title}</span>
-                    <span className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/80">
-                      <Archive className="size-3" aria-hidden />
-                      已归档
-                      <span className="text-muted-foreground/50">·</span>
-                      <span className="nums">{formatTime(archive.finishedAt, { seconds: false })}</span>
-                    </span>
-                  </span>
-                  <ArrowRight className="size-4 shrink-0 -translate-x-1 text-muted-foreground/40 opacity-0 transition-all duration-200 group-hover:translate-x-0 group-hover:text-foreground group-hover:opacity-100" />
-                </button>
+                <Button key={archive.id} variant="ghost" onClick={() => onOpenArchive(archive.id)} className="group h-auto justify-start gap-4 whitespace-normal rounded-xl border border-border bg-card p-4 text-left hover:border-foreground/30 hover:bg-card">
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground"><ScenarioIcon id={archive.scenarioId as ScenarioSummary["id"]} /></span>
+                  <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold">{archive.title}</span><span className="mt-1 flex items-center gap-2 text-xs text-muted-foreground"><Archive className="size-3" />{formatTime(archive.finishedAt, { seconds: false })}</span></span>
+                  <ArrowRight className="size-4 text-muted-foreground group-hover:text-foreground" />
+                </Button>
               ))}
             </div>
-          </section>
-        ) : null}
+          ) : (
+            <Empty className="rounded-xl border border-dashed py-8"><EmptyHeader><EmptyMedia variant="icon"><Archive /></EmptyMedia><EmptyTitle>还没有赛后归档</EmptyTitle><EmptyDescription>创建房间时开启“保存对局”，终局后会写入本机 JSON。</EmptyDescription></EmptyHeader></Empty>
+          )}
+        </section>
 
-        {standings.length ? (
-          <section className="mx-auto w-full max-w-6xl px-6 pb-28">
-            <SectionHeading title="模型战绩" count={standings.length} />
-            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-              {standings.map((standing, index) => (
-                <div
-                  key={standing.model}
-                  className="flex items-center gap-3.5 rounded-lg border border-border bg-card p-4"
-                >
-                  <span className="nums flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-muted font-mono text-[11px] text-muted-foreground">
-                    {String(index + 1).padStart(2, "0")}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-semibold tracking-tight">{standing.model}</p>
-                    <p className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/80">
-                      <span className="nums">{standing.seats} 席</span>
-                      <span className="text-muted-foreground/50">·</span>
-                      <span className="nums">{standing.wins} 胜</span>
-                      {standing.avgScore !== null ? (
-                        <>
-                          <span className="text-muted-foreground/50">·</span>
-                          <span className="nums">均分 {standing.avgScore}</span>
-                        </>
-                      ) : null}
-                    </p>
-                  </div>
-                  {index === 0 && standing.wins > 0 ? <Crown className="size-4 shrink-0 text-warn" aria-label="当前领先" /> : null}
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
+        <section id="scenarios" aria-labelledby="scenario-heading">
+          <SectionHeading id="scenario-heading" title="场景目录" meta={`${scenarios.length} 个公开世界`} />
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {scenarios.map((scenario) => <WorldCard key={scenario.id} scenario={scenario} disabled={ready === 0} onStart={() => onStart(scenario.id)} />)}
+          </div>
+        </section>
       </main>
 
-      <footer className="rule-t py-10">
-        <div className="mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-3 px-6 text-xs text-muted-foreground/80 sm:flex-row">
-          <span className="flex items-center gap-2">
-            <span className="flex size-5 items-center justify-center rounded bg-foreground font-mono text-[9px] text-background">◆</span>
-            Society · Live Multi-Agent Social Worlds
-          </span>
-          <span className="flex items-center gap-4">
-            <button onClick={onOpenAbout} className="transition-colors hover:text-foreground/80">关于</button>
-            <span className="text-muted-foreground/50">·</span>
-            <span className="nums font-mono">{scenarios.length} worlds · OpenAI Agents SDK</span>
-          </span>
+      <footer className="rule-t py-8">
+        <div className="mx-auto flex w-full max-w-7xl flex-col justify-between gap-3 px-4 text-xs text-muted-foreground sm:flex-row sm:px-6">
+          <span className="flex items-center gap-2"><CircleCheck className="size-3.5" />Local-first · JSON persistence · OpenAI Agents SDK</span>
+          <Button variant="link" className="h-auto justify-start p-0 text-xs text-muted-foreground" onClick={onOpenAbout}>项目说明</Button>
         </div>
       </footer>
     </div>
   );
 }
 
-/** Plain section opener: title, optional count, hairline. */
-function SectionHeading({ title, count }: { title: string; count?: number }): ReactNode {
-  return (
-    <div className="mb-8 flex items-center gap-4">
-      <h2 className="text-xl font-semibold tracking-tight sm:text-2xl">{title}</h2>
-      {count !== undefined ? <span className="nums text-sm text-muted-foreground">{count}</span> : null}
-      <span className="h-px flex-1 bg-border" aria-hidden />
-    </div>
-  );
+function SectionHeading({ id, title, meta }: { id: string; title: string; meta: string }): ReactNode {
+  return <div className="mb-5 flex flex-wrap items-end justify-between gap-2"><h2 id={id} className="text-lg font-semibold tracking-tight">{title}</h2><p className="text-xs text-muted-foreground">{meta}</p></div>;
 }
 
-function FeatureCell({ icon: Icon, title, children }: { icon: typeof Radio; title: string; children: ReactNode }): ReactNode {
+function WorldCard({ scenario, disabled, onStart }: { scenario: ScenarioSummary; disabled: boolean; onStart: () => void }): ReactNode {
   return (
-    <div className="sheen rounded-xl border border-border bg-card p-5">
-      <Icon className="size-4.5 text-muted-foreground" />
-      <h3 className="mt-3 text-[15px] font-semibold tracking-tight">{title}</h3>
-      <p className="mt-1.5 text-sm leading-6 text-muted-foreground">{children}</p>
-    </div>
-  );
-}
-
-/**
- * World card: icon, name, players, a three-line brief. The whole card starts
- * a world; the arrow highlights on hover as the only motion.
- */
-function WorldCard({ scenario, index, wide, onStart }: { scenario: ScenarioSummary; index: number; wide?: boolean; onStart: () => void }): ReactNode {
-  return (
-    <button
-      onClick={onStart}
-      className={cn(
-        "group relative flex items-start gap-3.5 rounded-xl border border-border bg-card p-5 text-left transition-colors hover:border-foreground/30 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-foreground",
-        wide && "sm:col-span-2 lg:col-span-3"
-      )}
-    >
-      <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground transition-colors group-hover:border-foreground/20 group-hover:text-foreground">
-        <ScenarioIcon id={scenario.id} className="size-4.5" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-baseline gap-2.5">
-          <span className="truncate text-[15px] font-semibold tracking-tight">{scenario.name}</span>
-          <span className="nums shrink-0 font-mono text-[10px] text-muted-foreground/75">
-            {scenario.playerRange ? `${scenario.playerRange.min}-${scenario.playerRange.max}P` : `${scenario.players}P`}
-          </span>
-        </span>
-        <span className="mt-1.5 line-clamp-3 block text-[13px] leading-5 text-muted-foreground" title={scenario.description}>
-          {scenario.description}
-        </span>
-      </span>
-      <span className="flex shrink-0 items-center gap-1.5">
-        <span className="nums font-mono text-[11px] text-muted-foreground/40">{String(index + 1).padStart(2, "0")}</span>
-        <ArrowUpRight className="size-4 text-muted-foreground/30 transition-all duration-200 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-foreground" aria-hidden />
-      </span>
-    </button>
+    <Button variant="ghost" disabled={disabled} onClick={onStart} className="group h-auto min-h-32 w-full items-start justify-start gap-4 whitespace-normal rounded-xl border border-border bg-card p-5 text-left hover:border-foreground/30 hover:bg-card">
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground"><ScenarioIcon id={scenario.id} /></span>
+      <span className="min-w-0 flex-1"><span className="flex items-center justify-between gap-3"><span className="text-base font-semibold">{scenario.name}</span><Badge variant="outline">{scenario.playerRange ? `${scenario.playerRange.min}–${scenario.playerRange.max} 人` : `${scenario.players} 人`}</Badge></span><span className="mt-2 line-clamp-3 block text-sm leading-6 text-muted-foreground">{scenario.description}</span></span>
+    </Button>
   );
 }

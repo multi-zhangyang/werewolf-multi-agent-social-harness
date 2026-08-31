@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { Shuffle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Toggle } from "@/components/ui/toggle";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Select,
   SelectContent,
@@ -12,22 +14,6 @@ import {
 import { cn } from "@/lib/utils";
 import type { ModelOption } from "../types";
 import type { ModelAssignMode, RosterPreviewRow } from "./types";
-
-/** Segmented pill used by the model-assignment and participant-mode switches. */
-export function ModeButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }): ReactNode {
-  return (
-    <button
-      onClick={onClick}
-      aria-pressed={active}
-      className={cn(
-        "h-8 rounded-md text-[13px] font-medium transition-colors",
-        active ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground/80"
-      )}
-    >
-      {children}
-    </button>
-  );
-}
 
 /** 模型分配: unified / per-seat / random pool, plus the final roster preview. */
 export function ModelAssignSection({
@@ -58,14 +44,21 @@ export function ModelAssignSection({
   return (
     <section>
       <div className="mb-2.5 flex items-center justify-between">
-        <p className="text-[13px] font-medium text-foreground/80">模型分配</p>
+        <p className="text-sm font-medium text-foreground/80">模型分配</p>
         <span className="nums font-mono text-xs text-muted-foreground/80">{eligibleModels.length} 个可用档案</span>
       </div>
-      <div className="mb-3 grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted p-1">
-        <ModeButton active={assignMode === "unified"} onClick={() => onAssignModeChange("unified")}>统一模型</ModeButton>
-        <ModeButton active={assignMode === "per-seat"} onClick={() => onAssignModeChange("per-seat")}>逐席配置</ModeButton>
-        <ModeButton active={assignMode === "random"} onClick={() => onAssignModeChange("random")}>随机混合</ModeButton>
-      </div>
+      <ToggleGroup
+        type="single"
+        value={assignMode}
+        onValueChange={(value) => { if (value) onAssignModeChange(value as ModelAssignMode); }}
+        spacing={1}
+        className="mb-3 grid w-full grid-cols-3 rounded-lg border border-border bg-muted p-1"
+        aria-label="模型分配方式"
+      >
+        <ToggleGroupItem value="unified" className="h-8 rounded-md text-sm">统一模型</ToggleGroupItem>
+        <ToggleGroupItem value="per-seat" className="h-8 rounded-md text-sm">逐席配置</ToggleGroupItem>
+        <ToggleGroupItem value="random" className="h-8 rounded-md text-sm">随机混合</ToggleGroupItem>
+      </ToggleGroup>
 
       {assignMode === "unified" ? (
         <div data-model>
@@ -83,7 +76,7 @@ export function ModelAssignSection({
               </SelectGroup>
             </SelectContent>
           </Select>
-          <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">全部 {players} 个 AI 席位使用同一模型。</p>
+          <p className="mt-1.5 text-xs leading-5 text-muted-foreground">全部 {players} 个 AI 席位使用同一模型。</p>
         </div>
       ) : null}
 
@@ -98,17 +91,18 @@ export function ModelAssignSection({
             {eligibleModels.map((model) => {
               const active = poolIds.includes(model.profileId!);
               return (
-                <button
+                <Toggle
                   key={model.profileId}
-                  onClick={() => onTogglePoolModel(model.profileId!)}
+                  pressed={active}
+                  onPressedChange={() => onTogglePoolModel(model.profileId!)}
                   className={cn(
-                    "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                    "h-auto min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
                     active ? "border-foreground/60 bg-muted text-foreground" : "border-border bg-card text-muted-foreground hover:border-foreground/30"
                   )}
                 >
                   <span className={cn("size-1.5 rounded-full", active ? "bg-live" : "bg-border")} />
                   <span className="max-w-52 truncate font-mono">{model.name}</span>
-                </button>
+                </Toggle>
               );
             })}
           </div>
@@ -123,18 +117,18 @@ export function ModelAssignSection({
               <Shuffle className="size-3.5" />
               重新随机
             </Button>
-            <span className="text-[11px] text-muted-foreground">提交的就是下方预览的分配，不做服务端暗箱随机。</span>
+            <span className="text-xs text-muted-foreground">提交的就是下方预览的分配，不做服务端暗箱随机。</span>
           </div>
         </div>
       ) : null}
 
       <div className="mt-3 rounded-lg border border-border bg-muted/60 px-3 py-2.5" data-roster-preview>
-        <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">最终阵容预览</p>
-        <div className="space-y-1">
+        <p className="mb-1.5 text-xs font-medium text-muted-foreground">最终阵容预览</p>
+        <div className="flex flex-col gap-1">
           {previewRows.map((row) => (
-            <div key={row.index} className="flex items-center justify-between gap-2 text-[11px]">
+            <div key={row.index} className="flex items-center justify-between gap-2 text-xs">
               <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
-                <span className="flex size-4 shrink-0 items-center justify-center rounded bg-card font-mono text-[9px] ring-1 ring-border">
+                <span className="flex size-4 shrink-0 items-center justify-center rounded bg-card font-mono text-xs ring-1 ring-border">
                   {row.index + 1}
                 </span>
                 <span className="truncate">{row.characterLabel}</span>

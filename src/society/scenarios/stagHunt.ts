@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { tool, type Tool } from "@openai/agents";
+import type { Tool } from "@openai/agents";
+import { societyTool as tool } from "../tools";
 import { z } from "zod";
 import type {
   ActivationCompletion,
@@ -112,7 +113,7 @@ export class StagHuntWorld extends SocialWorldBase {
         status: this.statuses.get(profile.id) ?? "idle"
       })),
       recentMessages: this.visibleMessages(actorId).slice(-20),
-      availableActions: this.phase === "discussion" ? ["communicate", "recall_memory", "reflect_on_social_situation"] : ["hunt_choice", "communicate"]
+      availableActions: this.phase === "discussion" ? ["final_response", "recall_memory", "reflect_on_social_situation"] : ["hunt_choice", "final_response"]
     };
   }
 

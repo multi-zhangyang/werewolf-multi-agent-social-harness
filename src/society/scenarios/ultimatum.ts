@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { tool, type Tool } from "@openai/agents";
+import type { Tool } from "@openai/agents";
+import { societyTool as tool } from "../tools";
 import { z } from "zod";
 import type {
   ActivationCompletion,
@@ -481,7 +482,7 @@ export class UltimatumWorld extends SocialWorldBase {
   private availableActions(actorId: string, proposerId: string, responderId: string): string[] {
     if (this.phase === "propose" && actorId === proposerId) return ["propose_split"];
     if (this.phase === "respond" && actorId === responderId) return ["respond_to_offer"];
-    return ["communicate", "reflect_on_social_situation", "read_the_room", "update_inner_state"];
+    return ["final_response", "reflect_on_social_situation", "read_the_room", "update_inner_state"];
   }
 
   private openCommitmentsThisRound(actorId: string): Commitment[] {

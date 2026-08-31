@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Globe, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { CenterColumn } from "./room-view";
 import { ScenarioIcon } from "./shared";
@@ -55,7 +56,7 @@ export function CasterRoomView({ roomId }: { roomId: string }): ReactNode {
   if (!room) {
     return (
       <div className="flex h-dvh flex-col items-center justify-center gap-3 bg-background text-foreground">
-        <span className="size-7 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-foreground" />
+        <Spinner className="size-7" />
         <p className={cn("text-sm text-muted-foreground", link === "reconnecting" && "animate-pulse")}>
           {connection.error ?? "连接直播流中…"}
         </p>
@@ -67,16 +68,16 @@ export function CasterRoomView({ roomId }: { roomId: string }): ReactNode {
     <div className="flex h-dvh min-h-0 flex-col bg-background text-foreground">
       <header className="rule-b flex h-10 shrink-0 items-center gap-2.5 bg-background px-4">
         <ScenarioIcon id={room.scenarioId} className="size-3.5 shrink-0 text-muted-foreground" />
-        <h1 className="min-w-0 truncate text-[13px] font-semibold leading-none tracking-tight">{room.title}</h1>
-        <p className="hidden min-w-0 truncate text-[11px] leading-none text-muted-foreground lg:block">{room.world.summary}</p>
-        <Badge variant="outline" className="ml-auto shrink-0 gap-1 text-[10px] font-normal text-muted-foreground">
+        <h1 className="min-w-0 truncate text-sm font-semibold leading-none tracking-tight">{room.title}</h1>
+        <p className="hidden min-w-0 truncate text-xs leading-none text-muted-foreground lg:block">{room.world.summary}</p>
+        <Badge variant="outline" className="ml-auto shrink-0 gap-1 text-xs font-normal text-muted-foreground">
           <Globe className="size-3" aria-hidden />
           {revealed ? "赛后揭晓" : "公开直播 · 无剧透"}
         </Badge>
       </header>
 
       {link !== "closed" && room.world.status !== "finished" && (link === "reconnecting" || connection.error) ? (
-        <p className="flex shrink-0 items-center justify-center gap-1.5 bg-warn/10 px-4 py-1 text-center text-[11px] text-warn">
+        <p className="flex shrink-0 items-center justify-center gap-1.5 bg-warn/10 px-4 py-1 text-center text-xs text-warn">
           <TriangleAlert className="size-3 shrink-0" aria-hidden />
           {connection.error ?? "连接中断，正在重连——快照会自愈。"}
         </p>

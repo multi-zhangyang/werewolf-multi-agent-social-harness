@@ -4,12 +4,13 @@
  * no network.
  */
 import { strict as assert } from "node:assert";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { it } from "vitest";
 import { builtinCharacter, builtinCharacters, characterAgentProfile } from "../../src/society/profiles";
 import { CharacterLibrary } from "../../src/server/characters";
+import { StorageHealth } from "../../src/server/storage";
 
 function check(name: string, fn: () => void): void {
   it(name, fn);
@@ -91,6 +92,44 @@ check("roster resolves picks, falls back to built-ins, and rejects unknown ids",
   assert.equal(roster[2].builtIn, true, "remaining seats fall back to built-ins");
   assert.throws(() => library.roster(["char-missing-000"], 2), /CHARACTER_NOT_FOUND/);
   library.remove(custom.id);
+});
+
+check("legacy JSON upgrades through an atomic write without leaving temporary files", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "society-character-upgrade-"));
+  const file = path.join(dir, "characters.json");
+  try {
+    writeFileSync(file, JSON.stringify({ characters: [] }), "utf8");
+    const legacy = new CharacterLibrary(file);
+    legacy.create({
+      displayName: "升级验证",
+      persona: "用于验证无版本文件能够安全升级。",
+      traits: ["谨慎"],
+      values: ["完整性"],
+      goals: ["完成升级"]
+    });
+    const saved = JSON.parse(readFileSync(file, "utf8")) as { schemaVersion?: number; characters?: unknown[] };
+    assert.equal(saved.schemaVersion, 1);
+    assert.equal(saved.characters?.length, 1);
+    assert.equal(readdirSync(dir).some((entry) => entry.endsWith(".tmp")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("corrupt character JSON is quarantined and reported without exposing a path", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "society-character-corrupt-"));
+  const file = path.join(dir, "characters.json");
+  const health = new StorageHealth();
+  try {
+    writeFileSync(file, "{not-json", "utf8");
+    const recovered = new CharacterLibrary(file, health);
+    assert.equal(recovered.list().customs.length, 0);
+    assert.equal(health.snapshot().status, "degraded");
+    assert.deepEqual(health.snapshot().issues, [{ store: "characters", code: "CORRUPT_FILE_QUARANTINED" }]);
+    assert.equal(readdirSync(dir).some((entry) => entry.startsWith("characters.corrupt-") && entry.endsWith(".json")), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 rmSync(tempDir, { recursive: true, force: true });

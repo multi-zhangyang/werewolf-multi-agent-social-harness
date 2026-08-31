@@ -14,6 +14,7 @@
 export class ActivationLimiter {
   private active = 0;
   private readonly waiting: Array<() => void> = [];
+  private readonly idleWaiters = new Set<() => void>();
 
   constructor(readonly maxConcurrent: number) {
     if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
@@ -47,6 +48,10 @@ export class ActivationLimiter {
       released = true;
       this.active -= 1;
       this.waiting.shift()?.();
+      if (this.active === 0) {
+        for (const resolve of this.idleWaiters) resolve();
+        this.idleWaiters.clear();
+      }
     };
   }
 
@@ -58,6 +63,24 @@ export class ActivationLimiter {
   /** Activations queued behind the pool. */
   pending(): number {
     return this.waiting.length;
+  }
+
+  /** Wait until every provider permit settles, bounded by the caller's grace. */
+  async waitForIdle(timeoutMs: number): Promise<boolean> {
+    if (this.active === 0) return true;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (idle: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.idleWaiters.delete(onIdle);
+        resolve(idle);
+      };
+      const onIdle = (): void => finish(true);
+      const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+      this.idleWaiters.add(onIdle);
+    });
   }
 }
 

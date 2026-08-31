@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { tool, type Tool } from "@openai/agents";
+import type { Tool } from "@openai/agents";
+import { societyTool as tool } from "../tools";
 import { z } from "zod";
 import type {
   ActivationCompletion,
@@ -551,7 +552,7 @@ export class TrustGameWorld extends SocialWorldBase {
   private availableActions(actorId: string, investorId: string, trusteeId: string): string[] {
     if (this.phase === "investment" && actorId === investorId) return ["make_investment"];
     if (this.phase === "return" && actorId === trusteeId) return ["return_from_trust"];
-    return ["communicate", "make_commitment", "accept_commitment", "reflect_on_social_situation", "update_inner_state"];
+    return ["final_response", "make_commitment", "accept_commitment", "reflect_on_social_situation", "update_inner_state"];
   }
 
   private rolesForRound(): [string, string] {

@@ -22,51 +22,61 @@ describe("trust-game commitment slice (§14.6)", () => {
     const script = new ScriptedModel([
       // Wave 1: the investor opens; the trustee announces and declares the
       // promise inside the same turn.
-      modelResponse([functionCall("communicate", { text: "这轮我想听听你的想法。", channel: "public" }, { callId: "call-msg-1" })]),
-      modelResponse([assistantMessage("我先看看对方是否愿意给出承诺。")]),
+      modelResponse([functionCall("prepare_message", {
+        channel: "public", recipientIds: [], replyTo: null, socialActs: []
+      }, { callId: "call-msg-1" })]),
+      modelResponse([assistantMessage("这轮我想听听你的想法。")]),
       modelResponse([
-        functionCall("communicate", { text: "林默，我打算承诺返还。", channel: "public" }, { callId: "call-msg-2" }),
+        functionCall("prepare_message", {
+          channel: "public", recipientIds: [], replyTo: null, socialActs: []
+        }, { callId: "call-msg-2" }),
         functionCall("make_commitment", {
           proposition: "你投 8，我至少返还 10。",
           actionType: "return-at-least",
           amount: 10
         }, { callId: "call-commit-1" })
       ]),
-      modelResponse([assistantMessage("承诺已登记，我会按约履行。")]),
+      modelResponse([assistantMessage("林默，我打算承诺返还。")]),
       // Wave 2: the investor accepts the promise.
-      modelResponse([functionCall("accept_commitment", { commitmentId: "commit:1:agent-02:1" }, { callId: "call-accept-1" })]),
+      modelResponse([
+        functionCall("accept_commitment", { commitmentId: "commit:1:agent-02:1" }, { callId: "call-accept-1" }),
+        functionCall("prepare_message", {
+          channel: "public", recipientIds: [], replyTo: null, socialActs: []
+        }, { callId: "call-msg-accept-1" })
+      ]),
       modelResponse([assistantMessage("我接受这个承诺。")]),
-      // Wave 3: the discussion decays; a plain closing turn.
-      modelResponse([assistantMessage("好。")]),
       // Investment phase: the investor cites the accepted promise.
       modelResponse([functionCall("make_investment", {
         amount: 8,
         reason: "相信对方的公开承诺",
         referencedCommitmentIds: ["commit:1:agent-02:1"]
       }, { callId: "call-inv-1" })]),
-      modelResponse([assistantMessage("已完成投资。")]),
+      modelResponse([assistantMessage("SILENT")]),
       // Return phase: the trustee breaks the promise.
       modelResponse([functionCall("return_from_trust", {
         amount: 0,
         reason: "改变主意"
       }, { callId: "call-ret-1" })]),
-      modelResponse([assistantMessage("已完成返还。")]),
+      modelResponse([assistantMessage("SILENT")]),
       // Round 2: roles swapped; plain cooperation without declarations.
-      modelResponse([functionCall("communicate", { text: "这轮我会公平。", channel: "public" }, { callId: "call-msg-3" })]),
-      modelResponse([assistantMessage("这轮轮到我看你如何对待承诺。")]),
-      modelResponse([functionCall("communicate", { text: "好的。", channel: "public" }, { callId: "call-msg-4" })]),
-      modelResponse([assistantMessage("我会按自己的判断行事。")]),
-      modelResponse([assistantMessage("好。")]),
+      modelResponse([functionCall("prepare_message", {
+        channel: "public", recipientIds: [], replyTo: null, socialActs: []
+      }, { callId: "call-msg-3" })]),
+      modelResponse([assistantMessage("这轮我会公平。")]),
+      modelResponse([functionCall("prepare_message", {
+        channel: "public", recipientIds: [], replyTo: null, socialActs: []
+      }, { callId: "call-msg-4" })]),
+      modelResponse([assistantMessage("好的。")]),
       modelResponse([functionCall("make_investment", {
         amount: 4,
         reason: "t"
       }, { callId: "call-inv-2" })]),
-      modelResponse([assistantMessage("已完成投资。")]),
+      modelResponse([assistantMessage("SILENT")]),
       modelResponse([functionCall("return_from_trust", {
         amount: 4,
         reason: "t"
       }, { callId: "call-ret-2" })]),
-      modelResponse([assistantMessage("已完成返还。")])
+      modelResponse([assistantMessage("SILENT")])
     ]);
     const limiter = new ActivationLimiter(1);
     const { room, cleanup } = testRoom(script, limiter);
@@ -74,7 +84,8 @@ describe("trust-game commitment slice (§14.6)", () => {
       void room.start();
       await waitFor(() => room.currentStatus() === "finished", 30_000).catch((error) => {
         const snapshot = room.snapshotForViewer({ mode: "omniscient" });
-        throw new Error(`${String(error instanceof Error ? error.message : error)}; error=${roomError(room) ?? "none"}; log=${snapshot.world.log.slice(-6).map((entry) => entry.text).join(" | ")}`);
+        const turns = (snapshot.agentTurns ?? []).map((turn) => `${turn.actorId}:${turn.activationLabel}:${turn.status}:${turn.tools.map((tool) => tool.toolName).join(",")}`).join(" | ");
+        throw new Error(`${String(error instanceof Error ? error.message : error)}; error=${roomError(room) ?? "none"}; log=${snapshot.world.log.slice(-6).map((entry) => entry.text).join(" | ")}; turns=${turns}`);
       });
       script.assertComplete();
       const snapshot = room.snapshotForViewer({ mode: "omniscient" });

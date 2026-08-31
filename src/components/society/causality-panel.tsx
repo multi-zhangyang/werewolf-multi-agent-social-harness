@@ -54,8 +54,8 @@ export const CausalityPanel = memo(function CausalityPanel({ room, viewerPrivile
     <div className="panel flex h-full min-h-0 flex-col">
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border/60 px-4">
         <Waypoints className="size-3 text-muted-foreground" aria-hidden />
-        <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground/70">因果账本</span>
-        {records > 0 ? <span className="nums ml-auto font-mono text-[10px] text-muted-foreground/50">{records}</span> : null}
+        <span className="font-mono text-xs uppercase tracking-[0.22em] text-muted-foreground/70">因果账本</span>
+        {records > 0 ? <span className="nums ml-auto font-mono text-xs text-muted-foreground/50">{records}</span> : null}
       </div>
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-4 p-4">
@@ -122,7 +122,7 @@ function SocialActsSection({ projection, actorName, hydrateText, propositions }:
   const acts = spectatorActs(projection).slice(-12).reverse();
   if (!acts.length) return null;
   return (
-    <CollapsibleSection title="社会行为" count={acts.length} defaultOpen contentClassName="space-y-0">
+    <CollapsibleSection title="社会行为" count={acts.length} defaultOpen contentClassName="gap-0">
       <ul>
         {acts.map((act) => (
           <li key={act.socialActId} className="border-b border-border/40 py-2.5 first:pt-0 last:border-b-0 last:pb-0">
@@ -162,7 +162,7 @@ function SocialActsSection({ projection, actorName, hydrateText, propositions }:
               ) : null}
             </div>
             {act.propositionIds.length ? (
-              <p className="mt-1 line-clamp-2 pl-3 text-[11px] leading-5 text-muted-foreground">
+              <p className="mt-1 line-clamp-2 pl-3 text-xs leading-5 text-muted-foreground">
                 {hydrateText(act.propositionIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；"))}
               </p>
             ) : null}
@@ -203,7 +203,7 @@ function SuspicionSection({ room }: { room: SocietyRoomSnapshot }): ReactNode {
   const names = new Map(room.world.agents.map((agent) => [agent.id, agent.displayName]));
   return (
     <CollapsibleSection title="公开怀疑" count={entries.length}>
-      <ul className="space-y-1 text-xs">
+      <ul className="flex flex-col gap-1 text-xs">
         {entries.map((entry, index) => (
           <li key={`${entry.accuser}-${entry.target}-${index}`} className="flex items-center gap-1.5">
             <span className="truncate">{names.get(entry.accuser) ?? entry.accuser}</span>
@@ -229,7 +229,7 @@ function ReputationSection({ projection, characterNames }: {
   if (!entries.length) return null;
   return (
     <CollapsibleSection title="信誉对账" count={entries.length}>
-      <ul className="space-y-1.5 text-xs">
+      <ul className="flex flex-col gap-1.5 text-xs">
         {entries.map((entry) => (
           <li key={entry.characterId} className="flex items-center gap-1.5">
             <span className="shrink-0 font-medium">{characterNames.get(entry.characterId) ?? entry.characterId}</span>
@@ -283,17 +283,17 @@ function BeliefSection({ projection, characterNames, hydrateText }: {
     groups.set(key, list);
   }
   return (
-    <CollapsibleSection title="信念时间线" count={updates.length} contentClassName="space-y-0">
+    <CollapsibleSection title="信念时间线" count={updates.length} contentClassName="gap-0">
       {[...groups.values()].slice(-8).reverse().map((group) => {
         const proposition = propositions.get(group[0].propositionId);
         return (
           <div key={group[0].beliefId} className="border-b border-border/40 py-2.5 first:pt-0 last:border-b-0 last:pb-0">
             <p className="text-xs font-medium">{characterNames.get(group[0].ownerCharacterId) ?? group[0].ownerCharacterId}</p>
-            <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{hydrateText(proposition?.predicate ?? group[0].propositionId)}</p>
+            <p className="mt-0.5 line-clamp-2 text-xs leading-4 text-muted-foreground">{hydrateText(proposition?.predicate ?? group[0].propositionId)}</p>
             <div className="mt-1.5 flex flex-wrap items-center gap-1">
               <TruthMark status={proposition?.truthStatus} />
               {group.slice(-4).map((update) => (
-                <Badge key={update.beliefUpdateId} variant="outline" className="rounded-full border-border/70 bg-muted/50 font-mono text-[10px]">
+                <Badge key={update.beliefUpdateId} variant="outline" className="rounded-full border-border/70 bg-muted/50 font-mono text-xs">
                   {Math.round(update.beforeProbability * 100)}→{Math.round(update.afterProbability * 100)}%
                 </Badge>
               ))}
@@ -335,18 +335,18 @@ function CommitmentSection({ projection, actorName, hydrateText }: {
   const commitments = [...(projection?.commitments ?? [])].reverse();
   if (!commitments.length) return null;
   return (
-    <CollapsibleSection title="承诺账本" count={commitments.length} contentClassName="space-y-0">
+    <CollapsibleSection title="承诺账本" count={commitments.length} contentClassName="gap-0">
       {commitments.map((commitment) => (
         <div key={commitment.commitmentId} className="border-b border-border/40 py-2.5 first:pt-0 last:border-b-0 last:pb-0">
           <div className="flex items-center gap-1.5">
             <span className="text-xs font-medium">{actorName(commitment.promisorActorId)}</span>
-            <Badge variant={commitment.state === "violated" ? "destructive" : commitment.state === "fulfilled" ? "secondary" : "outline"} className="text-[10px]">
+            <Badge variant={commitment.state === "violated" ? "destructive" : commitment.state === "fulfilled" ? "secondary" : "outline"} className="text-xs">
               {commitmentStateLabel(commitment.state)}
             </Badge>
             <ProvenanceDot source="message-claim" />
           </div>
-          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-foreground/85">{hydrateText(commitment.proposition)}</p>
-          <p className="mt-1 text-[10px] text-muted-foreground/70">
+          <p className="mt-1 line-clamp-2 text-xs leading-4 text-foreground/85">{hydrateText(commitment.proposition)}</p>
+          <p className="mt-1 text-xs text-muted-foreground/70">
             对象 {commitment.audienceActorIds.map(actorName).join("、")}{promisedActionText(commitment)}
           </p>
         </div>
@@ -379,7 +379,7 @@ function DeceptionSection({ projection, actorName, hydrateText, propositions }: 
   const episodes = [...(projection?.deceptions ?? [])].reverse();
   if (!episodes.length) return null;
   return (
-    <CollapsibleSection title="欺骗生命周期" count={episodes.length} contentClassName="space-y-0">
+    <CollapsibleSection title="欺骗生命周期" count={episodes.length} contentClassName="gap-0">
       {episodes.map((episode) => (
         <DeceptionCard key={episode.deceptionId} episode={episode} actorName={actorName} hydrateText={hydrateText} propositions={propositions} />
       ))}
@@ -398,10 +398,10 @@ function DeceptionCard({ episode, actorName, hydrateText, propositions }: {
     <div className="border-b border-border/40 py-2.5 first:pt-0 last:border-b-0 last:pb-0">
       <div className="flex items-center gap-1.5">
         <span className="text-xs font-medium">{actorName(episode.deceiverActorId)}</span>
-        <Badge variant={episode.status === "detected" ? "destructive" : "outline"} className="text-[10px]">{deceptionStatusLabel(episode.status)}</Badge>
+        <Badge variant={episode.status === "detected" ? "destructive" : "outline"} className="text-xs">{deceptionStatusLabel(episode.status)}</Badge>
         <ProvenanceDot source="agent-self-report" />
       </div>
-      <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+      <p className="mt-1 line-clamp-2 text-xs leading-4 text-muted-foreground">
         {hydrateText(episode.intendedFalseBeliefIds.map((id) => propositions.get(id)?.predicate).filter(Boolean).join("；")) || "目标命题未引用"}
       </p>
       {/* Lifecycle as chips: solid = reached, dashed + "?" = still unknown. */}
@@ -410,7 +410,7 @@ function DeceptionCard({ episode, actorName, hydrateText, propositions }: {
           <span
             key={stage}
             className={cn(
-              "rounded-full border px-1.5 py-px text-[9px] leading-3.5",
+              "rounded-full border px-1.5 py-px text-xs leading-3.5",
               index <= reached
                 ? "border-foreground/20 bg-muted/60 font-medium text-foreground"
                 : "border-dashed border-border/80 text-muted-foreground/45"
@@ -432,7 +432,7 @@ function RelationshipSection({ projection, characterNames }: {
   if (!relationships.length) return null;
   const nameFor = (id: string): string => characterNames.get(id) ?? id;
   return (
-    <CollapsibleSection title="有向关系" count={relationships.length} contentClassName="space-y-0">
+    <CollapsibleSection title="有向关系" count={relationships.length} contentClassName="gap-0">
       <RelationshipGraph relationships={relationships} nameFor={nameFor} />
     </CollapsibleSection>
   );
@@ -526,7 +526,7 @@ function RelationshipGraph({ relationships, nameFor }: {
               <TooltipTrigger asChild>
                 <g className="cursor-default">
                   <circle cx={spot.x} cy={spot.y} r={nodeRadius} className="fill-card stroke-border" strokeWidth={1.2} />
-                  <text x={spot.x} y={spot.y + 3.5} textAnchor="middle" className="fill-foreground font-mono text-[9px] font-medium">
+                  <text x={spot.x} y={spot.y + 3.5} textAnchor="middle" className="fill-foreground font-mono text-xs font-medium">
                     {nameFor(id).slice(0, 2)}
                   </text>
                 </g>
@@ -536,7 +536,7 @@ function RelationshipGraph({ relationships, nameFor }: {
           );
         })}
       </svg>
-      <p className="mt-1 text-center text-[10px] leading-4 text-muted-foreground/70">
+      <p className="mt-1 text-center text-xs leading-4 text-muted-foreground/70">
         绿色箭头 = 信任 ≥ 0.5，红色 = 低于；悬停查看四维数值
       </p>
     </div>
@@ -551,7 +551,7 @@ function OutcomeSection({ projection, actorName, hydrateText }: {
   const reconciliations = [...(projection?.outcomeReconciliations ?? [])].reverse().slice(0, 6);
   if (!reconciliations.length) return null;
   return (
-    <CollapsibleSection title="结果对账（全知）" count={reconciliations.length} contentClassName="space-y-0">
+    <CollapsibleSection title="结果对账（全知）" count={reconciliations.length} contentClassName="gap-0">
       {reconciliations.map((reconciliation) => (
         <OutcomeRow key={reconciliation.reconciliationId} reconciliation={reconciliation} actorName={actorName} hydrateText={hydrateText} />
       ))}
@@ -561,7 +561,7 @@ function OutcomeSection({ projection, actorName, hydrateText }: {
 
 function OutcomeRow({ reconciliation, actorName, hydrateText }: { reconciliation: OutcomeReconciliation; actorName: (id: string | undefined) => string; hydrateText: (text: string) => string }): ReactNode {
   return (
-    <div className="border-b border-border/40 py-2.5 text-[11px] leading-4 first:pt-0 last:border-b-0 last:pb-0">
+    <div className="border-b border-border/40 py-2.5 text-xs leading-4 first:pt-0 last:border-b-0 last:pb-0">
       <p className="font-medium">{actorName(reconciliation.actorId)}</p>
       <p className="mt-0.5 text-muted-foreground">{hydrateText(reconciliation.actualOutcome.summary)}</p>
     </div>
@@ -580,4 +580,3 @@ function deceptionStatusLabel(status: string): string {
 function commitmentStateLabel(state: string): string {
   return state === "proposed" ? "待接受" : state === "accepted" ? "已接受" : state === "fulfilled" ? "已履约" : state === "violated" ? "已违约" : "已作废";
 }
-

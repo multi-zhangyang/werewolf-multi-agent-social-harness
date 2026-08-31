@@ -9,10 +9,11 @@
  * private minds — so opening one requires the room owner's token (matched
  * against a stored sha256, never the raw secret) or the operator token.
  */
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 import { archiveOwnerTokenHash, type SocietyRoomArchive } from "../society/room";
+import { atomicWriteJson, quarantineCorruptFile, type StorageHealth } from "./storage";
 
 /** Metadata exposed by the archive list; no snapshot payload crosses this boundary. */
 export interface ArchiveMeta {
@@ -39,19 +40,25 @@ export function isArchiveOwner(archive: SocietyRoomArchive, token: string | unde
   return expected.length === given.length && timingSafeEqual(expected, given);
 }
 
-export async function writeRoomArchive(archive: SocietyRoomArchive): Promise<void> {
+export async function writeRoomArchive(archive: SocietyRoomArchive, storage?: StorageHealth): Promise<void> {
   const id = safeArchiveId(archive.id);
   if (!id) throw new Error(`ARCHIVE_ID_INVALID: '${archive.id}' is not a storable archive id.`);
   const directory = archiveDir();
   await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, `${id}.json`), JSON.stringify(archive), { encoding: "utf8" });
+  try {
+    atomicWriteJson(join(directory, `${id}.json`), archive);
+  } catch (error) {
+    storage?.record({ store: "archives", code: "WRITE_FAILED" });
+    throw error;
+  }
 }
 
-export async function listRoomArchives(): Promise<ArchiveMeta[]> {
+export async function listRoomArchives(storage?: StorageHealth): Promise<ArchiveMeta[]> {
   let entries: string[];
   try {
     entries = await readdir(archiveDir());
-  } catch {
+  } catch (error) {
+    if (!isMissing(error)) storage?.record({ store: "archives", code: "READ_FAILED" });
     return [];
   }
   const metas: ArchiveMeta[] = [];
@@ -69,21 +76,30 @@ export async function listRoomArchives(): Promise<ArchiveMeta[]> {
         });
       }
     } catch {
-      // An unreadable file never blocks the listing; it is simply not offered.
+      const quarantined = quarantineCorruptFile(join(archiveDir(), entry));
+      storage?.record({ store: "archives", code: quarantined ? "CORRUPT_FILE_QUARANTINED" : "READ_FAILED" });
     }
   }
   return metas.sort((left, right) => right.finishedAt.localeCompare(left.finishedAt));
 }
 
-export async function readRoomArchive(id: string): Promise<SocietyRoomArchive | undefined> {
+export async function readRoomArchive(id: string, storage?: StorageHealth): Promise<SocietyRoomArchive | undefined> {
   const safe = safeArchiveId(id);
   if (!safe) return undefined;
   try {
     const archive = JSON.parse(await readFile(join(archiveDir(), `${safe}.json`), "utf8")) as SocietyRoomArchive;
     return archive?.id === safe && archive.schemaVersion === 1 ? archive : undefined;
-  } catch {
+  } catch (error) {
+    if (!isMissing(error)) {
+      const quarantined = quarantineCorruptFile(join(archiveDir(), `${safe}.json`));
+      storage?.record({ store: "archives", code: quarantined ? "CORRUPT_FILE_QUARANTINED" : "READ_FAILED" });
+    }
     return undefined;
   }
+}
+
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
 }
 
 export async function deleteRoomArchive(id: string): Promise<boolean> {

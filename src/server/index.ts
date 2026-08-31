@@ -52,9 +52,30 @@ if (isMainModule()) {
     if (error instanceof Error && error.stack) console.error(error.stack);
     process.exit(1);
   });
-  app.listen(port, host, () => {
+  const server = app.listen(port, host, () => {
     console.log(`Society listening on http://${host}:${port}`);
   });
+  let shuttingDown = false;
+  const shutdown = (signal: "SIGINT" | "SIGTERM"): void => {
+    if (shuttingDown) {
+      console.error(`[society] second ${signal}; exiting immediately.`);
+      process.exit(signal === "SIGINT" ? 130 : 143);
+    }
+    shuttingDown = true;
+    const graceMs = positiveInteger(process.env.SOCIETY_SHUTDOWN_GRACE_MS, 15_000);
+    console.log(`[society] ${signal}; closing rooms and provider activations (grace ${graceMs}ms).`);
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    context.liveConnections.closeAll();
+    context.rooms.disposeAll("服务正在关闭");
+    void context.limiter.waitForIdle(graceMs).then(async (idle) => {
+      if (!idle) console.warn(`[society] shutdown grace expired with ${context.limiter.concurrency()} provider activation(s) still settling.`);
+      server.closeAllConnections();
+      await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 250))]);
+      process.exit(0);
+    });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 function isMainModule(): boolean {
@@ -71,4 +92,9 @@ function errorMessage(error: unknown): string {
     .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
     .replace(/\brp_[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
     .slice(0, 800);
+}
+
+function positiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }

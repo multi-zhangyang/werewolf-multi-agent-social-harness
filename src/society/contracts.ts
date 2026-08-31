@@ -436,6 +436,18 @@ export interface SocialMessage {
   wave?: number;
 }
 
+/**
+ * Delivery metadata prepared by an agent before its final natural-language
+ * response. Preparing this object has no world side effect; the room commits
+ * the final text exactly once after the SDK run completes.
+ */
+export interface PreparedAgentMessage {
+  channel: SocialChannel;
+  recipientIds?: string[];
+  replyTo?: string;
+  socialActs?: import("./social/contracts").SocialActDeclaration[];
+}
+
 export interface AgentObservation {
   roomId: string;
   scenarioId: ScenarioId;
@@ -770,12 +782,14 @@ export interface ActivationCompletion {
 }
 
 export type AgentRuntimeEvent =
-  | { type: "agent.status"; roomId: string; actorId: string; status: AgentStatus; at: string }
-  | { type: "agent.updated"; roomId: string; actorId: string; status: AgentStatus; mind: AgentMindState; turnCount: number; totalTokens: number; lastOutput?: string; at: string }
+  | { type: "agent.status"; roomId: string; actorId: string; turnId?: string; status: AgentStatus; at: string }
+  | { type: "agent.updated"; roomId: string; actorId: string; turnId?: string; status: AgentStatus; mind: AgentMindState; turnCount: number; totalTokens: number; lastOutput?: string; at: string }
   | {
       type: "agent.delta";
       roomId: string;
       actorId: string;
+      /** Stable room-side turn linkage; older replay envelopes may omit it. */
+      turnId?: string;
       delta: string;
       /** True while the current phase is sealed (night actions, simultaneous
        *  votes): public spectators must not see the token stream, because the
@@ -783,8 +797,8 @@ export type AgentRuntimeEvent =
       sealed?: boolean;
       at: string;
     }
-  | { type: "agent.reasoning-content"; roomId: string; actorId: string; delta: string; elapsedMs: number; done: boolean; at: string }
-  | { type: "agent.reasoning-summary"; roomId: string; actorId: string; delta: string; at: string }
+  | { type: "agent.reasoning-content"; roomId: string; actorId: string; turnId?: string; delta: string; elapsedMs: number; done: boolean; at: string }
+  | { type: "agent.reasoning-summary"; roomId: string; actorId: string; turnId?: string; delta: string; at: string }
   /** @deprecated Read-only compatibility with records created before schema v3. */
   | { type: "agent.reasoning"; roomId: string; actorId: string; delta: string; at: string }
   | {
@@ -805,6 +819,8 @@ export type AgentRuntimeEvent =
       type: "agent.tool";
       roomId: string;
       actorId: string;
+      /** Parent turn for deterministic tool → final-message reconstruction. */
+      turnId?: string;
       /** Stable trace id for this tool invocation. */
       toolCallId: string;
       toolName: string;
@@ -861,7 +877,7 @@ export type AgentRuntimeEvent =
       snapshot: WorldSnapshot;
       at: string;
     }
-  | { type: "world.action"; roomId: string; actorId: string; action: string; detail: string; at: string }
+  | { type: "world.action"; roomId: string; actorId: string; turnId?: string; action: string; detail: string; at: string }
   | { type: "world.updated"; roomId: string; snapshot: WorldSnapshot }
   | {
       type: "tension.changed";
@@ -881,6 +897,12 @@ export interface SocietyAgentContext {
   profile: AgentProfile;
   world: SocialWorld;
   mind: AgentMindState;
+  /** Latest side-effect-free delivery envelope for this activation. */
+  preparedMessage?: PreparedAgentMessage;
+  /** Activation-local, model-neutral circuit breaker for repeatedly failing tools. */
+  toolFailureState?: Record<string, { failures: number; blocked: boolean }>;
+  /** Attempt-local cancellation boundary; late provider output cannot execute tools. */
+  turnScope?: { signal: AbortSignal };
   emit(event: AgentRuntimeEvent): void;
 }
 
@@ -983,6 +1005,8 @@ export interface AgentTurnResult {
   actorId: string;
   turn: number;
   finalOutput: string;
+  /** Present only when the agent explicitly prepared an observable message. */
+  finalMessage?: PreparedAgentMessage & { text: string };
   toolCalls: string[];
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
 }

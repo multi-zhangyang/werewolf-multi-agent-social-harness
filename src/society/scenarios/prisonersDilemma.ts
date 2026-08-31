@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { tool, type Tool } from "@openai/agents";
+import type { Tool } from "@openai/agents";
+import { societyTool as tool } from "../tools";
 import { z } from "zod";
 import type {
   ActivationCompletion,
@@ -115,8 +116,8 @@ export class PrisonersDilemmaWorld extends SocialWorldBase {
       })),
       recentMessages: this.visibleMessages(actorId).slice(-20),
       availableActions: this.phase === "discussion"
-        ? ["communicate", "make_commitment", "accept_commitment", "recall_memory", "reflect_on_social_situation", "read_the_room"]
-        : ["choose_move", "communicate"]
+        ? ["final_response", "make_commitment", "accept_commitment", "recall_memory", "reflect_on_social_situation", "read_the_room"]
+        : ["choose_move", "final_response"]
     };
   }
 

@@ -6,7 +6,7 @@
  * round-trips it. Deterministic, no model calls.
  */
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -21,6 +21,7 @@ import {
   readRoomArchive,
   writeRoomArchive
 } from "../../src/server/archives";
+import { StorageHealth } from "../../src/server/storage";
 
 let tempDir: string;
 const previousDir = process.env.SOCIETY_ARCHIVE_DIR;
@@ -101,6 +102,7 @@ it("the disk layer round-trips: write, list, owner check, read, delete", async (
   } as unknown as SocietyRoomArchive;
 
   await writeRoomArchive(archive);
+  expect((await readdir(tempDir)).some((entry) => entry.endsWith(".tmp"))).toBe(false);
 
   const list = await listRoomArchives();
   expect(list.find((meta) => meta.id === archive.id)?.title).toBe("测试归档");
@@ -114,6 +116,19 @@ it("the disk layer round-trips: write, list, owner check, read, delete", async (
   expect(await deleteRoomArchive(archive.id)).toBe(true);
   expect(await readRoomArchive(archive.id)).toBeUndefined();
   expect(await deleteRoomArchive(archive.id)).toBe(false);
+});
+
+it("a corrupt archive is quarantined and degrades health without breaking the list", async () => {
+  const file = join(tempDir, "room_corrupt-archive.json");
+  await writeFile(file, "{broken-json", "utf8");
+  const health = new StorageHealth();
+  const list = await listRoomArchives(health);
+  expect(Array.isArray(list)).toBe(true);
+  expect(health.snapshot()).toEqual({
+    status: "degraded",
+    issues: [{ store: "archives", code: "CORRUPT_FILE_QUARANTINED" }]
+  });
+  expect((await readdir(tempDir)).some((entry) => entry.startsWith("room_corrupt-archive.corrupt-"))).toBe(true);
 });
 
 it("path-traversal ids are rejected by every disk operation", async () => {

@@ -10,7 +10,12 @@
  * receive `max_tokens`), so the probes below never send it and the
  * `maxOutputTokens` capability stays "unknown" — nothing depends on it.
  */
-import type { CapabilityState, ModelCapabilities } from "../society/models";
+import { Agent, type RunItem } from "@openai/agents";
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import type { CapabilityState, ModelCapabilities, ModelProtocolCheck } from "../society/models";
+import { createSocietyProvider, createSocietyRunner } from "../society/agent-runner";
+import { societyTool } from "../society/tools";
 import {
   reasoningFallbackFetch,
   type EffectiveReasoningEffort,
@@ -42,7 +47,30 @@ export interface CapabilityProbeResult {
   }>;
 }
 
+export interface ProtocolProbeInput extends CapabilityProbeInput {
+  apiMode: "responses" | "chat-completions" | "auto";
+  fingerprint: string;
+  timeoutMs?: number;
+}
+
+export interface ProtocolProbeResult {
+  ok: boolean;
+  message: string;
+  check: ModelProtocolCheck;
+  detail: Array<{ step: string; result: string }>;
+}
+
+export type ProtocolTranscriptEvent =
+  | { type: "tool-call"; toolName: string; callId?: string; arguments: string }
+  | { type: "tool-result"; callId?: string }
+  | { type: "final"; text: string };
+
+export type ProtocolTranscriptAssessment =
+  | { ok: true }
+  | { ok: false; errorCode: string; message: string };
+
 const TIMEOUT = 25_000;
+const PROTOCOL_TOOL = "confirm_protocol_receipt";
 
 export interface RemoteModelsResult {
   ok: boolean;
@@ -235,6 +263,230 @@ export async function probeCapabilities(input: CapabilityProbeInput): Promise<Ca
   };
 }
 
+/**
+ * Real Agents SDK handshake: the first actionable output must be one valid
+ * tool call, its result contains an unpredictable receipt, and only a later
+ * assistant message may repeat that receipt. No provider/model exceptions.
+ */
+export async function probeAgentProtocol(input: ProtocolProbeInput): Promise<ProtocolProbeResult> {
+  const startedAt = Date.now();
+  const challenge = `challenge_${randomUUID()}`;
+  const receipt = `receipt_${randomUUID()}`;
+  const detail: ProtocolProbeResult["detail"] = [];
+  let executed = 0;
+  let executedChallenge: string | undefined;
+  const receiptTool = societyTool({
+    name: PROTOCOL_TOOL,
+    description: "Validate the supplied one-time challenge and return a one-time receipt that must be quoted in the final response.",
+    parameters: z.object({ challenge: z.string().min(1) }),
+    execute: async ({ challenge: supplied }) => {
+      executed += 1;
+      executedChallenge = supplied;
+      if (supplied !== challenge) throw new Error("PROTOCOL_CHALLENGE_MISMATCH: The challenge was not copied exactly.");
+      return JSON.stringify({ ok: true, receipt });
+    }
+  });
+  const timeoutMs = positiveTimeout(input.timeoutMs ?? Number(process.env.SOCIETY_MODEL_PROTOCOL_TIMEOUT_MS), 120_000);
+  const fallbackNotices: ReasoningFallbackNotice[] = [];
+  const provider = createSocietyProvider({
+    apiKey: input.apiKey,
+    baseURL: input.baseURL,
+    useResponses: input.apiMode === "responses",
+    timeoutMs,
+    maxRetries: 0,
+    fetch: reasoningFallbackFetch({ useCapabilityCache: false, onNotice: (notice) => fallbackNotices.push(notice) })
+  });
+  const runner = createSocietyRunner(provider);
+  const modelSettings: Record<string, unknown> = {
+    parallelToolCalls: false
+  };
+  if (input.reasoningEffort) modelSettings.reasoning = { effort: input.reasoningEffort };
+  const agent = new Agent({
+    name: "Society protocol verifier",
+    model: input.modelId,
+    instructions: [
+      "This is a strict protocol verification, not a conversation.",
+      `Your first actionable output must be exactly one ${PROTOCOL_TOOL} call with challenge copied exactly from the user message.`,
+      "Do not emit any assistant text before the tool result. Do not call the tool more than once.",
+      "After the tool result, emit exactly one final response containing PROTOCOL_OK:<receipt>, using the receipt returned by the tool."
+    ].join(" "),
+    tools: [receiptTool],
+    toolUseBehavior: "run_llm_again",
+    resetToolChoice: true,
+    modelSettings
+  });
+
+  try {
+    const result = await runner.run(agent, `challenge=${challenge}`, {
+      // Some OpenAI-compatible providers expose the tool-call, tool-result
+      // acknowledgement and final response as separate SDK model turns. Five
+      // is still a strict finite budget; transcript validation below rejects
+      // every repeated tool call instead of admitting it as a workaround.
+      maxTurns: 5,
+      stream: true,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    // Exercise the same streamed Agents SDK lifecycle as a live participant;
+    // draining the stream before reading newItems/finalOutput is required for
+    // providers that only finalize assistant content in later SSE chunks.
+    for await (const _event of result) {
+      // The transcript is validated from durable SDK run items below.
+    }
+    await result.completed;
+    const calls = result.newItems.filter((item) => item.type === "tool_call_item");
+    const outputs = result.newItems.filter((item) => item.type === "tool_call_output_item");
+    detail.push({ step: "tool-call", result: `${calls.length} call(s)` });
+    detail.push({ step: "tool-result", result: `${outputs.length} result(s)` });
+
+    const assessment = validateProtocolTranscript(
+      protocolTranscript(result.newItems),
+      { toolName: PROTOCOL_TOOL, challenge, receipt }
+    );
+    if (!assessment.ok) {
+      return protocolFailure(input, startedAt, assessment.errorCode, assessment.message, detail);
+    }
+
+    if (calls.length !== 1 || executed !== 1) {
+      return protocolFailure(input, startedAt, "PROTOCOL_TOOL_REPEATED", `指定工具调用了 ${calls.length} 次、执行了 ${executed} 次。`, detail);
+    }
+    const call = calls[0]!;
+    const rawCall = call.rawItem as { type?: string; name?: string; arguments?: string; callId?: string };
+    if (rawCall.type !== "function_call" || rawCall.name !== PROTOCOL_TOOL) {
+      return protocolFailure(input, startedAt, "PROTOCOL_UNKNOWN_TOOL", `模型调用了未知工具 ${rawCall.name ?? "unknown"}。`, detail);
+    }
+    const parsedArguments = parseJson(rawCall.arguments ?? "");
+    if (parsedArguments.challenge !== challenge || executedChallenge !== challenge) {
+      return protocolFailure(input, startedAt, "PROTOCOL_ARGUMENTS_INVALID", "模型没有准确传入一次性 challenge。", detail);
+    }
+
+    const callIndex = result.newItems.indexOf(call);
+    const outputIndex = result.newItems.findIndex((item) => item.type === "tool_call_output_item");
+    const firstPrematureMessage = result.newItems.findIndex((item, index) =>
+      index < outputIndex && item.type === "message_output_item" && messageText(item).trim().length > 0
+    );
+    if (firstPrematureMessage >= 0 || callIndex < 0 || outputIndex <= callIndex) {
+      return protocolFailure(input, startedAt, "PROTOCOL_PREMATURE_FINAL", "模型在工具结果前输出了发言，或事件顺序不完整。", detail);
+    }
+    const finalMessageIndex = findLastMessageIndex(result.newItems);
+    if (finalMessageIndex <= outputIndex) {
+      return protocolFailure(input, startedAt, "PROTOCOL_FINAL_MISSING", "工具结果之后没有最终发言。", detail);
+    }
+    const finalOutput = typeof result.finalOutput === "string" ? result.finalOutput : String(result.finalOutput ?? "");
+    detail.push({ step: "final", result: finalOutput.includes(receipt) ? "receipt matched" : "receipt mismatch" });
+    if (!finalOutput.includes(receipt)) {
+      return protocolFailure(input, startedAt, "PROTOCOL_RECEIPT_MISMATCH", "最终发言没有准确复述工具返回的 receipt。", detail);
+    }
+    const latencyMs = Date.now() - startedAt;
+    const check: ModelProtocolCheck = {
+      status: "passed",
+      fingerprint: input.fingerprint,
+      checkedAt: new Date().toISOString(),
+      latencyMs,
+      message: "Agents SDK 工具调用、工具结果和最终发言顺序正确。"
+    };
+    if (fallbackNotices.length) detail.push({ step: "reasoning", result: `fallbacks: ${fallbackNotices.length}` });
+    return { ok: true, message: check.message!, check, detail };
+  } catch (cause) {
+    const code = protocolErrorCode(cause);
+    return protocolFailure(input, startedAt, code, sanitizeProviderError(cause instanceof Error ? cause.message : String(cause)), detail);
+  }
+}
+
+/** Deterministic validation used by the live SDK probe and its contract tests. */
+export function validateProtocolTranscript(
+  events: ProtocolTranscriptEvent[],
+  expected: { toolName: string; challenge: string; receipt: string }
+): ProtocolTranscriptAssessment {
+  const calls = events.filter((event): event is Extract<ProtocolTranscriptEvent, { type: "tool-call" }> => event.type === "tool-call");
+  if (!calls.length) return { ok: false, errorCode: "PROTOCOL_TOOL_MISSING", message: "模型没有先调用指定工具。" };
+  if (calls.length !== 1) return { ok: false, errorCode: "PROTOCOL_TOOL_REPEATED", message: `指定工具调用了 ${calls.length} 次。` };
+  const call = calls[0]!;
+  if (call.toolName !== expected.toolName) {
+    return { ok: false, errorCode: "PROTOCOL_UNKNOWN_TOOL", message: `模型调用了未知工具 ${call.toolName || "unknown"}。` };
+  }
+  if (parseJson(call.arguments).challenge !== expected.challenge) {
+    return { ok: false, errorCode: "PROTOCOL_ARGUMENTS_INVALID", message: "模型没有准确传入一次性 challenge。" };
+  }
+  const callIndex = events.indexOf(call);
+  const resultIndex = events.findIndex((event) => event.type === "tool-result" && (!event.callId || !call.callId || event.callId === call.callId));
+  const premature = events.findIndex((event, index) => event.type === "final" && event.text.trim().length > 0 && index < resultIndex);
+  if (premature >= 0 || resultIndex <= callIndex) {
+    return { ok: false, errorCode: "PROTOCOL_PREMATURE_FINAL", message: "模型在工具结果前输出了发言，或事件顺序不完整。" };
+  }
+  const finals = events.filter((event): event is Extract<ProtocolTranscriptEvent, { type: "final" }> => event.type === "final");
+  const final = finals.at(-1);
+  const finalIndex = final ? events.lastIndexOf(final) : -1;
+  if (!final || finalIndex <= resultIndex) {
+    return { ok: false, errorCode: "PROTOCOL_FINAL_MISSING", message: "工具结果之后没有最终发言。" };
+  }
+  if (!final.text.includes(expected.receipt)) {
+    return { ok: false, errorCode: "PROTOCOL_RECEIPT_MISMATCH", message: "最终发言没有准确复述工具返回的 receipt。" };
+  }
+  return { ok: true };
+}
+
+function protocolTranscript(items: RunItem[]): ProtocolTranscriptEvent[] {
+  const events: ProtocolTranscriptEvent[] = [];
+  for (const item of items) {
+    if (item.type === "tool_call_item" && item.rawItem.type === "function_call") {
+      events.push({
+        type: "tool-call",
+        toolName: item.rawItem.name,
+        callId: item.rawItem.callId,
+        arguments: item.rawItem.arguments
+      });
+    } else if (item.type === "tool_call_output_item" && item.rawItem.type === "function_call_result") {
+      events.push({ type: "tool-result", callId: item.rawItem.callId });
+    } else if (item.type === "message_output_item") {
+      const text = messageText(item);
+      if (text.trim()) events.push({ type: "final", text });
+    }
+  }
+  return events;
+}
+
+function protocolFailure(
+  input: ProtocolProbeInput,
+  startedAt: number,
+  errorCode: string,
+  message: string,
+  detail: ProtocolProbeResult["detail"]
+): ProtocolProbeResult {
+  const check: ModelProtocolCheck = {
+    status: "failed",
+    fingerprint: input.fingerprint,
+    checkedAt: new Date().toISOString(),
+    latencyMs: Date.now() - startedAt,
+    errorCode,
+    message
+  };
+  return { ok: false, message, check, detail };
+}
+
+function protocolErrorCode(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (/abort|timeout/i.test(message)) return "PROTOCOL_TIMEOUT";
+  if (/tool.*not found|unknown tool|tool_not_found/i.test(message)) return "PROTOCOL_UNKNOWN_TOOL";
+  if (/challenge_mismatch|invalid.*tool|schema|arguments/i.test(message)) return "PROTOCOL_ARGUMENTS_INVALID";
+  return "PROTOCOL_PROVIDER_ERROR";
+}
+
+function findLastMessageIndex(items: RunItem[]): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index]?.type === "message_output_item" && messageText(items[index]!).trim()) return index;
+  }
+  return -1;
+}
+
+function messageText(item: RunItem): string {
+  if (item.type !== "message_output_item") return "";
+  return item.rawItem.content.map((part) => part.type === "output_text" ? part.text : "").join("");
+}
+
+function positiveTimeout(value: number, fallback: number): number {
+  return Number.isFinite(value) && value >= 1_000 ? Math.min(Math.floor(value), 900_000) : fallback;
+}
+
 async function chat(
   input: CapabilityProbeInput,
   body: Record<string, unknown>,
@@ -297,18 +549,25 @@ async function chatStream(
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let receivedBytes = 0;
     let sawDelta = false;
-    for (let guard = 0; guard < 20; guard += 1) {
+    // Reasoning models may emit many reasoning-only SSE chunks before their
+    // first visible text delta. Bound the probe by time and bytes, not by an
+    // arbitrary chunk count, otherwise normal fragmented streams become a
+    // false capability failure.
+    while (receivedBytes < 1_000_000) {
       const { value, done } = await reader.read();
       if (done) break;
+      receivedBytes += value?.byteLength ?? 0;
       buffer += decoder.decode(value, { stream: true });
-      for (const line of buffer.split("\n")) {
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
         if (!line.startsWith("data:")) continue;
         const payload = parseJson(line.slice(5).trim());
         const delta = payload?.choices?.[0]?.delta?.content;
         if (typeof delta === "string" && delta) sawDelta = true;
       }
-      buffer = buffer.split("\n").at(-1) ?? "";
       if (sawDelta) break;
     }
     try { await reader.cancel(); } catch { /* ignore */ }

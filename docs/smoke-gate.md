@@ -5,15 +5,19 @@
 ## 前置条件
 
 - Node 22+，已按 `.env.example` 配置 `OPENAI_BASE_URL` / `OPENAI_API_KEY`；
-- 模型配置中心（或 `SOCIETY_MODELS`）中至少有一个 enabled 的模型档案。
+- 模型配置中心（或 `SOCIETY_MODELS`）中至少有一个 `enabled + protocol passed` 的模型档案；
+- 禁用模型不会被 doctor、创建房间或 smoke 调用。
 
 ## 步骤
 
 ```bash
-# 1. 启动服务端（生产式）
+# 1. 检查本机配置、存储和所有已启用模型的真实协议流程
+npm run doctor
+
+# 2. 启动服务端（生产式）
 npm run server
 
-# 2. 开 2-3 局真实小局（旗舰 + 一个普通场景；demo 会等待每局 finished）
+# 3. 开 2-3 局真实小局（旗舰 + 一个普通场景；demo 会等待每局 finished）
 node scripts/demo.mjs werewolf prisoners-dilemma
 #    可选：DEMO_ROUNDS=3（默认）、DEMO_PLAYERS、DEMO_REASONING_EFFORT（默认 high）、
 #    DEMO_TIMEOUT_MIN（默认 20；狼人杀等 9 席长局实际跑 60-90+ 分钟，需调大，如 90）
@@ -23,7 +27,7 @@ node scripts/demo.mjs werewolf prisoners-dilemma
 `/api/rooms/:id/resume` 权限）。
 
 ```bash
-# 3. 汇总指标（读运行时内存 /api/rooms/:id/metrics，不落盘）
+# 4. 汇总指标（读运行时内存 /api/rooms/:id/metrics，不落盘）
 #    metrics 端点携带 ground truth（真实角色、已裁决信念），需要鉴权：
 #    设置 OPERATOR_TOKEN=$SOCIETY_OPERATOR_TOKEN（或用某房间的 owner token 走 ROOM_TOKEN）
 OPERATOR_TOKEN=... node scripts/smoke-report.mjs

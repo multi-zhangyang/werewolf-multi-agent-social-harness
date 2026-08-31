@@ -8,12 +8,15 @@ Society 的运行形态：一名参与者 = 一个标准 SDK Agent，房间调�
 每个席位一个 `@openai/agents` 的 `Agent` 实例 + 一个 `MemorySession`（SDK 内置、纯内存）。
 会话只存在于本局进程内，不写文件、不跨局、无赛季、无恢复——重启即清零。
 
-每个激活回合内，`Runner.run` 以 模型→工具→模型 的标准 agent 循环执行（`maxTurns` 上限
-10/24），允许一个回合内多步思考与行动。
+每个激活回合内，`Runner.run` 执行标准 agent 循环。可见发言固定为
+`prepare_message → tool result → final response`：工具只准备频道、回复目标和社会行为元数据，
+最终自然语言响应在工具结果之后产生，并由房间恰好发布一次。领域动作仍是 typed tool；失败会
+以结构化工具结果返回模型，并受单工具三次、完整 Turn 一次重跑的有界恢复限制。
 
 ## 2. 工具面（全部平铺参数，无表单）
 
-- `communicate`：`{ text, channel, recipientIds?, replyTo?, socialActs? }`；
+- `prepare_message`：`{ channel, recipientIds?, replyTo?, socialActs? }`，不携带发言正文；
+  tool result 成功后，SDK run 的 final response 才是对外发言；
 - 领域行动工具（每场景）：`{ targetId? / choice? / amount? , reason }`，与领域结算 payload 同形；
 - 认知工具（可选、轻量）：`recall_memory`（只读检索自己的承诺、见证的主张、信念与记忆）、
   `update_inner_state`、`read_the_room`、`log_deception_plan`。
@@ -66,12 +69,12 @@ commitments / deceptions / outcomeReconciliations 全部保存在内存账本中
 - `GET /api/rooms/:id/metrics`（房主/操作员鉴权——含 ground truth）：内存计数器
   （有效行动率、迟到/无效拒绝、幂等命中、压力采样、turn 耗时、承诺分布、notice 率）
   与 Agent 质量信号（欺骗结局、信念校准 Brier、投票命中；`world.qualityMetrics()`，
-  纯观察聚合，绝不回流 agent 上下文）；模型战绩在 `GET /api/leaderboard`；
+  纯观察聚合，绝不回流 agent 上下文）；兼容接口 `GET /api/leaderboard` 不进入 v0.1 主界面；
 - 门禁：lint + typecheck + 单元/契约/集成/安全/重放/混沌测试 + build；
 - 真实模型 smoke：开一局、拉 `/metrics`、人工抽检提取样本与强标签。
 
 ## 8. 明确删除
 
 决策表单（candidateIntents/strategy selection/DecisionRecord/strategy profile）、
-影响链卡片、赛季（跨局会话复用、dossier）、会话文件、房间检查点/归档/启动恢复、
-export/restore 机制。决策理由只存在于当时对话中，不再结构化落账。
+影响链卡片、赛季（跨局会话复用、dossier）、会话文件、房间检查点与启动恢复。
+显式 opt-in 的终局 JSON 归档仍保留；运行中房间不会恢复。决策理由只存在于当时对话中。

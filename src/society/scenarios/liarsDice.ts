@@ -1,5 +1,6 @@
 import { randomInt, randomUUID } from "node:crypto";
-import { tool, type Tool } from "@openai/agents";
+import type { Tool } from "@openai/agents";
+import { societyTool as tool } from "../tools";
 import { z } from "zod";
 import type {
   ActivationCompletion,
@@ -149,7 +150,7 @@ export class LiarsDiceWorld extends SocialWorldBase {
         status: this.statuses.get(profile.id) ?? "idle"
       })),
       recentMessages: this.visibleMessages(actorId).slice(-20),
-      availableActions: ["communicate", "liars_move", "recall_memory"]
+      availableActions: ["final_response", "liars_move", "recall_memory"]
     };
   }
 
