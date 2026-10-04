@@ -1,0 +1,87 @@
+import { useCallback, useEffect, useState } from "react";
+import { ArrowRight, Download, FlaskConical, Play, Square } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Progress } from "@/components/ui/progress";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { Slider } from "@/components/ui/slider";
+import { json, headersFor } from "./api";
+import { MindPanel } from "./mind";
+import { Conversation } from "./room";
+import { psychologyFromEvent } from "@/runtime/psychology";
+import { StudyComparison } from "./study-comparison";
+import { StudyDistribution } from "./study-distribution";
+import { CognitionSettings, initialHybridCognition, type PhaseSettings } from "./cognition-settings";
+import { DecisionCases } from "./decision-cases";
+import type { StudyRecord, StudySpec, TrialResult, TrialSummary } from "@/runtime/studies";
+
+const conditions: Record<string, string> = { silence: "没有回应", apology: "只有道歉", compensation: "道歉 + 补偿 9 点", pledge: "承诺前", free: "自由博弈" };
+const mechanisms = { hybrid: "混合心理", instant: "关闭惯性", off: "关闭心理" };
+const statuses = { queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", stopped: "已停止", interrupted: "已中断" };
+const kinds = { repair: "受控修复实验", calibration: "模型稳定性校准", free: "三轮自由博弈" };
+const characters = [{ id: "self", name: "林" }, { id: "peer", name: "陈" }].map(c => ({ ...c, persona: "你与另一位参与者进行有实际积分结算的重复交易。", goals: ["获得收益", "理解对方是否值得继续合作"], values: ["收益", "公平", "关系"], voice: "简短自然，回应眼前的人", temperament: { openness: .5, conscientiousness: .5, extraversion: .5, agreeableness: .5, neuroticism: .5 } }));
+
+export function Studies({ id }: { id?: string }) {
+  const [studies, setStudies] = useState<StudyRecord[]>(); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  const [kind, setKind] = useState<StudySpec["kind"]>("repair"); const [repeats, setRepeats] = useState(5);
+  const [inertia, setInertia] = useState(.6); const [decay, setDecay] = useState(.1);
+  const [phases, setPhases] = useState<PhaseSettings>(initialHybridCognition.phases);
+  const refresh = useCallback(() => { void json<{ studies: StudyRecord[] }>("/api/v2/studies").then(r => { setStudies(r.studies); setError(""); }).catch(e => setError(e.message)); }, []);
+  useEffect(() => { refresh(); const timer = setInterval(refresh, 4000); return () => clearInterval(timer); }, [refresh]);
+  const current = studies?.find(s => s.id === id);
+  async function start() {
+    setBusy(true);
+    try { const r = await json<StudyRecord>("/api/v2/studies", { method: "POST", headers: headersFor(), body: JSON.stringify({ kind, repeats, inertia, decay, ...(kind === "calibration" ? {} : { phases, requestTimeoutMs: initialHybridCognition.requestTimeoutMs }) }) }); location.hash = `#/studies/${r.id}`; refresh(); }
+    catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  }
+  return <div className="page-content study-workspace"><header className="page-heading"><div><span className="eyebrow">SOCIETY / EXPERIMENTS</span><h1>同一段经历，不同的选择。</h1><p className="text-sm text-muted-foreground">对照修复条件，观察判断如何变成真实行动。</p></div><Badge variant="outline"><FlaskConical />研究工作台</Badge></header>
+    {error && <Alert><AlertDescription>{error}<Button variant="link" onClick={refresh}>重新加载</Button></AlertDescription></Alert>}
+    {id && !current && !error && (studies ? <Empty><EmptyHeader><EmptyTitle>没有找到这个实验</EmptyTitle><EmptyDescription>请从实验记录选择当前工作台已有的批次。</EmptyDescription></EmptyHeader><Button variant="outline" asChild><a href="#/studies">返回实验</a></Button></Empty> : <Skeleton className="h-64 w-full" />)}
+    {!id && <Card><CardHeader><CardTitle>设计一次实验</CardTitle><CardDescription>封闭交易环境 · gpt-6-luna · Responses · 可复测的输入与结果</CardDescription></CardHeader><CardContent><FieldGroup><Field><FieldLabel>实验类型</FieldLabel><ToggleGroup type="single" value={kind} onValueChange={v => { if (v) setKind(v as StudySpec["kind"]); }} variant="outline" className="flex-wrap">{Object.entries(kinds).map(([key, label]) => <ToggleGroupItem key={key} value={key}>{label}</ToggleGroupItem>)}</ToggleGroup></Field>{kind === "repair" && <Field><FieldLabel htmlFor="repeats">每个条件的重复次数</FieldLabel><Input className="max-w-32" id="repeats" type="number" min={1} max={20} value={repeats} onChange={e => setRepeats(Number(e.target.value))} /><FieldDescription>2 档宜人性 × 3 种修复条件 × 3 种心理机制。其他人物设定保持一致。</FieldDescription></Field>}<FieldDescription>{kind === "repair" ? "第一轮经历由实验设置；后续承诺、返还、补偿和投资均由模型选择并结算。补偿同时改变资源与社会信号。" : kind === "calibration" ? "四个固定决策情境，对比两档回忆窗口（16 / 64 条）与两档思考强度；模型上下文均为 256k。" : "六场三轮交易，交换人格位置；背叛与修复不保证发生。"}</FieldDescription></FieldGroup><Accordion type="single" collapsible><AccordionItem value="dynamics"><AccordionTrigger>心理惯性参数</AccordionTrigger><AccordionContent><FieldGroup><Field><FieldLabel>前态保留权重 · {inertia.toFixed(2)}</FieldLabel><Slider aria-label="前态保留权重" min={0} max={1} step={.05} value={[inertia]} onValueChange={v => setInertia(v[0])} /><FieldDescription>所有人格使用相同参数；关闭惯性条件固定为零。</FieldDescription></Field><Field><FieldLabel>每次新评价衰减 · {Math.round(decay * 100)}%</FieldLabel><Slider aria-label="阶段衰减" min={0} max={1} step={.05} value={[decay]} onValueChange={v => setDecay(v[0])} /><FieldDescription>按新证据评价推进。参数是可检验的工程假设，未经人类心理校准。</FieldDescription></Field></FieldGroup></AccordionContent></AccordionItem>{kind !== "calibration" && <AccordionItem value="model-phases"><AccordionTrigger>各阶段的模型配置</AccordionTrigger><AccordionContent><CognitionSettings value={phases} onChange={setPhases} /></AccordionContent></AccordionItem>}</Accordion></CardContent><CardFooter className="justify-between"><span className="text-sm text-muted-foreground">预计 {kind === "repair" ? repeats * 18 : kind === "calibration" ? 16 : 6} 条试验</span><Button disabled={busy || !Number.isInteger(repeats) || repeats < 1 || repeats > 20} onClick={() => void start()}><Play data-icon="inline-start" />{busy ? "正在创建" : "启动实验"}</Button></CardFooter></Card>}
+    {current && <StudyResults key={current.id} study={current} refresh={refresh} onError={setError} />}
+    {!id && (studies?.length ? <Card><CardHeader><CardTitle>实验记录</CardTitle></CardHeader><CardContent><Table><TableHeader><TableRow><TableHead>实验</TableHead><TableHead>有效 / 总数</TableHead><TableHead>状态</TableHead><TableHead>创建时间</TableHead></TableRow></TableHeader><TableBody>{studies.map(s => <TableRow key={s.id}><TableCell><Button variant="link" asChild><a href={`#/studies/${s.id}`}>{kinds[s.spec.kind]}<ArrowRight data-icon="inline-end" /></a></Button></TableCell><TableCell>{s.trials.filter(t => t.status === "completed").length} / {s.trials.length}</TableCell><TableCell><Badge variant="outline">{statuses[s.status]}</Badge></TableCell><TableCell>{new Date(s.createdAt).toLocaleString("zh-CN")}</TableCell></TableRow>)}</TableBody></Table></CardContent></Card> : studies ? <Empty><EmptyHeader><EmptyTitle>从一段共同经历开始</EmptyTitle><EmptyDescription>实验运行后，修复分支、心理变化和失败记录会显示在这里。</EmptyDescription></EmptyHeader></Empty> : !error && <Skeleton className="h-48 w-full" />)}
+  </div>;
+}
+
+function StudyResults({ study, refresh, onError }: { study: StudyRecord; refresh(): void; onError(message: string): void }) {
+  const [mechanism, setMechanism] = useState("hybrid"); const [trait, setTrait] = useState("0.2"); const [repeat, setRepeat] = useState("0"); const [detail, setDetail] = useState<TrialResult>(); const [loading, setLoading] = useState(false); const [focusSeq, setFocusSeq] = useState<number>();
+  const detailCharacters = characters.map(c => ({ ...c, temperament: { ...c.temperament, agreeableness: c.id === "self" ? detail?.agreeableness ?? .5 : .5 } }));
+  const done = study.trials.filter(t => ["completed", "failed", "stopped"].includes(t.status)).length;
+  const valid = study.trials.filter(t => t.status === "completed"); const failed = study.trials.filter(t => t.status === "failed");
+  const chosen = study.trials.filter(t => t.mechanism === mechanism && t.agreeableness === Number(trait) && t.repeat === Number(repeat));
+  async function inspect(trial: TrialSummary) { setFocusSeq(undefined); setLoading(true); try { setDetail(await json<TrialResult>(`/api/v2/studies/${study.id}/trials/${trial.id}`)); } catch (e) { onError((e as Error).message); } finally { setLoading(false); } }
+  async function download() { try { const data = await json(`/api/v2/studies/${study.id}/export`); const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })); const link = document.createElement("a"); link.href = url; link.download = `study-${study.id}.json`; link.click(); URL.revokeObjectURL(url); } catch (e) { onError((e as Error).message); } }
+  const prefixTotals = (study.prefixes ?? []).reduce((a, p) => ({ calls: a.calls + p.calls, truncations: a.truncations + p.truncations }), { calls: 0, truncations: 0 });
+  const totals = study.trials.reduce((a, t) => ({ calls: a.calls + (t.calls ?? 0), truncations: a.truncations + (t.truncations ?? 0) }), prefixTotals);
+  return <div className="flex flex-col gap-6"><Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-3"><div><CardDescription>{kinds[study.spec.kind]}</CardDescription><CardTitle>{valid.length} 条有效试验，{failed.length} 条失败</CardTitle></div><div className="flex gap-2"><Badge variant="outline">{statuses[study.status]}</Badge>{study.status === "running" && <Button variant="outline" size="sm" onClick={() => { void json(`/api/v2/studies/${study.id}/stop`, { method: "POST", headers: headersFor() }).then(refresh).catch(e => onError(e.message)); }}><Square data-icon="inline-start" />停止</Button>}<Button variant="outline" size="sm" onClick={() => void download()}><Download data-icon="inline-start" />导出</Button></div></div></CardHeader><CardContent className="flex flex-col gap-3"><Progress value={done / study.trials.length * 100} aria-label="批次进度" /><div className="flex flex-wrap justify-between gap-3 text-sm text-muted-foreground"><span>{done} / {study.trials.length} 已结束</span><span>运行时记录：{totals.calls} 次响应 · {totals.truncations} 次截断</span><span>{study.spec.kind === "calibration" ? `首次无错误：${valid.filter(t => !t.toolErrors && !t.truncations).length} / ${study.trials.length}` : "失败样本完整保留"}</span></div></CardContent></Card>
+    <StudyDiagnostics study={study} />
+    {study.error && <Alert><AlertDescription>{study.error}</AlertDescription></Alert>}
+    <Tabs defaultValue={study.spec.kind === "repair" ? "comparison" : "all"}><TabsList>{study.spec.kind === "repair" && <><TabsTrigger value="comparison">修复分支</TabsTrigger><TabsTrigger value="distribution">行为分布</TabsTrigger></>}<TabsTrigger value="all">全部试验</TabsTrigger></TabsList>
+      {study.spec.kind === "repair" && <div className="flex flex-wrap items-center gap-3 py-5"><ToggleGroup type="single" variant="outline" value={mechanism} onValueChange={v => { if (v) setMechanism(v); }}>{Object.entries(mechanisms).map(([key, label]) => <ToggleGroupItem key={key} value={key}>{label}</ToggleGroupItem>)}</ToggleGroup><ToggleGroup type="single" variant="outline" value={trait} onValueChange={v => { if (v) setTrait(v); }}><ToggleGroupItem value="0.2">低宜人性</ToggleGroupItem><ToggleGroupItem value="0.8">高宜人性</ToggleGroupItem></ToggleGroup><Select value={repeat} onValueChange={setRepeat}><SelectTrigger className="w-36" aria-label="重复试验"><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{Array.from({ length: study.spec.repeats }, (_, i) => <SelectItem key={i} value={String(i)}>第 {i + 1} 次重复</SelectItem>)}</SelectGroup></SelectContent></Select></div>}
+      <TabsContent value="comparison"><div className="study-branches">{["silence", "apology", "compensation"].map(condition => { const t = chosen.find(t => t.condition === condition); return <Card key={condition}><CardHeader><CardDescription>共同经历：承诺 9 点，实际返还 0</CardDescription><CardTitle>{conditions[condition]}</CardTitle></CardHeader><CardContent className="flex flex-col gap-5"><Badge variant="outline">{t ? statuses[t.status] : "没有该条件"}</Badge><dl className="study-outcomes"><div><dt>下一轮返还比例</dt><dd>{t?.returnedShare === undefined ? "—" : `${Math.round(t.returnedShare * 100)}%`}</dd></div><div><dt>主动补偿</dt><dd>{t?.repair ?? "—"}<small> 点</small></dd></div><div><dt>再次投资</dt><dd>{t?.investment ?? "—"}<small> / 10</small></dd></div></dl>{t?.error && <Alert><AlertDescription>{t.error}</AlertDescription></Alert>}</CardContent><CardFooter><Button className="w-full" variant="outline" disabled={!t || !["completed", "failed"].includes(t.status) || loading} onClick={() => t && void inspect(t)}>回看心理与行动<ArrowRight data-icon="inline-end" /></Button></CardFooter></Card>; })}</div><p className="py-4 text-sm text-muted-foreground">三条分支从同一份背叛后状态出发。前段行为为实验设置，后续选择真实结算。低返还不自动代表报复。</p><StudyComparison studyId={study.id} trials={chosen} /></TabsContent>
+      <TabsContent value="distribution"><StudyDistribution trials={study.trials} mechanism={mechanism} trait={trait} /></TabsContent>
+      <TabsContent value="all"><Table><TableHeader><TableRow><TableHead>条件 / 机制</TableHead><TableHead>人格</TableHead><TableHead>状态</TableHead><TableHead>响应 / 截断</TableHead><TableHead>错误记录</TableHead><TableHead>耗时</TableHead><TableHead>回看</TableHead></TableRow></TableHeader><TableBody>{study.trials.map(t => <TableRow key={t.id}><TableCell>{conditions[t.condition]} · {mechanisms[t.mechanism]}<p className="text-xs text-muted-foreground">{t.context} · {t.effort} · 重复 {t.repeat + 1}</p></TableCell><TableCell>{t.agreeableness}</TableCell><TableCell><Badge variant="outline">{statuses[t.status]}</Badge>{t.error && <p className="max-w-72 whitespace-normal text-xs text-muted-foreground">{t.error}</p>}</TableCell><TableCell>{t.calls ?? "—"} / {t.truncations ?? "—"}</TableCell><TableCell>{t.toolErrors ?? "—"}</TableCell><TableCell>{t.durationMs === undefined ? "—" : `${Math.round(t.durationMs / 1000)} 秒`}</TableCell><TableCell>{t.runId ? <Button variant="link" asChild><a href={`#/runs/${t.runId}`}>进入对局</a></Button> : <Button variant="ghost" size="sm" disabled={!["completed", "failed"].includes(t.status) || loading} onClick={() => void inspect(t)}>查看</Button>}</TableCell></TableRow>)}</TableBody></Table></TabsContent>
+    </Tabs>
+    <Sheet open={Boolean(detail) || loading} onOpenChange={open => { if (!open) setDetail(undefined); }}><SheetContent className="w-full sm:max-w-5xl"><SheetHeader><SheetTitle>{detail ? `${conditions[detail.condition]} · 心理与行动` : "正在读取"}</SheetTitle></SheetHeader>{detail ? <Tabs defaultValue="timeline" className="min-h-0 flex-1"><TabsList className="mx-4"><TabsTrigger value="timeline">心理与行动</TabsTrigger><TabsTrigger value="cases">决策案例</TabsTrigger></TabsList><TabsContent value="timeline" className="min-h-0"><div className="study-detail"><div className="flex min-h-0 flex-col"><Conversation events={detail.events.filter(e => ["message", "action", "fact", "phase"].includes(e.type))} characters={detailCharacters} inspect={event => setFocusSeq(event.seq)} /></div>{detail.events.some(e => psychologyFromEvent(e)) && <MindPanel key={detail.id} character={detailCharacters[0]} characters={detailCharacters} events={detail.events} memories={[]} focusSeq={focusSeq} />}</div></TabsContent><TabsContent value="cases" className="overflow-y-auto px-5 pb-5">{detail.errors.length > 0 && <Alert><AlertDescription>{detail.errors.join("；")}</AlertDescription></Alert>}<DecisionCases key={detail.id} studyId={study.id} trialId={detail.id} /></TabsContent></Tabs> : <Skeleton className="h-64" />}</SheetContent></Sheet>
+  </div>;
+}
+
+function StudyDiagnostics({ study }: { study: StudyRecord }) {
+  const [data, setData] = useState<{ requests: number; errors: number; truncations: number; malformedArguments: number }>();
+  const [error, setError] = useState("");
+  useEffect(() => { let active = true; void json<NonNullable<typeof data>>(`/api/v2/studies/${study.id}/diagnostics`).then(value => { if (active) { setData(value); setError(""); } }).catch(e => { if (active) setError(e.message); }); return () => { active = false; }; }, [study]);
+  if (error) return <Alert><AlertDescription>案例审计暂不可用：{error}</AlertDescription></Alert>;
+  if (!data) return <Skeleton className="h-10 w-full" />;
+  return <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground"><Badge variant="outline">原始案例复核</Badge><span>{data.requests} 次请求</span><span>{data.errors} 次失败响应</span><span>{data.truncations} 次截断</span><span>{data.malformedArguments} 次不完整参数</span><span>错误类型可重叠；包含共同前段，不含隔离复测。</span></div>;
+}

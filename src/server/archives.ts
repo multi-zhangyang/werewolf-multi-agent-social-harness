@@ -1,114 +1,50 @@
-/**
- * Opt-in archive persistence for finished games.
- *
- * The runtime core stays zero-disk: a room is archived only when its creator
- * explicitly asked for it at creation time, and the write happens exactly
- * once, when the game finishes. Archive files are user data (like model
- * settings and the character library): they live under `data/archives/`,
- * which is gitignored, and they contain the omniscient end state — including
- * private minds — so opening one requires the room owner's token (matched
- * against a stored sha256, never the raw secret) or the operator token.
- */
-import { mkdir, readdir, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { timingSafeEqual } from "node:crypto";
-import { archiveOwnerTokenHash, type SocietyRoomArchive } from "../society/room";
-import { atomicWriteJson, quarantineCorruptFile, type StorageHealth } from "./storage";
+import { readdir, readFile } from 'node:fs/promises';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import path from 'node:path';
+import type express from 'express';
+import type { ServerContext } from './context';
+import { isOperatorFor, tokenFromRequest } from './auth';
+import type { StorageHealth } from './storage';
 
-/** Metadata exposed by the archive list; no snapshot payload crosses this boundary. */
-export interface ArchiveMeta {
-  id: string;
-  scenarioId: string;
-  title: string;
-  createdAt: string;
-  finishedAt: string;
+export interface ArchiveMeta { id: string; scenarioId: string; title: string; createdAt: string; finishedAt: string; }
+export interface LegacyArchive extends ArchiveMeta {
+  schemaVersion: 1;
+  ownerTokenHash: string;
+  room: Record<string, unknown>;
+  publicRoom: Record<string, unknown>;
+  envelopes: unknown[];
 }
-
-/** Room ids are `room_<uuid>`; anything else would be a path-traversal attempt. */
-function safeArchiveId(id: string): string | undefined {
-  return /^[A-Za-z0-9_-]{4,120}$/.test(id) ? id : undefined;
-}
-
-export function archiveDir(): string {
-  return process.env.SOCIETY_ARCHIVE_DIR?.trim() || "data/archives";
-}
-
-export function isArchiveOwner(archive: SocietyRoomArchive, token: string | undefined): boolean {
+export function archiveDir() { return process.env.SOCIETY_ARCHIVE_DIR?.trim() || 'data/archives'; }
+export function isArchiveOwner(archive: LegacyArchive, token: string | undefined) {
   if (!token) return false;
+  const actual = Buffer.from(createHash('sha256').update(token).digest('hex'));
   const expected = Buffer.from(archive.ownerTokenHash);
-  const given = Buffer.from(archiveOwnerTokenHash(token));
-  return expected.length === given.length && timingSafeEqual(expected, given);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
-
-export async function writeRoomArchive(archive: SocietyRoomArchive, storage?: StorageHealth): Promise<void> {
-  const id = safeArchiveId(archive.id);
-  if (!id) throw new Error(`ARCHIVE_ID_INVALID: '${archive.id}' is not a storable archive id.`);
-  const directory = archiveDir();
-  await mkdir(directory, { recursive: true });
+export async function readRoomArchive(id: string, storage?: StorageHealth): Promise<LegacyArchive | undefined> {
+  if (!/^[A-Za-z0-9_-]{4,120}$/.test(id)) return;
   try {
-    atomicWriteJson(join(directory, `${id}.json`), archive);
-  } catch (error) {
-    storage?.record({ store: "archives", code: "WRITE_FAILED" });
-    throw error;
-  }
+    const data = JSON.parse(await readFile(path.join(archiveDir(), `${id}.json`), 'utf8')) as LegacyArchive;
+    return data.id === id && data.schemaVersion === 1 ? data : undefined;
+  } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') storage?.record({ store: 'archives', code: 'READ_FAILED' }); }
 }
-
 export async function listRoomArchives(storage?: StorageHealth): Promise<ArchiveMeta[]> {
   let entries: string[];
-  try {
-    entries = await readdir(archiveDir());
-  } catch (error) {
-    if (!isMissing(error)) storage?.record({ store: "archives", code: "READ_FAILED" });
-    return [];
+  try { entries = await readdir(archiveDir()); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') storage?.record({ store: 'archives', code: 'READ_FAILED' }); return []; }
+  const result: ArchiveMeta[] = [];
+  for (const file of entries.filter(f => f.endsWith('.json'))) {
+    const archive = await readRoomArchive(file.slice(0, -5), storage);
+    if (archive) result.push({ id: archive.id, scenarioId: archive.scenarioId, title: archive.title, createdAt: archive.createdAt, finishedAt: archive.finishedAt });
   }
-  const metas: ArchiveMeta[] = [];
-  for (const entry of entries) {
-    if (!entry.endsWith(".json")) continue;
-    try {
-      const archive = JSON.parse(await readFile(join(archiveDir(), entry), "utf8")) as SocietyRoomArchive;
-      if (archive?.id && archive.schemaVersion === 1) {
-        metas.push({
-          id: archive.id,
-          scenarioId: archive.scenarioId,
-          title: archive.title,
-          createdAt: archive.createdAt,
-          finishedAt: archive.finishedAt
-        });
-      }
-    } catch {
-      const quarantined = quarantineCorruptFile(join(archiveDir(), entry));
-      storage?.record({ store: "archives", code: quarantined ? "CORRUPT_FILE_QUARANTINED" : "READ_FAILED" });
-    }
-  }
-  return metas.sort((left, right) => right.finishedAt.localeCompare(left.finishedAt));
+  return result.sort((a,b) => b.finishedAt.localeCompare(a.finishedAt));
 }
-
-export async function readRoomArchive(id: string, storage?: StorageHealth): Promise<SocietyRoomArchive | undefined> {
-  const safe = safeArchiveId(id);
-  if (!safe) return undefined;
-  try {
-    const archive = JSON.parse(await readFile(join(archiveDir(), `${safe}.json`), "utf8")) as SocietyRoomArchive;
-    return archive?.id === safe && archive.schemaVersion === 1 ? archive : undefined;
-  } catch (error) {
-    if (!isMissing(error)) {
-      const quarantined = quarantineCorruptFile(join(archiveDir(), `${safe}.json`));
-      storage?.record({ store: "archives", code: quarantined ? "CORRUPT_FILE_QUARANTINED" : "READ_FAILED" });
-    }
-    return undefined;
-  }
-}
-
-function isMissing(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
-}
-
-export async function deleteRoomArchive(id: string): Promise<boolean> {
-  const safe = safeArchiveId(id);
-  if (!safe) return false;
-  try {
-    await rm(join(archiveDir(), `${safe}.json`));
-    return true;
-  } catch {
-    return false;
-  }
+export function registerArchiveRoutes(app: express.Express, context: ServerContext) {
+  app.get('/api/archives', async (_request, response) => response.json({ archives: await listRoomArchives(context.storage) }));
+  app.get('/api/archives/:id', async (request, response) => {
+    const archive = await readRoomArchive(request.params.id, context.storage);
+    if (!archive) { response.status(404).json({ message: '归档不存在' }); return; }
+    const privileged = isOperatorFor(context.auth, request) || isArchiveOwner(archive, tokenFromRequest(request));
+    response.json({ room: privileged ? archive.room : archive.publicRoom, envelopes: privileged ? archive.envelopes : [] });
+  });
 }

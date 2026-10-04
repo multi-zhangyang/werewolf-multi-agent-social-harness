@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, Cpu, Plug, Plus, Settings2, SlidersHorizontal } from "lucide-react";
+import { ArrowLeft, Cpu, KeyRound, Plug, Plus, Settings2, SlidersHorizontal } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { ErrorNote } from "../shared";
 import { GlobalDefaultsSection } from "./global-defaults-section";
+import { AccessSection } from "./access-section";
 import { ModelFormSection } from "./model-form-section";
 import { ModelProfilesSection } from "./model-profiles-section";
 import { ProviderSection } from "./provider-section";
@@ -32,7 +33,7 @@ import {
   type TestResult
 } from "./types";
 
-type SettingsTab = "providers" | "models" | "defaults";
+type SettingsTab = "providers" | "models" | "defaults" | "access";
 
 interface SettingsDialogProps {
   onBack: () => void;
@@ -45,8 +46,6 @@ export function SettingsPage({ onBack, onSaved }: SettingsDialogProps): ReactNod
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState<SettingsTab>("providers");
   const [globalModel, setGlobalModel] = useState<string>("");
-  /** Random-assignment pool (model-profile ids); the registry prunes removed profiles server-side. */
-  const [globalPool, setGlobalPool] = useState<string[]>([]);
   const [providerDraft, setProviderDraft] = useState<ProviderDraft>({ name: "", baseURL: "", apiKey: "", apiMode: "chat-completions" });
   const [modelDraft, setModelDraft] = useState<ModelDraft>(EMPTY_MODEL_DRAFT);
   const [probing, setProbing] = useState<string>();
@@ -77,7 +76,6 @@ export function SettingsPage({ onBack, onSaved }: SettingsDialogProps): ReactNod
       const next = await response.json() as ModelConfigView;
       setConfig(next);
       setGlobalModel(next.globalDefaults.modelProfileId ?? "");
-      setGlobalPool(Array.isArray(next.globalDefaults.randomPoolProfileIds) ? next.globalDefaults.randomPoolProfileIds : []);
       setLoaded(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -113,9 +111,7 @@ export function SettingsPage({ onBack, onSaved }: SettingsDialogProps): ReactNod
   const save = (): Promise<void> => putConfig(
     {
       globalDefaults: {
-        ...(globalModel ? { modelProfileId: globalModel } : {}),
-        // An empty pool is a meaningful "no configured preference" and clears it.
-        randomPoolProfileIds: globalPool
+        modelProfileId: globalModel
       }
     },
     { saved: true }
@@ -251,7 +247,6 @@ export function SettingsPage({ onBack, onSaved }: SettingsDialogProps): ReactNod
     const ok = await putConfig({ removeModelProfileIds: [id] });
     if (ok) {
       if (globalModel === id) setGlobalModel("");
-      setGlobalPool((current) => current.filter((entry) => entry !== id));
     }
   };
 
@@ -308,7 +303,6 @@ export function SettingsPage({ onBack, onSaved }: SettingsDialogProps): ReactNod
         const next = await refreshed.json() as ModelConfigView;
         setConfig(next);
         setGlobalModel(next.globalDefaults.modelProfileId ?? "");
-        setGlobalPool(Array.isArray(next.globalDefaults.randomPoolProfileIds) ? next.globalDefaults.randomPoolProfileIds : []);
         onSaved();
       }
     } catch (cause) {
@@ -327,7 +321,8 @@ export function SettingsPage({ onBack, onSaved }: SettingsDialogProps): ReactNod
   const tabs: Array<{ id: SettingsTab; label: string; icon: typeof Plug; count?: number }> = [
     { id: "providers", label: "提供商", icon: Plug, count: config.providers.length },
     { id: "models", label: "模型档案", icon: Cpu, count: config.modelProfiles.length },
-    { id: "defaults", label: "全局默认", icon: SlidersHorizontal }
+    { id: "defaults", label: "全局默认", icon: SlidersHorizontal },
+    { id: "access", label: "管理访问", icon: KeyRound }
   ];
 
   const editProfile = (profile: ModelProfileView): void => {
@@ -408,7 +403,7 @@ export function SettingsPage({ onBack, onSaved }: SettingsDialogProps): ReactNod
 
             <TabsContent value="models" className="m-0 flex flex-col gap-4 p-6 pb-10">
                 <ModelProfilesSection
-                  profiles={config.modelProfiles}
+                  profiles={config.modelProfiles.filter(p => config.providers.some(provider => provider.id === p.providerProfileId && provider.enabled))}
                   providers={config.providers}
                   probeResults={probeResults}
                   probing={probing}
@@ -459,19 +454,19 @@ export function SettingsPage({ onBack, onSaved }: SettingsDialogProps): ReactNod
                   profiles={config.modelProfiles}
                   value={globalModel}
                   onChange={setGlobalModel}
-                  pool={globalPool}
-                  onPoolChange={setGlobalPool}
                   onSave={() => void save()}
                   saving={saving}
                 />
+            </TabsContent>
+            <TabsContent value="access" className="m-0 p-6 pb-10">
+              <AccessSection />
             </TabsContent>
           </div>
         </Tabs>
 
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-4 py-3.5 sm:px-6">
-          <p className="text-xs text-muted-foreground">「测试」会向提供商发起一次真实请求；其余操作只写入本机配置。</p>
           <Button variant="ghost" className="text-muted-foreground hover:bg-muted hover:text-foreground" disabled={saving} onClick={onBack}>
-            返回大厅
+            返回互动
           </Button>
         </div>
         </main>
@@ -480,7 +475,7 @@ export function SettingsPage({ onBack, onSaved }: SettingsDialogProps): ReactNod
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>移除这个模型档案？</AlertDialogTitle>
-            <AlertDialogDescription>它会从默认模型和随机池中同步移除；历史对局不受影响。</AlertDialogDescription>
+            <AlertDialogDescription>移除后可重新添加。</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>

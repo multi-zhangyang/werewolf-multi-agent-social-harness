@@ -1,3 +1,5 @@
+> 历史调研记录。当前运行时约束以 [v2 架构](../architecture.md) 为准。
+
 # Frontier Research Report: Making LLM Agents "Human-Like" in Social/Deception Games
 
 **Scope:** Real, verified state of the art for building human-like (通人性) LLM social agents — persona, emotion, theory of mind, memory, persuasion, deception, grudges, reputation — targeting game-theory and social-deduction games built on the OpenAI Agents SDK (TypeScript).

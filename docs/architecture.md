@@ -1,157 +1,83 @@
-# Architecture
+# Society 架构
 
-Society is organized around four boundaries: an SDK Agent, a deterministic social world,
-a conversation director, and a room that connects them to the observer UI. Everything
-runs in process memory — the runtime writes nothing to disk.
+应用由共享 SDK 执行器、通用心理状态、环境适配器、事务存储和带权限的视图组成。首页使用多场景工作台，合伙人位于 `#/partners`；旧链接继续可读。
 
-```text
-browser
-  ▲ SSE snapshots and events
-  │
-SocietyRoom ── schedules activations, settles social accounts
-  │
-  ├─ AutonomousSocietyAgent × participants
-  │    ├─ @openai/agents Agent + MemorySession (in-memory)
-  │    ├─ appraisal engine (event → emotion/relationship/mind)
-  │    ├─ cognition tools (update_inner_state / read_the_room / log_deception_plan)
-  │    ├─ social tools (communicate)
-  │    └─ scene tools (flat binding actions)
-  │
-  ├─ DiscussionDirector ── dynamic turn-taking for conversation phases
-  │
-  └─ SocialWorld ── observation, visibility, rules and side effects
-       └─ scene implementation
-```
+| 路径 | 责任 |
+| --- | --- |
+| src/agents/sdk.ts | 唯一生产模型执行入口；官方 Runner、Responses、流审计和完成边界 |
+| src/agents/cognition.ts | 通用事件评价、情绪、需要、关系假设、计划、记忆修订、经历提炼、整局复盘与反馈 |
+| src/agents/recall.ts | 按 Unicode 分词与词面相关性选择工作记忆并支持主动回忆，不生成事实 |
+| src/agents/experience-evidence.ts | 按可见结算 ID 分组；区分账本事实、实际动作、个人解释及记录数量 |
+| src/agents/provenance.ts | 共享内核、场景、模型配置代码、服务器及 lockfile 的源码摘要与快照 |
+| src/runtime/agent-context.ts | 将当前环境能力声明为 SDK 工具，检查旧策略适用性流程，暂存本次心理和行动 |
+| src/runtime/agent-state.ts | 将环境账本转成可见经历、收益与历史图表投影 |
+| src/runtime/scenarios | 信任、公共品、狼人杀和信息交易的规则、可见性、合法动作和结算 |
+| src/runtime/run.ts | 人物调度、通信、真人机会、结束复盘、取消、事务提交和连续世界 |
+| src/runtime/store.ts | 运行、事件、记忆、心理、激活、快照和研究记录 |
+| src/runtime/replay-case.ts | 保存案例的只读模型复测 |
+| src/runtime/studies.ts | 固定前史、独立分支、心理消融和试验记录 |
+| src/partners | 合伙人规则、检查点、干预与同一 SDK 执行器的场景适配 |
+| src/server/routes | API、权限、SSE 和导出 |
+| src/GeneralApp.tsx / src/components/interaction | 多场景、人物心理、研究与案例 UI |
+| src/components/partners | 合伙人游玩、研究与检查点 UI |
 
-## Agent boundary
+## 状态与事务
 
-`src/society/participant.ts` creates one SDK `Agent` per participant — and only one. The
-participant holds an SDK `MemorySession` (in-memory only) and a private mind whose memory
-list is display-only. Binding tools are FLAT: a vote is `{ targetId, reason }`, never a
-deliberation form. Thinking happens inside the agent loop (model → tools → model, up to
-`maxTurns` iterations per activation); actions commit results only. There are no
-specialist sub-agents and no `Agent.asTool()` delegation.
+应用拥有持久心理；SDK Session 只属于一次人物激活。下一次机会由最新可见事实、本人状态和检索记忆重新构造输入，不复用对手的会话或研究流。
 
-The runner streams model and tool events to the room. A model's final text is a decision
-note for the observer; it is not an action protocol. World changes can only happen inside
-a successful domain tool call.
+`agent_minds` 以 run_id / actor_id 保存正式心理；`agent_activations` 防止重复提交。一次激活事务提交全部动作、消息与心理；失败时恢复规则世界检查点、内存心理、收件箱和对话状态。事务中不向浏览器通知中间结果。
 
-Model switching keeps this boundary: while the room (or that one seat) is paused,
-`AutonomousSocietyAgent.switchModel` rebuilds the engine on a new provider/model binding
-and recomputes the context budget; the session and mind are carried over verbatim.
+模型生成期间收到的可见事件在提交时补入正式心理。新预测的起点移到实际提交前沿，因此不能为期间已经发生的结果补登记概率。异常的模型请求与错误审计仍然保留。
 
-## Appraisal boundary
+连续世界在完成时生成各人物快照并更新 head；实验分支不写回源 head。角色连续性携带心理与来源，环境特有的隐藏身份按局隔离。旧数据和失败记录不会因为重建而删除。
 
-`src/society/appraisal.ts` turns world events into inner state: PAD / core emotion /
-social emotion / need / relationship deltas, modulated by the character's Big Five
-profile and stable judgment biases, and by relationship history: the same event does not
-land the same way from a warm ally and from a cold rival — hostile acts from an ally cost
-more trust, a rival's cooperation is more diagnostic, and both intensity and repair scale
-with directed warmth. Settlement outcomes become display-only memory
-notes for the spectator MindSheet; the model's own session history carries what the
-character actually remembers. Emotions are event-driven, never self-reported.
+v2 心理状态将 `relationships` 与 `episodeBeliefs` 分开；同一对象的局部身份猜测不能覆盖长期关系。旧 v1 快照通过读取视图兼容，新激活只转换自己的副本。研究分支重绑定两类记录的局标识，普通跨局迁移则清空局部假设。
 
-## Context boundary (one character = one agent)
+v3 增加可版本化的判断修订与停用。`agent_minds` 和不可变快照的 JSON 保存当前版本及历史，不需要破坏性迁移。生成输入与 recall 时剔除历史 revisions、停用项和旧局局部记忆。默认 16 / expanded 64 条工作记忆兼顾相关性与近期经历；被选中记忆的来源从存储只读回查，经人物权限过滤后才成为本次可引用证据。
 
-Each participant is a fully isolated SDK agent: its own `Agent`, its own in-memory
-session, its own mind and its own context object. Every tool is bound to one actor —
-`scopedContext` raises `CROSS_AGENT_CONTEXT_DETECTED` if the SDK ever hands it another
-agent's run context.
+v4 将本人结算经历的提炼与新情境适用性分开保存。v5 在世界结束后逐个安排私有复盘，仍调用同一个生产参与者。`episodeReviews` 保存状态、结算来源、策略版本和总结；字段可选，旧快照不用迁移。复盘没有合法世界动作或通信能力，必须以正式结束工具完成原子提交，随后才允许创建最终快照。真人和旧实验参与者保持原有生命周期。
 
-Context is budgeted per agent (`src/society/context-manager.ts`): once a turn's estimated
-input crosses the compaction threshold, the manager rewrites session history through the
-SDK's `sessionInputCallback`, compressing older turns into a pinned-facts + digest block
-and keeping recent exchanges verbatim. The pinned block carries identity, the current
-role context, active deceptions and the agent's own last few bounded conclusions
-verbatim, so the thinking layer survives compression deterministically.
+策略采用只关联同一机会实际提交的世界动作。公开表态和等待不产生采用反馈，旧 v4 的发言关联仍可在原始记录查看。每条检验保存当时策略内容和版本，旧版本结果不转计给新版本；可迁移策略可以被判断为不适用。
 
-An SDK input guardrail (`injection-shield`) scans every turn's input for manipulation
-attempts hidden in other players' speech; it never halts a turn, but flags the attempt
-for observers.
+v6 在取回旧可迁移策略的实质行动机会中，通过 SDK 原生 `isEnabled` 要求先完成当前机会、当前版本的适用性判断，再启用世界动作。采用、调整与拒绝具有同等的流程效力，不替模型决定策略。执行阶段再次检查该条件与回执读取顺序；旧机会检验、已被替换的策略版本不满足条件。讨论、私有复盘与关闭心理的条件不受影响，旧 v1–v5 心理记录继续可读。
 
-## Character boundary
+v7 在已提交决策中保存通过 SDK 校验的动作参数，后续可见结算将具体动作、轮次、环境和实际结果写入 `origin=ledger` 的经历。人物记录使用 `origin=agent`，历史来源不明的记录不被升级为账本事实。模型输入、recall 和复盘用不可变结算 ID 分组，原笔记逐条保留；提炼另存 `sourceOutcomeIds`。这些可选 JSON 字段不要求重写历史数据库，结算事实与个人解释分别呈现。
 
-The **character** is a persistent person (persona, values, voice, biases, autobiographical
-anchors); the **agent** is how they perceive and act; the **model** is the engine; the
-**role** is this game's temporary identity. Every game starts the person fresh — there is
-no cross-game carry-over. The local character library (`src/server/characters.ts`,
-`data/characters.json`, gitignored, no secrets) supports create / edit / copy / delete /
-import / export.
+v8 区分轮内经济反馈和整局胜负反馈。轮内结算只关联同轮尚未获反馈的动作，整局终局可以覆盖前面轮次，动作记录保留自身轮次。经济适配器为结算后的补偿生成独立的双方增减事件，零额补偿也有记录；被动收到回报时保存没有本人动作的观察。补偿事件在执行动作的原事务中生成，提交失败会一起回滚资金、双方心理和事件。信任结算显式记录当轮角色与资金方向，狼人杀终局写明实际天数。
 
-## Suspicion boundary
+v9 的 `withinCompletionBudget` 计算尚需评价、检验和结束的步骤数，接入 SDK 原生工具 `isEnabled`。当余下步数只够完成这些步骤时，仅提供下一个必需工具；可选工具不能占用该预算。受约束的策略检验 schema 只包含取回的候选 ID。预算仍为原配置的 8 次模型调用，执行器、正式回执和事务提交路径保持一致。
 
-`src/society/suspicion.ts` tracks the room's public opinion climate. Every public
-accusation, vote and quest outcome raises the suspicion score of the people it concerns —
-public knowledge by construction, injected into every agent's observation and rendered
-for observers as live suspicion bars.
+信息交易的 seed、随机状态和未揭晓质量只属于适配器内部检查点；发送者的本人观察获得当前质量，接收者和公开状态在选择前不含真值。结算事件独立记录报告、真值、接受与否、真实所得和归一化尺度。两种收益条件不改变通用心理 reducer 或 SDK 工具循环。
 
-## Conversation boundary
+## 模型调用
 
-`src/society/conversation.ts` implements turn-taking as response pressure (adjacency
-pairs). Every public utterance raises the urgency of the people it concerns; the director
-opens with a full round, then activates only those with real pressure, wave after wave.
-Silence is a legitimate move. Personality modulates urgency — talkativeness, dominance and
-sensitivity are computed from the adapted temperament plus the character's live PAD mood
-(a world-side mirror each participant pushes after appraisal; it never enters another
-agent's observations), so an energized character speaks up sooner and presses harder.
+生产使用 gpt-6-luna、256000 配置上下文、原生 Responses。SDK 负责函数定义、JSON 校验、工具结果与循环。应用只提供工具、完成条件、错误回执及提交边界。未启用 HTTP、SDK 或整次激活重试。
 
-## World boundary
+提炼策略的模型参数只包含所选经历和策略内容。结算来源属于工具产生的正式记录，由这些经历与当前可见账本的精确链接确定。参数中没有第二组结算选择，因此不会产生“经历与另填来源互不对应”的组合。原始请求、工具回执与存储后的来源分别保留，可独立核对。
 
-`src/society/world.ts` defines the shared world contract: scoped observations, message
-visibility, an activation schedule, typed flat tools that validate and commit domain
-actions, deterministic resolution, structured appraisal events, and in-memory command
-gateway counters exposed via `/api/rooms/:id/metrics`.
+模型流用于实时研究展示。世界只在流和 SDK 完整结束后提交。公开 SSE 不包含私有心理、模型文本、私有行动或完整研究案例。案例中保存实际 HTTP 请求与 SDK 返回的响应（含提供商状态）；原生只读复测另保存 OpenAI 客户端返回的 Responses 响应。前端可预览或下载，不把不透明加密块当作可读思考。
 
-## Social causality ledger (in-memory)
+上游失败响应和被其阻止的工具分别标为 `model_error` 与 `tool_rejected`；工具参数/领域错误标为 `tool_error`。前两类仍使真实运行失败，不以错误分类掩盖不完整输出。
 
-`src/society/social/ledger.ts` records propositions, social acts, evidence, belief
-updates, actor models, directed relationships, commitments, deception episodes and
-outcome reconciliations — all with provenance. Belief updates fuse instead of overwrite:
-a self-reported probability moves the prior by trust = confidence × evidence backing ×
-recency damping (Jeffrey conditioning), where backing comes only from newly-cited
-evidence and stale repetitions decay geometrically, with the result clamped to
-[0.02, 0.98] so no testimony alone ever reaches certainty. Commitment reconciliation
-(fulfilled / violated / void) is the settlement backbone for the causality page. Message
-sidecar extraction annotates every persisted message with structured social acts
-(`model-extracted`), strictly serialized off the send path. High-confidence extractions
-(≥ 0.7, not duplicating the speaker's own declaration) feed the same perception stack a
-declared act feeds — appraisal events, the scenario's suspicion hook and conversation
-response pressure — so an undeclared accusation still lands.
+首段非空模型内容立即发布；后续合并更新最多等待 80ms，即使供应商暂时停止输出也会补发积压内容。完成、失败和取消清理发布定时器，流式展示本身不能改变正式状态。
 
-## Spectator boundary
+## 主要接口
 
-`src/society/spectator/` hosts the presentation-only layer: a deterministic
-`TensionEngine` and the `CinematicDirector`, which derives camera cues from public facts
-only. Its outputs never modify world state. The room UI renders them as a tension meter,
-a cue banner and the three-pane workbench (participants / live stream / causality page).
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | /api/v2/catalog | 场景、人物、当前模型 |
+| GET / POST | /api/v2/runs | 列表 / 创建运行 |
+| GET | /api/v2/runs/:id | 按权限投影的状态与事件 |
+| GET | /api/v2/runs/:id/events | SSE，凭请求头授权 |
+| POST | /api/v2/runs/:id/actions | 真人行动与 opportunityId |
+| POST | /api/v2/runs/:id/control | pause / resume / stop |
+| GET | /api/v2/runs/:id/decision-cases | 研究案例索引 |
+| GET | /api/v2/decision-cases/:id | 脱敏完整请求与响应 |
+| POST | /api/v2/decision-cases/:id/replay | 不执行工具的独立模型复测 |
+| GET / POST | /api/v2/studies | 实验列表 / 创建 |
+| GET / POST | /api/partners | 合伙人列表 / 创建 |
+| GET | /api/partners/:id/runtime/events | 授权研究流 |
 
-## Room and event stream
+匿名只读公开事件；玩家令牌只控制本人；所有者令牌只授予对应局研究权限；操作员管理全局配置。令牌不进入 URL，数据库仅存授权摘要。默认绑定本机，外部绑定需要操作员配置。
 
-`src/society/room.ts` starts the world, runs each activation with bounded turns and
-timeout signals, and retains a finite in-memory event window (count + bytes). Speaking
-turns are optional; binding domain actions stay strict. Single agents can be paused and
-resumed individually, and a paused seat's model can be switched. The Express route
-`/api/rooms/:roomId/events` sends an initial snapshot followed by SSE envelopes; the
-browser reduces those envelopes into the current room view.
-
-## Zero-disk invariant
-
-The runtime never writes to disk by default. The permitted writes are the model configuration
-(`data/model-settings.json`, user data), the `SOCIETY_DEBUG_PROVIDER=1` failure-exchange
-dump (explicit debugging switch), and — only when a room's creator opts in at creation —
-one archive file per finished game under `data/archives/` (opt-in postgame persistence;
-contains the omniscient end state and opens only for its owner or the operator).
-Room state, session history, minds, the ledger and checkpoint-style recovery all exist in
-process memory only.
-
-## Adding a scene
-
-1. Add a `ScenarioSummary` in `src/society/scenarios/metadata.ts`.
-2. Implement `SocialWorld` in a focused module under `src/society/scenarios/`.
-3. Expose every state-changing choice as a typed FLAT tool (target/choice/amount + reason).
-4. Return actor-scoped observations and hide facts that actor should not know.
-5. Emit appraisal events for socially meaningful resolutions via `pushEvent`.
-6. Use `DiscussionDirector` for any phase that should feel like a conversation.
-7. Register the world in `src/society/scenarios/index.ts`.
-
-All thirteen scenarios ship this way without creating another runtime.
+服务重启不会重放未完成的模型工具。合伙人检查点恢复为暂停；通用运行的进程中断记为 interrupted，已提交事件、心理和案例保留。当前为单进程 SQLite，不包含分布式调度或模型权重训练。

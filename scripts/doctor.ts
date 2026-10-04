@@ -1,6 +1,5 @@
 import { createServerContext } from "../src/server/context";
 import { runModelProbe } from "../src/server/model-probe-service";
-import { isModelProtocolReady } from "../src/society/models";
 
 const nodeMajor = Number(process.versions.node.split(".")[0]);
 console.log("Society doctor · 本机发布自检");
@@ -41,12 +40,13 @@ if (!enabled.length) {
   console.log(`→ 将顺序检查 ${enabled.length} 个已启用模型；禁用模型不会被调用。`);
 }
 
+let passed = 0;
 for (const profile of enabled) {
   const startedAt = Date.now();
   try {
     const result = await runModelProbe(context, profile.id, profile.defaults.reasoningEffort);
     const elapsed = Date.now() - startedAt;
-    if (result.ok) console.log(`✓ ${profile.name} · capability + protocol passed · ${elapsed}ms`);
+    if (result.ok) { passed++; console.log(`✓ ${profile.name} · 工具调用通过 · ${elapsed}ms`); }
     else {
       console.error(`✗ ${profile.name} · ${result.protocol.check.errorCode ?? "PROTOCOL_FAILED"} · ${safeMessage(result.message)}`);
       process.exitCode = 1;
@@ -57,11 +57,9 @@ for (const profile of enabled) {
   }
 }
 
-const ready = context.models.listModelProfiles().filter((profile) =>
-  isModelProtocolReady(profile, context.models.providerProfile(profile.providerProfileId))
-);
-console.log(`结果：${ready.length}/${enabled.length} 个已启用模型可创建房间。`);
-if (!ready.length || context.storage.snapshot().status === "degraded") process.exitCode = 1;
+console.log(`结果：${passed}/${enabled.length} 个模型通过本次连通性检查。`);
+if (!passed || context.storage.snapshot().status === "degraded") process.exitCode = 1;
+context.runs.store.close();
 
 function safeMessage(value: unknown): string {
   return (value instanceof Error ? value.message : String(value))

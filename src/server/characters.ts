@@ -91,23 +91,6 @@ export class CharacterLibrary {
     return { builtins: builtinCharacters(), customs: structuredClone(this.customs) };
   }
 
-  /**
-   * All character ids registered under a display name — used to resolve
-   * display-name keys to stable character ids. Duplicates are legal
-   * (same-name characters coexist), so callers must treat an ambiguous match
-   * as unresolvable.
-   */
-  idsForDisplayName(displayName: string): string[] {
-    const ids: string[] = [];
-    for (const character of builtinCharacters()) {
-      if (character.displayName === displayName) ids.push(character.id);
-    }
-    for (const character of this.customs) {
-      if (character.displayName === displayName) ids.push(character.id);
-    }
-    return [...new Set(ids)];
-  }
-
   resolve(id: string): CharacterDefinition | undefined {
     if (!id) return undefined;
     const builtin = builtinCharacter(id);
@@ -169,16 +152,7 @@ export class CharacterLibrary {
     });
   }
 
-  /** Builds the seat roster for one room: explicit picks first, then built-ins. */
-  roster(characterIds: string[] | undefined, seatCount: number): CharacterDefinition[] {
-    const picks = (characterIds ?? []).slice(0, seatCount);
-    const resolved = picks.map((id) => this.resolve(id));
-    const missing = picks.find((id, index) => !resolved[index]);
-    if (missing) throw new Error(`CHARACTER_NOT_FOUND: '${missing}' is not a known character.`);
-    const taken = new Set(picks);
-    const fallback = builtinCharacters().filter((entry) => !taken.has(entry.id));
-    return [...(resolved as CharacterDefinition[]), ...fallback].slice(0, seatCount);
-  }
+
 }
 
 export function registerCharacterRoutes(app: express.Express, context: ServerContext): void {
@@ -213,7 +187,7 @@ export function registerCharacterRoutes(app: express.Express, context: ServerCon
 
   app.get("/api/characters/export", (_request, response) => {
     const { customs } = library.list();
-    const payload = JSON.stringify({ characters: customs }, null, 2);
+    const payload = JSON.stringify({ characters: customs.map(({ id: _id, builtIn: _builtIn, ...input }) => input) }, null, 2);
     response.setHeader("Content-Type", "application/json; charset=utf-8");
     response.setHeader("Content-Disposition", `attachment; filename="society-characters-${new Date().toISOString().slice(0, 10)}.json"`);
     response.send(payload);

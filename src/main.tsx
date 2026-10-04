@@ -5,6 +5,7 @@ import "@fontsource-variable/geist-mono";
 import { App } from "./App";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Toaster } from "./components/ui/sonner";
+import { ThemeProvider, useTheme } from "./components/theme-provider";
 import "./styles.css";
 
 // Screenshot mode: hide provider/model identifiers so published screenshots
@@ -15,9 +16,14 @@ if (typeof window !== "undefined" && new URLSearchParams(window.location.search)
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <TooltipProvider delayDuration={250}>
+    <ThemeProvider><TooltipProvider delayDuration={250}>
       <App />
-      <Toaster theme="dark" position="bottom-right" />
-    </TooltipProvider>
+      <ThemedToaster />
+    </TooltipProvider></ThemeProvider>
   </StrictMode>
 );
+
+function ThemedToaster() {
+  const { resolved } = useTheme();
+  return <Toaster theme={resolved} position="bottom-right" />;
+}

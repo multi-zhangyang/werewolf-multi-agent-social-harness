@@ -1,89 +1,19 @@
-import {
-  mergeProbeResult,
-  probeAgentProtocol,
-  probeCapabilities,
-  type CapabilityProbeResult,
-  type ProbeReasoningEffort,
-  type ProtocolProbeResult
-} from "./probe";
-import { persistRegistry, protocolCheckFingerprint } from "../society/models";
-import type { ServerContext } from "./context";
-
-export interface ModelProbeReport {
-  ok: boolean;
-  message: string;
-  capability: CapabilityProbeResult;
-  protocol: ProtocolProbeResult;
-}
-
-/** Shared real probe used by both the HTTP endpoint and `npm run doctor`. */
-export async function runModelProbe(
-  context: ServerContext,
-  modelProfileId: string,
-  reasoningEffort?: ProbeReasoningEffort
-): Promise<ModelProbeReport> {
-  const profile = context.models.modelProfile(modelProfileId);
-  if (!profile) throw codedError("MODEL_PROFILE_MISSING", "The requested model profile does not exist.");
+import { probeAgentProtocol, probeCapabilityResult, type CapabilityProbeResult, type ProbeReasoningEffort, type ProtocolProbeResult } from './probe';
+import { persistRegistry, protocolCheckFingerprint } from '../society/models';
+import type { ServerContext } from './context';
+export interface ModelProbeReport { ok: boolean; message: string; capability: CapabilityProbeResult; protocol: ProtocolProbeResult; }
+export async function runModelProbe(context: ServerContext, id: string, requested?: ProbeReasoningEffort): Promise<ModelProbeReport> {
+  const profile = context.models.modelProfile(id);
+  if (!profile?.enabled) throw new Error('模型未启用');
   const provider = context.models.providerProfile(profile.providerProfileId);
-  if (!provider) throw codedError("PROVIDER_PROFILE_MISSING", "The profile's provider does not exist.");
-  if (!profile.enabled || !provider.enabled) {
-    throw codedError("MODEL_PROFILE_DISABLED", "Only enabled models on enabled providers can be checked.");
-  }
-
-  const capability = await probeCapabilities({
-    baseURL: provider.baseURL,
-    apiKey: resolveKeyRef(provider.apiKeyRef),
-    modelId: profile.modelId,
-    reasoningEffort
-  });
-  const effectiveEffort = capability.effectiveReasoningEffort === "provider-default"
-    ? undefined
-    : capability.effectiveReasoningEffort;
-  const protocol = await probeAgentProtocol({
-    baseURL: provider.baseURL,
-    apiKey: resolveKeyRef(provider.apiKeyRef),
-    apiMode: provider.apiMode,
-    modelId: profile.modelId,
-    fingerprint: protocolCheckFingerprint(profile, provider),
-    ...(effectiveEffort ? { reasoningEffort: effectiveEffort } : {}),
-    timeoutMs: Number(process.env.SOCIETY_MODEL_PROTOCOL_TIMEOUT_MS)
-  });
-  const admissionProtocol: ProtocolProbeResult = capability.ok
-    ? protocol
-    : {
-        ...protocol,
-        ok: false,
-        message: `基础 capability 检查未通过：${capability.message}`,
-        check: {
-          ...protocol.check,
-          status: "failed",
-          errorCode: "CAPABILITY_CHECK_FAILED",
-          message: capability.message
-        }
-      };
-  const merged = {
-    ...profile,
-    capabilities: mergeProbeResult(profile.capabilities, capability.capabilities),
-    protocolCheck: admissionProtocol.check
-  };
-  context.models.upsertModelProfile(merged);
+  if (!provider?.enabled) throw new Error('提供商未启用');
+  const effort = requested ?? profile.defaults.reasoningEffort as ProbeReasoningEffort | undefined;
+  const protocol = await probeAgentProtocol({ baseURL: provider.baseURL, apiKey: resolveKeyRef(provider.apiKeyRef), apiMode: provider.apiMode, modelId: profile.modelId, fingerprint: protocolCheckFingerprint(profile, provider), reasoningEffort: effort });
+  const capability = probeCapabilityResult(protocol, effort);
+  const capabilities = { ...profile.capabilities };
+  if (protocol.ok) { capabilities.tools = 'yes'; if (effort) capabilities.reasoning = 'yes'; }
+  context.models.upsertModelProfile({ ...profile, capabilities, protocolCheck: protocol.check });
   persistRegistry(context.models, context.modelRegistryFile, context.storage);
-  return {
-    ok: capability.ok && admissionProtocol.ok,
-    message: admissionProtocol.ok ? capability.message : admissionProtocol.message,
-    capability: { ...capability, capabilities: merged.capabilities },
-    protocol: admissionProtocol
-  };
+  return { ok: protocol.ok, message: protocol.message, capability, protocol };
 }
-
-export function resolveKeyRef(ref: string | undefined): string {
-  if (!ref) return process.env.OPENAI_API_KEY ?? "";
-  if (ref.startsWith("env:")) return process.env[ref.slice(4)] ?? "";
-  return "";
-}
-
-function codedError(code: string, message: string): Error {
-  const error = new Error(`${code}: ${message}`);
-  (error as Error & { code?: string }).code = code;
-  return error;
-}
+export function resolveKeyRef(ref: string | undefined) { return ref?.startsWith('env:') ? process.env[ref.slice(4)] ?? '' : process.env.OPENAI_API_KEY ?? ''; }

@@ -8,9 +8,6 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { cjk } from "@streamdown/cjk";
-import { code } from "@streamdown/code";
-import { math } from "@streamdown/math";
-import { mermaid } from "@streamdown/mermaid";
 import { BrainIcon, ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import {
@@ -50,6 +47,7 @@ export type ReasoningProps = ComponentProps<typeof Collapsible> & {
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   duration?: number;
+  autoClose?: boolean;
 };
 
 const AUTO_CLOSE_DELAY = 1000;
@@ -63,6 +61,7 @@ export const Reasoning = memo(
     defaultOpen,
     onOpenChange,
     duration: durationProp,
+    autoClose = true,
     children,
     ...props
   }: ReasoningProps) => {
@@ -108,6 +107,7 @@ export const Reasoning = memo(
     useEffect(() => {
       if (
         hasEverStreamedRef.current &&
+        autoClose &&
         !isStreaming &&
         isOpen &&
         !hasAutoClosed
@@ -119,7 +119,7 @@ export const Reasoning = memo(
 
         return () => clearTimeout(timer);
       }
-    }, [isStreaming, isOpen, setIsOpen, hasAutoClosed]);
+    }, [isStreaming, isOpen, setIsOpen, hasAutoClosed, autoClose]);
 
     const handleOpenChange = useCallback(
       (newOpen: boolean) => {
@@ -155,15 +155,13 @@ export type ReasoningTriggerProps = ComponentProps<
 };
 
 const defaultGetThinkingMessage = (isStreaming: boolean, duration?: number) => {
-  if (isStreaming) {
-    return <Shimmer duration={1}>思考中…</Shimmer>;
+  if (isStreaming || duration === 0) {
+    return <Shimmer duration={1}>Thinking...</Shimmer>;
   }
-  // Sub-second cognition still happened: "片刻" reads honest where "0 秒"
-  // would read as a glitch, and stops the shimmer from outliving the stream.
-  if (duration === undefined || duration === 0) {
-    return <p>思考了片刻</p>;
+  if (duration === undefined) {
+    return <p>Thought for a few seconds</p>;
   }
-  return <p>思考了 {duration} 秒</p>;
+  return <p>Thought for {duration} seconds</p>;
 };
 
 export const ReasoningTrigger = memo(
@@ -200,52 +198,25 @@ export const ReasoningTrigger = memo(
   }
 );
 
-export type ReasoningContentProps = ComponentProps<typeof CollapsibleContent> & {
+export type ReasoningContentProps = ComponentProps<
+  typeof CollapsibleContent
+> & {
   children: string;
 };
 
-const streamdownPlugins = { cjk, code, math, mermaid };
-
-/**
- * Scrollable reasoning body: native overflow with a bottom fade so the height
- * cap reads as "more below" instead of truncation.
- */
-function ReasoningScroll({ children }: { children: string }): ReactNode {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [scrollable, setScrollable] = useState(false);
-
-  const sync = useCallback(() => {
-    const el = scrollRef.current;
-    if (el) setScrollable(el.scrollHeight > el.clientHeight + 4);
-  }, []);
-
-  useEffect(() => {
-    sync();
-    const el = scrollRef.current;
-    if (!el) return;
-    const observer = new ResizeObserver(sync);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [sync]);
-
-  return (
-    <div ref={scrollRef} onScroll={sync} className={cn("max-h-72 min-h-0 overflow-y-auto pr-3", scrollable && "scroll-fade-y")}>
-      <Streamdown className="[overflow-wrap:anywhere]" plugins={streamdownPlugins}>{children}</Streamdown>
-    </div>
-  );
-}
+const streamdownPlugins = { cjk };
 
 export const ReasoningContent = memo(
   ({ className, children, ...props }: ReasoningContentProps) => (
     <CollapsibleContent
       className={cn(
-        "mt-3 min-w-0 text-sm",
+        "mt-4 text-sm",
         "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
         className
       )}
       {...props}
     >
-      <ReasoningScroll>{children}</ReasoningScroll>
+      <Streamdown plugins={streamdownPlugins}>{children}</Streamdown>
     </CollapsibleContent>
   )
 );

@@ -35,7 +35,7 @@ export function ModelProfilesSection({ profiles, providers, probeResults, probin
     <section>
       <div className="mb-3 flex items-baseline justify-between gap-3">
         <h3 className="text-sm font-semibold text-foreground">模型档案</h3>
-        <span className="text-xs text-muted-foreground">{profiles.length} 个 · 只有启用且协议通过的档案会出现在创建房间时</span>
+        <span className="text-xs text-muted-foreground">{profiles.length} 个</span>
       </div>
 
       <div className="scroll-fade-y-lg flex max-h-[420px] flex-col gap-2 overflow-y-auto px-0.5 py-0.5">
@@ -128,11 +128,6 @@ export function ModelProfilesSection({ profiles, providers, probeResults, probin
                 <AlertTitle>{probeResults[profile.id].ok ? "测试通过" : "测试失败"}</AlertTitle>
                 <AlertDescription>
                   <p>{probeResults[profile.id].message}</p>
-                  {(probeResults[profile.id].capability?.reasoningFallbacks ?? probeResults[profile.id].reasoningFallbacks)?.map((fallback, index) => (
-                    <p key={`${fallback.from}-${fallback.to}-${index}`}>
-                      {fallback.from} → {fallback.to}（HTTP {fallback.status}）：{fallback.reason}
-                    </p>
-                  ))}
                 </AlertDescription>
               </Alert>
             ) : null}
@@ -149,6 +144,6 @@ export function ModelProfilesSection({ profiles, providers, probeResults, probin
 }
 
 function ProtocolBadge({ status }: { status: NonNullable<ModelProfileView["protocolCheck"]>["status"] }): ReactNode {
-  const label = status === "passed" ? "协议通过" : status === "failed" ? "协议失败" : status === "stale" ? "需重检" : "未检查";
+  const label = status === "passed" ? "连接正常" : status === "failed" ? "测试失败" : status === "stale" ? "需重检" : "未检查";
   return <Badge variant={status === "passed" ? "default" : status === "failed" ? "destructive" : "outline"} className="shrink-0 text-xs">{label}</Badge>;
 }

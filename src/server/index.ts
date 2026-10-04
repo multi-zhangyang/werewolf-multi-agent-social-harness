@@ -3,9 +3,15 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { ZodError } from "zod";
 import { createServerContext, host, port } from "./context";
-import { registerRoomRoutes } from "./routes/rooms";
+import { registerConfigurationRoutes } from "./routes/model-config";
+import { registerArchiveRoutes } from "./archives";
 import { registerCharacterRoutes } from "./characters";
-import { registerTemplateRoutes } from "./templates";
+import { registerRunRoutes } from "./routes/runs";
+import { registerStudyRoutes } from "./routes/studies";
+import { RunError } from "../runtime/types";
+import { registerPartnerRoutes } from "./routes/partners";
+import { PartnerError } from "../partners/service";
+import { WorldError } from "../partners/world";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
@@ -17,18 +23,27 @@ export function createServerApp(): express.Express {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "512kb" }));
+  registerPartnerRoutes(app, context);
   registerCharacterRoutes(app, context);
-  registerTemplateRoutes(app, context);
-  registerRoomRoutes(app, context);
+  registerRunRoutes(app, context);
+  registerStudyRoutes(app, context);
+  app.post("/api/rooms", (_request, response) => response.status(410).json({ message: "请使用新的互动入口" }));
+  app.delete("/api/archives/:archiveId", (_request, response) => response.status(405).json({ message: "历史归档为只读" }));
+  registerConfigurationRoutes(app, context);
+  registerArchiveRoutes(app, context);
+  app.get("/api/health", (_request, response) => response.json({ ok: true, storage: context.storage.snapshot() }));
   app.use(express.static(path.resolve(directory, "../../dist")));
   app.get("*path", (_request, response) => {
     response.sendFile(path.resolve(directory, "../../dist/index.html"));
   });
   app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+    if (error instanceof RunError) { response.status(error.statusCode).json({ message: error.message }); return; }
+    if (error instanceof PartnerError) { response.status(error.statusCode).json({ message: error.message }); return; }
+    if (error instanceof WorldError) { response.status(error.statusCode).json({ message: error.message }); return; }
     if (error instanceof ZodError) {
       response.status(400).json({
         error: "INVALID_REQUEST",
-        message: "Room configuration is invalid.",
+        message: "请检查填写的内容",
         fields: error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
       });
       return;
@@ -41,6 +56,9 @@ export function createServerApp(): express.Express {
 const app = createServerApp();
 
 if (isMainModule()) {
+  context.partners.store.recover();
+  context.runs.store.recoverInterrupted();
+  context.studies.recoverInterrupted();
   // Fail loudly instead of dying silently: surface process-level failures
   // with a scrubbed, grep-able reason so an external supervisor can restart.
   process.on("unhandledRejection", (reason) => {
@@ -66,11 +84,14 @@ if (isMainModule()) {
     console.log(`[society] ${signal}; closing rooms and provider activations (grace ${graceMs}ms).`);
     const closed = new Promise<void>((resolve) => server.close(() => resolve()));
     context.liveConnections.closeAll();
-    context.rooms.disposeAll("服务正在关闭");
-    void context.limiter.waitForIdle(graceMs).then(async (idle) => {
-      if (!idle) console.warn(`[society] shutdown grace expired with ${context.limiter.concurrency()} provider activation(s) still settling.`);
+    context.runs.stopAll();
+    context.interventions.stopAll();
+    context.partners.stopAll();
+    context.studies.stopAll();
+    void Promise.race([Promise.allSettled([context.interventions.settled(), context.partners.settled(), context.studies.settledAll(), ...[...context.runs.live.values()].map(run => run.settled())]), new Promise(resolve => setTimeout(resolve, graceMs))]).then(async () => {
       server.closeAllConnections();
       await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 250))]);
+      context.runs.store.close();
       process.exit(0);
     });
   };

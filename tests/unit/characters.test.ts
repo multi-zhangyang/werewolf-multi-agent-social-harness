@@ -1,6 +1,5 @@
 /**
- * Character-library checks: built-in roster integrity, character→seat profile
- * mapping, and the local library CRUD / roster resolution. No model calls,
+ * Character-library checks: built-in roster integrity and local library CRUD. No model calls,
  * no network.
  */
 import { strict as assert } from "node:assert";
@@ -8,7 +7,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { it } from "vitest";
-import { builtinCharacter, builtinCharacters, characterAgentProfile } from "../../src/society/profiles";
+import { builtinCharacter, builtinCharacters } from "../../src/society/profiles";
 import { CharacterLibrary } from "../../src/server/characters";
 import { StorageHealth } from "../../src/server/storage";
 
@@ -42,19 +41,6 @@ check("built-in ids are position-stable and resolvable", () => {
   assert.equal(builtinCharacter("char-xyz"), undefined);
 });
 
-check("character→seat profile keeps the person and round-robins models", () => {
-  const character = builtinCharacter("builtin-04")!;
-  const profile = characterAgentProfile(character, 0, ["model-a", "model-b"]);
-  assert.equal(profile.id, "agent-01");
-  assert.equal(profile.model, "model-a");
-  assert.equal(profile.displayName, character.displayName);
-  assert.deepEqual(profile.decisionBiases, character.decisionBiases);
-  assert.deepEqual(profile.autobiographicalAnchors, character.autobiographicalAnchors);
-  const second = characterAgentProfile(character, 1, ["model-a", "model-b"]);
-  assert.equal(second.model, "model-b", "round-robin continues");
-  assert.equal(second.id, "agent-02");
-});
-
 check("library create / copy / update / delete round-trip", () => {
   const created = library.create({
     displayName: "验客",
@@ -75,23 +61,6 @@ check("library create / copy / update / delete round-trip", () => {
   library.remove(created.id);
   library.remove(copy.id);
   assert.equal(library.list().customs.length, 0);
-});
-
-check("roster resolves picks, falls back to built-ins, and rejects unknown ids", () => {
-  const custom = library.create({
-    displayName: "新人甲",
-    persona: "一位用于阵容解析验证的临时人物。",
-    traits: ["稳健"],
-    values: ["秩序"],
-    goals: ["活着"]
-  });
-  const roster = library.roster([custom.id, "builtin-02"], 4);
-  assert.equal(roster.length, 4);
-  assert.equal(roster[0].id, custom.id);
-  assert.equal(roster[1].displayName, "苏遥");
-  assert.equal(roster[2].builtIn, true, "remaining seats fall back to built-ins");
-  assert.throws(() => library.roster(["char-missing-000"], 2), /CHARACTER_NOT_FOUND/);
-  library.remove(custom.id);
 });
 
 check("legacy JSON upgrades through an atomic write without leaving temporary files", () => {

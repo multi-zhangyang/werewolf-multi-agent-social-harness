@@ -1,0 +1,63 @@
+import puppeteer from "puppeteer-core";
+import { strict as assert } from "node:assert";
+import { mkdirSync } from "node:fs";
+
+// Explicit offline lifecycle fixtures; never counted as model trials.
+process.env.SOCIETY_DATABASE_FILE = ":memory:";
+process.env.SOCIETY_OPERATOR_TOKEN = "harness-ui-test-only";
+process.env.SOCIETY_MODEL_SETTINGS_FILE = "data/ui-models-test.json";
+process.env.SOCIETY_CHARACTERS_FILE = "data/v6-ui/characters-test.json";
+mkdirSync("data/v6-ui", { recursive: true });
+const { context, createServerApp } = await import("../src/server/index.ts");
+const { runSpecSchema } = await import("../src/runtime/types.ts");
+const { runtimeCharacter } = await import("../src/server/routes/runs.ts");
+const characters = context.characters.list().builtins.slice(0, 2).map(runtimeCharacter);
+const created = context.runs.create(runSpecSchema.parse({ scenario: "trust-game", rounds: 2, experiment: { psychology: "off" }, roster: characters.map(c => ({ characterId: c.id, human: true })) }), characters);
+const add = data => context.runs.store.append(created.run.id, { type: "trace", actorId: characters[0].id, visibility: "research", text: "sdk-harness", data: { harness: true, opportunityId: "fixture-op", phase: "discussion", attempt: 1, step: 1, ...data } }, []);
+add({ kind: "tool_start", callId: "rejected", toolName: "recall_memory", input: '{"query":"背叛 补偿","about":null}' });
+add({ kind: "tool_rejected", callId: "rejected", toolName: "recall_memory", message: "本次机会已检索过同一组关键词。" });
+add({ kind: "tool_start", callId: "completed", toolName: "remember", input: '{"text":"先看他的行动"}' });
+add({ kind: "tool_end", callId: "completed", toolName: "remember", result: '{"accepted":true}', durationMs: 3 });
+add({ kind: "model_start", step: 2, remainingActions: [] });
+const server = await new Promise(resolve => { const s = createServerApp().listen(0, "127.0.0.1", () => resolve(s)); });
+const base = `http://127.0.0.1:${server.address().port}`;
+const browser = await puppeteer.launch({ executablePath: process.env.CHROME_BIN ?? "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", headless: true });
+try {
+  const page = await browser.newPage(); const errors = [];
+  page.on("pageerror", e => errors.push(e.message));
+  await page.setViewport({ width: 1440, height: 1000 });
+  await page.goto(base, { waitUntil: "networkidle2" });
+  await page.evaluate(({ id, token }) => localStorage.setItem(`society:run:${id}:owner`, token), { id: created.run.id, token: created.ownerToken });
+  const route = `${base}/#/research/${created.run.id}`;
+  await page.goto(route, { waitUntil: "networkidle2" });
+  await page.locator('[role="tab"] ::-p-text(轨迹)').click();
+  await page.waitForFunction(() => document.body.textContent.includes("运行中") && document.body.textContent.includes("已拦截"));
+  assert.equal(await page.$$eval('[aria-label="展开检索自己的经历"]', nodes => nodes.length), 1);
+  await page.focus('[aria-label="展开检索自己的经历"]'); await page.keyboard.press("Enter");
+  await page.locator('[role="tab"] ::-p-text(输入)').click();
+  await page.waitForFunction(() => document.body.textContent.includes("背叛 补偿"));
+  await page.screenshot({ path: "data/v6-ui/sdk-dark.png", fullPage: true });
+  await page.evaluate(() => localStorage.setItem("society:theme", "light"));
+  await page.reload({ waitUntil: "networkidle2" }); await page.locator('[role="tab"] ::-p-text(轨迹)').click();
+  await page.screenshot({ path: "data/v6-ui/sdk-light.png", fullPage: true });
+  await page.setViewport({ width: 390, height: 844 });
+  await page.screenshot({ path: "data/v6-ui/sdk-mobile.png", fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  add({ kind: "model_error", step: 2, message: "UI 故障夹具：提供商响应截断", durationMs: 2400 });
+  await page.reload({ waitUntil: "networkidle2" }); await page.locator('[role="tab"] ::-p-text(轨迹)').click();
+  await page.waitForFunction(() => document.body.textContent.includes("提供商响应截断"));
+  assert.equal(await page.evaluate(() => document.body.textContent.includes("运行中")), false);
+  await page.screenshot({ path: "data/v6-ui/sdk-failed-mobile.png", fullPage: true });
+  await page.goto(`${base}/#/runs/${created.run.id}`, { waitUntil: "networkidle2" });
+  await page.waitForSelector('[aria-label="展开检索自己的经历"]');
+  await page.locator('[aria-label="展开检索自己的经历"]').click();
+  await page.locator('[role="tab"] ::-p-text(输入)').click();
+  await page.waitForFunction(() => document.body.textContent.includes("背叛 补偿"));
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  assert.deepEqual(errors, []);
+  console.log("SDK lifecycle UI passed: merged parameters/results, running/rejected/failed/completed, keyboard, dark/light, mobile, arena and research. Offline fixtures only.");
+} finally {
+  await browser.close(); context.runs.stopAll();
+  await created.run.settled(); context.liveConnections.closeAll();
+  server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); context.runs.store.close();
+}

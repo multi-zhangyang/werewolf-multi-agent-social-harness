@@ -1,0 +1,78 @@
+import puppeteer from "puppeteer-core";
+import { strict as assert } from "node:assert";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { cognitiveFixtureParticipant } from "../tests/partners/cognitive-fixture.ts";
+import { PartnerService } from "../src/partners/service.ts";
+import { InterventionService } from "../src/partners/interventions.ts";
+
+process.env.SOCIETY_DATABASE_FILE = ":memory:";
+process.env.SOCIETY_OPERATOR_TOKEN = "cognition-ui-fixture";
+process.env.SOCIETY_MODEL_SETTINGS_FILE = "data/partners-ui/cognition-model-fixture.json";
+process.env.SOCIETY_CHARACTERS_FILE = "data/partners-ui/cognition-characters-fixture.json";
+mkdirSync("data/partners-ui", { recursive: true });
+const { context, createServerApp } = await import("../src/server/index.ts");
+context.partners = new PartnerService(context.partners.store, cognitiveFixtureParticipant);
+context.interventions = new InterventionService(context.partners);
+const server = await new Promise(resolve => { const instance = createServerApp().listen(0, "127.0.0.1", () => resolve(instance)); });
+const base = `http://127.0.0.1:${server.address().port}`;
+const browser = await puppeteer.launch({ executablePath: "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", headless: true });
+const page = await browser.newPage(); const errors = []; const requests = [];
+page.on("pageerror", error => errors.push(error.message)); page.on("request", request => requests.push(request.url()));
+try {
+  await page.setViewport({ width: 1536, height: 960 }); await page.goto(base, { waitUntil: "networkidle2" });
+  await page.evaluate(() => { localStorage.setItem("society:owner-token", "cognition-ui-fixture"); localStorage.setItem("society:theme", "light"); });
+  await page.goto(`${base}/#/partners-intervention`, { waitUntil: "networkidle2" });
+  await page.waitForSelector('[data-testid="intervention-setup"]');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.locator('#intervention-repeats').fill("1");
+  await page.screenshot({ path: "data/partners-ui/cognition-setup-light.png", fullPage: true });
+  await page.locator('button ::-p-text(准备 4 条独立分支)').click();
+  await page.waitForSelector('[data-testid="intervention-experiment"]');
+  const id = await page.evaluate(() => location.hash.split("/")[2]);
+  assert.equal(context.interventions.view(id).status, "paused");
+  assert.equal(context.interventions.view(id).rows.every(row => context.partners.store.cases(row.runId).length === 0), true);
+  await page.locator('button ::-p-text(开始实验)').click();
+  await page.waitForFunction(() => document.body.textContent.includes("本批次已结束"));
+  assert.equal(context.interventions.view(id).completed, 4);
+  assert.equal(context.interventions.view(id).rows.every(row => row.runStatus === "paused"), true);
+  await page.screenshot({ path: "data/partners-ui/cognition-branches-light.png", fullPage: true });
+  await page.locator('[role="tab"] ::-p-text(行为对照)').click();
+  await page.waitForFunction(() => document.body.textContent.includes("有效样本不足"));
+  await page.locator('[aria-label="切换外观"]').click(); await page.locator('[role="menuitemradio"] ::-p-text(深色)').click();
+  await page.screenshot({ path: "data/partners-ui/cognition-comparison-dark.png", fullPage: true });
+  const row = context.interventions.view(id).rows.find(row => row.mechanism === "full");
+  await page.goto(`${base}/#/partners/${row.runId}`, { waitUntil: "networkidle2" });
+  await page.locator('[data-slot="toggle-group-item"] ::-p-text(研究)').click();
+  await page.locator('[aria-label="检查人物"]').click(); await page.locator('[role="option"] ::-p-text(林舟)').click();
+  await page.waitForSelector('[role="listbox"]', { hidden: true });
+  await page.waitForSelector('[data-testid="decision-flow"]');
+  await page.waitForFunction(() => document.body.textContent.includes("实际选择") && document.body.textContent.includes("建立计划"));
+  const run = context.partners.get(row.runId); const event = run.world.events.find(event => event.kind === "settlement");
+  await page.locator(`[data-event-id="${event.id}"] button`).click();
+  await page.waitForFunction(() => document.body.textContent.includes("后续回应 · 行动 #"));
+  assert.equal(await page.evaluate(() => document.body.textContent.includes("这个时点的检查点不可读取")), false);
+  await page.screenshot({ path: "data/partners-ui/cognition-decision-flow-dark.png", fullPage: true });
+  await page.evaluate(() => { window.flowNode = document.querySelector('[data-testid="decision-flow"]'); });
+  const summaryRequests = requests.filter(url => url.includes(`/api/partners/${row.runId}/decisions`)).length;
+  const latest = context.partners.get(row.runId); latest.version++; context.partners.store.save(latest);
+  await new Promise(resolve => setTimeout(resolve, 2200));
+  assert.equal(await page.evaluate(() => window.flowNode === document.querySelector('[data-testid="decision-flow"]')), true);
+  assert.equal(requests.filter(url => url.includes(`/api/partners/${row.runId}/decisions`)).length, summaryRequests, "Activity-only refresh must not refetch model cases");
+  assert.equal(requests.some(url => url.endsWith(`/api/partners/${row.runId}/cases`)), false);
+  await page.setViewport({ width: 390, height: 844 });
+  await page.locator('[aria-label="协议与人物详情"]').click(); await page.waitForSelector('[role="dialog"]');
+  await page.waitForFunction(() => document.querySelector('[role="dialog"] [aria-label="检查人物"]')?.textContent.includes("林舟"));
+  assert.equal(await page.$eval('[role="dialog"] [role="tab"][aria-selected="true"]', node => node.textContent), "心理变化");
+  await page.waitForFunction(() => { const box = document.querySelector('[role="dialog"]')?.getBoundingClientRect(); return box && box.left >= -1 && box.right <= window.innerWidth + 1; });
+  await page.screenshot({ path: "data/partners-ui/cognition-mobile-dark.png", fullPage: true });
+  await page.keyboard.press("Escape"); await page.waitForSelector('[role="dialog"]', { hidden: true });
+  await page.goto(`${base}/#/partners-intervention/${id}`, { waitUntil: "networkidle2" });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.screenshot({ path: "data/partners-ui/cognition-branches-mobile.png", fullPage: true });
+  assert.deepEqual(errors, []);
+  writeFileSync("data/partners-ui/cognition-result.json", JSON.stringify({ source: "deterministic UI fixture through real SDK, never live-model evidence", experiment: id,
+    branches: 4, singleDecisionPause: true, isolationControl: true, causalTimeline: "historical checkpoint separated from later appraisal", stableDom: true, noFullCasePolling: true,
+    themes: ["light", "dark"], widths: [1536, 390], keyboard: "sheet Escape", errors }, null, 2));
+  console.log("Cognition UI passed: preregistered interventions, 4 SDK fixture branches, single-step pause, formal state/action chain, history, stable DOM, light/dark and mobile.");
+} catch (error) { await page.screenshot({ path: "data/partners-ui/cognition-failure.png", fullPage: true }); console.log(await page.evaluate(() => document.body.innerText.slice(-5500))); throw error; }
+finally { context.interventions.stopAll(); context.partners.stopAll(); await context.interventions.settled(); await context.partners.settled(); await browser.close(); context.liveConnections.closeAll(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); context.runs.store.close(); }

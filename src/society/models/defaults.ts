@@ -1,9 +1,4 @@
-/**
- * System defaults for context policies and runtime safety limits. These are
- * the lowest precedence in the resolution chain: every user setting overrides
- * them, and runtime safety overrides every user setting.
- */
-import type { ContextPolicy, ModelCapabilities, RuntimeSafetyLimits } from "./contracts";
+import type { ContextPolicy, ModelCapabilities } from "./contracts";
 
 export const DEFAULT_CONTEXT_POLICY_ID = "policy-balanced-auto";
 
@@ -51,33 +46,4 @@ export function defaultCapabilities(): ModelCapabilities {
     imageInput: "unknown",
     maxOutputTokens: "unknown"
   };
-}
-
-export function defaultSafetyLimits(): RuntimeSafetyLimits {
-  return {
-    minContextWindow: 8_192,
-    maxOutputTokensCap: 64_000,
-    maxTurnsCap: 24,
-    maxRetryAttemptsCap: 8,
-    minRequestTimeoutMs: 30_000,
-    maxRequestTimeoutMs: 1_200_000
-  };
-}
-
-/**
- * Reserved budgets (tokens) when the policy says "auto". Deliberately
- * conservative: a long game must never blow the window because the reserve
- * was optimistic.
- */
-export function autoReservedTokens(contextWindow: number): {
-  reservedOutputTokens: number;
-  reservedToolTokens: number;
-  reservedSystemTokens: number;
-  safetyMarginTokens: number;
-} {
-  const reservedOutputTokens = Math.min(16_384, Math.floor(contextWindow * 0.08));
-  const reservedToolTokens = Math.min(32_768, Math.floor(contextWindow * 0.12));
-  const reservedSystemTokens = Math.min(24_576, Math.floor(contextWindow * 0.1));
-  const safetyMarginTokens = Math.floor(contextWindow * 0.04);
-  return { reservedOutputTokens, reservedToolTokens, reservedSystemTokens, safetyMarginTokens };
 }

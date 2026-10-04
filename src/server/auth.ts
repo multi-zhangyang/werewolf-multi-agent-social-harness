@@ -17,7 +17,6 @@
  */
 import type { Request } from "express";
 import { timingSafeEqual } from "node:crypto";
-import type { SocietyRoom } from "../society/room";
 
 export interface ServerAuth {
   operatorTokenConfigured(): boolean;
@@ -69,24 +68,6 @@ export function setTokenCookie(response: import("express").Response, token: stri
     "Set-Cookie",
     `society_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax`
   );
-}
-
-export interface RoomAuthority {
-  /** The request carries this room's owner token. */
-  owner: boolean;
-  /** The request carries a valid participant (player) token and its seat. */
-  participantActorId?: string;
-}
-
-/** Owner / participant authority for one room. */
-export function roomAuthorityFor(request: Request, room: SocietyRoom): RoomAuthority {
-  const token = tokenFromRequest(request);
-  if (!token) return { owner: false };
-  const participantActorId = room.actorForToken(token);
-  return {
-    owner: room.isOwnerToken(token),
-    ...(participantActorId ? { participantActorId } : {})
-  };
 }
 
 /** Global authority is a strict token, or tokenless loopback-only local mode. */

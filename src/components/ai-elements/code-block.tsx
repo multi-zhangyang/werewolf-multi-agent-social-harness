@@ -23,11 +23,13 @@ import {
 } from "react";
 import type {
   BundledLanguage,
-  BundledTheme,
-  HighlighterGeneric,
   ThemedToken,
 } from "shiki";
-import { createHighlighter } from "shiki";
+import { createHighlighterCore } from "shiki/core";
+import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
+import jsonGrammar from "shiki/langs/json.mjs";
+import lightTheme from "shiki/themes/github-light.mjs";
+import darkTheme from "shiki/themes/github-dark.mjs";
 
 // Shiki uses bitflags for font styles: 1=italic, 2=bold, 4=underline
 // oxlint-disable-next-line eslint(no-bitwise)
@@ -132,7 +134,7 @@ const CodeBlockContext = createContext<CodeBlockContextType>({
 // Highlighter cache (singleton per language)
 const highlighterCache = new Map<
   string,
-  Promise<HighlighterGeneric<BundledLanguage, BundledTheme>>
+  Promise<Awaited<ReturnType<typeof createHighlighterCore>>>
 >();
 
 // Token cache
@@ -141,23 +143,20 @@ const tokensCache = new Map<string, TokenizedCode>();
 // Subscribers for async token updates
 const subscribers = new Map<string, Set<(result: TokenizedCode) => void>>();
 
-const getTokensCacheKey = (code: string, language: BundledLanguage) => {
-  const start = code.slice(0, 100);
-  const end = code.length > 100 ? code.slice(-100) : "";
-  return `${language}:${code.length}:${start}:${end}`;
-};
+const getTokensCacheKey = (code: string, language: BundledLanguage) => `${language}:${code}`;
 
 const getHighlighter = (
   language: BundledLanguage
-): Promise<HighlighterGeneric<BundledLanguage, BundledTheme>> => {
+): Promise<Awaited<ReturnType<typeof createHighlighterCore>>> => {
   const cached = highlighterCache.get(language);
   if (cached) {
     return cached;
   }
 
-  const highlighterPromise = createHighlighter({
-    langs: [language],
-    themes: ["github-light", "github-dark"],
+  const highlighterPromise = createHighlighterCore({
+    langs: [jsonGrammar],
+    themes: [lightTheme, darkTheme],
+    engine: createJavaScriptRegexEngine(),
   });
 
   highlighterCache.set(language, highlighterPromise);
@@ -226,6 +225,7 @@ export const highlightCode = (
 
       // Cache the result
       tokensCache.set(tokensCacheKey, tokenized);
+      if (tokensCache.size > 128) tokensCache.delete(tokensCache.keys().next().value!);
 
       // Notify all subscribers
       const subs = subscribers.get(tokensCacheKey);

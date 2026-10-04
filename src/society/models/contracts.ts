@@ -1,25 +1,4 @@
-/**
- * Model, provider and context-policy configuration contracts.
- *
- * Model configuration is a first-class capability of every agent. A
- * character is not a role, a role is not a model, and a model is not a
- * personality: each participant resolves its own model binding through the
- * precedence chain in `resolver.ts`.
- */
-
 export type CapabilityState = "yes" | "no" | "unknown";
-
-/** The internal cognitive phases of one peer agent (not separate agents). */
-export type CognitivePhase =
-  | "perceive"
-  | "recall"
-  | "appraise"
-  | "infer"
-  | "plan"
-  | "decide"
-  | "act"
-  | "reflect"
-  | "consolidate";
 
 export interface ProviderProfile {
   id: string;
@@ -35,8 +14,7 @@ export interface ProviderProfile {
 }
 
 /**
- * Three-state capability matrix. `unknown` is not "no": parameters gated on
- * unknown capabilities are not sent unless the user explicitly forces them.
+ * Capability metadata retained with the local model configuration.
  */
 export interface ModelCapabilities {
   streaming: CapabilityState;
@@ -58,6 +36,7 @@ export interface ModelTuning {
   topP?: number;
   presencePenalty?: number;
   frequencyPenalty?: number;
+  /** Historical profile field; live execution does not use output caps. */
   maxOutputTokens?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   reasoningSummary?: "auto" | "concise" | "detailed" | "off";
@@ -109,8 +88,8 @@ export interface ModelProfile {
 }
 
 /**
- * Multi-level context pressure policy. Every agent owns a copy; thresholds are
- * ratios of the *usable* input budget, never of the raw context window.
+ * Legacy context-policy document retained for local JSON compatibility.
+ * The v2 participant manages its own bounded session window.
  */
 export interface ContextPolicy {
   id: string;
@@ -138,98 +117,4 @@ export interface ContextPolicy {
   useNativeCompaction: "auto" | "always" | "never";
   verifyPinnedFacts: boolean;
   consolidateDuringIdle: boolean;
-}
-
-export interface AgentUtilityModelBindings {
-  summarizerModelProfileId?: string;
-  embeddingModelProfileId?: string;
-  rerankerModelProfileId?: string;
-  ttsModelProfileId?: string;
-  speechToTextModelProfileId?: string;
-}
-
-export interface AgentModelBinding {
-  defaultModelProfileId?: string;
-  tuningOverrides?: Partial<ModelTuning>;
-  contextPolicyId?: string;
-  contextOverrides?: Partial<ContextPolicy>;
-  utilityModels?: AgentUtilityModelBindings;
-  /** Per-cognitive-phase model config — same agent identity throughout. */
-  phaseOverrides?: Partial<Record<CognitivePhase, {
-    modelProfileId?: string;
-    tuning?: Partial<ModelTuning>;
-  }>>;
-}
-
-export type ResolvedFieldSource =
-  | "system"
-  | "model-profile"
-  | "global"
-  | "room"
-  | "agent"
-  | "phase"
-  | "runtime-safety";
-
-export interface ResolvedField<T> {
-  value: T;
-  source: ResolvedFieldSource;
-}
-
-/** Every tuning field the runtime may send, with provenance. */
-export interface ResolvedTuning {
-  temperature?: ResolvedField<number>;
-  topP?: ResolvedField<number>;
-  presencePenalty?: ResolvedField<number>;
-  frequencyPenalty?: ResolvedField<number>;
-  maxOutputTokens?: ResolvedField<number>;
-  reasoningEffort?: ResolvedField<Exclude<ModelTuning["reasoningEffort"], undefined>>;
-  reasoningSummary?: ResolvedField<Exclude<ModelTuning["reasoningSummary"], undefined>>;
-  toolChoice?: ResolvedField<Exclude<ModelTuning["toolChoice"], undefined>>;
-  parallelToolCalls?: ResolvedField<boolean>;
-  truncation?: ResolvedField<Exclude<ModelTuning["truncation"], undefined>>;
-  store?: ResolvedField<boolean>;
-  seed?: ResolvedField<number>;
-  stop?: ResolvedField<string[]>;
-  maxTurns?: ResolvedField<number>;
-  requestTimeoutMs?: ResolvedField<number>;
-  retryMaxAttempts?: ResolvedField<number>;
-  retryInitialDelayMs?: ResolvedField<number>;
-  promptCacheRetention?: ResolvedField<Exclude<ModelTuning["promptCacheRetention"], undefined>>;
-}
-
-/**
- * The final, effective configuration for one agent's decision model. Includes
- * only what can actually be sent to the target provider after capability
- * negotiation; every field carries its precedence source.
- */
-export interface ResolvedModelConfig {
-  agentId: string;
-  modelProfileId: string;
-  modelId: string;
-  providerProfileId: string;
-  contextWindow: number;
-  contextWindowSource: ModelProfile["contextWindowSource"];
-  /** contextWindow − output/tool/system reserves − safety margin. */
-  usableInputTokens: number;
-  reservedOutputTokens: number;
-  reservedToolTokens: number;
-  reservedSystemTokens: number;
-  safetyMarginTokens: number;
-  tuning: ResolvedTuning;
-  /** Sanitized modelSettings that the SDK may receive. */
-  sdkModelSettings: Record<string, unknown>;
-  contextPolicy: ContextPolicy;
-  capabilities: ModelCapabilities;
-  /** Capability states that forced a parameter to be dropped or gated. */
-  negotiationNotes: string[];
-}
-
-/** System-level safety floor applied last, above every user preference. */
-export interface RuntimeSafetyLimits {
-  minContextWindow: number;
-  maxOutputTokensCap: number;
-  maxTurnsCap: number;
-  maxRetryAttemptsCap: number;
-  minRequestTimeoutMs: number;
-  maxRequestTimeoutMs: number;
 }

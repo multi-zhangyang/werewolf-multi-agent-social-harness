@@ -1,220 +1,89 @@
-<div align="center">
+# Society：通用社会心理 Agent 实验台
 
-# Society
+同一套心理与学习内核用于信任交易、公共品合作、狼人杀和信息交易。人物根据自己的可见经历形成判断，管理目标、情绪、关系假设和条件策略，并用实际结果更新记忆与概率预测。合伙人场景保留为独立的交易适配器与研究入口。
 
-### 本机优先的多智能体社会博弈与可观测 Agent 运行时
+当前模型固定为 **gpt-6-luna**，配置上下文 **256000**，使用 **OpenAI Agents SDK + 原生 Responses**。运行、探测和复测均不设置输出 token 上限，由提供商决定；历史配置不会重新带入请求。没有自定义 JSON 工具信封、Chat Completions 转接或自动替换模型。256k 是本项目的配置值，尚未通过满窗口容量测试。
 
-基于 OpenAI Agents SDK 驱动独立 Agent，在十三种社会压力场景中完成工具调用、公开发言、确定性结算与可审计复盘。
+当前心理状态为 v14。经历新增实际角色，复盘输入分别汇总回合、结算、角色动作和各单位收益；跨场景比较依据共同决策关系。SDK 在 8 步内为必需评价、策略检验和完成动作保留步数。模型可以采用、调整或拒绝旧策略；发言中的意向不计作行动采用。本次输出上限移除通过 31 项相关测试、局部 lint、类型检查和生产构建，没有重复运行完整实验批次。
 
-[快速开始](#快速开始) · [Agent-运行模型](#agent-运行模型) · [场景目录](#场景目录) · [质量门禁](#质量门禁)
+v14 短信任局完成 43 次真实调用，零模型失败、零工具错误，收益为 20 / 16；全部继承策略被拒绝，未证明正迁移。公共品运行 26 次调用后因用户要求移除输出上限而停止，保留为 interrupted。这些运行发生在移除上限之前，不能用来证明修改后的真实模型行为。通用学习、可靠欺骗与收益改善仍未完成验收，完整结果见[验证记录](docs/validation-native-responses.md)。
 
-</div>
+## 启动
 
-![Society 产品大厅](docs/screenshots/landing.png)
+需要 Node.js 22 或更新版本；本地使用 Windows / Node 24。
 
-## 产品概览
-
-Society 将多模型 Agent 放入隐藏身份、资源冲突、重复互动、承诺与群体压力构成的社会世界。每个参与者拥有独立会话、有限观察和结构化工具，世界规则负责验证行动并确定性结算，观众通过直播舞台、工具轨迹和因果账本理解每个结果的形成过程。
-
-| 能力 | 实现 |
-| --- | --- |
-| 标准 Agent 主链 | 每个席位使用独立的 `@openai/agents` Agent 与 `MemorySession` |
-| 工具优先发言 | 可见发言严格执行 `prepare_message → tool result → final response` |
-| 有界错误恢复 | 工具失败、协议错误和 provider 故障均有明确预算、暂停状态与恢复入口 |
-| 确定性世界 | 十三个场景分别维护阶段、合法行动、密封提交和结算规则 |
-| 权限化投影 | public、agent-pov、omniscient 在服务端完成数据裁剪 |
-| 舞台式观战 | 对话、工具、推理和代码由 Vercel AI Elements 统一呈现 |
-| 社会因果账本 | 追踪承诺、主张、信念、关系变化与欺骗生命周期 |
-| 本机数据治理 | 配置与归档使用版本化 JSON、原子写入和损坏文件隔离 |
-
-## 产品界面
-
-### 创建世界
-
-创建页集中配置场景、回合、阵容和模型分配。只有已启用且通过真实协议检查的模型能够进入阵容。
-
-![Society 创建世界](docs/screenshots/create-room.png)
-
-### 舞台、终局与因果
-
-房间以中央 Conversation 为主舞台，参与者详情与因果账本按需展开。工具调用位于最终发言之前，终局完成身份翻牌、结算和静态归档。
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/screenshots/room-werewolf-finished.png" alt="狼人杀终局舞台" /></td>
-    <td width="50%"><img src="docs/screenshots/room-werewolf-causality.png" alt="社会因果账本" /></td>
-  </tr>
-  <tr>
-    <td align="center">狼人杀终局舞台</td>
-    <td align="center">社会因果账本</td>
-  </tr>
-</table>
-
-### 移动端参与者面板
-
-<p align="center">
-  <img src="docs/screenshots/mobile-participants.png" alt="移动端参与者面板" width="390" />
-</p>
-
-## Agent 运行模型
-
-```text
-Authorized Observation
-        ↓
-SDK Agent × N（Agent + MemorySession）
-        ↓
-prepare_message
-        ↓
-Tool Result（领域行动或结构化认知）
-        ↓
-Final Response
-        ↓
-Command Gateway（身份、阶段、参数、幂等校验）
-        ↓
-Deterministic World（密封提交、结算、因果账本）
-        ↓
-Viewer-safe Projection → React UI / SSE / Archive
-```
-
-运行时与模型协议检查复用同一套 SDK Runner、工具 Schema、参数清洗和失败协议，不包含模型名称判断或供应商专用分支。协议检查要求模型先正确调用指定工具，再在工具结果之后准确复述随机 receipt；未知工具、错误参数、提前发言、重复调用、错误 receipt 和超时均会失败。
-
-单次 Agent Turn 的恢复边界保持固定：同一工具最多尝试三次，完整 Turn 最多重跑一次。第二次仍失败时，当前 Activation 关闭并暂停房间；切换模型或恢复房间会启动全新的 Turn。每条记录维持 `turnId → toolCallId → messageId` 追踪关系，未完成工具之前不会发布最终消息。
-
-## 场景目录
-
-| 场景 | 核心机制 |
-| --- | --- |
-| 狼人杀 | 隐藏身份、身份主张、讨论投票、角色能力与终局揭晓 |
-| 阿瓦隆 | 阵营知识不对称、组队表决、密封任务与梅林刺杀 |
-| 囚徒困境 | 同时合作或背离、重复互惠、报复与宽恕 |
-| 信任博弈 | 投资、返还、明确承诺、机会主义与关系修复 |
-| 谈判博弈 | 私密底线、报价、让步、虚张声势与谈崩风险 |
-| 公共品博弈 | 群体贡献规范、搭便车、声誉与多人影响 |
-| 最后通牒博弈 | 分配权、公平判断、接受与拒绝 |
-| 选美博弈 | 多阶预期、群体均值与策略预测 |
-| 密封拍卖 | 私密估值、策略误导与次价结算 |
-| 蜈蚣博弈 | 递增收益、继续信任与提前拿走 |
-| 胆小鬼博弈 | 威胁可信度、风险承受与同时退让 |
-| 猎鹿博弈 | 高收益协调、低风险退出与互相预测 |
-| 吹牛骰 | 私有骰面、逐步叫价、虚张声势与质疑揭示 |
-
-## 快速开始
-
-运行环境需要 Node.js 22 或更高版本，以及支持 OpenAI Chat Completions 格式和工具调用的模型端点。
-
-```bash
-git clone https://github.com/multi-zhangyang/werewolf-multi-agent-social-harness.git
-cd werewolf-multi-agent-social-harness
+```sh
 npm install
-cp .env.example .env.local
-npm run doctor
 npm run dev
 ```
 
-Windows PowerShell 使用以下命令创建本机配置：
+开发页面：[127.0.0.1:5173](http://127.0.0.1:5173)。生产运行：
 
-```powershell
-Copy-Item .env.example .env.local
-```
-
-服务地址：
-
-| 服务 | 地址 |
-| --- | --- |
-| Web 开发服务器 | `http://127.0.0.1:5173` |
-| API 与生产静态站点 | `http://127.0.0.1:8787` |
-| 创建世界 | `http://127.0.0.1:5173/#/create` |
-| 模型设置 | `http://127.0.0.1:5173/#/settings` |
-| 人物管理 | `http://127.0.0.1:5173/#/characters` |
-
-## 模型配置与 Doctor
-
-`.env.local` 保存 provider 凭证，模型设置页管理非敏感档案、上下文窗口、推理参数和启用状态。
-
-```dotenv
-OPENAI_BASE_URL=https://your-openai-compatible-endpoint.example/v1
-OPENAI_API_KEY=replace-me
-SOCIETY_MODELS=model-a,model-b
-SOCIETY_MODEL_CONTEXTS=model-a:262144,model-b:131072
-```
-
-`npm run doctor` 执行以下发布前检查：
-
-1. 验证 Node.js 版本、回环绑定、配置文件和 JSON 存储状态。
-2. 顺序检查所有已启用模型的基础能力。
-3. 使用正式 Agents SDK Runner 验证工具调用、工具结果和最终发言顺序。
-4. 持久化最新协议状态，并在没有可用模型、存储损坏或协议失败时返回非零退出码。
-
-模型 ID、provider、API mode 或推理配置发生变化后，原协议结果自动标记为失效。创建房间与随机模型池仅接收 `enabled + protocol passed` 的模型。
-
-## 本机运行与数据
-
-```bash
+```sh
 npm run build
 npm run server
 ```
 
-默认监听 `127.0.0.1`。未配置 `SOCIETY_OPERATOR_TOKEN` 时，回环地址上的本机请求可以管理模型、人物、模板和房间。非回环绑定必须配置 operator token，否则服务拒绝启动；配置 token 后，全局写入与跨房间控制执行严格鉴权。
+默认生产端口为 8787。本次恢复的本机服务位于 [127.0.0.1:8794](http://127.0.0.1:8794/)，使用原有 `data/society-v5-stability.sqlite`。
 
-| 数据 | 持久化方式 | 生命周期 |
-| --- | --- | --- |
-| Provider 密钥 | `.env.local` | 本机文件，不进入 Git |
-| 模型、人物、模板 | 版本化 JSON | 原子写入，兼容旧结构 |
-| 赛后归档 | 每局一个 JSON | 创建房间时显式启用 |
-| 运行中房间 | 内存 | 服务重启后清零 |
+8794 正在运行 v14 的无输出上限代码。v11 至 v13 的四个历史批次以及上述两场 v14 运行已备份后追加到原库，停止与失败记录保留。原库现有 98 场通用运行、6951 条决策案例，包含失败与中断；连续世界指针、SDK 会话和环境文件保持原样。独立实验库继续保留。
 
-无法解析的存储文件会改名为 `.corrupt-<timestamp>` 并进入隔离状态，健康检查通过结构化 `storage.issues` 报告问题，不返回磁盘路径、密钥或私有归档内容。
+模型与提供商在 `data/model-settings.json` 配置；密钥只从服务端环境引用读取。已有 `.env.local` 保持原样。当前已配置的兼容提供商必须支持原生 Responses 的函数工具与工具结果回传。
 
-## 观战、直播与复盘
+## 可以做什么
 
-- 房间页提供 public、agent-pov 和 omniscient 视角，权限边界在服务端执行。
-- `#/caster/:roomId` 提供无剧透纯流界面，可直接作为 OBS 浏览器源。
-- 终局后归档使用静态投影，不建立 SSE 连接。
-- public 与 postgame 投影不会包含私聊、团队频道、心智、私有工具结果或密封阶段选择。
-- 暂停、provider 故障和存储告警使用统一状态组件，并提供切换模型、恢复房间或返回设置的操作入口。
+- 在首页选择信任交易、公共品、狼人杀或信息交易，配置人物、轮次和心理机制。
+- 在信息交易中交换发送者与接收者，比较利益一致和冲突条件，逐轮核验报告、真值与实际所得。
+- 在连续世界中让同一人物跨场景继承可迁移经验；本局隐藏身份不会作为下一局的事实。
+- 同一个人的长期关系经验与本局身份假设分别保存、分别修订；中文回忆按分词相关性检索经历与条件策略。
+- 依据新证据修订或停用原判断，查看原文、理由和版本；实际经历保持不变，停用项不再参与下一次决策。
+- 让人物在整局结束后比较本人经历、预测与实际结果，形成可供后续检验的策略，或明确记录证据不足。
+- 区分实际结算与人物解释，查看每条经历的具体动作，并分开统计结算次数和记录条数。
+- 分开查看检索到的旧策略、适用性判断、实质动作采用和之后的真实收益；不适用的策略可以拒绝。
+- 查看人物的事件评价、情绪、需要、对手假设、持续计划、私有意图和三类记忆。
+- 查看真实收益反馈、预测结果与 Brier 分数；从保存的原始请求单独复测模型。
+- 在 [合伙人入口](http://127.0.0.1:8794/#/partners) 亲自交易、观察双 AI 对局、查看检查点与心理干预分支。
+- 查看历史运行和失败记录；新版本不会将旧实验结果当成本版本的验证。
 
-## 质量门禁
+公开页面、玩家视角和研究者视角由服务端分别授权。私有意图与心理记录不会写入对手观察。
 
-```bash
+## 实现
+
+每次行动机会使用一个官方 `Agent`、`Runner` 和新的隔离 `MemorySession`。工具直接通过 Zod 定义并由 SDK 执行。证据编号、合法频道、可选人物等写入原生工具 schema；证据在数据库中保留不可变原始 ID。
+
+工具先暂存本次心理变化和动作；只有完整流、SDK 完成状态和业务校验全部成功后，才通过一个 SQLite 事务提交。中断、不完整输出、重复提交或持久化失败不会留下半次行动。HTTP 与 SDK 重试均为零。
+
+心理学习是**基于经历的状态、记忆和反馈更新**，没有训练模型权重。当前实现不证明人类心理真实性，也不证明策略已在统计意义上变得更优。
+
+详见 [Agent 设计](docs/agent-design.md)、[系统架构](docs/architecture.md)、[当前验收矩阵](docs/acceptance-native-responses.md) 与 [本次验证记录](docs/validation-native-responses.md)。
+
+## 验证
+
+```sh
 npm run ci
+npm run test:ui
+npm run test:ui:partners
+node --import tsx scripts/ui-partners-streaming.mjs
+node --env-file-if-exists=.env.local --import tsx scripts/validate-general-agents.ts
+node --env-file-if-exists=.env.local --import tsx scripts/validate-agent-adaptation.ts
+node --env-file-if-exists=.env.local --import tsx scripts/validate-memory-revision.ts
+node --import tsx scripts/ui-memory-revision.mjs
+node --env-file-if-exists=.env.local --import tsx scripts/validate-signaling-agents.ts
+node --import tsx scripts/ui-signaling.mjs
+node --env-file-if-exists=.env.local --import tsx scripts/validate-episode-review.ts
+node --env-file-if-exists=.env.local --import tsx scripts/validate-strategy-application.ts data/episode-review-validation-1791070192853
+node --import tsx scripts/ui-strategy-learning.mjs
+npm run study:partners:validation
 ```
 
-完整门禁依次执行 ESLint、TypeScript、单元测试、契约测试、集成测试、安全测试、回放测试、混沌测试和 production build。独立命令如下：
+离线测试验证协议、权限、事务和规则；浏览器夹具验证界面。真实模型验证将源码快照、配置、原始 Responses 请求、错误、使用量和结果写入独立 `data/` 目录。完整结果及仍然存在的限制以验证记录为准。
 
-```bash
-npm run lint
-npm run typecheck
-npm run test:unit
-npm run test:contract
-npm run test:integration
-npm run test:security
-npm run test:replay
-npm run test:chaos
-npm run build
-```
+整局复盘验证固定两条信息交易来源、分别进入信任交易和公共品，再运行独立狼人杀。预定来源缺少有效提炼策略时，目标局保持 `not_started`。源码与计划在首个请求前冻结；不按结果改选来源，不改写失败或放宽门槛。研究依据与解释范围见[策略学习设计](docs/research/strategy-consolidation.md)。
 
-v0.1 发布验收覆盖四种真实模型协议检查、十三个场景最小阵容两回合 smoke、六人狼人杀、390/768/1440/1920 四档 Chromium 布局、键盘导航、静态归档零 SSE 请求，以及 Turn、工具和消息关联完整性审计。
+策略适用性验证只创建两个新目标局，复用指定已结束批次的两个原定源快照。它分别报告协议、明确检验和实际采用反馈；拒绝可以满足检验要求，不会被算成正迁移。来源数据库只读导入、保留原 ID 与代码版本，统计时去重。
 
-## 技术栈
+经验对照脚本需要一份已完成的真实公共品源记录，可通过 `AGENT_ADAPTATION_SOURCE` 指定。它保持人物与初始世界一致，仅清空焦点人物的一整包既有经验作对照；动作差异不等于已经证明策略改善或单一心理机制的因果作用。
 
-- React 19、Vite 8、TypeScript 6、Tailwind CSS 4
-- shadcn/ui `new-york/radix`、Vercel AI Elements、Geist、Lucide
-- Express 5、Server-Sent Events、Zod
-- OpenAI Agents SDK、OpenAI-compatible Chat Completions
-- Vitest、ESLint、Puppeteer Core
+反证修订脚本覆盖信任 / 公共品两种场景、过度信任 / 完全不信任两种旧判断，各重复两次。旧判断及 20 条无关记忆明确标为研究设置，第一轮和其他人物由固定合法策略执行，焦点人物第二轮使用相同生产 Agent。检查真实请求、正式修订回执、原始账本来源和后续行动，不指定模型应采取的动作。设置 `AGENT_REVISION_PREFLIGHT=1` 可只验证实验流程，零模型调用；该预检不算真实模型通过。
 
-## v0.1 范围
-
-v0.1 面向本机单操作员运行，不包含公网账号、邀请系统、锦标赛、Elo、赛季、SQLite、多进程写入和运行中房间恢复。模型输出具有随机性；承诺、信念和欺骗记录只来源于真实结构化工具调用，界面不会为缺失数据生成替代记录。
-
-## 项目文档
-
-- [Agent 架构与运行时不变量](docs/agent-design.md)
-- [场景成熟度与验收矩阵](docs/scenarios.md)
-- [真实模型 smoke 门禁](docs/smoke-gate.md)
-- [贡献指南](CONTRIBUTING.md)
-- [安全策略](SECURITY.md)
-
-## 许可证
-
-[Apache License 2.0](LICENSE)
+信息交易脚本固定两个种子、两种发送者安排与两种利益条件，共 8 局、每局 4 轮，全部由生产 Agent 自主决策。将已结束批次目录传给 `scripts/validate-signaling-transfer.ts`，可执行一次从预定信息交易记录继承经验的全新狼人杀迁移验证。脚本先检查每位原人物是否已有可迁移条件策略；条件不足时记录 `not_started` 并以退出码 1 结束，零模型调用，不改选源局。它不会重试或改写旧失败对局。浏览器脚本使用独立数据库和注入测试模型，界面夹具不计入真实模型行为证据。

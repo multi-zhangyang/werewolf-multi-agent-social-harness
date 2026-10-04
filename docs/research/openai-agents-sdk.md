@@ -1,3 +1,5 @@
+> 历史调研记录，代码示例并不表示当前项目已接入这些能力。当前实现以 [Agent 设计](../agent-design.md) 和 [harness v6 验证](harness-v6.md) 为准。
+
 # OpenAI Agents SDK for JS/TS — Reference & Society Refactor Guide
 
 > **Research basis**: inspected `openai/openai-agents-js` at `main` (commit `b93163b`, release **0.16.0**) and npm (`latest` = `0.16.0`). Every snippet below reflects the **0.16.x** surface. Anything that only works on the **Responses API** is marked `[Responses-only]`; anything that works on **Chat Completions** (and therefore on OpenAI-compatible endpoints) is marked `[ChatCompletions]`.

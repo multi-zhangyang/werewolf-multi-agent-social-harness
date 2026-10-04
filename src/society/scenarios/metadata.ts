@@ -1,6 +1,17 @@
 import type { ScenarioSummary } from "../contracts";
 
 export const SCENARIO_METADATA: Record<ScenarioSummary["id"], ScenarioSummary> = {
+  "signaling-game": {
+    id: "signaling-game",
+    name: "信息交易",
+    shortDescription: "发送者知道真值，接收者依据报告作出选择。",
+    description: "两人反复交易，结算时公开真值与所得。比较利益一致和利益冲突时的报告、判断与关系调整。",
+    players: 2,
+    defaultRounds: 4,
+    minRounds: 2,
+    maxRounds: 16,
+    capabilities: ["私有信息", "事实核验", "收益对照", "重复互动"]
+  },
   "prisoners-dilemma": {
     id: "prisoners-dilemma",
     name: "囚徒困境",

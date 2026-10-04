@@ -1,6 +1,7 @@
 "use client";
 
 import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/spinner";
 import {
   Collapsible,
   CollapsibleContent,
@@ -46,22 +47,22 @@ export type ToolHeaderProps = {
 
 const statusLabels: Record<ToolPart["state"], string> = {
   "approval-requested": "等待确认",
-  "approval-responded": "已确认",
+  "approval-responded": "已回应",
   "input-available": "执行中",
-  "input-streaming": "准备中",
+  "input-streaming": "输出中",
   "output-available": "已完成",
-  "output-denied": "已拒绝",
-  "output-error": "失败",
+  "output-denied": "未授权",
+  "output-error": "未完成",
 };
 
 const statusIcons: Record<ToolPart["state"], ReactNode> = {
-  "approval-requested": <ClockIcon className="size-4 text-muted-foreground" />,
-  "approval-responded": <CheckCircleIcon className="size-4 text-muted-foreground" />,
-  "input-available": <ClockIcon className="size-4 animate-pulse" />,
+  "approval-requested": <ClockIcon />,
+  "approval-responded": <CheckCircleIcon />,
+  "input-available": <Spinner />,
   "input-streaming": <CircleIcon className="size-4" />,
-  "output-available": <CheckCircleIcon className="size-4 text-foreground" />,
-  "output-denied": <XCircleIcon className="size-4 text-muted-foreground" />,
-  "output-error": <XCircleIcon className="size-4 text-destructive" />,
+  "output-available": <CheckCircleIcon />,
+  "output-denied": <XCircleIcon />,
+  "output-error": <XCircleIcon />,
 };
 
 export const getStatusBadge = (status: ToolPart["state"]) => (
@@ -85,12 +86,12 @@ export const ToolHeader = ({
   return (
     <CollapsibleTrigger
       className={cn(
-        "flex w-full items-center justify-between gap-4 p-3",
+        "flex w-full items-center justify-between gap-3 p-3 text-left",
         className
       )}
       {...props}
     >
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <WrenchIcon className="size-4 text-muted-foreground" />
         <span className="font-medium text-sm">{title ?? derivedName}</span>
         {getStatusBadge(state)}
@@ -105,7 +106,7 @@ export type ToolContentProps = ComponentProps<typeof CollapsibleContent>;
 export const ToolContent = ({ className, ...props }: ToolContentProps) => (
   <CollapsibleContent
     className={cn(
-      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 space-y-4 p-4 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+      "flex flex-col gap-4 p-4 text-popover-foreground outline-none",
       className
     )}
     {...props}
@@ -117,9 +118,9 @@ export type ToolInputProps = ComponentProps<"div"> & {
 };
 
 export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
-  <div className={cn("space-y-2 overflow-hidden", className)} {...props}>
+  <div className={cn("flex flex-col gap-2 overflow-hidden", className)} {...props}>
     <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-      参数
+      调用参数
     </h4>
     <div className="rounded-md bg-muted/50">
       <CodeBlock code={JSON.stringify(input, null, 2)} language="json" />
@@ -138,7 +139,7 @@ export const ToolOutput = ({
   errorText,
   ...props
 }: ToolOutputProps) => {
-  if (!(output || errorText)) {
+  if ((output === undefined || output === null) && !errorText) {
     return null;
   }
 
@@ -153,9 +154,9 @@ export const ToolOutput = ({
   }
 
   return (
-    <div className={cn("space-y-2", className)} {...props}>
+    <div className={cn("flex flex-col gap-2", className)} {...props}>
       <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-        {errorText ? "错误" : "结果"}
+        {errorText ? "错误" : "实际返回"}
       </h4>
       <div
         className={cn(

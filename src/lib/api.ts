@@ -14,14 +14,15 @@ export function storedOwnerToken(): string | undefined {
 }
 
 export function storeOwnerToken(token: string): void {
-  if (typeof window === "undefined" || !token) return;
-  window.localStorage.setItem(OWNER_TOKEN_KEY, token);
+  if (typeof window === "undefined") return;
+  if (token.trim()) window.localStorage.setItem(OWNER_TOKEN_KEY, token.trim());
+  else window.localStorage.removeItem(OWNER_TOKEN_KEY);
 }
 
 /** `fetch` with the room-owner token attached when one is stored. */
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const token = storedOwnerToken();
   const headers = new Headers(init.headers);
-  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
   return fetch(path, { ...init, headers });
 }

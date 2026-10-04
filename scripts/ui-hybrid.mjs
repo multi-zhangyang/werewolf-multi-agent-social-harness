@@ -1,0 +1,61 @@
+import puppeteer from "puppeteer-core";
+import { strict as assert } from "node:assert";
+import { mkdirSync } from "node:fs";
+import { mindFixture } from "../tests/helpers/psychology-fixture.ts";
+process.env.SOCIETY_DATABASE_FILE = ":memory:";
+process.env.SOCIETY_MODEL_SETTINGS_FILE = "data/v5-ui/isolated-models.json";
+process.env.SOCIETY_CHARACTERS_FILE = "data/v5-ui/isolated-characters.json";
+process.env.SOCIETY_OPERATOR_TOKEN = "hybrid-ui-test-only";
+mkdirSync("data/v5-ui", { recursive: true });
+const { context, createServerApp } = await import("../src/server/index.ts");
+const { StudyService } = await import("../src/runtime/studies.ts");
+const { defaultCapabilities, defaultContextPolicy } = await import("../src/society/models/defaults.ts");
+const now = new Date().toISOString();
+context.models.upsertProvider({ id: "ui-only", name: "UI fixture", kind: "custom", baseURL: "https://api.cardinalize.com/v1", apiKeyRef: "env:UI_ONLY_KEY", apiMode: "chat-completions", enabled: true, createdAt: now, updatedAt: now });
+context.models.upsertModelProfile({ id: "ui-only", name: "离线界面测试", providerProfileId: "ui-only", modelId: "apodex/apodex-1.1-mini:free", enabled: true, contextWindow: 32768, contextWindowSource: "manual", capabilities: defaultCapabilities(), defaults: {}, contextPolicyId: defaultContextPolicy().id });
+context.studies = new StudyService(context.runs.store, (_character, spec) => ({ async turn(c) {
+  if (spec.experiment.psychology === "off" && c.character.temperament.agreeableness > .5 && c.recent.some(e => e.type === "message" && e.actorId === "peer") && !c.recent.some(e => e.data.action === "repair_transfer" && e.data.amount === 9)) throw new Error("离线故障夹具：保留失败样本");
+  if (spec.experiment.psychology !== "off") {
+    const sourceId = c.recent.at(-1).id;
+    const paid = c.recent.some(e => e.data.action === "repair_transfer" && e.data.amount === 9);
+    await c.call("update_mind", { ...mindFixture(sourceId, "peer"), appraisal: paid ? "补偿确实到账了。我愿意留一个机会，但下一步要看他的行动。" : "承诺和行动没有对上。我想知道他把这段合作看成了什么。", relationships: [{ targetId: "peer", willingness: paid ? .55 : .2, competence: .8, hypothesis: "他可能愿意为继续合作付出代价", alternative: "也可能只是希望我下一轮多投入", confidence: .5, expectedNextMove: "观察他下一次的实际返还", sourceIds: [sourceId] }], conflict: "想保住收益，也在意对方是否认真对待承诺", regulation: "reappraise", predictions: [] });
+  }
+  for (const action of c.opportunity.actions) await c.call(action.name, { amount: action.name === "pledge_return" ? 50 : action.name === "invest" ? 4 : action.name === "return_funds" ? 6 : 0 });
+  return { text: c.appraisalOnly ? undefined : "你把九点补回来了。我可以再试一次，但不会只听承诺。" };
+} }));
+const server = await new Promise(resolve => { const s = createServerApp().listen(0, "127.0.0.1", () => resolve(s)); });
+const base = `http://127.0.0.1:${server.address().port}`;
+const browser = await puppeteer.launch({ executablePath: process.env.CHROME_BIN ?? "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", headless: true });
+try {
+  const page = await browser.newPage(); const errors = []; page.on("pageerror", e => { errors.push(e.message); console.log("Browser error:", e.message); });
+  await page.setViewport({ width: 1512, height: 1000 }); await page.goto(base, { waitUntil: "networkidle2" });
+  await page.evaluate(() => localStorage.setItem("society:owner-token", "hybrid-ui-test-only"));
+  await page.goto(`${base}/#/studies`, { waitUntil: "networkidle2" });
+  await page.waitForFunction(() => document.body.textContent.includes("从一段共同经历开始"));
+  await page.screenshot({ path: "data/v5-ui/setup-dark.png", fullPage: true });
+  await page.$eval('#repeats', input => { const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; setter.call(input, '1'); input.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.locator('button ::-p-text(启动实验)').click();
+  await page.waitForFunction(() => location.hash.includes('/studies/'));
+  await page.waitForFunction(() => document.body.textContent.includes('17 条有效试验'));
+  assert.equal(await page.$$eval('.study-branches > [data-slot="card"]', nodes => nodes.length), 3);
+  await page.screenshot({ path: "data/v5-ui/branches-dark.png", fullPage: true });
+  await page.locator('.study-branches button').click();
+  await page.waitForSelector('[data-slot="sheet-content"] .mind-panel');
+  await page.waitForFunction(() => document.querySelector('.mind-panel').textContent.includes('合作意愿'));
+  await page.screenshot({ path: "data/v5-ui/detail-dark.png" });
+  await page.locator('[data-slot="sheet-content"] ::-p-aria(决策案例)').click();
+  await page.waitForFunction(() => document.body.textContent.includes('这份记录没有决策案例'));
+  await page.locator('[data-slot="sheet-content"] ::-p-aria(心理与行动)').click();
+  await page.keyboard.press('Escape'); await page.waitForSelector('[data-slot="sheet-content"]', { hidden: true });
+  await page.locator('::-p-aria(行为分布)').click(); await page.waitForSelector('.recharts-surface', { timeout: 5000 }).catch(async error => { await page.screenshot({ path: 'data/v5-ui/chart-failure.png', fullPage: true }); console.log(await page.evaluate(() => document.body.innerText.slice(-2200))); throw error; });
+  await page.screenshot({ path: "data/v5-ui/distribution-dark.png", fullPage: true });
+  await page.evaluate(() => localStorage.setItem('society:theme', 'light')); await page.reload({ waitUntil: 'networkidle2' });
+  await page.screenshot({ path: "data/v5-ui/branches-light.png", fullPage: true });
+  await page.setViewport({ width: 390, height: 844 }); await page.screenshot({ path: "data/v5-ui/branches-mobile.png", fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.locator('.study-branches button').click(); await page.waitForSelector('[data-slot="sheet-content"] .mind-panel');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.screenshot({ path: "data/v5-ui/detail-mobile.png" }); await page.keyboard.press('Escape');
+  assert.deepEqual(errors, []);
+  console.log('Hybrid UI passed: setup, 18 isolated fixture trials including a failure, branches, psychology, chart, keyboard, dark/light, mobile. Screenshots are explicitly offline fixtures.');
+} finally { await browser.close(); context.studies.stopAll(); context.liveConnections.closeAll(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); context.runs.store.close(); }

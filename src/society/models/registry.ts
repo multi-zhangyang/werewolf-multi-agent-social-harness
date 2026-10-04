@@ -188,7 +188,7 @@ export function seedRegistryFromEnv(registry: ModelRegistry, env: NodeJS.Process
     kind: "openai-compatible",
     baseURL,
     apiKeyRef: "env:OPENAI_API_KEY",
-    apiMode: "chat-completions",
+    apiMode: env.SOCIETY_API_MODE === "chat-completions" ? "chat-completions" : "responses",
     enabled: true,
     createdAt: now,
     updatedAt: now

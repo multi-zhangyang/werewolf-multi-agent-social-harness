@@ -50,6 +50,8 @@ function Slider({
       {Array.from({ length: _values.length }, (_, index) => (
         <SliderPrimitive.Thumb
           data-slot="slider-thumb"
+          aria-label={props["aria-label"]}
+          aria-labelledby={props["aria-labelledby"]}
           key={index}
           className="block size-3.5 shrink-0 rounded-full border border-foreground/25 bg-foreground shadow-[0_1px_4px_oklch(0_0_0/0.5)] transition-[scale,box-shadow] hover:scale-110 focus-visible:scale-110 focus-visible:ring-4 focus-visible:ring-ring/25 focus-visible:outline-hidden disabled:pointer-events-none disabled:opacity-50"
         />

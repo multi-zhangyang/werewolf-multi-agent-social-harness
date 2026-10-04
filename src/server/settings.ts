@@ -53,6 +53,7 @@ export function writeEnvKey(name: string, value: string): void {
   if (!written) next.push(`${key}=${value}`);
   const content = next.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
   writeFileSync(ENV_FILE, content, { mode: 0o600 });
+  process.env[key] = value;
 }
 
 function normalizeBaseUrl(value: string | undefined): string {
