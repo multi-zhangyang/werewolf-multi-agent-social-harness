@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { fact, RunError, type ActionSpec, type ActorObservation, type Channel, type Character, type EventDraft, type ScenarioAdapter, type SignalingIncentives, type Stage } from "../types";
+import { signalingPayoffs } from "./payoffs";
 
 export interface SignalingResult {
   round: number;
@@ -70,7 +71,7 @@ export class SignalingScenario implements ScenarioAdapter {
       actors: discussion ? this.ids : [this.phase === "report" ? this.sender.id : this.receiver.id] };
   }
   private get payoffTable() {
-    return { acceptHigh: { sender: 6, receiver: 6 }, acceptLow: { sender: this.incentives === "aligned" ? 0 : 6, receiver: 0 }, reject: { sender: 2, receiver: 2 } };
+    return { acceptHigh: signalingPayoffs(this.incentives, true, true), acceptLow: signalingPayoffs(this.incentives, false, true), reject: signalingPayoffs(this.incentives, false, false) };
   }
   observe(actorId: string) {
     this.assertActor(actorId);
@@ -117,7 +118,7 @@ export class SignalingScenario implements ScenarioAdapter {
     if (this.phase === "report") this.phase = "discussion";
     else if (this.phase === "discussion") this.phase = "choose";
     else if (this.phase === "choose") {
-      const payoff = !this.accepted ? this.payoffTable.reject : this.highQuality ? this.payoffTable.acceptHigh : this.payoffTable.acceptLow;
+      const payoff = signalingPayoffs(this.incentives, this.highQuality, this.accepted!);
       const payoffs = { [this.sender.id]: payoff.sender, [this.receiver.id]: payoff.receiver };
       for (const id of this.ids) this.scores[id] += payoffs[id];
       const result: SignalingResult = { round: this.round, incentives: this.incentives, senderId: this.sender.id, receiverId: this.receiver.id,

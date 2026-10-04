@@ -19,7 +19,7 @@ it.each([["trust-game", 2], ["public-goods", 3], ["werewolf", 6], ["signaling-ga
   expect(db.cases(run.id).length).toBeGreaterThan(0);
   for (const character of characters.slice(0, count)) {
     const mind = db.cognition(run.id, character.id)!;
-    expect(mind).toMatchObject({ version: "psychology-responses-v15", actorId: character.id });
+    expect(mind).toMatchObject({ version: "psychology-responses-v16", actorId: character.id });
     expect(mind.learning.episodes).toContain(run.id); expect(mind.learning.observed).toBeGreaterThan(0);
     expect(db.snapshot(db.head("society", character.id)!)?.cognition).toEqual(mind);
   }

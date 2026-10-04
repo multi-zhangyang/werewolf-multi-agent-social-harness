@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { payoffFeedback, type DecisionStructure, type PayoffComparison } from "./decision-analysis";
 
-export const cognitionVersion = "psychology-responses-v15";
+export const cognitionVersion = "psychology-responses-v16";
 const unit = z.number().min(0).max(1);
 const text = (limit: number) => z.string().trim().min(1).max(limit);
 const sources = z.array(text(160)).min(1).max(8).describe("从本次 evidence.id / newEvidenceIds 选择短证据编号，例如 e1；不要自行生成编号");
@@ -59,7 +60,8 @@ export interface CognitiveMemory extends z.infer<typeof memoryParameters> {
   id: string; episode: string; revision?: number; status?: "active" | "retired";
   origin?: "ledger" | "agent";
   observation?: { sourceId: string; round: number; environment?: string;
-    actions: Array<Pick<PrivateDecision, "id" | "action" | "parameters"> & { round?: number }>; reward: NonNullable<Experience["reward"]> };
+    actions: Array<Pick<PrivateDecision, "id" | "action" | "parameters"> & { round?: number }>; reward: NonNullable<Experience["reward"]>;
+    decisionStructures?: DecisionStructure[]; comparisons?: Array<{ decisionId: string; analysis: PayoffComparison; feedback: ReturnType<typeof payoffFeedback> }> };
   consolidation?: { episode: string; rationale: string; sourceMemories: Array<{ id: string; revision: number }>; sourceOutcomeIds?: string[] };
   revisions?: Array<{ atRevision: number; episode: string; change: "revise" | "retire"; reason: string; sourceIds: string[];
     previous: Omit<CognitiveMemory, "revisions"> }>;
@@ -75,6 +77,8 @@ export interface PrivateDecision {
   intent: "truthful" | "withhold" | "bluff" | "mixed" | "none"; privateAim: string;
   predictionIds: string[]; reward?: number; feedbackId?: string; assessmentIds?: string[];
   strategyBasis?: { assessmentIds: string[]; reason: string };
+  decisionStructure?: DecisionStructure;
+  payoffComparison?: PayoffComparison;
 }
 export interface StrategyAssessment extends Omit<z.infer<typeof strategyAssessmentParameters>, "id"> {
   id: string; episode: string; opportunityId: string; round: number;
@@ -92,7 +96,7 @@ export interface PredictionFeedback {
   note: string;
 }
 export interface AgentMind {
-  version: typeof cognitionVersion | "psychology-responses-v1" | "psychology-responses-v2" | "psychology-responses-v3" | "psychology-responses-v4" | "psychology-responses-v5" | "psychology-responses-v6" | "psychology-responses-v7" | "psychology-responses-v8" | "psychology-responses-v9" | "psychology-responses-v10" | "psychology-responses-v11" | "psychology-responses-v12" | "psychology-responses-v13" | "psychology-responses-v14"; actorId: string; episode: string; revision: number;
+  version: typeof cognitionVersion | "psychology-responses-v1" | "psychology-responses-v2" | "psychology-responses-v3" | "psychology-responses-v4" | "psychology-responses-v5" | "psychology-responses-v6" | "psychology-responses-v7" | "psychology-responses-v8" | "psychology-responses-v9" | "psychology-responses-v10" | "psychology-responses-v11" | "psychology-responses-v12" | "psychology-responses-v13" | "psychology-responses-v14" | "psychology-responses-v15"; actorId: string; episode: string; revision: number;
   emotions: Record<typeof emotions[number], number>; needs: Record<typeof needs[number], number>;
   appraisal?: z.infer<typeof appraisalParameters>;
   dynamics?: { inertia: number; decay: number; freshSourceIds: string[] };
@@ -182,7 +186,11 @@ export function memoryOriginEpisode(memory: CognitiveMemory) {
 }
 /** Historical revisions remain available to research, not as competing current beliefs in model input. */
 export function memoryForPrompt(memory: CognitiveMemory) {
-  const { revisions: _history, ...current } = memory; return current;
+  const { revisions: _history, ...current } = memory;
+  if (!current.observation?.comparisons) return current;
+  // Full alternatives live in decision evidence; ordinary recall only needs the grounded feedback.
+  return { ...current, observation: { ...current.observation, comparisons: current.observation.comparisons.map(({ decisionId, analysis, feedback }) =>
+    ({ decisionId, action: analysis.action, rationale: analysis.rationale, feedback })) } };
 }
 export function remember(mind: AgentMind, proposal: z.infer<typeof memoryParameters>) {
   validateMemory(proposal);
@@ -333,10 +341,14 @@ export function integrateExperience(mind: AgentMind, event: Experience) {
       mind.learning.strategies[decision.strategy] = aggregate;
     }
     const actions = decisions.filter(isWorldDecision).map(({ id, action, round, parameters }) => ({ id, action, round, ...(parameters ? { parameters: structuredClone(parameters) } : {}) }));
+    const decisionStructures = decisions.filter(isWorldDecision).flatMap(decision => decision.decisionStructure ? [structuredClone(decision.decisionStructure)] : []);
+    const comparisons = decisions.filter(isWorldDecision).flatMap(decision => decision.payoffComparison && decision.parameters ? [{ decisionId: decision.id,
+      analysis: structuredClone(decision.payoffComparison), feedback: payoffFeedback(decision.payoffComparison, decision.parameters, event.data, event.reward!.value) }] : []);
     const actionText = actions.length ? `本人实际行动：${actions.map(item => `第 ${item.round} 轮 ${item.action}${item.parameters ? ` ${JSON.stringify(item.parameters)}` : ""}`).join("；")}` : "这次结算没有待关联的本人实质行动";
     mind.memories.push({ id: crypto.randomUUID(), episode: mind.episode, kind: "episodic", scope: "transferable", origin: "ledger",
       sourceIds: [event.id], text: `${event.environment ? `${event.environment}，` : ""}第 ${event.round} 轮：${event.text}\n${actionText}。本次结算的本人回报 ${event.reward.value} ${event.reward.unit}（归一值 ${event.reward.normalized.toFixed(3)}）。这是关联样本，不是策略优越性的证明。`,
-      observation: { sourceId: event.id, round: event.round, ...(event.environment ? { environment: event.environment } : {}), actions, reward: structuredClone(event.reward) },
+      observation: { sourceId: event.id, round: event.round, ...(event.environment ? { environment: event.environment } : {}), actions, reward: structuredClone(event.reward),
+        ...(decisionStructures.length ? { decisionStructures } : {}), ...(comparisons.length ? { comparisons } : {}) },
       confidence: 1, tags: [...(decision ? [decision.strategy] : []), "observed-feedback"], when: null, then: null });
   }
   mind.revision++; return true;

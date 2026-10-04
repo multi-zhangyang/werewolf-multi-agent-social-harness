@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { fact, RunError, type ActionSpec, type Character, type EventDraft, type ScenarioAdapter, type Stage, type Channel } from "../types";
+import { contributionPayoff, trustPayoffs } from "./payoffs";
 
 export function numberAction(name: string, label: string, max: number): ActionSpec {
   return { name, label, description: `${label}，整数 0–${max}。提交后不可撤回。`, parameters: z.object({ amount: z.number().int().min(0).max(max) }).strict(), fields: [{ name: "amount", label, type: "number", min: 0, max }] };
@@ -84,11 +85,12 @@ export class EconomicScenario implements ScenarioAdapter {
     } else if (this.phase === "return" || this.phase === "contribute") {
       const payoffs: Record<string, number> = {};
       if (this.scenario === "trust-game") {
-        payoffs[this.investor] = 10 - this.amounts[this.investor] + this.amounts[this.trustee];
-        payoffs[this.trustee] = this.amounts[this.investor] * 3 - this.amounts[this.trustee];
+        const result = trustPayoffs(this.amounts[this.investor], this.amounts[this.trustee]);
+        payoffs[this.investor] = result.investor;
+        payoffs[this.trustee] = result.trustee;
       } else {
-        const share = Object.values(this.amounts).reduce((a, b) => a + b, 0) * 1.6 / this.ids.length;
-        for (const id of this.ids) payoffs[id] = 10 - this.amounts[id] + share;
+        const total = Object.values(this.amounts).reduce((a, b) => a + b, 0);
+        for (const id of this.ids) payoffs[id] = contributionPayoff(this.amounts[id], total, this.ids.length);
       }
       for (const id of this.ids) this.scores[id] = Math.round((this.scores[id] + payoffs[id]) * 100) / 100;
       const result = { round: this.round, amounts: { ...this.amounts }, payoffs, scores: { ...this.scores },
@@ -103,7 +105,7 @@ export class EconomicScenario implements ScenarioAdapter {
     }
     return [];
   }
-  publicState() { return { scenario: this.scenario, protocol: this.protocol, round: this.round, phase: this.stage()?.label ?? "已结束", phaseId: this.phase, scores: { ...this.scores }, history: this.history, ...(this.scenario === "trust-game" ? { investorId: this.investor, trusteeId: this.trustee, investment: this.amounts[this.investor], returned: this.amounts[this.trustee], pledge: this.pledge, repair: this.repair } : {}) }; }
+  publicState() { return { scenario: this.scenario, protocol: this.protocol, round: this.round, rounds: this.rounds, phase: this.stage()?.label ?? "已结束", phaseId: this.phase, scores: { ...this.scores }, history: this.history, ...(this.scenario === "trust-game" ? { investorId: this.investor, trusteeId: this.trustee, investment: this.amounts[this.investor], returned: this.amounts[this.trustee], pledge: this.pledge, repair: this.repair } : {}) }; }
   canMessage(actorId: string, channel: Channel, recipients: string[]) {
     return this.ids.includes(actorId) && this.stage()?.kind === "discussion" && channel !== "team" && recipients.every(id => this.ids.includes(id));
   }
