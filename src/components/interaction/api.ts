@@ -10,7 +10,7 @@ export interface RunSummary { id: string; scenario: RunSpec["scenario"]; status:
 export interface RunView extends RunSummary {
   modelConfigs?: Record<string, Record<string, unknown>>;
   events: WorldEvent[]; spec?: RunSpec; world: { phase?: string; phaseId?: string; protocol?: string; investorId?: string; trusteeId?: string; investment?: number; returned?: number; pledge?: number; repair?: number; round?: number; scores?: Record<string, number>; alive?: string[]; revealed?: Record<string, string>; winners?: string[];
-    incentives?: RunSpec["signalingIncentives"]; senderId?: string; receiverId?: string; highQuality?: boolean; reportedHighQuality?: boolean; accepted?: boolean; reportAccurate?: boolean; history?: SignalingResult[] };
+    incentives?: RunSpec["signalingIncentives"]; payoffProfile?: RunSpec["signalingPayoffProfile"]; senderId?: string; receiverId?: string; highQuality?: boolean; reportedHighQuality?: boolean; accepted?: boolean; reportAccurate?: boolean; history?: SignalingResult[] };
   active: Array<{ actorId: string }>;
   opportunities: Array<Omit<Opportunity, "actions"> & { actions: Omit<ActionSpec, "parameters">[] }>;
   memories: Memory[];

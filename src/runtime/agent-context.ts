@@ -8,7 +8,7 @@ import { historicalMind, ledgerExperience } from "./agent-state";
 import { rankRecall, recallCognitiveMemories, selectWorkingMemories } from "../agents/recall";
 import { buildExperienceEvidence } from "../agents/experience-evidence";
 import { sameChoice, type PayoffComparison } from "../agents/decision-analysis";
-import { actionReadback, decisionStructure, payoffTool, strategicBrief } from "./decision-support";
+import { actionReadback, decisionStructure, payoffTool, signalingDecisionSupport, strategicBrief } from "./decision-support";
 
 const decisionFields = { strategy: z.enum(strategies), intent: z.enum(["truthful", "withhold", "bluff", "mixed", "none"]), privateAim: z.string().min(1).max(360) };
 export class GeneralAgentContext implements NativeState {
@@ -26,7 +26,7 @@ export class GeneralAgentContext implements NativeState {
     const actorId = input.character.id;
     if (actorId !== input.opportunity.actorId || !input.opportunity.stage.actors.includes(actorId)) throw new Error("当前人物没有这个行动机会");
     if (input.episodeReview && (!input.appraisalOnly || spec.experiment.psychology === "off" || input.opportunity.actions.length || input.opportunity.communications.length)) throw new Error("整局复盘必须是启用心理的私有记录机会，且不能提供动作或通信");
-    this.mind = enterEpisode(spec.experiment.psychology === "off" ? undefined : input.cognition ?? historicalMind(input.psychology, actorId, runId), actorId, runId);
+    this.mind = enterEpisode(spec.experiment.psychology === "off" && spec.scenario !== "signaling-game" ? undefined : input.cognition ?? historicalMind(input.psychology, actorId, runId), actorId, runId);
     this.targets = spec.roster.map(s => s.characterId).filter(id => id !== actorId);
     const recent = input.recent.filter(event => visible(event, { actorId }) && ["message", "action", "fact"].includes(event.type));
     const query = `${JSON.stringify(input.worldObservation ?? input.observation)}\n${recent.slice(-4).map(event => event.text).join("\n")}`;
@@ -39,7 +39,7 @@ export class GeneralAgentContext implements NativeState {
     this.evidence.forEach((event, index) => this.evidenceRefs.set(`e${index + 1}`, event.id));
     this.refreshMemoryReferences();
     this.activation = { id: input.opportunity.id, actorId, stageId: input.opportunity.stage.id, calls: [],
-      ...(spec.experiment.psychology !== "off" ? { cognition: this.mind } : {}) };
+      ...(spec.experiment.psychology !== "off" || spec.scenario === "signaling-game" ? { cognition: this.mind } : {}) };
   }
   refreshMemoryReferences() {
     this.revisableMemoryRefs.clear(); this.strategyRefs.clear(); this.consolidationMemoryRefs.clear(); this.consolidationStrategyRefs.clear();
@@ -134,6 +134,13 @@ export class GeneralAgentContext implements NativeState {
       predictionIds: this.mind.predictions.filter(p => p.episode === this.runId && p.result === undefined && !p.expired).map(p => p.id) };
     if (parameters) {
       decision.decisionStructure = decisionStructure(this.input, this.spec);
+      const signal = signalingDecisionSupport(this.input, this.spec, this.mind);
+      if (signal && ["declare_quality", "choose_offer"].includes(name)) {
+        const chosen = signal.options.find(option => sameChoice(option.parameters, parameters))!;
+        decision.beliefSnapshot = structuredClone(signal.belief);
+        decision.expectedOwnPayoff = chosen.expectedOwn;
+        decision.estimatedImmediateCost = Math.max(...signal.options.map(option => option.expectedOwn)) - chosen.expectedOwn;
+      }
       if (this.payoffComparison?.action === name && this.payoffComparison.options.some(option => sameChoice(option.parameters, parameters)))
         decision.payoffComparison = structuredClone(this.payoffComparison);
     }
@@ -148,8 +155,8 @@ export class GeneralAgentContext implements NativeState {
     const actorId = this.input.character.id;
     const memoryLimit = this.spec.cognition?.context === "expanded" ? 64 : 16;
     const { id, name, persona, values, goals, voice } = this.input.character;
-    return JSON.stringify(this.displayReferences({ actor: { id, name, persona, values, goals, voice }, observation: this.input.worldObservation ?? this.input.observation,
-      strategicContext: strategicBrief(this.input, this.spec),
+    return JSON.stringify(this.displayReferences({ actor: this.spec.experiment.objective === "score" ? { id, name, voice, goals: ["提高本人的整局累计点数"] } : { id, name, persona, values, goals, voice }, observation: this.input.worldObservation ?? this.input.observation,
+      strategicContext: strategicBrief(this.input, this.spec, this.mind),
       opportunity: { ...this.input.opportunity, actions: this.input.opportunity.actions.map(({ parameters: _parameters, ...action }) => action) },
       evidence: this.evidence, targets: this.targets, appraisalRequired: this.needsAppraisal,
       newEvidenceIds: this.evidence.filter(e => e.runId === this.runId && !this.mind.appraised.includes(e.id)).map(e => e.id),
@@ -187,7 +194,8 @@ export class GeneralAgentContext implements NativeState {
 export const generalInstructions = `你在虚构的多人社会环境中扮演当前人物。观察与证据只包含自己实际获知的信息；不知他人的私有心理或未公开行动。
 你可合作、竞争、试探、隐瞒或在游戏中虚张声势。对外 text 是发言；privateAim 与 intent 是自己的私有意图，不会对外广播。声明、推断和事实彼此独立，不能用声明改写世界。
 你的任务是作为参与者作出选择，不是主持调解或对所有人讲道德建议。依据本人物目标权衡收益、关系和风险；允许在虚构游戏内隐藏信息、虚报和诱导错误判断，也允许诚实和合作，不强制选择某种策略。欺骗的前提是自己知道什么、希望对方相信什么、对方因此会怎样行动以及败露代价；别把标注 deceive 或写下 privateAim 当成真正实施。
-strategicContext 给出当前决策结构和收益门槛。面对新决策、改变对手判断或准备牺牲明显收益时，优先用 compare_options 比较至少两个合法参数，再读取回执行动。概率由你依据可见记录估计，允许不确定；不要只算有利分支。计算仅覆盖本轮点数，未来信誉、互惠、公平偏好需另行权衡，不能当作保证收益。狼人不提供全知模拟；用本人信息提出身份假设和可验证预测。
+strategicContext 给出当前决策结构和收益门槛。面对新决策、改变对手判断或准备牺牲明显收益时，优先用 compare_options 比较至少两个合法参数，再读取回执行动。信息交易的概率由真实结算证据计算，不由你填写或用文字改写；其他经济场景按工具 schema 提供假设，不要只算有利分支。计算仅覆盖本轮点数，未来信誉、互惠及人物模式中的公平偏好需另行权衡，不能当作保证收益。狼人不提供全知模拟；用本人信息提出身份假设和可验证预测。
+信息交易中的 evidenceEstimate 区分报告后的接受频率和质量条件下的报告似然，不能混为一种信任。priorOnly 表示没有对应样本，不是已经证明对方以50%概率行动。每个实质动作都会保存当时的信念，真实结算先评分再更新统计；无需为这些相同事件重复 forecast。估计是有限样本的参考，不强迫动作。当你选择 probe，privateAim 要说明想检验什么及如何据结果调整；estimatedImmediateCost 是相对当前估计最高点数选项的当轮代价，不是因果后悔值。
 实际世界只执行行动参数，不执行 privateAim。提交前核对参数与意图，例如想报告高质量必须 highQuality=true，想接受必须 accept=true。intent 是对自己的行为描述，不是改写参数或真值的开关。
 需要评价时先 appraise_event；sourceIds 从 newEvidenceIds 的短编号选取（如 e1）。责任归属只用 self/other/shared/situation/unknown 或 null。控制感、责任判断和情绪是主观报告。再读取工具回执的正式状态。update_opponent 记录某人的可错假设并保留另一种解释；角色猜测仅属于本局 scope=episode，保存在 episodeBeliefs，换场景清除。跨情境关系经验才可用 relationship，保存在 relationships。同一个人的两类判断分别修订，不能用身份猜测覆盖过去的关系经验。
 set_plan 管理自己的目标与可修订计划，条件用情境语义描述，不套用别的游戏阶段。当前记忆窗口同时考虑相关性、条件策略与近期经历；recall 可查阅更早的本人经历。remember 区分经历、命题和条件策略；仅本局的结论保留 scope=episode，隐藏身份不要当成跨局事实。
@@ -201,6 +209,7 @@ strategyLearning.assessmentRequired 为 true 时，先评价新事件，再从 a
 首次看到新的实际结算后，比较结果与原先预期，并把教训保存到正式记忆。已有条件策略覆盖这类结果时，检查其适用范围，需要补充证据或修正条件就用 consolidate_strategy 更新原 strategyId，原则无需变化可直接复用；尚无覆盖这类结果的策略且有结算经历时才新增有条件和边界的待检验策略，confidence 表达不确定性。若只能支持本局结论，用 remember 保存并说明局限。单次经历不能写成普遍保证；不要为相同教训反复新增策略。仅对外谈论教训、调用 appraise_event 或关闭计划，都不会生成可迁移策略。
 forecast 可登记一个尚未发生的可观测事件概率，后续由账本评分。predictionFeedback 区分行动与结算预测、已评分与未验证，并按评分来源事件分组；同一事件的多次预测不能说成多次独立观察，未验证不能算作失败。事后能比较真实结果不表示原预测完成了正式评分。learning 是实际结果反馈；收益均值不证明某策略更优。根据反证修正计划与判断，不需要每次创建新计划或记忆。
 payoffFeedback 将实际动作、事前分支和实际所得对应起来。检查是概率判断出错、收益理解出错，还是明知少得点数而选择其他目标；把条件和改变选择的阈值写入经验，不只写“保持谨慎”。未选动作的对手反应仍未知，一次虚报遭拒不能证明所有虚报都无效，一次成功也不能证明永远有效。检索中的相似决策结构来自原结算关联动作，不表示旧原则已适用。
+behaviorFeedback / beliefFeedback 是自动冻结的事前预测及真实结果。复盘说明哪项预测失准、什么条件变了、下一次怎样调整。单次结算可以形成低把握、有明确边界的待检验策略，不必等到足以证明普遍规律；仍可选择证据不足。知情虚报、虚报成交、接收者质量判断变化和收益分别记录；低质成交不自动证明骗过对方，接收者可能原本就会接受。
 输入含 episodeReview 时世界已经结束，这是自己的私有整局复盘。比较提供的整段经历、实际收益、行动和预测，检查现有策略，必要时修订或 consolidate_strategy 提炼；不要重复保存同一教训。读完正式回执后用 finish_episode_review 结束：strategyIds 选择当前有效、可供后续检验的可迁移策略短编号；没有可引用策略时使用空数组并说明证据不足。状态由所选列表生成，不另填 status；保留策略不表示它已经被证明有效，也不要求编造普遍规律。
 每次只调用一个工具。所有数字用原生 JSON 数值。工具错误后读错误再修正。预算是 model turns，包括最后行动；SDK 会为尚未完成的评价、旧策略检验和正式结束保留步数，预算不足时只提供下一步必需工具。可以拒绝不适用策略，不要通过重复修改计划回避检验或行动。
 先评价新事件，心理/计划/预测变更后读取回执，再使用合法行动工具；讨论用 speak 或 wait。行动仅暂存，完整 SDK 运行成功后一次提交。用简短中文，不输出长篇分析。`;
@@ -222,8 +231,8 @@ export function generalTools(c: GeneralAgentContext, report: (name: string, erro
     }) });
   const psychological = () => c.spec.experiment.psychology !== "off";
   const tools: Tool<GeneralAgentContext>[] = [];
-  const comparison = payoffTool(c.input, c.spec);
-  if (comparison) tools.push(tool({ name: "compare_options", description: "按真实规则比较不同合法行动的本轮收益。自己提供对手反应/未知状态的概率假设；不会读取隐藏信息或替你行动。回执及已选参数随后与实际结算核对。",
+  const comparison = payoffTool(c.input, c.spec, c.mind);
+  if (comparison) tools.push(tool({ name: "compare_options", description: "比较不同合法行动的本轮收益。信息交易概率来自真实结算证据；其他场景按 schema 提供假设。不会读取隐藏信息或替你行动。回执及已选参数随后与实际结算核对。",
     parameters: comparison.parameters, ...common("compare_options", () => !c.needsAppraisal), execute: async args => {
       c.assertOpen(); c.payoffComparison = comparison.compare(args); return c.changed(c.payoffComparison);
     } }));

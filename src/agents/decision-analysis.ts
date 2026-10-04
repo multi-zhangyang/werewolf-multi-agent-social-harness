@@ -1,3 +1,5 @@
+import type { BeliefSnapshot } from "./behavior-model";
+
 export interface DecisionStructure {
   information: "private-information" | "unverified-claim" | "public-history" | "sealed-actions" | "hidden-roles";
   control: "signal" | "accept-or-reject" | "entrust" | "distribute" | "contribute" | "compensate" | "social-deduction";
@@ -20,6 +22,7 @@ export interface PayoffComparison {
   action: string;
   rationale: string;
   options: PayoffOption[];
+  beliefSnapshot?: BeliefSnapshot;
   note: string;
 }
 

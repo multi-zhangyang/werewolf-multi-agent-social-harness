@@ -19,7 +19,7 @@ it.each([["trust-game", 2], ["public-goods", 3], ["werewolf", 6], ["signaling-ga
   expect(db.cases(run.id).length).toBeGreaterThan(0);
   for (const character of characters.slice(0, count)) {
     const mind = db.cognition(run.id, character.id)!;
-    expect(mind).toMatchObject({ version: "psychology-responses-v16", actorId: character.id });
+    expect(mind).toMatchObject({ version: "psychology-responses-v17", actorId: character.id });
     expect(mind.learning.episodes).toContain(run.id); expect(mind.learning.observed).toBeGreaterThan(0);
     expect(db.snapshot(db.head("society", character.id)!)?.cognition).toEqual(mind);
   }
@@ -78,7 +78,34 @@ it("allows an intentional false report through the shared SDK while isolating th
   expect(inputs.some(input => input.actor.id === "peer" && input.observation.round === 1 && input.observation.facts.highQuality === false)).toBe(true);
   expect((run.world.publicState().history as Array<{ reportAccurate: boolean }>)[0].reportAccurate).toBe(false);
   expect(db.cognition(run.id, "self")?.decisions.some(decision => decision.action === "declare_quality" && decision.intent === "bluff" && decision.strategy === "deceive")).toBe(true);
+  const senderDecision = db.cognition(run.id, "self")!.decisions.find(d => d.action === "declare_quality")!;
+  expect(senderDecision.payoffComparison).toBeUndefined();
+  expect(senderDecision.beliefSnapshot).toMatchObject({ modelRevision: 0, knownHighQuality: false });
+  expect(senderDecision.beliefFeedback).toMatchObject({ knownFalseReport: true, falseReportAccepted: true, brier: .25 });
+  const receiverDecision = db.cognition(run.id, "peer")!.decisions.find(d => d.action === "choose_offer")!;
+  expect(receiverDecision.beliefSnapshot).not.toHaveProperty("knownHighQuality");
+  expect(receiverDecision.beliefFeedback?.lowQualityAcceptedWithRaisedBelief).toBe(false);
+  expect(Object.values(db.cognition(run.id, "peer")!.behaviorModels!)[0].revision).toBe(2);
+  expect(JSON.stringify(run.view({}))).not.toContain("beliefSnapshot");
   expect(JSON.stringify(run.view({}))).not.toContain("fixture-strategic-misreport");
+});
+
+it("keeps score-mode learning and off-mode numeric evidence without adding personality utility", async () => {
+  for (const psychology of ["hybrid", "off"] as const) {
+    const db = store(); const fixture = generalFixture();
+    const objective = psychology === "off" ? "character" : "score";
+    const spec = runSpecSchema.parse({ scenario: "signaling-game", signalingPayoffProfile: "diagnostic", seed: 1, rounds: 2, mode: "experiment",
+      roster: characters.slice(0, 2).map(c => ({ characterId: c.id })), budgets: { discussionTurns: 2 }, experiment: { psychology, objective } });
+    const run = new RunService(db, fixture.factory).create(spec, characters.slice(0, 2)).run; await run.settled();
+    expect(run.status).toBe("completed");
+    const mind = db.cognition(run.id, "peer")!;
+    expect(mind.decisions.filter(d => d.beliefFeedback)).toHaveLength(2);
+    expect(Object.values(mind.behaviorModels!)[0]).toMatchObject({ revision: 2, context: { objective, payoffProfile: "diagnostic" } });
+    if (objective === "score") for (const input of fixture.requests.map(sdkInput)) {
+      expect(input.actor).not.toHaveProperty("persona"); expect(input.actor).not.toHaveProperty("values");
+      expect(input.actor.goals).toEqual(["提高本人的整局累计点数"]);
+    }
+  }
 });
 it("rejects a duplicate committed activation without applying its world action twice", async () => {
   const db = store(); let duplicates = 0;

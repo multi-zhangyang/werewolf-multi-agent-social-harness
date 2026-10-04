@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { payoffFeedback, type DecisionStructure, type PayoffComparison } from "./decision-analysis";
+import { observeBehavior, scoreBehavior, type BehaviorModel, type BehaviorObservation, type BeliefFeedback, type BeliefSnapshot } from "./behavior-model";
 
-export const cognitionVersion = "psychology-responses-v16";
+export const cognitionVersion = "psychology-responses-v17";
 const unit = z.number().min(0).max(1);
 const text = (limit: number) => z.string().trim().min(1).max(limit);
 const sources = z.array(text(160)).min(1).max(8).describe("从本次 evidence.id / newEvidenceIds 选择短证据编号，例如 e1；不要自行生成编号");
@@ -53,6 +54,7 @@ export interface Experience {
   id: string; episode: string; seq: number; round: number; actorId?: string;
   environment?: string;
   role?: string;
+  behaviorObservation?: BehaviorObservation;
   kind: "observation" | "message" | "action" | "outcome"; name: string; text: string; data: Record<string, unknown>;
   reward?: { value: number; normalized: number; unit: string; scope?: "round" | "episode" };
 }
@@ -61,7 +63,8 @@ export interface CognitiveMemory extends z.infer<typeof memoryParameters> {
   origin?: "ledger" | "agent";
   observation?: { sourceId: string; round: number; environment?: string;
     actions: Array<Pick<PrivateDecision, "id" | "action" | "parameters"> & { round?: number }>; reward: NonNullable<Experience["reward"]>;
-    decisionStructures?: DecisionStructure[]; comparisons?: Array<{ decisionId: string; analysis: PayoffComparison; feedback: ReturnType<typeof payoffFeedback> }> };
+    decisionStructures?: DecisionStructure[]; comparisons?: Array<{ decisionId: string; analysis: PayoffComparison; feedback: ReturnType<typeof payoffFeedback> }>;
+    beliefs?: Array<{ decisionId: string; snapshot: BeliefSnapshot; feedback?: BeliefFeedback }> };
   consolidation?: { episode: string; rationale: string; sourceMemories: Array<{ id: string; revision: number }>; sourceOutcomeIds?: string[] };
   revisions?: Array<{ atRevision: number; episode: string; change: "revise" | "retire"; reason: string; sourceIds: string[];
     previous: Omit<CognitiveMemory, "revisions"> }>;
@@ -79,6 +82,10 @@ export interface PrivateDecision {
   strategyBasis?: { assessmentIds: string[]; reason: string };
   decisionStructure?: DecisionStructure;
   payoffComparison?: PayoffComparison;
+  beliefSnapshot?: BeliefSnapshot;
+  beliefFeedback?: BeliefFeedback;
+  expectedOwnPayoff?: number;
+  estimatedImmediateCost?: number;
 }
 export interface StrategyAssessment extends Omit<z.infer<typeof strategyAssessmentParameters>, "id"> {
   id: string; episode: string; opportunityId: string; round: number;
@@ -96,12 +103,13 @@ export interface PredictionFeedback {
   note: string;
 }
 export interface AgentMind {
-  version: typeof cognitionVersion | "psychology-responses-v1" | "psychology-responses-v2" | "psychology-responses-v3" | "psychology-responses-v4" | "psychology-responses-v5" | "psychology-responses-v6" | "psychology-responses-v7" | "psychology-responses-v8" | "psychology-responses-v9" | "psychology-responses-v10" | "psychology-responses-v11" | "psychology-responses-v12" | "psychology-responses-v13" | "psychology-responses-v14" | "psychology-responses-v15"; actorId: string; episode: string; revision: number;
+  version: typeof cognitionVersion | "psychology-responses-v1" | "psychology-responses-v2" | "psychology-responses-v3" | "psychology-responses-v4" | "psychology-responses-v5" | "psychology-responses-v6" | "psychology-responses-v7" | "psychology-responses-v8" | "psychology-responses-v9" | "psychology-responses-v10" | "psychology-responses-v11" | "psychology-responses-v12" | "psychology-responses-v13" | "psychology-responses-v14" | "psychology-responses-v15" | "psychology-responses-v16"; actorId: string; episode: string; revision: number;
   emotions: Record<typeof emotions[number], number>; needs: Record<typeof needs[number], number>;
   appraisal?: z.infer<typeof appraisalParameters>;
   dynamics?: { inertia: number; decay: number; freshSourceIds: string[] };
   relationships: Record<string, OpponentModel>; episodeBeliefs?: Record<string, OpponentModel>; plans: CognitivePlan[]; memories: CognitiveMemory[];
   predictions: Prediction[]; decisions: PrivateDecision[]; strategyAssessments?: StrategyAssessment[];
+  behaviorModels?: Record<string, BehaviorModel>;
   episodeReviews?: Array<Omit<z.infer<typeof episodeReviewParameters>, "strategyIds"> & {
     episode: string; opportunityId: string; strategies: Array<{ id: string; revision: number }>; predictionFeedback?: PredictionFeedback;
   }>;
@@ -325,6 +333,13 @@ export function integrateExperience(mind: AgentMind, event: Experience) {
     assessment.predictions = mind.predictions.filter(prediction => assessment.predictionIds.includes(prediction.id) && prediction.result !== undefined && prediction.sourceId && prediction.brier !== undefined)
       .map(prediction => ({ id: prediction.id, sourceId: prediction.sourceId!, result: prediction.result!, brier: prediction.brier! }));
   }
+  if (event.behaviorObservation && event.kind === "outcome" && event.data.settlement === true) {
+    for (const decision of mind.decisions) {
+      if (decision.episode !== event.episode || decision.round !== event.round || !decision.beliefSnapshot || decision.beliefFeedback || !decision.parameters) continue;
+      decision.beliefFeedback = scoreBehavior(decision.beliefSnapshot, decision.parameters, event.behaviorObservation, event.id, event.reward?.value);
+    }
+    observeBehavior(mind.behaviorModels ??= {}, event.behaviorObservation, event.id);
+  }
   if (event.reward) {
     const decisions = mind.decisions.filter(d => d.episode === event.episode && d.feedbackId === undefined &&
       (event.reward!.scope === "episode" ? d.round <= event.round : d.round === event.round));
@@ -344,11 +359,13 @@ export function integrateExperience(mind: AgentMind, event: Experience) {
     const decisionStructures = decisions.filter(isWorldDecision).flatMap(decision => decision.decisionStructure ? [structuredClone(decision.decisionStructure)] : []);
     const comparisons = decisions.filter(isWorldDecision).flatMap(decision => decision.payoffComparison && decision.parameters ? [{ decisionId: decision.id,
       analysis: structuredClone(decision.payoffComparison), feedback: payoffFeedback(decision.payoffComparison, decision.parameters, event.data, event.reward!.value) }] : []);
+    const beliefs = decisions.flatMap(decision => decision.beliefSnapshot ? [{ decisionId: decision.id, snapshot: structuredClone(decision.beliefSnapshot),
+      ...(decision.beliefFeedback ? { feedback: structuredClone(decision.beliefFeedback) } : {}) }] : []);
     const actionText = actions.length ? `本人实际行动：${actions.map(item => `第 ${item.round} 轮 ${item.action}${item.parameters ? ` ${JSON.stringify(item.parameters)}` : ""}`).join("；")}` : "这次结算没有待关联的本人实质行动";
     mind.memories.push({ id: crypto.randomUUID(), episode: mind.episode, kind: "episodic", scope: "transferable", origin: "ledger",
       sourceIds: [event.id], text: `${event.environment ? `${event.environment}，` : ""}第 ${event.round} 轮：${event.text}\n${actionText}。本次结算的本人回报 ${event.reward.value} ${event.reward.unit}（归一值 ${event.reward.normalized.toFixed(3)}）。这是关联样本，不是策略优越性的证明。`,
       observation: { sourceId: event.id, round: event.round, ...(event.environment ? { environment: event.environment } : {}), actions, reward: structuredClone(event.reward),
-        ...(decisionStructures.length ? { decisionStructures } : {}), ...(comparisons.length ? { comparisons } : {}) },
+        ...(decisionStructures.length ? { decisionStructures } : {}), ...(comparisons.length ? { comparisons } : {}), ...(beliefs.length ? { beliefs } : {}) },
       confidence: 1, tags: [...(decision ? [decision.strategy] : []), "observed-feedback"], when: null, then: null });
   }
   mind.revision++; return true;
@@ -380,6 +397,8 @@ export function cognitionForPrompt(mind: AgentMind, memoryLimit = 16, selected?:
     memories: memories.slice(0, limit).map(memory => ({ ...memoryForPrompt(memory), ...(memory.kind === "procedural" ? { usage: strategyUsage(mind, memory) } : {}) })),
     strategyAssessments: (mind.strategyAssessments ?? []).filter(item => item.episode === mind.episode).slice(-4),
     episodeReview: mind.episodeReviews?.find(review => review.episode === mind.episode),
+    behaviorFeedback: mind.decisions.filter(decision => decision.episode === mind.episode && decision.beliefSnapshot).slice(-6)
+      .map(({ id, action, round, parameters, beliefFeedback, expectedOwnPayoff, estimatedImmediateCost }) => ({ id, action, round, parameters, beliefFeedback, expectedOwnPayoff, estimatedImmediateCost })),
     predictions: mind.predictions.filter(p => p.episode === mind.episode && !p.expired).slice(-12), learning: mind.learning,
     note: "记忆是带来源的个人记录；推断、私人意图和公开声明都不等于世界事实。收益均值是观测关联，未作因果归因。" };
 }

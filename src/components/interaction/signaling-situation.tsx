@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { RunView } from "./api";
+import { signalingPayoffText } from "@/runtime/scenarios/payoffs";
 
 const quality = (value?: boolean) => value === undefined ? "尚未公开" : value ? "高质量" : "低质量";
 
@@ -16,7 +17,7 @@ export function SignalingSituation({ run }: { run: RunView }) {
     <div className="transaction-facts"><span>正式报告<strong>{quality(world.reportedHighQuality)}</strong></span><span>公开真值<strong>{quality(world.highQuality)}</strong></span>
       {world.reportAccurate !== undefined && <Badge variant={world.reportAccurate ? "secondary" : "outline"}>{world.reportAccurate ? "报告与真值一致" : "报告与真值不一致"}</Badge>}
     </div>
-    <p className="mt-2 text-xs text-muted-foreground">接受高质量双方各得 6 点；接受低质量发送者得 {world.incentives === "aligned" ? 0 : 6} 点、接收者得 0 点；拒绝双方各得 2 点。真值在决定后公开核验。</p>
+    <p className="mt-2 text-xs text-muted-foreground">{signalingPayoffText(world.incentives ?? "conflicting", world.payoffProfile ?? "legacy")}</p>
     {Boolean(world.history?.length) && <Collapsible className="mt-2"><CollapsibleTrigger asChild><Button variant="ghost" size="sm"><ChevronDown data-icon="inline-start" />逐轮核验 · {world.history!.length}</Button></CollapsibleTrigger><CollapsibleContent className="max-h-44 overflow-y-auto">
       <Table aria-label="信息交易结算记录"><TableHeader><TableRow><TableHead>轮次</TableHead><TableHead>报告 / 真值</TableHead><TableHead>选择</TableHead><TableHead>所得 · 发送 / 接收</TableHead></TableRow></TableHeader><TableBody>{world.history!.map(row => <TableRow key={row.round}><TableCell>{row.round}</TableCell><TableCell>{quality(row.reportedHighQuality)} / {quality(row.highQuality)}</TableCell><TableCell>{row.accepted ? "接受" : "拒绝"}</TableCell><TableCell>{row.payoffs[row.senderId]} / {row.payoffs[row.receiverId]}</TableCell></TableRow>)}</TableBody></Table>
     </CollapsibleContent></Collapsible>}

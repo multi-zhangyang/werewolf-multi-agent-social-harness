@@ -6,6 +6,7 @@ import { psychologySetupSchema } from "./psychology-setup";
 export const scenarioIds = ["trust-game", "public-goods", "werewolf", "signaling-game"] as const;
 export const signalingIncentives = ["aligned", "conflicting"] as const;
 export type SignalingIncentives = typeof signalingIncentives[number];
+export type SignalingPayoffProfile = "legacy" | "diagnostic";
 export const cognitivePhaseSchema = z.object({ effort: z.enum(["low", "medium"]) });
 export const cognitivePhasesSchema = z.object({ psychology: cognitivePhaseSchema.optional(), discussion: cognitivePhaseSchema.optional(), action: cognitivePhaseSchema.optional() });
 export const runSpecSchema = z.object({
@@ -19,6 +20,7 @@ export const runSpecSchema = z.object({
   rounds: z.number().int().min(2).max(16).default(3),
   trustProtocol: z.enum(["classic", "pledge-repair"]).default("classic"),
   signalingIncentives: z.enum(signalingIncentives).default("conflicting"),
+  signalingPayoffProfile: z.enum(["legacy", "diagnostic"]).default("legacy"),
   cognition: z.object({
     inertia: z.number().min(0).max(1).default(.6),
     decay: z.number().min(0).max(1).default(.1),
@@ -36,8 +38,13 @@ export const runSpecSchema = z.object({
     speaking: z.enum(["ready-queue", "round-robin"]).default("ready-queue"),
     personality: z.enum(["full", "persona-only"]).default("full"),
     psychology: z.enum(["appraisal", "hybrid", "off"]).default("appraisal"),
-  }).default({ relationshipMemory: true, speaking: "ready-queue", personality: "full", psychology: "appraisal" }),
+    objective: z.enum(["character", "score"]).default("character"),
+  }).default({ relationshipMemory: true, speaking: "ready-queue", personality: "full", psychology: "appraisal", objective: "character" }),
 }).strict().superRefine((spec, ctx) => {
+  if (spec.experiment.objective === "score" && (spec.mode !== "experiment" || spec.scenario !== "signaling-game"))
+    ctx.addIssue({ code: "custom", path: ["experiment", "objective"], message: "收益优先对照仅用于信息交易独立实验" });
+  if (spec.experiment.objective === "score" && spec.experiment.psychology === "off")
+    ctx.addIssue({ code: "custom", path: ["experiment", "psychology"], message: "收益优先对照须保留心理与记忆学习" });
   if (spec.scenario === "signaling-game" && spec.roster.length !== 2) ctx.addIssue({ code: "custom", path: ["roster"], message: "信息交易需要一位发送者和一位接收者" });
   for (const [actorId, setup] of Object.entries(spec.psychologySetup ?? {})) {
     if (spec.mode !== "experiment" || spec.experiment.psychology !== "hybrid") ctx.addIssue({ code: "custom", path: ["psychologySetup"], message: "心理初态注入仅用于开启混合心理的独立实验" });

@@ -1,10 +1,11 @@
 import { z } from "zod";
-import { fact, RunError, type ActionSpec, type ActorObservation, type Channel, type Character, type EventDraft, type ScenarioAdapter, type SignalingIncentives, type Stage } from "../types";
-import { signalingPayoffs } from "./payoffs";
+import { fact, RunError, type ActionSpec, type ActorObservation, type Channel, type Character, type EventDraft, type ScenarioAdapter, type SignalingIncentives, type SignalingPayoffProfile, type Stage } from "../types";
+import { signalingPayoffs, signalingPayoffTable, signalingPayoffText, signalingQualityPrior } from "./payoffs";
 
 export interface SignalingResult {
   round: number;
   incentives: SignalingIncentives;
+  payoffProfile?: SignalingPayoffProfile;
   senderId: string;
   receiverId: string;
   highQuality: boolean;
@@ -23,7 +24,7 @@ const reportAction: ActionSpec = {
 };
 const offerAction: ActionSpec = {
   name: "choose_offer", label: "决定是否接受",
-  description: "accept=true 接受本轮交易，false 拒绝。实际收益由真实质量和已公开的收益表决定；拒绝双方各得 2 点。提交后不能修改。",
+  description: "accept=true 接受本轮交易，false 拒绝。实际收益由真实质量和已公开的收益表决定。提交后不能修改。",
   parameters: z.object({ accept: z.boolean() }).strict(),
   fields: [{ name: "accept", label: "交易决定", type: "choice", options: [{ label: "接受", value: true }, { label: "拒绝", value: false }] }],
 };
@@ -40,7 +41,7 @@ export class SignalingScenario implements ScenarioAdapter {
   private scores: Record<string, number>;
   private history: SignalingResult[] = [];
 
-  constructor(readonly characters: Character[], readonly rounds: number, seed: number, readonly incentives: SignalingIncentives = "conflicting") {
+  constructor(readonly characters: Character[], readonly rounds: number, seed: number, readonly incentives: SignalingIncentives = "conflicting", readonly payoffProfile: SignalingPayoffProfile = "legacy") {
     if (characters.length !== 2 || new Set(characters.map(c => c.id)).size !== 2) throw new RunError("信息交易需要两位不同的参与者", 400);
     if (!Number.isSafeInteger(seed) || !Number.isInteger(rounds) || rounds < 2 || rounds > 16) throw new RunError("信息交易的轮次或种子无效", 400);
     if (!["aligned", "conflicting"].includes(incentives)) throw new RunError("信息交易的收益条件无效", 400);
@@ -59,7 +60,7 @@ export class SignalingScenario implements ScenarioAdapter {
     let value = this.randomState;
     value = Math.imul(value ^ value >>> 15, value | 1);
     value ^= value + Math.imul(value ^ value >>> 7, value | 61);
-    return ((value ^ value >>> 14) >>> 0) / 4294967296 < .5;
+    return ((value ^ value >>> 14) >>> 0) / 4294967296 < signalingQualityPrior;
   }
   private assertActor(actorId: string) {
     if (!this.ids.includes(actorId)) throw new RunError("该人物不在本局", 403);
@@ -71,15 +72,15 @@ export class SignalingScenario implements ScenarioAdapter {
       actors: discussion ? this.ids : [this.phase === "report" ? this.sender.id : this.receiver.id] };
   }
   private get payoffTable() {
-    return { acceptHigh: signalingPayoffs(this.incentives, true, true), acceptLow: signalingPayoffs(this.incentives, false, true), reject: signalingPayoffs(this.incentives, false, false) };
+    return signalingPayoffTable(this.incentives, this.payoffProfile);
   }
   observe(actorId: string) {
     this.assertActor(actorId);
     const known = actorId === this.sender.id || this.phase === "reflection" || this.phase === "done";
     return `信息交易共${this.rounds}轮，现在第${this.round}轮，${labels[this.phase]}。${this.sender.name}始终是发送者，${this.receiver.name}始终是接收者。` +
-      `每轮高、低质量各有50%机会，独立生成。发送者在报告前已检查真实质量；接收者在选择前无法检查，只能依据报告、交流和以前的结算判断。` +
+      `每轮高质量概率${signalingQualityPrior * 100}%，独立生成。发送者在报告前已检查真实质量；接收者在选择前无法检查，只能依据报告、交流和以前的结算判断。` +
       `发送者先用 declare_quality 报告高或低质量，双方交流后，接收者用 choose_offer 接受或拒绝。报告没有强制约束，不改变质量和收益表。` +
-      `当前收益条件是${this.incentives === "aligned" ? "利益一致" : "利益冲突"}，双方都知道：接受高质量双方各得6点；接受低质量发送者得${this.payoffTable.acceptLow.sender}点、接收者得0点；拒绝双方各得2点。` +
+      `当前收益条件是${this.incentives === "aligned" ? "利益一致" : "利益冲突"}，双方都知道：${signalingPayoffText(this.incentives, this.payoffProfile)}` +
       `无论接受还是拒绝，随后都会公开本轮真值、报告是否一致和双方所得，留出复盘交流，然后进入下一轮。` +
       `你的角色是${actorId === this.sender.id ? "发送者" : "接收者"}，累计${this.scores[actorId]}点。` +
       (known ? `本轮真实质量：${this.highQuality ? "高" : "低"}。` : "本轮真实质量尚未向你公开。") +
@@ -118,10 +119,10 @@ export class SignalingScenario implements ScenarioAdapter {
     if (this.phase === "report") this.phase = "discussion";
     else if (this.phase === "discussion") this.phase = "choose";
     else if (this.phase === "choose") {
-      const payoff = signalingPayoffs(this.incentives, this.highQuality, this.accepted!);
+      const payoff = signalingPayoffs(this.incentives, this.highQuality, this.accepted!, this.payoffProfile);
       const payoffs = { [this.sender.id]: payoff.sender, [this.receiver.id]: payoff.receiver };
       for (const id of this.ids) this.scores[id] += payoffs[id];
-      const result: SignalingResult = { round: this.round, incentives: this.incentives, senderId: this.sender.id, receiverId: this.receiver.id,
+      const result: SignalingResult = { round: this.round, incentives: this.incentives, payoffProfile: this.payoffProfile, senderId: this.sender.id, receiverId: this.receiver.id,
         highQuality: this.highQuality, reportedHighQuality: this.reportedHighQuality!, reportAccurate: this.reportedHighQuality === this.highQuality,
         accepted: this.accepted!, payoffs, scores: { ...this.scores } };
       this.history.push(result); this.phase = "reflection";
@@ -136,7 +137,7 @@ export class SignalingScenario implements ScenarioAdapter {
     return [];
   }
   publicState() {
-    return { scenario: "signaling-game", incentives: this.incentives, round: this.round, rounds: this.rounds, phase: labels[this.phase], phaseId: this.phase,
+    return { scenario: "signaling-game", incentives: this.incentives, payoffProfile: this.payoffProfile, qualityPrior: signalingQualityPrior, round: this.round, rounds: this.rounds, phase: labels[this.phase], phaseId: this.phase,
       senderId: this.sender.id, receiverId: this.receiver.id, payoffTable: this.payoffTable,
       reportedHighQuality: this.reportedHighQuality, accepted: this.accepted, scores: { ...this.scores }, history: structuredClone(this.history),
       ...(this.phase === "reflection" || this.phase === "done" ? { highQuality: this.highQuality, reportAccurate: this.reportedHighQuality === this.highQuality } : {}) };

@@ -5,6 +5,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { isWorldDecision, opponentViews, strategyUsage, type AgentMind, type Strategy } from "@/agents/cognition";
 import type { Character } from "@/runtime/types";
+import { BehaviorLearning } from "./behavior-learning";
 
 const strategyLabels: Record<Strategy, string> = { observe: "观察", probe: "试探", cooperate: "合作", protect: "自保", repair: "修复", compete: "竞争", deceive: "误导", withdraw: "退出" };
 const intentLabels = { truthful: "如实表达", withhold: "保留信息", bluff: "虚张声势", mixed: "混合表达", none: "未作声明" };
@@ -25,6 +26,7 @@ export function GeneralCognition({ mind, characters }: { mind: AgentMind; charac
     key: `${memory.id}:${index}`, change, after: history[index + 1]?.previous ?? memory,
   }))).sort((a, b) => b.change.atRevision - a.change.atRevision).slice(0, 8);
   return <div className="flex flex-col gap-4" data-testid="general-cognition">
+    <BehaviorLearning mind={mind} characters={characters} />
     {review && <Card data-testid="episode-review"><CardHeader><CardDescription>对局结束后的私有学习记录</CardDescription><CardTitle>整局复盘</CardTitle></CardHeader><CardContent className="flex flex-col gap-3">
       <Badge variant="secondary" className="w-fit">{review.status === "ready" ? "可供后续检验" : "证据不足"}</Badge>
       <p className="text-sm">{review.summary}</p>

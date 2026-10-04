@@ -1,10 +1,10 @@
 import { createAgentMind, opponentViews, type AgentMind, type Experience } from "../agents/cognition";
 import { type HybridState, type PsychologicalState } from "./psychology";
-import type { RunSpec, WorldEvent } from "./types";
+import { visible, type RunSpec, type WorldEvent } from "./types";
 
 /** Environment-specific payoff interpretation stays outside the general cognition reducer. */
 export function ledgerExperience(event: WorldEvent, spec: RunSpec, actorId: string): Experience | undefined {
-  if (!["message", "action", "fact"].includes(event.type)) return;
+  if (!visible(event, { actorId }) || !["message", "action", "fact"].includes(event.type)) return;
   const data = event.data;
   const payoffs = data.payoffs as Record<string, number> | undefined;
   const winners = Array.isArray(data.winners) ? data.winners as string[] : undefined;
@@ -18,6 +18,13 @@ export function ledgerExperience(event: WorldEvent, spec: RunSpec, actorId: stri
         : data.settlement && data.amounts && actorId in (data.amounts as Record<string, number>) ? "contributor" : undefined;
   return { id: event.id, episode: event.runId, seq: event.seq, round: Number(data.round ?? data.day ?? 1), environment: spec.scenario,
     ...(role ? { role } : {}),
+    ...(spec.scenario === "signaling-game" && data.settlement === true && (role === "sender" || role === "receiver") &&
+      (data.payoffProfile === "legacy" || data.payoffProfile === "diagnostic") && (data.incentives === "aligned" || data.incentives === "conflicting") &&
+      typeof data.highQuality === "boolean" && typeof data.reportedHighQuality === "boolean" && typeof data.accepted === "boolean" ? {
+        behaviorObservation: { context: { opponentId: String(role === "sender" ? data.receiverId : data.senderId), role,
+          incentives: data.incentives, payoffProfile: data.payoffProfile, objective: spec.experiment.objective ?? "character" },
+          highQuality: data.highQuality, reportedHighQuality: data.reportedHighQuality, accepted: data.accepted },
+      } : {}),
     actorId: event.actorId ?? (typeof data.actorId === "string" ? data.actorId : undefined),
     kind: event.type === "message" ? "message" : event.type === "action" ? "action" : outcome ? "outcome" : "observation",
     name: event.type === "action" ? String(data.action) : data.role ? "reveal" : outcome ? "settlement" : "observation", text: event.text, data,

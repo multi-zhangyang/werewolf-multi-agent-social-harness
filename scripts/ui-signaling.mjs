@@ -37,7 +37,11 @@ try {
   await page.waitForSelector(condition);
   const initialNames = await page.$$eval(".selected-personalities strong", nodes => nodes.map(node => node.textContent));
   await page.locator(`${condition} ::-p-text(利益一致)`).click();
-  assert.ok((await page.$eval(condition, node => node.closest('[data-slot="field"]').textContent)).includes("发送者得 0 点"));
+  const profile = '[aria-label="信息交易收益配置"]';
+  await page.locator(`${profile} ::-p-text(诊断)`).click();
+  await page.locator('[aria-label="信息交易决策目标"] ::-p-text(累计收益优先)').click();
+  const payoffText = await page.$eval(profile, node => node.closest('[data-slot="field"]').textContent);
+  assert.ok(payoffText.includes("发送者得 0 点")); assert.ok(payoffText.includes("接收者得 4 点"));
   await page.locator('button ::-p-text(交换发送者与接收者)').click();
   assert.deepEqual(await page.$$eval(".selected-personalities strong", nodes => nodes.map(node => node.textContent)), [...initialNames].reverse());
   await page.screenshot({ path: path.join(directory, "create-desktop.png"), fullPage: true });
@@ -46,6 +50,7 @@ try {
   const response = await created; assert.equal(response.status(), 201);
   const submitted = JSON.parse(response.request().postData());
   assert.equal(submitted.scenario, "signaling-game"); assert.equal(submitted.signalingIncentives, "aligned");
+  assert.equal(submitted.signalingPayoffProfile, "diagnostic"); assert.equal(submitted.experiment.objective, "score");
   assert.equal(submitted.rounds, 4); assert.equal(submitted.budgets.discussionTurns, 2);
   const createdData = await response.json(); const runId = createdData.run.id;
   const running = context.runs.live.get(runId); if (running) await running.settled();
@@ -58,9 +63,22 @@ try {
   assert.equal(await page.$$eval('[aria-label="信息交易结算记录"] tbody tr', rows => rows.length), 4);
   for (const [name, width, height] of [["desktop", 1440, 1000], ["mobile", 390, 844]]) {
     await page.setViewport({ width, height });
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, `${name} viewport overflow`);
+    const layout = await page.evaluate(() => [...document.querySelectorAll('main, .room-shell, [data-slot="resizable-panel-group"], [data-slot="resizable-panel"], .mind-panel, [data-testid="behavior-learning"]')].map(node => ({ tag: node.tagName, slot: node.getAttribute("data-slot"), class: node.className, width: node.getBoundingClientRect().width, minWidth: getComputedStyle(node).minWidth, scroll: node.scrollWidth })));
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, `${name} viewport overflow ${JSON.stringify(layout)}`);
     measurements.push({ view: "replay", width, height, overflow: false });
     await page.screenshot({ path: path.join(directory, `replay-${name}.png`), fullPage: false });
+  }
+  step = "research-evidence";
+  await page.goto(`${base}/#/research/${runId}`, { waitUntil: "networkidle2" });
+  await page.waitForSelector('[data-testid="behavior-learning"]');
+  assert.equal(await page.$$eval('[data-testid="behavior-learning"]', nodes => nodes.length), 2);
+  assert.equal(await page.$$eval('[aria-label="行动前预测与实际反馈"] tbody tr', nodes => nodes.length), 8);
+  for (const [name, width, height] of [["desktop", 1440, 1000], ["mobile", 390, 844]]) {
+    await page.setViewport({ width, height });
+    await page.$eval('[data-testid="behavior-learning"]', node => node.scrollIntoView({ block: "start" }));
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, `${name} research overflow`);
+    measurements.push({ view: "research", width, height, overflow: false });
+    await page.screenshot({ path: path.join(directory, `research-${name}.png`) });
   }
   await page.goto(`${base}/#/create?scenario=signaling-game`, { waitUntil: "networkidle2" });
   await page.waitForSelector(condition);
@@ -126,7 +144,7 @@ try {
   assert.deepEqual(errors, []); assert.equal(registryHash(), beforeRegistry);
   const result = { passed: true, fixture: true, actualModelEvidence: false, isolatedDatabase: process.env.SOCIETY_DATABASE_FILE,
     productionRegistryUnchanged: true, completedFixtureRunId: runId, humanFixtureRunId: humanRun.id,
-    conditionsAndRoleSwapSubmitted: true, humanFalseBooleansSubmitted: true, senderCanReadPrivateTruth: true, truthHiddenUntilSettlement: true,
+    conditionsAndRoleSwapSubmitted: true, diagnosticAndScoreSubmitted: true, beliefTablesVisible: true, humanFalseBooleansSubmitted: true, senderCanReadPrivateTruth: true, truthHiddenUntilSettlement: true,
     measurements, errors, at: new Date().toISOString() };
   writeFileSync(path.join(directory, "results.json"), JSON.stringify(result, null, 2));
   console.log(JSON.stringify({ ...result, artifact: directory }));

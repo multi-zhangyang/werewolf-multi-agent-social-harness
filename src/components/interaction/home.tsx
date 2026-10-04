@@ -21,7 +21,7 @@ export function InteractionHome({ catalog, runs, archives }: { catalog: Catalog;
     setBusy(mode); setError("");
     try { await createRun({ scenario: "trust-game", trustProtocol: "pledge-repair", mode: "experiment", worldId: "trust-play", rounds: 3, seed: 1,
       roster: [first, second].map((characterId, index) => ({ characterId, modelProfileId: catalog.defaultModel, human: mode === "play" && index === 0 })),
-      experiment: { personality: "full", psychology: "hybrid", relationshipMemory: true, speaking: "round-robin" }, cognition: initialHybridCognition,
+      experiment: { personality: "full", objective: "character", psychology: "hybrid", relationshipMemory: true, speaking: "round-robin" }, cognition: initialHybridCognition,
       budgets: { discussionTurns: 2, maxTurns: 8, humanTimeoutMs: 300000 } }); }
     catch (e) { setError((e as Error).message); } finally { setBusy(undefined); }
   }

@@ -17,6 +17,7 @@ import type { RunView } from "./api";
 import { GeneralCognition } from "./general-cognition";
 import type { AgentMind } from "@/agents/cognition";
 import { SignalingSituation } from "./signaling-situation";
+import { BehaviorLearning } from "./behavior-learning";
 
 const publicFaceLabels: Record<string, string> = { truthful: "如实表达", withhold: "保留信息", bluff: "虚张声势", mixed: "混合表达", none: "未作声明" };
 
@@ -45,6 +46,7 @@ export function MindPanel({ character, characters, events, memories, close, focu
   const linked = focusSeq === undefined || ignoreLinked ? undefined : states.find(e => e.seq > focusSeq) ?? states.findLast(e => e.seq <= focusSeq);
   const current = states.find(e => e.id === focusedId) ?? linked ?? states.at(-1);
   const state = psychologyFromEvent(current);
+  const evidenceOnly = events.findLast(e => e.actorId === character.id && e.data.cognition)?.data.cognition as AgentMind | undefined;
   const historical = Boolean((focusedId || linked) && current?.id !== states.at(-1)?.id);
   const name = (id: string) => characters.find(c => c.id === id)?.name ?? "既往人物";
   return <aside ref={panel} className="mind-panel" aria-label={`${character.name}的心理视角`}>
@@ -64,7 +66,7 @@ export function MindPanel({ character, characters, events, memories, close, focu
 
           {current.data.cognition && <GeneralCognition mind={current.data.cognition as AgentMind} characters={characters} />}
           <Evidence event={current} events={events} />
-        </> : <Empty><EmptyHeader><EmptyMedia variant="icon"><ScanEye /></EmptyMedia><EmptyTitle>等待人物形成判断</EmptyTitle><EmptyDescription>心理状态仅对本人和研究视角开放。开启心理机制后，人物会在决定之前留下主观状态。</EmptyDescription></EmptyHeader></Empty>}
+        </> : evidenceOnly?.behaviorModels ? <BehaviorLearning mind={evidenceOnly} characters={characters} /> : <Empty><EmptyHeader><EmptyMedia variant="icon"><ScanEye /></EmptyMedia><EmptyTitle>等待人物形成判断</EmptyTitle><EmptyDescription>心理状态仅对本人和研究视角开放。开启心理机制后，人物会在决定之前留下主观状态。</EmptyDescription></EmptyHeader></Empty>}
       </TabsContent>
       <TabsContent value="history" className="mind-content">
         <p className="text-xs text-muted-foreground">从最近一次往回看。信任数值是人物的主观估计；点击记录可回看当时的完整心理状态。</p>

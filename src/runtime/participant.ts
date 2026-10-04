@@ -13,7 +13,7 @@ export function modelParticipantFactory(registry: ModelRegistry, options: Native
       maxTurns: spec.budgets.maxTurns,
       requestTimeoutMs: spec.cognition?.requestTimeoutMs ?? options.requestTimeoutMs };
     const configuration = { ...nativeConfiguration(registry, settings), cognitionVersion, psychology: spec.experiment.psychology,
-      personality: spec.experiment.personality, execution: "staged activation; single atomic commit", instructionPolicy: "sdk-dynamic-progress" };
+      personality: spec.experiment.personality, objective: spec.experiment.objective ?? "character", execution: "staged activation; single atomic commit", instructionPolicy: "sdk-dynamic-progress" };
     return { configuration, reviewAtEpisodeEnd: spec.experiment.psychology !== "off", async turn(input: TurnContext) {
       const c = new GeneralAgentContext(input, spec, runId);
       const phase = input.appraisalOnly ? "psychology" : input.opportunity.stage.kind;
@@ -31,7 +31,8 @@ export function modelParticipantFactory(registry: ModelRegistry, options: Native
       try {
         result = await runNativeAgent(registry, activationOptions, { name: character.name, actorId: character.id,
           sessionId: `${runId}:${character.id}:${input.opportunity.id}`, context: c,
-          input: c.modelInput(), instructions: ({ context }) => [...characterInstructions(character, spec.experiment.personality), generalInstructions,
+          input: c.modelInput(), instructions: ({ context }) => [...characterInstructions(character, spec.experiment.personality, spec.experiment.objective), generalInstructions,
+            ...(spec.experiment.objective === "score" ? ["本局是收益优先对照：以本人整局累计点数为唯一目标。上述人物、公平、关系偏好的通用说明不能添加独立效用。"] : []),
             "下面的执行进度按本次请求更新，优先于初始输入中的进度标志。普通文字或 JSON 描述不会执行工具；只调用当前实际提供的原生工具。",
             `当前执行状态：${JSON.stringify(context.executionProgress)}`].join("\n"),
           tools: error => generalTools(c, error), done: () => c.finished, signal: input.signal,

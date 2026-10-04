@@ -40,7 +40,7 @@ export class SocietyRun {
 
   constructor(readonly record: StoredRun, readonly store: SocietyStore, factory: ParticipantFactory) {
     this.world = record.spec.scenario === "werewolf" ? new WerewolfScenario(record.characters, record.spec.rounds, record.spec.seed)
-      : record.spec.scenario === "signaling-game" ? new SignalingScenario(record.characters, record.spec.rounds, record.spec.seed, record.spec.signalingIncentives)
+      : record.spec.scenario === "signaling-game" ? new SignalingScenario(record.characters, record.spec.rounds, record.spec.seed, record.spec.signalingIncentives, record.spec.signalingPayoffProfile)
       : new EconomicScenario(record.spec.scenario, record.characters, record.spec.rounds, record.spec.trustProtocol);
     for (const c of record.characters) {
       this.inboxes.set(c.id, []);
@@ -52,6 +52,10 @@ export class SocietyRun {
         this.cognitions.set(c.id, enterEpisode(snapshot?.cognition ?? historicalMind(previous, c.id, record.id), c.id, record.id));
       } else if (record.spec.experiment.psychology !== "off") {
         this.cognitions.set(c.id, enterEpisode(undefined, c.id, record.id));
+      } else if (record.spec.scenario === "signaling-game") {
+        const mind = enterEpisode(undefined, c.id, record.id);
+        if (record.spec.experiment.relationshipMemory) mind.behaviorModels = structuredClone(snapshot?.cognition?.behaviorModels);
+        this.cognitions.set(c.id, mind);
       }
       this.priorContext.set(c.id, this.inherited.get(c.id)!.filter(m => m.kind === "experience" && m.sourceIds.some(id => {
         const source = store.event(id); return source && visible(source, { actorId: c.id }) && !source.data.identityScope && (source.type === "message" || source.type === "action" || source.data.settlement);
@@ -97,9 +101,9 @@ export class SocietyRun {
         this.store.db.transaction(() => {
           for (const mind of this.cognitions.values()) {
             finishEpisode(mind); this.store.saveCognition(this.id, mind);
-            if (mind.appraisal) this.emit({ type: "note", actorId: mind.actorId, visibility: [mind.actorId], text: "本局结果已反馈到学习记录",
+            if (mind.appraisal || mind.behaviorModels) this.emit({ type: "note", actorId: mind.actorId, visibility: [mind.actorId], text: "本局结果已反馈到学习记录",
               data: { kind: "psychology", version: mind.version, finalized: true, round: this.record.spec.rounds, stageId: "finished",
-                cognition: mind, psychology: psychologyProjection(mind, "finished"), sourceIds: mind.appraisal.sourceIds } });
+                cognition: mind, psychology: psychologyProjection(mind, "finished"), sourceIds: mind.appraisal?.sourceIds ?? [] } });
           }
           this.store.complete(this.record);
         })();

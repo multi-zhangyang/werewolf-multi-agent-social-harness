@@ -36,7 +36,7 @@ export function App() {
   else if (page === "settings") content = <Suspense fallback={<Skeleton className="h-72 w-full" />}><SettingsPage onBack={() => { location.hash = "#/"; }} onSaved={refresh} /></Suspense>;
   else if (page === "archives") content = <LegacyArchive id={route[1]} />;
   else content = <InteractionHome catalog={catalog} runs={runs} archives={archives} />;
-  return <SidebarProvider style={{ "--sidebar-width": "13.5rem" } as CSSProperties}><Navigation page={page} /><SidebarInset><div className="mobile-navigation"><SidebarTrigger /><span>Society</span><div className="ml-auto"><ThemeToggle /></div></div><Suspense fallback={<Skeleton className="m-8 h-72" />}>{content}</Suspense></SidebarInset></SidebarProvider>;
+  return <SidebarProvider style={{ "--sidebar-width": "13.5rem" } as CSSProperties}><Navigation page={page} /><SidebarInset className="min-w-0"><div className="mobile-navigation"><SidebarTrigger /><span>Society</span><div className="ml-auto"><ThemeToggle /></div></div><Suspense fallback={<Skeleton className="m-8 h-72" />}>{content}</Suspense></SidebarInset></SidebarProvider>;
 }
 function Navigation({ page }: { page: string }) {
   const { setOpenMobile } = useSidebar();

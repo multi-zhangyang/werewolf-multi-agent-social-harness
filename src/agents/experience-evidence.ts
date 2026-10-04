@@ -12,7 +12,8 @@ export function buildExperienceEvidence(mind: AgentMind, events: readonly Experi
       ...(event.role ? { role: event.role } : {}), ...(event.reward ? { reward: { ...event.reward } } : {}),
       text: event.text, facts: structuredClone(event.data), memoryIds: records.map(memory => memory.id),
       actions: mind.decisions.filter(decision => decision.episode === event.episode && decision.feedbackId === event.id && isWorldDecision(decision))
-        .map(({ id, action, round, parameters, payoffComparison }) => ({ id, action, round, ...(parameters ? { parameters: structuredClone(parameters) } : {}),
+        .map(({ id, action, round, parameters, payoffComparison, beliefSnapshot, beliefFeedback, expectedOwnPayoff, estimatedImmediateCost }) => ({ id, action, round, ...(parameters ? { parameters: structuredClone(parameters) } : {}),
+          ...(beliefSnapshot ? { beliefSnapshot: structuredClone(beliefSnapshot), beliefFeedback, expectedOwnPayoff, estimatedImmediateCost } : {}),
           ...(payoffComparison && parameters && event.reward ? { payoffComparison: structuredClone(payoffComparison),
             payoffFeedback: payoffFeedback(payoffComparison, parameters, event.data, event.reward.value) } : {}) })),
       records: records.map(memory => ({ id: memory.id, origin: memory.origin ?? "legacy-unspecified", text: memory.text, confidence: memory.confidence })),

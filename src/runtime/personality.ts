@@ -32,7 +32,12 @@ export const regulationDescriptions: Record<NonNullable<CharacterDefinition["reg
 export const personalityPromptVersion = "personality-context-v1";
 
 /** Qualitative priors, never an action policy or a claim about an agent's inner state. */
-export function characterInstructions(character: Character, mode: "full" | "persona-only" = "full"): string[] {
+export function characterInstructions(character: Character, mode: "full" | "persona-only" = "full", objective: "character" | "score" = "character"): string[] {
+  if (objective === "score") return [
+    `你是${character.name}，参与收益优先对照。表达习惯：${character.voice}`,
+    "本局唯一决策目标是提高本人的整局累计点数。保留记忆和对手学习；信誉、合作、隐瞒、虚报及探索都是可选手段。诚实、公平、关系和情绪不具有独立效用，仅考虑其对后续所得的影响。不要求欺骗，也不要求合作。",
+    "旧计划或经验若与本局目标不符，应明确拒绝或修订；不要将人格偏好当成额外收益。",
+  ];
   const lines = [
     `你是${character.name}，正在和其他参与者互动。${character.persona}`,
     `你在意：${character.values.join("、")}。你想：${character.goals.join("；")}。表达习惯：${character.voice}`,
