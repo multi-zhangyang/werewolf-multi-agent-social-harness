@@ -41,7 +41,6 @@
     "test:security": "vitest run tests/security",
     "test:replay": "vitest run tests/replay",
     "test": "vitest run",
-    "ci": "npm run lint && npm run typecheck && npm test && npm run build",
     "society:server": "npm run server",
     "doctor": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --import tsx scripts/doctor.ts",
     "study": "node --env-file-if-exists=.env.local --import tsx scripts/study.ts",

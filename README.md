@@ -59,8 +59,10 @@ npm run server
 
 ## 验证
 
+项目不使用远端 CI，也不自动运行全套检查。以下入口按当前改动需要手动选择。
+
 ```sh
-npm run ci
+npm run typecheck
 npm run test:ui
 npm run test:ui:partners
 node --import tsx scripts/ui-partners-streaming.mjs

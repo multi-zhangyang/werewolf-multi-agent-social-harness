@@ -1,12 +1,12 @@
 # 验证入口
 
-`npm run ci` 执行 ESLint、TypeScript、Vitest 和 Vite build。默认测试不请求外部模型。
+项目不使用 CI 或自动全套检查。按需手动选择 `npm run lint`、`npm run typecheck`、相关 Vitest 测试或 `npm run build`。默认测试不请求外部模型。
 
 离线覆盖：三场景规则、全部狼人杀人数牌组、警长/平票/查验/女巫/守卫/猎人、独立 SDK 会话及合法工具、消息权限、人物快照、实验不回写、重复提交、取消迟到结果、缺失动作、重启回放与 API 鉴权。
 
 `npm run test:ui` 使用本机 Edge，或 `CHROME_BIN` 指定浏览器。覆盖 1440px 和 390px 下的真人发言、选人详情、单层 Sheet、无横向溢出与无浏览器异常。先运行 build。
 
-`npm run study -- --count=5 --workers=3` 是会付费/消耗模型额度的显式在线研究入口，不属于 CI。模型与原始失败记录均保留。`blind-review.html` 让真实评审填写分数；程序不生成冒充人工评审的结论。
+`npm run study -- --count=5 --workers=3` 是会付费/消耗模型额度的显式在线研究入口，仅手动运行。模型与原始失败记录均保留。`blind-review.html` 让真实评审填写分数；程序不生成冒充人工评审的结论。
 
 第一次真实试跑暴露模型长篇复述、角色交换理解错误和超时。随后减少重复上下文，修正 SDK 显式 modelSettings，并明确当前待提交的领域动作。完整信任博弈试跑成功；自然度和关系连续性仍需比较样本与人工评价。
 

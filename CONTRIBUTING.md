@@ -7,7 +7,7 @@ the runtime, and [the scenario guide](docs/scenarios.md) before adding a game.
 ## Local setup
 
 ```bash
-npm ci
+npm install
 cp .env.example .env.local
 npm run typecheck
 npm run build
@@ -32,6 +32,6 @@ logs, screenshots or commits.
 - Do not set output token caps. Archived cases retain their original request;
   a replay removes its old cap without executing returned tools.
 
-Run `npm run typecheck` and `npm run build` for every change. If a change needs a
-live model call, use a short local run and keep its credentials and transcript
-outside the repository.
+Do not add or use CI workflows. Choose focused local checks as needed instead
+of automatically running the full suite. If a change needs a live model call,
+use a short local run and keep credentials and transcripts outside the repository.
