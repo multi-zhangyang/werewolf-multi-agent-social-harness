@@ -8,7 +8,7 @@ import { nativeCall, nativeResponse, responsesFixture, sendEvent, sendResponse }
 afterEach(() => vi.unstubAllEnvs());
 
 it.each(["headers", "partial", "terminal", "buffered"])("enforces the configured response deadline after HTTP headers: %s", async phase => {
-  const call = nativeCall("invest", { amount: 4, ...decisionMeta });
+  const call = nativeCall("invest", { amount: 4, ...decisionMeta, strategyBasis: null });
   const fixture = await responsesFixture(async (_body, response) => {
     if (phase === "buffered") {
       const body = JSON.stringify(nativeResponse([call]));
@@ -47,7 +47,7 @@ it.each(["headers", "partial", "terminal", "buffered"])("enforces the configured
 it("releases each HTTP deadline when its body ends so later SDK turns retain their own full budget", async () => {
   const fixture = await responsesFixture(async (_body, response, index) => {
     await new Promise(resolve => setTimeout(resolve, 250));
-    sendResponse(response, [index < 2 ? nativeCall("recall", { query: "当前可见处境" }, `recall-${index}`) : nativeCall("invest", { amount: 2, ...decisionMeta }, "action")]);
+    sendResponse(response, [index < 2 ? nativeCall("recall", { query: "当前可见处境" }, `recall-${index}`) : nativeCall("invest", { amount: 2, ...decisionMeta, strategyBasis: null }, "action")]);
   });
   try {
     vi.stubEnv("RESPONSES_TEST_KEY", "local-test-credential-canary");

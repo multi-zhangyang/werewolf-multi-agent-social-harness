@@ -85,7 +85,7 @@ it("does not treat absent, unauthorized or local identity records as retrieved o
 it("captures parsed world parameters through the official SDK while keeping statements outside outcome actions", async () => {
   const { context, spec, activations } = generalContext();
   const fixture = sdkFixture((request, index) => index === 0 ? sdkCall("appraise_event", generalAppraisal(sdkInput(request).newEvidenceIds[0]))
-    : sdkCall("invest", { amount: 3, ...decisionMeta }));
+    : sdkCall("invest", { amount: 3, ...decisionMeta, strategyBasis: null }));
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   const saved = activations[0].cognition!; expect(saved.decisions[0]).toMatchObject({ action: "invest", parameters: { amount: 3 } });
   const observed = { ...outcome(1), episode: "r", id: "actual-settlement", data: { settlement: true }, seq: 10 };

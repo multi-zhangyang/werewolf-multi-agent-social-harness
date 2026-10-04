@@ -37,7 +37,7 @@ it.each(["action", "plan", "discussion", "review", "record", "off"] as const)("r
     }
     if (mode === "action" || mode === "plan") expect(sdkToolResult(request)).toMatchObject({ verdict: "reject" });
     const ending = names.includes("invest") ? "invest" : names.includes("speak") ? "speak" : names[0]; chosen.push(ending);
-    if (ending === "invest") return sdkCall(ending, { amount: 2, ...decisionMeta });
+    if (ending === "invest") return sdkCall(ending, { amount: 2, ...decisionMeta, strategyBasis: null });
     if (ending === "speak") return sdkCall(ending, { text: "依据现有证据行动", ...decisionMeta });
     if (ending === "finish_record") return sdkCall(ending, {});
     return sdkCall("finish_episode_review", { sourceIds: [data.episodeReview.outcomes[0].id], strategyIds: [], summary: "证据不足，不编造策略" });
@@ -80,7 +80,9 @@ it.each([
       return assess();
     }
     expect(names).toEqual(["invest"]);
-    return call("invest", { amount: 2, ...decisionMeta });
+    const status = JSON.parse(request.systemInstructions!.split("当前执行状态：").at(-1)!);
+    return call("invest", { amount: 2, ...decisionMeta,
+      strategyBasis: { assessmentIds: status.usableAssessmentIds, reason: "按当前版本的核验原则控制投入" } });
   });
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   expect(chosen).toHaveLength(8); expect(activations).toHaveLength(1); expect(context.cognition).toEqual(before);

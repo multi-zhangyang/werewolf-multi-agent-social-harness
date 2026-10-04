@@ -24,7 +24,9 @@ it.each(["apply", "adapt", "reject"] as const)("requires an explicit %s verdict 
       return sdkCall("assess_strategy", { id: "m1", sourceIds: [input.newEvidenceIds[0]], verdict, matching: "都需要比较承诺与激励", differences: "当前选择和可核验条件已经变化", adaptation: verdict === "adapt" ? "按当前收益规则重新限制风险" : null });
     }
     expect(sdkToolResult(request)).toMatchObject({ verdict, memoryId: "m1" }); expect(names).toContain("invest"); expect(activations).toHaveLength(0);
-    return sdkCall("invest", { amount: 2, ...decisionMeta });
+    const receipt = sdkToolResult(request);
+    return sdkCall("invest", { amount: 2, ...decisionMeta,
+      strategyBasis: verdict === "reject" ? null : { assessmentIds: [receipt.id], reason: "检验后的风险边界决定本次投入为2" } });
   });
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   expect(activations).toHaveLength(1); expect(context.cognition).toEqual(before);

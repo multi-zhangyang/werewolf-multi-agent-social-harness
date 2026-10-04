@@ -34,7 +34,7 @@ export function generalFixture(extra?: (request: ModelRequest) => ReturnType<typ
     const action = data.opportunity.actions.find((a: { name: string }) => toolNames.includes(a.name));
     if (action) {
       const args = Object.fromEntries(action.fields.map((field: { name: string; type: string; min: number; max: number; options?: Array<{ value: unknown }> }) => [field.name, field.type === "number" ? Math.min(field.max, 4) : field.options![0].value]));
-      return sdkCall(action.name, { ...args, ...decisionMeta });
+      return sdkCall(action.name, { ...args, ...decisionMeta, strategyBasis: null });
     }
     return sdkCall("speak", { text: "测试交流", ...decisionMeta });
   });

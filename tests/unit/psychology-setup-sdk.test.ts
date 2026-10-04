@@ -9,7 +9,7 @@ it("honors an injected initial state and returns the inertia-adjusted canonical 
   context.cognition = createAgentMind("self", "r"); context.cognition.emotions.anxiety = .9;
   const fixture = sdkFixture((request, index) => {
     if (!index) { expect(sdkInput(request).cognition.emotions.anxiety).toBe(.9); return sdkCall("appraise_event", { ...generalAppraisal("e1"), emotions: [{ emotion: "anxiety", intensity: .1 }] }); }
-    expect(sdkToolResult(request).emotions.anxiety).toBeCloseTo(.58); return sdkCall("invest", { amount: 2, ...decisionMeta });
+    expect(sdkToolResult(request).emotions.anxiety).toBeCloseTo(.58); return sdkCall("invest", { amount: 2, ...decisionMeta, strategyBasis: null });
   });
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   expect(context.cognition.emotions.anxiety).toBe(.9); expect(activations[0].cognition?.emotions.anxiety).toBeCloseTo(.58);

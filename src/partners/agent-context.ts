@@ -22,7 +22,7 @@ export class PartnerAgentContext {
   boundaryError?: Error;
   readonly evidenceRefs = new Map<string, string>();
   constructor(readonly input: PartnerDecisionInput, readonly mode: PsychologyMode,
-    readonly record: PartnerDecisionCase, readonly shadow = false) {
+    readonly record: PartnerDecisionCase, readonly shadow = false, readonly maxTurns = 8) {
     this.observation = observeWorld(input.world, input.actorId);
     this.observation.events.forEach((event, index) => this.evidenceRefs.set(`e${index + 1}`, event.id));
     this.originalMind = structuredClone(input.mind ?? createMind(input.actorId, this.observation.self.privateObjective));
@@ -49,6 +49,19 @@ export class PartnerAgentContext {
   }
   get livePlan() { return Boolean(this.mind.plan && ["active", "needs-review"].includes(this.mind.plan.status)); }
   get finished() { return Boolean(this.action || this.recordFinished); }
+  get completionTools() { return this.shadow ? ["finish_record"] : this.observation.legalActions.map(action => action.type); }
+  withinCompletionBudget(name: string) {
+    if (this.maxTurns - this.turn > Number(this.needsAppraisal) + 1) return true;
+    return this.needsAppraisal ? name === "appraise_event" : this.completionTools.includes(name as Action["type"]);
+  }
+  get executionProgress() {
+    return this.displayReferences({ modelTurn: this.turn + 1, remainingModelTurns: this.maxTurns - this.turn,
+      appraisalRequired: this.needsAppraisal, appraisalEventId: this.needsAppraisal ? this.appraisalEvent!.id : null,
+      requiredTool: this.needsAppraisal ? "appraise_event" : null, completionTools: this.completionTools,
+      completionAvailable: !this.needsAppraisal, completionOnly: !this.needsAppraisal && !this.withinCompletionBudget("recall"),
+      ...(this.mode === "off" ? {} : { mindVersion: this.mind.version, planAssessment: assessPlan(this.mind.plan, this.observation) }),
+    });
+  }
   assertOpen() {
     this.input.signal?.throwIfAborted();
     if (this.boundaryError) throw this.boundaryError;

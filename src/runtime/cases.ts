@@ -29,7 +29,7 @@ export function sourceHash() {
 export function decisionCase(c: TurnContext, runId: string, phase: string, configuration: Record<string, unknown>, exchange: ModelExchange | NativeExchange): DecisionCase {
   return redact({ id: randomUUID(), runId, actorId: c.character.id, opportunityId: c.opportunity.id, phase, createdAt: new Date().toISOString(), sourceHash: sourceHash(),
     context: { character: c.character, observation: c.observation, worldObservation: c.worldObservation, previousState: c.psychology, cognition: c.cognition, recent: c.recent, inbox: c.inbox, memories: c.memories, stage: c.opportunity.stage, actions: c.opportunity.actions.map(a => ({ name: a.name, description: a.description })) },
-    configuration, requestFormat: configuration.executionVersion === "native-responses-v1" ? "native-responses" : "sdk-model-request", ...exchange });
+    configuration, requestFormat: String(configuration.executionVersion).startsWith("native-responses-") ? "native-responses" : "sdk-model-request", ...exchange });
 }
 /** Saved model requests contain schemas, never executable tool handlers. */
 export function replayRequest(record: DecisionCase): ModelRequest { const { signal: _signal, _internal, ...request } = structuredClone(record.request) as ModelRequest & { _internal?: unknown }; return { ...request, tracing: false }; }

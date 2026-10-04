@@ -11,7 +11,7 @@ it("uses canonical SDK tool feedback before one atomic environment commit", asyn
     expect(activations).toHaveLength(0);
     if (!index) return sdkCall("appraise_event", generalAppraisal("e1"));
     expect(sdkToolResult(request).emotions.anxiety).toBeCloseTo(.38);
-    return sdkCall("invest", { amount: 4, ...decisionMeta });
+    return sdkCall("invest", { amount: 4, ...decisionMeta, strategyBasis: null });
   });
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   expect(activations).toHaveLength(1); expect(activations[0].calls).toEqual([{ name: "invest", args: { amount: 4 } }]);
@@ -22,7 +22,7 @@ it("corrects numeric validation errors in the same SDK loop and never calls the 
   const { context, spec, activations } = generalContext("off");
   const fixture = sdkFixture((request, index) => {
     if (index) expect(sdkToolResult(request).error).toBeTruthy();
-    return sdkCall("invest", { amount: index ? 2 : "2", ...decisionMeta });
+    return sdkCall("invest", { amount: index ? 2 : "2", ...decisionMeta, strategyBasis: null });
   });
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   expect(fixture.requests).toHaveLength(2); expect(activations).toHaveLength(1); expect(activations[0].cognition).toBeUndefined();
@@ -34,20 +34,20 @@ it("keeps foreign private events, foreign memories and disabled psychology out o
   context.cognition = createAgentMind("self", "r"); context.cognition.relationships.peer = { targetId: "peer", sourceIds: ["visible"], willingness: .9, competence: .5, hypothesis: "disabled-mind-canary", alternative: "other", confidence: .7, scope: "relationship", episode: "r", updates: 1 };
   const fixture = sdkFixture(request => {
     for (const text of ["foreign-event-canary", "foreign-memory-canary", "disabled-mind-canary"]) expect(JSON.stringify(request)).not.toContain(text);
-    expect(sdkInput(request).cognition).toBeUndefined(); return sdkCall("invest", { amount: 2, ...decisionMeta });
+    expect(sdkInput(request).cognition).toBeUndefined(); return sdkCall("invest", { amount: 2, ...decisionMeta, strategyBasis: null });
   });
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
 });
 it("records unavailable tools and accepts a corrected native action", async () => {
   const { context, spec, activations } = generalContext("off"); const errors: string[] = [];
   context.recordToolError = name => errors.push(name);
-  const fixture = sdkFixture((_request, index) => sdkCall(index ? "invest" : "expired_action", index ? { amount: 2, ...decisionMeta } : {}));
+  const fixture = sdkFixture((_request, index) => sdkCall(index ? "invest" : "expired_action", index ? { amount: 2, ...decisionMeta, strategyBasis: null } : {}));
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   expect(errors).toContain("expired_action"); expect(activations).toHaveLength(1);
 });
 it("refuses to run a legacy environment without the atomic commit capability", async () => {
   const { context, spec } = generalContext("off"); delete context.commitActivation;
-  const fixture = sdkFixture(() => sdkCall("invest", { amount: 2, ...decisionMeta }));
+  const fixture = sdkFixture(() => sdkCall("invest", { amount: 2, ...decisionMeta, strategyBasis: null }));
   await expect(modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context)).rejects.toThrow("原子激活提交");
 });
 it("resolves exact short evidence references, returns usable errors and stores immutable original IDs", async () => {
@@ -62,7 +62,7 @@ it("resolves exact short evidence references, returns usable errors and stores i
       return sdkCall("appraise_event", { ...generalAppraisal("e1"), responsibility: "other" });
     }
     expect(sdkToolResult(request).freshSourceIds).toEqual(["e1"]);
-    return sdkCall("invest", { amount: 2, ...decisionMeta });
+    return sdkCall("invest", { amount: 2, ...decisionMeta, strategyBasis: null });
   });
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   expect(errors).toHaveLength(1); expect(activations).toHaveLength(1);
@@ -78,7 +78,7 @@ it("uses the SDK schema to reject person names in the responsibility enum before
       expect(sdkToolResult(request).error).toBeTruthy();
       return sdkCall("appraise_event", { ...generalAppraisal("e1"), responsibility: "shared" });
     }
-    return sdkCall("invest", { amount: 2, ...decisionMeta });
+    return sdkCall("invest", { amount: 2, ...decisionMeta, strategyBasis: null });
   });
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   expect(errors).toHaveLength(1);

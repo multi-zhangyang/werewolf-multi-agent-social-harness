@@ -12,7 +12,7 @@ import { observeWorld } from "./world";
 
 export * from "./agent-types";
 export { redactNative as redactPartnerRecord } from "../agents/sdk";
-export const partnerHarnessVersion = "partners-responses-v1";
+export const partnerHarnessVersion = "partners-responses-v2";
 export const partnerModelId = defaultAgentModel;
 export const partnerContextWindow = defaultAgentContext;
 let sourceDigest: string | undefined;
@@ -31,13 +31,15 @@ function recordTranscript(record: PartnerDecisionCase, transcript: NativeTranscr
 }
 export function createSdkParticipant(registry: ModelRegistry, options: PartnerAgentOptions = {}): PartnerParticipant {
   const psychology = options.psychology ?? "hybrid";
-  const configuration = { ...nativeConfiguration(registry, options), harnessVersion: partnerHarnessVersion, protocol: "responses-v1", psychology,
+  const configuration = { ...nativeConfiguration(registry, options), harnessVersion: partnerHarnessVersion, protocol: "responses-v1", psychology, instructionPolicy: "sdk-dynamic-progress",
     ...(psychology === "record-only" ? { shadowPolicy: "action first; isolated psychological record before world settlement" } : {}) };
   async function run(context: PartnerAgentContext) {
     try {
       const result = await runNativeAgent(registry, options, { name: context.observation.self.name, actorId: context.input.actorId,
         sessionId: `${context.input.world.id}:${context.input.actorId}:${context.shadow ? "shadow" : "decision"}:${randomUUID()}`,
-        instructions: context.shadow ? shadowInstructions : decisionInstructions, input: context.modelInput(), context,
+        instructions: ({ context }) => [context.shadow ? shadowInstructions : decisionInstructions,
+          "当前执行状态优先于初始输入；读取正式回执，只调用当前提供的原生工具。",
+          `当前执行状态：${JSON.stringify(context.executionProgress)}`].join("\n"), input: context.modelInput(), context,
         tools: reportError => createPartnerTools(context, reportError), done: () => context.finished, signal: context.input.signal,
         channel: context.shadow ? "shadow" : "decision", onActivity: event => context.input.onActivity?.(event as PartnerActivity) });
       recordTranscript(context.record, result.transcript); return result.sessionItems;
@@ -50,14 +52,14 @@ export function createSdkParticipant(registry: ModelRegistry, options: PartnerAg
     const started = Date.now(); const record = newCase(input, configuration);
     try {
       if (record.observation.currentActor !== input.actorId || !record.observation.legalActions.length) throw new Error("当前人物没有合法行动机会");
-      const context = new PartnerAgentContext(input, psychology === "record-only" ? "off" : psychology, record);
+      const context = new PartnerAgentContext(input, psychology === "record-only" ? "off" : psychology, record, false, options.maxTurns ?? 8);
       const sessionItems = await run(context);
       record.status = "completed"; record.action = context.action;
       let mind = context.mode === "off" ? structuredClone(context.originalMind) : context.mind;
       let memories = context.memories;
       if (psychology === "record-only") {
         const shadowStarted = Date.now(); const shadowRecord = newCase(input, configuration);
-        const shadowContext = new PartnerAgentContext(input, "hybrid", shadowRecord, true);
+        const shadowContext = new PartnerAgentContext(input, "hybrid", shadowRecord, true, options.maxTurns ?? 8);
         try {
           await run(shadowContext); mind = shadowContext.mind; memories = shadowContext.memories;
           shadowRecord.status = "completed"; shadowRecord.after = structuredClone(mind);

@@ -79,7 +79,7 @@ it.each([false, true])("uses a native revision receipt and rechecks the new vers
       return sdkCall("assess_strategy", { ...judgment, sourceIds: [currentRef] });
     }
     expect(sdkToolResult(request)).toMatchObject({ memoryId: "m2", memoryRevision: 2, memoryEpisode: "r", memoryOriginEpisode: "source" });
-    return sdkCall("invest", { amount: 2, ...decisionMeta });
+    return sdkCall("invest", { amount: 2, ...decisionMeta, strategyBasis: null });
   });
   const run = modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   if (fail) { await expect(run).rejects.toThrow("provider failed after strategy revision"); expect(activations).toEqual([]); }

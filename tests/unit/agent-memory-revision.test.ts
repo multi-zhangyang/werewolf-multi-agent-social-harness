@@ -74,7 +74,7 @@ it("uses the official SDK revision receipt for the following action and commits 
     if (index === 1) return sdkCall("revise_memory", { id: "m1", change: "revise", sourceIds: ["e1"], reason: "根据新的可见结果降低把握", replacement });
     expect(sdkToolResult(request)).toMatchObject({ id: "m1", revision: 2, text: replacement.text, status: "active" });
     expect(sdkToolResult(request)).not.toHaveProperty("revisions");
-    return sdkCall("invest", { amount: 2, ...decisionMeta });
+    return sdkCall("invest", { amount: 2, ...decisionMeta, strategyBasis: null });
   });
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   expect(activations).toHaveLength(1);

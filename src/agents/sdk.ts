@@ -3,7 +3,7 @@ import OpenAI from "openai";
 import { randomUUID } from "node:crypto";
 import type { ModelRegistry } from "../society/models/registry";
 
-export const nativeAgentVersion = "native-responses-v1";
+export const nativeAgentVersion = "native-responses-v2";
 export const defaultAgentModel = "gpt-6-luna";
 export const defaultAgentContext = 256_000;
 export interface NativeStream {
@@ -64,7 +64,8 @@ export function nativeConfiguration(registry: ModelRegistry, options: NativeOpti
     modelInjected: Boolean(options.model), modelProfileId: profile?.id, providerId: provider?.id, apiMode: "responses", contextWindow: defaultAgentContext,
     modelSettings: settings, maxTurns: options.maxTurns ?? 8, requestTimeoutMs: options.requestTimeoutMs ?? profile?.defaults.requestTimeoutMs ?? 120_000,
     streamOutput: options.streamOutput ?? true, toolTransport: "native-tools", retryLimit: 0, requestTimeoutScope: "headers-and-body",
-    sessionPolicy: "fresh actor-isolated SDK session; application owns persistent cognition" };
+    sessionPolicy: "fresh actor-isolated SDK session; application owns persistent cognition",
+    toolPolicy: "SDK native tools; refresh schemas after tool receipts; dynamic isEnabled" };
 }
 
 type StreamResponse = { output: { type: string; callId?: string; name?: string; arguments?: string; status?: string }[];
@@ -149,7 +150,7 @@ export async function runNativeAgent<T extends NativeState>(registry: ModelRegis
     if (remaining <= 0) publish(state);
     else state.publishTimer ??= setTimeout(() => publish(state), remaining);
   };
-  const tools = input.tools((name, error, args) => {
+  const reportToolError = (name: string, error: unknown, args?: unknown) => {
     // The errorFunction callback can receive validation details before tool-start hooks.
     // Read optional metadata without importing non-exported SDK classes or changing execution.
     const validation = error instanceof Error && error.name === "InvalidToolInputError" ? error as Error & {
@@ -160,7 +161,7 @@ export async function runNativeAgent<T extends NativeState>(registry: ModelRegis
     emit({ kind: input.context.boundaryError ? "tool_rejected" : "tool_error", tool: name, callId: input.context.currentToolCallId ?? validation?.toolInvocation?.details?.toolCall?.callId,
       input: args ?? validation?.toolInvocation?.input, message });
     return JSON.stringify({ error: message, instruction: input.context.boundaryError ? "模型响应未通过完整性检查，当前激活已终止；不会执行或提交工具" : "根据错误修正参数；当前工具未成功，世界尚未提交" });
-  });
+  };
   const profile = registry.modelProfile(configuration.modelProfileId ?? "");
   const provider = profile && registry.providerProfile(profile.providerProfileId);
   const apiKey = provider?.apiKeyRef ? process.env[provider.apiKeyRef.replace(/^env:/, "")] : undefined;
@@ -220,9 +221,18 @@ export async function runNativeAgent<T extends NativeState>(registry: ModelRegis
       emit({ kind: "tool_end", tool: tool.name, callId: toolCall.callId, output });
     input.context.currentToolCallId = undefined;
   });
-  const agent = new Agent<T>({ name: input.name, instructions: input.instructions, tools, modelSettings: configuration.modelSettings,
-    resetToolChoice: false, toolUseBehavior: () => input.done() ? { isFinalOutput: true, isInterrupted: undefined, finalOutput: "结果已暂存" }
-      : { isFinalOutput: false, isInterrupted: undefined } });
+  const agent = new Agent<T>({ name: input.name, instructions: input.instructions, tools: input.tools(reportToolError), modelSettings: configuration.modelSettings,
+    resetToolChoice: false, toolUseBehavior: (_context, results) => {
+      if (input.done()) {
+        const receipt = results.findLast(result => result.type === "function_output");
+        return { isFinalOutput: true, isInterrupted: undefined,
+          finalOutput: receipt?.type === "function_output" ? typeof receipt.output === "string" ? receipt.output : JSON.stringify(receipt.output) : "" };
+      }
+      // The next SDK turn collects these public Agent.tools and applies isEnabled.
+      // New memories, revisions and assessments must be reflected in native schemas.
+      agent.tools = input.tools(reportToolError);
+      return { isFinalOutput: false, isInterrupted: undefined };
+    } });
   const session = new MemorySession({ sessionId: input.sessionId });
   const deadline = AbortSignal.timeout(configuration.requestTimeoutMs * configuration.maxTurns);
   const signal = input.signal ? AbortSignal.any([input.signal, deadline]) : deadline;
@@ -234,6 +244,7 @@ export async function runNativeAgent<T extends NativeState>(registry: ModelRegis
     transcript.toolFailures = transcript.activities.filter(item => item.kind === "tool_error").length;
   };
   try {
+    let finalOutput: string | undefined;
     if (configuration.streamOutput) {
       const streamed = await runner.run(agent, input.input, { context: input.context, session, maxTurns: configuration.maxTurns, signal, stream: true });
       const completion = streamed.completed.then(() => ({ ok: true as const }), error => ({ ok: false as const, error }));
@@ -242,16 +253,18 @@ export async function runNativeAgent<T extends NativeState>(registry: ModelRegis
       const result = await completion;
       if (!result.ok) throw result.error;
       if (streamError) throw streamError;
+      finalOutput = streamed.finalOutput;
     } else {
       const result = await runner.run(agent, input.input, { context: input.context, session, maxTurns: configuration.maxTurns, signal });
       result.rawResponses.forEach((response, index) => retain(states[index], response as unknown as StreamResponse));
+      finalOutput = result.finalOutput;
     }
     signal.throwIfAborted();
     if (input.context.boundaryError) throw input.context.boundaryError;
     if (!input.done()) throw new Error("Agent 没有提交完整的本次结果");
     if (states.some(state => !state.record.response)) throw new Error("模型缺少完整的终止响应");
     finalize();
-    return { transcript: redactNative(transcript), sessionItems: redactNative(await session.getItems()), configuration };
+    return { transcript: redactNative(transcript), sessionItems: redactNative(await session.getItems()), configuration, finalOutput: redactNative(finalOutput) };
   } catch (error) {
     const failure = input.context.boundaryError ?? error;
     if (states.length) end(states.at(-1)!, failure);

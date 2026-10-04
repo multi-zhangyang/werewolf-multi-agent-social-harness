@@ -19,7 +19,7 @@ it.each([["trust-game", 2], ["public-goods", 3], ["werewolf", 6], ["signaling-ga
   expect(db.cases(run.id).length).toBeGreaterThan(0);
   for (const character of characters.slice(0, count)) {
     const mind = db.cognition(run.id, character.id)!;
-    expect(mind).toMatchObject({ version: "psychology-responses-v14", actorId: character.id });
+    expect(mind).toMatchObject({ version: "psychology-responses-v15", actorId: character.id });
     expect(mind.learning.episodes).toContain(run.id); expect(mind.learning.observed).toBeGreaterThan(0);
     expect(db.snapshot(db.head("society", character.id)!)?.cognition).toEqual(mind);
   }
@@ -60,7 +60,7 @@ it("allows an intentional false report through the shared SDK while isolating th
   const db = store(); const fixture = generalFixture(request => {
     const data = sdkInput(request);
     if (data.opportunity.actions.some((action: { name: string }) => action.name === "declare_quality")) return sdkCall("declare_quality", {
-      highQuality: true, strategy: "deceive", intent: "bluff", privateAim: "fixture-strategic-misreport" });
+      highQuality: true, strategy: "deceive", intent: "bluff", privateAim: "fixture-strategic-misreport", strategyBasis: null });
   });
   const spec = runSpecSchema.parse({ scenario: "signaling-game", seed: 1, rounds: 2, roster: characters.slice(0, 2).map(c => ({ characterId: c.id })), budgets: { discussionTurns: 2 }, experiment: { psychology: "hybrid" } });
   const { run } = new RunService(db, fixture.factory).create(spec, characters.slice(0, 2)); await run.settled();

@@ -36,6 +36,8 @@ it("uses actual Responses HTTP, native strict schemas and call_id-linked SDK fun
     expect(state.staged).toBe(7); expect(fixture.urls).toEqual(["/v1/responses", "/v1/responses"]); expect(fixture.errors).toEqual([]);
     expect(result.transcript).toMatchObject({ inputTokens: 40, outputTokens: 20, toolFailures: 0 });
     expect(result.configuration.modelSettings).not.toHaveProperty("maxTokens");
+    expect(JSON.parse(result.finalOutput!)).toEqual({ staged: 7 });
+    expect(result.transcript.activities.findLast(item => item.kind === "agent_end")?.output).toBe(result.finalOutput);
     expect(result.transcript.exchanges.map(e => e.stream?.toolCalls?.[0]?.name)).toEqual(["prepare", "commit"]);
     expect(JSON.stringify(result)).not.toContain("local-test-credential-canary");
   } finally { await fixture.close(); }
@@ -93,7 +95,7 @@ it("reports a filtered response as a model failure and a blocked tool, preservin
   const fixture = await responsesFixture((_body, response) => {
     response.writeHead(200, { "content-type": "text/event-stream" });
     sendEvent(response, { type: "response.created", response: nativeResponse([], "in_progress") });
-    const output = [nativeCall("invest", { amount: 4, strategy: "cooperate", intent: "truthful", privateAim: "fixture" }, "blocked-call")];
+    const output = [nativeCall("invest", { amount: 4, strategy: "cooperate", intent: "truthful", privateAim: "fixture", strategyBasis: null }, "blocked-call")];
     sendEvent(response, { type: "response.incomplete", response: { ...nativeResponse(output, "incomplete"), incomplete_details: { reason: "content_filter" } } });
   });
   try {

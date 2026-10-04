@@ -32,7 +32,7 @@ export async function replayDecisionCase(record: DecisionCase, registry: ModelRe
   const cognition = record.configuration.cognition as { requestTimeoutMs?: number } | undefined;
   const timeout = overrides.requestTimeoutMs ?? Number(record.configuration.requestTimeoutMs ?? cognition?.requestTimeoutMs ?? 120000);
   const client = new OpenAI({ apiKey: key, baseURL: provider.baseURL, maxRetries: 0, timeout });
-  if (record.requestFormat === "native-responses" || record.providerRequest || record.configuration.executionVersion === "native-responses-v1") {
+  if (record.requestFormat === "native-responses" || record.providerRequest || String(record.configuration.executionVersion).startsWith("native-responses-")) {
     if (!record.providerRequest) throw new Error("案例缺少原生 providerRequest，不能用不完整的 SDK 输入代替回放");
     if (provider.apiMode !== "responses") throw new Error("原生 Responses 案例需要 Responses 提供商配置");
     const request = structuredClone(record.providerRequest) as ResponseCreateParams;

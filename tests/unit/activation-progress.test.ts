@@ -31,7 +31,7 @@ it("updates official dynamic instructions after each native tool receipt while r
       sendResponse(response, [nativeCall("assess_strategy", { id: "m1", sourceIds: [data.newEvidenceIds[0]], verdict: "reject", matching: "同样需要核验", differences: "原收益结构不同", adaptation: null }, "assess")]);
     } else {
       expect(index).toBe(2); expect(status).toMatchObject({ requiredTool: null, appraisalRequired: false, assessmentRequired: false, assessmentCandidateIds: [], completionAvailable: true });
-      expect(names).toContain("invest"); sendResponse(response, [nativeCall("invest", { amount: 2, ...decisionMeta }, "action")]);
+      expect(names).toContain("invest"); sendResponse(response, [nativeCall("invest", { amount: 2, ...decisionMeta, strategyBasis: null }, "action")]);
     }
   });
   try {
@@ -62,7 +62,8 @@ it.each(["revise", "retire"] as const)("updates progress after an assessed rule 
     } else {
       expect(index).toBe(change === "revise" ? 4 : 3);
       expect(status).toMatchObject({ requiredTool: null, assessmentRequired: false, completionAvailable: true });
-      call = nativeCall("invest", { amount: 2, ...decisionMeta }, "action");
+      call = nativeCall("invest", { amount: 2, ...decisionMeta,
+        strategyBasis: change === "revise" ? { assessmentIds: status.usableAssessmentIds, reason: "使用修订后的核验原则限制投入" } : null }, "action");
     }
     response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(nativeResponse([call])));
   });

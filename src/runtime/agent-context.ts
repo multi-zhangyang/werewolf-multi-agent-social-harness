@@ -1,7 +1,7 @@
 import { tool, type RunContext, type Tool } from "@openai/agents";
 import { z } from "zod";
 import { activeMemories, appraise, appraisalParameters, assessStrategy, bindStrategyAssessments, cognitionForPrompt, completeEpisodeReview, consolidateStrategy, consolidationParameters, enterEpisode, episodeReviewParameters, forecast, memoryForPrompt, memoryParameters, memoryRevisionParameters, opponentParameters,
-  memoryOriginEpisode, planParameters, predictionFeedback, predictionParameters, remember, reviseMemory, setPlan, strategies, strategyAssessmentParameters, strategyUsage, updateOpponent, type AgentMind, type CognitiveMemory, type PrivateDecision } from "../agents/cognition";
+  memoryOriginEpisode, planParameters, predictionFeedback, predictionParameters, remember, reviseMemory, setPlan, strategies, strategyAssessmentParameters, strategyUsage, updateOpponent, usableStrategyAssessments, type AgentMind, type CognitiveMemory, type PrivateDecision } from "../agents/cognition";
 import type { NativeState } from "../agents/sdk";
 import { visible, type RunSpec, type StagedActivation, type TurnContext, type WorldEvent } from "./types";
 import { historicalMind, ledgerExperience } from "./agent-state";
@@ -29,23 +29,26 @@ export class GeneralAgentContext implements NativeState {
     const query = `${JSON.stringify(input.worldObservation ?? input.observation)}\n${recent.slice(-4).map(event => event.text).join("\n")}`;
     this.workingMemories = spec.experiment.psychology === "off" ? [] : selectWorkingMemories(this.mind, query, spec.cognition?.context === "expanded" ? 64 : 16);
     const memorySources = this.workingMemories.flatMap(memory => memory.sourceIds.flatMap(id => input.lookupEvidence?.(id) ?? []));
-    const activeIds = new Set(activeMemories(this.mind).filter(memory => memory.kind !== "episodic").map(memory => memory.id));
-    this.mind.memories.forEach((memory, index) => { if (activeIds.has(memory.id)) this.revisableMemoryRefs.set(`m${index + 1}`, memory.id); });
     const records = [...recent, ...input.inbox, ...input.memories.filter(m => m.characterId === actorId).flatMap(m => m.sources ?? []), ...memorySources]
       .filter(e => visible(e, { actorId }) && ["message", "action", "fact"].includes(e.type));
     const latestObservation = records.filter(e => e.data.identityScope === runId).sort((a, b) => b.seq - a.seq)[0]?.id;
     this.evidence = [...new Map(records.filter(e => !e.data.identityScope || e.id === latestObservation).map(e => [e.id, e])).values()].sort((a, b) => a.seq - b.seq);
     this.evidence.forEach((event, index) => this.evidenceRefs.set(`e${index + 1}`, event.id));
+    this.refreshMemoryReferences();
+    this.activation = { id: input.opportunity.id, actorId, stageId: input.opportunity.stage.id, calls: [],
+      ...(spec.experiment.psychology !== "off" ? { cognition: this.mind } : {}) };
+  }
+  refreshMemoryReferences() {
+    this.revisableMemoryRefs.clear(); this.strategyRefs.clear(); this.consolidationMemoryRefs.clear(); this.consolidationStrategyRefs.clear();
     const outcomes = new Set(this.evidence.filter(event => event.data.settlement === true).map(event => event.id));
     const available = new Set(activeMemories(this.mind).map(memory => memory.id));
     this.mind.memories.forEach((memory, index) => {
       if (!available.has(memory.id)) return;
+      if (memory.kind !== "episodic") this.revisableMemoryRefs.set(`m${index + 1}`, memory.id);
       if (memory.kind === "procedural") this.strategyRefs.set(`m${index + 1}`, memory.id);
       if (memory.kind === "procedural" && memory.scope === "transferable") this.consolidationStrategyRefs.set(`m${index + 1}`, memory.id);
       if (memory.kind === "episodic" && memory.sourceIds.some(id => outcomes.has(id))) this.consolidationMemoryRefs.set(`m${index + 1}`, memory.id);
     });
-    this.activation = { id: input.opportunity.id, actorId, stageId: input.opportunity.stage.id, calls: [],
-      ...(spec.experiment.psychology !== "off" ? { cognition: this.mind } : {}) };
   }
   get needsAppraisal() { return this.spec.experiment.psychology !== "off" && !this.appraised && this.evidence.some(e => e.runId === this.runId && !this.mind.appraised.includes(e.id)); }
   get experienceEvidence() {
@@ -73,6 +76,7 @@ export class GeneralAgentContext implements NativeState {
       : this.input.opportunity.stage.kind === "discussion" ? ["speak", "wait", ...(this.input.opportunity.communications.length ? ["send_message"] : [])]
         : this.input.opportunity.actions.filter(action => !this.activation.calls.some(call => call.name === action.name)).map(action => action.name);
   }
+  get actionStrategyAssessments() { return usableStrategyAssessments(this.mind, this.input.opportunity.id); }
   /** Official Agent.instructions reads current local state before each SDK request. */
   get executionProgress() {
     const requiredTool = this.needsAppraisal ? "appraise_event" : this.needsStrategyAssessment ? "assess_strategy" : null;
@@ -80,6 +84,7 @@ export class GeneralAgentContext implements NativeState {
     return this.displayReferences({ modelTurn: this.turn + 1, remainingModelTurns: this.spec.budgets.maxTurns - this.turn,
       appraisalRequired: this.needsAppraisal, assessmentRequired: this.needsStrategyAssessment,
       assessmentCandidateIds: this.needsStrategyAssessment ? this.assessmentCandidates.map(memory => memory.id) : [],
+      usableAssessmentIds: this.actionStrategyAssessments.map(assessment => assessment.id),
       requiredTool, completionTools: this.completionTools, completionAvailable: requiredTool === null, completionOnly,
       next: requiredTool === "appraise_event" ? "先用 appraise_event 评价新证据，读取回执后继续。"
         : requiredTool === "assess_strategy" ? "先用 assess_strategy 检验上述旧策略之一；不适用可以 reject。读取回执后才开放完成工具。"
@@ -119,11 +124,15 @@ export class GeneralAgentContext implements NativeState {
   resolvePlanId(id: string | null) { return id?.match(/^p\d+$/) ? this.mind.plans[Number(id.slice(1)) - 1]?.id ?? id : id; }
   changed<T>(result: T): T { this.lastMutationTurn = this.turn; return this.displayReferences(result); }
   ready() { this.assertOpen(); if (this.needsAppraisal) throw new Error("先评价新的可见事件"); if (this.needsStrategyAssessment) throw new Error("先检验一条取回的旧策略；不适用可明确 reject，不必照搬"); if (this.lastMutationTurn >= this.turn) throw new Error("请在下一次响应读取正式心理回执后再行动"); }
-  decide(name: string, meta: z.infer<z.ZodObject<typeof decisionFields>>, parameters?: Record<string, unknown>) {
+  decide(name: string, meta: z.infer<z.ZodObject<typeof decisionFields>>, parameters?: Record<string, unknown>, basis?: PrivateDecision["strategyBasis"] | null) {
     this.ready();
     const decision: PrivateDecision = { id: crypto.randomUUID(), episode: this.runId, round: this.input.opportunity.stage.round,
       action: name, ...meta, ...(parameters ? { parameters: structuredClone(parameters) } : {}),
       predictionIds: this.mind.predictions.filter(p => p.episode === this.runId && p.result === undefined && !p.expired).map(p => p.id) };
+    if (parameters && this.spec.experiment.psychology !== "off") decision.strategyBasis = basis ? {
+      assessmentIds: basis.assessmentIds.map(ref => this.mind.strategyAssessments?.find((_assessment, index) => ref === `a${index + 1}`)?.id ?? ref),
+      reason: basis.reason,
+    } : { assessmentIds: [], reason: meta.privateAim };
     bindStrategyAssessments(this.mind, this.input.opportunity.id, decision);
     this.mind.decisions.push(decision); this.mind.revision++;
   }
@@ -172,7 +181,7 @@ export const generalInstructions = `你在虚构的多人社会环境中扮演�
 set_plan 管理自己的目标与可修订计划，条件用情境语义描述，不套用别的游戏阶段。当前记忆窗口同时考虑相关性、条件策略与近期经历；recall 可查阅更早的本人经历。remember 区分经历、命题和条件策略；仅本局的结论保留 scope=episode，隐藏身份不要当成跨局事实。
 consolidate_strategy 从本人实际结算经历创建或修订可迁移的待检验策略。先比较 strategyLearning.existingStrategies：同一原则的新证据、补充条件或反证，strategyId 选择 consolidationStrategyIds 中已有编号，保留该编号并形成新版本；已有原则无需变化时可直接复用，不必再次提炼。只有不同的新原则才填 strategyId=null，不能用换一种说法或多经历一轮来新增重复策略。memoryIds 从 consolidationMemoryIds 选择，程序沿所选经历的可见账本链接保留本次来源；旧版本和原经历保留。rationale 说明为何补充、修正或新增，哪些关系可能可复用、哪些是源情境的偶然细节；when 写适用条件与边界，then 写行动原则。可迁移表示允许在新情境接受检验，不表示已经证明普遍有效。
 strategyLearning.experienceEvidence 按原始结算事件分组。episodes 和 episodeReview.summary 给出本人的角色次数、实际动作次数、轮数和分单位收益合计；按这些计数描述经历，不把投资者所得称为受托者所得，不把补偿结算混作交易轮数。outcomes 中的 role、reward 和 facts 是可见事实，records 是个人解释；同一事件的多条记录只算一次结算。先比较谁知道什么、谁承担什么后果、哪些行动可核验，再提炼关系结构。
-取回旧策略后，先找当前处境与旧经验共有的决策问题，再用 assess_strategy 判断 apply / adapt / reject。matching 写共有关系，differences 写真正影响选择的差异。场景名、角色名或金额不同本身不足以拒绝；能保留原原则并改变合法动作或风险阈值时，用 adapt 说明如何调整。原原则所需的信息、激励或核验条件缺失且无法调整时用 reject，不编造缺失条件。随后自己选择当前合法动作，发言不计作行动采用。系统只关联实际提交的行动和账本反馈，旧版本成绩不计作新版本成绩。
+取回旧策略后，先找当前处境与旧经验共有的决策问题，再用 assess_strategy 判断 apply / adapt / reject。matching 写共有关系，differences 写真正影响选择的差异。场景名、角色名或金额不同本身不足以拒绝；能保留原原则并改变合法动作或风险阈值时，用 adapt 说明如何调整。原原则所需的信息、激励或核验条件缺失且无法调整时用 reject，不编造缺失条件。随后自己选择当前合法动作，发言不计作行动采用。行动的 strategyBasis 仅引用真正影响本次选择的检验回执 a 编号，reason 说明它如何影响实际参数；不采用旧策略时填 null，用 privateAim 说明当前选择。apply / adapt 只表示可用，不会自动算采用；被拒绝、旧机会或旧版本不能作依据。系统只关联明确选择且实际提交的行动和账本反馈。
 讨论中的适用性判断只表示准备，不计为行动采用。要在实际行动中采用某条策略，应在提交该动作的机会先检验它，再读回执和提交动作。
 strategyLearning.assessmentRequired 为 true 时，先评价新事件，再从 assessmentCandidateIds 选择一条当前取回的旧策略检验。可以 apply、adapt 或 reject，不要求采用。完成这一步并读取回执后才提供世界动作；这保证旧经验被明确检验，不替你选择策略或动作。
 判断和条件策略可以被反证。新证据改变了旧判断或适用范围时，用 revise_memory 修订已有 m1 等记忆编号的内容、把握与条件；已不适用的判断可 change=retire、replacement=null 停用。修订要说明新来源和原因，保留历史；经历本身不能改写。不要通过新增一条矛盾记忆来回避修订旧判断。
@@ -184,6 +193,8 @@ forecast 可登记一个尚未发生的可观测事件概率，后续由账本�
 先评价新事件，心理/计划/预测变更后读取回执，再使用合法行动工具；讨论用 speak 或 wait。行动仅暂存，完整 SDK 运行成功后一次提交。用简短中文，不输出长篇分析。`;
 
 export function generalTools(c: GeneralAgentContext, report: (name: string, error: unknown, args?: unknown) => string): Tool<GeneralAgentContext>[] {
+  // Rebuild exact references after each SDK tool receipt, including newly written memories.
+  c.refreshMemoryReferences();
   const evidenceRef = z.enum([...c.evidenceRefs.keys()] as [string, ...string[]]);
   const sourceIds = z.array(evidenceRef).min(1).max(8).describe("只引用本次已经可见的证据编号；不可使用轮次、计划或预测 ID");
   const newEvidenceRefs = [...c.evidenceRefs].filter(([, id]) => c.evidence.some(event => event.id === id && event.runId === c.runId && !c.mind.appraised.includes(id))).map(([ref]) => ref);
@@ -239,7 +250,7 @@ export function generalTools(c: GeneralAgentContext, report: (name: string, erro
     const requiredCandidates = new Set(c.assessmentCandidates.map(memory => memory.id));
     const assessableRefs = [...c.strategyRefs].filter(([, id]) => !c.needsStrategyAssessment || requiredCandidates.has(id));
     const currentRefs = [...c.evidenceRefs].filter(([, id]) => c.evidence.some(event => event.id === id && event.runId === c.runId)).map(([ref]) => ref);
-    if (currentRefs.length) tools.push(tool({ name: "assess_strategy", description: "行动前检验一条已有条件策略：采用、调整后采用或不适用；引用当前情境证据。结果由后续真实行动与结算回填。",
+    if (currentRefs.length) tools.push(tool({ name: "assess_strategy", description: "检验策略适用性：apply / adapt / reject；引用当前情境证据。只有行动的 strategyBasis 明确选择这条回执后才计采用，并由真实账本反馈。",
       parameters: strategyAssessmentParameters.extend({ id: z.enum(assessableRefs.map(([ref]) => ref) as [string, ...string[]]),
         sourceIds: z.array(z.enum(currentRefs as [string, ...string[]])).min(1).max(8) }),
       ...common("assess_strategy", () => !c.needsAppraisal), execute: async args => c.changed(assessStrategy(c.mind,
@@ -278,12 +289,19 @@ export function generalTools(c: GeneralAgentContext, report: (name: string, erro
       ...common("send_message", () => !c.needsAppraisal), execute: async ({ channel, recipients, text, ...meta }) => {
         const allowed = c.input.opportunity.communications.some(o => o.channel === channel && recipients.every(id => o.recipients.includes(id)) && (channel !== "private" || recipients.length > 0));
         if (!allowed) throw new Error("目标频道或接收者不在本次允许范围内"); c.decide("send_message", meta); c.activation.calls.push({ name: "send_message", args: { channel, recipients, text } }); c.finished = true; return { staged: true }; } }));
-  } else for (const action of c.input.opportunity.actions) tools.push(tool({ name: action.name, description: action.description,
-    parameters: action.parameters.extend(decisionFields).strict(),
+  } else for (const action of c.input.opportunity.actions) {
+    const assessmentRefs = c.displayReferences(c.actionStrategyAssessments.map(assessment => assessment.id));
+    const strategyBasisSchema = psychological() && assessmentRefs.length ? z.object({
+      assessmentIds: z.array(z.enum(assessmentRefs as [string, ...string[]])).min(1).max(assessmentRefs.length).describe("本次真正采用的检验回执 a 编号，不要填记忆 m 编号"),
+      reason: z.string().trim().min(1).max(360).describe("这些策略如何影响本次实际行动参数"),
+    }).strict().nullable().describe("明确采用已检验策略时填写；不采用时填 null，由 privateAim 说明当前选择") : z.null();
+    tools.push(tool({ name: action.name, description: action.description,
+    parameters: action.parameters.extend({ ...decisionFields, strategyBasis: strategyBasisSchema }).strict(),
     ...common(action.name, () => !c.needsAppraisal && !c.needsStrategyAssessment && !c.activation.calls.some(call => call.name === action.name)),
-    execute: async ({ strategy, intent, privateAim, ...args }) => { const parsed = action.parameters.parse(args) as Record<string, unknown>;
-      c.decide(action.name, z.object(decisionFields).parse({ strategy, intent, privateAim }), parsed); c.activation.calls.push({ name: action.name, args: parsed });
+    execute: async ({ strategy, intent, privateAim, strategyBasis, ...args }) => { const parsed = action.parameters.parse(args) as Record<string, unknown>;
+      c.decide(action.name, z.object(decisionFields).parse({ strategy, intent, privateAim }), parsed, strategyBasisSchema.parse(strategyBasis)); c.activation.calls.push({ name: action.name, args: parsed });
       c.finished = c.input.opportunity.actions.every(a => c.activation.calls.some(call => call.name === a.name));
       return { staged: true, remaining: c.input.opportunity.actions.filter(a => !c.activation.calls.some(call => call.name === a.name)).map(a => a.name) }; } }));
+  }
   return tools;
 }

@@ -35,7 +35,7 @@ it("reads a legacy local belief in its original episode without rewriting the sn
   legacy.relationships.peer = { targetId: "peer", sourceIds: ["claim"], willingness: .4, competence: .6, hypothesis: "本局的角色猜测", alternative: "也可能只是谨慎", confidence: .5, scope: "episode", episode: "old", updates: 2 };
   const original = JSON.stringify(legacy);
   const same = enterEpisode(legacy, "self", "old");
-  expect(same.version).toBe("psychology-responses-v14");
+  expect(same.version).toBe("psychology-responses-v15");
   expect(same.episodeBeliefs?.peer.hypothesis).toBe("本局的角色猜测");
   expect(same.relationships).toEqual({});
   expect(enterEpisode(same, "self", "new").episodeBeliefs).toEqual({});

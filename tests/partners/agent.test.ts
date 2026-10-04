@@ -52,6 +52,27 @@ describe("Partners adapter on the shared native Responses executor", () => {
     expect(result.decisionCase.appraisal?.eventId).toBe(source);
     expect(result.memories[0].sourceIds).toEqual([source]);
   });
+  it("reserves appraisal and completion turns with dynamic SDK instructions and legal monetary schemas", async () => {
+    const { model, requests } = sdkFixture((request, index) => {
+      const progress = JSON.parse(request.systemInstructions!.split("当前执行状态：").at(-1)!);
+      expect(progress).toMatchObject({ modelTurn: index + 1, remainingModelTurns: 3 - index });
+      const names = request.tools.filter(tool => tool.type === "function").map(tool => tool.name);
+      if (!index) return sdkCall("recall", { query: "返还" });
+      if (index === 1) { expect(names).toEqual(["appraise_event"]); return sdkCall("appraise_event", appraisal(progress.appraisalEventId)); }
+      expect(progress).toMatchObject({ appraisalRequired: false, requiredTool: null, completionOnly: true });
+      expect(names).toEqual(["respond", "exit"]);
+      return sdkCall("respond", { choice: "continue", message: null, intent: null, basis: "one-off" });
+    });
+    await createSdkParticipant(new ModelRegistry(), { model, maxTurns: 3 }).decide({ world: betrayal(), actorId: "a" });
+    expect(requests).toHaveLength(3);
+    const schemaFixture = sdkFixture(request => {
+      const data = sdkInput(request);
+      const schema = request.tools.find(tool => tool.type === "function" && tool.name === "offer") as any;
+      expect(schema.parameters.properties.collateral.maximum).toBe(data.observation.legalActions.find((action: any) => action.type === "offer").fields.collateral.max);
+      return offer();
+    });
+    await createSdkParticipant(new ModelRegistry(), { model: schemaFixture.model }).decide({ world: fresh(), actorId: "b" });
+  });
   it("never forwards peer secrets, foreign memories or obsolete SDK sessions", async () => {
     const world = fresh(); const { model, requests } = sdkFixture(() => offer());
     const result = await createSdkParticipant(new ModelRegistry(), { model }).decide({ world, actorId: "b",

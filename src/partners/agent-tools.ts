@@ -53,8 +53,8 @@ export function createPartnerTools(context: PartnerAgentContext, reportError: (n
     .describe("已经观察到的证据编号；从 recentEvents / appraisalRequired 选择。不是轮次 ID，也不是未来事件 ID。");
   const scopedPlanSchema = planSchema.extend({ eventId: evidenceRef });
   const common = (name: string) => ({
-    isEnabled: () => !context.finished && (isAction.has(name) ? !context.shadow && !context.needsAppraisal &&
-      (name === "exit" || context.observation.phase === name) : name === "appraise_event" ? context.mode !== "off" && !context.record.appraisal
+    isEnabled: () => !context.finished && context.withinCompletionBudget(name) && (isAction.has(name) ? !context.shadow && !context.needsAppraisal &&
+      context.observation.legalActions.some(action => action.type === name) : name === "appraise_event" ? context.mode !== "off" && !context.record.appraisal
       : name === "finish_record" ? context.shadow && !context.needsAppraisal
       : name === "create_plan" ? context.mode !== "off" && !context.needsAppraisal && !context.livePlan
       : ["revise_plan", "keep_plan", "close_plan"].includes(name) ? context.mode !== "off" && !context.needsAppraisal && context.livePlan
@@ -65,6 +65,10 @@ export function createPartnerTools(context: PartnerAgentContext, reportError: (n
         allowedEvidenceIds: [...context.evidenceRefs.keys()], legalActions: context.observation.legalActions });
     },
   });
+  const money = (action: string, field: string) => {
+    const limits = context.observation.legalActions.find(item => item.type === action)?.fields[field];
+    return z.number().int().min(limits?.min ?? 0).max(limits?.max ?? 1_000_000);
+  };
   const tools: Tool<PartnerAgentContext>[] = [
     tool({ name: "recall", description: "检索本人可见的旧事件和个人经历，不读取对方私有信息。", parameters: z.object({ query: z.string().min(1).max(100) }).strict(),
       ...common("recall"), execute: async ({ query }) => {
@@ -84,13 +88,13 @@ export function createPartnerTools(context: PartnerAgentContext, reportError: (n
       ...common("close_plan"), execute: async raw => context.plan({ kind: raw.reasonForClosing, version: raw.version }, raw.eventId, raw.reason) }),
     tool({ name: "forecast", description: "根据已观察证据，登记对方未来合法机会的概率；eventId 是既有证据编号，metric 达到 threshold 算发生，continue 的阈值用 1。", parameters: forecastSchema.extend({ eventId: evidenceRef }).strict(),
       ...common("forecast"), execute: async ({ eventId, ...proposal }) => context.forecast(proposal, eventId) }),
-    tool({ name: "offer", description: "经营者报价并冻结自己的担保；违约时担保赔给本轮投资人。暂存当前真实行动。", parameters: z.object({ promiseRatio: unit, collateral: amount, ...actionFields }).strict(),
+    tool({ name: "offer", description: "经营者报价并冻结自己的担保；违约时担保赔给本轮投资人。暂存当前真实行动。", parameters: z.object({ promiseRatio: unit, collateral: money("offer", "collateral"), ...actionFields }).strict(),
       ...common("offer"), execute: async ({ message, intent, basis, ...action }) => context.stage({ type: "offer", ...action, ...(message ? { message } : {}), ...(intent ? { intent } : {}) }, basis) }),
-    tool({ name: "invest", description: "投资人投入整数金额，范围见合法行动。暂存当前真实行动。", parameters: z.object({ amount, ...actionFields }).strict(),
+    tool({ name: "invest", description: "投资人投入整数金额，范围见合法行动。暂存当前真实行动。", parameters: z.object({ amount: money("invest", "amount"), ...actionFields }).strict(),
       ...common("invest"), execute: async ({ message, intent, basis, ...action }) => context.stage({ type: "invest", ...action, ...(message ? { message } : {}), ...(intent ? { intent } : {}) }, basis) }),
-    tool({ name: "settle", description: "经营者实际返还资金。claimedIncome 为对外收入声明或 null；revealIncome 决定是否公开真实凭证。声明无法改变规则裁决。", parameters: z.object({ returnAmount: amount, claimedIncome: amount.nullable(), revealIncome: z.boolean(), ...actionFields }).strict(),
+    tool({ name: "settle", description: "经营者实际返还资金。claimedIncome 为对外收入声明或 null；revealIncome 决定是否公开真实凭证。声明无法改变规则裁决。", parameters: z.object({ returnAmount: money("settle", "returnAmount"), claimedIncome: money("settle", "claimedIncome").nullable(), revealIncome: z.boolean(), ...actionFields }).strict(),
       ...common("settle"), execute: async ({ message, intent, basis, claimedIncome, ...action }) => context.stage({ type: "settle", ...action, ...(claimedIncome !== null ? { claimedIncome } : {}), ...(message ? { message } : {}), ...(intent ? { intent } : {}) }, basis) }),
-    tool({ name: "repair", description: "经营者付出真实补偿，可以填 0；message 可表达道歉，不替代资金行为。", parameters: z.object({ compensation: amount, ...actionFields }).strict(),
+    tool({ name: "repair", description: "经营者付出真实补偿，可以填 0；message 可表达道歉，不替代资金行为。", parameters: z.object({ compensation: money("repair", "compensation"), ...actionFields }).strict(),
       ...common("repair"), execute: async ({ message, intent, basis, ...action }) => context.stage({ type: "repair", ...action, ...(message ? { message } : {}), ...(intent ? { intent } : {}) }, basis) }),
     tool({ name: "respond", description: "投资人决定继续或结束合作。最后一轮 continue 后也会结算并结束。", parameters: z.object({ choice: z.enum(["continue", "exit"]), ...actionFields }).strict(),
       ...common("respond"), execute: async ({ message, intent, basis, ...action }) => context.stage({ type: "respond", ...action, ...(message ? { message } : {}), ...(intent ? { intent } : {}) }, basis) }),

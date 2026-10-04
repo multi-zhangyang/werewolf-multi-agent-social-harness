@@ -14,6 +14,7 @@ const fixture = await response.json(); const original = JSON.stringify(fixture);
 const actor = fixture.characters[0];
 const event = fixture.events.findLast(event => event.actorId === actor.id && event.data.cognition); assert.ok(event);
 const mind = enterEpisode(event.data.cognition, actor.id, event.data.cognition.episode); event.data.cognition = mind;
+mind.episodeReviews = (mind.episodeReviews ?? []).filter(review => review.episode !== mind.episode);
 const sourceIds = event.data.sourceIds; assert.ok(sourceIds.length);
 const source = remember(mind, { kind: "episodic", scope: "transferable", text: "界面夹具：公开核验后的实际结果", sourceIds, confidence: 1, tags: ["界面夹具"], when: null, then: null });
 let memory = consolidateStrategy(mind, { strategyId: null, memoryIds: [source.id], confidence: .55, tags: ["界面夹具"],
@@ -24,8 +25,12 @@ memory = consolidateStrategy(mind, { strategyId: memory.id, memoryIds: [source.i
   text: "把承诺与实际行为分开核验", when: "有机会观察行为且能够承担试探代价；无法核验时应保持不确定", then: "根据核验结果调整下一次选择",
   rationale: "界面夹具：修订已有原则并保留此前经历的来源；原局身份和具体金额不构成通用规则。" }, sourceIds);
 assert.equal(memory.episode, mind.episode); assert.equal(memory.revisions[0].previous.episode, "earlier-ui-fixture");
+const historical = assessStrategy(mind, { id: memory.id, sourceIds, verdict: "apply", matching: "旧版界面夹具", differences: "旧版没有记录动作的明确选择", adaptation: null }, "ui-legacy", 4);
+const legacy = { id: "ui-legacy-decision", episode: mind.episode, round: 4, action: "contribute", strategy: "probe", intent: "none", privateAim: "旧版界面夹具", predictionIds: [], assessmentIds: [historical.id] };
+mind.decisions.push(legacy); historical.decisionIds.push(legacy.id);
 const adopted = assessStrategy(mind, { id: memory.id, sourceIds, verdict: "adapt", matching: "仍然面对需要验证的承诺", differences: "当前是多人合作，共同结果不能直接归因给某个人", adaptation: "先区分个体贡献和共同结果，再调整自己的风险" }, "ui-adopt", 4);
-const decision = { id: "ui-decision", episode: mind.episode, round: 4, action: "contribute", strategy: "probe", intent: "none", privateAim: "界面夹具", predictionIds: [] };
+const decision = { id: "ui-decision", episode: mind.episode, round: 4, action: "contribute", strategy: "probe", intent: "none", privateAim: "界面夹具", predictionIds: [],
+  strategyBasis: { assessmentIds: [adopted.id], reason: "界面夹具：以当前版本核验策略限制实际投入" } };
 bindStrategyAssessments(mind, "ui-adopt", decision); mind.decisions.push(decision);
 integrateExperience(mind, { id: "ui-feedback", episode: mind.episode, seq: (mind.cursors[mind.episode] ?? 0) + 1, round: 4,
   kind: "outcome", name: "settlement", text: "界面夹具所得", data: { payoffs: { [actor.id]: 3 } }, reward: { value: 3, normalized: .1, unit: "points" } });
@@ -57,7 +62,8 @@ try {
     await page.setViewport({ width, height });
     await page.$eval(selector, node => node.scrollIntoView({ block: "start" }));
     const text = await page.$eval(selector, node => node.textContent);
-    for (const value of ["调整后采用", "不适用", "来自此前经历", "未采用这条策略", "已关联 1 次实际行动", "实际结算：3 点", "当前是多人合作"]) assert.ok(text.includes(value), value);
+    for (const value of ["调整后采用", "不适用", "来自此前经历", "未采用这条策略", "明确采用 1 次实际行动", "历史自动关联", "实际结算：3 点", "当前是多人合作"]) assert.ok(text.includes(value), value);
+    assert.ok(await page.$eval(scope, node => node.textContent.includes("选择理由：界面夹具：以当前版本核验策略限制实际投入")));
     const overflow = await page.$$eval(`${selector} p`, nodes => nodes.filter(node => node.scrollWidth > node.clientWidth + 1).map(node => node.textContent));
     assert.deepEqual(overflow, []); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     measurements.push({ width, height, overflow });

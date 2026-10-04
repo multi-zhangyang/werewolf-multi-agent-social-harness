@@ -67,7 +67,8 @@ it("records adoption only on a later action and obtains outcomes and prediction 
   const assessment = assessStrategy(mind, { ...judgment, id: learned.rule.id }, "op", 1);
   const prediction = forecast(mind, { sourceIds: ["new-observation"], kind: "outcome", targetId: null, eventName: "settlement", field: "payoffs.self", operator: "gte", expected: 5, probability: .7 }, 1);
   expect(strategyUsage(mind, learned.rule)).toMatchObject({ assessed: 1, adopted: 0, outcomeSamples: 0 });
-  const action = decision(); action.predictionIds = [prediction.id]; bindStrategyAssessments(mind, "op", action); mind.decisions.push(action);
+  const action = decision(); action.predictionIds = [prediction.id]; action.strategyBasis = { assessmentIds: [assessment.id], reason: "按这条检验调整风险" };
+  bindStrategyAssessments(mind, "op", action); mind.decisions.push(action);
   expect(action.assessmentIds).toEqual([assessment.id]);
   const feedback: Experience = { id: "new-outcome", episode: "target", round: 1, seq: 2, kind: "outcome", name: "settlement", text: "实际所得2", data: { payoffs: { self: 2 } }, reward: { value: 2, normalized: .2, unit: "points" } };
   integrateExperience(mind, { ...feedback, episode: "source" }); expect(assessment.feedback).toEqual([]);
@@ -82,15 +83,56 @@ it("records adoption only on a later action and obtains outcomes and prediction 
   expect(assessment.memory.text).toBe(lesson.text); expect(assessment.memoryRevision).toBe(1);
 });
 
+it("does not infer adoption from an apply verdict or treat legacy automatic associations as explicit choices", () => {
+  const learned = learnedMind(); const mind = enterEpisode(learned.mind, "self", "target");
+  const assessment = assessStrategy(mind, { ...judgment, id: learned.rule.id, verdict: "apply", adaptation: null }, "op", 1);
+  const action = decision(); action.strategyBasis = { assessmentIds: [], reason: "本次按照即时风险选择，没有使用旧策略" };
+  bindStrategyAssessments(mind, "op", action); mind.decisions.push(action);
+  expect(action.assessmentIds).toEqual([]); expect(assessment.decisionIds).toEqual([]);
+  const legacy = decision("legacy"); legacy.assessmentIds = [assessment.id]; mind.decisions.push(legacy); assessment.decisionIds.push(legacy.id);
+  expect(strategyUsage(mind, learned.rule).adopted).toBe(0);
+});
+
+it("exposes new and revised memories in the next SDK tool schema and uses the selected assessment receipt", async () => {
+  const { context, spec, activations } = generalContext();
+  const { rationale: _rationale, ...rule } = lesson;
+  const fixture = sdkFixture((request, index) => {
+    if (!index) return sdkCall("appraise_event", generalAppraisal("e1"));
+    if (index === 1) return sdkCall("remember", { ...rule, kind: "procedural", scope: "transferable", sourceIds: ["e1"] });
+    const names = request.tools.filter(tool => tool.type === "function").map(tool => tool.name);
+    if (index === 2) {
+      expect(sdkToolResult(request).id).toBe("m1"); expect(names).toContain("revise_memory"); expect(names).toContain("assess_strategy");
+      return sdkCall("revise_memory", { id: "m1", sourceIds: ["e1"], change: "revise", reason: "按当前机会收紧边界",
+        replacement: { ...rule, kind: "procedural", scope: "transferable", text: "只采用已能核验的行动依据" } });
+    }
+    if (index === 3) {
+      expect(sdkToolResult(request)).toMatchObject({ id: "m1", revision: 2 });
+      return sdkCall("assess_strategy", { ...judgment, id: "m1", sourceIds: ["e1"] });
+    }
+    const receipt = sdkToolResult(request); expect(receipt).toMatchObject({ id: "a1", memoryRevision: 2 });
+    const actionTool = request.tools.find(tool => tool.type === "function" && tool.name === "invest")!;
+    expect(JSON.stringify(actionTool)).toContain('"a1"');
+    return sdkCall("invest", { amount: 2, ...decisionMeta, strategyBasis: { assessmentIds: [receipt.id], reason: "按修订后的核验条件限制投入" } });
+  });
+  await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
+  expect(fixture.requests).toHaveLength(5); expect(activations[0].calls).toEqual([{ name: "invest", args: { amount: 2 } }]);
+  const mind = activations[0].cognition!;
+  expect(mind.decisions[0].strategyBasis).toEqual({ assessmentIds: [mind.strategyAssessments![0].id], reason: "按修订后的核验条件限制投入" });
+  expect(strategyUsage(mind, mind.memories[0]).adopted).toBe(1);
+});
+
 it("does not attribute actions to rejected, superseded, retired or another opportunity's strategy judgments", () => {
   const learned = learnedMind(); const mind = enterEpisode(learned.mind, "self", "target");
   const adopt = assessStrategy(mind, { ...judgment, id: learned.rule.id }, "op", 1);
   assessStrategy(mind, { ...judgment, id: learned.rule.id, verdict: "reject", adaptation: null }, "op", 1);
-  const action = decision(); bindStrategyAssessments(mind, "op", action); expect(action.assessmentIds).toBeUndefined(); expect(adopt.decisionIds).toEqual([]);
+  const action = decision(); bindStrategyAssessments(mind, "op", action); expect(action.assessmentIds).toEqual([]); expect(adopt.decisionIds).toEqual([]);
+  action.strategyBasis = { assessmentIds: [adopt.id], reason: "无效选择" };
+  expect(() => bindStrategyAssessments(mind, "op", action)).toThrow("行动依据");
+  delete action.strategyBasis;
   assessStrategy(mind, { ...judgment, id: learned.rule.id }, "other-op", 1);
-  bindStrategyAssessments(mind, "op", action); expect(action.assessmentIds).toBeUndefined();
+  bindStrategyAssessments(mind, "op", action); expect(action.assessmentIds).toEqual([]);
   reviseMemory(mind, { id: learned.rule.id, change: "retire", sourceIds: ["changed-rules"], reason: "本轮缺少检验条件", replacement: null });
-  bindStrategyAssessments(mind, "other-op", action); expect(action.assessmentIds).toBeUndefined();
+  bindStrategyAssessments(mind, "other-op", action); expect(action.assessmentIds).toEqual([]);
   expect(() => assessStrategy(mind, { ...judgment, id: learned.rule.id }, "later", 1)).toThrow("当前可用");
   expect(cognitionForPrompt(enterEpisode(mind, "self", "third")).strategyAssessments).toEqual([]);
 });
@@ -101,7 +143,7 @@ it("does not count a spoken intention or a historical speech association as worl
   bindStrategyAssessments(mind, "discussion", speech); mind.decisions.push(speech);
   expect(speech.assessmentIds).toBeUndefined(); expect(assessment.decisionIds).toEqual([]);
   const action = decision(); bindStrategyAssessments(mind, "action", action); mind.decisions.push(action);
-  expect(action.assessmentIds).toBeUndefined();
+  expect(action.assessmentIds).toEqual([]);
   // Old evidence stays intact, but a v4 speech association must not inflate current action statistics.
   assessment.decisionIds.push(speech.id); speech.assessmentIds = [assessment.id];
   assessment.feedback.push({ sourceId: "old-result", decisionIds: [speech.id], value: 2, normalized: .2, unit: "points" });
@@ -137,7 +179,7 @@ it("uses the native SDK consolidation receipt and commits its new memory once wi
     }
     expect(sdkToolResult(request)).toMatchObject({ kind: "procedural", scope: "transferable", sourceIds: ["e1"],
       consolidation: { sourceMemories: [{ id: "m1", revision: 1 }], sourceOutcomeIds: ["e1"] } });
-    return sdkCall("invest", { amount: 2, ...decisionMeta });
+    return sdkCall("invest", { amount: 2, ...decisionMeta, strategyBasis: null });
   });
   await modelParticipantFactory(new ModelRegistry(), { model: fixture.model })(context.character, spec, "r").turn(context);
   expect(activations).toHaveLength(1); expect(activations[0].cognition?.memories).toHaveLength(2); expect(JSON.stringify(context.cognition)).toBe(before);
@@ -156,7 +198,8 @@ it("requires current-context evidence for a native applicability judgment and at
       return sdkCall("assess_strategy", { ...judgment, id: "m2", sourceIds: [current] });
     }
     expect(sdkToolResult(request)).toMatchObject({ verdict: "adapt", memoryId: "m2", decisionIds: [], feedback: [] });
-    return sdkCall("invest", { amount: 3, ...decisionMeta });
+    return sdkCall("invest", { amount: 3, ...decisionMeta,
+      strategyBasis: { assessmentIds: [sdkToolResult(request).id], reason: "依检验的风险原则把投入限制为3" } });
   });
   const c = new GeneralAgentContext(context, spec, "r");
   expect(JSON.parse(c.modelInput()).strategyLearning.availableStrategyIds).toContain("m2");

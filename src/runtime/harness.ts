@@ -1,5 +1,5 @@
 /** Historical event shape retained for archive/UI compatibility. Execution lives in agents/sdk.ts. */
-export const harnessVersion = "native-responses-v1";
+export { nativeAgentVersion as harnessVersion } from "../agents/sdk";
 export interface HarnessEvent {
   kind: "agent_start" | "agent_end" | "model_start" | "model_delta" | "model_end" | "model_error" | "tool_start" | "tool_end" | "tool_error" | "tool_rejected" | "retry";
   phase: string; attempt: number; step: number;

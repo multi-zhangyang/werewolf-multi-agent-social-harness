@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const cognitionVersion = "psychology-responses-v14";
+export const cognitionVersion = "psychology-responses-v15";
 const unit = z.number().min(0).max(1);
 const text = (limit: number) => z.string().trim().min(1).max(limit);
 const sources = z.array(text(160)).min(1).max(8).describe("从本次 evidence.id / newEvidenceIds 选择短证据编号，例如 e1；不要自行生成编号");
@@ -74,6 +74,7 @@ export interface PrivateDecision {
   parameters?: Record<string, unknown>;
   intent: "truthful" | "withhold" | "bluff" | "mixed" | "none"; privateAim: string;
   predictionIds: string[]; reward?: number; feedbackId?: string; assessmentIds?: string[];
+  strategyBasis?: { assessmentIds: string[]; reason: string };
 }
 export interface StrategyAssessment extends Omit<z.infer<typeof strategyAssessmentParameters>, "id"> {
   id: string; episode: string; opportunityId: string; round: number;
@@ -91,7 +92,7 @@ export interface PredictionFeedback {
   note: string;
 }
 export interface AgentMind {
-  version: typeof cognitionVersion | "psychology-responses-v1" | "psychology-responses-v2" | "psychology-responses-v3" | "psychology-responses-v4" | "psychology-responses-v5" | "psychology-responses-v6" | "psychology-responses-v7" | "psychology-responses-v8" | "psychology-responses-v9" | "psychology-responses-v10" | "psychology-responses-v11" | "psychology-responses-v12" | "psychology-responses-v13"; actorId: string; episode: string; revision: number;
+  version: typeof cognitionVersion | "psychology-responses-v1" | "psychology-responses-v2" | "psychology-responses-v3" | "psychology-responses-v4" | "psychology-responses-v5" | "psychology-responses-v6" | "psychology-responses-v7" | "psychology-responses-v8" | "psychology-responses-v9" | "psychology-responses-v10" | "psychology-responses-v11" | "psychology-responses-v12" | "psychology-responses-v13" | "psychology-responses-v14"; actorId: string; episode: string; revision: number;
   emotions: Record<typeof emotions[number], number>; needs: Record<typeof needs[number], number>;
   appraisal?: z.infer<typeof appraisalParameters>;
   dynamics?: { inertia: number; decay: number; freshSourceIds: string[] };
@@ -220,14 +221,21 @@ export function assessStrategy(mind: AgentMind, proposal: z.infer<typeof strateg
     memory: { text: memory.text, when: memory.when, then: memory.then }, decisionIds: [], predictionIds: [], feedback: [], predictions: [] };
   (mind.strategyAssessments ??= []).push(assessment); mind.revision++; return assessment;
 }
-/** Keep the last judgment for each rule, and never attribute an action to a superseded version. */
-export function bindStrategyAssessments(mind: AgentMind, opportunityId: string, decision: PrivateDecision) {
-  if (!isWorldDecision(decision)) return;
+/** Applicability is not adoption. Only explicitly selected, current judgments can explain an action. */
+export function usableStrategyAssessments(mind: AgentMind, opportunityId: string) {
   const latest = new Map((mind.strategyAssessments ?? []).filter(item => item.episode === mind.episode && item.opportunityId === opportunityId)
     .map(item => [item.memoryId, item]));
-  const adopted = [...latest.values()].filter(item => item.verdict !== "reject" && activeMemories(mind)
-    .some(memory => memory.id === item.memoryId && (memory.revision ?? 1) === item.memoryRevision));
-  if (adopted.length) decision.assessmentIds = adopted.map(item => item.id);
+  return [...latest.values()].filter(item => item.verdict !== "reject" && activeMemories(mind)
+    .some(memory => memory.id === item.memoryId && memory.kind === "procedural" && (memory.revision ?? 1) === item.memoryRevision));
+}
+export function bindStrategyAssessments(mind: AgentMind, opportunityId: string, decision: PrivateDecision) {
+  if (!isWorldDecision(decision)) return;
+  const selected = decision.strategyBasis?.assessmentIds ?? [];
+  const available = usableStrategyAssessments(mind, opportunityId);
+  const adopted = available.filter(item => selected.includes(item.id));
+  if (new Set(selected).size !== selected.length || adopted.length !== selected.length)
+    throw new Error("行动依据只能选择本次机会已检验、未拒绝且版本仍有效的策略回执；无采用策略时使用空数组");
+  decision.assessmentIds = [...selected];
   for (const item of adopted) {
     item.decisionIds.push(decision.id);
     item.predictionIds = [...new Set([...item.predictionIds, ...decision.predictionIds])];
@@ -236,7 +244,7 @@ export function bindStrategyAssessments(mind: AgentMind, opportunityId: string, 
 export function isWorldDecision(decision: PrivateDecision) { return !["speak", "send_message", "wait"].includes(decision.action); }
 export function strategyUsage(mind: AgentMind, memory: CognitiveMemory) {
   const judgments = (mind.strategyAssessments ?? []).filter(item => item.memoryId === memory.id && item.memoryRevision === (memory.revision ?? 1));
-  const decisions = new Set(mind.decisions.filter(isWorldDecision).map(decision => decision.id));
+  const decisions = new Set(mind.decisions.filter(decision => isWorldDecision(decision) && decision.strategyBasis).map(decision => decision.id));
   const adopted = judgments.filter(item => item.decisionIds.some(id => decisions.has(id)));
   return { assessed: judgments.length, adopted: adopted.length,
     rejected: judgments.filter(item => item.verdict === "reject").length,
@@ -315,7 +323,7 @@ export function integrateExperience(mind: AgentMind, event: Experience) {
     const decision = decisions.findLast(d => !["speak", "send_message", "wait"].includes(d.action));
     for (const item of decisions) { item.reward = event.reward.normalized; item.feedbackId = event.id; }
     for (const assessment of mind.strategyAssessments ?? []) {
-      const related = decisions.filter(decision => isWorldDecision(decision) && decision.assessmentIds?.includes(assessment.id));
+      const related = decisions.filter(decision => isWorldDecision(decision) && decision.strategyBasis?.assessmentIds.includes(assessment.id));
       if (assessment.episode === event.episode && related.length && !assessment.feedback.some(feedback => feedback.sourceId === event.id))
         assessment.feedback.push({ sourceId: event.id, decisionIds: related.map(decision => decision.id), ...event.reward });
     }

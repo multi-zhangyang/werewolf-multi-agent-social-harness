@@ -13,9 +13,11 @@ export function GeneralCognition({ mind, characters }: { mind: AgentMind; charac
   const decision = mind.decisions.at(-1);
   const beliefs = opponentViews(mind);
   const targets = [...new Set([...Object.keys(beliefs.relationships), ...Object.keys(beliefs.episodeBeliefs)])];
-  const worldDecisionIds = new Set(mind.decisions.filter(isWorldDecision).map(item => item.id));
+  const worldDecisionIds = new Set(mind.decisions.filter(item => isWorldDecision(item) && item.strategyBasis).map(item => item.id));
+  const legacyDecisionIds = new Set(mind.decisions.filter(item => isWorldDecision(item) && !item.strategyBasis).map(item => item.id));
   const assessments = (mind.strategyAssessments ?? []).slice(-6).reverse().map(item => ({ ...item,
     actionIds: item.decisionIds.filter(id => worldDecisionIds.has(id)),
+    legacyActionIds: item.decisionIds.filter(id => legacyDecisionIds.has(id)),
     actionFeedback: item.feedback.filter(feedback => feedback.decisionIds.some(id => worldDecisionIds.has(id))),
   }));
   const review = mind.episodeReviews?.find(item => item.episode === mind.episode);
@@ -31,14 +33,19 @@ export function GeneralCognition({ mind, characters }: { mind: AgentMind; charac
     </CardContent></Card>}
     <Card><CardHeader><CardDescription>本人的私有记录</CardDescription><CardTitle>目标与策略</CardTitle></CardHeader><CardContent className="flex flex-col gap-4">
       {decision && <div className="flex flex-col gap-2"><div className="flex flex-wrap gap-2"><Badge>{strategyLabels[decision.strategy]}</Badge><Badge variant="outline">{intentLabels[decision.intent]}</Badge></div><p className="text-sm">{decision.privateAim}</p><p className="text-xs text-muted-foreground">这是人物自己的意图报告，公开发言与真实结果另行记录。</p></div>}
+      {decision?.strategyBasis && <div className="flex flex-col gap-2">
+        <p className="text-sm">选择理由：{decision.strategyBasis.reason}</p>
+        {decision.strategyBasis.assessmentIds.length === 0 ? <Badge variant="outline" className="w-fit">本次未采用经验策略</Badge>
+          : decision.strategyBasis.assessmentIds.map(id => { const assessment = mind.strategyAssessments?.find(item => item.id === id); return assessment && <p key={id} className="text-xs text-muted-foreground">策略依据：{assessment.memory.text} · 版本 {assessment.memoryRevision}</p>; })}
+      </div>}
       {mind.plans.filter(plan => plan.status === "active").map(plan => <div key={plan.id} className="flex flex-col gap-2"><p className="text-sm font-medium">{plan.goal}</p><p className="text-sm">{plan.steps.join(" → ")}</p><p className="text-xs text-muted-foreground">适用：{plan.when} · 修订：{plan.reviseWhen} · 结束：{plan.stopWhen}</p><Badge variant="secondary" className="w-fit">{plan.portable ? "可跨场景" : "本局计划"} · 版本 {plan.revision}</Badge></div>)}
       {!mind.plans.some(plan => plan.status === "active") && <p className="text-sm text-muted-foreground">尚无持续计划；当前选择按本次处境作出。</p>}
     </CardContent></Card>
     {assessments.length > 0 && <Card data-testid="strategy-assessments"><CardHeader><CardDescription>旧经验在当前处境中的适用性</CardDescription><CardTitle>经验策略的检验</CardTitle></CardHeader><CardContent className="flex flex-col gap-4">{assessments.map(assessment => <div key={assessment.id} className="flex flex-col gap-2">
-      <div className="flex flex-wrap gap-2"><Badge variant="secondary">{assessment.verdict === "reject" ? "不适用" : assessment.actionIds.length ? assessment.verdict === "adapt" ? "调整后采用" : "采用" : assessment.verdict === "adapt" ? "准备调整" : "准备采用"}</Badge><Badge variant="outline">策略版本 {assessment.memoryRevision}</Badge>{(assessment.memoryOriginEpisode ?? assessment.memoryEpisode) !== assessment.episode && <Badge variant="outline">来自此前经历</Badge>}</div>
+      <div className="flex flex-wrap gap-2"><Badge variant="secondary">{assessment.verdict === "reject" ? "不适用" : assessment.actionIds.length ? assessment.verdict === "adapt" ? "调整后采用" : "采用" : assessment.legacyActionIds.length ? "历史自动关联" : assessment.verdict === "adapt" ? "可调整" : "可适用"}</Badge><Badge variant="outline">策略版本 {assessment.memoryRevision}</Badge>{(assessment.memoryOriginEpisode ?? assessment.memoryEpisode) !== assessment.episode && <Badge variant="outline">来自此前经历</Badge>}</div>
       <p className="text-sm">{assessment.memory.text}</p><p className="text-xs text-muted-foreground">相符之处：{assessment.matching}</p><p className="text-xs text-muted-foreground">差异与未知：{assessment.differences}</p>
       {assessment.adaptation && <p className="text-sm">本次调整：{assessment.adaptation}</p>}
-      <p className="text-xs text-muted-foreground">{assessment.actionIds.length ? `已关联 ${assessment.actionIds.length} 次实际行动` : assessment.verdict === "reject" ? "未采用这条策略" : assessment.decisionIds.length ? "仅关联发言，未计入行动采用" : "尚未关联实际行动"} · {assessment.sourceIds.length} 条当前证据</p>
+      <p className="text-xs text-muted-foreground">{assessment.actionIds.length ? `明确采用 ${assessment.actionIds.length} 次实际行动` : assessment.verdict === "reject" ? "未采用这条策略" : assessment.legacyActionIds.length ? `历史自动关联 ${assessment.legacyActionIds.length} 次，不计明确采用` : "尚未明确采用"} · {assessment.sourceIds.length} 条当前证据</p>
       {assessment.actionFeedback.map(feedback => <p key={feedback.sourceId} className="text-xs text-muted-foreground">实际结算：{feedback.value} {feedback.unit === "points" ? "点" : feedback.unit} · 归一回报 {feedback.normalized.toFixed(3)}</p>)}
       {assessment.predictions.length > 0 && <p className="text-xs text-muted-foreground">相关预测已获反馈：{assessment.predictions.length} 项</p>}
     </div>)}<p className="text-xs text-muted-foreground">适用性是人物的判断；结算与预测反馈来自真实账本。结果关联不等于已经证明策略更优。</p></CardContent></Card>}
